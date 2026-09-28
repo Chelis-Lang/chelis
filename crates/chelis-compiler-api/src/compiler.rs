@@ -1,4 +1,4 @@
-use crate::schema::numbers::{NonnegativeExtent, SourceInteger};
+use crate::schema::numbers::{NonnegativeCount, NonnegativeExtent, SourceInteger};
 use chelis_deep::DeepTag;
 use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
@@ -6841,6 +6841,15 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
                 chelis_ir::dag::KeyBranch::Right => crate::schema::WireKeyBranch::Right,
             },
         },
+        RiscOp::Iota => WireRiscOp::Iota,
+        RiscOp::ListMapCapture { first } => WireRiscOp::ListMapCapture { first: *first },
+        RiscOp::OrderedAdjointSum { groups } => WireRiscOp::OrderedAdjointSum {
+            groups: groups
+                .iter()
+                .copied()
+                .map(NonnegativeCount::try_from)
+                .collect::<WireResult<_>>()?,
+        },
         RiscOp::FoldIn => WireRiscOp::FoldIn {},
         RiscOp::KeySelect => WireRiscOp::KeySelect {},
         RiscOp::SplitN { count } => WireRiscOp::SplitN {
@@ -7423,7 +7432,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 20);
+        assert_eq!(json["schema_version"], 21);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()
@@ -7499,6 +7508,157 @@ mod tests {
         let json = serde_json::to_value(&wire).unwrap();
         let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn ordered_list_capture_wire_round_trip_and_malformed_groups() {
+        let mut dag = Dag::new();
+        let owner = dag.declare("ordered_list");
+        let scalar = TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        };
+        let vector = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let source = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "source".into(),
+            },
+            vec![],
+            scalar.clone(),
+            None,
+        );
+        let carrier = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "carrier".into(),
+            },
+            vec![],
+            vector.clone(),
+            None,
+        );
+        let capture = dag.add_node(
+            owner,
+            RiscOp::ListMapCapture { first: true },
+            vec![source, carrier],
+            vector,
+            None,
+        );
+        let sum = dag.add_node(
+            owner,
+            RiscOp::OrderedAdjointSum { groups: vec![2] },
+            vec![capture, capture],
+            scalar,
+            None,
+        );
+        dag.add_root(sum);
+        let json = serde_json::to_value(wire_dag(&dag).unwrap()).unwrap();
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert!(matches!(
+            decoded.nodes[2].op,
+            WireRiscOp::ListMapCapture { .. }
+        ));
+        assert!(
+            matches!(&decoded.nodes[3].op, WireRiscOp::OrderedAdjointSum { groups } if groups.len() == 1 && groups[0].get() == 2)
+        );
+        for (node, field, replacement) in [
+            (
+                2,
+                "op",
+                serde_json::json!({"kind": "list_map_capture", "first": false}),
+            ),
+            (2, "inputs", serde_json::json!([0])),
+            (
+                2,
+                "output_type",
+                serde_json::json!({"dims": [], "precision": "f32"}),
+            ),
+            (3, "inputs", serde_json::json!([2, 0])),
+            (
+                3,
+                "op",
+                serde_json::json!({"kind": "ordered_adjoint_sum", "groups": [0, 2]}),
+            ),
+            (
+                3,
+                "op",
+                serde_json::json!({"kind": "ordered_adjoint_sum", "groups": [1]}),
+            ),
+            (
+                3,
+                "op",
+                serde_json::json!({"kind": "ordered_adjoint_sum", "groups": [usize::MAX, 2]}),
+            ),
+            (
+                3,
+                "output_type",
+                serde_json::json!({"dims": [], "precision": "f64"}),
+            ),
+        ] {
+            let mut malformed = json.clone();
+            malformed["nodes"][node][field] = replacement;
+            assert!(
+                WireDag::from_validated_json(&malformed.to_string()).is_err(),
+                "{malformed}"
+            );
+        }
+    }
+
+    fn runtime_iota_wire_fixture() -> Dag {
+        let mut dag = Dag::new();
+        let owner = dag.declare("runtime_iota");
+        let scalar = TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        };
+        let start = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "start".into(),
+            },
+            vec![],
+            scalar.clone(),
+            None,
+        );
+        let end = dag.add_node(
+            owner,
+            RiscOp::Load { name: "end".into() },
+            vec![],
+            scalar,
+            None,
+        );
+        let output = dag.add_node(
+            owner,
+            RiscOp::Iota,
+            vec![start, end],
+            TensorType {
+                dims: vec![DimInfo::Named("count".into(), None)],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        dag.add_root(output);
+        dag
+    }
+
+    #[test]
+    fn runtime_iota_wire_round_trip_and_malformed_endpoints() {
+        let dag = runtime_iota_wire_fixture();
+        let wire = wire_dag(&dag).unwrap();
+        let json = serde_json::to_string(&wire).unwrap();
+        let decoded = WireDag::from_validated_json(&json).unwrap();
+        assert!(matches!(decoded.nodes[2].op, WireRiscOp::Iota));
+        for path in [0, 1, 2] {
+            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            value["nodes"][path]["output_type"]["precision"] = serde_json::json!("f32");
+            assert!(WireDag::from_validated_json(&value.to_string()).is_err());
+        }
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["nodes"][2]["inputs"] = serde_json::json!([0]);
+        assert!(WireDag::from_validated_json(&value.to_string()).is_err());
     }
 
     #[test]

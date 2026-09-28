@@ -173,6 +173,50 @@ class ReceiptTests(unittest.TestCase):
             tuple(row["args"]),
         )
 
+    def test_list_map_numeric_forms_have_frozen_positive_and_negative_execution(self):
+        packet = oracle.frozen_manifest(
+            oracle.MANIFEST.read_bytes(),
+            oracle.MANIFEST_SHA256,
+        )
+        rows = {row["name"]: row for row in packet["legs"]}
+        expected = {
+            "exact C List-map capture and ordered cotangent execution": [
+                "chelis-backend-c::issue_570_runtime_iota::"
+                "ordered_cotangent_native_groups_check_actual_column_lengths",
+            ],
+            "exact List-map capture compiled C parity and negative controls": [
+                "chelis-cli::issue_2419_range_tensor_ad::"
+                "captured_cotangent_keeps_the_false_forward_range_claim",
+                "chelis-cli::issue_2419_range_tensor_ad::"
+                "runtime_capture_accumulation_preserves_the_executed_consumer_tree",
+                "chelis-cli::issue_2419_range_tensor_ad::"
+                "runtime_capture_tree_preserves_inactive_and_empty_rows",
+                "chelis-cli::issue_2419_range_tensor_ad::"
+                "runtime_capture_tree_rounds_each_pair_at_the_capture_dtype",
+            ],
+        }
+        for name, identities in expected.items():
+            with self.subTest(name=name):
+                row = rows[name]
+                self.assertEqual(row["required"], identities)
+                self.assertEqual(
+                    tuple(row["args"]),
+                    next(args for leg_name, args in oracle.phase1_legs() if leg_name == name),
+                )
+                altered = copy.deepcopy(packet)
+                altered["legs"] = [leg for leg in altered["legs"] if leg["name"] != name]
+                with self.assertRaises(oracle.OracleFailure):
+                    oracle.validate_manifest(altered)
+                altered = copy.deepcopy(packet)
+                next(leg for leg in altered["legs"] if leg["name"] == name)["required"] = identities[:-1]
+                with self.assertRaises(oracle.OracleFailure):
+                    oracle.frozen_manifest(
+                        oracle.json.dumps(altered).encode(),
+                        oracle.MANIFEST_SHA256,
+                    )
+                with self.assertRaises(oracle.OracleFailure):
+                    oracle.require_frozen_selection(identities[:-1], identities)
+
     def test_key_callable_inherited_leg_preserves_execution_and_rejection_floors(self):
         packet = oracle.frozen_manifest(oracle.MANIFEST.read_bytes(), oracle.MANIFEST_SHA256)
         name = 'checked key callable scalar and tensor C execution'

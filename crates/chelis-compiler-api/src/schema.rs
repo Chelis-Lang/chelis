@@ -2142,7 +2142,10 @@ pub struct WireRecordPatternField {
 /// - `20`: the five signed integer bitwise identities share one tagged
 ///   `Bitwise` operation. A version-19 reader does not know that operation,
 ///   so the complete graph is rejected before node decoding.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 20;
+/// - `21`: `Iota` represents the exact runtime i64 range source ([05-OP-54]);
+///   List capture invocation carriers and ordered scalar cotangent groups
+///   preserve [05-OP-55] and spec/06 section 2.4 through projection.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 21;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2615,6 +2618,92 @@ impl WireDag {
                             node.id,
                             node.inputs.len()
                         )));
+                    }
+                }
+                WireRiscOp::ListMapCapture { first } => {
+                    let valid = node.inputs.len() == 2
+                        && node.output_type.dims.len() == 1
+                        && matches!(
+                            node.output_type.precision.as_str(),
+                            "f16" | "bf16" | "f32" | "f64"
+                        )
+                        && wire_node_by_id(&self.nodes, node.inputs[0]).is_some_and(|source| {
+                            source.output_type.dims.is_empty()
+                                && source.output_type.precision == node.output_type.precision
+                        })
+                        && wire_node_by_id(&self.nodes, node.inputs[1]).is_some_and(|carrier| {
+                            carrier.output_type.dims.len() == 1
+                                && (*first
+                                    || matches!(
+                                        carrier.op,
+                                        WireRiscOp::ListMapCapture { first: true }
+                                    ))
+                        });
+                    if !valid {
+                        return Err(WireDagContractError::new(
+                            "WireDag ListMapCapture requires a float scalar and rank-one invocation carrier",
+                        ));
+                    }
+                }
+                WireRiscOp::OrderedAdjointSum { groups } => {
+                    let widths = groups
+                        .iter()
+                        .map(|group| usize::try_from(group.get()))
+                        .collect::<Result<Vec<_>, _>>();
+                    let valid_widths = widths.as_ref().is_ok_and(|widths| {
+                        !widths.is_empty()
+                            && widths.iter().all(|width| *width > 0)
+                            && widths
+                                .iter()
+                                .try_fold(0usize, |sum, width| sum.checked_add(*width))
+                                == Some(node.inputs.len())
+                    });
+                    if !node.output_type.dims.is_empty()
+                        || !matches!(
+                            node.output_type.precision.as_str(),
+                            "f16" | "bf16" | "f32" | "f64"
+                        )
+                        || !valid_widths
+                    {
+                        return Err(WireDagContractError::new(
+                            "WireDag OrderedAdjointSum has invalid group arity or scalar float output",
+                        ));
+                    }
+                    let widths = widths.expect("validated group counts");
+                    let mut offset = 0;
+                    for width in widths {
+                        for input in &node.inputs[offset..offset + width] {
+                            if !wire_node_by_id(&self.nodes, *input).is_some_and(|input| {
+                                input.output_type.precision == node.output_type.precision
+                                    && (input.output_type.dims.len() == 1
+                                        || (width == 1 && input.output_type.dims.is_empty()))
+                            }) {
+                                return Err(WireDagContractError::new(
+                                    "WireDag OrderedAdjointSum requires own-dtype scalar or rank-one contributions",
+                                ));
+                            }
+                        }
+                        offset += width;
+                    }
+                }
+                WireRiscOp::Iota => {
+                    let valid = node
+                        .activation
+                        .and_then(|id| wire_node_by_id(&self.nodes, id))
+                        .is_none_or(|active| active.output_type.dims.is_empty())
+                        && node.inputs.len() == 2
+                        && node.inputs.iter().all(|id| {
+                            wire_node_by_id(&self.nodes, *id).is_some_and(|input| {
+                                input.output_type.precision == "int64"
+                                    && input.output_type.dims.is_empty()
+                            })
+                        })
+                        && node.output_type.precision == "int64"
+                        && node.output_type.dims.len() == 1;
+                    if !valid {
+                        return Err(WireDagContractError::new(
+                            "WireDag Iota requires two rank-zero i64 endpoints and a rank-one i64 output",
+                        ));
                     }
                 }
                 WireRiscOp::SplitN { count } => {
@@ -3384,6 +3473,8 @@ fn wire_axis_origin(
                 wire_rt_dim_origin(nodes, node, count, fuel - 1, relevant_shape_sources)
             }
         }
+        WireRiscOp::ListMapCapture { .. } => input_axis(1, axis),
+        WireRiscOp::OrderedAdjointSum { .. } => None,
         WireRiscOp::Permute { axes } => input_axis(0, usize::try_from(*axes.get(axis)?).ok()?),
         WireRiscOp::Expand {
             axis: expanded,
@@ -3426,7 +3517,8 @@ fn wire_axis_origin(
             fuel - 1,
             relevant_shape_sources,
         ),
-        WireRiscOp::Shrink { .. }
+        WireRiscOp::Iota
+        | WireRiscOp::Shrink { .. }
         | WireRiscOp::ReduceWindow { .. }
         | WireRiscOp::BlasMatmul { .. } => {
             Some(WireSemanticAxisOrigin::OpComputed { op: node.id, axis })
@@ -3857,6 +3949,13 @@ pub struct WireExtentClaim {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireRiscOp {
+    Iota,
+    ListMapCapture {
+        first: bool,
+    },
+    OrderedAdjointSum {
+        groups: Vec<NonnegativeCount>,
+    },
     Add,
     Sub,
     Mul,

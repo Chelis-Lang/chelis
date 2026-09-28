@@ -1118,6 +1118,20 @@ not serve. The two rows are the seams the Phase 0 scanner observes in that
 owner; neither is gratuitous, and dropping either reproduces an unclassified
 inventory hit.
 
+Runtime List-map capture and ordered cotangent summation add two exact C
+numeric-operation final forms under [05-OP-55] and spec/06 section 2.4:
+`CEmitter::emit_list_map_capture` has a `load-store-template`, and
+`CEmitter::emit_ordered_adjoint_sum` has a `backend-element-spelling`. The
+capture copies the source scalar's declared element bits into the actual
+invocation rows; the sum loads those rows in invocation and consumer order,
+then combines them at the declared float width. Both operate on private
+typed tensor storage and introduce no public bare-number channel. The Phase 0
+execution legs bind these exact owners to native C length-mismatch rejection
+and compiled Eval/C parity for the ordered tree, each float-width rounding,
+inactive and empty rows, and a false forward range claim. Renaming an owner
+or introducing another spelling remains an unclassified scanner hit until it
+has its own semantic authority and execution contract.
+
 The private C key-callable entries emitted by `append_key_callable_helpers`
 have one exact `load-store-template` final-form owner. The tensor entries read
 and write key or seed storage under [05-OP-69] through [05-OP-72]; they add no
@@ -1757,18 +1771,21 @@ existing command is an addition: it executes and is reported without changing
 the required floor. Neither a previous receipt nor a regenerated selection is an
 acceptance input.
 
-The integer-unary typed-lane amendment retains both inherited Phase 0 execution
-legs in the Phase 1 manifest: integer-to-float finalization freezes its two
-native C/UBSan positive and invalid-target controls; integer device lowering
-freezes four HIP and seven Metal admission, exact-storage, shape, and rejection
-controls. The initial floors come from freshly built nextest listings in the
-Phase 1 profile. The manifest digest changes with these two added commands and
-13 required identities; every prior command, identity floor, Python floor,
-native control, and planner mutation remains unchanged. Removing either leg or
-losing any selected required identity rejects; altered manifest bytes require a
-reviewed digest. Hardware-only HIP and Metal execution remains registered
-separately and cannot be counted by these active-test receipts. This amendment
-does not change the Phase 0 foundation, mutation contract, or digest.
+The integer-unary typed-lane amendment retains two inherited Phase 0 execution
+legs in the Phase 1 manifest: integer-to-float finalization freezes two native
+C/UBSan positive and invalid-target controls; integer device lowering freezes
+four HIP and seven Metal admission, exact-storage, shape, and rejection
+controls. The [05-OP-55] List-map C owners add two further legs: one native C
+column-length rejection and four compiled Eval/C cotangent controls for
+ordered consumer accumulation, stored-width pair rounding, inactive/empty
+rows, and a false forward range claim. Fresh nextest listings established the
+exact binary/test identities. The manifest retains every earlier command,
+required identity floor, Python floor, native control, and planner mutation;
+its reviewed digest binds the four additive commands and 18 identities.
+Hardware-only HIP and Metal execution remains registered separately and cannot
+be counted by these active-test receipts. These amendments do not change the
+Phase 0 foundation, mutation contract, or digest. A passing selection receipt
+still requires actual execution and artifact verification.
 
 The host/C consumer audit follows the representation owners and submissions:
 

@@ -141,7 +141,10 @@ impl CachePayload for crate::StdLibContext {
     // V38: result-origin quantifiers preserve complete scope components.
     // V39: result-origin schemes also carry scalar/tensor key relations.
     // V40: raw origins retain their own quantified dtype restrictions.
-    const FORMAT_VERSION: u32 = 40;
+    // V41 (#2419): the merged lowered DAG adds Iota and ordered List
+    // capture/cotangent operations to RiscOp's bincode layout. Main's V36
+    // and the branch's V40 encoded different payloads.
+    const FORMAT_VERSION: u32 = 41;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

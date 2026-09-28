@@ -5531,6 +5531,27 @@ fn adt_cons_chain_values(value: &LoweredValue) -> Option<Vec<LoweredValue>> {
     }
 }
 
+// A runtime scalar list represented by its tensor storage. Keeping a VALUE,
+// rather than replaying its source expression, evaluates endpoints and map
+// callbacks once and transports the source through normal lexical captures.
+const TENSOR_LIST_CTOR: &str = "__chelis_tensor_list";
+fn tensor_list_value(source: NodeId) -> LoweredValue {
+    LoweredValue::Adt {
+        host: None,
+        ctor: TENSOR_LIST_CTOR.into(),
+        field_names: None,
+        fields: vec![LoweredValue::Node(source)],
+    }
+}
+fn tensor_list_source(value: &LoweredValue) -> Option<NodeId> {
+    match value {
+        LoweredValue::Adt { ctor, fields, .. } if ctor == TENSOR_LIST_CTOR && fields.len() == 1 => {
+            fields[0].as_single_node()
+        }
+        _ => None,
+    }
+}
+
 fn runtime_list_view_parts(value: &LoweredValue) -> Option<(NodeId, NodeId, Vec<LoweredValue>)> {
     let LoweredValue::Adt { ctor, fields, .. } = value else {
         return None;
@@ -10689,6 +10710,40 @@ impl<'program> LowerCtx<'program> {
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
         {
+            if self.allow_host_list_ad_rewrites && func_name == "range" && kids.len() == 3 {
+                let start = self.lower_expr_node(&kids[1], "range start");
+                let end = self.lower_expr_node(&kids[2], "range end");
+                let dim = DimInfo::Named("*".into(), None);
+                let source = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Iota,
+                    vec![start, end],
+                    TensorType {
+                        dims: vec![dim],
+                        precision: Prim::Int64,
+                    },
+                    self.current_span_id.clone(),
+                );
+                return tensor_list_value(source);
+            }
+            if self.allow_host_list_ad_rewrites
+                && func_name == "map"
+                && kids.len() == 3
+                && self.is_tensor_list_expr(&kids[2])
+            {
+                let list = self.lower_expr(&kids[2]);
+                let source = tensor_list_source(&list).expect("represented tensor list");
+                let output = self
+                    .lower_host_list_map(&kids[1], source)
+                    .unwrap_or_else(|| {
+                        raise_fatal_lowering_error(
+                            "runtime map callback cannot be represented as a scalar tensor graph",
+                            Some(app_span),
+                            self.current_span_id.clone(),
+                        )
+                    });
+                return tensor_list_value(output);
+            }
             if self.allow_host_list_ad_rewrites && func_name == "Cons" && kids.len() == 3 {
                 return LoweredValue::Adt {
                     host: None,
@@ -10704,7 +10759,35 @@ impl<'program> LowerCtx<'program> {
             // static empty/non-empty guard look runtime-dependent and mix an
             // i64 mask into the floating adjoint branches.
             if self.allow_host_list_ad_rewrites && func_name == "len" && kids.len() == 2 {
+                let resolved = self.resolved_list_expr(&kids[1]);
+                if let Some(source) = to_list_source_expr(&resolved) {
+                    let source = self.lower_expr_node(source, "list length source");
+                    // [05-OP-57] preserves nested Lists. Their outer length
+                    // is axis zero, never the tensor's total element count.
+                    return LoweredValue::Node(self.dag.add_node(
+                        self.owner(),
+                        RiscOp::Shape { axis: 0 },
+                        vec![source],
+                        TensorType {
+                            dims: vec![],
+                            precision: Prim::Int64,
+                        },
+                        self.current_span_id.clone(),
+                    ));
+                }
                 let list = self.lower_expr(&kids[1]);
+                if let Some(source) = tensor_list_source(&list) {
+                    return LoweredValue::Node(self.dag.add_node(
+                        self.owner(),
+                        RiscOp::Shape { axis: 0 },
+                        vec![source],
+                        TensorType {
+                            dims: vec![],
+                            precision: Prim::Int64,
+                        },
+                        self.current_span_id.clone(),
+                    ));
+                }
                 if let Some((_, len, _)) = runtime_list_view_parts(&list) {
                     return LoweredValue::Node(len);
                 }
@@ -12571,7 +12654,7 @@ impl<'program> LowerCtx<'program> {
             .iter()
             .map(|arg| self.lower_expr_node(arg, "vmap arguments"))
             .collect();
-        self.lower_vmap_callable_with_nodes(fn_expr, axis, &actual_args, app_span)
+        self.lower_vmap_callable_with_nodes(fn_expr, axis, &actual_args, app_span, false)
     }
 
     fn restore_vmapped_entry_witness_axes(
@@ -12678,6 +12761,7 @@ impl<'program> LowerCtx<'program> {
         axis: usize,
         actual_args: &[NodeId],
         app_span: Span,
+        ordered_scalar_map: bool,
     ) -> LoweredValue {
         #[cfg(feature = "lowering-trace")]
         if let Some(trace) = &self.trace {
@@ -12831,11 +12915,31 @@ impl<'program> LowerCtx<'program> {
             })
             .collect::<UnordSet<_>>();
 
-        let vmapped = match vmap::vectorize_axis0_with_captures(
-            &subctx.dag,
-            batch_dim.clone(),
-            &captured_loads,
-        ) {
+        // [05-OP-55] Vectorization may reorder callback operations between
+        // iterations only if no invocation can produce an observable check.
+        // Scalar outputs also exclude iteration-dependent allocation extents.
+        if ordered_scalar_map
+            && crate::optimize::dead_code_eliminate(&subctx.dag)
+                .nodes()
+                .iter()
+                .any(|node| {
+                    !node.output_type.dims.is_empty()
+                        || node.runtime_check() != crate::dag::RuntimeCheck::Nothing
+                        || node.output_type.precision == Prim::Key
+                })
+        {
+            raise_fatal_lowering_error(
+                "runtime map callback requires ordered execution: its scalar DAG is not proven free of observable checks",
+                Some(app_span),
+                self.current_span_id.clone(),
+            );
+        }
+        let vectorize = if ordered_scalar_map {
+            vmap::vectorize_list_map
+        } else {
+            vmap::vectorize_axis0_with_captures
+        };
+        let vmapped = match vectorize(&subctx.dag, batch_dim.clone(), &captured_loads) {
             Ok(dag) => dag,
             Err(message) => raise_lowering_error(
                 format!("`vmap` lowering failed: {message}"),
@@ -13081,6 +13185,7 @@ impl<'program> LowerCtx<'program> {
         subctx.current_span_id = self.current_span_id.clone();
         let mut wrt = Vec::new();
         let mut wrt_param_indices = Vec::new();
+        let mut mapped_batch_witness = None;
         for (index, (name, param_ty)) in param_names
             .iter()
             .zip(param_types.iter().cloned())
@@ -13096,6 +13201,14 @@ impl<'program> LowerCtx<'program> {
                 param_ty.clone(),
                 subctx.current_span_id.clone(),
             );
+            if mapped_batch_witness.is_none()
+                && self
+                    .dag
+                    .get(canonical_args[index])
+                    .is_some_and(|actual| actual.output_type.dims.len() > param_ty.dims.len())
+            {
+                mapped_batch_witness = Some(load);
+            }
             if self.is_selected_wrt(index, &param_ty, wrt_indices) {
                 wrt.push(load);
                 wrt_param_indices.push(index);
@@ -13123,6 +13236,14 @@ impl<'program> LowerCtx<'program> {
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
+        // Even a constant body has one result per mapped input row. Keep the
+        // formal's shape available through AD pruning so a symbolic batch
+        // broadcast reads its cardinality from the actual at the call site.
+        if let Some(witness) = mapped_batch_witness
+            && witness != output
+        {
+            subctx.dag.add_shape_dep(output, witness);
+        }
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -16262,11 +16383,38 @@ impl<'program> LowerCtx<'program> {
         }
         matches!(
             app_var_name_and_args(expr),
-            Some(("to_list", [_])) | Some(("map", [_, _])) | Some(("filter", [_, _]))
+            Some(("to_list", [_]))
+                | Some(("map", [_, _]))
+                | Some(("filter", [_, _]))
+                | Some(("range", [_, _]))
         )
     }
 
+    fn is_tensor_list_expr(&self, expr: &Expr) -> bool {
+        if let Some(name) = bare_var_name(expr) {
+            return self
+                .bindings
+                .get(&name)
+                .and_then(tensor_list_source)
+                .is_some();
+        }
+        let builtin = |name: &str| {
+            !self.program_defs.contains_key(name)
+                && !self.local_callables.contains_key(name)
+                && !self.fn_typed_params.contains(name)
+        };
+        match app_var_name_and_args(expr) {
+            Some(("range", [_, _])) if builtin("range") => true,
+            Some(("map", [_, source])) if builtin("map") => self.is_tensor_list_expr(source),
+            _ => false,
+        }
+    }
+
     fn lower_host_list_to_tensor(&mut self, expr: &Expr, ty: &TensorType) -> Option<NodeId> {
+        if self.is_tensor_list_expr(expr) {
+            let value = self.lower_expr(expr);
+            return tensor_list_source(&value);
+        }
         let resolved = self.resolved_list_expr(expr);
         if let Some(source) = to_list_source_expr(&resolved) {
             return Some(self.lower_expr_node(source, "to_list/tensor AD boundary"));
@@ -16281,8 +16429,7 @@ impl<'program> LowerCtx<'program> {
                     let rhs_node = self.lower_expr_node(rhs, "map zip right source");
                     self.lower_host_list_zip_map(callback, lhs_node, rhs_node)
                 } else {
-                    let source = to_list_source_expr(&list_resolved)?;
-                    let source_node = self.lower_expr_node(source, "map source");
+                    let source_node = self.lower_host_list_to_tensor(&list_resolved, ty)?;
                     self.lower_host_list_map(callback, source_node)
                 }
             }
@@ -16303,6 +16450,20 @@ impl<'program> LowerCtx<'program> {
         let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(callback)? else {
             return None;
         };
+        if self.dag.get(source_node)?.output_type.dims.len() == 1
+            && concrete_dim_len(&self.dag.get(source_node)?.output_type.dims[0]).is_none()
+        {
+            return Some(
+                self.lower_vmap_callable_with_nodes(
+                    &fn_expr,
+                    0,
+                    &[source_node],
+                    callback.span(),
+                    true,
+                )
+                .expect_node("scalar map callback"),
+            );
+        }
         let (source_node, len, elem_ty, out_dim) = self.flattened_list_source_parts(source_node)?;
         let mut mapped = Vec::with_capacity(len);
         for index in 0..len {
@@ -22293,6 +22454,38 @@ mod tests {
             LinearityInfo::default(),
         )
         .declared_for_test()
+    }
+
+    #[test]
+    fn host_list_length_reads_the_outer_axis() {
+        let mut ctx = empty_lower_ctx();
+        ctx.allow_host_list_ad_rewrites = true;
+        let input = ctx.dag.add_node(
+            ctx.owner(),
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        ctx.bindings.insert("x".into(), LoweredValue::Node(input));
+        let expr = chelis_deep::parser::parse_str(
+            "(app {} (var {} len) (app {} (var {} to_list) (var {} x)))",
+        )
+        .unwrap()
+        .remove(0);
+        let count = ctx.lower_expr_node(&expr, "outer list length");
+        ctx.dag.add_root(count);
+        let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[count], |name| {
+            (name == "x").then(|| crate::eval::TensorValue::from_vec(vec![2, 3], vec![1.0; 6]))
+        })
+        .unwrap();
+        assert_eq!(
+            values[&count].storage().scalar_at(0).as_i64_exact(),
+            Some(2)
+        );
     }
 
     fn pattern_scope_depends_on_bad(pattern: Expr) -> bool {

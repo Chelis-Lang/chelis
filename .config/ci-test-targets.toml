@@ -376,6 +376,11 @@ prefix = "examples/grad_extent_claim.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+[[path_rule]]
+prefix = "examples/grad_runtime_basis.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 # chelis#2027: canonical release manifests and bundled locks are live inputs.
 [[standing_target]]
 package = "chelis-cli"
@@ -1391,6 +1396,24 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "the materialization-case selection and expectations are imported by PR script-unit census controls"
 tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_fixed_roles.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit executes the exact fixed-field role admission and rejection controls"
+tracking_issue = "chelis#729"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_fixed_roles.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit executes the exact fixed-field role admission and rejection controls"
+tracking_issue = "chelis#729"
 
 [[path_rule]]
 prefix = "scripts/capacity_census_wire_artifact.py"
