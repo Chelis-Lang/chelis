@@ -379,14 +379,14 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
         if let Some(call) = central_workflow_call(ctx, body) {
             checked += 1;
             if let Some(version) = &call.chelis_version
-                && version.trim_start_matches('v') != bare
+                && version != bare
             {
                 mismatches.push(format!(
                     "{name}: central chelis-version={version} != {bare}"
                 ));
             }
             if let Some(tag) = &call.chelis_tag
-                && tag.trim_start_matches('v') != bare
+                && tag.strip_prefix('v') != Some(bare)
             {
                 mismatches.push(format!("{name}: central chelis-tag={tag} != v{bare}"));
             }
@@ -458,14 +458,13 @@ fn check_pin_consistency_guard(ctx: &Ctx) -> Check {
     };
     let local_guard = workflow_runs_command(ci, "chelis reef conform bump-check")
         || workflow_runs_command(ci, "chelis reef conform audit");
-    let central_guard = central_workflow_call(ctx, ci)
-        .is_some_and(|call| matches!(call.profile.as_str(), "coral-ci" | "nautilus-ci"));
+    let central_guard = central_ci_workflow_call(ctx, ci).is_some();
     if local_guard || central_guard {
         pass()
     } else {
         fail(
-            "ci.yml does not run the offline pin/conformance guard or a known legacy central CI profile",
-            "run `chelis reef conform bump-check --base origin/main` / `conform audit`, or call the known legacy central CI revision (consumer approval is separate)",
+            "ci.yml lacks a blocking offline pin guard or known legacy central CI profile with exact reef inputs and PR/main-push triggers",
+            "run `chelis reef conform bump-check --base origin/main` / `conform audit`, or wire the known legacy central CI revision with exact pins and PR/main-push triggers (consumer approval is separate)",
         )
     }
 }
@@ -937,8 +936,7 @@ fn check_tests_neg(ctx: &Ctx) -> Check {
     }
     let suite_is_wired = ctx.workflows.iter().any(|(_, body)| {
         workflow_runs_expected_suite(body, "tests_neg", "neg")
-            || central_workflow_call(ctx, body)
-                .is_some_and(|call| matches!(call.profile.as_str(), "coral-ci" | "nautilus-ci"))
+            || central_ci_workflow_call(ctx, body).is_some()
     });
     if !suite_is_wired {
         return fail(
@@ -968,7 +966,7 @@ fn check_tests_blocked(ctx: &Ctx) -> Check {
     }
     let suite_is_wired = ctx.workflows.iter().any(|(_, body)| {
         workflow_runs_expected_suite(body, "tests_blocked", "blocked")
-            || central_workflow_call(ctx, body).is_some_and(|call| call.profile == "nautilus-ci")
+            || central_ci_workflow_call(ctx, body).is_some_and(|call| call.profile == "nautilus-ci")
     });
     if !suite_is_wired {
         return fail(
@@ -1422,6 +1420,153 @@ fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
         _ => false,
     };
     matches_shell.then_some(call)
+}
+
+/// A central CI profile certifies blocking guards and suites only when the
+/// caller runs for pull requests and main pushes with the exact reef inputs.
+/// Trigger/concurrency equality with the selected profile belongs to the
+/// central wrapper validator; this is the offline minimum for a running gate.
+fn central_ci_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
+    let call = central_workflow_call(ctx, body)?;
+    if !matches!(call.profile.as_str(), "coral-ci" | "nautilus-ci") || !ci_runs_on_changes(body) {
+        return None;
+    }
+    let bare = ctx.reef_pin.as_deref()?.trim_start_matches('=');
+    (call.chelis_version.as_deref() == Some(bare)
+        && call
+            .chelis_tag
+            .as_deref()
+            .and_then(|tag| tag.strip_prefix('v'))
+            == Some(bare))
+    .then_some(call)
+}
+
+/// Only explicit top-level event mappings can establish change coverage.
+/// The accepted push/PR filters are unfiltered events or branch lists
+/// containing literal `main` with no negations or other restricting filters.
+fn ci_runs_on_changes(body: &str) -> bool {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut on_start = None;
+    for (index, line) in lines.iter().enumerate() {
+        if let Some((key, value)) = mapping_at(line, 0)
+            && key == "on"
+        {
+            if on_start.is_some() || !value.is_empty() {
+                return false;
+            }
+            on_start = Some(index + 1);
+        }
+    }
+    let Some(start) = on_start else {
+        return false;
+    };
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, line)| !line.trim().is_empty() && leading_spaces(line) == Some(0))
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+    let mut push = false;
+    let mut pull_request = false;
+    let mut index = start;
+    while index < end {
+        let line = lines[index];
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            index += 1;
+            continue;
+        }
+        let Some((event, value)) = mapping_at(line, 2) else {
+            return false;
+        };
+        let next = lines
+            .iter()
+            .enumerate()
+            .take(end)
+            .skip(index + 1)
+            .find(|(_, child)| {
+                !child.trim().is_empty()
+                    && !child.trim_start().starts_with('#')
+                    && leading_spaces(child).is_some_and(|indent| indent <= 2)
+            })
+            .map(|(next, _)| next)
+            .unwrap_or(end);
+        if event == "push" {
+            if push || !ci_event_includes_main(&value, &lines[index + 1..next]) {
+                return false;
+            }
+            push = true;
+        } else if event == "pull_request" {
+            if pull_request || !ci_event_includes_main(&value, &lines[index + 1..next]) {
+                return false;
+            }
+            pull_request = true;
+        }
+        index = next;
+    }
+    push && pull_request
+}
+
+fn ci_event_includes_main(value: &str, lines: &[&str]) -> bool {
+    if value == "{}" {
+        return lines
+            .iter()
+            .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'));
+    }
+    if !value.is_empty() {
+        return false;
+    }
+    let mut branches = None;
+    let mut multiline = false;
+    for line in lines {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        match leading_spaces(line) {
+            Some(4) => {
+                let Some((key, filter)) = mapping_at(line, 4) else {
+                    return false;
+                };
+                if key != "branches" || branches.is_some() {
+                    return false;
+                }
+                multiline = filter.is_empty();
+                branches = Some(if multiline {
+                    false
+                } else {
+                    let Some(inline) = main_in_branch_list(&filter) else {
+                        return false;
+                    };
+                    inline
+                });
+            }
+            Some(6) if multiline => {
+                let Some(branch) = line[6..].strip_prefix("- ") else {
+                    return false;
+                };
+                let branch = yaml_scalar(branch);
+                if branch.is_empty() || branch.starts_with('!') {
+                    return false;
+                }
+                branches = Some(branches.unwrap_or(false) || branch == "main");
+            }
+            _ => return false,
+        }
+    }
+    branches.unwrap_or(true)
+}
+
+fn main_in_branch_list(value: &str) -> Option<bool> {
+    let entries = value.strip_prefix('[')?.strip_suffix(']')?;
+    let mut main = false;
+    for entry in entries.split(',') {
+        let branch = yaml_scalar(entry);
+        if branch.is_empty() || branch.starts_with('!') {
+            return None;
+        }
+        main |= branch == "main";
+    }
+    Some(main)
 }
 
 fn parse_central_workflow_call(body: &str) -> Option<CentralWorkflowCall> {

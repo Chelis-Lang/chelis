@@ -134,7 +134,10 @@ fn central_ci_wrapper(package: &str, version: &str) -> String {
         inputs.push("nautilus-tag: v4.5.6".to_string());
         inputs.push("package-version: 7.8.9".to_string());
     }
-    central_profile_wrapper(profile, &inputs)
+    central_profile_wrapper(profile, &inputs).replace(
+        "on: workflow_dispatch",
+        "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:",
+    )
 }
 
 #[test]
@@ -163,6 +166,103 @@ fn immutable_central_ci_wrappers_satisfy_executed_contract_rows() {
             );
         }
         assert!(report.ok(), "{package}: central wrapper must audit green");
+    }
+}
+
+#[test]
+fn central_ci_inputs_require_the_exact_reef_version_and_tag_shape() {
+    for package in ["coral", "nautilus"] {
+        for (needle, replacement) in [
+            (format!("chelis-tag: v{VER}"), format!("chelis-tag: {VER}")),
+            (
+                format!("chelis-tag: v{VER}"),
+                format!("chelis-tag: vv{VER}"),
+            ),
+            (
+                format!("chelis-version: {VER}"),
+                format!("chelis-version: v{VER}"),
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = stamp(tmp.path(), package);
+            let wrapper = central_ci_wrapper(package, VER).replace(&needle, &replacement);
+            std::fs::write(root.join(".github/workflows/ci.yml"), wrapper).unwrap();
+            if package == "nautilus" {
+                std::fs::create_dir_all(root.join("tests_blocked/example")).unwrap();
+                std::fs::write(root.join("tests_blocked/example/case.ch"), "1\n").unwrap();
+            }
+            let report = audit::audit(&root);
+            assert_eq!(
+                verdict_of(&report, "workflow-env-pins"),
+                Verdict::Fail,
+                "{package}: {replacement} must not match the reef pin"
+            );
+            if package == "nautilus" {
+                assert_eq!(verdict_of(&report, "tests-blocked"), Verdict::Fail);
+            }
+            assert!(!report.ok(), "{package}: {replacement} must fail the audit");
+        }
+    }
+}
+
+#[test]
+fn central_ci_must_run_for_pull_requests_and_main_pushes() {
+    for package in ["coral", "nautilus"] {
+        let active = central_ci_wrapper(package, VER);
+        let events = "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:";
+        for replacement in [
+            "on: workflow_dispatch",
+            "",
+            "on:\n  pull_request:\n  workflow_dispatch:",
+            "on:\n  push:\n    branches: [main]\n  workflow_dispatch:",
+            "on:\n  push:\n    branches: [dev]\n  pull_request:",
+            "# on:\n#   push:\n#   pull_request:",
+            "env:\n  NOTE: |\n    on:\n      push:\n      pull_request:",
+            "on:\n  push:\n    branches: [main]\n    paths: [src/**]\n  pull_request:",
+            "on:\n  push:\n    branches: [main, '!main']\n  pull_request:",
+            "on:\n  push:\n    branches: [main]\n  pull_request:\n    types: [closed]",
+            "on:\n  push:\n  pull_request:\non: workflow_dispatch",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = stamp(tmp.path(), package);
+            let wrapper = active.replace(events, replacement);
+            std::fs::write(root.join(".github/workflows/ci.yml"), wrapper).unwrap();
+            if package == "nautilus" {
+                std::fs::create_dir_all(root.join("tests_blocked/example")).unwrap();
+                std::fs::write(root.join("tests_blocked/example/case.ch"), "1\n").unwrap();
+            }
+            let report = audit::audit(&root);
+            for row in ["pin-consistency-guard", "tests-neg"] {
+                assert_eq!(
+                    verdict_of(&report, row),
+                    Verdict::Fail,
+                    "{package}: {replacement:?} must not certify {row}"
+                );
+            }
+            if package == "nautilus" {
+                assert_eq!(verdict_of(&report, "tests-blocked"), Verdict::Fail);
+            }
+            assert!(!report.ok(), "{package}: {replacement:?} must fail audit");
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        let alternate = active.replace(
+            events,
+            "on:\n  pull_request:\n    branches:\n      - main\n  push: {}\n  workflow_dispatch:",
+        );
+        std::fs::write(root.join(".github/workflows/ci.yml"), alternate).unwrap();
+        let report = audit::audit(&root);
+        for row in ["pin-consistency-guard", "tests-neg"] {
+            assert_eq!(
+                verdict_of(&report, row),
+                Verdict::Pass,
+                "{package}: an unfiltered main push and PR targeting main must satisfy {row}"
+            );
+        }
+        assert!(
+            report.ok(),
+            "{package}: legitimate change triggers must audit green"
+        );
     }
 }
 

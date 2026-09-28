@@ -113,6 +113,16 @@ reviewing its job behavior and updating the auditor, not treating any
 40-character immutable reference as equivalent.
 An unknown central pointer in any workflow is a failed workflow-pin row,
 even if another workflow invokes the known legacy revision.
+For a legacy central CI profile, `chelis-tag` must equal `vX.Y.Z` and
+`chelis-version` must equal `X.Y.Z` for the exact `reef.toml` pin; extra or
+missing `v` prefixes do not count. To certify the CI pin guard and negative
+or blocked suites, the thin caller must also have explicit top-level `on`
+events covering both pull requests targeting `main` and pushes to `main`.
+The offline audit accepts unfiltered events or literal `main` branch filters
+without negations or other restricting filters; manual-only, absent, or
+inert source markers do not establish a blocking change gate. This is only
+minimum offline event viability: the central wrapper validator owns exact
+profile trigger and concurrency equality under ci#5 RWF-015.
 
 - Toolchain installs go through an installer that reads the reef pin. The
   first-party path (shipped; WS-B/WS-C of
