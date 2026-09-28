@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
-"""Fail on runtime-archive lookups outside the runtime bundle (chelis#1354).
+"""Make every line that names the runtime outside its bundle a reviewed line (chelis#1354).
 
 `chelis-runtime-bundle` owns the runtime archive: a build embeds the archive it
 linked, `stage` writes those bytes, and `chelis runtime export` wraps `stage`
 (spec/08-backends.md §2.1). Code that instead finds an archive can link bytes
 its consumer was not built with.
 
-A lookup has to name what it looks for, so the guard anchors on the runtime's
-names rather than on the syntax around them. It reads every tracked or
-untracked, not ignored, Rust, Python, Nix, shell, TOML and YAML file outside the
-two bundle crates and matches:
+A lookup has to name what it looks for, and telling a lookup from a staged use
+needs a reader, so the guard does not classify lines: every line that names
+the runtime needs a reviewed row. It reads every tracked or untracked, not
+ignored, Rust, Python, Nix, shell, TOML and YAML file outside the two bundle
+crates, one line at a time, and matches:
 
-- any mention of `CHELIS_RUNTIME_DIR` (reviewable) or `CHELIS_RUNTIME_LIB` (never
-  allowed), whatever reads, sets or names it;
-- the runtime's library or Cargo target name as a string literal
-  (`"chelis_runtime"`, `'libchelis_runtime'`), which a Cargo artifact read, a
-  `#[link]` attribute or a name filter must contain;
-- a library search for it: `-lchelis_runtime`, `-l chelis_runtime`, an `"-l"`
-  argument followed by the name, `rustc-link-lib` or `#[link(name = ...)]`;
-- `libchelis_runtime` other than the exact staged file name
-  `libchelis_runtime.a`: a prefix, a hashed name or a glob stem;
-- the exact file name inside a glob or `find -name` scan, or joined onto a
-  build-tree directory (`target`, `deps`, `debug`, `release`, `profile`, a
-  `target*()` helper or `CARGO_TARGET_DIR`), also across a line break;
-- the exact file name on a line that probes for it (an existence or file check,
-  a shell test, a directory walk or listing, the executable's location or a
-  modification time), or bound to a variable that one of the next three lines
-  checks for existence;
+- `libchelis_runtime` in any form: the staged file name, a prefix, a hashed
+  name or a glob;
+- a runtime variable, `CHELIS_RUNTIME_` followed by a name (C header guards
+  ending in `_H` are not variables); `CHELIS_RUNTIME_LIB` admits no row;
+- the library or Cargo target name as a string literal, `"chelis_runtime"` or
+  `"static=chelis_runtime"`, which a Cargo artifact read, a `#[link]` attribute
+  or a split `-l` argument contains;
+- a library search: `-lchelis_runtime`, `-l chelis_runtime`, `-l
+  static=chelis_runtime`, `rustc-link-lib=...chelis_runtime` or
+  `--library=chelis_runtime`;
+- the bundle's exported names for the archive and the variable,
+  `ARCHIVE_FILE_NAME` and `RUNTIME_DIR_VARIABLE`;
 - a Cargo package id of the runtime (`"chelis-runtime 0.1.0 (...)"`,
-  `#chelis-runtime@...`).
+  `.../crates/chelis-runtime#0.18.11`, `#chelis-runtime@...`).
 
-Linking the staged archive by path, `out.join("libchelis_runtime.a")`, is none
-of these. Each reviewed row pins the exact lines one pattern matches in one file,
-so a new match fails, an edited or removed match fails, and the change that
+Each reviewed row pins the exact text of the lines one pattern matches in one
+file. A new line fails, an edited or removed line fails, and the change that
 removes a lookup also removes its row. A `lookup` row names the issue that
-removes it; a `not-lookup` row says why the text is not one.
+removes it; a `not-lookup` row says why the line is not one.
+
+The guard follows no values. A lookup that reaches the runtime only through a
+reviewed line, such as a constant naming the archive or a directory computed on
+another line, is visible only as that reviewed line.
 """
 from __future__ import annotations
 
@@ -53,11 +53,16 @@ OWNER_PREFIXES = ("crates/chelis-runtime-bundle/", "crates/chelis-runtime-bundle
 GUARD_FILES = frozenset(
     {"scripts/check_runtime_archive_lookups.py", "scripts/test_check_runtime_archive_lookups.py"}
 )
-# Every alternative of every pattern contains one of these; other files are skipped.
-TOKENS = ("chelis_runtime", "chelis-runtime", "CHELIS_RUNTIME_")
+# Every alternative of every pattern contains one of these; other lines are skipped.
+TOKENS = (
+    "chelis_runtime",
+    "chelis-runtime",
+    "CHELIS_RUNTIME_",
+    "ARCHIVE_FILE_NAME",
+    "RUNTIME_DIR_VARIABLE",
+)
 DISPOSITIONS = frozenset({"lookup", "not-lookup"})
 ISSUE = re.compile(r"chelis#[1-9][0-9]*")
-BUILD_TREE = r"(?:target|deps|debug|release)"
 
 
 @dataclass(frozen=True)
@@ -65,7 +70,8 @@ class Pattern:
     name: str
     alternatives: tuple[str, ...]
     # Lines the pattern must match. Each alternative has a sample no other
-    # alternative matches, so deleting one fails the guard's tests.
+    # alternative matches, so deleting one fails the guard's tests. A pattern
+    # applies to one line at a time.
     samples: tuple[str, ...]
     # False: no reviewed row may allow a match.
     reviewable: bool = True
@@ -77,116 +83,52 @@ class Pattern:
 
 PATTERNS = (
     Pattern(
+        "archive-name",
+        (r"libchelis_runtime",),
+        ('let runtime = build_dir.join("libchelis_runtime.a");',),
+    ),
+    Pattern(
         "runtime-variable",
-        (r"\bCHELIS_RUNTIME_DIR\b",),
+        # Any runtime variable but the one below; C header guards are not variables.
+        (r"\bCHELIS_RUNTIME_(?!LIB\b)(?!(?:[A-Z0-9_]*_)?H\b)[A-Z0-9_]+",),
         ('runtime = env.get("CHELIS_RUNTIME_DIR")',),
     ),
     Pattern(
         "runtime-lib-variable",
         (r"\bCHELIS_RUNTIME_LIB\b",),
-        ('CHELIS_RUNTIME_LIB="$PWD/target/debug/libchelis_runtime.a" cargo nextest run',),
+        ('CHELIS_RUNTIME_LIB="$PWD/target/debug/runtime.a" cargo nextest run',),
         reviewable=False,
     ),
     Pattern(
         "library-name",
-        (r"[\"'](?:lib)?chelis_runtime[\"']",),
-        ("if row.get('target', {}).get('name') != 'chelis_runtime':",),
+        (r"[\"'](?:[a-z]+=)?chelis_runtime[\"']",),
+        (
+            "if row.get('target', {}).get('name') != 'chelis_runtime':",
+            'rustflags = ["-l", "static=chelis_runtime"]',
+        ),
     ),
     Pattern(
         "linker-search",
-        (
-            r"-l\s*:?(?:lib)?chelis_runtime\b",
-            r"[\"']-l[\"']\s*(?:,|\)\s*\.arg\()\s*[\"']:?(?:lib)?chelis_runtime\b",
-            r"link-lib=[^\s\"']*chelis_runtime",
-            r"#\[link\(\s*name\s*=\s*r?\"(?:lib)?chelis_runtime\"",
-        ),
+        (r"-l[ \t]*(?:[a-z]+=)*:?(?:lib)?chelis_runtime\b",),
         (
             'cmd.args(["-L.", "-lchelis_runtime"]);',
-            'cmd.arg("-L").arg(dir).arg("-l").arg("chelis_runtime");',
             'println!("cargo:rustc-link-lib=static=chelis_runtime");',
-            '#[link(name = "chelis_runtime", kind = "static")]',
         ),
     ),
     Pattern(
-        "archive-prefix",
-        (r"libchelis_runtime(?!\.a(?![\w*?\[{]))",),
-        ("const LIB_PREFIX: &str = \"libchelis_runtime\";", "ls target/debug/libchelis_runtime.a*"),
-    ),
-    Pattern(
-        "archive-scan",
+        "bundle-constant",
+        (r"\b(?:ARCHIVE_FILE_NAME|RUNTIME_DIR_VARIABLE)\b",),
         (
-            r"\b(?:r?glob|iglob|fnmatch)\s*\([^)]*libchelis_runtime",
-            r"\bfind\b[^\n;|]*-i?name\s+[\"']?[^\s\"';|]*libchelis_runtime",
-        ),
-        (
-            'archive = next(Path(target).glob("**/libchelis_runtime.a"))',
-            'glob::glob(\n    &format!("{}/**/libchelis_runtime.a", target.display()),\n)',
-            "find target -name libchelis_runtime.a -newer Cargo.lock",
-        ),
-    ),
-    Pattern(
-        "build-tree-archive",
-        (
-            rf"\b{BUILD_TREE}/[^\s\"']*libchelis_runtime",
-            rf"[\"']{BUILD_TREE}[\"'][^\n]*?[\"']libchelis_runtime",
-            rf"[\"']{BUILD_TREE}[\"']\s*\)\s*\.join\(\s*[\"']libchelis_runtime",
-            r"\b(?:target|deps|debug|release|profile)\w*(?:\(\))?\s*(?:\.join\(\s*|/\s*)"
-            r"[\"']libchelis_runtime",
-            r"CARGO_TARGET_DIR[^\n]*libchelis_runtime",
-        ),
-        (
-            "cp target/release/libchelis_runtime.a dist/",
-            'archive = os.path.join("target", "debug", "libchelis_runtime.a")',
-            'let archive = root\n    .join("debug")\n    .join("libchelis_runtime.a");',
-            'let canonical = target_debug_dir().join("libchelis_runtime.a");',
-            'cc main.c "$CARGO_TARGET_DIR/libchelis_runtime.a"',
-        ),
-    ),
-    Pattern(
-        "archive-probe",
-        (
-            # The name and a probe on one line: an existence or file check,
-            *(
-                rf"(?m:^(?=[^\n]*libchelis_runtime\.a)(?=[^\n]*(?:{probe}))[^\n]*)"
-                for probe in (
-                    r"\.(?:exists|is_file|try_exists)\(\)|\b(?:exists|isfile)\(|\bmetadata\(",
-                    # a shell test,
-                    r"\[\[?\s+-[ef]\s|\btest\s+-[ef]\s",
-                    # a directory walk or listing,
-                    r"WalkDir|os\.walk|read_dir|listdir|\bin\s+files\b|file_name\(\)\s*==",
-                    # the executable's location,
-                    r"current_exe",
-                    # or a modification time.
-                    r"st_mtime|getmtime|modified\(\)",
-                )
-            ),
-            # A variable bound to the name and probed within the next three lines.
-            r"(?m:^[^\S\n]*(?:let\s+(?:mut\s+)?)?(?P<bound>\w+)[^\S\n]*(?::[^=\n]*)?=[^=\n]*"
-            r"libchelis_runtime\.a[^\n]*(?:\n[^\n]*){0,3}?"
-            r"(?:\b(?P=bound)\s*\.\s*(?:exists|is_file|try_exists)\("
-            r"|\b(?:exists|isfile|getmtime|metadata)\(\s*&?(?P=bound)\b))",
-        ),
-        (
-            'if dir.join("libchelis_runtime.a").exists() {',
-            'if os.path.isfile(os.path.join(d, "libchelis_runtime.a")):',
-            'if fs::metadata(dir.join("libchelis_runtime.a")).is_ok() {',
-            '[ -f "$d/libchelis_runtime.a" ] && runtime="$d"',
-            'test -f "$d/libchelis_runtime.a" && runtime="$d"',
-            'WalkDir::new(&target).into_iter().find(|e| e.file_name() == "libchelis_runtime.a")',
-            'if "libchelis_runtime.a" in files:',
-            'let beside = std::env::current_exe()?.with_file_name("libchelis_runtime.a");',
-            'newest = max((d / "libchelis_runtime.a" for d in dirs), key=lambda p: p.stat().st_mtime)',
-            'newest = max((d / "libchelis_runtime.a" for d in dirs), key=os.path.getmtime)',
-            'let candidate = dir.join("libchelis_runtime.a");\nif candidate.exists() {',
-            'candidate = d / "libchelis_runtime.a"\nif os.path.isfile(candidate):',
+            "let candidate = dir.join(chelis_runtime_bundle::ARCHIVE_FILE_NAME);",
+            "runtime = os.environ.get(RUNTIME_DIR_VARIABLE)",
         ),
     ),
     Pattern(
         "runtime-package",
-        (r"[\"']chelis-runtime[ @]", r"#chelis-runtime@"),
+        (r"[\"']chelis-runtime[ @]", r"[#/]chelis-runtime[@#]"),
         (
             'if message["package_id"].startswith("chelis-runtime "):',
-            "id = f\"path+file://{root}/crates/chelis-runtime#chelis-runtime@{version}\"",
+            'if package_id.endswith("/crates/chelis-runtime#" + version):',
         ),
     ),
 )
@@ -207,89 +149,67 @@ class Row:
 # The reviewed matches. A lookup row's tracking issue owns its removal.
 REVIEWED: tuple[Row, ...] = (
     Row(
-        "crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs",
-        "linker-search",
+        ".github/scripts/smoke_macos_manifested_callable.py",
+        "archive-name",
         lines=(
-            '.arg("-lchelis_runtime")',
+            'runtime_a = output_dir / "libchelis_runtime.a"',
         ),
-        disposition="lookup",
+        disposition="not-lookup",
         reason=(
-            "an entirely ignored HIP gate links `-L. -lchelis_runtime` in its `chelis build` "
-            "output directory; linking the staged archive by path needs its manual-gate row "
-            "and wired docs/manual_gates.md entry in the same change"
+            "links the archive `chelis build` staged in its output directory"
         ),
-        tracking="chelis#1354",
     ),
     Row(
-        "crates/chelis-cli/tests/issue_1314_json_bigint.rs",
-        "library-name",
+        ".github/scripts/smoke_macos_metal.py",
+        "archive-name",
         lines=(
-            'row["reason"] == "compiler-artifact" && row["target"]["name"] == "chelis_runtime"',
+            'str(out_dir / "libchelis_runtime.a"),',
         ),
-        disposition="lookup",
+        disposition="not-lookup",
         reason=(
-            "selects a separately built ownership-ledger archive from Cargo's "
-            "compiler-artifact messages and copies it over the staged runtime, instead of "
-            "building its consumer with chelis-runtime/ownership-ledger"
+            "links the archive `chelis build` staged in its output directory"
         ),
-        tracking="chelis#1354",
     ),
     Row(
-        "crates/chelis-cli/tests/std_io_pipeline.rs",
-        "linker-search",
+        ".github/scripts/test_verify_release_smt.py",
+        "archive-name",
         lines=(
-            'cmd.args(["-L.", "-lchelis_runtime"]);',
+            '(root / "staging" / "lib" / "libchelis_runtime.a").write_text("x")',
         ),
-        disposition="lookup",
+        disposition="not-lookup",
         reason=(
-            "an entirely ignored manual gate links `-L. -lchelis_runtime` in its `chelis "
-            "build` output directory; linking the staged archive by path needs its manual-only "
-            "or manual-gate row in the same change"
+            "a fixture file in a release staging tree, where the verifier must find no `chelis` binary"
         ),
-        tracking="chelis#1354",
     ),
     Row(
-        "crates/chelis-compiler-api/tests/ownership_support/mod.rs",
-        "archive-prefix",
+        ".github/workflows/ecosystem-drift.yml",
+        "archive-name",
         lines=(
-            'let archive = staged.join(format!("libchelis_runtime-{:016x}.a", hasher.finish()));',
+            'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
+            'python3 -c \'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")\' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"',
+            'cp "$tdir/lib/libchelis_runtime.a" "$ctx/libchelis_runtime.a"',
+            "COPY libchelis_runtime.a /usr/local/lib/libchelis_runtime.a",
         ),
-        disposition="lookup",
+        disposition="not-lookup",
         reason=(
-            "stages that separately built archive under a content-addressed "
-            "`libchelis_runtime-<hash>.a` name"
+            "copies the archive `chelis runtime export` wrote into the staged toolchain and checks it against the export's receipt; copies an installed toolchain's archive into a container image"
         ),
-        tracking="chelis#1354",
     ),
     Row(
-        "crates/chelis-compiler-api/tests/ownership_support/mod.rs",
-        "library-name",
+        ".github/workflows/release.yml",
+        "archive-name",
         lines=(
-            'row["reason"] == "compiler-artifact" && row["target"]["name"] == "chelis_runtime"',
+            'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
+            'python3 -c \'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")\' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"',
+            'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
+            'python3 -c \'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")\' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"',
+            'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
+            'python3 -c \'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")\' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"',
         ),
-        disposition="lookup",
+        disposition="not-lookup",
         reason=(
-            "selects a separately built ownership-ledger archive from Cargo's "
-            "compiler-artifact messages instead of building its consumer with "
-            "chelis-runtime/ownership-ledger"
+            "copies the archive `chelis runtime export` wrote into each release's staging tree and checks it against the export's receipt"
         ),
-        tracking="chelis#1354",
-    ),
-    Row(
-        "crates/chelis-python/tests/manual_reef_context.rs",
-        "runtime-variable",
-        lines=(
-            "//! built `libchelis_runtime.a` discoverable via `CHELIS_RUNTIME_DIR`. No",
-            "//! # bindings installed into py/.venv, runtime staticlib on CHELIS_RUNTIME_DIR",
-            '//! export CHELIS_RUNTIME_DIR="$PWD/target/agents/<name>/debug"',
-            '#[ignore = "manual acceptance gate (#816): needs the 0.16.1 toolchain + reef registry, uv, and CHELIS_RUNTIME_DIR (libchelis_runtime.a); builds a temp reef project (tens of seconds)"]',
-        ),
-        disposition="lookup",
-        reason=(
-            "a manual gate's prerequisites, command block and ignore reason still point the "
-            "extension at a runtime directory, which it now rejects"
-        ),
-        tracking="chelis#2694",
     ),
     Row(
         "bindings/python/chelis/__init__.py",
@@ -315,7 +235,7 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "crates/chelis-backend-c/src/host_emit.rs",
-        "archive-prefix",
+        "archive-name",
         lines=(
             "// exported by libchelis_runtime; only the declarations are private.",
         ),
@@ -325,38 +245,113 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
-        "crates/chelis-cli/tests/cli.rs",
-        "archive-prefix",
+        "crates/chelis-backend-c/src/lib.rs",
+        "bundle-constant",
         lines=(
-            'bin_dir.join("deps/libchelis_runtime-ffffffffffffffff.a"),',
+            "cmd.arg(dir.join(chelis_runtime_bundle::ARCHIVE_FILE_NAME));",
         ),
         disposition="not-lookup",
         reason=(
-            "plants a stale hashed archive beside the CLI that `chelis build` must not stage"
+            "a test links the archive `stage_runtime` wrote, by exact path"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/build_deep_ingestion.rs",
+        "archive-name",
+        lines=(
+            'let runtime = dir.path().join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "plants a read-only stale archive where `chelis build` stages, which the build must replace"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/cbackend_cast_arithmetic_composition.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/cbackend_cast_memcpy.rs",
+        "archive-name",
+        lines=(
+            "/// Compile `kernel.c + main.c + libchelis_runtime.a` and run the",
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "documents and links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/cbackend_empty_tensor_numel.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/cbackend_print_tensor_f64.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/cbackend_reshape_memcpy.rs",
+        "archive-name",
+        lines=(
+            "/// Compile `kernel.c + main.c + libchelis_runtime.a` and run the",
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+            'let runtime = build.path().join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "documents and links the archive `chelis build` staged in its build directory"
         ),
     ),
     Row(
         "crates/chelis-cli/tests/cli.rs",
-        "archive-probe",
+        "archive-name",
         lines=(
+            'cmd.arg(out_dir.join("libchelis_runtime.a"));',
+            'cmd.arg(out_dir.join("libchelis_runtime.a"));',
+            '"libchelis_runtime.a",',
+            '.stdout(predicate::str::contains("libchelis_runtime.a"))',
+            'let staged_archive = out_dir.join("libchelis_runtime.a");',
             'assert!(out_dir.join("libchelis_runtime.a").exists());',
-            'assert!(out_dir.join("libchelis_runtime.a").exists());',
-            'assert!(out_dir.join("libchelis_runtime.a").exists());',
-            'assert!(out_dir.join("libchelis_runtime.a").exists());',
-            'assert!(out_dir.join("libchelis_runtime.a").exists());',
-        ),
-        disposition="not-lookup",
-        reason="asserts that `chelis build` staged the archive in its output directory",
-    ),
-    Row(
-        "crates/chelis-cli/tests/cli.rs",
-        "build-tree-archive",
-        lines=(
+            'runtime_dir.join("libchelis_runtime.a"),',
             'bin_dir.join("deps/libchelis_runtime-ffffffffffffffff.a"),',
+            'bin_dir.join("libchelis_runtime.a"),',
+            'dir.path().join("lib/libchelis_runtime.a"),',
+            'let staged_archive = out_dir.join("libchelis_runtime.a");',
+            'let archive = export_dir.join("libchelis_runtime.a");',
+            'assert!(out_dir.join("libchelis_runtime.a").exists());',
+            'assert!(out_dir.join("libchelis_runtime.a").exists());',
+            'out_dir.join("libchelis_runtime.a").display().to_string(),',
+            'assert!(out_dir.join("libchelis_runtime.a").exists());',
+            'assert!(out_dir.join("libchelis_runtime.a").exists());',
+            '"libchelis_runtime.a",',
+            '"libchelis_runtime.a",',
+            '"libchelis_runtime.a",',
         ),
         disposition="not-lookup",
         reason=(
-            "plants a stale hashed archive beside the CLI that `chelis build` must not stage"
+            "links and asserts the archive `chelis build` staged in its output directory, compares `chelis runtime export`'s archive with the carried digest, and plants foreign archives beside the CLI and in a rejected runtime directory, which `chelis build` must not take"
         ),
     ),
     Row(
@@ -385,60 +380,531 @@ REVIEWED: tuple[Row, ...] = (
         ),
         disposition="not-lookup",
         reason=(
-            "sets the variable or removes it from a test's environment, and asserts that "
-            "`chelis build` and the export reject it"
+            "sets the variable or removes it from a test's environment, and asserts that `chelis build` and the export reject it"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/common/mod.rs",
+        "archive-name",
+        lines=(
+            'cmd.arg(out_dir.join("libchelis_runtime.a"));',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "`link_generated` links the archive `chelis build` staged in its output directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs",
+        "linker-search",
+        lines=(
+            '.arg("-lchelis_runtime")',
+        ),
+        disposition="lookup",
+        tracking="chelis#1354",
+        reason=(
+            "an entirely ignored HIP gate links `-L. -lchelis_runtime` in its `chelis build` output directory; linking the staged archive by path needs its manual-gate row and wired docs/manual_gates.md entry in the same change"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_1137_shrink_expand_rank.rs",
+        "archive-name",
+        lines=(
+            '.arg(out_dir.join("libchelis_runtime.a"))',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its output directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_1271_cross_package_ctor_collision.rs",
+        "archive-name",
+        lines=(
+            'command.arg("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_1314_json_bigint.rs",
+        "archive-name",
+        lines=(
+            'fs::copy(archives[0], out.join("libchelis_runtime.a")).unwrap();',
+        ),
+        disposition="lookup",
+        tracking="chelis#1354",
+        reason=(
+            "copies a separately built ownership-ledger archive over the runtime `chelis build` staged"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_1314_json_bigint.rs",
+        "library-name",
+        lines=(
+            'row["reason"] == "compiler-artifact" && row["target"]["name"] == "chelis_runtime"',
+        ),
+        disposition="lookup",
+        tracking="chelis#1354",
+        reason=(
+            "selects a separately built ownership-ledger archive from Cargo's compiler-artifact messages instead of building its consumer with chelis-runtime/ownership-ledger"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_1464_transformed_fail_traps.rs",
+        "archive-name",
+        lines=(
+            '.arg(build_dir.join("libchelis_runtime.a"))',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_1710_c_source_names.rs",
+        "archive-name",
+        lines=(
+            '.arg(output.join("libchelis_runtime.a"))',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its output directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_1753_grad_result_order_cli.rs",
+        "archive-name",
+        lines=(
+            '.args(["-O2", "order.c", "libchelis_runtime.a", "-lm", "-o"])',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_1771_callable_selected_result_claims.rs",
+        "archive-name",
+        lines=(
+            '.arg("libchelis_runtime.a")',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_1801_wildcard_absorption.rs",
+        "archive-name",
+        lines=(
+            'build_dir.join("libchelis_runtime.a").to_str().unwrap(),',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_1975_fused_zero_cotangents_cli.rs",
+        "archive-name",
+        lines=(
+            '.args(["-O2", "zero.c", "libchelis_runtime.a", "-lm", "-o"])',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_2107_generated_declarations.rs",
+        "archive-name",
+        lines=(
+            'command.args(["main.c", "driver.c", "libchelis_runtime.a"]);',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_2318_key_form.rs",
+        "archive-name",
+        lines=(
+            '.arg("libchelis_runtime.a")',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_2442_binder_literal_pattern.rs",
+        "archive-name",
+        lines=(
+            'out_dir.join("libchelis_runtime.a").to_str().unwrap(),',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its output directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_2582_cxx_host_linkage.rs",
+        "archive-name",
+        lines=(
+            '//! declared `extern "C"`, and then the link against `libchelis_runtime.a`',
+            '.arg("libchelis_runtime.a")',
+            '"`{source}` does not link against libchelis_runtime.a:\\n{}",',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "documents and links the archive `chelis build` staged in the output directory it compiles in"
         ),
     ),
     Row(
         "crates/chelis-cli/tests/issue_300_grad_codegen_compiles.rs",
-        "archive-probe",
-        lines=("runtime.is_file(),",),
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
         disposition="not-lookup",
-        reason="asserts that `chelis build` staged the archive in its build directory",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
     ),
     Row(
         "crates/chelis-cli/tests/issue_352_captured_global_c_emit.rs",
-        "archive-probe",
-        lines=("runtime.is_file(),",),
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
         disposition="not-lookup",
-        reason="asserts that `chelis build` staged the archive in its build directory",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_368_grad_concat_windows.rs",
+        "archive-name",
+        lines=(
+            'build_dir.join("libchelis_runtime.a").to_str().unwrap(),',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_513_reshape_shape_derived_grad.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_513_symbolic_axis_adjoints.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_520_adt_match_grad.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_549_grad_permute_named_axis.rs",
+        "archive-name",
+        lines=(
+            '.arg("libchelis_runtime.a")',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_551_grad_symbolic_concat_c_build.rs",
+        "archive-name",
+        lines=(
+            "//!     `libchelis_runtime.a` and runs it,",
+            "/// `<stem>.c`, the runtime headers, and `libchelis_runtime.a` into `<dir>`.",
+            "/// `libchelis_runtime.a`, run the binary, and return stdout. A gcc or",
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "documents and links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_558_shape_value_read.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_579_chained_expand_eval.rs",
+        "archive-name",
+        lines=(
+            '.arg("libchelis_runtime.a")',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_616_runtime_movement_c_parity.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_616_runtime_reshape_c_parity.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_620_static_if_adt_grad.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_631_guarded_forward_concat_c_parity.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_662_forward_fail_grad_scope.rs",
+        "archive-name",
+        lines=(
+            '.arg(build_dir.join("libchelis_runtime.a"))',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/issue_664_runtime_wildcard_consumer_guards.rs",
+        "archive-name",
+        lines=(
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
     ),
     Row(
         "crates/chelis-cli/tests/issue_735_device_fence.rs",
-        "archive-probe",
+        "archive-name",
         lines=(
             'assert!(output.join("libchelis_runtime.a").is_file(), "{name}");',
         ),
         disposition="not-lookup",
-        reason="asserts that `chelis build` staged the archive in its output directory",
+        reason=(
+            "asserts that `chelis build` staged the archive in its output directory"
+        ),
     ),
     Row(
-        "crates/chelis-cli/tests/ws2b_numeric_identifier_divergence.rs",
-        "archive-probe",
-        lines=("runtime.is_file(),",),
-        disposition="not-lookup",
-        reason="asserts that `chelis build` staged the archive in its build directory",
-    ),
-    Row(
-        "crates/chelis-compiler-api/tests/ownership_support/mod.rs",
-        "build-tree-archive",
+        "crates/chelis-cli/tests/issue_770_uniform_like_affine_parity.rs",
+        "archive-name",
         lines=(
-            "/// or not, replaces the uplifted `debug/libchelis_runtime.a` with a new file.",
+            'cmd.arg("libchelis_runtime.a");',
         ),
         disposition="not-lookup",
         reason=(
-            "a comment explaining why the harness does not link the uplifted build-tree "
-            "archive"
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/jit_par_runtime_gap.rs",
+        "archive-name",
+        lines=(
+            'cmd.arg("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/numeric_dtype_adversarial.rs",
+        "archive-name",
+        lines=(
+            'cmd.arg("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/parity.rs",
+        "archive-name",
+        lines=(
+            "//!       4. `gcc <name>.c libchelis_runtime.a -o <name>` -> binary",
+            'cmd.arg("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "documents and links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/rank_poly_tier2.rs",
+        "archive-name",
+        lines=(
+            '.arg("libchelis_runtime.a")',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/rank_poly_tier3.rs",
+        "archive-name",
+        lines=(
+            '.arg("libchelis_runtime.a")',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/reduction_and_bitwise_matrix.rs",
+        "archive-name",
+        lines=(
+            '.arg("libchelis_runtime.a")',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in the output directory it compiles in"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/runtime_extent_slice_a.rs",
+        "archive-name",
+        lines=(
+            'build_dir.join("libchelis_runtime.a").to_str().unwrap(),',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/std_io_pipeline.rs",
+        "linker-search",
+        lines=(
+            'cmd.args(["-L.", "-lchelis_runtime"]);',
+        ),
+        disposition="lookup",
+        tracking="chelis#1354",
+        reason=(
+            "an entirely ignored manual gate links `-L. -lchelis_runtime` in its `chelis build` output directory; linking the staged archive by path needs its manual-only or manual-gate row in the same change"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/tests/ws2b_numeric_identifier_divergence.rs",
+        "archive-name",
+        lines=(
+            "//!   links the debug `libchelis_runtime.a`, whose `debug_assert` is active.)",
+            'let runtime = build_dir.join("libchelis_runtime.a");',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "documents and links the archive `chelis build` staged in its build directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-compiler-api/tests/ownership_support/mod.rs",
+        "archive-name",
+        lines=(
+            "/// or not, replaces the uplifted `debug/libchelis_runtime.a` with a new file.",
+            'let archive = staged.join(format!("libchelis_runtime-{:016x}.a", hasher.finish()));',
+        ),
+        disposition="lookup",
+        tracking="chelis#1354",
+        reason=(
+            "stages a separately built ownership-ledger archive under a content-addressed `libchelis_runtime-<hash>.a` name; a comment explains why it does not link the uplifted build-tree archive"
+        ),
+    ),
+    Row(
+        "crates/chelis-compiler-api/tests/ownership_support/mod.rs",
+        "library-name",
+        lines=(
+            'row["reason"] == "compiler-artifact" && row["target"]["name"] == "chelis_runtime"',
+        ),
+        disposition="lookup",
+        tracking="chelis#1354",
+        reason=(
+            "selects a separately built ownership-ledger archive from Cargo's compiler-artifact messages instead of building its consumer with chelis-runtime/ownership-ledger"
         ),
     ),
     Row(
         "crates/chelis-python/src/lib.rs",
-        "archive-probe",
+        "archive-name",
         lines=(
             'dir.path().join("libchelis_runtime.a").exists(),',
+            'let staged = fs::read(dir.path().join("libchelis_runtime.a")).expect("staged archive");',
         ),
         disposition="not-lookup",
-        reason="asserts that `compile_and_load` staged the archive beside the shared library",
+        reason=(
+            "asserts that `compile_and_load` staged the archive beside the shared library, and reads those staged bytes"
+        ),
     ),
     Row(
         "crates/chelis-python/src/lib.rs",
@@ -455,8 +921,69 @@ REVIEWED: tuple[Row, ...] = (
         ),
         disposition="not-lookup",
         reason=(
-            "a test sets the variable, restores the caller's value and asserts that "
-            "`compile_and_load` rejects it"
+            "a test sets the variable, restores the caller's value and asserts that `compile_and_load` rejects it"
+        ),
+    ),
+    Row(
+        "crates/chelis-python/tests/manual_reef_context.rs",
+        "archive-name",
+        lines=(
+            "//! built `libchelis_runtime.a` discoverable via `CHELIS_RUNTIME_DIR`. No",
+            '#[ignore = "manual acceptance gate (#816): needs the 0.16.1 toolchain + reef registry, uv, and CHELIS_RUNTIME_DIR (libchelis_runtime.a); builds a temp reef project (tens of seconds)"]',
+        ),
+        disposition="lookup",
+        tracking="chelis#2694",
+        reason=(
+            "a manual gate's documentation and ignore reason still point the extension at a runtime directory holding the archive, which it now rejects"
+        ),
+    ),
+    Row(
+        "crates/chelis-python/tests/manual_reef_context.rs",
+        "runtime-variable",
+        lines=(
+            "//! built `libchelis_runtime.a` discoverable via `CHELIS_RUNTIME_DIR`. No",
+            "//! # bindings installed into py/.venv, runtime staticlib on CHELIS_RUNTIME_DIR",
+            '//! export CHELIS_RUNTIME_DIR="$PWD/target/agents/<name>/debug"',
+            '#[ignore = "manual acceptance gate (#816): needs the 0.16.1 toolchain + reef registry, uv, and CHELIS_RUNTIME_DIR (libchelis_runtime.a); builds a temp reef project (tens of seconds)"]',
+        ),
+        disposition="lookup",
+        tracking="chelis#2694",
+        reason=(
+            "a manual gate's prerequisites, command block and ignore reason still point the extension at a runtime directory, which it now rejects"
+        ),
+    ),
+    Row(
+        "crates/chelis-runtime/tests/runtime_dtype_invalid_ffi.rs",
+        "runtime-variable",
+        lines=(
+            'const CHILD_CASE_ENV: &str = "CHELIS_RUNTIME_DTYPE_INVALID_CHILD_CASE";',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "names the variable that selects this test's child-process case, not a runtime location"
+        ),
+    ),
+    Row(
+        "crates/chelisup/src/cli.rs",
+        "archive-name",
+        lines=(
+            '(libchelis_runtime.a sha256 {archive_sha256})"',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "prints the digest of the archive the installed release ships"
+        ),
+    ),
+    Row(
+        "crates/chelisup/src/runtime_check.rs",
+        "archive-name",
+        lines=(
+            "//! A release tarball ships `lib/libchelis_runtime.a` and the public runtime",
+            'const ARCHIVE: &str = "libchelis_runtime.a";',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "names the archive a release ships under `lib/`, which `chelisup` compares with the one the release's `chelis runtime export` writes"
         ),
     ),
     Row(
@@ -472,14 +999,18 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "crates/chelisup/tests/common/mod.rs",
-        "archive-prefix",
+        "archive-name",
         lines=(
+            "/// `lib/libchelis_runtime.a` in the tarball.",
+            "/// Ship `lib/libchelis_runtime.a` as a symlink to a sibling holding",
+            '"archive": "libchelis_runtime.a",',
+            'let archive = root.join("lib/libchelis_runtime.a");',
             'root.join("lib/libchelis_runtime.real"),',
             'std::os::unix::fs::symlink("libchelis_runtime.real", &archive).unwrap();',
         ),
         disposition="not-lookup",
         reason=(
-            "the link target of the fixture's symlinked-archive refusal case"
+            "builds fixture release tarballs whose `lib/` holds the archive, including a symlinked archive `chelisup` must refuse, and a fake export's receipt"
         ),
     ),
     Row(
@@ -497,12 +1028,18 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "crates/chelisup/tests/install.rs",
-        "archive-probe",
+        "archive-name",
         lines=(
+            '"match `chelis runtime export` (libchelis_runtime.a sha256 {})",',
             'assert!(toolchain.join("lib/libchelis_runtime.a").is_file());',
+            '"ships lib/libchelis_runtime.a with SHA-256",',
+            '"no usable lib/libchelis_runtime.a: lib/libchelis_runtime.a is not a regular file",',
+            '"no usable lib/libchelis_runtime.a: lib is not a directory",',
         ),
         disposition="not-lookup",
-        reason="asserts that the installed toolchain holds the release's archive",
+        reason=(
+            "asserts the installed toolchain's archive and `chelisup`'s messages about it"
+        ),
     ),
     Row(
         "crates/chelisup/tests/install.rs",
@@ -512,8 +1049,57 @@ REVIEWED: tuple[Row, ...] = (
         ),
         disposition="not-lookup",
         reason=(
-            "sets the variable in the caller's environment to show that `install` does not "
-            "pass it to the export"
+            "sets the variable in the caller's environment to show that `install` does not pass it to the export"
+        ),
+    ),
+    Row(
+        "nix/checks.nix",
+        "archive-name",
+        lines=(
+            "${packages.chelis-runtime}/lib/libchelis_runtime.a \\",
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive in the Nix runtime package, which that package's `chelis runtime export` wrote"
+        ),
+    ),
+    Row(
+        "nix/contracts.nix",
+        "archive-name",
+        lines=(
+            '"lib/libchelis_runtime.a"',
+            '"lib/libchelis_runtime.a"',
+            '"lib/libchelis_runtime.a"',
+            '"lib/libchelis_runtime.a"',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "lists the archive among the files the Nix toolchain and runtime packages must ship"
+        ),
+    ),
+    Row(
+        "nix/packages.nix",
+        "archive-name",
+        lines=(
+            'install -Dm444 "$export_dir/libchelis_runtime.a" $out/lib/libchelis_runtime.a',
+            'archive_sha256="$(sha256sum $out/lib/libchelis_runtime.a | cut -d \' \' -f 1)"',
+            "cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a",
+        ),
+        disposition="not-lookup",
+        reason=(
+            "installs the archive `chelis runtime export` wrote into the Nix runtime package and records its digest, and copies that package's archive into the toolchain"
+        ),
+    ),
+    Row(
+        "scripts/capacity_census_native_execution.py",
+        "archive-name",
+        lines=(
+            'staged = _digest(library.parent / "libchelis_runtime.a")',
+            '_require(isinstance(receipt, dict) and receipt.get("archive") == "libchelis_runtime.a"',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "checks the archive staged beside a compiled library against its staging receipt"
         ),
     ),
     Row(
@@ -529,14 +1115,38 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "scripts/compiled_value_ownership_oracle.py",
+        "archive-name",
+        lines=(
+            'RUNTIME_ARCHIVE_NAME = "libchelis_runtime.a"',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "names the file the CLI's export and `chelis build` write, which the oracle reads by exact path and compares with the CLI's own export"
+        ),
+    ),
+    Row(
+        "scripts/compiled_value_ownership_oracle.py",
+        "bundle-constant",
+        lines=(
+            'RUNTIME_DIR_VARIABLE = "CHELIS_RUNTIME_DIR"',
+            "if RUNTIME_DIR_VARIABLE in os.environ:",
+            'f"{RUNTIME_DIR_VARIABLE} is set, but chelis build rejects it and this "',
+            'f"oracle links only the runtime its CLI carries. Unset {RUNTIME_DIR_VARIABLE}"',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "names the variable only to refuse an inherited value"
+        ),
+    ),
+    Row(
+        "scripts/compiled_value_ownership_oracle.py",
         "library-name",
         lines=(
             'elif artifact_target.get("name") == "chelis_runtime":',
         ),
         disposition="not-lookup",
         reason=(
-            "requires the CLI's Cargo build to have compiled chelis-runtime with the ledger "
-            "feature; the reference digest comes from the CLI's own export"
+            "requires the CLI's Cargo build to have compiled chelis-runtime with the ledger feature; the reference digest comes from the CLI's own export"
         ),
     ),
     Row(
@@ -563,6 +1173,22 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "scripts/installed_artifact_canary.py",
+        "archive-name",
+        lines=(
+            'REQUIRED_FILES = ("bin/chelis", "lib/libchelis_runtime.a", *HEADERS)',
+            'archive = inventory["lib/libchelis_runtime.a"]',
+            'if digest(output / "libchelis_runtime.a") != archive:',
+            'expected = {"schema": "chelis-runtime-staging/1", "archive": "libchelis_runtime.a",',
+            'installed / "lib/libchelis_runtime.a", "-lm",',
+            'installed / "lib/libchelis_runtime.a", "-lm", "-o", binary])',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "the archive an installed release must ship, checked against the release inventory and the export's receipt, and linked by exact path into the canary's callable"
+        ),
+    ),
+    Row(
+        "scripts/installed_artifact_canary.py",
         "library-name",
         lines=(
             '"chelis_runtime", "chelis_runtime_views", "chelis_runtime_dtype",',
@@ -570,6 +1196,28 @@ REVIEWED: tuple[Row, ...] = (
         disposition="not-lookup",
         reason=(
             "the stem of the public header chelis_runtime.h, which a release must ship"
+        ),
+    ),
+    Row(
+        "scripts/nautilus_local_gate.py",
+        "archive-name",
+        lines=(
+            'str(out_dir / "libchelis_runtime.a"),',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build` staged in its output directory"
+        ),
+    ),
+    Row(
+        "scripts/runtime_representation_phase1.py",
+        "archive-name",
+        lines=(
+            "empty = bad / 'libchelis_runtime.a'",
+        ),
+        disposition="not-lookup",
+        reason=(
+            "the empty archive in the directory a negative control offers `chelis build` through the variable, which it must refuse"
         ),
     ),
     Row(
@@ -586,6 +1234,21 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "scripts/test_capacity_census_native_execution.py",
+        "archive-name",
+        lines=(
+            'def receipt_bytes(archive_sha256: str, archive: str = "libchelis_runtime.a") -> bytes:',
+            '"compiled/libchelis_runtime.a": self.runtime,',
+            'self.rewrite("compiled/libchelis_runtime.a", b"foreign runtime")',
+            'self.rewrite("compiled/libchelis_runtime.a", runtime)',
+            'candidates = [Path(packet["binaries"][0]["path"]), library.with_name("libchelis_runtime.a"),',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "fixture receipts and staged archives beside a compiled library, which the census checks and must reject when changed"
+        ),
+    ),
+    Row(
+        "scripts/test_capacity_census_native_execution.py",
         "runtime-variable",
         lines=(
             '"CHELIS_RUNTIME_DIR": "/foreign/runtime", "CHELIS_CC": "/foreign/compiler",',
@@ -598,24 +1261,16 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "scripts/test_compiled_value_ownership_oracle.py",
-        "archive-prefix",
+        "archive-name",
         lines=(
             'archive = target / "debug" / "deps" / "libchelis_runtime-0123abcd.a"',
+            '(exported / "libchelis_runtime.a").write_bytes(carried)',
+            'stdout = report(exported / "libchelis_runtime.a")',
+            'staged = output / "libchelis_runtime.a"',
         ),
         disposition="not-lookup",
         reason=(
-            "a decoy Cargo deps archive whose bytes the oracle must not take as the runtime"
-        ),
-    ),
-    Row(
-        "scripts/test_compiled_value_ownership_oracle.py",
-        "build-tree-archive",
-        lines=(
-            'archive = target / "debug" / "deps" / "libchelis_runtime-0123abcd.a"',
-        ),
-        disposition="not-lookup",
-        reason=(
-            "a decoy Cargo deps archive whose bytes the oracle must not take as the runtime"
+            "a decoy Cargo deps archive the oracle must not take, and fixture export and staged archives"
         ),
     ),
     Row(
@@ -656,14 +1311,43 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
-        "scripts/test_nix_flake_contract.py",
-        "build-tree-archive",
+        "scripts/test_installed_artifact_canary.py",
+        "archive-name",
         lines=(
-            'self.assertNotIn("target/release/libchelis_runtime.a", release)',
+            'for name in ("bin/chelis", "lib/libchelis_runtime.a", "include/chelis_runtime.h"):',
+            'for name in ("lib/libchelis_runtime.a", *canary.HEADERS):',
+            'sealed = {"schema": "chelis-runtime-staging/1", "archive": "libchelis_runtime.a",',
+            '"archive_sha256": inventory["lib/libchelis_runtime.a"], "mode": "sealed",',
+            '(output / "libchelis_runtime.a").write_bytes(b"swapped")',
         ),
         disposition="not-lookup",
         reason=(
-            "asserts that the release no longer copies the build-tree archive"
+            "fixture release inventories and a swapped staged archive the canary must reject"
+        ),
+    ),
+    Row(
+        "scripts/test_nix_flake_contract.py",
+        "archive-name",
+        lines=(
+            '\'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"\', step',
+            '\'"$staging/lib/libchelis_runtime.a"\',',
+            'self.assertNotIn("target/release/libchelis_runtime.a", release)',
+            '"cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a", packages',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "asserts how the release and the Nix packages copy the exported archive, and that the release no longer copies the build-tree archive"
+        ),
+    ),
+    Row(
+        "scripts/test_runtime_representation_phase1.py",
+        "archive-name",
+        lines=(
+            "empty = evidence / 'empty-runtime/libchelis_runtime.a'",
+        ),
+        disposition="not-lookup",
+        reason=(
+            "the empty archive in the directory the rejection control offers"
         ),
     ),
     Row(
@@ -673,8 +1357,8 @@ REVIEWED: tuple[Row, ...] = (
             "watched = ('CHELIS_RUNTIME_DIR', 'CHELIS_TEST_CC')",
             "oracle.os.environ.pop('CHELIS_RUNTIME_DIR', None)",
             "self.assertNotIn('CHELIS_RUNTIME_DIR', oracle.os.environ)",
-            "return (f'stderr=\"error: CHELIS_RUNTIME_DIR is set ({bad}), but chelis stages the runtime '",
-            "'built into it and never takes one from a directory. Unset CHELIS_RUNTIME_DIR\"')",
+            'return (f\'stderr="error: CHELIS_RUNTIME_DIR is set ({bad}), but chelis stages the runtime \'',
+            '\'built into it and never takes one from a directory. Unset CHELIS_RUNTIME_DIR"\')',
             "'runtime-directory-rejected': {'CHELIS_RUNTIME_DIR': str(empty.parent), 'CHELIS_TEST_CC': None},",
             "'missing-c-compiler': {'CHELIS_RUNTIME_DIR': None, 'CHELIS_TEST_CC': str(evidence / 'missing-compiler')},",
             "{'CHELIS_RUNTIME_DIR': None, 'CHELIS_TEST_CC': None})",
@@ -699,8 +1383,9 @@ def repository_files(root: Path = ROOT) -> list[str]:
 
 
 def scan(root: Path, names: Iterable[str]) -> tuple[dict[tuple[str, str], list[tuple[int, str]]], list[str]]:
-    """Map each (file, pattern) with a match to its (line, text) locations.
+    """Map each (file, pattern) with a match to the lines it matches.
 
+    Each matching line appears once per pattern, as (line number, stripped text).
     Also return the files that could not be read.
     """
     found: dict[tuple[str, str], list[tuple[int, str]]] = {}
@@ -723,12 +1408,12 @@ def scan(root: Path, names: Iterable[str]) -> tuple[dict[tuple[str, str], list[t
             continue
         if not any(token in text for token in TOKENS):
             continue
-        lines = text.splitlines()
-        for pattern in PATTERNS:
-            for match in pattern.regex.finditer(text):
-                # The line holding the matched name, even when a match spans a line break.
-                line = text.count("\n", 0, match.end() - 1) + 1
-                found.setdefault((name, pattern.name), []).append((line, lines[line - 1].strip()))
+        for number, line in enumerate(text.splitlines(), 1):
+            if not any(token in line for token in TOKENS):
+                continue
+            for pattern in PATTERNS:
+                if pattern.regex.search(line):
+                    found.setdefault((name, pattern.name), []).append((number, line.strip()))
     return found, unreadable
 
 
@@ -790,10 +1475,12 @@ def check(
                 f"{name}:{line}: {text}" for line, text in locations if text in unreviewed
             ]
             errors.append(
-                f"{pattern}: {sum(unreviewed.values())} unreviewed match(es) in {name}. "
-                "Link the archive that `chelis build`, `chelis_runtime_bundle::stage` or "
-                "`chelis runtime export` wrote, by its exact path; or, if the text is not "
-                "a lookup, add or update a reviewed not-lookup row.\n  " + "\n  ".join(listed)
+                f"{pattern}: {sum(unreviewed.values())} unreviewed line(s) in {name}. Every "
+                "line that names the runtime outside its bundle needs a reviewed row. A lookup "
+                "must instead link the archive that `chelis build`, "
+                "`chelis_runtime_bundle::stage` or `chelis runtime export` wrote, by its exact "
+                "path; a line that does so, or is not a lookup, gets a not-lookup row saying "
+                "why.\n  " + "\n  ".join(listed)
             )
         missing = reviewed - observed
         if missing:

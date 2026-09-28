@@ -18,8 +18,9 @@ OWNER_FILES = {
 }
 LOOKUP = "archive = next((target / 'debug' / 'deps').glob('libchelis_runtime-*.a'))\n"
 
-# Lookups this repository shipped before chelis#1354 removed them, without the
-# sibling lines (an environment read, a literal deps path) that also flagged them.
+# Lookups this repository shipped before chelis#1354 removed them, reduced to
+# the lines that remain once the sibling lines (an environment read, a hashed
+# name, a literal deps path) are gone.
 HISTORICAL = {
     # The CLI selector (`git show a8feaf19b^:crates/chelis-cli/src/main.rs`).
     "crates/planted/src/find_runtime.rs": (
@@ -48,6 +49,14 @@ HISTORICAL = {
     "crates/planted/tests/exec_compile.rs": (
         'let canonical = target_debug_dir().join("libchelis_runtime.a");\n'
     ),
+    # The CLI selector's exact-name fallback, reached only through its constant.
+    "crates/planted/src/find_exact.rs": (
+        'const LIB_NAME: &str = "libchelis_runtime.a";\n'
+        "fn find_in_dir(dir: &Path) -> Option<PathBuf> {\n"
+        "    let exact = dir.join(LIB_NAME);\n"
+        "    exact.exists().then_some(exact)\n"
+        "}\n"
+    ),
 }
 
 # Lookup idioms in other syntaxes, one per line, each of which must fail.
@@ -67,7 +76,27 @@ IDIOMS = (
     'if row.get("target", {}).get("name") == Some("chelis_runtime")',
     "export RUNTIME=$CHELIS_RUNTIME_DIR/libchelis_runtime.a",
     "runtime: ${{ env.CHELIS_RUNTIME_DIR }}",
+    'if path.file_name()?.to_str()? == "libchelis_runtime.a" {',
+    'runtime = next(p for p in Path(d).iterdir() if p.name == "libchelis_runtime.a")',
+    'RUNTIME_ARCHIVE_NAME = "libchelis_runtime.a"',
+    'let archive = target_dir().join(profile).join("libchelis_runtime.a");',
+    "find target -path '*/libchelis_runtime.a'",
+    '[ -s "$d/libchelis_runtime.a" ] && runtime="$d"',
+    'let archive = out_dir.ancestors().nth(3).unwrap().join("libchelis_runtime.a");',
+    'if package_id.endswith("/crates/chelis-runtime#" + version):',
+    'RUSTFLAGS="-l static=chelis_runtime" cargo build',
+    'cmd.args(["-l", "static=chelis_runtime"]);',
+    "cc main.c -Wl,--library=chelis_runtime",
+    'archive = os.environ["CHELIS_RUNTIME_ARCHIVE"]',
+    "let candidate = dir.join(chelis_runtime_bundle::ARCHIVE_FILE_NAME);",
 )
+# Lines that link or ship the archive a staging step wrote: they name the
+# runtime, so each needs a reviewed row.
+STAGED = {
+    "crates/c/tests/link.rs": 'cmd.arg(out_dir.join("libchelis_runtime.a"));\n',
+    "scripts/stage.py": 'runtime = output / "libchelis_runtime.a"\n',
+    ".github/workflows/release.yml": 'run: cp "$RUNTIME_EXPORT/libchelis_runtime.a" "$DIST/lib/"\n',
+}
 
 
 class PlantedTree:
@@ -96,7 +125,7 @@ def row(path: str, pattern: str, *lines: str, **fields: str) -> guard.Row:
 
 
 def matched_patterns(failures: list[str]) -> set[str]:
-    return {failure.split(":", 1)[0] for failure in failures if "unreviewed match" in failure}
+    return {failure.split(":", 1)[0] for failure in failures if "unreviewed line" in failure}
 
 
 class RepositoryTests(unittest.TestCase):
@@ -156,40 +185,51 @@ class PatternTests(unittest.TestCase):
             "crates/planted/tests/join.rs": (
                 'let archive = root\n    .join("debug")\n    .join("libchelis_runtime.a");\n'
             ),
+            "crates/planted/src/probe.rs": (
+                'let candidate = dir.join("libchelis_runtime.a");\nif candidate.exists() {}\n'
+            ),
         }
         for name, text in split.items():
             with self.subTest(file=name):
                 self.assertTrue(matched_patterns(PlantedTree(self, {name: text}).check()))
 
-    def test_staged_uses_are_not_lookups(self) -> None:
-        # Real shapes of code that links or ships the staged archive by path.
+    def test_a_staged_use_needs_a_reviewed_row(self) -> None:
+        for name, text in STAGED.items():
+            with self.subTest(file=name):
+                tree = PlantedTree(self, {name: text})
+                self.assertEqual(matched_patterns(tree.check()), {"archive-name"})
+                self.assertEqual(tree.check((row(name, "archive-name", text.strip()),)), [])
+
+    def test_lines_that_do_not_name_the_runtime_need_no_row(self) -> None:
         corpus = {
             "crates/c/tests/link.rs": (
-                'cmd.arg(out_dir.join("libchelis_runtime.a"));\n'
                 "let staged = chelis_runtime_bundle::stage(dir.path()).unwrap();\n"
                 "cc.arg(&staged.archive);\n"
                 'let receipt = out.join("chelis_runtime.receipt.json");\n'
                 "pub use chelis_runtime::public_headers::PUBLIC_HEADERS;\n"
                 'fs::write(dir.join("main.c"), "#include \\"chelis_runtime.h\\"\\n")?;\n'
+                'const SCHEMA: &str = "chelis-runtime-staging/1";\n'
+                'let header = "#ifndef CHELIS_RUNTIME_VIEWS_H\\n#define CHELIS_RUNTIME_H\\n";\n'
             ),
             "scripts/stage.py": (
-                'runtime = output / "libchelis_runtime.a"\n'
                 'HEADERS = ("chelis_runtime.h", "chelis_runtime_views.h")\n'
+                'command = ["cargo", "test", "-p", "chelis-runtime"]\n'
             ),
-            ".github/workflows/release.yml": (
-                'run: cp "$RUNTIME_EXPORT/libchelis_runtime.a" "$DIST/lib/"\n'
+            "Cargo.toml": (
+                'chelis-runtime = { path = "crates/chelis-runtime" }\n'
+                'ledger = ["chelis-runtime/ownership-ledger"]\n'
             ),
-            "nix/packages.nix": '$out/bin/chelis runtime export "$runtime/lib"\n',
+            "nix/packages.nix": '-I${packages.chelis-runtime}/include \\\n',
         }
         self.assertEqual(PlantedTree(self, corpus).check(), [])
 
-    def test_every_mention_of_the_runtime_directory_variable_needs_a_row(self) -> None:
+    def test_every_mention_of_a_runtime_variable_needs_a_row(self) -> None:
         name = "crates/c/tests/reject.rs"
-        text = '.env_remove("CHELIS_RUNTIME_DIR")\n'
-        tree = PlantedTree(self, {name: text})
-        self.assertEqual(matched_patterns(tree.check()), {"runtime-variable"})
-        reviewed = row(name, "runtime-variable", '.env_remove("CHELIS_RUNTIME_DIR")')
-        self.assertEqual(tree.check((reviewed,)), [])
+        for text in ('.env_remove("CHELIS_RUNTIME_DIR")', 'env::var("CHELIS_RUNTIME_ARCHIVE")'):
+            with self.subTest(text=text):
+                tree = PlantedTree(self, {name: text + "\n"})
+                self.assertEqual(matched_patterns(tree.check()), {"runtime-variable"})
+                self.assertEqual(tree.check((row(name, "runtime-variable", text),)), [])
 
     def test_the_owner_crates_are_exempt_and_lookalikes_are_not(self) -> None:
         self.assertEqual(
@@ -226,7 +266,18 @@ class RowTests(unittest.TestCase):
         pinned = row(self.NAME, "linker-search", self.ASSERTION, self.ASSERTION)
         self.assertEqual(tree.check((pinned,)), [])
         once = tree.check((row(self.NAME, "linker-search", self.ASSERTION),))
-        self.assertTrue(any("1 unreviewed match(es)" in failure for failure in once), once)
+        self.assertTrue(any("1 unreviewed line(s)" in failure for failure in once), once)
+
+    def test_a_row_pins_the_line_that_names_the_runtime(self) -> None:
+        staged = 'let runtime = build_dir.join("libchelis_runtime.a");'
+        probe = "assert!(runtime.is_file());"
+        reviewed = (row(self.NAME, "archive-name", staged),)
+        tree = PlantedTree(self, {self.NAME: f"{staged}\n{probe}\n"})
+        self.assertEqual(tree.check(reviewed), [])
+        moved = PlantedTree(self, {self.NAME: f"{staged.replace('build_dir', 'exe_dir')}\n{probe}\n"})
+        failures = moved.check(reviewed)
+        self.assertTrue(any("exe_dir" in failure for failure in failures), failures)
+        self.assertTrue(any(failure.startswith("stale row") for failure in failures), failures)
 
     def test_a_swapped_line_fails_even_at_the_same_count(self) -> None:
         tree = PlantedTree(self, {self.NAME: self.ASSERTION + "\n" + self.SEARCH + "\n"})
@@ -266,6 +317,11 @@ class RowTests(unittest.TestCase):
 
     def test_the_reviewed_rows_are_well_formed(self) -> None:
         self.assertEqual(guard.row_errors(guard.REVIEWED), [])
+
+    def test_the_check_reports_malformed_rows(self) -> None:
+        malformed = row("scripts/planted.py", "linker-search", self.SEARCH, reason=" ")
+        failures = PlantedTree(self, {"scripts/planted.py": self.SEARCH + "\n"}).check((malformed,))
+        self.assertTrue(any("has no reason" in failure for failure in failures), failures)
 
 
 class RepositoryFileTests(unittest.TestCase):
