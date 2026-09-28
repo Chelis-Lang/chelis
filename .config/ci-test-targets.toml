@@ -215,6 +215,25 @@ cadence = "pull_request and push"
 reason = "the managed-interpreter acceptance roster and unsafe-fallback guard execute in script-unit"
 tracking_issue = "chelis#1955"
 
+# The keyed corpus is manual; its receipt contract runs in script-unit.
+[[path_rule]]
+prefix = "scripts/keyed_randomness_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes selection, execution-receipt, timeout and retirement negative controls; full keyed acceptance is an explicit manual gate"
+tracking_issue = "chelis#2413"
+
+[[path_rule]]
+prefix = "scripts/test_keyed_randomness_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the keyed randomness acceptance runner contract tests without compiling its manual corpus"
+tracking_issue = "chelis#2413"
+
 # The completion runner consumes these exact runtime-extent corpus inputs.
 [[path_rule]]
 prefix = "scripts/runtime_extent_oracle.py"
