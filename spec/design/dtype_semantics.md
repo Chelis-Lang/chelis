@@ -2323,7 +2323,7 @@ remains rejected. The Metal `integer_abs_guard` manual gate executes literal
 and parameter-weight gradients through these kernels. HIP executes kernel
 bodies with device-intrinsic shims in default tests; real HIP execution still
 requires its hardware gate. Metal activation-gated integer `abs` remains
-rejected pending the operand-gate implementation in #2413.
+rejected under the remaining Metal integer-Abs capability in #693.
 The reduction follow-up routes ordinary, windowed, and argument reductions,
 plus the overlapping window adjoint, through the same sealed boundary:
 consumers retain only shape and ordered index-group planning. Declared-width

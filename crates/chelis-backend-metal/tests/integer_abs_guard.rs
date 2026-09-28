@@ -449,6 +449,10 @@ fn activated_integer_abs_is_refused_before_emission_without_a_gate() {
     dag.node_mut(abs).unwrap().owner.activation = Some(active);
     dag.set_roots(vec![abs]);
     let error = try_codegen_metal(&dag, "gated_abs").unwrap_err();
+    assert_eq!(
+        error.authority.issue().map(|issue| issue.number()),
+        Some(693)
+    );
     assert!(
         error
             .to_string()

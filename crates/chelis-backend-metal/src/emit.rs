@@ -311,7 +311,7 @@ pub(crate) fn emit_verified_dag(
             format!("an activated integer abs at Metal DAG node {}", node.id.0),
             Stage::Codegen("metal"),
             chelis_types::unimplemented_rejection!(
-                2413,
+                693,
                 "Metal has no operand activation gate for checked integer abs; use the C or HIP target"
             ),
         ));

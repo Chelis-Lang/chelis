@@ -1079,6 +1079,25 @@ negative controls. Renaming or splitting either owner requires a new
 final-authority classification and execution contract rather than transition
 debt.
 
+Integer-weight gradients register four exact `backend-element-spelling`
+final forms: `integer_float::integer_to_float_bits`, HIP
+`cast_integer_to_float`, and Metal `Emitter::{emit_integer_float_cast,emit_expand}`.
+The shared helper constructs target IEEE bits by rounding once in integer space
+under [04-NUM-14]; the device cast owners select exact signed source storage and
+target width from `Prim`. No float intermediary or raw dtype identifier carries
+the operand. Expand checks axis insertion and copies
+stored elements of the unchanged declared dtype under [05-OP-49]. The Phase 0
+manifest binds these identities to the shared generator's native C/UBSan
+exact-bit and invalid-target tests, and HIP/Metal integer-Abs lowering and
+rejection controls. Its manual Metal `integer_abs_guard` command executes exact
+casts, Grad, expansion, empty shapes, and nonempty/MIN trap twins; the registered
+HIP `integer_abs` device command remains a hardware gate, distinct from executed
+CPU kernel shims. Constant-fill load/store retirement follows `ScalarValue` /
+`ElementRef` dispatch; binary/reduction launch-template retirements follow the
+shared buffer-binding emitter, which transports opaque buffers rather than
+reading tensor elements. These registrations and shrink-only retirements do not
+change the frozen foundation or mutation contract.
+
 `NUMERIC_DEVICE_HELPERS` is a separate numeric final-form owner for the
 `uniform_like` sampler governed by [05-OP-8]. Splitting it from the common HIP
 device helpers does not transfer it into the typed-nonnumeric cohort. Its exact
