@@ -1150,6 +1150,24 @@ class ManifestTests(unittest.TestCase):
             for command in commands
         ))
 
+    def test_key_callable_load_store_owner_requires_exact_execution_controls(self) -> None:
+        path = "crates/chelis-backend-c/src/host_emit.rs"
+        kind = "load-store-template"
+        owner = "append_key_callable_helpers"
+        self.assertEqual(oracle.KEY_CALLABLE_BACKEND_FINAL_FORMS, ((path, kind, owner),))
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+        self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+        self.assertFalse(oracle.owner_module_final_form("backend-element-spelling", path, owner))
+        self.assertFalse(oracle.owner_module_final_form(kind, path.replace("host_emit.rs", "emit.rs"), owner))
+        self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
+        self.assertTrue(any(
+            "chelis-compiler-api" in command
+            and "key_tensor_forms" in command
+            for command in commands
+        ))
+
     def test_exact_reduction_backend_owners_require_exact_execution_controls(self) -> None:
         expected = (
             (

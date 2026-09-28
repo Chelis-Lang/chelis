@@ -10643,10 +10643,12 @@ impl<'program> LowerCtx<'program> {
 
         let ty = self.type_from_meta(meta);
 
-        // Check if func is a known built-in: (var {} name).
+        // Unbound direct callees include builtin operations registered outside
+        // BUILTIN_NAMES (for example dropout) and positional ADT constructors.
+        // A lexical value binding takes precedence: a builtin-spelled alias or
+        // shadow must be resolved from its checked callable identity below.
         if let Some((DeepTag::Var, _, func_kids)) = stamped_parts(&kids[0])
             && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_kids.first()
-            && BUILTIN_NAMES.contains(&func_name.as_str())
             && !self.bindings.contains_key(func_name)
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
@@ -27187,6 +27189,30 @@ mod regression_tests {
                 |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
             ),
             "dead arm's literal must not be lowered: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_payload_ctor_call_selects_taken_arm_and_binds_payload() {
+        // A positional constructor application must reach the ADT arm of
+        // lower_app, even though constructors are absent from BUILTIN_NAMES.
+        let dag = parse_and_lower_unchecked(
+            "(match {} (app {} (var {} ModeA) (lit {type: (t-prim {} f32)} 2.5)) \
+             (arm {} (pat-ctor {} ModeA (pat-var {} value)) () (var {} value)) \
+             (arm {} (pat-ctor {} ModeB (pat-var {} other)) () \
+               (lit {type: (t-prim {} f32)} 9.0)))",
+        );
+        assert!(
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
+            "constructor payload must lower into the taken arm: {dag:?}"
+        );
+        assert!(
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
+            "dead constructor arm must not be lowered: {dag:?}"
         );
     }
 
