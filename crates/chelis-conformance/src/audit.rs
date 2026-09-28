@@ -376,30 +376,30 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
     let mut mismatches = Vec::new();
     let mut checked = 0;
     for (name, body) in &ctx.workflows {
-        if let Some(call) = central_workflow_call(ctx, body) {
-            checked += 1;
-            if let Some(version) = &call.chelis_version
-                && version != bare
-            {
+        match central_workflow_evidence(ctx, body) {
+            CentralWorkflowEvidence::Known(call) => {
+                checked += 1;
+                if let Some(version) = &call.chelis_version
+                    && version != bare
+                {
+                    mismatches.push(format!(
+                        "{name}: central chelis-version={version} != {bare}"
+                    ));
+                }
+                if let Some(tag) = &call.chelis_tag
+                    && tag.strip_prefix('v') != Some(bare)
+                {
+                    mismatches.push(format!("{name}: central chelis-tag={tag} != v{bare}"));
+                }
+                continue;
+            }
+            CentralWorkflowEvidence::Unrecognized => {
                 mismatches.push(format!(
-                    "{name}: central chelis-version={version} != {bare}"
+                    "{name}: unknown or malformed central workflow wrapper"
                 ));
+                continue;
             }
-            if let Some(tag) = &call.chelis_tag
-                && tag.strip_prefix('v') != Some(bare)
-            {
-                mismatches.push(format!("{name}: central chelis-tag={tag} != v{bare}"));
-            }
-            continue;
-        }
-        // An unrelated valid workflow must not make row 3 pass while a second
-        // workflow names an unrecognized central implementation. Inert markers
-        // cannot supply authority either; fail closed rather than skipping them.
-        if body.contains(CENTRAL_WORKFLOW_PREFIX) {
-            mismatches.push(format!(
-                "{name}: unknown or malformed central workflow wrapper"
-            ));
-            continue;
+            CentralWorkflowEvidence::Absent => {}
         }
         if !workflow_installs_toolchain(body) {
             continue;
@@ -1387,7 +1387,7 @@ fn read_workflows(root: &Path) -> Vec<(String, String)> {
     out
 }
 
-const CENTRAL_WORKFLOW_PREFIX: &str = "Chelis-Lang/ci/.github/workflows/consumer.yml@";
+const CENTRAL_WORKFLOW_PATH: &str = ".github/workflows/consumer.yml";
 // This known historical revision has the closed Coral/Nautilus jobs audited
 // below; Nautilus #32 pins it, but that PR is not an approval of a consumer
 // migration. Neither an audit Pass nor this constant approves the revision for
@@ -1404,13 +1404,92 @@ struct CentralWorkflowCall {
     chelis_tag: Option<String>,
 }
 
-/// Recognize a complete thin reusable-workflow calling job. This parser is
-/// intentionally narrower than YAML: it accepts only the canonical block-map
-/// wrapper shape. Comments, run-string lookalikes, conditional jobs, mutable
-/// refs, unexpected inputs, and additional jobs therefore cannot become audit
-/// authority.
-fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
-    let call = parse_central_workflow_call(body)?;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CentralWorkflowReference {
+    Known,
+    Unrecognized,
+}
+
+enum CentralWorkflowEvidence {
+    Absent,
+    Known(CentralWorkflowCall),
+    Unrecognized,
+}
+
+/// GitHub repository owner and name are case-insensitive; the workflow path
+/// and accepted commit revision are not interchangeable with other values.
+fn classify_central_reference(uses: &str) -> Option<CentralWorkflowReference> {
+    let (owner, rest) = uses.split_once('/')?;
+    let (repository, workflow) = rest.split_once('/')?;
+    if !owner.eq_ignore_ascii_case("Chelis-Lang") || !repository.eq_ignore_ascii_case("ci") {
+        return None;
+    }
+    let (path, revision) = workflow.split_once('@').unwrap_or((workflow, ""));
+    if path != CENTRAL_WORKFLOW_PATH {
+        return None;
+    }
+    Some(if revision == KNOWN_LEGACY_CENTRAL_WORKFLOW_SHA {
+        CentralWorkflowReference::Known
+    } else {
+        CentralWorkflowReference::Unrecognized
+    })
+}
+
+/// Classify only job-level `uses` values under a workflow's `jobs` map.
+/// Comments, steps, and run strings cannot masquerade as a central caller.
+fn central_reference_in_workflow(body: &str) -> Option<CentralWorkflowReference> {
+    let mut in_jobs = false;
+    let mut in_job = false;
+    let mut known = false;
+    for line in body.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        match leading_spaces(line) {
+            Some(0) => {
+                in_jobs = mapping_at(line, 0)
+                    .is_some_and(|(key, value)| key == "jobs" && value.is_empty());
+                in_job = false;
+            }
+            Some(2) if in_jobs => {
+                in_job = mapping_at(line, 2).is_some_and(|(_, value)| value.is_empty());
+            }
+            Some(4) if in_jobs && in_job => {
+                if let Some((key, uses)) = mapping_at(line, 4)
+                    && key == "uses"
+                {
+                    match classify_central_reference(&uses) {
+                        Some(CentralWorkflowReference::Unrecognized) => {
+                            return Some(CentralWorkflowReference::Unrecognized);
+                        }
+                        Some(CentralWorkflowReference::Known) if known => {
+                            return Some(CentralWorkflowReference::Unrecognized);
+                        }
+                        Some(CentralWorkflowReference::Known) => known = true,
+                        None => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    known.then_some(CentralWorkflowReference::Known)
+}
+
+/// The same job-reference classification drives both recognized wrappers and
+/// unknown-pointer rejection. A known reference with malformed job shape or
+/// an unrelated shell profile cannot earn any audit authority.
+fn central_workflow_evidence(ctx: &Ctx, body: &str) -> CentralWorkflowEvidence {
+    match central_reference_in_workflow(body) {
+        None => return CentralWorkflowEvidence::Absent,
+        Some(CentralWorkflowReference::Unrecognized) => {
+            return CentralWorkflowEvidence::Unrecognized;
+        }
+        Some(CentralWorkflowReference::Known) => {}
+    }
+    let Some(call) = parse_central_workflow_call(body) else {
+        return CentralWorkflowEvidence::Unrecognized;
+    };
     let matches_shell = match ctx.shell_name.as_deref() {
         Some("coral") => matches!(call.profile.as_str(), "coral-ci" | "coral-release"),
         Some("nautilus") => matches!(
@@ -1419,7 +1498,23 @@ fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
         ),
         _ => false,
     };
-    matches_shell.then_some(call)
+    if matches_shell {
+        CentralWorkflowEvidence::Known(call)
+    } else {
+        CentralWorkflowEvidence::Unrecognized
+    }
+}
+
+/// Recognize a complete thin reusable-workflow calling job. This parser is
+/// intentionally narrower than YAML: it accepts only the canonical block-map
+/// wrapper shape. Comments, run-string lookalikes, conditional jobs, mutable
+/// refs, unexpected inputs, and additional jobs therefore cannot become audit
+/// authority.
+fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
+    match central_workflow_evidence(ctx, body) {
+        CentralWorkflowEvidence::Known(call) => Some(call),
+        CentralWorkflowEvidence::Absent | CentralWorkflowEvidence::Unrecognized => None,
+    }
 }
 
 /// A central CI profile certifies blocking guards and suites only when the
@@ -1663,9 +1758,7 @@ fn parse_central_workflow_call(body: &str) -> Option<CentralWorkflowCall> {
             return None;
         }
     }
-    let uses = &keys.get("uses")?.0;
-    let sha = uses.strip_prefix(CENTRAL_WORKFLOW_PREFIX)?;
-    if sha != KNOWN_LEGACY_CENTRAL_WORKFLOW_SHA {
+    if classify_central_reference(&keys.get("uses")?.0) != Some(CentralWorkflowReference::Known) {
         return None;
     }
 

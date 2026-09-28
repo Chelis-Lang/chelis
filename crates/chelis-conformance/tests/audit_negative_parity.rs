@@ -395,6 +395,88 @@ fn unrecognized_release_wrapper_cannot_hide_behind_known_ci_profile() {
 }
 
 #[test]
+fn mixed_central_revisions_cannot_hide_behind_github_repository_casing() {
+    for package in ["coral", "nautilus"] {
+        for (repository, revision) in [
+            ("chelis-lang/ci", "main"),
+            ("CHELIS-LANG/CI", "31ab77c35018d72bccdcae8d7330b25312a38114"),
+            ("Chelis-Lang/CI", "main"),
+            ("cHeLiS-lAnG/cI", "31ab77c35018d72bccdcae8d7330b25312a38114"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = stamp(tmp.path(), package);
+            std::fs::write(
+                root.join(".github/workflows/ci.yml"),
+                central_ci_wrapper(package, VER),
+            )
+            .unwrap();
+            let release = central_profile_wrapper(
+                &format!("{package}-release"),
+                &[format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+            )
+            .replace(
+                &format!("Chelis-Lang/ci/.github/workflows/consumer.yml@{CENTRAL_SHA}"),
+                &format!("{repository}/.github/workflows/consumer.yml@{revision}"),
+            );
+            std::fs::write(root.join(".github/workflows/other.yml"), release).unwrap();
+            let report = audit::audit(&root);
+            assert_eq!(
+                verdict_of(&report, "workflow-env-pins"),
+                Verdict::Fail,
+                "{package}: {repository}@{revision} is an unaccepted central pointer"
+            );
+            assert!(
+                !report.ok(),
+                "{package}: another valid CI caller must not conceal {repository}@{revision}"
+            );
+        }
+    }
+}
+
+#[test]
+fn accepted_central_revision_keeps_github_repository_identity_case_insensitive() {
+    for package in ["coral", "nautilus"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        std::fs::write(
+            root.join(".github/workflows/ci.yml"),
+            central_ci_wrapper(package, VER),
+        )
+        .unwrap();
+        let release = central_profile_wrapper(
+            &format!("{package}-release"),
+            &[format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+        )
+        .replace("Chelis-Lang/ci/", "cHeLiS-lAnG/CI/");
+        std::fs::write(root.join(".github/workflows/other.yml"), release).unwrap();
+        let report = audit::audit(&root);
+        assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Pass);
+        assert!(report.ok(), "{package}: repository casing is not a new SHA");
+    }
+}
+
+#[test]
+fn central_reference_in_an_unrelated_run_string_is_not_a_caller() {
+    for package in ["coral", "nautilus"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        std::fs::write(
+            root.join(".github/workflows/ci.yml"),
+            central_ci_wrapper(package, VER),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".github/workflows/other.yml"),
+            "name: logging\non: workflow_dispatch\njobs:\n  logging:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo 'uses: CHELIS-LANG/CI/.github/workflows/consumer.yml@main'\n",
+        )
+        .unwrap();
+        let report = audit::audit(&root);
+        assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Pass);
+        assert!(report.ok(), "{package}: run text is not a job-level uses");
+    }
+}
+
+#[test]
 fn duplicate_jobs_document_cannot_launder_an_inert_central_call() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "nautilus");

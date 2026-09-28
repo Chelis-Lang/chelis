@@ -113,6 +113,12 @@ reviewing its job behavior and updating the auditor, not treating any
 40-character immutable reference as equivalent.
 An unknown central pointer in any workflow is a failed workflow-pin row,
 even if another workflow invokes the known legacy revision.
+Central workflow references use GitHub's case-insensitive owner/repository
+identity; the `.github/workflows/consumer.yml` path and accepted commit
+revision stay exact. A job-level `uses` pointing at the same central
+repository with a mutable or different revision fails the workflow-pin row
+even if another job calls the known revision. Comments and run strings are
+not central callers.
 For a legacy central CI profile, `chelis-tag` must equal `vX.Y.Z` and
 `chelis-version` must equal `X.Y.Z` for the exact `reef.toml` pin; extra or
 missing `v` prefixes do not count. To certify the CI pin guard and negative
