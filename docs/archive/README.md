@@ -8,3 +8,6 @@ and current status.
 - `red-team/`: red-team sweeps and validation reports
 - `reports/`: generated or one-off project reports
 - `snapshots/`: repository snapshots and archaeology
+
+The [Phase 1e benchmark capture](perf/phase1e/RESULTS.md) is retained as a
+point-in-time comparison; its runner and PyTorch scripts are retired.

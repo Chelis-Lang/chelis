@@ -1,5 +1,9 @@
 ## Phase 1e: Fixed-Workload Benchmarking and Reference Comparison
 
+Historical design only. The runner, integration test, and PyTorch scripts have
+been retired. The [dated capture](../../../docs/archive/perf/phase1e/RESULTS.md)
+is not a current acceptance oracle.
+
 **Goal:** prove the shipped Phase 1 GPU backend on a small fixed workload set, record real numbers, and compare Chelis CPU, Chelis HIP, and PyTorch through the repo-local Python benchmark environment when it is prepared.
 
 ### Authoritative Oracle

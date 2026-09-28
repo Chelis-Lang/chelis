@@ -143,13 +143,13 @@ Interactive execution policy:
 **Deliverable:** GPU execution through a single HIP backend plus executable grammar
 validation tooling.
 
-**Current shipped boundary:** the HIP backend work through Phase 1e is in `main`.
-That includes HIP code generation, fusion, device memory planning, segmented and staged
-reduction paths, hipBLAS-backed specialization for contiguous rank ≥ 2 `f32` matmul, and the
-fixed-workload benchmark oracle with checked-in results. `chelis validate` from 1f is
-now shipped too. The fixed Phase 1e benchmark set (`mnist`, `linreg`,
-`transformer_block`) compiles and runs on both backends, so the intended Phase 1
-deliverable is met for the shipped models.
+**Current shipped boundary:** HIP code generation, fusion, device memory planning,
+segmented and staged reductions, and hipBLAS-backed specialization for contiguous
+rank ≥ 2 `f32` matmul are in `main`. `chelis validate` provides executable grammar
+validation. The former fixed-workload benchmark runner has been retired; its
+[dated comparison](../../docs/archive/perf/phase1e/RESULTS.md) is historical evidence,
+not a current acceptance oracle. Backend correctness is exercised through the
+target-specific tests and manual gates in [`docs/phase_oracles.md`](../../docs/phase_oracles.md).
 
 **Known carried-forward limitations:** these are real debt and must stay documented, but
 they do not block Phase 2 language work.
@@ -197,8 +197,9 @@ and Tide tooling.
 - keep PyTorch as a local/manual comparison dependency through the repo `py/` env, not a CI requirement
 - target credibility, not premature parity with PyTorch
 
-Phase 1e is now implemented through `chelis-e2e`'s `bench_phase1e` oracle and the
-checked-in `benchmarks/results/latest.json` / `benchmarks/RESULTS.md` artifacts.
+The former Phase 1e benchmark plan and its capture are archived. The executable
+examples remain in `examples/`; active backend validation is indexed in
+[`docs/phase_oracles.md`](../../docs/phase_oracles.md).
 
 ### 1f: Executable Grammar
 

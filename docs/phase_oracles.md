@@ -44,9 +44,13 @@ Status legend:
 | 1b | `cargo test --workspace` (plus rerun the 1a HIP manual oracle) | `spec/design/phase1b_fusion.md` §Acceptance Oracle | default gate (with HIP rerun as supplement) |
 | 1c | `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/phase1c_memory_planning.md` §Acceptance Oracle | manual gate (HIP hardware) |
 | 1d | `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/phase1d_flattening.md` §Acceptance Oracle | manual gate (HIP hardware) |
-| 1e | `cargo test -p chelis-e2e --test bench_phase1e -- --ignored` (real benchmark scope; `bench_phase1e` smoke variants run by default) | `spec/design/phase1e_benchmarks.md` §Authoritative Oracle | manual gate (real scope); default gate covers smoke |
 | 1f | `cargo test -p chelis-e2e --test example_corpus_validate` | `spec/design/phase1f_executable_grammar.md` §Authoritative oracle | default gate |
 | 1 (symbolic dims carry-forward) | `cargo test --workspace` plus 1a HIP gate | `spec/design/phase1_symbolic_dims.md` | default gate + manual gate |
+
+The former Phase 1e fixed-workload benchmark was retired; its
+[plan](../spec/design/archive/phase1e_benchmarks.md) and
+[dated results](archive/perf/phase1e/RESULTS.md) are historical, not a current
+completion oracle. GPU correctness gates remain above.
 
 ## Phase 2
 
