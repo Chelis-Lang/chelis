@@ -100,6 +100,12 @@ assertion failures unless an explicit different success condition is given.
 | `cooperative_unwind_precedes_the_backstop_on_an_idle_box` | `chelis-cli` | `cargo nextest run -p chelis-cli --test issue_914_eval_timeout cooperative_unwind_precedes_the_backstop_on_an_idle_box -- --ignored` | An otherwise idle box: one-minute load average below the core count. Expected: `chelis eval --timeout 2` on a slow program unwinds cooperatively, so stderr carries the documented timeout message and NOT the watchdog's `forced exit` suffix. This is a quality-of-implementation property with a load precondition the default suite cannot hold, which is why it is ignored rather than asserted in CI (chelis#1607). | chelis#1607 |
 | `a_starved_box_falls_back_to_the_forced_exit` | `chelis-cli` | `cargo nextest run -p chelis-cli --test issue_914_eval_timeout a_starved_box_falls_back_to_the_forced_exit --test-threads=1 -- --ignored` | An otherwise idle box to start with. The row oversubscribes every core tenfold for a few seconds and will make the machine briefly unresponsive, so run it alone. Expected: the watchdog's hard-exit backstop fires and stderr carries both the documented prefix and the `forced exit` suffix. The negative twin of the row above: without it, deleting every cancellation poll would leave that row green on a fast box. | chelis#1607 |
 
+For runtime bundle identity (#1354), the full
+`.venv/bin/python scripts/runtime_bundle_oracle.py` acceptance runner records
+the HIP and Metal commands above as **unrun** while verifying their host staging.
+Its `PASS` does not claim device execution; run the two device gates on their
+respective hardware and record those results separately.
+
 ## Developer-environment acceptance gates
 
 These executable/manual gates are not ignored Rust tests. Run them from one
