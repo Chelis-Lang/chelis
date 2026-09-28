@@ -288,3 +288,6 @@ the [05-OP-58] authority, before a placeholder can cause a comparison error.
 An unmatched builtin application declines numeric lowering instead of becoming
 a synthetic input Load. Exact host arguments do not implement their consumer;
 the host path retains its effects and order, including discarded observations.
+Computed function values are classified for host execution before declaration
+lowering; statically resolved literal callables can still inline. A numeric
+probe declines an unresolved callee rather than substituting its final argument.

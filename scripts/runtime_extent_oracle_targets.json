@@ -976,6 +976,7 @@
         "mode": "all"
       },
       "expected": [
+        "computed_closures_keep_captures_and_eager_arguments",
         "lambda_pipe_stages_evaluate_the_input_before_the_body",
         "lambda_pipe_stages_preserve_lexical_bindings",
         "resugaring_the_deep_still_prints_the_pipe",

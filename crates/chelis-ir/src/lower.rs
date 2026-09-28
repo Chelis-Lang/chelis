@@ -3837,6 +3837,7 @@ pub fn top_level_lowering_map(
     let types = LowerabilityTypes {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
+        function_typed_defs: collect_function_typed_defs(exprs),
     };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
@@ -3884,6 +3885,7 @@ pub fn top_level_lowering_map_with_context(
     let types = LowerabilityTypes {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
+        function_typed_defs: collect_function_typed_defs(new_exprs),
     };
     let mut cache = library.lowered_names.clone();
     let mut visiting = UnordSet::new();
@@ -3963,6 +3965,7 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
     let types = LowerabilityTypes {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
+        function_typed_defs: collect_function_typed_defs(program.exprs()),
     };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
@@ -3973,7 +3976,7 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
         program.type_env(),
         &mut cache,
         &mut visiting,
-        &UnordSet::new(),
+        &LowerabilityBindings::default(),
     )
 }
 
@@ -4219,6 +4222,19 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
         ExprCarrier::DecodedNode(tag, _, kids) => {
             if exempt_to_tensor_literal && static_to_tensor_literal(expr).is_some() {
                 return false;
+            }
+            // Only literal functions, lexical references and transform forms
+            // have static callable identities in the numeric resolver. Other
+            // function-valued expressions (calls, projections, selections)
+            // produce host callable values. Classify them before lowering
+            // declarations so legal host calls do not become language
+            // rejections ([04] §8.3, [05-HOST-1]).
+            if !matches!(
+                tag,
+                DeepTag::Fn | DeepTag::Var | DeepTag::Grad | DeepTag::Vmap
+            ) && LowerCtx::type_expr_is_fn(expr_type_metadata(expr))
+            {
+                return true;
             }
             // Tuple projections can resolve to DAG nodes when their carrier
             // is statically known; classify the carrier through the children.
@@ -4599,9 +4615,24 @@ fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut BTreeMap<String, Exp
     }
 }
 
+/// Function-valued declarations are recorded on the checked `def` even when
+/// the sparse tensor/scalar type environment omits their names.
+fn collect_function_typed_defs(exprs: &[Expr]) -> UnordSet<String> {
+    let mut names = UnordSet::new();
+    for_each_top_level_item(exprs, &mut |expr| {
+        if let Some(name) = top_level_expr_name(expr)
+            && LowerCtx::type_expr_is_fn(expr_type_metadata(expr))
+        {
+            names.insert(name.to_owned());
+        }
+    });
+    names
+}
+
 struct LowerabilityTypes<'a> {
     signatures: &'a BTreeMap<String, Expr>,
     dtype_bound_names: &'a BTreeMap<String, UnordSet<String>>,
+    function_typed_defs: UnordSet<String>,
 }
 
 fn def_is_lowered(
@@ -4621,6 +4652,19 @@ fn def_is_lowered(
     }
 
     let lowered = top_level_defs.get(name).is_some_and(|body| {
+        // A declaration of function type can bind a computed function value,
+        // not only a function literal. Its initializer needs the same callable
+        // identity as a lexical binding; a projected closure is host-served.
+        if (types.function_typed_defs.contains(name)
+            || LowerCtx::type_expr_is_fn(lookup_declared_type_expr(
+                types.signatures,
+                type_env,
+                name,
+            )))
+            && !LowerabilityBindings::default().static_callable(body, top_level_defs)
+        {
+            return false;
+        }
         // Issue Chelis-Lang/chelis#218: function-def bodies get the
         // to_tensor-literal exemption (a `(fn ...)` body can hold a
         // literal `to_tensor` that lowers into the IR DAG and stays
@@ -4635,7 +4679,7 @@ fn def_is_lowered(
                 type_env,
                 cache,
                 visiting,
-                &UnordSet::new(),
+                &LowerabilityBindings::default(),
             )
             && !lookup_declared_type_expr(types.signatures, type_env, name)
                 .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)))
@@ -4682,6 +4726,51 @@ fn unique_terminal_match<'a>(map: &'a BTreeMap<String, Expr>, name: &str) -> Opt
     matches.next().is_none().then_some(first)
 }
 
+/// Lexical names and whether applying their values requires host execution.
+/// Incoming function parameters and literal callable aliases keep the numeric
+/// resolver's existing identities. A computed local value never acquires one
+/// merely because the checker accepts its later use as a callee.
+#[derive(Clone, Default)]
+struct LowerabilityBindings {
+    names: UnordSet<String>,
+    host_calls: UnordSet<String>,
+}
+
+impl LowerabilityBindings {
+    fn bind(&mut self, name: String, callable: bool) {
+        self.names.insert(name.clone());
+        if callable {
+            self.host_calls.remove(&name);
+        } else {
+            self.host_calls.insert(name);
+        }
+    }
+
+    fn static_callable(&self, mut expr: &Expr, declarations: &BTreeMap<String, Expr>) -> bool {
+        loop {
+            match stamped_parts(expr) {
+                Some((DeepTag::Fn, _, _)) => return true,
+                Some((DeepTag::Var, _, kids)) => {
+                    return kids.first().and_then(symbol_name).is_some_and(|name| {
+                        if self.names.contains(name) {
+                            !self.host_calls.contains(name)
+                        } else {
+                            declarations.contains_key(name)
+                        }
+                    });
+                }
+                Some((DeepTag::Grad | DeepTag::Vmap, _, kids)) => {
+                    let Some(inner) = kids.first() else {
+                        return false;
+                    };
+                    expr = inner;
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+
 fn expr_depends_on_nonlowerable_name(
     expr: &Expr,
     top_level_defs: &BTreeMap<String, Expr>,
@@ -4689,7 +4778,7 @@ fn expr_depends_on_nonlowerable_name(
     type_env: &BTreeMap<String, Expr>,
     cache: &mut BTreeMap<String, bool>,
     visiting: &mut UnordSet<String>,
-    bound_names: &UnordSet<String>,
+    bound_names: &LowerabilityBindings,
 ) -> bool {
     if let Some((tag, meta, kids)) = match expr.carrier() {
         ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
@@ -4699,6 +4788,20 @@ fn expr_depends_on_nonlowerable_name(
         | ExprCarrier::MetadataMap(_)
         | ExprCarrier::MetadataExpression(_) => None,
     } {
+        // A local callee must retain a callable identity the numeric
+        // resolver understands. Computed values keep host execution even
+        // when their producing projection has no checked type annotation.
+        if tag == DeepTag::App
+            && let Some(callee) = kids.first()
+            && (callable_ref_name(callee)
+                .is_some_and(|name| bound_names.host_calls.contains(&name))
+                || !matches!(
+                    callee.tag(),
+                    Some(DeepTag::Var | DeepTag::Fn | DeepTag::Grad | DeepTag::Vmap)
+                ))
+        {
+            return true;
+        }
         // A precision/rank-polymorphic def has no standalone DAG, but a
         // checked call can bind it. Inspect the body and actual arguments
         // instead of inheriting the declaration's standalone exclusion.
@@ -4706,7 +4809,7 @@ fn expr_depends_on_nonlowerable_name(
         // merely from the concrete result (which may be bool).
         if tag == DeepTag::App
             && let Some(name) = kids.first().and_then(callable_ref_name)
-            && !bound_names.contains(&name)
+            && !bound_names.names.contains(&name)
             && let Some(body) = top_level_defs.get(&name)
             && body.tag() == Some(DeepTag::Fn)
             && (lookup_declared_type_expr(types.signatures, type_env, &name).is_some_and(|ty| {
@@ -4725,7 +4828,7 @@ fn expr_depends_on_nonlowerable_name(
                 type_env,
                 cache,
                 visiting,
-                &UnordSet::new(),
+                &LowerabilityBindings::default(),
             );
             visiting.remove(&name);
             return requires_host
@@ -4743,7 +4846,7 @@ fn expr_depends_on_nonlowerable_name(
         }
         if tag == DeepTag::Var
             && let Some(name) = kids.first().and_then(symbol_name)
-            && !bound_names.contains(name)
+            && !bound_names.names.contains(name)
             && top_level_defs.contains_key(name)
         {
             return !def_is_lowered(name, top_level_defs, types, type_env, cache, visiting);
@@ -4761,7 +4864,11 @@ fn expr_depends_on_nonlowerable_name(
                     | ExprCarrier::MetadataExpression(_) => return true,
                 };
                 for param in params_kids {
-                    collect_param_bound_names(param, &mut scoped);
+                    let mut names = UnordSet::new();
+                    collect_param_bound_names(param, &mut names);
+                    for name in names.into_sorted() {
+                        scoped.bind(name, true);
+                    }
                 }
             }
             return kids.get(1).is_some_and(|body| {
@@ -4802,7 +4909,9 @@ fn expr_depends_on_nonlowerable_name(
                         return true;
                     }
                     if let Some(name) = symbol_name(&binding_kids[index]) {
-                        scoped.insert(name.to_string());
+                        let callable =
+                            scoped.static_callable(&binding_kids[index + 1], top_level_defs);
+                        scoped.bind(name.to_string(), callable);
                     }
                     index += 2;
                 }
@@ -4845,7 +4954,11 @@ fn expr_depends_on_nonlowerable_name(
                 };
                 let mut scoped = bound_names.clone();
                 if let Some(pattern) = arm_kids.first() {
-                    collect_pattern_bound_names(pattern, &mut scoped);
+                    let mut names = UnordSet::new();
+                    collect_pattern_bound_names(pattern, &mut names);
+                    for name in names.into_sorted() {
+                        scoped.bind(name, false);
+                    }
                 }
                 if arm_kids.get(1).is_some_and(|guard| {
                     expr_depends_on_nonlowerable_name(
@@ -10700,8 +10813,7 @@ impl<'program> LowerCtx<'program> {
         // fn body that would have been inlined -- this is
         // HostEval-ScalarFn-F1's root cause. `&kids[1..]` yielding an
         // empty slice is already handled by every downstream arm
-        // (`lower_builtin_app`, `try_lower_callable_app`, and the
-        // fallback "lower func and args, return last" path).
+        // (`lower_builtin_app` and `try_lower_callable_app`).
         if kids.is_empty() {
             raise_malformed_deep(
                 "an `app` form with no callee",
@@ -10718,6 +10830,7 @@ impl<'program> LowerCtx<'program> {
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
+            && !self.bindings.contains_key(func_name)
         {
             if self.allow_host_list_ad_rewrites && func_name == "Cons" && kids.len() == 3 {
                 return LoweredValue::Adt {
@@ -10818,12 +10931,15 @@ impl<'program> LowerCtx<'program> {
             return lowered;
         }
 
-        // Not a recognized built-in -- lower func and args, return last.
-        let mut last = self.lower_expr(&kids[0]);
-        for arg in &kids[1..] {
-            last = self.lower_expr(arg);
-        }
-        last
+        // A computed or otherwise unresolved callee belongs to host
+        // execution. Neither its spelling nor its final actual implements
+        // the application. Decline speculative numeric lowering intact.
+        // Preserve a callee's own diagnostic, such as an unresolved grad.
+        let _ = self.lower_expr(&kids[0]);
+        self.reject_lowering_at(
+            (Some(app_span), self.current_span_id.clone()),
+            "function application requires a resolved numeric callable; preserve its host execution (spec/05-risc-primitives.md [05-HOST-1])".to_owned(),
+        )
     }
 
     fn try_lower_callable_app(
@@ -22356,6 +22472,7 @@ mod tests {
         let types = LowerabilityTypes {
             signatures: &signatures,
             dtype_bound_names: &dtype_bound_names,
+            function_typed_defs: UnordSet::new(),
         };
         let mut cache = BTreeMap::from([("bad".into(), false)]);
         expr_depends_on_nonlowerable_name(
@@ -22365,7 +22482,7 @@ mod tests {
             &BTreeMap::new(),
             &mut cache,
             &mut UnordSet::new(),
-            &UnordSet::new(),
+            &LowerabilityBindings::default(),
         )
     }
 
@@ -22618,6 +22735,42 @@ mod tests {
                 "{diagnostic}"
             );
         }
+    }
+
+    /// [04] §8.3 / [05-HOST-1]: a computed function value belongs to
+    /// the host lane; a statically resolved literal callable can inline.
+    #[test]
+    fn computed_closures_route_to_host_while_literal_callables_inline() {
+        for (initializer, expected_numeric) in [
+            (
+                "(fn {} (params {} (x {type: (t-prim {} i64)})) (var {} x))",
+                true,
+            ),
+            (
+                "(app {} (fn {} (params {} (x {type: (t-prim {} i64)})) (fn {} (params {} (y {type: (t-prim {} i64)})) (var {} x))) (var {} y))",
+                false,
+            ),
+        ] {
+            let checked = parse_and_check(&format!(
+                "(def {{}} f (fn {{}} (params {{}} (y {{type: (t-prim {{}} i64)}})) (let {{}} (bind {{}} later {initializer}) (app {{}} (var {{}} later) (var {{}} y)))))"
+            ));
+            let decisions = top_level_lowering_map(checked.exprs(), checked.type_env());
+            assert_eq!(decisions.get("f"), Some(&expected_numeric), "{decisions:?}");
+            let lowered = try_lower_program(&checked)
+                .expect("a host classification is not a language rejection");
+            assert_eq!(!lowered.roots().is_empty(), expected_numeric);
+        }
+        let checked = parse_and_check(
+            "(def {} pair (tuple {} (fn {} (params {} (x {type: (t-prim {} i64)})) (lit {type: (t-prim {} i64)} 3)) (lit {type: (t-prim {} i64)} 7))) (def {} selected (tuple-get {} (var {} pair) (lit {type: (t-prim {} i32)} 0))) (def {} out (app {} (var {} selected) (lit {type: (t-prim {} i64)} 9)))",
+        );
+        let decisions = top_level_lowering_map(checked.exprs(), checked.type_env());
+        assert_eq!(
+            decisions.get("selected"),
+            Some(&false),
+            "{decisions:?} {:?}",
+            checked.type_env()
+        );
+        assert_eq!(decisions.get("out"), Some(&false), "{decisions:?}");
     }
 
     fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {
@@ -27405,6 +27558,21 @@ mod regression_tests {
         assert!(
             message.contains("chelis build --target c"),
             "diagnostic should name the build workaround: {message}"
+        );
+    }
+
+    /// [05-HOST-1]: a numeric attempt cannot replace an unresolved
+    /// computed callee with its last actual argument.
+    #[test]
+    fn computed_callee_never_becomes_its_last_argument() {
+        let source = "(app {} (app {} (fn {} (params {} (x {type: (t-prim {} i64)})) (fn {} (params {} (y {type: (t-prim {} i64)})) (var {} x))) (lit {type: (t-prim {} i64)} 3)) (lit {type: (t-prim {} i64)} 9))";
+        let exprs = chelis_deep::parser::parse_str(source).expect("parse probe");
+        let error =
+            try_lower_subexpr_program(&exprs[0], UnordMap::new(), UnordMap::new(), UnordMap::new())
+                .expect_err("a computed closure is a host value, not its final actual");
+        assert!(
+            error.to_string().contains("resolved numeric callable"),
+            "{error}"
         );
     }
 
