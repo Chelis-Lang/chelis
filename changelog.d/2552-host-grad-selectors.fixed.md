@@ -8,3 +8,5 @@ Preserve host observations and their order around tensor result guards when
 numeric helper probes encounter exact string or aggregate arguments.
 Keep computed lexical closures on the host execution path when numeric
 lowering cannot represent their callable values.
+Preserve existing finite-list AD and typed builtin alias admission while
+rejecting unsupported numeric applications.

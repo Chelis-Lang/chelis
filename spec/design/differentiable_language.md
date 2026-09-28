@@ -291,3 +291,10 @@ the host path retains its effects and order, including discarded observations.
 Computed function values are classified for host execution before declaration
 lowering; statically resolved literal callables can still inline. A numeric
 probe declines an unresolved callee rather than substituting its final argument.
+
+Finite `to_list`/`map`/`zip` producers admitted by numeric AD materialize
+recursive List values with tensor leaves. Their bindings retain evaluated
+values and callback traps; conversion consumes those values without replaying
+callbacks. Slice selection assembles tensors without arithmetic on stored bits.
+Builtin callable references participate in admission, subject to lexical
+shadowing and the numeric resolver's supported operations.

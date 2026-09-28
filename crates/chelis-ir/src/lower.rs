@@ -4755,7 +4755,7 @@ impl LowerabilityBindings {
                         if self.names.contains(name) {
                             !self.host_calls.contains(name)
                         } else {
-                            declarations.contains_key(name)
+                            declarations.contains_key(name) || BUILTIN_NAMES.contains(&name)
                         }
                     });
                 }
@@ -10832,6 +10832,11 @@ impl<'program> LowerCtx<'program> {
             && !self.fn_typed_params.contains(func_name)
             && !self.bindings.contains_key(func_name)
         {
+            if self.allow_host_list_ad_rewrites
+                && let Some(value) = self.try_lower_list_producer(func_name, &kids[1..])
+            {
+                return value;
+            }
             if self.allow_host_list_ad_rewrites && func_name == "Cons" && kids.len() == 3 {
                 return LoweredValue::Adt {
                     host: None,
@@ -16439,6 +16444,13 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn lower_host_list_to_tensor(&mut self, expr: &Expr, ty: &TensorType) -> Option<NodeId> {
+        // A binding owns the already executed producer, including its callback
+        // captures and traps. Do not replay its saved expression at each use.
+        if let Some(value) = bare_var_name(expr).and_then(|name| self.bindings.get(&name).cloned())
+            && adt_cons_chain_values(&value).is_some()
+        {
+            return self.staged_list_tensor(&value, Some(ty));
+        }
         let resolved = self.resolved_list_expr(expr);
         if let Some(source) = to_list_source_expr(&resolved) {
             return Some(self.lower_expr_node(source, "to_list/tensor AD boundary"));
@@ -16469,6 +16481,223 @@ impl<'program> LowerCtx<'program> {
                 None
             }
         }
+    }
+
+    /// Materialize the existing finite List AD producers as actual recursive
+    /// values. Their numeric leaves are ordinary DAG nodes; the list itself is
+    /// never a tensor input named after its producer. This also keeps eager
+    /// callback execution when a binding is unused ([05-OP-55]).
+    fn try_lower_list_producer(&mut self, name: &str, args: &[Expr]) -> Option<LoweredValue> {
+        match (name, args) {
+            ("to_list", [source]) => {
+                let source = self.lower_expr_node(source, "to_list source");
+                self.staged_tensor_list(source)
+            }
+            ("map", [callback, source]) => {
+                let CallableExpr::Plain(callback) = self.resolve_callable_expr(callback)? else {
+                    return None;
+                };
+                let source = self.lower_expr(source);
+                let items = adt_cons_chain_values(&source)?;
+                let mapped = items
+                    .into_iter()
+                    .map(|item| self.lower_plain_callable_with_values(&callback, &[item]))
+                    .collect();
+                Some(rebuild_cons_chain(mapped))
+            }
+            ("zip", [left, right]) => {
+                let left = self.lower_expr(left);
+                let right = self.lower_expr(right);
+                let left = adt_cons_chain_values(&left)?;
+                let right = adt_cons_chain_values(&right)?;
+                Some(rebuild_cons_chain(
+                    left.into_iter()
+                        .zip(right)
+                        .map(|(a, b)| LoweredValue::Tuple(vec![a, b]))
+                        .collect(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn staged_tensor_list(&mut self, source: NodeId) -> Option<LoweredValue> {
+        let ty = self.dag.get(source)?.output_type.clone();
+        let (first, tail) = ty.dims.split_first()?;
+        let len = concrete_dim_len(first)?;
+        let mut values = Vec::with_capacity(len);
+        for index in 0..len {
+            let mut slice_dims = ty.dims.clone();
+            slice_dims[0] = DimInfo::Lit(1);
+            let slice = self.dag.add_node(
+                self.owner(),
+                RiscOp::Shrink {
+                    bounds: std::iter::once((RtDim::Lit(index), RtDim::Lit(index + 1)))
+                        .chain(
+                            tail.iter()
+                                .map(|dim| {
+                                    Some((RtDim::Lit(0), RtDim::Lit(concrete_dim_len(dim)?)))
+                                })
+                                .collect::<Option<Vec<_>>>()?,
+                        )
+                        .collect(),
+                },
+                vec![source],
+                TensorType {
+                    dims: slice_dims,
+                    precision: ty.precision,
+                },
+                self.current_span_id.clone(),
+            );
+            let item = self.dag.add_node(
+                self.owner(),
+                RiscOp::Reshape {
+                    new_shape: tail
+                        .iter()
+                        .map(|dim| concrete_dim_len(dim).map(RtDim::Lit))
+                        .collect::<Option<Vec<_>>>()?,
+                },
+                vec![slice],
+                TensorType {
+                    dims: tail.to_vec(),
+                    precision: ty.precision,
+                },
+                self.current_span_id.clone(),
+            );
+            values.push(if tail.is_empty() {
+                LoweredValue::Node(item)
+            } else {
+                self.staged_tensor_list(item)?
+            });
+        }
+        Some(rebuild_cons_chain(values))
+    }
+
+    fn staged_list_tensor(
+        &mut self,
+        value: &LoweredValue,
+        expected: Option<&TensorType>,
+    ) -> Option<NodeId> {
+        if let Some(node) = value.as_single_node() {
+            return Some(node);
+        }
+        let items = adt_cons_chain_values(value)?;
+        if items.is_empty() {
+            // Empty spines supply no trailing extents. Only an exact checked
+            // shape can supply those obligations; never invent them.
+            let expected = expected?;
+            if expected.dims.first().and_then(concrete_dim_len) != Some(0)
+                || expected
+                    .dims
+                    .iter()
+                    .any(|dim| concrete_dim_len(dim).is_none())
+            {
+                return None;
+            }
+            return Some(self.zero_tensor_node(expected, None));
+        }
+        let child_expected =
+            expected
+                .filter(|expected| !expected.dims.is_empty())
+                .map(|expected| TensorType {
+                    dims: expected.dims[1..].to_vec(),
+                    precision: expected.precision,
+                });
+        let nodes = items
+            .iter()
+            .map(|item| self.staged_list_tensor(item, child_expected.as_ref()))
+            .collect::<Option<Vec<_>>>()?;
+        let first_ty = self.dag.get(*nodes.first()?)?.output_type.clone();
+        let out_dims = std::iter::once(DimInfo::Lit(nodes.len()))
+            .chain(first_ty.dims.clone())
+            .collect::<Vec<_>>();
+        let unit_dims = std::iter::once(DimInfo::Lit(1))
+            .chain(first_ty.dims.clone())
+            .collect::<Vec<_>>();
+        let out_ty = TensorType {
+            dims: out_dims.clone(),
+            precision: first_ty.precision,
+        };
+        let mut accumulator = None;
+        for (index, node) in nodes.iter().copied().enumerate() {
+            if self.dag.get(node)?.output_type != first_ty {
+                return None;
+            }
+            let unit = self.dag.add_node(
+                self.owner(),
+                RiscOp::Reshape {
+                    new_shape: unit_dims
+                        .iter()
+                        .map(|dim| concrete_dim_len(dim).map(RtDim::Lit))
+                        .collect::<Option<Vec<_>>>()?,
+                },
+                vec![node],
+                TensorType {
+                    dims: unit_dims.clone(),
+                    precision: first_ty.precision,
+                },
+                self.current_span_id.clone(),
+            );
+            let padding = std::iter::once((RtDim::Lit(index), RtDim::Lit(nodes.len() - index - 1)))
+                .chain(first_ty.dims.iter().map(|_| (RtDim::Lit(0), RtDim::Lit(0))))
+                .collect::<Vec<_>>();
+            let padded = self.dag.add_node(
+                self.owner(),
+                RiscOp::zero_pad(first_ty.precision, padding.clone()),
+                vec![unit],
+                out_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            accumulator = Some(if let Some(previous) = accumulator {
+                // Select disjoint slices instead of adding zero padding:
+                // addition would change -0 and perform arithmetic on NaNs.
+                let mut mask = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::synth_const(Prim::Bool, 1.0),
+                    vec![],
+                    TensorType {
+                        dims: vec![],
+                        precision: Prim::Bool,
+                    },
+                    self.current_span_id.clone(),
+                );
+                for (axis, dim) in unit_dims.iter().enumerate() {
+                    mask = self.dag.add_node(
+                        self.owner(),
+                        RiscOp::Expand {
+                            axis,
+                            size: RtDim::Lit(concrete_dim_len(dim)?),
+                        },
+                        vec![mask],
+                        TensorType {
+                            dims: unit_dims[..=axis].to_vec(),
+                            precision: Prim::Bool,
+                        },
+                        self.current_span_id.clone(),
+                    );
+                }
+                mask = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::zero_pad(Prim::Bool, padding),
+                    vec![mask],
+                    TensorType {
+                        dims: out_dims.clone(),
+                        precision: Prim::Bool,
+                    },
+                    self.current_span_id.clone(),
+                );
+                self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Where,
+                    vec![mask, padded, previous],
+                    out_ty.clone(),
+                    self.current_span_id.clone(),
+                )
+            } else {
+                padded
+            });
+        }
+        accumulator
     }
 
     fn lower_host_list_map(&mut self, callback: &Expr, source_node: NodeId) -> Option<NodeId> {
