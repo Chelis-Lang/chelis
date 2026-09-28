@@ -316,6 +316,22 @@ fn concretely_typed_key_builtin_aliases_execute_in_eval_and_c() {
     for (seeds, shape, values, seed_ty, key_ty, children_ty) in [
         ("-1i64", vec![], vec![-1i64], "i64", "key", "tensor[2, key]"),
         (
+            "scalar_to_tensor(-1i64)",
+            vec![],
+            vec![-1],
+            "tensor[i64]",
+            "tensor[key]",
+            "tensor[2, key]",
+        ),
+        (
+            "reshape(to_tensor(range(0i64, 0i64)), [0i64, 1i64, 1i64, 1i64, 1i64, 1i64, 1i64, 1i64, 1i64])",
+            vec![0, 1, 1, 1, 1, 1, 1, 1, 1],
+            vec![],
+            "tensor[0, 1, 1, 1, 1, 1, 1, 1, 1, i64]",
+            "tensor[0, 1, 1, 1, 1, 1, 1, 1, 1, key]",
+            "tensor[0, 1, 1, 1, 1, 1, 1, 1, 1, 2, key]",
+        ),
+        (
             "to_tensor([1i64, -1i64])",
             vec![2],
             vec![1, -1],
@@ -509,5 +525,36 @@ fn key_builtin_aliases_preserve_runtime_domain_rejections() {
         let generated = ownership_support::emit(source, "key-alias-domain");
         let stderr = ownership_support::run_failure_stderr(&generated, "");
         assert!(stderr.contains(trap), "{source}\n{stderr}");
+    }
+}
+
+#[test]
+fn key_callable_helpers_are_emitted_only_for_alias_consumers() {
+    for (source, expected) in [
+        ("def main() -> string = \"plain\"\n", false),
+        ("def main() -> string = \"chelis_key_callable\"\n", false),
+        (
+            "def main() = {\n  seed: i64 -> key = key_from_seed\n  seed(7i64)\n}\n",
+            true,
+        ),
+    ] {
+        let compiled = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.into(),
+            target: CompileTarget::C,
+            entry_name: Some("key_callable_selection".into()),
+        })
+        .expect("checked host fixture");
+        let c = compiled
+            .files
+            .iter()
+            .find(|file| file.path.ends_with(".c"))
+            .expect("C source");
+        assert_eq!(
+            c.contents
+                .contains("static inline chelis_key __chelis_key_callable_seed_scalar"),
+            expected,
+            "{source}"
+        );
     }
 }

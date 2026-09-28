@@ -545,6 +545,7 @@ struct UnitLowerer<'a, 'sites> {
     owners: BTreeMap<OwnerId, OwnerInfo>,
     owner_depth: BTreeMap<OwnerId, usize>,
     callback_modes: BTreeMap<OwnerId, Vec<ParamMode>>,
+    key_callbacks: BTreeMap<OwnerId, crate::host_type_state::KeyBuiltinCallable>,
     next_owner: u32,
     next_operation: u32,
     next_edge: u32,
@@ -579,6 +580,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             owners: BTreeMap::new(),
             owner_depth: BTreeMap::new(),
             callback_modes: BTreeMap::new(),
+            key_callbacks: BTreeMap::new(),
             next_owner: 0,
             next_operation: 0,
             next_edge: 0,
@@ -1260,12 +1262,13 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 // unrelated function value cannot acquire callback status
                 // merely by sharing its concrete function type.
                 if args.is_empty()
-                    && crate::host_type_state::KeyBuiltinCallable::from_symbol(name).is_some()
+                    && let Some(op) = crate::host_type_state::KeyBuiltinCallable::from_symbol(name)
                     && let ConcreteHostType::Function(params, _) = ty
                     && let Value::Fresh(owner) = &value
                 {
                     self.callback_modes
                         .insert(*owner, vec![ParamMode::Owned; params.len()]);
+                    self.key_callbacks.insert(*owner, op);
                 }
                 Ok(value)
             }
@@ -1634,7 +1637,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     .collect();
                 (
                     format!("call_callback:%{}", owner.0),
-                    ApplyKind::IndirectCall,
+                    self.key_callbacks
+                        .get(&owner)
+                        .copied()
+                        .map_or(ApplyKind::IndirectCall, ApplyKind::KeyBuiltinCall),
                     specs,
                 )
             }

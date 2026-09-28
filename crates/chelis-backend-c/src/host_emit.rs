@@ -242,8 +242,7 @@ pub(crate) fn emit_host_abi_program(
     // elements through `chelis_key_at`.
     append_uniform_sample_helper(&mut body);
     body.push(String::new());
-    append_key_callable_helpers(&mut body);
-    body.push(String::new());
+    let key_callable_helpers_index = body.len();
     append_tensor_print_helper(&mut body);
     body.push(String::new());
     append_tensor_math_helpers(&mut body);
@@ -501,6 +500,22 @@ pub(crate) fn emit_host_abi_program(
             helper_result_origins,
             external_helpers,
         )?;
+    }
+
+    // Insert private key callback support only when a selected body needs
+    // its closed carrier or function symbol, before any such declaration.
+    if body.iter().any(|line| {
+        line.trim().split_once(" = ").is_some_and(|(_, value)| {
+            value == "(chelis_key_callable){ NULL };" || value.starts_with("__chelis_key_callable_")
+        })
+    }) {
+        let mut key_helpers = Vec::new();
+        append_key_callable_helpers(&mut key_helpers);
+        key_helpers.push(String::new());
+        body.splice(
+            key_callable_helpers_index..key_callable_helpers_index,
+            key_helpers,
+        );
     }
 
     let mut result_claim_support = Vec::new();
@@ -889,6 +904,27 @@ static inline chelis_tuple *__chelis_key_pair(chelis_key left, chelis_key right)
     return pair;
 }
 
+// Shape scratch stays in a checked i64 tensor; rank never sizes a C stack
+// array. Key storage is allocated by its own dtype, never a scalar exemplar.
+static inline chelis_tensor *__chelis_key_callable_alloc_shape(
+    const chelis_tensor *input, bool append_count, int64_t count) {
+    int64_t rank = chelis_tensor_rank(input);
+    if (append_count && rank >= INT32_MAX)
+        chelis_numeric_trap("numeric trap: overflow in split_keys at i64");
+    int64_t shape_count = rank + (append_count ? 1 : 0);
+    chelis_tensor *shape_storage = chelis_alloc(1, &shape_count, CHELIS_DTYPE_I64);
+    chelis_tensor_write *shape_guard = chelis_tensor_begin_write(shape_storage);
+    chelis_write_view shape_view = chelis_tensor_write_view(shape_guard);
+    int64_t *shape = (int64_t *)shape_view.data;
+    for (int64_t axis = 0; axis < rank; ++axis) shape[axis] = chelis_tensor_shape(input, axis);
+    if (append_count) shape[rank] = count;
+    chelis_tensor_end_write(shape_guard);
+    chelis_read_view checked_shape = chelis_tensor_read_view(shape_storage);
+    chelis_tensor *out = chelis_alloc((int32_t)shape_count, (const int64_t *)checked_shape.data, CHELIS_DTYPE_KEY);
+    chelis_tensor_release(shape_storage);
+    return out;
+}
+
 static inline chelis_key __chelis_key_callable_seed_scalar(int64_t seed) {
     return chelis_key_from_seed_bits(seed);
 }
@@ -905,11 +941,8 @@ static inline chelis_key __chelis_key_callable_fold_scalar(chelis_key key, int64
 }
 static inline chelis_tensor *__chelis_key_callable_seed_tensor(chelis_tensor *seeds) {
     chelis_read_view input = chelis_tensor_read_view(seeds);
-    int64_t rank = chelis_tensor_rank(seeds);
     if (input.dtype != CHELIS_DTYPE_I64) abort();
-    int64_t shape[rank > 0 ? rank : 1];
-    for (int64_t axis = 0; axis < rank; ++axis) shape[axis] = chelis_tensor_shape(seeds, axis);
-    chelis_tensor *out = chelis_alloc(rank, rank ? shape : NULL, CHELIS_DTYPE_KEY);
+    chelis_tensor *out = __chelis_key_callable_alloc_shape(seeds, false, 0);
     chelis_tensor_write *guard = chelis_tensor_begin_write(out);
     chelis_write_view view = chelis_tensor_write_view(guard);
     for (int64_t i = 0; i < input.count; ++i)
@@ -920,12 +953,9 @@ static inline chelis_tensor *__chelis_key_callable_seed_tensor(chelis_tensor *se
 }
 static inline chelis_tuple *__chelis_key_callable_split_tensor(chelis_tensor *keys) {
     chelis_read_view input = chelis_tensor_read_view(keys);
-    int64_t rank = chelis_tensor_rank(keys);
     if (input.dtype != CHELIS_DTYPE_KEY) abort();
-    int64_t shape[rank > 0 ? rank : 1];
-    for (int64_t axis = 0; axis < rank; ++axis) shape[axis] = chelis_tensor_shape(keys, axis);
-    chelis_tensor *left = chelis_alloc(rank, rank ? shape : NULL, CHELIS_DTYPE_KEY);
-    chelis_tensor *right = chelis_alloc(rank, rank ? shape : NULL, CHELIS_DTYPE_KEY);
+    chelis_tensor *left = __chelis_key_callable_alloc_shape(keys, false, 0);
+    chelis_tensor *right = __chelis_key_callable_alloc_shape(keys, false, 0);
     chelis_tensor_write *left_guard = chelis_tensor_begin_write(left);
     chelis_tensor_write *right_guard = chelis_tensor_begin_write(right);
     chelis_write_view left_view = chelis_tensor_write_view(left_guard);
@@ -947,12 +977,8 @@ static inline chelis_tuple *__chelis_key_callable_split_tensor(chelis_tensor *ke
 static inline chelis_tensor *__chelis_key_callable_children_tensor(chelis_tensor *keys, int64_t count) {
     if (count < 0) chelis_numeric_trap("numeric trap: domain in split_keys at i64");
     chelis_read_view input = chelis_tensor_read_view(keys);
-    int64_t rank = chelis_tensor_rank(keys);
     if (input.dtype != CHELIS_DTYPE_KEY) abort();
-    int64_t shape[rank + 1];
-    for (int64_t axis = 0; axis < rank; ++axis) shape[axis] = chelis_tensor_shape(keys, axis);
-    shape[rank] = count;
-    chelis_tensor *out = chelis_alloc(rank + 1, shape, CHELIS_DTYPE_KEY);
+    chelis_tensor *out = __chelis_key_callable_alloc_shape(keys, true, count);
     chelis_tensor_write *guard = chelis_tensor_begin_write(out);
     chelis_write_view view = chelis_tensor_write_view(guard);
     for (int64_t i = 0; i < input.count; ++i) {
@@ -971,13 +997,11 @@ static inline chelis_tensor *__chelis_key_callable_fold_tensor(chelis_tensor *ke
     int64_t rank = chelis_tensor_rank(keys);
     if (input.dtype != CHELIS_DTYPE_KEY || index.dtype != CHELIS_DTYPE_I64
         || chelis_tensor_rank(indices) != rank) abort();
-    int64_t shape[rank > 0 ? rank : 1];
     for (int64_t axis = 0; axis < rank; ++axis) {
-        shape[axis] = chelis_tensor_shape(keys, axis);
-        if (chelis_tensor_shape(indices, axis) != shape[axis])
+        if (chelis_tensor_shape(indices, axis) != chelis_tensor_shape(keys, axis))
             chelis_numeric_trap("numeric trap: domain in fold_in at i64");
     }
-    chelis_tensor *out = chelis_alloc(rank, rank ? shape : NULL, CHELIS_DTYPE_KEY);
+    chelis_tensor *out = __chelis_key_callable_alloc_shape(keys, false, 0);
     chelis_tensor_write *guard = chelis_tensor_begin_write(out);
     chelis_write_view view = chelis_tensor_write_view(guard);
     for (int64_t i = 0; i < input.count; ++i)
@@ -3614,7 +3638,7 @@ fn container_operand_is_moved(
 /// A diagnostic label or an intrinsic/indirect application cannot authorize
 /// a *direct* call. Missing or duplicated structural direct-call identity
 /// fails closed here; the general pre-call hook below separately admits a
-/// verifier-authorized indirect callback application.
+/// verifier-authorized closed key callback application.
 #[cfg(test)]
 pub(crate) fn direct_call_action_index(site: &ProjectedHostSite<'_>) -> Result<usize, Unsupported> {
     let mut direct_call = None;
@@ -3648,7 +3672,7 @@ fn verified_call_action_index(site: &ProjectedHostSite<'_>) -> Result<usize, Uns
         if matches!(
             action,
             VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
-                kind: VerifiedApplyKind::DirectCall { .. } | VerifiedApplyKind::IndirectCall,
+                kind: VerifiedApplyKind::DirectCall { .. } | VerifiedApplyKind::KeyBuiltinCall(_),
                 ..
             })
         ) && call.replace(index).is_some()
@@ -3661,7 +3685,7 @@ fn verified_call_action_index(site: &ProjectedHostSite<'_>) -> Result<usize, Uns
     }
     call.ok_or_else(|| {
         invalid_abi_shape(
-            "verified call site has no direct or indirect call authority".to_string(),
+            "verified user-function call site has no direct-call authority".to_string(),
             "verified C host ownership emission",
         )
     })
