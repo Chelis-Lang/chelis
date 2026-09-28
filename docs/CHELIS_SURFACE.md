@@ -455,8 +455,8 @@ Each target checks whether it can lower the selected source function.
   backward DAG.
 - **Zero cotangent or barrier:** `cmplt` and comparison results, `const`,
   `load`, and the `uniform_like` template carry zero cotangent.
-  `stop_gradient` cuts a selected path. Logical operations have their own
-  structural rejection and must not be described as numeric zero aliases.
+  `stop_gradient` cuts a selected path. Logical operations reject `grad`
+  structurally.
 - **Structural rejection:** float `floor`/`ceil`/`round` and `cast_trunc`
   are piecewise constant; `count` and argument reductions have discrete
   outputs; replace-scatter variants reject duplicate-sensitive gradients.
@@ -582,9 +582,8 @@ Resource regions are checked against the chosen target before an artifact
 is exposed. C host emission recognizes the exact `cpu` selector
 and rejects other designators with `BuildTargetMismatch`. Entry-scoped
 compilation validates its selected dependency closure, while whole-program
-emission covers all definitions. Contextual compilation may first reject
-an imported callable that its host representation cannot carry;
-that rejection is not proof of Resource admission.
+emission covers all definitions. Contextual compilation rejects an imported
+callable if its host representation cannot carry it.
 
 ---
 
