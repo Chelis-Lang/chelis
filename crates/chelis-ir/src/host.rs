@@ -18135,6 +18135,13 @@ fn lookup_declared_fn_type(
 }
 
 fn lookup_program_def<'a>(defs: &'a BTreeMap<String, Expr>, name: &str) -> Option<&'a Expr> {
+    // A top-level value can arrive here through its resolved load label
+    // after an enclosing host body has been qualified. Shape-only walks
+    // still need the declaration's initializer.
+    let decoded = LoadStoreName::top_level_source_for_label(name)
+        .ok()
+        .flatten();
+    let name = decoded.as_deref().unwrap_or(name);
     defs.get(name).or_else(|| {
         let mut matches = defs
             .iter()

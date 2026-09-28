@@ -35,6 +35,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
+/// Resolved globals use a private C name disjoint from authored identifiers.
+fn private_global_c_alias(name: &str) -> String {
+    let encoded = name
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("__chelis_global_{encoded}")
+}
+
 /// Resolve the C compiler the way the existing C-backend exec tests do:
 /// honor `$CC`, else `cc`. CI runners provide one.
 fn c_compiler() -> String {
@@ -231,11 +241,13 @@ b = g(to_tensor([1.0, 2.0]))\n";
     let build = chelis_build_c(source, "twodefs");
     let kernel_c = build.path().join("twodefs.c");
 
-    // Emit-shape invariant: exactly one file-scope declaration of `w`.
+    // Emit-shape invariant: exactly one file-scope declaration of `w`'s
+    // private alias, which can be read from both compiled functions.
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
+    let declaration = format!("static chelis_tensor* {};", private_global_c_alias("w"));
     let decl_count = c_source
         .lines()
-        .filter(|line| line.trim() == "static chelis_tensor* w;")
+        .filter(|line| line.trim() == declaration)
         .count();
     assert_eq!(
         decl_count, 1,
@@ -473,15 +485,15 @@ out = f(to_tensor([3.0, 4.0]))\n";
         .success();
 
     let host_source = fs::read_to_string(&out_cpp).expect("read emitted HIP host source");
+    let capture = private_global_c_alias("w");
+    let declaration = format!("static chelis_tensor* {capture};");
     assert!(
-        host_source
-            .lines()
-            .any(|line| line.trim() == "static chelis_tensor* w;"),
+        host_source.lines().any(|line| line.trim() == declaration),
         "HIP host lane shares the host emit path and must declare the \
          captured binding at file scope (issue #352); emitted=\n{host_source}",
     );
     assert!(
-        host_source.contains("= w;"),
+        host_source.contains(&format!("= {capture};")),
         "sanity: the host function still references the captured binding; \
          emitted=\n{host_source}",
     );

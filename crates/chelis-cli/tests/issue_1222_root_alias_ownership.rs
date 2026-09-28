@@ -274,6 +274,17 @@ fn ownership_calls(body: &str) -> Vec<(&'static str, usize)> {
     .collect()
 }
 
+/// The C alias for a resolved top-level binding carries its source spelling
+/// as UTF-8 hex. An alpha rename changes that alias along with the root.
+fn private_global_c_alias(name: &str) -> String {
+    let encoded = name
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("__chelis_global_{encoded}")
+}
+
 /// Build `source` and its α-renamed twin and assert they are the same program.
 ///
 /// Renaming a bound variable cannot change which allocations a program
@@ -309,10 +320,14 @@ fn assert_alpha_invariant(source: &str, stem: &str, binder: &str) {
     let (stdout_b, emitted_b) = build_run_and_emit(&renamed, &format!("{stem}_alpha"));
 
     let main_a = strip_span_comments(emitted_main(&emitted_a));
-    // Undo the rename in the emitted text so the two bodies are comparable,
-    // and undo the stem the second build was written under.
+    // Undo both the source spelling and its resolved-global C alias, then
+    // undo the stem the second build was written under.
     let main_b = strip_span_comments(
         &emitted_main(&emitted_b)
+            .replace(
+                &private_global_c_alias(renamed_binder),
+                &private_global_c_alias(binder),
+            )
             .replace(renamed_binder, binder)
             .replace(&format!("{stem}_alpha"), stem),
     );
@@ -393,6 +408,10 @@ fn assert_alpha_invariant_pair(
     let (stdout_a, emitted_a) = build_run_and_emit(colliding, stem);
     let (stdout_b, emitted_b) = build_run_and_emit(distinct, &format!("{stem}_distinct"));
     let mapped_b = emitted_b
+        .replace(
+            &private_global_c_alias(fresh),
+            &private_global_c_alias(original),
+        )
         .replace(fresh, original)
         .replace(&format!("{stem}_distinct"), stem);
 
