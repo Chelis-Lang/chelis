@@ -296,17 +296,9 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
             "adjoint accumulation base must be exact positive zero"
         );
     }
-    let x_tail = &parsed.nodes[usize::try_from(x_node.inputs[1]).unwrap()];
-    let y_tail = &parsed.nodes[usize::try_from(y_node.inputs[1]).unwrap()];
-    assert!(matches!(x_tail.op, WireRiscOp::Reshape { .. }));
-    assert!(matches!(y_tail.op, WireRiscOp::Reshape { .. }));
     assert_eq!(
-        x_tail.inputs[0], y_tail.inputs[0],
-        "equal adjoints share the numeric contribution before each target's physical-axis view"
-    );
-    assert_ne!(
-        x_tail.inputs[1], y_tail.inputs[1],
-        "each target's view reads its own primal axes"
+        x_node.inputs[1], y_node.inputs[1],
+        "equal adjoints share the numeric contribution tail"
     );
 
     // Still no in-tree fit: each equal-adjoint goal is no-fit -> Unsupported, never
