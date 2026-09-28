@@ -1,19 +1,15 @@
 # Chelis capability surface
 
-This is a current-use guide to the language, compiler, and bundled `chelis-std`.
+This guide maps language operations, compiler support, and bundled `chelis-std`.
 The numbered specs decide language behavior; code and executable tests establish
 which parts the compiler implements. A shell's `docs/CHELIS_SURFACE.md`, required by
 [`spec/design/shell_repo_contract.md`](../spec/design/shell_repo_contract.md) §3
 is a domain-scoped, `@pin`/`@upstream`-annotated view of this guide.
 
-This page describes the checkout on `main`. For a released toolchain, select a
-tag from [GitHub releases](https://github.com/Chelis-Lang/chelis/releases) and
-read the guide at that tag; the checkout and an installed release may differ.
-
-Read this before designing around a suspected gap. A builtin name, a legal
-language expression, and an implemented execution path are different claims.
-In particular, `chelis check` can accept a program that a selected build target
-cannot yet emit.
+This page describes the checkout on `main`. For a released toolchain, use
+the corresponding tag on [GitHub releases](https://github.com/Chelis-Lang/chelis/releases).
+Language rules, registered builtins, and target execution support have
+separate owners, identified below.
 
 If this guide disagrees with an owning source, correct the guide:
 
@@ -34,32 +30,28 @@ If this guide disagrees with an owning source, correct the guide:
 Checking establishes types, effects, and ownership before target selection.
 Lowering then keeps tensor work in a `RiscOp` DAG and represents functions,
 collections, I/O, and other host work in a host execution program. One source
-program can contain both. The host interpreter and generated host code can call
-tensor helpers; a host wrapper does not by itself mean its tensor operations
-run on a CPU. Inspect the selected target and its helper gates (§6).
+program can contain both. The host interpreter and generated host code call
+tensor helpers admitted by the selected target (§6).
 
 - **DAG:** `crates/chelis-ir/src/dag.rs`, `lower.rs`, and `tier2.rs` contain
   tensor nodes and derived-op lowerings. Eval and the C, HIP, and Metal emitters
-  have separate capability checks. Presence of a `RiscOp` variant does not
-  establish support for every dtype, shape, or target.
+  check capability separately by dtype, shape, and target.
 - **Host execution:** `crates/chelis-ir/src/host.rs` represents calls, control,
   scalar and collection values, and tensor helpers. Eval uses
   `chelis-compiler-api/src/runtime/host_ops.rs`; compiled host programs use
   target host emitters and the carried runtime. Some builtin applications are
   explicitly eval/test-only (§3.5, §3.8, §3.9).
 
-The numbered transform spec includes host values, lists, branches, and
-recursion. Current transform lowerings cover selected cases and reject other
-forms; §5 describes the boundary. The prover has its own supported subset
-(§12). The checker's alias-resolved ADT information and authored signatures
-feed host representation decisions; target ABI gaps remain separate from
-language typing.
+Transform rules include host values, lists, branches, and recursion;
+implementation coverage is in §5. The prover's supported subset is in §12.
+The checker's alias-resolved ADT information and authored signatures feed
+host representation decisions.
 
 **Lane legend used in the tables below:**
 
 | Mark | Meaning |
 |---|---|
-| `DAG` | Has a tensor DAG lowering; target admission still depends on §6. |
+| `DAG` | Has a tensor DAG lowering; target admission is described in §6. |
 | `Host` | Uses a host execution form and its target's host-runtime support. |
 | `DAG+Host` | Has both lowering paths; the selected entry and context decide which one is used. |
 
@@ -72,8 +64,7 @@ These registered builtins have direct tensor DAG nodes. Their contracts come fro
 a precision. Read-only tensor inputs are borrow-typed (`&tensor`) and are
 auto-borrowed at ordinary call sites. An adjoint column describes float data
 paths unless the named atom says otherwise. Scalar forms and target limits
-are specified separately; a tensor signature here is not an exclusion of
-every scalar form.
+are specified separately.
 
 ### 1.1 Elementwise binary — `spec/05` §2.1
 
@@ -89,8 +80,8 @@ every scalar form.
 | `min_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | complete `g` to the exact operand selected by [05-OP-40], including its stored-bit tie rule; integer forms are forward-only |
 | `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | zero gradient (by design) |
 
-`div` and `recip` use native float division, including signed zero and
-infinity rules; neither is an `exp`/`log` approximation. `/` desugars to
+`div` and `recip` follow IEEE-754 float division, including signed zero and
+infinity. `/` desugars to
 `div`, so integer `/` is a type error. Use `floor_div` for a quotient rounded
 toward −∞, `trunc_div` for an integer quotient rounded toward zero, or
 explicitly cast before float division. Integer overflow is checked unless a
@@ -116,9 +107,6 @@ separately named modular operation applies (`spec/04` [04-NUM-3/7]).
 
 `recip`, transcendental functions, and `sqrt` admit floats. `neg`, `abs`,
 `floor`, `ceil`, and `round` also admit signed integers under the rules above.
-The numbered spec defines `is_nan`, `is_finite`, and `is_infinite`; they are
-not entries in the current `BUILTIN_NAMES` array (§4), so this guide makes
-no callable-support claim for them.
 
 ### 1.3 Reduction — `spec/05` §2.3
 
@@ -140,13 +128,13 @@ are type errors. The checker applies these rules before a backend is chosen.
 
 `sum` and `prod_reduce` use the specified balanced trees, with integer
 overflow checked at each operation. `count` has one dedicated node with
-normalized original positions in descending order; it does not cast a bool
-tensor and call `sum`. For `sum`, the default `bf16`/`f16` accumulator is
-`f32` **while the result returns to `bf16`/`f16`**. Other defaults are
+normalized original positions in descending order. For `sum`, the default
+`bf16`/`f16` accumulator is `f32`, and the result returns to `bf16`/`f16`.
+Other defaults are
 `f32→f32`, `f64→f64`, `i8/i16→i32`, `i32→i32`, and `i64→i64`.
 An explicit wider accumulator follows the exact result matrix in
-`spec/04` §5.7.1; it is not implicit operand promotion. `mean` is the
-float-only derived reduction (§2) and has no accumulator parameter.
+`spec/04` §5.7.1. `mean` is a float-only derived reduction (§2) with no
+accumulator parameter.
 
 ### 1.4 Windowed reduction — `spec/05` §2.3.1 (Valid padding only)
 
@@ -198,9 +186,7 @@ Other IR nodes, including `Store`, `Copy`, `Realize`, `Cast`, `FusedElem`,
 `OneHot`, and `BlasMatmul`, are internal representations or come from
 separate language forms. Random keys are affine values. A draw consumes its
 key without introducing `IO`; the exact mask, rate validation, and pathwise
-adjoint are governed by [05-OP-37]. Source execution and C emission have
-different entry limitations, so a successful eval is not a compiled-target
-receipt.
+adjoint are governed by [05-OP-37]. C entry support is described in §6.
 
 ### 1.7 Sparse tensor-lane nodes — `spec/05` §3.5
 
@@ -227,9 +213,8 @@ The five-argument, string-mode `scatter` is a separate host-runtime form (§3).
 
 `spec/05` §3–4 gives these names typed identities and lowering rules. Most
 are implemented by compositions of primitive nodes in
-`crates/chelis-ir/src/tier2.rs`; a typed identity need not disappear before
-semantic transforms. `relu` retains a dedicated DAG node and adjoint so its
-zero rule cannot be confused with `max_elem`'s tie rule.
+`crates/chelis-ir/src/tier2.rs`. `relu` has a dedicated DAG node and
+its own zero rule.
 
 | Name | Lowering | AD |
 |---|---|---|
@@ -245,19 +230,16 @@ zero rule cannot be confused with `max_elem`'s tie rule.
 | `conv` | N-dimensional padded window gather → one matrix contraction → reshape/permute; explicit per-axis i64 strides and `(low,high)` padding pairs (`spec/05` §4.5) | differentiable |
 
 Some derived arithmetic also has a compiled-host path when a surrounding
-function is represented in the host program. That path has its own admission
-checks and does not turn every derived operation into a universal device
-capability.
+function is represented in the host program. Target admission is checked
+separately.
 
-The spec also describes composite recipes such as `linear`,
+Composite recipes such as `linear`,
 `cross_entropy`, `embedding`, `multi_head_attention`, and `argmax`
-(`spec/05` §3.5, §4.3–4.7). They are not extra members of the closed
-builtin array. Use an imported library definition where one exists or
+(`spec/05` §3.5, §4.3–4.7) are library compositions. Use an imported definition or
 compose the underlying operations explicitly.
 
-`normalize` is likewise an ordinary user-defined name. The
-[`explicit_normalization.ch`](../examples/explicit_normalization.ch) example
-shows a definition; an unbound `normalize` call is an error.
+The [`explicit_normalization.ch`](../examples/explicit_normalization.ch)
+example defines `normalize` as an ordinary function.
 
 ---
 
@@ -267,9 +249,9 @@ Most operations here have a host execution form, evaluated by
 `host_ops.rs` or emitted through target host code and `chelis_*` runtime
 calls. Some also acquire a direct tensor DAG form in a tensor context:
 `where`, comparison/logical operations, integer bitwise operations, and
-selected tensor helpers are examples. The section-4 group labels are a
-vocabulary audit, not a promise about every call's selected lowering.
-Target support is decided per operation and entry (§6). Host AD is
+selected tensor helpers are examples. Section 4 lists builtin names;
+lowering and target support depend on the operation and selected entry
+(§6). Host AD is
 implemented for selected paths, with wider semantics specified by
 `spec/06` (§5).
 
@@ -286,19 +268,19 @@ implemented for selected paths, with wider semantics specified by
 | `clamp` | `(&tensor, lo, hi) -> tensor` | elementwise clip |
 | `concat` | `(tensors: List[tensor], axis: i32) -> tensor` | join tensors along axis; ordinary two-list concatenation has no axis slot |
 | `split` | `(&tensor, axis: i32, sizes: List[int]) -> list` | partition along axis |
-| `scatter` | `(base, indices, updates, axis: i32, mode: string) -> tensor` | current registered host pentaop; `spec/05` [05-OP-33] says no public string scatter mode, so this code/spec discrepancy is not a basis for a new public contract |
+| `scatter` | `(base, indices, updates, axis: i32, mode: string) -> tensor` | registered host form; its string mode conflicts with the public [05-OP-33] contract |
 | `pad_sequences`, `pad_sequences_to` | typed List input, pad value, and optional width | runtime-derived extents; [05-OP-9..10] govern all-dtype padding and adjoints |
 
 ### 3.2 Host-runtime tensor builder — `spec/05` §3.6
 
 | Name | Signature | Notes |
 |---|---|---|
-| `tensor_scan` | `(initial: T, fn: (T,i64)->T ! E, n: i64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-HOST-1] and [05-OP-38] define scalar or fixed-shape tensor state, ordered callback effects, and typed output. The current eval path covers scalar state; compiled execution and transform coverage remain incomplete. |
+| `tensor_scan` | `(initial: T, fn: (T,i64)->T ! E, n: i64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-HOST-1] and [05-OP-38] define scalar or fixed-shape tensor state, ordered callback effects, and typed output. Eval supports scalar state; compiled execution and transform coverage are incomplete. |
 
 `tensor_scan` stacks successive states into a tensor; list `scan` (§3.3)
-returns a `List`. Its spec includes float-state AD and `vmap` rules. Current
-build paths reject unsupported `tensor_scan` forms rather than emitting an
-inert helper (`crates/chelis-cli/tests/issue_703_silent_placeholders.rs`).
+returns a `List`. Its spec includes float-state AD and `vmap` rules. Build
+paths reject unsupported `tensor_scan` forms
+(`crates/chelis-cli/tests/issue_703_silent_placeholders.rs`).
 
 ### 3.3 Higher-order list / sequence combinators
 
@@ -307,8 +289,8 @@ inert helper (`crates/chelis-cli/tests/issue_703_silent_placeholders.rs`).
 and the List overload of `concat`. Higher-order forms accept callable values
 and execute eagerly in list order. `len` and `index` auto-borrow a List or
 Dict query argument; they do not consume that container (`spec/05` §1.3.1).
-The spec defines positional List cotangents for several forms. Current
-Eval/C tests cover selected list gradients, including
+The spec defines positional List cotangents for several forms. Eval/C tests
+cover selected list gradients, including
 `to_list`/`map`/`to_tensor` paths; other transforms and callback shapes
 may reject (`crates/chelis-cli/tests/ad_host_list_combinators.rs`).
 
@@ -333,7 +315,7 @@ may reject (`crates/chelis-cli/tests/ad_host_list_combinators.rs`).
 | Name | Signature | Notes |
 |---|---|---|
 | `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by host-name bytes; strict UTF-8 conversion under [05-HOST-4]. An invalid name traps `IO` for the complete call. |
-| `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. Eval/test runs it; current CLI and compiler API reject compiled builds. |
+| `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. Eval/test runs it; CLI and compiler API reject compiled builds. |
 
 String-valued path APIs cannot directly name non-UTF-8 files. `list_dir`
 preserves valid names exactly, without normalization; on conversion failure its
@@ -362,9 +344,9 @@ check (§6). Shifts use declared-width two's-complement semantics; counts
 at or above the width fully shift out the value, while negative counts
 trap ([04-NUM-13]).
 
-### 3.8 Decimal rounding — current Eval/test implementation
+### 3.8 Decimal rounding — Eval/test availability
 
-The currently registered `round_to(x: f64|f32, places: int) -> f64|f32`
+The registered `round_to(x: f64|f32, places: int) -> f64|f32`
 performs ties-to-even decimal rounding on the operand's exact binary
 value ([05-OP-1], [04-NUM-8]). It preserves the operand dtype and accepts
 `places` in 0..=100 at any integer width; f16/bf16 calls currently reject.
@@ -372,14 +354,12 @@ The controlling [05-OP-1] contract admits all four float dtypes and the
 complete signed-integer `places` domain, so those limits are implementation
 gaps.
 Eval/test execute it; compiled builds reject it through the shared
-eval-only gate. [05-HOST-2] defines the broader compiled-host language
-contract, so the gate is an implementation gap rather than a language ban.
+eval-only gate. [05-HOST-2] requires compiled-host support.
 
-JSON is not a builtin or prelude ADT. The sole public JSON surface is the
-source-defined `Std.Io.Json` module described in §11, including its distinct
-`JsonInt`, `JsonBigInt`, and `JsonFloat` numeric variants.
+The source-defined `Std.Io.Json` module (§11) provides JSON values with
+distinct `JsonInt`, `JsonBigInt`, and `JsonFloat` numeric variants.
 
-### 3.9 CSV I/O — current builtin execution in Eval/test
+### 3.9 CSV I/O — Eval/test availability
 
 The builtin CSV carrier is exactly `List[Dict[string,string]]`: the input's
 first record supplies the column names, the carrier contains only data rows,
@@ -403,10 +383,10 @@ coerced or defaulted. The compiled-lane source module is `Std.Io.Csv` (§11).
 
 Missing columns name the requested column and list the available columns.
 The shared eval-only gate in `crates/chelis-ir/src/host.rs` rejects these
-builtins in current compiled builds, including calls reached through a
-helper. The source-defined `Std.Io.Csv` module supplies the compiled-host
-path (§11). [05-HOST-2] still defines compiled-host semantics for the
-builtins; the implementation gap is tracked by chelis#1297.
+builtins in compiled builds, including calls reached through a helper.
+The source-defined `Std.Io.Csv` module supplies the compiled-host path
+(§11). Builtin compiled-host support required by [05-HOST-2] is tracked
+by chelis#1297.
 
 ---
 
@@ -416,17 +396,15 @@ Every name in `BUILTIN_NAMES` (`crates/chelis-types/src/builtins.rs`), verbatim.
 fenced block below mirrors the array exactly and is locked to it by the
 `doc_surface_section_4_mirrors_builtin_names` test (`crates/chelis-types/src/builtins.rs`),
 so it cannot silently drift. Its group labels reflect the vocabulary
-organization, including some operations that now have additional lowering
-paths; they do not decide target or AD support. To change the array, review
+organization. Target and AD support are described in their own sections.
+To change the array, review
 the owning spec, registration, and this exact list together.
 
 Three capabilities live *outside* the array and are intentionally absent below: `const`
-and `load` are `RiscOp` memory nodes produced during lowering (not name-callable
-builtins), and `dropout` is registered straight into the builtin type env (`builtin_env`)
-rather than the array. All three are documented in §1.6. Keywords and special
-forms, including `cast`, `cast_trunc`, `copy`, `grad`, `vmap`, `jit`, and `realize`,
-are outside the name-callable array as well. A name absent from this block
-needs separate evidence before treating it as a callable builtin.
+and `load` are `RiscOp` memory nodes produced during lowering, and
+`dropout` is registered in `builtin_env`. All three are documented in
+§1.6. Keywords and special forms include `cast`, `cast_trunc`, `copy`,
+`grad`, `vmap`, `jit`, and `realize`.
 
 ```
 Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan sqrt
@@ -467,15 +445,13 @@ Prelude ADTs/constructors (also in scope): `Option`/`Some`/`None`,
 
 `grad` is a compiler transform. `spec/06` §2 and the [05-OP-N] atoms
 determine an operation's adjoint, zero cotangent, or structural rejection.
-Whether a particular source function lowers for Eval, C, or a device target
-is a separate implementation question. There is no rule that all DAG ops
-differentiate or that all host values are outside AD.
+Each target checks whether it can lower the selected source function.
 
 - **Float tensor paths:** `add`, `sub`, `mul`, `div`, supported unary functions,
   reductions, movement, `matmul`, derived activations, `relu`, and `gather`
   have specified adjoints. `max_elem`/`min_elem` use [05-OP-40]'s exact
   selection; `relu` uses its distinct [05-OP-43] zero rule. `prod_reduce`
-  differentiates its balanced tree. A target can still reject the resulting
+  differentiates its balanced tree. A target may reject the resulting
   backward DAG.
 - **Zero cotangent or barrier:** `cmplt` and comparison results, `const`,
   `load`, and the `uniform_like` template carry zero cotangent.
@@ -484,11 +460,10 @@ differentiate or that all host values are outside AD.
 - **Structural rejection:** float `floor`/`ceil`/`round` and `cast_trunc`
   are piecewise constant; `count` and argument reductions have discrete
   outputs; replace-scatter variants reject duplicate-sensitive gradients.
-  Integer arithmetic is forward-only where its atom says so. Rejection is
-  an error, not a silently substituted gradient.
+  Integer arithmetic is forward-only where its atom says so.
 - **Host values and control:** `spec/06` §2.10 defines cotangents for
   selected `List` combinators, the executed `if`/`match` branch, recursive
-  trajectories, and ADT fields. Current integration coverage includes
+  trajectories, and ADT fields. Integration tests cover
   Eval list `map`/round-trip gradients and selected compiled List,
   scalar, and ADT paths (`ad_host_list_combinators.rs`,
   `issue_620_static_if_adt_grad.rs`). Other shapes can fail at transform
@@ -498,8 +473,8 @@ For a composed gradient, use a scalar result and check the exact execution
 mode. A non-scalar result needs an explicit seed under `spec/06` §8.3.
 `grad(f, wrt=x)` returns one selected gradient directly; multiple selected
 parameters return a tuple in authored selector order. A discrete field of
-a recursive parameter has `unit` cotangent rather than an invented numeric
-zero. [`spec/design/differentiable_language.md`](../spec/design/differentiable_language.md)
+a recursive parameter has `unit` cotangent.
+[`spec/design/differentiable_language.md`](../spec/design/differentiable_language.md)
 tracks implementation sequencing, while `spec/06` owns the language rule.
 
 ---
@@ -511,27 +486,23 @@ headers/runtime artifacts, and compile flags; it does not invoke
 `gcc`, `hipcc`, or `clang++`. Generated host code can carry selected tensor
 helpers, while device kernels have their own supported operation sets.
 `spec/04` §1.1.3 controls dtype admission and `spec/08` controls target
-strategy; the current rejection gates are in
+strategy; rejection gates are in
 `chelis-compiler-api/src/compiler.rs`.
 
 | Target | Emits | Status |
 |---|---|---|
-| `c` (default) | C source, header, carried runtime and flags; OpenMP and BLAS paths where selected | broad host and tensor path, still subject to explicit feature gates |
+| `c` (default) | C source, header, carried runtime and flags; OpenMP and BLAS paths where selected | broad host and tensor path with explicit feature gates |
 | `hip` | C++ host source with embedded HIP kernel strings, runtime, and rocBLAS matmul path | selected GPU nodes and host wrappers; capability gates apply before emission |
 | `metal` | Objective-C++ host source with embedded MSL kernel strings and runtime | selected GPU nodes and host wrappers; dtype and operation gates apply |
 
 ### 6.1 Host wrappers and device routing
 
-HIP and Metal both have generated host-program paths. A host wrapper can
-invoke compiled tensor helpers, and a host-only program can select a host
-artifact path. That is a target/entry decision in `crates/chelis-cli/src/main.rs`,
-not a promise that every enclosed tensor operation runs on device. Before
-emission, the compiler gates unsupported effects, eval-only builtins, and
-target-specific helper DAGs. For example, HIP rejects C-host helper
-`pad`/`shrink` routing that would silently execute those operations on CPU,
-even though its direct tensor DAG has literal-bound device kernels. Count
-helpers receive device capability checks. Inspect the selected entry,
-helper route, and rejection for a particular GPU build.
+HIP and Metal both emit host programs. Host wrappers invoke compiled tensor
+helpers according to the target and selected entry
+(`crates/chelis-cli/src/main.rs`). Before emission, the compiler checks
+effects, eval-only builtins, and helper DAG capabilities. HIP admits
+literal-bound `pad`/`shrink` DAG nodes but rejects their C-host helper
+route; count helpers also receive device capability checks.
 
 ### 6.2 DAG-lane GPU coverage gaps
 
@@ -549,11 +520,8 @@ helper route, and rejection for a particular GPU build.
 | `f64` tensor work | admitted | admitted on supported operations | hard-rejected ([04-TGT-1]) |
 | f16/bf16 tensor work | admitted by operation | operation-limited (`spec/04` §1.1.3) | f16 admitted; bf16 requires Apple7+ |
 
-This is a routing summary, not an exhaustive dtype-by-operation matrix.
-The exact `spec/04` table and target gates decide each cell. In particular,
-a checked program is not proof of an admissible device kernel, and a host
-artifact is not proof that its tensor work ran on the GPU. An unsupported
-operation should produce a target diagnostic before artifact emission.
+The exact `spec/04` table and target gates decide each operation and dtype
+cell. Unsupported operations produce target diagnostics before emission.
 
 ---
 
@@ -579,7 +547,7 @@ operation should produce a target diagnostic before artifact emission.
   (`spec/04` §4.5). Ordinary binary tensor operators never broadcast;
   use explicit `expand` or movement. A runtime `shape(t, axis)` query
   can return an `i64` extent, while an axis that selects a reduction
-  or `expand` dimension must still resolve statically.
+  or `expand` dimension resolves statically.
 - **Ownership:** owned tensor and key values have linear-use rules.
   Read-only primitive tensor arguments auto-borrow; `len`/`index`
   auto-borrow their List/Dict query argument. `copy()` makes an
@@ -588,14 +556,12 @@ operation should produce a target diagnostic before artifact emission.
   and drop obligations into verified lowering.
 - **Generic bounds:** a binder may declare `Float`, `Int`, or
   `Numeric` ([04-DTYPE-2]); `Numeric` excludes `bool`. Bounds survive
-  aliases, imports, and higher-order uses rather than being inferred
-  from a caller's spelling. The exported stdlib signatures declare
+  aliases, imports, and higher-order uses. The exported stdlib signatures declare
   applicable dtype families in `packages/chelis-std/src/`.
 
-For exact reduction result dtypes and accumulator choices, use `spec/04`
-§5.7.1, rather than guessing from operand precision. The checker can also
-reject unsupported generic bodies or ambiguous dimensions before a target
-is selected.
+`spec/04` §5.7.1 gives reduction result dtypes and accumulator choices.
+The checker rejects unsupported generic bodies and ambiguous dimensions
+before target selection.
 
 ---
 
@@ -609,18 +575,15 @@ is selected.
 | `Resource(Device)` | `with device(...)` placement region | checked handler and selected target |
 
 Effects are inferred and checked with types before lowering; `chelis check`
-reports effect rows. Randomness is key passing, not an implicit `Random`
-effect: `dropout` and `uniform_like` take and consume `key` arguments.
-Retired `with seed`/`Random` syntax is rejected instead of activating a
-hidden random source.
+reports effect rows. `dropout` and `uniform_like` take and consume explicit
+`key` arguments.
 
 Resource regions are checked against the chosen target before an artifact
-is exposed. Current C host emission recognizes the exact `cpu` selector
-and rejects other designators with `BuildTargetMismatch`; an unsupported
-selector does not evaporate when the program takes a host path. Entry-scoped
+is exposed. C host emission recognizes the exact `cpu` selector
+and rejects other designators with `BuildTargetMismatch`. Entry-scoped
 compilation validates its selected dependency closure, while whole-program
 emission covers all definitions. Contextual compilation may first reject
-an imported callable that its current host representation cannot carry;
+an imported callable that its host representation cannot carry;
 that rejection is not proof of Resource admission.
 
 ---
@@ -633,11 +596,11 @@ These are language forms and compiler transforms, not stdlib functions:
 |---|---|
 | `grad` | Reverse-mode AD; `wrt` selects parameters. One selected target returns its gradient directly; several return an ordered tuple. See §5. |
 | `vmap` | Map a function over a batch axis; mapped tensor and key forms, shared arguments, and runtime-extent restrictions are in `spec/06` §3. |
-| `jit` | Compilation and cache hint that preserves the function's language semantics (`spec/06` §4); target execution still needs a supported lowering. |
+| `jit` | Compilation and cache hint that preserves the function's language semantics (`spec/06` §4); target execution requires a supported lowering. |
 | `realize` | Force materialization of a (lazy) tensor; a consuming operation. |
 
 Transform composition is governed by `spec/06`, including
-`vmap(grad(f))` for per-example gradients. Current transform preparation
+`vmap(grad(f))` for per-example gradients. Transform preparation
 rejects a body that reaches an unsupported host-only builder such as
 `tensor_scan` at the transform boundary. A successful transform check does
 not replace the selected backend's admission check.
@@ -677,16 +640,15 @@ expose the two source representations.
 
 ## 11. Bundled `chelis-std` — `packages/chelis-std`
 
-`chelis-std` ships with the selected compiler toolchain. Its actual module
-exports are the `export` declarations under `packages/chelis-std/src/`;
-an exported name still needs a supported concrete call and selected
-execution mode. Neural-network layers, losses, optimizers, and training
-loops belong in the `school` shell rather than an implicit stdlib
-fallback (`spec/design/chelis_canonical_reference.md` §8.5).
+`chelis-std` ships with the selected compiler toolchain. Its module
+exports are the `export` declarations under `packages/chelis-std/src/`.
+Concrete calls depend on their target execution mode. The `school` shell
+owns neural-network layers, losses, optimizers, and training loops
+(`spec/design/chelis_canonical_reference.md` §8.5).
 
 | Module | Key exports |
 |---|---|
-| `Std.Tensor.Construct` | `linspace`, `arange`, `stack`, `squeeze`, `unsqueeze`. `Float`/`Int` bounds are checked; compiled-host generic casts and some concrete calls still have gaps ([#1418](https://github.com/Chelis-Lang/chelis/issues/1418), [#1416](https://github.com/Chelis-Lang/chelis/issues/1416)). |
+| `Std.Tensor.Construct` | `linspace`, `arange`, `stack`, `squeeze`, `unsqueeze`. `Float`/`Int` bounds are checked; compiled-host generic casts and some concrete calls have gaps ([#1418](https://github.com/Chelis-Lang/chelis/issues/1418), [#1416](https://github.com/Chelis-Lang/chelis/issues/1416)). |
 | `Std.Tensor.Mask` | `where_indices`, a source-defined mask index helper. |
 | `Std.Init.Random`, `Std.Init.Kaiming`, `Std.Init.XavierExt` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal`; random initializers take and consume a `key`. |
 | `Std.Sort`, `Std.Scan`, `Std.Index` | `sort`; `scan_list`; `list_index`, `take_list`, `skip_list`. The `sort` wrapper and host builtin return `i64` indices. Selected List index/selection adjoints have Eval/C coverage. |
@@ -697,8 +659,8 @@ fallback (`spec/design/chelis_canonical_reference.md` §8.5).
 | `Std.Scalar`, `Std.Text`, `Std.Test` | Scalar `max`/`min`/`abs`; `join`; assertions, shape checks, and failure helpers. |
 | `Std.Time`, `Std.Decimal`, `Std.Tokenizer`, `Std.Process`, `Std.Contracts` | Dates/durations; fixed-point arithmetic; tokenizer loading/encoding/decoding; `run`/`run_chelis`; named contract predicates. |
 
-The compiled-host path for a source-defined module is established by
-that module's selected dependencies and tests, not by being in stdlib.
+Compiled-host support for a source-defined module depends on its
+selected dependencies and execution path.
 For example, `packages/chelis-std/tests/io/json.ch` and `io/csv.ch`
 exercise the respective modules, while the builtin CSV family has a
 separate build rejection (§3.9). `Std.Tensor.Reduce` is absent; call
@@ -715,7 +677,7 @@ statically resolved axis instead.
 [`spec/design/chelis_property_spec.md`](../spec/design/chelis_property_spec.md);
 the executable dispatch is in `crates/chelis-prove/src/property_runner.rs`.
 
-| Tier / option | Current route |
+| Tier / option | Route |
 |---|---|
 | `induction-only` | Surf structural-recursion subset: separate base and step SMT obligations; unsupported shapes stop without sampling. |
 | `smt-only` | Lowerable arithmetic and supported contract/gradient forms go to SMT; unsupported forms do not become sampled passes. |
