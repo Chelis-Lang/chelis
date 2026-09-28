@@ -1186,6 +1186,7 @@ impl InferenceProduct {
                         &check.arg_tys[0],
                         &check.result_ty,
                         &|ty, subst| product.awaits_group_completion(ty, subst),
+                        true,
                         vg,
                         subst,
                         adt_reg,
@@ -1386,14 +1387,9 @@ impl InferenceProduct {
                     continue;
                 }
                 DeferredShapeRule::Derivation(ref derivation) => {
-                    // chelis#2626: a `grad` waits only on types its recursive
-                    // group determines, and the group is complete here, so
-                    // nothing waits: it is decided on the types the group
-                    // left, as the call decides them. Replaying it at every
-                    // instantiation of a variable left would admit `grad` of a
-                    // generic function, which the compiled lanes do not
-                    // implement. Only an operand that is still a variable goes
-                    // to the boundary's instantiations, where it is rejected.
+                    // Decide a gradient only after all local applications and
+                    // recursive-group links have settled. Any parameter still
+                    // unknown is rejected; it cannot be silently skipped.
                     if matches!(derivation, TypeDerivation::Grad { .. })
                         && matches!(
                             resolve_type_derivation(
@@ -1401,6 +1397,7 @@ impl InferenceProduct {
                                 &check.arg_tys[0],
                                 &check.result_ty,
                                 &|_, _| false,
+                                false,
                                 vg,
                                 subst,
                                 adt_reg,

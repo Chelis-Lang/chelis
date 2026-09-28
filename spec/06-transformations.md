@@ -55,7 +55,13 @@ Then grad(loss) : (tensor[D1, P], tensor[D2, P]) -> (tensor[D1, P], tensor[D2, P
 ### 2.2 The `wrt` Parameter
 
 By default, `grad(f)` differentiates with respect to all differentiable parameters of
-`f`. The optional `wrt` parameter restricts differentiation to specific parameters:
+`f`. Parameter classification uses the final inferred types, including nested
+components. An unresolved type variable is not a non-differentiable type and
+cannot justify omitting a gradient component. Application may determine a
+lambda's parameter types under [04-INF-1]; an unresolved classification at
+the enclosing declaration boundary is a type error.
+
+The optional `wrt` parameter restricts differentiation to specific parameters:
 
 ```
 grad(f, wrt=(param1, param2))

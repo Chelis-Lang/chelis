@@ -561,6 +561,7 @@ fn replay_at_instantiation(
                 &settled[0],
                 result_ty,
                 &|_, _| false,
+                false,
                 &mut trial_vg,
                 &mut trial_subst,
                 adt_reg,
