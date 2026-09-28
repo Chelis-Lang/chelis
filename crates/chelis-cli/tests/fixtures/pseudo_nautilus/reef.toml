@@ -1,3 +1,4 @@
+schema = "1"
 [package]
 name = "pseudo-nautilus"
 version = "0.1.0"

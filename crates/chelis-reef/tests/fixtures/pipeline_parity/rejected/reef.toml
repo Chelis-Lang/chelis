@@ -1,3 +1,4 @@
+schema = "1"
 [package]
 name = "pipeline-rejected"
 version = "1.2.3"

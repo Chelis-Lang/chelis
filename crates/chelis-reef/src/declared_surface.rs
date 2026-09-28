@@ -64,6 +64,7 @@ pub fn link_package_declarations(
                     },
                     dependencies: BTreeMap::new(),
                     chelis_src: None,
+                    conform: None,
                     artifacts: BTreeMap::new(),
                 },
                 modules,

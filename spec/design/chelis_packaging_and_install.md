@@ -84,6 +84,24 @@ lock and chelis#468 must go in. See
 [`chelis_source_crate_sourcing.md`](chelis_source_crate_sourcing.md) §5 (lands
 with chelis#571) for the source-crate side.
 
+### 3.1 Document versions and recoverable replacement
+
+The manifest and lockfile formats have independent schema versions. Both first write `schema = "1"`.
+
+A missing schema identifies legacy schema 0. A schema-specific wire parser owns each current document shape.
+
+`chelis reef upgrade` is the only document migration command. It can report changes or apply ordered registered steps.
+
+One package-root `.reef-write.lock` serializes manifest, lockfile, and package archive replacement. This lock is separate from the registry lock.
+
+Each document replacement is atomic by itself. The manifest replacement occurs before the lock replacement.
+
+A process stop can leave a current manifest and an older supported lock. All readers accept this state.
+
+A later upgrade completes the lock step. The design does not claim a transaction across both files.
+
+Versioned JSON Schema artifacts provide editor support. They do not replace typed Reef parsing or artifact validation.
+
 ## 4. Store consolidation
 
 Chelis state is currently scattered and inconsistent:

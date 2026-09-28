@@ -484,6 +484,24 @@ enum ReefCommand {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
+    /// Check or apply registered Reef document schema upgrades
+    Upgrade {
+        /// Report required migration steps without file writes.
+        #[arg(long)]
+        check: bool,
+        /// Apply required migration steps through atomic file replacement.
+        #[arg(long)]
+        inplace: bool,
+        /// Package root. Defaults to the current directory.
+        #[arg(long, value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Stop after this supported manifest schema.
+        #[arg(long, value_name = "SCHEMA")]
+        manifest_to: Option<chelis_reef::ManifestSchemaVersion>,
+        /// Stop after this supported lock schema.
+        #[arg(long, value_name = "SCHEMA")]
+        lock_to: Option<chelis_reef::LockSchemaVersion>,
+    },
     /// Build package artifacts (.chb + .tar.zst).
     ///
     /// By default, missing-from-registry dependencies are
@@ -4674,6 +4692,33 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                 "Initialized Reef package `{name}` at {}",
                 root.canonicalize().unwrap_or(root).display()
             );
+        }
+        ReefCommand::Upgrade {
+            check,
+            inplace,
+            path,
+            manifest_to,
+            lock_to,
+        } => {
+            let mode = match (check, inplace) {
+                (true, false) => chelis_reef::UpgradeMode::Check,
+                (false, true) => chelis_reef::UpgradeMode::InPlace,
+                _ => {
+                    return Err(
+                        "`chelis reef upgrade` requires exactly one of `--check` or `--inplace`"
+                            .into(),
+                    );
+                }
+            };
+            let root = path.unwrap_or_else(|| PathBuf::from("."));
+            let report = chelis_reef::upgrade_documents(&root, mode, manifest_to, lock_to)?;
+            if report.steps.is_empty() {
+                println!("Reef documents are current.");
+            } else {
+                for step in report.steps {
+                    println!("{step}");
+                }
+            }
         }
         ReefCommand::Build {
             path,
