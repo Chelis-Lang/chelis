@@ -1429,6 +1429,24 @@ reason = "the dedicated corpus scanner and boundary mutation controls run in the
 tracking_issue = "chelis#1592"
 
 [[path_rule]]
+prefix = "scripts/runtime_bundle_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs stdlib contract tests for this acceptance runner; heavy runtime rows stay outside PR CI"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/test_runtime_bundle_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the runtime bundle oracle's receipt, mutation, prerequisite and guard contracts run in script-unit"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
 prefix = "scripts/test_runtime_extent_cache_compatibility.py"
 disposition = "owner"
 workflow = "ci.yml"
