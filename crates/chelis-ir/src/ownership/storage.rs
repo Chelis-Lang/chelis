@@ -730,6 +730,7 @@ fn classify_nodes(
                 | RiscOp::FloorDiv
                 | RiscOp::TruncDiv
                 | RiscOp::Mod
+                | RiscOp::Bitwise(_)
                 | RiscOp::Compare(_)
                 | RiscOp::Logical(_)
                 | RiscOp::Where

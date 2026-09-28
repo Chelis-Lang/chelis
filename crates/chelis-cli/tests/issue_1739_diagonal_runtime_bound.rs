@@ -1665,9 +1665,10 @@ fn the_census_reader_finds_the_guard_a_block_tail_moved() {
 
 /// THE CENSUS. Every executable Phase 0 example is offered to C. Recorded
 /// capability refusals are asserted; local and forwarded declared-result
-/// obligations are read back from the generated program and checked against
-/// their authored return types. An example may gain a host-owned result check
-/// only when its declared result actually names that obligation.
+/// obligations are read back from the generated program. Authored return
+/// types check result guards; the keyed State wrapper's four local guards
+/// remain in the exact shipped census, with Eval/C controls in
+/// `key_pair_host_staging`.
 ///
 /// Entry guards have a different contract: compare their emitted conditions
 /// and labels with an independent parameter-axis traversal of checked source
@@ -1712,7 +1713,10 @@ fn assert_result_guards_follow_authored_signature(
         })
     }
     let decls = chelis_surf::parser::parse_str(source).expect("shipped example parses");
-    for (function, _, axis, required) in guards {
+    for (function, target, axis, required) in guards {
+        if target != "__result" {
+            continue;
+        }
         let result = authored_result(&decls, function).unwrap_or_else(|| {
             panic!("{stem}: result guard has no authored return type for {function}")
         });
@@ -1759,6 +1763,7 @@ fn no_shipped_example_gains_a_host_lane_guard() {
     let dir = tempdir().expect("tempdir");
     let examples = executable_examples();
 
+    let mut census: Vec<String> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
     for example in &examples {
         let stem = example.file_stem().expect("stem").to_str().expect("UTF-8");
@@ -1781,6 +1786,11 @@ fn no_shipped_example_gains_a_host_lane_guard() {
         }
         let source = emit_c(path, &out);
         let guards = emitted_guards(&source);
+        for (function, target, axis, required) in &guards {
+            census.push(format!(
+                "{stem}: {function} guards {target} axis {axis} claiming {required}"
+            ));
+        }
         assert_result_guards_follow_authored_signature(
             stem,
             &fs::read_to_string(example).expect("read example"),
@@ -1806,5 +1816,18 @@ fn no_shipped_example_gains_a_host_lane_guard() {
         refused, expected_refusals,
         "every recorded refusal must be reached: a name that no longer matches an \
          example, or an enumeration that returned nothing, silently shrinks the census"
+    );
+
+    assert_eq!(
+        census,
+        vec![
+            "grad_runtime_basis: basis guards __result axis 0 claiming n",
+            "keyed_state_wrapper: main guards __let_19 axis 0 claiming 2",
+            "keyed_state_wrapper: main guards __let_19 axis 1 claiming 1",
+            "keyed_state_wrapper: main guards __let_19 axis 2 claiming 1",
+            "keyed_state_wrapper: main guards __let_19 axis 3 claiming 1",
+        ],
+        "these shipped defs changed their host-lane result guards; each change \
+         needs positive and negative both-lane checks before it lands"
     );
 }

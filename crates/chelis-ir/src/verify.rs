@@ -1284,6 +1284,7 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
         | RiscOp::Mod
+        | RiscOp::Bitwise(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where
@@ -2450,6 +2451,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
+            | RiscOp::Bitwise(_)
             | RiscOp::MaxElem
             | RiscOp::MinElem => {
                 if arity != 2 {
@@ -2459,9 +2461,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
 
-                if matches!(node.op, RiscOp::Mod) && !node.output_type.precision.is_integer() {
+                if matches!(node.op, RiscOp::Mod | RiscOp::Bitwise(_))
+                    && !node.output_type.precision.is_integer()
+                {
                     errors.push(format!(
-                        "mod at node {} requires an integer dtype",
+                        "integer binary op at node {} requires an integer dtype",
                         node.id.0
                     ));
                 }
@@ -2478,7 +2482,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         ));
                     }
 
-                    if matches!(node.op, RiscOp::Mod)
+                    if matches!(node.op, RiscOp::Mod | RiscOp::Bitwise(_))
                         && (node.output_type.precision != lhs.output_type.precision
                             || node.output_type.dims.len() != lhs.output_type.dims.len()
                             || node
@@ -2489,7 +2493,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                 .any(|(out, input)| !dims_compatible(out, input)))
                     {
                         errors.push(format!(
-                            "mod at node {} output must match its input shape and dtype",
+                            "integer binary op at node {} output must match its input shape and dtype",
                             node.id.0
                         ));
                     }

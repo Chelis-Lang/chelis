@@ -201,6 +201,7 @@ pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
     570,
     600,
     689,
+    693,
     729,
     759,
     829,
@@ -209,7 +210,6 @@ pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
     951,
     1058,
     1059,
-    1138,
     1192,
     1277,
     1298,
@@ -228,4 +228,5 @@ pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
     2515,
     2583,
     2651,
+    2702,
 ];

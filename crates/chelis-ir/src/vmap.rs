@@ -678,6 +678,7 @@ fn shared_scalar_op(op: &RiscOp) -> bool {
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
+            | RiscOp::Bitwise(_)
             | RiscOp::MaxElem
             | RiscOp::MinElem
     )
@@ -723,6 +724,7 @@ fn mark_shared_bound(dag: &Dag, id: NodeId, shared: &mut UnordSet<NodeId>) -> Re
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
         | RiscOp::Mod
+        | RiscOp::Bitwise(_)
         | RiscOp::MaxElem
         | RiscOp::MinElem => {
             for input in &node.inputs {

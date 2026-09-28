@@ -468,6 +468,22 @@ fn parity_grad_disconnected() {
 }
 
 #[test]
+fn parity_grad_bitwise() {
+    let path = examples_root().join("grad_bitwise.ch");
+    drive_parity(&path, true);
+    let output = String::from_utf8(run_eval(&path)).expect("UTF-8 eval");
+    assert!(output.contains("derivative = 4.0"), "{output}");
+    assert!(
+        output.contains("mapped = tensor(shape=[2], data=[4.0, 8.0])"),
+        "{output}"
+    );
+    assert!(
+        output.contains("exact = tensor(shape=[2], data=[9007199254740993, -2])"),
+        "{output}"
+    );
+}
+
+#[test]
 fn parity_grad_extent_claim() {
     let path = examples_root().join("grad_extent_claim.ch");
     drive_parity(&path, true);
@@ -545,6 +561,11 @@ fn parity_dropout_fixed_stream() {
         b"main.0 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 2.0])\nmain.1 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\n",
     );
     drive_parity(&path, true);
+}
+
+#[test]
+fn parity_tensor_key_operations() {
+    drive_parity(&examples_root().join("tensor_key_operations.ch"), true);
 }
 
 #[test]
@@ -894,4 +915,14 @@ fn parity_comparator_rejects_non_tensor_diff() {
 #[test]
 fn parity_generic_host_permutation() {
     drive_parity(&examples_root().join("generic_host_permutation.ch"), true);
+}
+
+#[test]
+fn parity_grad_host_results() {
+    drive_parity(&examples_root().join("grad_host_results.ch"), true);
+}
+
+#[test]
+fn parity_keyed_state_wrapper() {
+    drive_parity(&examples_root().join("keyed_state_wrapper.ch"), true);
 }

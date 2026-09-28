@@ -54,7 +54,7 @@ fn check_eval_and_run_kind(source: &str, expected: &str, extension: &str) {
 fn executable_nullary_integer_example_agrees_in_eval_and_c() {
     check_eval_and_run(
         include_str!("../../../examples/integer_functions.ch"),
-        "anchor = 7\nuser = 7\nzero_checked = true\n",
+        "anchor = 7\nuser = 7\nzero_checked = true\nweight_gradient = tensor(shape=[4], data=[100.0, 200.0, 300.0, 400.0])\n",
     );
 }
 

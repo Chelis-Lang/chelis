@@ -128,7 +128,7 @@ fn linked_context(files: &[(&str, &str)]) -> chelis_compiler_api::CompiledContex
     std::fs::create_dir(directory.path().join("src")).unwrap();
     std::fs::write(
         directory.path().join("reef.toml"),
-        format!("[package]\nname = \"declaration_frames\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", chelis_compiler_api::COMPILER_VERSION),
+        format!("[package]\nname = \"declaration-frames\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", chelis_compiler_api::COMPILER_VERSION),
     ).unwrap();
     for (name, source) in files {
         std::fs::write(directory.path().join("src").join(name), source).unwrap();

@@ -21,11 +21,12 @@ What landed vs. the plan below, with two deliberate divergences:
   rejected at parse time), `(d-rank {} r)` deep node, `Dim::Rank` + `Scheme.rvars`
   + a unitary rank-unification arm, the `Dim::Rank`-free monomorphization
   assertion at IR lowering, and the Body-Discipline check (an explicit
-  shape-identity allowlist over every builtin; everything else is rejected in a
-  `..r` body, so a missed classification can only over-reject, never open a
-  §4.2 hole). A `..r` body may currently call only shape-identity *builtins* —
-  calling a user-defined function from a rank-poly body is conservatively
-  rejected (proving an arbitrary callee rank-safe is future work).
+  shape-class allowlist over every builtin). The current classes follow
+  spec/04 §4.5.3: shape identity, named-axis operations, and ordered-prefix
+  key derivations. The latter retain each operand axis in order and let
+  `split_keys` append its count axis; their checked operation relations own
+  the result shapes. Calling a user-defined function from a rank-poly body
+  remains conservatively rejected.
 - **Erasure tier is deferred.** `&tensor[..r, p] -> tensor[p]` requires a
   genuine order-invariant *all-reduce-to-scalar* primitive; Chelis's `sum`/`mean`
   are axis-indexed (rank-reducing = Tier-3 rank arithmetic), so there is no

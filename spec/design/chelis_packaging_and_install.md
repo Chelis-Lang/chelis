@@ -84,6 +84,52 @@ lock and chelis#468 must go in. See
 [`chelis_source_crate_sourcing.md`](chelis_source_crate_sourcing.md) §5 (lands
 with chelis#571) for the source-crate side.
 
+### 3.1 Document versions and recoverable replacement
+
+The manifest and lockfile formats have independent schema versions. New manifests use schema 3. New locks use schema 1.
+
+A missing schema identifies legacy schema 0. A schema-specific wire parser owns each current document shape.
+
+`chelis reef upgrade` is the only document migration command. It can report changes or apply ordered registered steps.
+
+One package-root `.reef-write.lock` serializes manifest, lockfile, and package archive replacement. This lock is separate from the registry lock.
+
+Each document replacement is atomic by itself. The manifest replacement occurs before the lock replacement.
+
+A process stop can leave a current manifest and an older supported lock. All readers accept this state.
+
+A later upgrade completes the lock step. The design does not claim a transaction across both files.
+
+Versioned JSON Schema artifacts provide editor support. They do not replace typed Reef parsing or artifact validation.
+
+### 3.2 Exact lock preference
+
+Reef parses package and lock identities before filesystem or registry use. Package versions are complete Semantic Versions without build metadata.
+
+A valid `reef.lock` is the preferred exact graph for build, check, eval, schema, and prepared-graph paths.
+
+Reef verifies the root identity, direct requirements, source kinds, canonical paths, origins, and hashes before lock reuse.
+
+A valid lock causes no version search and no lock rewrite. This rule prevents implicit compatible upgrades during normal commands.
+
+A changed requirement or source declaration invalidates the lock preference. Reef then runs bounded local-first resolution.
+
+If no local graph completes, Reef uses bounded provider discovery. An explicit update uses refresh mode even when a local graph completes.
+
+A locked hash failure or unavailable origin is an integrity failure. Reef does not search for replacement bytes after that failure.
+
+Manifest schema 1 retains exact dependency versions. Manifest schema 2 activates resolver-2 ranges and bounded GitHub discovery.
+
+Manifest schema 3 owns optional descriptive metadata and declared package files. These values do not change resolver or source-provider behavior.
+
+Declared README and license files enter source archives through bounded, no-follow snapshots. They do not enter lock, index, or shell formats.
+
+Reef treats the local registry as an append-only cache of verified package pairs. It does not roll back a complete entry after a late failure.
+
+A final update gets the project lock before the registry lock. It keeps both locks through package, index, and lock replacement.
+
+Reef replaces `reef.lock` last. Thus, a new lock never names an incomplete registry entry.
+
 ## 4. Store consolidation
 
 Chelis state is currently scattered and inconsistent:
@@ -431,9 +477,10 @@ explicit and preserves member payloads; published containers remain unchanged.
 
 ## 11. Out of scope
 
-Inherited from `reef_distribution.md` §Out of scope: semver / version-range
-resolution, a public registry server (Item 10), cryptographic artifact signing
+Inherited from `reef_distribution.md` §Out of scope: a public registry server (Item 10), multiple providers, cryptographic artifact signing
 (trust-stack Item 5), and bit-reproducible cross-machine artifact comparison.
 Additionally: garbage-collection / uninstall of the three stores — all of
 `~/.chelis/{toolchains,reef,src}` currently grow unbounded — is deferred to a
 later hygiene workstream.
+
+Workspaces, features, development dependencies, publication controls, and general archive patterns remain deferred.

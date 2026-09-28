@@ -239,19 +239,18 @@ impl HipEmitter {
         }
     }
 
-    /// The current HIP unary kernel spells `fabsf` for every dtype. Keep
-    /// integer `abs` out of that float-only template until Phase 3 supplies
-    /// the typed, trapping backend kernel (chelis#699).
+    /// Integer abs remains a materialized checking node during fusion.
+    /// Refuse externally supplied fused IR until its per-step traps have
+    /// a device implementation; direct nodes use the exact integer kernel.
     fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
-        if let Some(node) = dag.first_integer_abs_node() {
+        if let Some(node) = dag.first_fused_integer_abs_node() {
             return Err(Unsupported::new(
                 UnsupportedKind::Op("Abs".to_string()),
                 format!("an integer tensor at HIP DAG node {}", node.0),
                 Stage::Codegen("hip"),
                 chelis_types::unimplemented_rejection!(
                     689,
-                    "integer abs code generation waits for the typed, trapping Phase 3 \
-                     kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane"
+                    "fused integer abs requires per-step numeric traps; keep abs as a direct node"
                 ),
             ));
         }
@@ -1567,6 +1566,7 @@ impl HipEmitter {
                 Self::dtype_kernel_suffix(operand_prec())
             )),
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
+            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
             RiscOp::TruncDiv => Some(format!(
                 "kernel_trunc_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -1622,7 +1622,10 @@ impl HipEmitter {
             RiscOp::Cos => Some(format!("kernel_cos_{}", kind_for_node(node)?.suffix())),
             RiscOp::Tan => Some(format!("kernel_tan_{}", kind_for_node(node)?.suffix())),
             RiscOp::Atan => Some(format!("kernel_atan_{}", kind_for_node(node)?.suffix())),
-            RiscOp::Abs => Some(format!("kernel_abs_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Abs => Some(format!(
+                "kernel_abs{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
             RiscOp::Floor => Some(format!("kernel_floor_{}", kind_for_node(node)?.suffix())),
             RiscOp::Ceil => Some(format!("kernel_ceil_{}", kind_for_node(node)?.suffix())),
             RiscOp::Round => Some(format!("kernel_round_{}", kind_for_node(node)?.suffix())),
@@ -1742,10 +1745,10 @@ impl HipEmitter {
             | RiscOp::ExtentWitness { .. }
             | RiscOp::CheckedReshapeExtent { .. }
             | RiscOp::CheckedUnitAxis { .. } => None,
-            RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix())),
-            RiscOp::ConstTensor { .. } => {
-                Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix()))
+            RiscOp::Const { .. } => {
+                Some(format!("kernel_fill_{}", node.output_type.precision.name()))
             }
+            RiscOp::ConstTensor { .. } => None,
             RiscOp::Reshape { .. } => Some(format!(
                 "kernel_reshape_{}",
                 Self::dtype_macro(&node.output_type)
@@ -1823,6 +1826,15 @@ impl HipEmitter {
     /// the in-precision identity kernel; when they differ, it's the
     /// cross-precision conversion kernel.
     fn cast_kernel_name(node: &DagNode, dag: VerifiedDagView<'_>) -> Result<String, Unsupported> {
+        let source = dag.get(node.inputs[0]).unwrap().output_type.precision;
+        let target = node.output_type.precision;
+        if source.is_integer() && target.is_float() {
+            return Ok(format!(
+                "kernel_cast_{}_to_{}",
+                source.name(),
+                target.name()
+            ));
+        }
         let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             format!("kernel_cast_{}", dst_kind.suffix())
@@ -1964,6 +1976,7 @@ impl HipEmitter {
             // operands only — native `/` is exactly the C truncating
             // quotient, so it reuses the typed binary template.
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
+            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
             RiscOp::TruncDiv => {
                 let prec = operand_prec();
                 debug_assert!(
@@ -2061,6 +2074,12 @@ impl HipEmitter {
             RiscOp::Cos => kernels::unary_func(self.kernel_rank, name, "cosf", elem_for_unary()?),
             RiscOp::Tan => kernels::unary_func(self.kernel_rank, name, "tanf", elem_for_unary()?),
             RiscOp::Atan => kernels::unary_func(self.kernel_rank, name, "atanf", elem_for_unary()?),
+            RiscOp::Abs if operand_prec().is_integer() => kernels::unary_checked_abs_integer(
+                self.kernel_rank,
+                name,
+                operand_prec(),
+                take_gate(),
+            ),
             RiscOp::Abs => kernels::unary_func(self.kernel_rank, name, "fabsf", elem_for_unary()?),
             RiscOp::Floor => {
                 kernels::unary_func(self.kernel_rank, name, "floorf", elem_for_unary()?)
@@ -2149,7 +2168,9 @@ impl HipEmitter {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
                 kernels::reduce_argmin(self.kernel_rank, name, *axis, Self::elem_kind(input_ty)?)
             }
-            RiscOp::Const { .. } => kernels::fill(self.kernel_rank, name, elem_for_unary()?),
+            RiscOp::Const { .. } => {
+                kernels::fill_stored(name, Self::comparison_c_type(node.output_type.precision))
+            }
             RiscOp::ConstTensor { .. } => kernels::fill(self.kernel_rank, name, elem_for_unary()?),
             RiscOp::Reshape { .. } | RiscOp::Realize => kernels::reshape_copy(
                 self.kernel_rank,
@@ -2305,6 +2326,17 @@ impl HipEmitter {
         dag: VerifiedDagView<'_>,
         gate: Option<&kernels::OperandGate>,
     ) -> Result<String, Unsupported> {
+        let source = dag.get(node.inputs[0]).unwrap().output_type.precision;
+        let target = node.output_type.precision;
+        if source.is_integer() && target.is_float() {
+            return Ok(kernels::cast_integer_to_float(
+                self.kernel_rank,
+                name,
+                source,
+                target,
+                gate,
+            ));
+        }
         let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             kernels::cast(self.kernel_rank, name, dst_kind, gate)
@@ -2393,12 +2425,8 @@ impl HipEmitter {
                 ));
             }
             RiscOp::Const { .. } if self.is_emission_literal(node) => {}
-            RiscOp::Const { value } => {
-                self.emit_const(id, value.as_f64_lossy(), &node.output_type)?
-            }
-            RiscOp::ConstTensor { data } => {
-                self.emit_const_tensor(id, &data.to_f64_lossy_vec(), &node.output_type)?
-            }
+            RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type)?,
+            RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary_launch(
                 id,
@@ -2439,6 +2467,7 @@ impl HipEmitter {
             // chelis#178: floor / truncating integer division launch like
             // any other binary elementwise kernel.
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
+            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
             RiscOp::FloorDiv | RiscOp::TruncDiv => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -2553,12 +2582,22 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::Abs => self.emit_unary_launch(
-                id,
-                &resolved_kernel_name()?,
-                &node.inputs,
-                &node.output_type,
-            ),
+            RiscOp::Abs => {
+                let trap = node.output_type.precision.is_integer().then(|| {
+                    chelis_types::dtype_semantics::NumericTrap::Overflow {
+                        op: "abs",
+                        prim: node.output_type.precision,
+                    }
+                    .to_string()
+                });
+                self.emit_unary_launch_with_trap(
+                    id,
+                    &resolved_kernel_name()?,
+                    &node.inputs,
+                    &node.output_type,
+                    trap.as_deref(),
+                );
+            }
             RiscOp::Floor => self.emit_unary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -2985,38 +3024,32 @@ impl HipEmitter {
         self.emit_owner_observation(id);
     }
 
-    fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) -> Result<(), Unsupported> {
+    fn emit_const(
+        &mut self,
+        id: usize,
+        value: ScalarValue,
+        ty: &TensorType,
+    ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
-        let elem = Self::elem_kind(ty)?;
-        let kernel = format!("kernel_fill_{}", elem.suffix());
+        let kernel = format!("kernel_fill_{}", ty.precision.name());
         self.line("{");
         self.indent += 1;
-        match elem {
-            kernels::ElemKind::F32 => {
-                // Issue #250 (parallel #189): narrow the IR's f64 source to
-                // f32 (storage width is f32) and reconstruct the fill value
-                // from its exact bit pattern via the `chelis_f32_from_bits`
-                // static inline helper (declared in the included
-                // `chelis_runtime.h`). The pre-fix `{:.8}f` format string
-                // printed decimal places after the point, not significant
-                // digits, so small magnitudes drifted by ~3% or collapsed
-                // to zero when the emitted HIP host code parsed the literal
-                // back. Bit-pattern emission round-trips the closest-f32 to
-                // the source value verbatim.
-                let bits = (value as f32).to_bits();
-                self.line(&format!(
-                    "float fill_val = chelis_f32_from_bits(0x{bits:08x}u);"
-                ));
-            }
-            kernels::ElemKind::F64 => {
-                // Issue #250 sibling: emit the source f64's exact bit
-                // pattern and reconstruct it via `chelis_f64_from_bits`
-                // rather than a decimal format string. Symmetric with the
-                // f32 arm above and with the C backend's #189 fix.
-                let bits = value.to_bits();
-                self.line(&format!(
-                    "double fill_val = chelis_f64_from_bits(0x{bits:016x}uLL);"
-                ));
+        if let Some(integer) = value.as_i64_exact() {
+            self.line(&format!(
+                "{} fill_val = {};",
+                Self::dtype_c_type(ty.precision),
+                Self::i64_c_literal(integer)
+            ));
+        } else {
+            match Self::elem_kind(ty)? {
+                kernels::ElemKind::F32 => self.line(&format!(
+                    "float fill_val = chelis_f32_from_bits(0x{:08x}u);",
+                    (value.as_f64_lossy() as f32).to_bits()
+                )),
+                kernels::ElemKind::F64 => self.line(&format!(
+                    "double fill_val = chelis_f64_from_bits(0x{:016x}uLL);",
+                    value.as_f64_lossy().to_bits()
+                )),
             }
         }
         self.line(&format!(
@@ -3042,10 +3075,35 @@ impl HipEmitter {
     fn emit_const_tensor(
         &mut self,
         id: usize,
-        data: &[f64],
+        data: &chelis_types::dtype_semantics::TensorStorage,
         ty: &TensorType,
     ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
+        if ty.precision.is_integer() {
+            let host_ty = Self::dtype_c_type(ty.precision);
+            self.line("{");
+            self.indent += 1;
+            self.line(&format!(
+                "{host_ty} *__host_data = ({host_ty}*)malloc({}u * sizeof({host_ty}));",
+                data.len()
+            ));
+            for index in 0..data.len() {
+                let value = data
+                    .scalar_at(index)
+                    .as_i64_exact()
+                    .expect("typed integer constant");
+                self.line(&format!(
+                    "__host_data[{index}] = {};",
+                    Self::i64_c_literal(value)
+                ));
+            }
+            self.line(&format!("CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, __host_data, {}u * sizeof({host_ty}), hipMemcpyHostToDevice));", data.len()));
+            self.line("free(__host_data);");
+            self.indent -= 1;
+            self.line("}");
+            return Ok(());
+        }
+        let data = data.to_f64_lossy_vec();
         let elem = Self::elem_kind(ty)?;
         self.line("{");
         self.indent += 1;
@@ -3266,6 +3324,17 @@ impl HipEmitter {
         inputs: &[NodeId],
         ty: &TensorType,
     ) {
+        self.emit_unary_launch_with_trap(id, kernel_name, inputs, ty, None);
+    }
+
+    fn emit_unary_launch_with_trap(
+        &mut self,
+        id: usize,
+        kernel_name: &str,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        numeric_trap: Option<&str>,
+    ) {
         let a = inputs[0].0;
         self.emit_slot_wrapper(id, ty);
         self.line("{");
@@ -3291,13 +3360,20 @@ impl HipEmitter {
             a_stride_refs = self.stride_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
-        self.emit_kernel_launch_expr(
-            &format!("mod_{kernel_name}"),
-            kernel_name,
-            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
-            "256",
-            "args",
-        );
+        let module = format!("mod_{kernel_name}");
+        let grid = format!("t{id}_size / 256 + (t{id}_size % 256 != 0)");
+        if let Some(message) = numeric_trap {
+            self.emit_numeric_trap_kernel_launch_expr(
+                &module,
+                kernel_name,
+                &grid,
+                "256",
+                "args",
+                message,
+            );
+        } else {
+            self.emit_kernel_launch_expr(&module, kernel_name, &grid, "256", "args");
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -5041,11 +5117,18 @@ impl HipEmitter {
         )
     }
 
-    /// The [05-OP-6] rung has no guarded device kernel, so it never
-    /// reaches codegen: `reject_unsupported_hip_ops` gates it first.
-    /// These arms exist so a future HIP implementation has to remove
-    /// this rejection deliberately rather than inherit `cast`'s
-    /// unguarded conversion by accident.
+    fn bitwise_unsupported(node: &DagNode, kind: chelis_types::BitwiseKind) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op(kind.name().to_string()),
+            format!("the HIP kernel set (node {})", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                2702,
+                "exact signed-width bitwise tensor kernels have no HIP implementation; select the C target"
+            ),
+        )
+    }
+
     fn remainder_unsupported(node: &DagNode) -> Unsupported {
         Unsupported::new(
             UnsupportedKind::Op("mod".to_string()),
@@ -5058,6 +5141,11 @@ impl HipEmitter {
         )
     }
 
+    /// The [05-OP-6] rung has no guarded device kernel, so it never
+    /// reaches codegen: `reject_unsupported_hip_ops` gates it first.
+    /// These arms exist so a future HIP implementation has to remove
+    /// this rejection deliberately rather than inherit `cast`'s
+    /// unguarded conversion by accident.
     fn cast_trunc_unsupported(node: &DagNode) -> Unsupported {
         Unsupported::new(
             UnsupportedKind::Op("cast_trunc".to_string()),
@@ -5086,6 +5174,7 @@ impl HipEmitter {
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
+            | RiscOp::Bitwise(_)
             | RiscOp::Compare(_)
             | RiscOp::Logical(_)
             | RiscOp::Where
@@ -5777,7 +5866,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_abs_is_rejected_before_the_float_unary_template() {
+    fn integer_abs_uses_checked_kernel_and_fused_abs_stays_rejected() {
         let ty = vec_i64(1);
 
         let mut direct = Dag::new();
@@ -5791,11 +5880,10 @@ mod tests {
         );
         let out = direct.add_node(direct_decl, RiscOp::Abs, vec![x], ty.clone(), None);
         direct.set_roots(vec![out]);
-        let err = match emit_test_dag(&direct, "integer_abs") {
-            Err(error) => error,
-            Ok(_) => panic!("integer abs must not enter the HIP fabsf template"),
-        };
-        assert!(err.to_string().contains("unsupported: op `Abs`"));
+        let code = emit_test_dag(&direct, "integer_abs").expect("typed integer abs");
+        assert!(code.0.contains("numeric trap: overflow in abs at i64"));
+        assert!(code.0.contains("chelis_record_numeric_failure"));
+        assert!(!code.0.contains("fabsf("));
 
         let mut fused = Dag::new();
         let fused_decl = fused.declare("test");

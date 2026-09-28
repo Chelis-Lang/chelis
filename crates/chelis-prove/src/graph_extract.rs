@@ -220,6 +220,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
             | WireRiscOp::Mod
+            | WireRiscOp::Bitwise { .. }
             | WireRiscOp::Compare { .. }
             | WireRiscOp::Logical { .. }
             | WireRiscOp::Where {}
@@ -593,10 +594,10 @@ const _: () = {
     // `Expand` size is, so they join the same group.
     // Version 19 (chelis#2413) deletes the counter-stream bridge operation;
     // it adds no operation.
-    // Version 20 adds the discrete Iota source, with no embedded payload.
-    // Version 21 adds List capture carriers and contribution-group counts.
-    // Neither embeds a floating numeric payload; both remain outside the
-    // supported float-envelope transformers.
+    // Version 20 adds the tagged signed-integer Bitwise family, which has no
+    // floating numeric payload. Version 21 adds the discrete Iota source,
+    // List capture carriers and contribution-group counts. None embeds a
+    // floating numeric payload or is a float-envelope transformer.
     assert!(WIRE_DAG_SCHEMA_VERSION == 21);
 };
 

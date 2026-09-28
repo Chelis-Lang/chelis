@@ -124,11 +124,12 @@ that source axis; its scalar callback captures retain their own gradient
 paths while the integer source has zero cotangent.
 
 AD constructs zero leaves by expanding a scalar along the exact primal
-axes. A same-shape operation's input cotangent is an explicit reshape view
-whose extents read that input; the view retains the forward consumer so its
-operand and result checks precede cotangent use. This carries anonymous
-range axes through cotangent accumulation without inventing a dimension
-name or treating a matching element count as shape evidence. A branch-owned
+axes. A same-shape operation's input cotangent needs an explicit reshape view
+when any axis is symbolic; the view reads that input's physical extents and
+retains the forward consumer so its checks precede cotangent use. Fully fixed
+axes already have checked exact extents and need no view. This carries
+anonymous range axes through cotangent accumulation without inventing a
+dimension name or treating a matching element count as shape evidence. A branch-owned
 broadcast masks inactive cotangent rows before its adjoint reduces them,
 while the activation axes are still present.
 

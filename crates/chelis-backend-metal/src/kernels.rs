@@ -126,13 +126,39 @@ pub fn msl_type(prec: Prim) -> &'static str {
     dtype::msl_type(prec)
 }
 
+/// [05-OP-46] integer abs never passes through an MSL float intrinsic.
+/// MIN is tested before negation so even i64 cannot overflow. All failures
+/// have the same trap: the host consumes the status after the command ends.
+pub fn integer_abs_body(precision: Prim) -> String {
+    let minimum = match precision {
+        Prim::Int8 => "(-127 - 1)",
+        Prim::Int16 => "(-32767 - 1)",
+        Prim::Int32 => "(-2147483647 - 1)",
+        Prim::Int64 => "(-9223372036854775807L - 1L)",
+        _ => panic!("integer abs requires a signed integer dtype"),
+    };
+    let ty = dtype::msl_type(precision);
+    format!(
+        "    {ty} value = a[tid];
+    if (value == ({ty}){minimum}) {{
+        atomic_fetch_or_explicit(numeric_status, 1u, memory_order_relaxed);
+        out[tid] = ({ty})0;
+        return;
+    }}
+    out[tid] = value < ({ty})0 ? ({ty})-value : value;"
+    )
+}
+
 /// MSL spelling for a unary math intrinsic.
 ///
 /// Note: MSL's default `exp`/`log`/`sqrt`/`sin` are fast-math variants. M6
 /// will widen the Metal-specific f32 tolerance for transcendental-heavy
 /// kernels, and switch individual call sites to `precise::exp` etc. when
 /// numerical agreement requires it.
-pub fn unary_func(op: &chelis_ir::dag::RiscOp) -> Option<&'static str> {
+pub fn unary_func(op: &chelis_ir::dag::RiscOp, precision: Prim) -> Option<&'static str> {
+    if !precision.is_float() {
+        return None;
+    }
     use chelis_ir::dag::RiscOp;
     match op {
         RiscOp::Neg => Some("-"),

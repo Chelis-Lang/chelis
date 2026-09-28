@@ -1382,9 +1382,6 @@ pub enum EntryLaneDecline {
     /// The selected entry def's signature is not tensor-in/tensor-out
     /// (e.g. a scalar `f32 -> f32` def selected by name).
     NotTensorSignature { entry: String },
-    /// The selected entry uses a `grad`/`vmap` form; the host lane owns
-    /// multi-root grad-tuple emission (issue #309).
-    GradLike { entry: String },
     /// `lower_named_tensor_entry_dag` could not lower the entry body.
     LoweringFailed { entry: String },
     /// The entry lowered, but its DAG had no roots after dead-code
@@ -1416,30 +1413,6 @@ fn strict_entry_decline_error(reason: EntryLaneDecline) -> CompilerError {
              supports top-level bindings.",
             GeneralKind::CompileError,
         ),
-        EntryLaneDecline::GradLike { entry } => {
-            unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Construct(format!(
-                    "a `grad`/`vmap` transform entry (`{entry}`)"
-                )),
-                "the compiled-execution lane (compile_and_load), which emits a single \
-                 entry-scoped tensor kernel and does not yet lower transform entries \
-                 standalone",
-                chelis_types::unsupported::Stage::Codegen("c"),
-                // chelis#1138 owns this capability: the entry-scoped
-                // compiled lane declines grad/vmap transform entries
-                // standalone (the chelis#817/#818 entry-scoping did not
-                // extend to transform entries). Filed and re-pointed from
-                // the provisional chelis#613 citation after the PR #1037
-                // delta red team adjudicated that #613 (the legacy
-                // whole-program build lane, different predicate) does not
-                // govern this decline.
-                chelis_types::unimplemented_rejection!(
-                    1138,
-                    "run the transform through `eval`, or select a non-transform def \
-                     with `entry_name=`"
-                ),
-            ))
-        }
         other => stage_error(
             "compile",
             format!(
@@ -1479,13 +1452,10 @@ enum EntryLaneOutcome<'a> {
 ///     the LEGACY surface declines to whole-program emission);
 ///   - that def is tensor-signature (`NotTensorSignature` otherwise) — a
 ///     scalar/record/ADT entry stays on the host lane;
-///   - the def does NOT use a `grad`/`vmap` form (`GradLike` otherwise) —
-///     the host lane owns multi-root grad-tuple emission (#309), which
-///     `lower_named_tensor_entry_dag` can technically lower but must not
-///     here. NOTE: unlike `grad`, a `vmap` entry does NOT force the host
-///     backend, so its `GradLike` decline reaches the legacy whole-DAG
-///     fallthrough (a loud error on the strict surface, whole-program
-///     emission on the legacy one);
+///   - the checked body lowers to a standalone tensor DAG regardless of
+///     whether it contains `grad` or `vmap`; a tensor-valued projection
+///     of a gradient tuple is one entry result, while a tuple-valued entry
+///     stays on the host lane by its declared signature;
 ///   - the def lowers to a DAG (`LoweringFailed`) that is non-empty after
 ///     DCE (`EmptyAfterDce`);
 ///   - the DAG's `Load` labels are a subset of the def's declared param
@@ -1534,11 +1504,6 @@ fn entry_lane_decision<'a>(
             entry: entry.to_string(),
         }));
     }
-    if chelis_ir::host::named_entry_uses_grad_like(checked, entry) {
-        return Ok(Decline(EntryLaneDecline::GradLike {
-            entry: entry.to_string(),
-        }));
-    }
     let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, entry) else {
         return Ok(Decline(EntryLaneDecline::LoweringFailed {
             entry: entry.to_string(),
@@ -1547,6 +1512,11 @@ fn entry_lane_decision<'a>(
     let dag = chelis_ir::optimize::dead_code_eliminate(&dag);
     if dag.roots().is_empty() {
         return Ok(Decline(EntryLaneDecline::EmptyAfterDce {
+            entry: entry.to_string(),
+        }));
+    }
+    if dag.roots().len() != 1 {
+        return Ok(Decline(EntryLaneDecline::LoweringFailed {
             entry: entry.to_string(),
         }));
     }
@@ -1578,8 +1548,7 @@ fn entry_lane_decision<'a>(
 /// (python's `compile_and_load`). STRICT entry integrity: an unknown
 /// `entry_name`, an ambiguous default on a multi-def program, or an
 /// entry-lane decline that would otherwise fall through to merged
-/// whole-program metadata (top-level value bindings, a `grad`/`vmap`
-/// transform entry) is a loud error here, never a silently merged
+/// whole-program metadata is a loud error here, never a silently merged
 /// manifest (#817) and never a debug assert. The C-source surface with
 /// the legacy whole-program contract is [`compile`].
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
@@ -2061,7 +2030,11 @@ fn execution_artifact_from_compiled_observed(
                 reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
                 reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
                 reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
-                reject_unsized_named_dims(&entry_dag, "c")?;
+                // The C emitter validates each axis's extent source and each
+                // rendered dimension's origin after backend preparation. A
+                // runtime extent is representable when those checks succeed;
+                // rejecting every unsized dimension here also rejects valid
+                // transformed entries with runtime pad/shrink intermediates.
                 let specialized =
                     chelis_ir::specialize::specialize_for_exact_arithmetic(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
@@ -2245,8 +2218,8 @@ fn execution_artifact_from_compiled_observed(
                 // scalar-global shape is the one strict #817 fallback that
                 // remains unsafe here: source-level detection sees the global,
                 // while host lowering has no global product to expose. Real
-                // host globals and GradLike entries retain their established
-                // host-lane artifact with an explicit decline reason.
+                // host globals retain their established host-lane artifact
+                // with an explicit decline reason.
                 if strictness == EntryStrictness::Strict
                     && matches!(entry_lane_decline, Some(EntryLaneDecline::HasGlobals))
                     && scalar_only_globals
@@ -2311,11 +2284,7 @@ fn execution_artifact_from_compiled_observed(
             // On this legacy whole-DAG path a `Some(decline)` co-occurs with
             // a real (whole-program, merged) manifest — see the
             // `entry_lane_decline` field doc. Every decline reason that
-            // leaves the whole-program DAG rooted can get here, including
-            // `GradLike`: a `vmap` entry declines the lane but, unlike
-            // `grad`, does NOT force the host backend, so it reaches this
-            // path (an earlier revision asserted it could not, and a vmap
-            // entry panicked every debug-built caller). On the STRICT
+            // leaves the whole-program DAG rooted can get here. On the STRICT
             // (callable) surface a merged manifest is the #817 defect, so
             // any decline here is a loud error; on the LEGACY (C-source)
             // surface the whole-program emission is the product contract
@@ -6802,6 +6771,7 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::FloorDiv => WireRiscOp::FloorDiv,
         RiscOp::TruncDiv => WireRiscOp::TruncDiv,
         RiscOp::Mod => WireRiscOp::Mod,
+        RiscOp::Bitwise(kind) => WireRiscOp::Bitwise { bitwise: *kind },
         RiscOp::Compare(kind) => WireRiscOp::Compare {
             comparison: match kind {
                 ComparisonKind::CmpLt => WireComparisonKind::CmpLt,

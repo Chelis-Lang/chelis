@@ -90,21 +90,21 @@ fn stage_dep_fixture(scratch: &Path, dep_body: &str, entry_body: &str) -> PathBu
     write(
         &root.join("reef.toml"),
         &format!(
-            "[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"PseudoApp\"\n\n[dependencies]\nazdep = {{ path = \"./azdep\" }}\n"
+            "schema = \"1\"\n\n[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"PseudoApp\"\n\n[dependencies]\nazdep = {{ path = \"./azdep\" }}\n"
         ),
     );
     write(&root.join("src/main.ch"), entry_body);
     write(
         &root.join("azdep/reef.toml"),
         &format!(
-            "[package]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Azdep\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Azdep\"\n"
         ),
     );
     write(&root.join("azdep/src/math.ch"), dep_body);
     write(
         &root.join("reef.lock"),
         &format!(
-            "[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./azdep\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./azdep\"\n"
         ),
     );
     root.join("src/main.ch")
@@ -656,21 +656,21 @@ fn stage_named_dep_fixture(
     write(
         &root.join("reef.toml"),
         &format!(
-            "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{root_prefix}\"\n\n[dependencies]\n{dep_name} = {{ path = \"./{dep_name}\" }}\n"
+            "schema = \"1\"\n\n[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{root_prefix}\"\n\n[dependencies]\n{dep_name} = {{ path = \"./{dep_name}\" }}\n"
         ),
     );
     write(&root.join("src/main.ch"), entry_body);
     write(
         &root.join(format!("{dep_name}/reef.toml")),
         &format!(
-            "[package]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{dep_prefix}\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{dep_prefix}\"\n"
         ),
     );
     write(&root.join(format!("{dep_name}/src/math.ch")), dep_body);
     write(
         &root.join("reef.lock"),
         &format!(
-            "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./{dep_name}\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./{dep_name}\"\n"
         ),
     );
     root.join("src/main.ch")
@@ -797,15 +797,19 @@ fn chelis_std_importing_build_monolithic_vs_cache_warm_c_identical() {
 
     // Settle reef.lock (the first build resolves + writes it, which fixes the
     // chelis-std set folded into the key) so the compared builds are stable.
-    let _ = build_probe(&entry, &cache_home, &[]);
+    let (settled_ok, settled_error, _) = build_probe(&entry, &cache_home, &[]);
+    assert!(
+        settled_ok,
+        "initial lock settlement failed: {settled_error}"
+    );
 
-    let (mono_ok, _mono_err, mono_c) =
+    let (mono_ok, mono_err, mono_c) =
         build_probe(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
-    let (warm_ok, _warm_err, warm_c) = build_probe(&entry, &cache_home, &[]);
+    let (warm_ok, warm_err, warm_c) = build_probe(&entry, &cache_home, &[]);
 
     assert!(
         mono_ok && warm_ok,
-        "a chelis-std-importing package must build in both cache regimes"
+        "a chelis-std-importing package must build in both cache regimes: monolithic={mono_err:?} warm={warm_err:?}"
     );
     // Confirm the stdlib layer engaged (i.e. real chelis-std was linked and the
     // eval-only drop path ran over it, not the no-chelis-std shortcut).

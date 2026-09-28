@@ -266,6 +266,7 @@ pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
         | WireRiscOp::FloorDiv
         | WireRiscOp::TruncDiv
         | WireRiscOp::Mod
+        | WireRiscOp::Bitwise { .. }
         | WireRiscOp::Compare { .. }
         | WireRiscOp::Logical { .. }
         | WireRiscOp::Where {}
@@ -352,6 +353,7 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
             | WireRiscOp::Mod
+            | WireRiscOp::Bitwise { .. }
             | WireRiscOp::Compare { .. }
             | WireRiscOp::Logical { .. }
             | WireRiscOp::Where { .. }

@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Seventy-eight are Rust and eleven are C, C++, or Objective-C sources. A completeness
+Seventy-nine are Rust and eleven are C, C++, or Objective-C sources. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -103,6 +103,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-backend-c/src/host_emit.rs",
     "crates/chelis-backend-c/src/host_emit/entry.rs",
     "crates/chelis-backend-c/src/host_emit/entry_walk.rs",
+    "crates/chelis-backend-c/src/integer_float.rs",
     "crates/chelis-backend-c/src/lib.rs",
     "crates/chelis-backend-c/src/memory.rs",
     "crates/chelis-backend-c/src/toolchain.rs",
@@ -319,6 +320,15 @@ LIST_MAP_BACKEND_FINAL_FORMS = (
         "CEmitter::emit_ordered_adjoint_sum",
     ),
 )
+# [04-NUM-14], [05-OP-46,49]: closed dtype-directed integer finalization
+# and stored-element expansion. The non-hardware legs and explicit device
+# harnesses below bind these exact identities to positive/negative execution.
+INTEGER_UNARY_BACKEND_FINAL_FORMS = (
+    ("crates/chelis-backend-c/src/integer_float.rs", "backend-element-spelling", "integer_to_float_bits"),
+    ("crates/chelis-backend-hip/src/kernels.rs", "backend-element-spelling", "cast_integer_to_float"),
+    ("crates/chelis-backend-metal/src/emit.rs", "backend-element-spelling", "Emitter < 'plan >::emit_expand"),
+    ("crates/chelis-backend-metal/src/emit.rs", "backend-element-spelling", "Emitter < 'plan >::emit_integer_float_cast"),
+)
 UNIFORM_RANDOM_BACKEND_FINAL_FORMS = (
     (
         "crates/chelis-backend-hip/src/kernels.rs",
@@ -484,6 +494,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         (path, kind, owner) in EXACT_REDUCTION_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in LIST_MAP_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in INTEGER_UNARY_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in UNIFORM_RANDOM_BACKEND_FINAL_FORMS
     ) or (
@@ -872,6 +884,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
         *EXACT_REDUCTION_BACKEND_FINAL_FORMS,
         *LIST_MAP_BACKEND_FINAL_FORMS,
+        *INTEGER_UNARY_BACKEND_FINAL_FORMS,
         *UNIFORM_RANDOM_BACKEND_FINAL_FORMS,
         *DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS,
         *UTF8_STRING_FINAL_FORMS,
@@ -2279,6 +2292,15 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_reduction"),
         ),
         OracleLeg(
+            "integer-to-float exact finalization execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--lib", "-E", "test(integer_float::tests::)"),
+        ),
+        OracleLeg(
+            "integer unary device lowering and trap controls",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-hip", "-p", "chelis-backend-metal",
+             "--test", "integer_abs", "--test", "integer_abs_guard"),
+        ),
+        OracleLeg(
             "exact C reduction stored-width and runtime-empty execution",
             (
                 "cargo",
@@ -2623,6 +2645,21 @@ def hardware_probe_manifest() -> tuple[dict[str, str], ...]:
                 "scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness "
                 "direct_ -- --ignored --test-threads=1 "
                 "--skip direct_relu_and_adjoint_preserve_exact_bits_at_every_float_width_on_gpu"
+            ),
+        },
+        {
+            "lane": "hip-integer-unary",
+            "status": "manual-required",
+            "command": (
+                "scripts/hip_test.py -p chelis-backend-hip --test integer_abs "
+                "-- --ignored --test-threads=1"
+            ),
+        },
+        {
+            "lane": "metal-integer-unary",
+            "status": "manual-required",
+            "command": (
+                "cargo test -p chelis-backend-metal --test integer_abs_guard -- --ignored --test-threads=1"
             ),
         },
         {

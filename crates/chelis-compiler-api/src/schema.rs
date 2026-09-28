@@ -2139,10 +2139,12 @@ pub struct WireRecordPatternField {
 ///   version-18 graph may hold that bridge operation, which has no
 ///   version-19 spelling, so it is rejected like every other earlier
 ///   version.
-/// - `20`: `Iota` represents the exact runtime i64 range source ([05-OP-54]).
-///   Its two scalar endpoints and rank-one result are validated before use.
-/// - `21`: List capture invocation carriers and ordered scalar cotangent
-///   groups preserve [05-OP-55] and spec/06 section 2.4 through projection.
+/// - `20`: the five signed integer bitwise identities share one tagged
+///   `Bitwise` operation. A version-19 reader does not know that operation,
+///   so the complete graph is rejected before node decoding.
+/// - `21`: `Iota` represents the exact runtime i64 range source ([05-OP-54]);
+///   List capture invocation carriers and ordered scalar cotangent groups
+///   preserve [05-OP-55] and spec/06 section 2.4 through projection.
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 21;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
@@ -2463,7 +2465,7 @@ impl WireDag {
                         )));
                     }
                 }
-                WireRiscOp::Mod => {
+                WireRiscOp::Mod | WireRiscOp::Bitwise { .. } => {
                     if node.inputs.len() != 2
                         || !Prim::parse_interchange_name(&node.output_type.precision)
                             .is_some_and(|prim| prim.is_integer())
@@ -2487,8 +2489,8 @@ impl WireDag {
                         })
                     {
                         return Err(WireDagContractError::new(format!(
-                            "WireDag Mod node {} requires two earlier inputs with its integer dtype and shape",
-                            node.id
+                            "WireDag {:?} node {} requires two earlier inputs with its integer dtype and shape",
+                            node.op, node.id
                         )));
                     }
                 }
@@ -3424,6 +3426,7 @@ fn wire_axis_origin(
         | WireRiscOp::FloorDiv
         | WireRiscOp::TruncDiv
         | WireRiscOp::Mod
+        | WireRiscOp::Bitwise { .. }
         | WireRiscOp::MaxElem
         | WireRiscOp::MinElem
         | WireRiscOp::ExtremaAdjoint { .. }
@@ -3960,6 +3963,9 @@ pub enum WireRiscOp {
     FloorDiv,
     TruncDiv,
     Mod,
+    Bitwise {
+        bitwise: chelis_types::BitwiseKind,
+    },
     Compare {
         comparison: WireComparisonKind,
     },

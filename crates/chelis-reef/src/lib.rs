@@ -16,6 +16,7 @@ use std::env;
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -28,6 +29,29 @@ use walkdir::WalkDir;
 /// `chelis reef src`.
 pub mod chelis_src;
 pub mod declared_surface;
+mod document_schema;
+/// Typed package identities and deterministic bounded local resolution.
+mod package_metadata;
+#[doc(hidden)]
+pub mod package_versioning;
+mod remote_discovery;
+
+pub use package_metadata::{
+    DeclaredFileSnapshot, METADATA_FILE_MAX_BYTES, METADATA_TOTAL_MAX_BYTES, PackageDescription,
+    PackageMetadata, PackageMetadataError, PackageUrl, PortablePackagePath, SpdxLicense,
+    snapshot_declared_metadata_file,
+};
+pub use remote_discovery::{
+    BudgetDimension, BudgetError, DiscoveryError, DiscoveryMode, OutdatedPackage, OutdatedReport,
+    ResolutionBudget, SourceLocator, UpdateReport, VersionChange,
+    inspect_candidate_manifest_archive, outdated_project, update_project,
+};
+
+pub use document_schema::{
+    DocumentUpgradeError, LockSchemaVersion, ManifestSchemaVersion, UpgradeMode, UpgradeReport,
+    lock_schema_v1_json, manifest_schema_v1_json, manifest_schema_v2_json, manifest_schema_v3_json,
+    upgrade_documents,
+};
 
 const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
 
@@ -79,6 +103,11 @@ pub struct ReefManifest {
     /// manifest without `[chelis-src]` round-trips byte-identically.
     #[serde(default, rename = "chelis-src")]
     pub chelis_src: Option<ChelisSrcSpec>,
+    /// Shell-owned configuration for `chelis reef conform`. Reef validates
+    /// and preserves this table, while `chelis-conformance` owns its semantics.
+    /// Keep the field unconditional in the prepared-graph bincode payload.
+    #[serde(default)]
+    pub conform: Option<ConformSpec>,
     /// Item 11 (chelis#468): first-class binary release artifacts.
     /// Logical artifact name -> per-platform, SHA-pinned release-asset
     /// spec. These are neither reef source packages nor Cargo crates, so
@@ -156,6 +185,10 @@ pub struct ManifestPackage {
     /// full set of validation rules.
     #[serde(default)]
     pub additional_sources: Vec<String>,
+    /// Descriptive schema-3 metadata. It does not participate in package
+    /// identity, dependency matching, or source selection.
+    #[serde(default)]
+    pub metadata: PackageMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,8 +238,19 @@ pub struct ChelisSrcSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformSpec {
+    #[serde(default)]
+    pub local_skills: Vec<String>,
+    /// Embedded shared skills the shell omits during `chelis reef conform sync`.
+    /// Reef only carries the list; `chelis-conformance` owns its meaning.
+    #[serde(default)]
+    pub excluded_skills: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReefLock {
     pub package: PackageId,
+    #[serde(default)]
     pub dependencies: Vec<LockedDependency>,
 }
 
@@ -1911,19 +1955,20 @@ impl PreparedReefGraph {
         let manifest_bytes = fs::read(&manifest_path)
             .map_err(|e| format!("read manifest `{}`: {e}", manifest_path.display()))?;
         if validate_graph_against_snapshot {
-            let snapshot_manifest: ReefManifest =
-                toml::from_str(std::str::from_utf8(&manifest_bytes).map_err(|error| {
-                    format!(
-                        "manifest `{}` is not UTF-8: {error}",
-                        manifest_path.display()
-                    )
-                })?)
-                .map_err(|error| {
-                    format!(
-                        "parse manifest snapshot `{}`: {error}",
-                        manifest_path.display()
-                    )
-                })?;
+            let snapshot_text = std::str::from_utf8(&manifest_bytes).map_err(|error| {
+                format!(
+                    "manifest `{}` is not UTF-8: {error}",
+                    manifest_path.display()
+                )
+            })?;
+            let snapshot_manifest =
+                document_schema::parse_manifest_text(snapshot_text, &manifest_path, false)
+                    .map_err(|error| {
+                        format!(
+                            "parse manifest snapshot `{}`: {error}",
+                            manifest_path.display()
+                        )
+                    })?;
             if snapshot_manifest != package.manifest {
                 return Err(format!(
                     "manifest `{}` changed while its graph was prepared",
@@ -2139,6 +2184,9 @@ impl Default for BuildOptions {
 struct LoadedPackage {
     id: PackageId,
     manifest: ReefManifest,
+    /// The resolver parsed from the document schema boundary.
+    /// The prepared-graph cache preserves it with the raw manifest payload.
+    resolver: package_versioning::ResolverVersion,
     modules: BTreeMap<String, ModuleSource>,
     source: LoadedSourceKind,
     /// Published identities are cache determinants for registry/bundled
@@ -2240,6 +2288,8 @@ pub fn init_package(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     fs::create_dir_all(root.join("src"))?;
+    let _project_lock = document_schema::acquire_project_write_lock(&root)?;
+    document_schema::ensure_project_lock_ignore(&root).map_err(std::io::Error::other)?;
     let manifest = ReefManifest {
         package: ManifestPackage {
             name: name.to_string(),
@@ -2247,12 +2297,14 @@ pub fn init_package(
             compiler: CURRENT_COMPILER_VERSION.to_string(),
             module_prefix: module_prefix.to_string(),
             additional_sources: Vec::new(),
+            metadata: PackageMetadata::default(),
         },
         dependencies: BTreeMap::new(),
         chelis_src: None,
+        conform: None,
         artifacts: BTreeMap::new(),
     };
-    write_manifest(&root.join("reef.toml"), &manifest)?;
+    write_manifest_unlocked(&root.join("reef.toml"), &manifest)?;
     let main_module = format!("{module_prefix}.Main");
     // Canonical Surf form: no blank line between `module` and the first
     // decl, no trailing newline. The scaffold must satisfy
@@ -2331,8 +2383,14 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
         // obsolete lockfile by resolving the manifest and rewriting the lock.
         // Preserve that behavior; the cached/lock fast path owns only a
         // parseable current lock.
-        Err(_) if !lock_path.exists() || read_lockfile(&lock_path).is_err() => {
-            let loaded = resolve_package_graph(&root, LoadOptions::default_for_load())?;
+        Err(_) if !lock_path.exists() => {
+            let (loaded, _) = load_package_graph_with_lock_preference(
+                &root,
+                LoadOptions::default_for_load(),
+                remote_discovery::LockPublication::Project {
+                    project_lock_held: false,
+                },
+            )?;
             write_lockfile(&lock_path, &build_lockfile(&loaded))?;
             prepare_graph_from_loaded(root.clone(), loaded, &BTreeSet::new())?
         }
@@ -2343,8 +2401,10 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
     // check/build path and historically owns lockfile repair, so persist the
     // resolved graph even when the cache supplied it. Otherwise a warm cache
     // makes a successful package build silently omit `reef.lock`.
-    if !lock_path.exists() || read_lockfile(&lock_path).is_err() {
+    if !lock_path.exists() {
         write_lockfile(&lock_path, &build_lockfile(&graph.graph))?;
+    } else {
+        read_lockfile(&lock_path)?;
     }
     let root_package = graph
         .graph
@@ -2545,7 +2605,13 @@ const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
 // branch format clean-misses before positional bincode decoding.
 // v6 (chelis#2616): a package's filesystem root moved into its source kind,
 // and the bundled runtime gained a `Bundled` kind with no location.
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 6;
+// v7 adds schema-aware manifest parsing and changes every current manifest's
+// exact source bytes. The bump keeps pre-schema envelopes outside this boundary.
+// v8 adds typed package identities and lock-preference validation. The bump
+// keeps pre-SemVer graph payloads outside the typed resolver boundary.
+// v9 adds invariant package metadata to every prepared manifest payload.
+// v10 preserves each package's parsed resolver across prepared graph caches.
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 10;
 const PREPARED_GRAPH_CACHE_KEY_DOMAIN: &[u8] = b"chelis-prepared-graph-cache-key-v1\0";
 
 #[derive(Serialize, Deserialize)]
@@ -3110,30 +3176,308 @@ pub fn compile_with_reef_graph(
     ))
 }
 
-/// Resolve a `PackageGraph` for eval: fast-path the lockfile when present,
-/// otherwise run the full resolver under the standard 5-second timeout.
-///
-/// Eval does not write the lockfile — that is the build path's responsibility.
-///
-/// Auto-fetch is on by default for eval too: `chelis check` / `chelis eval`
-/// against an empty registry should not require a manual install round-trip
-/// any more than `chelis reef build` does. The Item 8 `--no-auto-fetch`
-/// surface is exposed only on `chelis reef build` for now; eval-side
-/// callers run with [`LoadOptions::default_for_load`].
-fn load_package_graph_for_eval(root: &Path) -> Result<PackageGraph, String> {
-    let options = LoadOptions::default_for_load();
+fn canonical_manifest_dependencies(
+    root: &Path,
+    manifest: &package_versioning::TypedManifest,
+) -> Result<BTreeMap<package_versioning::PackageName, package_versioning::TypedDependency>, String>
+{
+    let mut dependencies = manifest.dependencies.clone();
+    for (name, dependency) in &mut dependencies {
+        if let package_versioning::TypedDependency::Path { path, .. } = dependency {
+            let canonical = root.join(&*path).canonicalize().map_err(|error| {
+                format!("failed to canonicalize declared path dependency `{name}`: {error}")
+            })?;
+            *path = canonical.to_string_lossy().into_owned();
+        }
+    }
+    Ok(dependencies)
+}
+
+fn canonical_lock_snapshot(
+    root: &Path,
+    lock: &package_versioning::LockSnapshot,
+) -> Result<package_versioning::LockSnapshot, String> {
+    let mut lock = lock.clone();
+    for dependency in &mut lock.dependencies {
+        if let package_versioning::CandidateSource::Path { canonical_path } = &mut dependency.source
+        {
+            let raw_path = canonical_path.clone();
+            *canonical_path = match root.join(&raw_path).canonicalize() {
+                Ok(canonical) => canonical.to_string_lossy().into_owned(),
+                Err(_) => format!("<unavailable-locked-path:{raw_path}>"),
+            };
+        }
+    }
+    Ok(lock)
+}
+
+/// The locked package's manifest and, for a package on disk, its root. The
+/// bundled runtime has no root.
+fn load_locked_manifest_for_assessment(
+    root: &Path,
+    dependency: &LockedDependency,
+    options: LoadOptions,
+) -> Result<Option<(ParsedManifest, Option<PathBuf>)>, String> {
+    let (manifest, package_root, archive_sha256, shell_sha256) = match &dependency.source {
+        LockSource::Binary { .. } => return Ok(None),
+        LockSource::Path { path } => {
+            let package_root = root.join(path).canonicalize().map_err(|error| {
+                format!(
+                    "failed to canonicalize locked path for `{}`: {error}",
+                    dependency.name
+                )
+            })?;
+            let manifest = read_manifest(&package_root.join("reef.toml"))?;
+            (manifest, Some(package_root), None, None)
+        }
+        LockSource::Bundled { .. } => {
+            // The runtime comes from this compiler, never from a registry.
+            if !is_bundled_runtime(&dependency.name, &dependency.version) {
+                return Err(format!(
+                    "bundled package `{}` `{}` is unavailable: this compiler bundles `{CHELIS_STD_PACKAGE_NAME}` `{BUNDLED_CHELIS_STD_VERSION}`",
+                    dependency.name, dependency.version
+                ));
+            }
+            let runtime = bundled_runtime_package()?;
+            let manifest = bundled_runtime_manifest(bundled_runtime_files()?)?;
+            (manifest, None, runtime.archive_sha256, runtime.shell_sha256)
+        }
+        LockSource::LocalRegistry { remote_origin } => {
+            let installed = match load_registry_package(&dependency.name, &dependency.version) {
+                Ok(installed) => installed,
+                Err(LoadRegistryError::Other(message)) => return Err(message),
+                Err(LoadRegistryError::MissingFromIndex | LoadRegistryError::MissingPackageDir) => {
+                    if remote_origin.is_none() {
+                        return Err(
+                            package_versioning::VersioningError::UnavailableLockedOrigin {
+                                package: package_versioning::PackageName::from_str(
+                                    &dependency.name,
+                                )
+                                .map_err(|error| error.to_string())?,
+                                version: package_versioning::PackageVersion::from_str(
+                                    &dependency.version,
+                                )
+                                .map_err(|error| error.to_string())?,
+                                origin: None,
+                            }
+                            .to_string(),
+                        );
+                    }
+                    load_registry_package_or_autofetch(
+                        &dependency.name,
+                        &dependency.version,
+                        options,
+                        Some(dependency),
+                    )?
+                }
+            };
+            let archive = installed.shell.archive_sha256.clone();
+            let shell = shell_package_sha256(&installed.shell)?;
+            let manifest = read_manifest(&installed.root.join("reef.toml"))?;
+            (manifest, Some(installed.root), Some(archive), Some(shell))
+        }
+    };
+    verify_locked_package(
+        dependency,
+        &manifest,
+        archive_sha256.as_deref(),
+        shell_sha256.as_deref(),
+    )?;
+    Ok(Some((manifest, package_root)))
+}
+
+fn assess_transitive_lock(
+    root: &Path,
+    root_manifest: &ParsedManifest,
+    lock: &ReefLock,
+    options: LoadOptions,
+) -> Result<package_versioning::LockAssessment, String> {
+    let mut lock_by_name = BTreeMap::<String, &LockedDependency>::new();
+    for dependency in &lock.dependencies {
+        if matches!(dependency.source, LockSource::Binary { .. }) {
+            continue;
+        }
+        if lock_by_name
+            .insert(dependency.name.clone(), dependency)
+            .is_some()
+        {
+            return Err(package_versioning::VersioningError::InvalidLock {
+                reason: format!("duplicate locked package `{}`", dependency.name),
+            }
+            .to_string());
+        }
+    }
+
+    let mut manifests =
+        BTreeMap::<String, (package_versioning::TypedManifest, Option<PathBuf>)>::new();
+    manifests.insert(
+        root_manifest.typed.package.name.to_string(),
+        (root_manifest.typed.clone(), Some(root.to_path_buf())),
+    );
+    let mut reasons = Vec::new();
+    let mut pending = vec![root_manifest.typed.package.name.to_string()];
+    let mut reachable = BTreeSet::new();
+    if let Some(runtime) = lock_by_name.get(CHELIS_STD_PACKAGE_NAME) {
+        let source_matches = match &runtime.source {
+            LockSource::Bundled { compiler_version } => {
+                compiler_version.trim_start_matches('=') == env!("CARGO_PKG_VERSION")
+            }
+            _ => false,
+        };
+        if runtime.version == BUNDLED_CHELIS_STD_VERSION && source_matches {
+            pending.push(CHELIS_STD_PACKAGE_NAME.to_string());
+        } else {
+            reasons.push(format!(
+                "locked runtime `{}` from {:?} differs from compiler-bundled `{}`",
+                runtime.version, runtime.source, BUNDLED_CHELIS_STD_VERSION
+            ));
+        }
+    }
+
+    while let Some(package_name) = pending.pop() {
+        if !reachable.insert(package_name.clone()) {
+            continue;
+        }
+        if !manifests.contains_key(&package_name) {
+            let Some(locked) = lock_by_name.get(&package_name) else {
+                reasons.push(format!(
+                    "lock lacks manifest for reachable package `{package_name}`"
+                ));
+                continue;
+            };
+            let Some((manifest, package_root)) =
+                load_locked_manifest_for_assessment(root, locked, options)?
+            else {
+                continue;
+            };
+            manifests.insert(package_name.clone(), (manifest.typed, package_root));
+        }
+        let (manifest, package_root) = manifests
+            .get(&package_name)
+            .expect("reachable manifest was inserted")
+            .clone();
+        for (dependency_name, declaration) in &manifest.dependencies {
+            let Some(locked) = lock_by_name.get(dependency_name.as_str()) else {
+                reasons.push(format!(
+                    "lock lacks `{dependency_name}` required by `{package_name}`"
+                ));
+                continue;
+            };
+            let locked_version = package_versioning::PackageVersion::from_str(&locked.version)
+                .map_err(|error| error.to_string())?;
+            if let Some(requirement) = declaration.requirement()
+                && !requirement.matches(&locked_version)
+            {
+                reasons.push(format!(
+                    "locked `{dependency_name}` `{locked_version}` does not satisfy `{}` from `{package_name}`",
+                    requirement.as_text()
+                ));
+                continue;
+            }
+            let source_matches = match (declaration, &locked.source) {
+                (
+                    package_versioning::TypedDependency::Path { path, .. },
+                    LockSource::Path { path: locked_path },
+                ) => {
+                    // A package without a root cannot declare a resolvable path.
+                    let declared = package_root
+                        .as_ref()
+                        .map(|package_root| package_root.join(path).canonicalize());
+                    let locked_path = root.join(locked_path).canonicalize();
+                    matches!((declared, locked_path), (Some(Ok(declared)), Ok(locked)) if declared == locked)
+                }
+                (package_versioning::TypedDependency::Path { .. }, _) => false,
+                (package_versioning::TypedDependency::Registry { .. }, LockSource::Path { .. }) => {
+                    false
+                }
+                _ => true,
+            };
+            if !source_matches {
+                reasons.push(format!(
+                    "locked source or path for `{dependency_name}` differs from `{package_name}` declaration"
+                ));
+                continue;
+            }
+            pending.push(dependency_name.to_string());
+        }
+    }
+
+    for dependency in lock_by_name.keys() {
+        if dependency != CHELIS_STD_PACKAGE_NAME && !reachable.contains(dependency) {
+            reasons.push(format!("lock contains unreachable package `{dependency}`"));
+        }
+    }
+    if reasons.is_empty() {
+        Ok(package_versioning::LockAssessment::Reusable)
+    } else {
+        Ok(package_versioning::LockAssessment::Stale { reasons })
+    }
+}
+
+fn load_package_graph_with_lock_preference(
+    root: &Path,
+    options: LoadOptions,
+    publication: remote_discovery::LockPublication,
+) -> Result<(PackageGraph, bool), String> {
     let lock_path = root.join("reef.lock");
     if lock_path.exists() {
+        let manifest = read_manifest(&root.join("reef.toml"))?;
         let lock = read_lockfile(&lock_path)?;
-        reconstruct_graph_from_lockfile(root, &lock, options)
-    } else {
-        let root_clone = root.to_path_buf();
-        run_with_timeout(
-            move || resolve_package_graph(&root_clone, options),
-            Duration::from_secs(5),
-            TIMEOUT_MSG,
+        let declarations = canonical_manifest_dependencies(root, &manifest.typed)?;
+        let lock_snapshot = canonical_lock_snapshot(root, &lock.typed)?;
+        match package_versioning::assess_lock(
+            &manifest.typed.package,
+            &declarations,
+            &lock_snapshot,
         )
+        .map_err(|error| error.to_string())?
+        {
+            package_versioning::LockAssessment::Reusable => {
+                match assess_transitive_lock(root, &manifest, &lock, options)? {
+                    package_versioning::LockAssessment::Reusable => {
+                        return reconstruct_graph_from_lockfile(root, &lock, options)
+                            .map(|graph| (graph, true));
+                    }
+                    package_versioning::LockAssessment::Stale { reasons } => {
+                        eprintln!(
+                            "chelis reef: transitive lock preference is stale ({}); running bounded local resolution",
+                            reasons.join("; ")
+                        );
+                    }
+                }
+            }
+            package_versioning::LockAssessment::Stale { reasons } => {
+                eprintln!(
+                    "chelis reef: lock preference is stale ({}); running bounded local resolution",
+                    reasons.join("; ")
+                );
+            }
+        }
     }
+    let manifest = read_manifest(&root.join("reef.toml"))?;
+    if manifest.typed.resolver == package_versioning::ResolverVersion::Two {
+        let lock = remote_discovery::resolve_project(root, options.auto_fetch, publication)
+            .map_err(|error| error.to_string())?;
+        return reconstruct_graph_from_lockfile(root, &lock, options).map(|graph| (graph, true));
+    }
+    let root_clone = root.to_path_buf();
+    run_with_timeout(
+        move || resolve_package_graph(&root_clone, options),
+        Duration::from_secs(5),
+        TIMEOUT_MSG,
+    )
+    .map(|graph| (graph, false))
+}
+
+/// Resolve a graph for eval. A valid lock is the preferred exact solution.
+/// Eval never writes `reef.lock` (chelis#1520); a resolution stays in memory.
+fn load_package_graph_for_eval(root: &Path) -> Result<PackageGraph, String> {
+    load_package_graph_with_lock_preference(
+        root,
+        LoadOptions::default_for_load(),
+        remote_discovery::LockPublication::InMemory,
+    )
+    .map(|(graph, _)| graph)
 }
 
 pub fn prepare_program_for_eval_source(
@@ -3191,9 +3535,20 @@ pub fn build_package_with_options(
     options: &BuildOptions,
 ) -> Result<PackageBuildArtifacts, String> {
     let root = canonical_root(root)?;
-    let graph = resolve_package_graph(&root, options.into())?;
-    let lock = build_lockfile(&graph);
-    write_lockfile(&root.join("reef.lock"), &lock)?;
+    let _project_lock =
+        document_schema::acquire_project_write_lock(&root).map_err(|error| error.to_string())?;
+    let (graph, reused_lock) = load_package_graph_with_lock_preference(
+        &root,
+        options.into(),
+        remote_discovery::LockPublication::Project {
+            project_lock_held: true,
+        },
+    )?;
+    document_schema::ensure_project_lock_ignore(&root)?;
+    if !reused_lock {
+        let lock = build_lockfile(&graph);
+        write_lockfile_unlocked(&root.join("reef.lock"), &lock)?;
+    }
 
     let (root_pkg, linked_decls) = link_package_for_build(&graph)?;
     let deep = expanded_desugared_program(&linked_decls)?;
@@ -3284,7 +3639,7 @@ pub fn publish_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
         // identical to a pre-Item-9 publish.
         remote_origin: None,
     });
-    versions.sort_by(|a, b| a.version.cmp(&b.version));
+    canonicalize_local_registry_index(&mut index)?;
     fs::create_dir_all(&registry_root).map_err(|e| e.to_string())?;
     let serialized = serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?;
     // Atomic-rename invariant: every registry-level write under
@@ -3344,6 +3699,12 @@ pub fn verify_artifact_pair(
     })?;
     let shell = read_shell(shell_path)
         .map_err(|error| format!("decode shell {}: {error}", shell_path.display()))?;
+    package_versioning::PackageName::from_str(&shell.package.name)
+        .map_err(|error| format!("invalid shell package identity: {error}"))?;
+    package_versioning::PackageVersion::from_str(&shell.package.version)
+        .map_err(|error| format!("invalid shell package identity: {error}"))?;
+    package_versioning::ExactCompilerVersion::from_str(&shell.compiler)
+        .map_err(|error| format!("invalid shell compiler identity: {error}"))?;
     if shell.archive_sha256 != archive_sha256 {
         return Err(format!(
             "shell {} disagrees with archive {} on archive_sha256: \
@@ -3789,7 +4150,20 @@ pub fn install_validated_artifact_pair(
     // any registry state. The same boundary is exposed read-only through
     // `chelis reef verify-artifact`.
     let verified = verify_artifact_pair(archive_path, shell_path)?;
-    if verified.package.name != name || verified.package.version != version {
+    let requested_name =
+        package_versioning::PackageName::from_str(name).map_err(|error| error.to_string())?;
+    let requested_version =
+        package_versioning::PackageVersion::from_str(version).map_err(|error| error.to_string())?;
+    let verified_name = package_versioning::PackageName::from_str(&verified.package.name)
+        .map_err(|error| error.to_string())?;
+    let verified_version = package_versioning::PackageVersion::from_str(&verified.package.version)
+        .map_err(|error| error.to_string())?;
+    package_versioning::ExactCompilerVersion::from_str(&verified.compiler)
+        .map_err(|error| error.to_string())?;
+    if let Some(origin) = remote_origin {
+        parse_remote_origin(origin).map_err(|error| error.to_string())?;
+    }
+    if verified_name != requested_name || verified_version != requested_version {
         return Err(format!(
             "prebuilt shell {} advertises `{}-{}` but was requested as `{name}-{version}`",
             shell_path.display(),
@@ -3815,41 +4189,108 @@ pub fn install_validated_artifact_pair(
     } else {
         LocalRegistryIndex::default()
     };
+    canonicalize_local_registry_index(&mut index)?;
 
-    let target_dir = registry_root.join("packages").join(name).join(version);
-    fs::create_dir_all(&target_dir).map_err(|e| {
+    let package_parent = registry_root.join("packages").join(requested_name.as_str());
+    fs::create_dir_all(&package_parent).map_err(|e| {
         format!(
-            "failed to create registry package dir {}: {e}",
-            target_dir.display()
+            "failed to create registry package parent {}: {e}",
+            package_parent.display()
         )
     })?;
+    let target_dir = package_parent.join(requested_version.to_string());
     let archive_dst = target_dir.join(format!("{name}-{version}.tar.zst"));
     let shell_dst = target_dir.join(format!("{name}-{version}.chb"));
-    fs::copy(archive_path, &archive_dst).map_err(|e| {
-        format!(
-            "failed to copy archive {} -> {}: {e}",
-            archive_path.display(),
-            archive_dst.display()
-        )
-    })?;
-    fs::copy(shell_path, &shell_dst).map_err(|e| {
-        format!(
-            "failed to copy shell {} -> {}: {e}",
-            shell_path.display(),
-            shell_dst.display()
-        )
-    })?;
+    if target_dir.exists() {
+        let existing = verify_artifact_pair(&archive_dst, &shell_dst).map_err(|error| {
+            format!("existing package `{name}` `{version}` is incomplete or invalid: {error}")
+        })?;
+        if existing.archive_sha256 != archive_sha256
+            || existing.shell_sha256 != shell_sha256
+            || existing.package.name != name
+            || existing.package.version != version
+        {
+            return Err(format!(
+                "source conflict for existing package `{name}` `{version}`: bytes differ"
+            ));
+        }
+    } else {
+        let temporary = tempfile::Builder::new()
+            .prefix(".reef-package-")
+            .tempdir_in(&package_parent)
+            .map_err(|error| {
+                format!(
+                    "failed to create package sibling in {}: {error}",
+                    package_parent.display()
+                )
+            })?;
+        let staged_archive = temporary.path().join(format!("{name}-{version}.tar.zst"));
+        let staged_shell = temporary.path().join(format!("{name}-{version}.chb"));
+        fs::copy(archive_path, &staged_archive).map_err(|e| {
+            format!(
+                "failed to stage archive {} -> {}: {e}",
+                archive_path.display(),
+                staged_archive.display()
+            )
+        })?;
+        fs::copy(shell_path, &staged_shell).map_err(|e| {
+            format!(
+                "failed to stage shell {} -> {}: {e}",
+                shell_path.display(),
+                staged_shell.display()
+            )
+        })?;
+        let temporary_path = temporary.keep();
+        if let Err(error) = fs::rename(&temporary_path, &target_dir) {
+            if target_dir.exists() {
+                let concurrent = verify_artifact_pair(&archive_dst, &shell_dst).map_err(|verify| {
+                    let _ = fs::remove_dir_all(&temporary_path);
+                    format!(
+                        "concurrent package publication for `{name}` `{version}` is invalid: {verify}"
+                    )
+                })?;
+                let identical = concurrent.archive_sha256 == archive_sha256
+                    && concurrent.shell_sha256 == shell_sha256
+                    && concurrent.package.name == name
+                    && concurrent.package.version == version;
+                let _ = fs::remove_dir_all(&temporary_path);
+                if !identical {
+                    return Err(format!(
+                        "source conflict for concurrently published package `{name}` `{version}`"
+                    ));
+                }
+            } else {
+                let _ = fs::remove_dir_all(&temporary_path);
+                return Err(format!(
+                    "failed to publish package sibling {} -> {}: {error}",
+                    temporary_path.display(),
+                    target_dir.display()
+                ));
+            }
+        }
+        document_schema::sync_parent(&package_parent)?;
+    }
 
     let versions = index.packages.entry(name.to_string()).or_default();
-    versions.retain(|entry| entry.version != version);
-    versions.push(RegistryVersion {
-        version: version.to_string(),
-        compiler: verified.compiler,
-        archive_sha256: archive_sha256.clone(),
-        shell_sha256: shell_sha256.clone(),
-        remote_origin: remote_origin.map(str::to_string),
-    });
-    versions.sort_by(|a, b| a.version.cmp(&b.version));
+    if let Some(existing) = versions.iter().find(|entry| entry.version == version) {
+        if existing.compiler != verified.compiler
+            || existing.archive_sha256 != archive_sha256
+            || existing.shell_sha256 != shell_sha256
+        {
+            return Err(format!(
+                "source conflict for registry index package `{name}` `{version}`"
+            ));
+        }
+    } else {
+        versions.push(RegistryVersion {
+            version: version.to_string(),
+            compiler: verified.compiler,
+            archive_sha256: archive_sha256.clone(),
+            shell_sha256: shell_sha256.clone(),
+            remote_origin: remote_origin.map(str::to_string),
+        });
+    }
+    canonicalize_local_registry_index(&mut index)?;
 
     let serialized = serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?;
     atomic_write(&index_path, serialized.as_bytes())?;
@@ -3920,7 +4361,11 @@ pub fn install_from_monorepo(
                 continue;
             }
             let manifest = read_manifest(&manifest_path)?;
-            out.push((manifest.package.name, manifest.package.version, pkg_root));
+            out.push((
+                manifest.typed.package.name.to_string(),
+                manifest.typed.package.version.to_string(),
+                pkg_root,
+            ));
         }
         if out.is_empty() {
             return Err(format!(
@@ -4068,6 +4513,19 @@ impl GitHubReleaseSpec {
                 reason: "empty <org> component".to_string(),
             });
         }
+        let org_bytes = org.as_bytes();
+        if org_bytes.len() > 39
+            || !org_bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+            || !org_bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+            || !org_bytes
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        {
+            return Err(GitHubFetchError::Parse {
+                input: input.to_string(),
+                reason: "invalid GitHub organization component".to_string(),
+            });
+        }
         if repo.is_empty() {
             return Err(GitHubFetchError::Parse {
                 input: input.to_string(),
@@ -4080,18 +4538,31 @@ impl GitHubReleaseSpec {
                 reason: "empty <tag> component".to_string(),
             });
         }
-        let version = tag.strip_prefix('v').unwrap_or(tag).to_string();
-        if version.is_empty() {
+        let parsed_repo = package_versioning::PackageName::from_str(repo).map_err(|error| {
+            GitHubFetchError::Parse {
+                input: input.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        let raw_version = tag.strip_prefix('v').unwrap_or(tag);
+        if raw_version.is_empty() {
             return Err(GitHubFetchError::Parse {
                 input: input.to_string(),
                 reason: "tag is just `v` with no version".to_string(),
             });
         }
+        let version =
+            package_versioning::PackageVersion::from_str(raw_version).map_err(|error| {
+                GitHubFetchError::Parse {
+                    input: input.to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
         Ok(Self {
             org: org.to_string(),
-            repo: repo.to_string(),
+            repo: parsed_repo.to_string(),
             tag: tag.to_string(),
-            version,
+            version: version.to_string(),
         })
     }
 
@@ -4607,14 +5078,7 @@ pub fn install_binary_artifact(
     let token = resolve_github_token()?;
     let api_base = github_api_base_url();
 
-    // Reuse GitHubReleaseSpec only for its URL builders; the version
-    // field mirrors install_from_github's leading-`v` stripping.
-    let spec = GitHubReleaseSpec {
-        org: org.to_string(),
-        repo: repo.to_string(),
-        tag: tag.to_string(),
-        version: tag.strip_prefix('v').unwrap_or(tag).to_string(),
-    };
+    let spec = GitHubReleaseSpec::parse(&format!("{org}/{repo}@{tag}"))?;
 
     let tmp = tempfile::tempdir().map_err(|e| GitHubFetchError::Io {
         message: format!("create tempdir: {e}"),
@@ -5112,9 +5576,15 @@ pub fn install_from_lockfile(
         path: lockfile_path.clone(),
         message: format!("failed to read: {e}"),
     })?;
-    let lock: ReefLock = toml::from_str(&text).map_err(|e| LockfileInstallError::Malformed {
+    let lock = document_schema::parse_lock_text(&text, &lockfile_path, true).map_err(|error| {
+        LockfileInstallError::Malformed {
+            path: lockfile_path.clone(),
+            message: error.to_string(),
+        }
+    })?;
+    typed_lock_snapshot(&lock).map_err(|message| LockfileInstallError::Malformed {
         path: lockfile_path.clone(),
-        message: e.to_string(),
+        message,
     })?;
 
     fs::create_dir_all(registry_root).map_err(|e| LockfileInstallError::Malformed {
@@ -5409,10 +5879,12 @@ fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ReefManifest, Bootstr
             message: "archive does not contain `reef.toml` at the root".to_string(),
         });
     }
-    read_manifest(&manifest_path).map_err(|message| BootstrapError::ManifestRead {
-        spec: format!("{}/{}@{}", spec.org, spec.repo, spec.tag),
-        message,
-    })
+    read_manifest(&manifest_path)
+        .map(ParsedManifest::into_raw)
+        .map_err(|message| BootstrapError::ManifestRead {
+            spec: format!("{}/{}@{}", spec.org, spec.repo, spec.tag),
+            message,
+        })
 }
 
 /// One node in the bootstrap dependency graph: `(name, version,
@@ -5573,6 +6045,18 @@ pub fn install_bootstrap(
 ) -> Result<Vec<InstalledArtifact>, BootstrapError> {
     if specs.is_empty() {
         return Err(BootstrapError::NothingToInstall);
+    }
+    for spec in specs {
+        let canonical =
+            GitHubReleaseSpec::parse(&format!("{}/{}@{}", spec.org, spec.repo, spec.tag))?;
+        if &canonical != spec {
+            return Err(BootstrapError::Validation {
+                message: format!(
+                    "release specification fields disagree with canonical `{}/{}@{}` parsing",
+                    spec.org, spec.repo, spec.tag
+                ),
+            });
+        }
     }
 
     // Reject explicit `chelis-std` entries up front: the runtime is
@@ -6001,9 +6485,17 @@ pub struct ConstructorSchema {
 pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
     let root = canonical_root(root)?;
     let manifest = read_manifest(&root.join("reef.toml"))?;
-    let graph = resolve_package_graph(&root, LoadOptions::default_for_load())?;
-    let lock = build_lockfile(&graph);
-    write_lockfile(&root.join("reef.lock"), &lock)?;
+    let (graph, reused_lock) = load_package_graph_with_lock_preference(
+        &root,
+        LoadOptions::default_for_load(),
+        remote_discovery::LockPublication::Project {
+            project_lock_held: false,
+        },
+    )?;
+    if !reused_lock {
+        let lock = build_lockfile(&graph);
+        write_lockfile(&root.join("reef.lock"), &lock)?;
+    }
 
     let (root_pkg, linked_decls) = link_package_for_build(&graph)?;
     let deep = expanded_desugared_program(&linked_decls)?;
@@ -6204,18 +6696,42 @@ pub fn artifact_install_path(name: &str) -> Result<PathBuf, String> {
     Ok(artifact_bin_dir()?.join(name))
 }
 
-fn read_manifest(path: &Path) -> Result<ReefManifest, String> {
-    let text =
-        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    parse_manifest(&text, &path.display().to_string())
+#[derive(Debug, Clone)]
+struct ParsedManifest {
+    raw: ReefManifest,
+    typed: package_versioning::TypedManifest,
 }
 
-/// Parse and validate manifest text; `label` names its origin in errors.
-fn parse_manifest(text: &str, label: &str) -> Result<ReefManifest, String> {
-    let manifest = toml::from_str::<ReefManifest>(text)
-        .map_err(|e| format!("failed to parse {label}: {e}"))?;
-    validate_manifest(&manifest)?;
-    Ok(manifest)
+impl std::ops::Deref for ParsedManifest {
+    type Target = ReefManifest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
+
+impl ParsedManifest {
+    fn into_raw(self) -> ReefManifest {
+        self.raw
+    }
+}
+
+fn parse_manifest_contents(path: &Path, text: &str) -> Result<ParsedManifest, String> {
+    let schema =
+        document_schema::manifest_schema_version(text, path).map_err(|error| error.to_string())?;
+    let manifest = document_schema::parse_manifest_text(text, path, true)
+        .map_err(|error| error.to_string())?;
+    let typed = validate_manifest_schema_with(&manifest, schema, allow_dep_compiler_drift())?;
+    Ok(ParsedManifest {
+        raw: manifest,
+        typed,
+    })
+}
+
+fn read_manifest(path: &Path) -> Result<ParsedManifest, String> {
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    parse_manifest_contents(path, &text)
 }
 
 /// Read a shell's `<root>/reef.toml` for the cross-version `reef src`
@@ -6229,26 +6745,125 @@ pub fn read_manifest_for_src(root: &Path) -> Result<ReefManifest, String> {
     let path = root.join("reef.toml");
     let text =
         fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    toml::from_str::<ReefManifest>(&text)
-        .map_err(|e| format!("failed to parse {}: {e}", path.display()))
+    let schema = document_schema::manifest_schema_version(&text, &path)
+        .map_err(|error| error.to_string())?;
+    let manifest = document_schema::parse_manifest_text(&text, &path, true)
+        .map_err(|error| error.to_string())?;
+    validate_manifest_schema_with(&manifest, schema, true)?;
+    Ok(manifest)
 }
 
-fn write_manifest(path: &Path, manifest: &ReefManifest) -> Result<(), Box<dyn std::error::Error>> {
-    let text = toml::to_string_pretty(manifest)?;
-    fs::write(path, format!("{text}\n"))?;
+fn write_manifest_unlocked(
+    path: &Path,
+    manifest: &ReefManifest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = document_schema::serialize_manifest_v3(manifest)?;
+    let text = std::str::from_utf8(&bytes)?;
+    document_schema::parse_manifest_text(text, path, false)?;
+    document_schema::atomic_replace(path, &bytes)?;
     Ok(())
 }
 
 fn write_lockfile(path: &Path, lock: &ReefLock) -> Result<(), String> {
-    let text = toml::to_string_pretty(lock).map_err(|e| e.to_string())?;
-    fs::write(path, format!("{text}\n")).map_err(|e| e.to_string())
+    let root = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    let _project_lock =
+        document_schema::acquire_project_write_lock(root).map_err(|error| error.to_string())?;
+    document_schema::ensure_project_lock_ignore(root)?;
+    write_lockfile_unlocked(path, lock)
 }
 
-fn read_lockfile(path: &Path) -> Result<ReefLock, String> {
+fn write_lockfile_unlocked(path: &Path, lock: &ReefLock) -> Result<(), String> {
+    let bytes = document_schema::serialize_lock_v1(lock)?;
+    let text = std::str::from_utf8(&bytes).map_err(|error| error.to_string())?;
+    document_schema::parse_lock_text(text, path, false).map_err(|error| error.to_string())?;
+    document_schema::atomic_replace(path, &bytes)
+}
+
+#[derive(Debug, Clone)]
+struct ParsedLock {
+    raw: ReefLock,
+    typed: package_versioning::LockSnapshot,
+}
+
+impl std::ops::Deref for ParsedLock {
+    type Target = ReefLock;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
+
+fn typed_lock_snapshot(lock: &ReefLock) -> Result<package_versioning::LockSnapshot, String> {
+    let root = package_versioning::ResolvedPackageId::new(
+        package_versioning::PackageName::from_str(&lock.package.name)
+            .map_err(|error| error.to_string())?,
+        package_versioning::PackageVersion::from_str(&lock.package.version)
+            .map_err(|error| error.to_string())?,
+    );
+    let mut dependencies = Vec::new();
+    for dependency in &lock.dependencies {
+        package_versioning::PackageVersion::from_str(&dependency.version)
+            .map_err(|error| error.to_string())?;
+        package_versioning::ExactCompilerVersion::from_str(&dependency.compiler)
+            .map_err(|error| error.to_string())?;
+        if let LockSource::Binary { remote_origin, .. } = &dependency.source {
+            parse_remote_origin(remote_origin).map_err(|error| error.to_string())?;
+            continue;
+        }
+        let name = package_versioning::PackageName::from_str(&dependency.name)
+            .map_err(|error| error.to_string())?;
+        let version = package_versioning::PackageVersion::from_str(&dependency.version)
+            .map_err(|error| error.to_string())?;
+        let source = match &dependency.source {
+            LockSource::Path { path } => package_versioning::CandidateSource::Path {
+                canonical_path: path.clone(),
+            },
+            LockSource::LocalRegistry { remote_origin } => {
+                if let Some(origin) = remote_origin {
+                    parse_remote_origin(origin).map_err(|error| error.to_string())?;
+                }
+                package_versioning::CandidateSource::LocalRegistry {
+                    source_identity: remote_origin
+                        .clone()
+                        .unwrap_or_else(|| format!("registry://{name}/{version}")),
+                }
+            }
+            LockSource::Bundled { compiler_version } => {
+                let normalized = match compiler_version.strip_prefix('=') {
+                    Some(rest) if rest.starts_with('=') => {
+                        return Err(format!(
+                            "invalid bundled compiler version `{compiler_version}`"
+                        ));
+                    }
+                    Some(_) => compiler_version.clone(),
+                    None => format!("={compiler_version}"),
+                };
+                let compiler_version =
+                    package_versioning::ExactCompilerVersion::from_str(&normalized)
+                        .map_err(|error| error.to_string())?;
+                package_versioning::CandidateSource::BundledRuntime { compiler_version }
+            }
+            LockSource::Binary { .. } => unreachable!("binary entries were skipped"),
+        };
+        dependencies.push(package_versioning::LockDependency {
+            id: package_versioning::ResolvedPackageId::new(name, version),
+            source,
+            archive_sha256: dependency.archive_sha256.clone(),
+            shell_sha256: dependency.shell_sha256.clone(),
+        });
+    }
+    Ok(package_versioning::LockSnapshot { root, dependencies })
+}
+
+fn read_lockfile(path: &Path) -> Result<ParsedLock, String> {
     let text =
         fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    toml::from_str::<ReefLock>(&text)
-        .map_err(|e| format!("failed to parse {}: {e}", path.display()))
+    let raw =
+        document_schema::parse_lock_text(&text, path, true).map_err(|error| error.to_string())?;
+    let typed = typed_lock_snapshot(&raw)?;
+    Ok(ParsedLock { raw, typed })
 }
 
 /// Run `f` on a background thread.  Return `Err(timeout_msg)` if it does not
@@ -6281,6 +6896,56 @@ const TIMEOUT_MSG: &str = "reef dependency resolution timed out \u{2014} run `ch
 /// **outside** the timeout-bound thread because the network round trip
 /// can legitimately exceed 5 s — the timeout exists to bound a wedged
 /// local registry, not the auto-fetch itself.
+fn verify_locked_package(
+    dependency: &LockedDependency,
+    manifest: &ParsedManifest,
+    archive_sha256: Option<&str>,
+    shell_sha256: Option<&str>,
+) -> Result<(), String> {
+    if manifest.typed.package.name.as_str() != dependency.name
+        || manifest.typed.package.version.to_string() != dependency.version
+    {
+        return Err(package_versioning::VersioningError::InvalidLock {
+            reason: format!(
+                "locked `{}` `{}` loaded manifest `{}`",
+                dependency.name, dependency.version, manifest.typed.package
+            ),
+        }
+        .to_string());
+    }
+    verify_locked_hashes(dependency, archive_sha256, shell_sha256)
+}
+
+pub(crate) fn verify_locked_hashes(
+    dependency: &LockedDependency,
+    archive_sha256: Option<&str>,
+    shell_sha256: Option<&str>,
+) -> Result<(), String> {
+    for (kind, expected, actual) in [
+        (
+            "archive",
+            dependency.archive_sha256.as_str(),
+            archive_sha256,
+        ),
+        ("shell", dependency.shell_sha256.as_str(), shell_sha256),
+    ] {
+        if let Some(actual) = actual
+            && expected != actual
+        {
+            return Err(
+                package_versioning::VersioningError::InvalidLock {
+                    reason: format!(
+                        "locked {kind} hash mismatch for `{}` `{}`: expected `{expected}`, found `{actual}`",
+                        dependency.name, dependency.version
+                    ),
+                }
+                .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn reconstruct_graph_from_lockfile(
     root: &Path,
     lock: &ReefLock,
@@ -6296,7 +6961,8 @@ fn reconstruct_graph_from_lockfile(
         root_name.clone(),
         LoadedPackage {
             id: lock.package.clone(),
-            manifest: root_manifest,
+            manifest: root_manifest.raw.clone(),
+            resolver: root_manifest.typed.resolver,
             modules: root_modules,
             source: LoadedSourceKind::Root {
                 root: root.to_path_buf(),
@@ -6367,6 +7033,12 @@ fn reconstruct_graph_from_lockfile(
                 let archive_sha256 = installed.shell.archive_sha256.clone();
                 let shell_sha256 = shell_package_sha256(&installed.shell)?;
                 let dep_manifest = read_manifest(&installed.root.join("reef.toml"))?;
+                verify_locked_package(
+                    dep,
+                    &dep_manifest,
+                    Some(&archive_sha256),
+                    Some(&shell_sha256),
+                )?;
                 let dep_modules = load_package_modules(&installed.root, &dep_manifest)?;
                 packages.insert(
                     dep.name.clone(),
@@ -6375,7 +7047,8 @@ fn reconstruct_graph_from_lockfile(
                             name: dep.name.clone(),
                             version: dep.version.clone(),
                         },
-                        manifest: dep_manifest,
+                        manifest: dep_manifest.raw.clone(),
+                        resolver: dep_manifest.typed.resolver,
                         modules: dep_modules,
                         source: LoadedSourceKind::LocalRegistry {
                             root: installed.root,
@@ -6398,6 +7071,7 @@ fn reconstruct_graph_from_lockfile(
                     format!("failed to resolve path dependency `{}`: {e}", dep.name)
                 })?;
                 let dep_manifest = read_manifest(&dep_root.join("reef.toml"))?;
+                verify_locked_package(dep, &dep_manifest, None, None)?;
                 let dep_modules = load_package_modules(&dep_root, &dep_manifest)?;
                 packages.insert(
                     dep.name.clone(),
@@ -6406,7 +7080,8 @@ fn reconstruct_graph_from_lockfile(
                             name: dep.name.clone(),
                             version: dep.version.clone(),
                         },
-                        manifest: dep_manifest,
+                        manifest: dep_manifest.raw.clone(),
+                        resolver: dep_manifest.typed.resolver,
                         modules: dep_modules,
                         source: LoadedSourceKind::Path {
                             relative: path.clone(),
@@ -6449,6 +7124,20 @@ fn reconstruct_graph_from_lockfile(
                 let installed = match timeout_result {
                     Ok(installed) => installed,
                     Err(s) if s == MISSING_REGISTRY_SENTINEL => {
+                        if remote_origin.is_none() {
+                            return Err(
+                                package_versioning::VersioningError::UnavailableLockedOrigin {
+                                    package: package_versioning::PackageName::from_str(&dep_name)
+                                        .map_err(|error| error.to_string())?,
+                                    version: package_versioning::PackageVersion::from_str(
+                                        &dep_version,
+                                    )
+                                    .map_err(|error| error.to_string())?,
+                                    origin: None,
+                                }
+                                .to_string(),
+                            );
+                        }
                         // Auto-fetch has its own internal lock + retry
                         // logic and can take longer than the 5-second
                         // local-registry budget.
@@ -6472,6 +7161,12 @@ fn reconstruct_graph_from_lockfile(
                     .or_else(|| installed.remote_origin.clone());
                 let archive_sha256 = installed.shell.archive_sha256.clone();
                 let shell_sha256 = shell_package_sha256(&installed.shell)?;
+                verify_locked_package(
+                    dep,
+                    &dep_manifest,
+                    Some(&archive_sha256),
+                    Some(&shell_sha256),
+                )?;
                 packages.insert(
                     dep.name.clone(),
                     LoadedPackage {
@@ -6479,7 +7174,8 @@ fn reconstruct_graph_from_lockfile(
                             name: dep.name.clone(),
                             version: dep.version.clone(),
                         },
-                        manifest: dep_manifest,
+                        manifest: dep_manifest.raw.clone(),
+                        resolver: dep_manifest.typed.resolver,
                         modules: dep_modules,
                         source: LoadedSourceKind::LocalRegistry {
                             root: installed.root,
@@ -6594,20 +7290,62 @@ fn compiler_pin_outcome(
     }
 }
 
-fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
+#[cfg(test)]
+fn validate_manifest(manifest: &ReefManifest) -> Result<package_versioning::TypedManifest, String> {
     validate_manifest_with(manifest, allow_dep_compiler_drift())
 }
 
 fn validate_manifest_with(
     manifest: &ReefManifest,
     allow_compiler_drift: bool,
-) -> Result<(), String> {
-    if manifest.package.name.trim().is_empty() {
-        return Err("package.name must not be empty".to_string());
+) -> Result<package_versioning::TypedManifest, String> {
+    validate_manifest_schema_with(
+        manifest,
+        ManifestSchemaVersion::from_str("1").expect("schema 1 is valid"),
+        allow_compiler_drift,
+    )
+}
+
+pub(crate) fn validate_manifest_schema_with(
+    manifest: &ReefManifest,
+    schema: ManifestSchemaVersion,
+    allow_compiler_drift: bool,
+) -> Result<package_versioning::TypedManifest, String> {
+    if schema.get() < 3 && manifest.package.metadata != PackageMetadata::default() {
+        return Err(format!(
+            "manifest schema {} does not support package metadata; upgrade to schema 3",
+            schema.get()
+        ));
     }
-    if manifest.package.version.trim().is_empty() {
-        return Err("package.version must not be empty".to_string());
+    let dependencies = || {
+        manifest.dependencies.iter().map(|(name, dependency)| {
+            (
+                name.clone(),
+                dependency.version.clone(),
+                dependency.path.clone(),
+            )
+        })
+    };
+    let typed = match schema.get() {
+        0 | 1 => package_versioning::TypedManifest::schema_one(
+            &manifest.package.name,
+            &manifest.package.version,
+            &manifest.package.compiler,
+            dependencies(),
+        ),
+        2 | 3 => package_versioning::TypedManifest::schema_two(
+            &manifest.package.name,
+            &manifest.package.version,
+            &manifest.package.compiler,
+            dependencies(),
+        ),
+        value => {
+            return Err(format!(
+                "no manifest validator is registered for schema {value}"
+            ));
+        }
     }
+    .map_err(|error| error.to_string())?;
     if manifest.package.module_prefix.trim().is_empty() {
         return Err("package.module_prefix must not be empty".to_string());
     }
@@ -6649,11 +7387,6 @@ fn validate_manifest_with(
     }
     for (name, dep) in &manifest.dependencies {
         match (&dep.version, &dep.path) {
-            (Some(_), Some(_)) => {
-                return Err(format!(
-                    "dependency `{name}` cannot specify both `version` and `path`"
-                ));
-            }
             (_, Some(_)) if name == CHELIS_STD_PACKAGE_NAME => {
                 return Err(
                     "`chelis-std` is the language runtime bundled with the compiler; it cannot be supplied as a path dependency"
@@ -6705,7 +7438,7 @@ fn validate_manifest_with(
     for (name, artifact) in &manifest.artifacts {
         validate_artifact(name, artifact)?;
     }
-    Ok(())
+    Ok(typed)
 }
 
 /// Validate one `[artifacts.<name>]` entry (Item 11). Rules:
@@ -6729,7 +7462,11 @@ fn validate_artifact(name: &str, artifact: &ArtifactSpec) -> Result<(), String> 
         return Err(format!("artifact `{name}`: repo must not be empty"));
     }
     match artifact.repo.split_once('/') {
-        Some((org, repo)) if !org.is_empty() && !repo.is_empty() => {}
+        Some((org, repo)) if !org.is_empty() && !repo.is_empty() => {
+            package_versioning::PackageName::from_str(repo).map_err(|error| {
+                format!("artifact `{name}`: invalid release repository name: {error}")
+            })?;
+        }
         _ => {
             return Err(format!(
                 "artifact `{name}`: repo `{}` must be in <org>/<repo> form",
@@ -6740,6 +7477,9 @@ fn validate_artifact(name: &str, artifact: &ArtifactSpec) -> Result<(), String> 
     if artifact.tag.trim().is_empty() {
         return Err(format!("artifact `{name}`: tag must not be empty"));
     }
+    let artifact_version = artifact.tag.strip_prefix('v').unwrap_or(&artifact.tag);
+    package_versioning::PackageVersion::from_str(artifact_version)
+        .map_err(|error| format!("artifact `{name}`: invalid release tag: {error}"))?;
     if artifact.platforms.is_empty() {
         return Err(format!(
             "artifact `{name}`: at least one platform is required (`linux-x86_64` is the minimum)"
@@ -6796,14 +7536,232 @@ fn is_safe_artifact_name(name: &str) -> bool {
         .any(|c| c == '/' || c == '\\' || c == '\0' || c.is_control())
 }
 
+fn resolver_requirement(
+    graph: &PackageGraph,
+    dependency_name: &package_versioning::PackageName,
+    dependency: &package_versioning::TypedDependency,
+) -> Result<package_versioning::PackageRequirement, String> {
+    if let Some(requirement) = dependency.requirement() {
+        return Ok(requirement.as_package_requirement());
+    }
+    let resolved = graph
+        .packages
+        .get(dependency_name.as_str())
+        .ok_or_else(|| format!("resolved graph lacks path dependency `{dependency_name}`"))?;
+    let version = package_versioning::PackageVersion::from_str(&resolved.id.version)
+        .map_err(|error| error.to_string())?;
+    Ok(package_versioning::PackageRequirement::exact(&version))
+}
+
+fn prune_unreachable_packages(graph: &mut PackageGraph) {
+    let mut pending = vec![graph.root_package.clone()];
+    let mut reachable = BTreeSet::new();
+    if graph.packages.contains_key(CHELIS_STD_PACKAGE_NAME) {
+        pending.push(CHELIS_STD_PACKAGE_NAME.to_string());
+    }
+    while let Some(package_name) = pending.pop() {
+        if !reachable.insert(package_name.clone()) {
+            continue;
+        }
+        if let Some(package) = graph.packages.get(&package_name) {
+            pending.extend(package.manifest.dependencies.keys().cloned());
+        }
+    }
+    graph
+        .packages
+        .retain(|package_name, _| reachable.contains(package_name));
+}
+
+fn typed_manifest_for_loaded(
+    package: &LoadedPackage,
+) -> Result<package_versioning::TypedManifest, String> {
+    let dependencies = package
+        .manifest
+        .dependencies
+        .iter()
+        .map(|(name, dependency)| {
+            (
+                name.clone(),
+                dependency.version.clone(),
+                dependency.path.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let parsed = match package.resolver {
+        package_versioning::ResolverVersion::One => package_versioning::TypedManifest::schema_one(
+            &package.manifest.package.name,
+            &package.manifest.package.version,
+            &package.manifest.package.compiler,
+            dependencies,
+        ),
+        package_versioning::ResolverVersion::Two => package_versioning::TypedManifest::schema_two(
+            &package.manifest.package.name,
+            &package.manifest.package.version,
+            &package.manifest.package.compiler,
+            dependencies,
+        ),
+    };
+    parsed.map_err(|error| error.to_string())
+}
+
+fn validate_resolved_graph_with_local_resolver(graph: &PackageGraph) -> Result<(), String> {
+    let root = graph
+        .packages
+        .get(&graph.root_package)
+        .ok_or_else(|| "root package missing from resolved graph".to_string())?;
+    let root_typed = typed_manifest_for_loaded(root)?;
+    let mut requested = root_typed
+        .dependencies
+        .iter()
+        .map(|(name, dependency)| {
+            Ok(package_versioning::RequestedPackage::new(
+                root_typed.package.name.clone(),
+                name.clone(),
+                resolver_requirement(graph, name, dependency)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if root_typed.package.name.as_str() != CHELIS_STD_PACKAGE_NAME
+        && graph.packages.contains_key(CHELIS_STD_PACKAGE_NAME)
+        && !root_typed
+            .dependencies
+            .contains_key(CHELIS_STD_PACKAGE_NAME)
+    {
+        requested.push(package_versioning::RequestedPackage::new(
+            root_typed.package.name.clone(),
+            package_versioning::PackageName::from_str(CHELIS_STD_PACKAGE_NAME)
+                .expect("canonical runtime package name"),
+            package_versioning::PackageRequirement::exact(
+                &package_versioning::PackageVersion::from_str(BUNDLED_CHELIS_STD_VERSION)
+                    .expect("bundled runtime package version"),
+            ),
+        ));
+    }
+
+    let mut candidates = BTreeMap::new();
+    for (raw_name, package) in &graph.packages {
+        if raw_name == &graph.root_package {
+            continue;
+        }
+        let typed = typed_manifest_for_loaded(package)?;
+        let source = if raw_name == CHELIS_STD_PACKAGE_NAME {
+            package_versioning::CandidateSource::BundledRuntime {
+                compiler_version: typed.compiler.clone(),
+            }
+        } else {
+            match &package.source {
+                LoadedSourceKind::Path { root, .. } => package_versioning::CandidateSource::Path {
+                    canonical_path: root.to_string_lossy().into_owned(),
+                },
+                LoadedSourceKind::LocalRegistry { .. } => {
+                    package_versioning::CandidateSource::LocalRegistry {
+                        source_identity: package.remote_origin.clone().unwrap_or_else(|| {
+                            format!(
+                                "registry://{}/{}",
+                                typed.package.name, typed.package.version
+                            )
+                        }),
+                    }
+                }
+                LoadedSourceKind::Root { .. } => continue,
+                LoadedSourceKind::Bundled => {
+                    return Err(format!(
+                        "only `{CHELIS_STD_PACKAGE_NAME}` can come from the compiler bundle, not `{raw_name}`"
+                    ));
+                }
+            }
+        };
+        let dependencies = typed
+            .dependencies
+            .iter()
+            .map(|(name, dependency)| {
+                Ok(package_versioning::RequestedPackage::new(
+                    typed.package.name.clone(),
+                    name.clone(),
+                    resolver_requirement(graph, name, dependency)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        candidates
+            .entry(typed.package.name.clone())
+            .or_insert_with(Vec::new)
+            .push(package_versioning::LocalCandidate {
+                id: typed.package,
+                source,
+                content_identity: format!(
+                    "{}#{}#{}",
+                    package.source.filesystem_root().map_or_else(
+                        || BUNDLED_RUNTIME_LABEL.to_string(),
+                        |root| { root.display().to_string() }
+                    ),
+                    package.archive_sha256.as_deref().unwrap_or("editable"),
+                    package.shell_sha256.as_deref().unwrap_or("editable")
+                ),
+                dependencies,
+            });
+    }
+    let resolution = package_versioning::resolve_local(
+        &requested,
+        &candidates,
+        package_versioning::ResolverLimits::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    let expected_count = graph.packages.len().saturating_sub(1);
+    if resolution.selected.len() != expected_count {
+        return Err(format!(
+            "bounded local resolver selected {} packages, but materialization produced {expected_count}",
+            resolution.selected.len()
+        ));
+    }
+    for (raw_name, package) in &graph.packages {
+        if raw_name == &graph.root_package {
+            continue;
+        }
+        let name = package_versioning::PackageName::from_str(raw_name)
+            .map_err(|error| error.to_string())?;
+        let version = package_versioning::PackageVersion::from_str(&package.id.version)
+            .map_err(|error| error.to_string())?;
+        let selected = resolution.selected.get(&name).ok_or_else(|| {
+            format!("bounded local resolver omitted materialized package `{name}`")
+        })?;
+        if selected.id.version != version {
+            return Err(format!(
+                "bounded local resolver selected `{}` for `{name}`, but materialization produced `{version}`",
+                selected.id.version
+            ));
+        }
+        match (&selected.source, &package.source) {
+            (
+                package_versioning::CandidateSource::Path { canonical_path },
+                LoadedSourceKind::Path { root, .. },
+            ) if canonical_path == &root.to_string_lossy() => {}
+            (
+                package_versioning::CandidateSource::LocalRegistry { .. },
+                LoadedSourceKind::LocalRegistry { .. },
+            ) if raw_name != CHELIS_STD_PACKAGE_NAME => {}
+            (
+                package_versioning::CandidateSource::BundledRuntime { .. },
+                LoadedSourceKind::Bundled,
+            ) if raw_name == CHELIS_STD_PACKAGE_NAME => {}
+            _ => {
+                return Err(format!(
+                    "bounded local resolver source for `{name}` disagrees with materialization"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGraph, String> {
     let mut packages = BTreeMap::new();
     let mut by_name = UnordMap::<String, PackageId>::new();
     let mut stack = Vec::new();
+    let mut resolver_states = 0_u64;
     let root_manifest = read_manifest(&root.join("reef.toml"))?;
     let root_id = PackageId {
-        name: root_manifest.package.name.clone(),
-        version: root_manifest.package.version.clone(),
+        name: root_manifest.typed.package.name.to_string(),
+        version: root_manifest.typed.package.version.to_string(),
     };
     resolve_package_recursive(
         &root_id.name,
@@ -6815,13 +7773,17 @@ fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGra
         &mut packages,
         &mut by_name,
         &mut stack,
+        &mut resolver_states,
         options,
     )?;
     insert_implicit_runtime(&mut packages)?;
-    Ok(PackageGraph {
+    let mut graph = PackageGraph {
         root_package: root_id.name,
         packages,
-    })
+    };
+    prune_unreachable_packages(&mut graph);
+    validate_resolved_graph_with_local_resolver(&graph)?;
+    Ok(graph)
 }
 
 // 8 arguments — the prior surface was already 7 and Item 9 adds
@@ -6838,14 +7800,85 @@ fn resolve_package_recursive(
     packages: &mut BTreeMap<String, LoadedPackage>,
     by_name: &mut UnordMap<String, PackageId>,
     stack: &mut Vec<String>,
+    resolver_states: &mut u64,
     options: LoadOptions,
 ) -> Result<(), String> {
+    let attempted_depth = stack.len() as u64 + 1;
+    if attempted_depth > package_versioning::MAX_DEPENDENCY_DEPTH {
+        return Err(package_versioning::VersioningError::LimitExceeded {
+            dimension: "dependency depth",
+            package: Some(
+                package_versioning::PackageName::from_str(package_name)
+                    .map_err(|error| error.to_string())?,
+            ),
+            limit: package_versioning::MAX_DEPENDENCY_DEPTH,
+            attempted: attempted_depth,
+        }
+        .to_string());
+    }
+    *resolver_states = resolver_states.checked_add(1).ok_or_else(|| {
+        package_versioning::VersioningError::LimitExceeded {
+            dimension: "explored resolver states",
+            package: None,
+            limit: package_versioning::MAX_RESOLVER_STATES,
+            attempted: u64::MAX,
+        }
+        .to_string()
+    })?;
+    if *resolver_states > package_versioning::MAX_RESOLVER_STATES {
+        return Err(package_versioning::VersioningError::LimitExceeded {
+            dimension: "explored resolver states",
+            package: None,
+            limit: package_versioning::MAX_RESOLVER_STATES,
+            attempted: *resolver_states,
+        }
+        .to_string());
+    }
     if stack.iter().any(|name| name == package_name) {
         stack.push(package_name.to_string());
         return Err(format!("dependency cycle detected: {}", stack.join(" -> ")));
     }
-    if packages.contains_key(package_name) {
-        return Ok(());
+    if let Some(existing) = packages.get(package_name) {
+        match (&existing.source, &source) {
+            (
+                LoadedSourceKind::Path {
+                    root: existing_root,
+                    ..
+                },
+                LoadedSourceKind::Path { root, .. },
+            ) if existing_root != root => {
+                return Err(package_versioning::VersioningError::PathSourceConflict {
+                    package: package_versioning::PackageName::from_str(package_name)
+                        .map_err(|error| error.to_string())?,
+                    paths: vec![
+                        existing_root.to_string_lossy().into_owned(),
+                        root.to_string_lossy().into_owned(),
+                    ],
+                }
+                .to_string());
+            }
+            (LoadedSourceKind::Path { .. }, _) => return Ok(()),
+            (_, LoadedSourceKind::Path { .. }) => {
+                packages.remove(package_name);
+                by_name.remove(package_name);
+            }
+            _ => return Ok(()),
+        }
+    }
+    let attempted_packages = by_name.len() as u64 + 1;
+    if !by_name.contains_key(package_name)
+        && attempted_packages > package_versioning::MAX_RESOLVED_PACKAGE_NAMES
+    {
+        return Err(package_versioning::VersioningError::LimitExceeded {
+            dimension: "resolved package names",
+            package: Some(
+                package_versioning::PackageName::from_str(package_name)
+                    .map_err(|error| error.to_string())?,
+            ),
+            limit: package_versioning::MAX_RESOLVED_PACKAGE_NAMES,
+            attempted: attempted_packages,
+        }
+        .to_string());
     }
 
     // The bundled runtime is inserted by the caller, never resolved from a
@@ -6856,16 +7889,16 @@ fn resolve_package_recursive(
         .to_path_buf();
     stack.push(package_name.to_string());
     let manifest = read_manifest(&root.join("reef.toml"))?;
-    if manifest.package.name != package_name {
+    if manifest.typed.package.name.as_str() != package_name {
         return Err(format!(
             "manifest at {} names package `{}`, expected `{package_name}`",
             root.display(),
-            manifest.package.name
+            manifest.typed.package.name
         ));
     }
     let id = PackageId {
-        name: manifest.package.name.clone(),
-        version: manifest.package.version.clone(),
+        name: manifest.typed.package.name.to_string(),
+        version: manifest.typed.package.version.to_string(),
     };
     if let Some(existing) = by_name.get(package_name)
         && existing.version != id.version
@@ -6880,7 +7913,8 @@ fn resolve_package_recursive(
     let modules = load_package_modules(&root, &manifest)?;
     let package = LoadedPackage {
         id,
-        manifest: manifest.clone(),
+        manifest: manifest.raw.clone(),
+        resolver: manifest.typed.resolver,
         modules,
         source: source.clone(),
         archive_sha256: maybe_shell
@@ -6891,24 +7925,22 @@ fn resolve_package_recursive(
         remote_origin: remote_origin.clone(),
     };
 
-    for (dep_name, dep) in &manifest.dependencies {
-        match (&dep.version, &dep.path) {
-            (_, Some(path)) => {
-                if dep_name == CHELIS_STD_PACKAGE_NAME {
+    for (dep_name, dependency) in &manifest.typed.dependencies {
+        match dependency {
+            package_versioning::TypedDependency::Path { path, requirement } => {
+                if dep_name.as_str() == CHELIS_STD_PACKAGE_NAME {
                     return Err(
                         "`chelis-std` is the language runtime bundled with the compiler; it cannot be supplied as a path dependency"
                             .to_string(),
                     );
                 }
-                let dep_root = root.join(path);
-                let dep_root = dep_root
-                    .canonicalize()
-                    .map_err(|e| format!("failed to resolve path dependency `{dep_name}`: {e}"))?;
-                let relative = path.to_string();
+                let dep_root = root.join(path).canonicalize().map_err(|error| {
+                    format!("failed to resolve path dependency `{dep_name}`: {error}")
+                })?;
                 resolve_package_recursive(
-                    dep_name,
+                    dep_name.as_str(),
                     LoadedSourceKind::Path {
-                        relative,
+                        relative: path.clone(),
                         root: dep_root,
                     },
                     None,
@@ -6916,21 +7948,36 @@ fn resolve_package_recursive(
                     packages,
                     by_name,
                     stack,
+                    resolver_states,
                     options,
                 )?;
+                if let Some(requirement) = requirement {
+                    let actual = by_name.get(dep_name.as_str()).ok_or_else(|| {
+                        format!("resolved path dependency `{dep_name}` is missing from the graph")
+                    })?;
+                    let actual_version =
+                        package_versioning::PackageVersion::from_str(&actual.version)
+                            .map_err(|error| error.to_string())?;
+                    if !requirement.matches(&actual_version) {
+                        return Err(package_versioning::VersioningError::PathPackageMismatch {
+                            dependency: dep_name.clone(),
+                            actual: package_versioning::ResolvedPackageId::new(
+                                dep_name.clone(),
+                                actual_version,
+                            ),
+                            requirement: Some(requirement.as_text()),
+                        }
+                        .to_string());
+                    }
+                }
             }
-            (Some(version), None) => {
-                // chelis-std is the language runtime, not a shell.
-                // Soft-verify the declared version against the
-                // compiler's bundled runtime. On mismatch, refuse
-                // before we even try to load — the user has either an
-                // out-of-date `reef.toml` declaration or an
-                // out-of-date compiler. Auto-fetch from GitHub is
-                // explicitly NOT attempted: chelis-std is not
-                // distributed via GitHub releases.
-                if dep_name == CHELIS_STD_PACKAGE_NAME {
+            package_versioning::TypedDependency::Registry { requirement } => {
+                let version = requirement.as_text();
+                if dep_name.as_str() == CHELIS_STD_PACKAGE_NAME {
                     let bundled = compiler_bundled_chelis_std_version();
-                    if version != bundled {
+                    let bundled_version = package_versioning::PackageVersion::from_str(bundled)
+                        .map_err(|error| error.to_string())?;
+                    if !requirement.matches(&bundled_version) {
                         return Err(format!(
                             "package depends on `chelis-std` `{version}`, but this compiler \
                              bundles chelis-std `{bundled}`. \
@@ -6946,18 +7993,11 @@ fn resolve_package_recursive(
                     insert_implicit_runtime(packages)?;
                     continue;
                 }
-                // Item 8 insertion point: missing-from-registry deps
-                // route through the auto-fetch decision before bailing.
-                // No lockfile context here (we're walking manifests);
-                // pass `None` so the source URL falls back to the
-                // canonical-org default for the named package.
                 let installed =
-                    load_registry_package_or_autofetch(dep_name, version, options, None)?;
-                // Item 9 plumbing: pull the registry-recorded
-                // `remote_origin` so `build_lockfile` can persist it.
+                    load_registry_package_or_autofetch(dep_name.as_str(), &version, options, None)?;
                 let dep_origin = installed.remote_origin.clone();
                 resolve_package_recursive(
-                    dep_name,
+                    dep_name.as_str(),
                     LoadedSourceKind::LocalRegistry {
                         root: installed.root,
                     },
@@ -6966,10 +8006,29 @@ fn resolve_package_recursive(
                     packages,
                     by_name,
                     stack,
+                    resolver_states,
                     options,
                 )?;
+                let actual = by_name.get(dep_name.as_str()).ok_or_else(|| {
+                    format!("resolved registry dependency `{dep_name}` is missing from the graph")
+                })?;
+                let actual_version = package_versioning::PackageVersion::from_str(&actual.version)
+                    .map_err(|error| error.to_string())?;
+                if !requirement.matches(&actual_version) {
+                    return Err(
+                        package_versioning::VersioningError::IncompatibleRequirements {
+                            package: dep_name.clone(),
+                            requirements: vec![package_versioning::RequestedPackage::new(
+                                manifest.typed.package.name.clone(),
+                                dep_name.clone(),
+                                requirement.as_package_requirement(),
+                            )],
+                            candidates: vec![actual_version],
+                        }
+                        .to_string(),
+                    );
+                }
             }
-            _ => unreachable!("validated earlier"),
         }
     }
 
@@ -7010,6 +8069,7 @@ fn bundled_runtime_files() -> Result<&'static BTreeMap<PathBuf, Vec<u8>>, String
 /// The bundled runtime's package sources, parsed once per process.
 struct BundledRuntime {
     manifest: ReefManifest,
+    resolver: package_versioning::ResolverVersion,
     modules: BTreeMap<String, ModuleSource>,
     shell: ShellPackage,
     shell_sha256: String,
@@ -7020,7 +8080,9 @@ static BUNDLED_RUNTIME: std::sync::OnceLock<Result<BundledRuntime, String>> =
 
 fn load_bundled_runtime() -> Result<BundledRuntime, String> {
     let files = bundled_runtime_files()?;
-    let manifest = bundled_runtime_manifest(files)?;
+    let parsed = bundled_runtime_manifest(files)?;
+    let resolver = parsed.typed.resolver;
+    let manifest = parsed.into_raw();
     if manifest.package.name != CHELIS_STD_PACKAGE_NAME
         || manifest.package.version != BUNDLED_CHELIS_STD_VERSION
     {
@@ -7052,19 +8114,23 @@ fn load_bundled_runtime() -> Result<BundledRuntime, String> {
     let shell_sha256 = shell_package_sha256(&shell)?;
     Ok(BundledRuntime {
         manifest,
+        resolver,
         modules,
         shell,
         shell_sha256,
     })
 }
 
-fn bundled_runtime_manifest(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<ReefManifest, String> {
+fn bundled_runtime_manifest(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<ParsedManifest, String> {
     let bytes = files
         .get(Path::new("reef.toml"))
         .ok_or_else(|| format!("{BUNDLED_RUNTIME_LABEL} has no reef.toml"))?;
     let text = std::str::from_utf8(bytes)
         .map_err(|error| format!("{BUNDLED_RUNTIME_LABEL}/reef.toml is not UTF-8: {error}"))?;
-    parse_manifest(text, &format!("{BUNDLED_RUNTIME_LABEL}/reef.toml"))
+    parse_manifest_contents(
+        Path::new(&format!("{BUNDLED_RUNTIME_LABEL}/reef.toml")),
+        text,
+    )
 }
 
 /// The path of a bundled `.ch` file relative to `declared_root`, or `None`
@@ -7094,6 +8160,7 @@ fn bundled_runtime_package() -> Result<LoadedPackage, String> {
             version: runtime.manifest.package.version.clone(),
         },
         manifest: runtime.manifest.clone(),
+        resolver: runtime.resolver,
         modules: runtime.modules.clone(),
         source: LoadedSourceKind::Bundled,
         archive_sha256: Some(runtime.shell.archive_sha256.clone()),
@@ -7217,6 +8284,12 @@ fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, 
         )));
     }
     let shell = read_shell(&shell_path).map_err(|e| LoadRegistryError::Other(e.to_string()))?;
+    package_versioning::PackageName::from_str(&shell.package.name)
+        .map_err(|error| LoadRegistryError::Other(error.to_string()))?;
+    package_versioning::PackageVersion::from_str(&shell.package.version)
+        .map_err(|error| LoadRegistryError::Other(error.to_string()))?;
+    package_versioning::ExactCompilerVersion::from_str(&shell.compiler)
+        .map_err(|error| LoadRegistryError::Other(error.to_string()))?;
     if archive_sha256 != shell.archive_sha256 {
         return Err(LoadRegistryError::Other(format!(
             "archive checksum mismatch for `{name}` version `{version}`"
@@ -7530,15 +8603,67 @@ impl From<&BuildOptions> for LoadOptions {
     }
 }
 
+/// Parse and canonicalize all identities in a local registry index.
+pub fn canonicalize_local_registry_index(index: &mut LocalRegistryIndex) -> Result<(), String> {
+    for (raw_name, versions) in &mut index.packages {
+        let package_name = package_versioning::PackageName::from_str(raw_name)
+            .map_err(|error| format!("corrupt registry index package key: {error}"))?;
+        if versions.len() as u64 > package_versioning::MAX_CANDIDATES_PER_PACKAGE {
+            return Err(package_versioning::VersioningError::LimitExceeded {
+                dimension: "candidates per package name",
+                package: Some(package_name),
+                limit: package_versioning::MAX_CANDIDATES_PER_PACKAGE,
+                attempted: versions.len() as u64,
+            }
+            .to_string());
+        }
+        for entry in versions.iter() {
+            package_versioning::PackageVersion::from_str(&entry.version)
+                .map_err(|error| format!("corrupt registry index version: {error}"))?;
+            package_versioning::ExactCompilerVersion::from_str(&entry.compiler)
+                .map_err(|error| format!("corrupt registry index compiler: {error}"))?;
+            if let Some(origin) = &entry.remote_origin {
+                parse_remote_origin(origin)
+                    .map_err(|error| format!("corrupt registry index origin: {error}"))?;
+            }
+        }
+        package_versioning::sort_registry_versions(versions)
+            .map_err(|error| format!("corrupt registry index: {error}"))?;
+        let mut deduplicated: Vec<RegistryVersion> = Vec::with_capacity(versions.len());
+        for entry in versions.drain(..) {
+            if let Some(previous) = deduplicated.last()
+                && previous.version == entry.version
+            {
+                if previous != &entry {
+                    return Err(package_versioning::VersioningError::SourceConflict {
+                        package: package_versioning::PackageName::from_str(raw_name)
+                            .expect("validated package name"),
+                        version: package_versioning::PackageVersion::from_str(&entry.version)
+                            .expect("validated package version"),
+                        sources: vec![format!("index:{previous:?}"), format!("index:{entry:?}")],
+                    }
+                    .to_string());
+                }
+                continue;
+            }
+            deduplicated.push(entry);
+        }
+        *versions = deduplicated;
+    }
+    Ok(())
+}
+
 fn read_registry_index(registry_root: &Path) -> Result<LocalRegistryIndex, String> {
     let index_path = registry_root.join("index.json");
     if !index_path.exists() {
         return Ok(LocalRegistryIndex::default());
     }
-    serde_json::from_str::<LocalRegistryIndex>(
+    let mut index = serde_json::from_str::<LocalRegistryIndex>(
         &fs::read_to_string(&index_path).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    canonicalize_local_registry_index(&mut index)?;
+    Ok(index)
 }
 
 fn build_lockfile(graph: &PackageGraph) -> ReefLock {
@@ -8066,28 +9191,49 @@ fn module_name_for_input(
     ))
 }
 
+enum ArchiveMember {
+    Source(PathBuf),
+    Snapshot(Vec<u8>),
+}
+
 fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
-    // Re-read the manifest to know which additional source roots to pack.
-    // (This function is called from `build_package` after the graph has
-    // already been resolved; reading once more here is cheap and keeps
-    // the archive packing self-contained.)
-    let manifest = read_manifest(&root.join("reef.toml"))?;
+    build_archive_with_snapshot_hook(root, out_path, || {})
+}
+
+fn build_archive_with_snapshot_hook<F>(
+    root: &Path,
+    out_path: &Path,
+    after_snapshots: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    // Capture the manifest bytes once. The parsed declarations and archived
+    // manifest must describe the same immutable byte snapshot.
+    let manifest_path = root.join("reef.toml");
+    let manifest_bytes = fs::read(&manifest_path)
+        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+    let manifest_text = std::str::from_utf8(&manifest_bytes)
+        .map_err(|error| format!("{} is not UTF-8: {error}", manifest_path.display()))?;
+    let manifest = parse_manifest_contents(&manifest_path, manifest_text)?;
     let archive_mtime = canonical_archive_mtime()?;
-    let mut members = BTreeMap::<String, PathBuf>::new();
-    let metadata_files: &[&str] = if manifest.package.name == CHELIS_STD_PACKAGE_NAME {
-        // chelis-std is the bundled runtime and therefore has a
-        // self-referential lock entry. Including reef.lock in its own
-        // archive makes the archive hash depend on the previous bundle
-        // hash and prevents the committed lock from reaching a fixed
-        // point. Downstream shells still pack reef.lock normally.
-        &["reef.toml"]
-    } else {
-        &["reef.toml", "reef.lock"]
-    };
-    for rel in metadata_files {
-        let path = root.join(rel);
-        if path.exists() {
-            members.insert((*rel).to_string(), path);
+    let mut members = BTreeMap::<String, ArchiveMember>::new();
+    members.insert(
+        "reef.toml".to_string(),
+        ArchiveMember::Snapshot(manifest_bytes),
+    );
+    if manifest.package.name != CHELIS_STD_PACKAGE_NAME {
+        // chelis-std has a self-referential lock entry. Excluding its lock
+        // lets the committed bundle hash reach a fixed point.
+        let lock_path = root.join("reef.lock");
+        match fs::read(&lock_path) {
+            Ok(bytes) => {
+                members.insert("reef.lock".to_string(), ArchiveMember::Snapshot(bytes));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("failed to read {}: {error}", lock_path.display()));
+            }
         }
     }
     // Pack src/ plus every declared additional source root. Tar paths
@@ -8118,16 +9264,42 @@ fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
             }
             let rel = entry.path().strip_prefix(root).map_err(|e| e.to_string())?;
             let archive_path = portable_archive_path(rel)?;
-            members.insert(archive_path, entry.path().to_path_buf());
+            members.insert(
+                archive_path,
+                ArchiveMember::Source(entry.path().to_path_buf()),
+            );
         }
     }
+
+    let declared_paths = [
+        manifest.package.metadata.readme(),
+        manifest.package.metadata.license_file(),
+    ]
+    .into_iter()
+    .flatten()
+    .cloned()
+    .collect::<BTreeSet<_>>();
+    for path in declared_paths {
+        let snapshot = snapshot_declared_metadata_file(root, &path)
+            .map_err(|error| format!("package metadata snapshot failed: {error}"))?;
+        let (path, bytes) = snapshot.into_parts();
+        for existing in members.keys() {
+            package_metadata::ensure_archive_spellings_do_not_collide(existing, path.as_str())
+                .map_err(|error| error.to_string())?;
+        }
+        members.insert(path.to_string(), ArchiveMember::Snapshot(bytes));
+    }
+    after_snapshots();
 
     let mut tar_bytes = Vec::new();
     {
         let mut builder = Builder::new(&mut tar_bytes);
-        for (archive_path, source_path) in members {
-            let contents = fs::read(&source_path)
-                .map_err(|e| format!("failed to read {}: {e}", source_path.display()))?;
+        for (archive_path, member) in members {
+            let contents = match member {
+                ArchiveMember::Source(source_path) => fs::read(&source_path)
+                    .map_err(|e| format!("failed to read {}: {e}", source_path.display()))?,
+                ArchiveMember::Snapshot(contents) => contents,
+            };
             let mut header = Header::new_gnu();
             header.set_size(contents.len() as u64);
             header.set_mode(0o644);
@@ -8142,7 +9314,7 @@ fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
     }
     let compressed =
         zstd::stream::encode_all(Cursor::new(tar_bytes), 19).map_err(|e| e.to_string())?;
-    fs::write(out_path, compressed).map_err(|e| e.to_string())
+    document_schema::atomic_replace(out_path, &compressed)
 }
 
 const DEFAULT_ARCHIVE_MTIME: u64 = 0;
@@ -8402,6 +9574,25 @@ mod shell_type_variable_canonicalization_tests {
     use chelis_types::types::{
         Dim, DimVar, RankVar, Scheme, TensorPrec, Type, TypeVar, TypeVarRestriction,
     };
+
+    #[test]
+    fn key_operation_relations_are_part_of_published_scheme_identity() {
+        let (env, _) = chelis_types::builtin_env();
+        let mut previous = None;
+        for name in ["key_from_seed", "split_key", "split_keys", "fold_in"] {
+            let scheme = env.lookup(name).expect("registered key builtin");
+            let canonical = canonical_shell_scheme(scheme).expect("key relation canonicalizes");
+            assert_eq!(canonical.collection_obligations.len(), 1);
+            assert_eq!(canonical.collection_obligations[0].builtin(), name);
+            if let Some(previous) = previous {
+                assert_ne!(
+                    previous, canonical,
+                    "different key relations cannot share identity"
+                );
+            }
+            previous = Some(canonical);
+        }
+    }
 
     fn representative_type(t_first: u32, t_second: u32, dim: u32, rank: u32) -> Type {
         Type::Fn(
@@ -8892,6 +10083,34 @@ fn render_collection_obligation(
             .to_string()
     };
     match constraint {
+        CollectionConstraint::KeyFromSeed { operand, result } => {
+            CollectionObligation::KeyFromSeed {
+                operand: render(operand),
+                result: render(result),
+            }
+        }
+        CollectionConstraint::SplitKey { operand, result } => CollectionObligation::SplitKey {
+            operand: render(operand),
+            result: render(result),
+        },
+        CollectionConstraint::SplitKeys {
+            operand,
+            count,
+            result,
+        } => CollectionObligation::SplitKeys {
+            operand: render(operand),
+            count: render(count),
+            result: render(result),
+        },
+        CollectionConstraint::FoldIn {
+            operand,
+            index,
+            result,
+        } => CollectionObligation::FoldIn {
+            operand: render(operand),
+            index: render(index),
+            result: render(result),
+        },
         CollectionConstraint::Len { operand, result } => CollectionObligation::Len {
             operand: render(operand),
             result: render(result),
@@ -10477,6 +11696,47 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn archive_serialization_uses_captured_metadata_and_manifest() {
+        use std::io::Read;
+
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(
+            root.join("reef.toml"),
+            format!(
+                "schema = \"3\"\n[package]\nname = \"snapshot-probe\"\nversion = \"0.1.0\"\n\
+                 compiler = \"={}\"\nmodule_prefix = \"Snapshot\"\nresolver = \"2\"\nreadme = \"src/NOTICE.md\"\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("src/main.ch"), b"module Snapshot.Main\n").unwrap();
+        fs::write(root.join("src/NOTICE.md"), b"captured bytes").unwrap();
+        let archive_path = root.join("snapshot.tar.zst");
+        let manifest_before = fs::read(root.join("reef.toml")).unwrap();
+
+        build_archive_with_snapshot_hook(root, &archive_path, || {
+            fs::write(root.join("src/NOTICE.md"), b"replacement bytes").unwrap();
+            fs::write(root.join("reef.toml"), b"attacker manifest bytes").unwrap();
+        })
+        .unwrap();
+
+        let compressed = fs::read(archive_path).unwrap();
+        let decoded = zstd::stream::decode_all(Cursor::new(compressed)).unwrap();
+        let mut members = BTreeMap::new();
+        for entry in tar::Archive::new(Cursor::new(decoded)).entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            members.insert(path, bytes);
+        }
+        assert_eq!(members[Path::new("src/NOTICE.md")], b"captured bytes");
+        assert_eq!(members[Path::new("reef.toml")], manifest_before);
+    }
+
+    #[test]
     fn reserved_linker_name_predicate_matches_only_full_mangled_names() {
         // RFC v6: the entry-boundary reserved-name reject must match
         // exactly the names that could self-key via `reef_module_stem`.
@@ -10863,14 +12123,18 @@ mod tests {
                 ),
                 BundleHashDrift::ArchiveDrift => panic!(
                     "{} archive_sha256 is stale vs the embedded bundle; \
-                     regenerate the lock with `chelis reef build` (or \
-                     scripts/bump_compiler_pins.py step 5). chelis#585",
+                     refresh the lock with `chelis reef update --offline` (a \
+                     schema-1 package: remove `reef.lock`, then run `chelis reef \
+                     build`), or scripts/bump_compiler_pins.py step 5 for a \
+                     compiler bump. chelis#585",
                     lock_path.display()
                 ),
                 BundleHashDrift::ShellDrift => panic!(
                     "{} shell_sha256 is stale vs the embedded bundle; \
-                     regenerate the lock with `chelis reef build` (or \
-                     scripts/bump_compiler_pins.py step 5). chelis#585",
+                     refresh the lock with `chelis reef update --offline` (a \
+                     schema-1 package: remove `reef.lock`, then run `chelis reef \
+                     build`), or scripts/bump_compiler_pins.py step 5 for a \
+                     compiler bump. chelis#585",
                     lock_path.display()
                 ),
                 BundleHashDrift::NoBundledDep => {
@@ -11101,6 +12365,7 @@ kind = "local_registry"
                 compiler: CURRENT_COMPILER_VERSION.to_string(),
                 module_prefix: "Demo".to_string(),
                 additional_sources: Vec::new(),
+                metadata: PackageMetadata::default(),
             },
             dependencies: BTreeMap::from([(
                 "chelis-std".to_string(),
@@ -11110,6 +12375,7 @@ kind = "local_registry"
                 },
             )]),
             chelis_src: None,
+            conform: None,
             artifacts: BTreeMap::new(),
         };
         let text = toml::to_string_pretty(&manifest).expect("serialize");
@@ -11200,26 +12466,31 @@ platforms.darwin-arm64 = {{ asset = "octant-translator-darwin-arm64.tar.gz", sha
                 .collect(),
         };
         // (artifact name, spec, expected error substring)
+        let valid_tag = "v1.0.0";
         let cases: Vec<(&str, ArtifactSpec, &str)> = vec![
             (
                 "",
                 make(
                     "a/b",
-                    "v1",
+                    valid_tag,
                     vec![("linux-x86_64", platform("a", &good_sha))],
                 ),
                 "name must be a bare binary name",
             ),
             (
                 "x",
-                make("", "v1", vec![("linux-x86_64", platform("a", &good_sha))]),
+                make(
+                    "",
+                    valid_tag,
+                    vec![("linux-x86_64", platform("a", &good_sha))],
+                ),
                 "repo must not be empty",
             ),
             (
                 "x",
                 make(
                     "no-slash",
-                    "v1",
+                    valid_tag,
                     vec![("linux-x86_64", platform("a", &good_sha))],
                 ),
                 "<org>/<repo> form",
@@ -11229,17 +12500,21 @@ platforms.darwin-arm64 = {{ asset = "octant-translator-darwin-arm64.tar.gz", sha
                 make("a/b", "", vec![("linux-x86_64", platform("a", &good_sha))]),
                 "tag must not be empty",
             ),
-            ("x", make("a/b", "v1", vec![]), "at least one platform"),
+            ("x", make("a/b", valid_tag, vec![]), "at least one platform"),
             (
                 "x",
-                make("a/b", "v1", vec![("linux-x86_64", platform("", &good_sha))]),
+                make(
+                    "a/b",
+                    valid_tag,
+                    vec![("linux-x86_64", platform("", &good_sha))],
+                ),
                 "asset must not be empty",
             ),
             (
                 "x",
                 make(
                     "a/b",
-                    "v1",
+                    valid_tag,
                     vec![("linux-x86_64", platform("a", "deadbeef"))],
                 ),
                 "64-character lowercase hex",
@@ -11248,7 +12523,7 @@ platforms.darwin-arm64 = {{ asset = "octant-translator-darwin-arm64.tar.gz", sha
                 "x",
                 make(
                     "a/b",
-                    "v1",
+                    valid_tag,
                     // Uppercase hex is rejected: the helper hashes render
                     // lowercase, so an uppercase pin can never match.
                     vec![("linux-x86_64", platform("a", &"A".repeat(64)))],
@@ -13581,7 +14856,8 @@ module_prefix = "RegistryLib"
                     name: "registry-lib".to_string(),
                     version: "1.0.0".to_string(),
                 },
-                manifest,
+                manifest: manifest.raw.clone(),
+                resolver: manifest.typed.resolver,
                 modules,
                 source: LoadedSourceKind::LocalRegistry {
                     root: registry_root,
@@ -13819,7 +15095,24 @@ module_prefix = "RegistryLib"
     #[test]
     fn prepared_reef_graph_round_trips_through_bincode() {
         let (_dir, root) = shared_graph_fixture();
-        let original = prepare_reef_graph(&root).expect("prepare graph");
+        let mut original = prepare_reef_graph(&root).expect("prepare graph");
+        original
+            .graph
+            .packages
+            .get_mut("myapp")
+            .expect("root package")
+            .manifest
+            .package
+            .metadata = PackageMetadata::new(
+            Some("Prepared metadata".parse().expect("description")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("metadata");
         let bytes = original.encode().expect("encode graph");
         let restored = PreparedReefGraph::decode(&bytes).expect("decode graph");
 
@@ -13835,6 +15128,15 @@ module_prefix = "RegistryLib"
         );
         assert_eq!(original.dep_shells.len(), restored.dep_shells.len());
         assert_eq!(original.eval_module_prefix, restored.eval_module_prefix);
+        assert_eq!(
+            original.graph.packages["myapp"].manifest.package.metadata,
+            restored.graph.packages["myapp"].manifest.package.metadata,
+            "typed metadata survives the prepared-graph cache boundary"
+        );
+        assert_eq!(
+            original.graph.packages["myapp"].resolver, restored.graph.packages["myapp"].resolver,
+            "the parsed resolver survives the prepared-graph cache boundary"
+        );
         assert_eq!(
             original.internal_maps.len(),
             restored.internal_maps.len(),
@@ -14044,7 +15346,9 @@ module_prefix = "RegistryLib"
     fn bundled_runtime_matches_an_extracted_copy_without_a_location() {
         let extracted = tempdir().expect("tempdir");
         chelis_std_bundle::extract_into(extracted.path()).expect("extract bundle");
-        let manifest = read_manifest(&extracted.path().join("reef.toml")).expect("manifest");
+        let manifest = read_manifest(&extracted.path().join("reef.toml"))
+            .expect("manifest")
+            .into_raw();
         let on_disk_modules = load_package_modules(extracted.path(), &manifest).expect("modules");
 
         let bundled = bundled_runtime_package().expect("bundled runtime");
@@ -14095,11 +15399,6 @@ module_prefix = "RegistryLib"
     }
 
     #[test]
-    fn prepared_graph_cache_version_tracks_both_branch_formats() {
-        assert_eq!(PREPARED_GRAPH_CACHE_VERSION, 6);
-    }
-
-    #[test]
     fn prepared_graph_cache_rejects_the_preceding_positional_format() {
         let _guard = lock_reef_home_env();
         let (dir, root) = shared_graph_fixture();
@@ -14127,7 +15426,7 @@ module_prefix = "RegistryLib"
         let error = load_prepared_graph_cache(&cache_path, &root)
             .expect_err("preceding positional payload must be rejected before decode");
         assert!(
-            error.contains("format version 5 unsupported (expected 6)"),
+            error.contains("format version 9 unsupported (expected 10)"),
             "unexpected version diagnostic: {error}"
         );
     }
@@ -14467,9 +15766,11 @@ additional_sources = ["properties"]
                     compiler: CURRENT_COMPILER_VERSION.to_string(),
                     module_prefix: "Demo".to_string(),
                     additional_sources: entries.iter().map(|s| s.to_string()).collect(),
+                    metadata: PackageMetadata::default(),
                 },
                 dependencies: BTreeMap::new(),
                 chelis_src: None,
+                conform: None,
                 artifacts: BTreeMap::new(),
             };
             let err =
@@ -14487,9 +15788,11 @@ additional_sources = ["properties"]
                 compiler: CURRENT_COMPILER_VERSION.to_string(),
                 module_prefix: "Demo".to_string(),
                 additional_sources: vec!["properties".to_string(), "references".to_string()],
+                metadata: PackageMetadata::default(),
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
+            conform: None,
             artifacts: BTreeMap::new(),
         };
         validate_manifest(&manifest).expect("valid additional_sources must pass");
@@ -14515,9 +15818,11 @@ additional_sources = ["properties"]
                 compiler: mismatched.to_string(),
                 module_prefix: "Demo".to_string(),
                 additional_sources: Vec::new(),
+                metadata: PackageMetadata::default(),
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
+            conform: None,
             artifacts: BTreeMap::new(),
         };
         let err =
@@ -14544,9 +15849,11 @@ additional_sources = ["properties"]
                 compiler: compiler.to_string(),
                 module_prefix: "Demo".to_string(),
                 additional_sources: Vec::new(),
+                metadata: PackageMetadata::default(),
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
+            conform: None,
             artifacts: BTreeMap::new(),
         }
     }
@@ -14657,9 +15964,11 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
                 compiler: CURRENT_COMPILER_VERSION.to_string(),
                 module_prefix: "Plain".to_string(),
                 additional_sources: Vec::new(),
+                metadata: PackageMetadata::default(),
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
+            conform: None,
             artifacts: BTreeMap::new(),
         };
         let text = toml::to_string_pretty(&manifest).expect("serialize");
@@ -14684,6 +15993,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
             compiler: CURRENT_COMPILER_VERSION.to_string(),
             module_prefix: "Shelly".to_string(),
             additional_sources: Vec::new(),
+            metadata: PackageMetadata::default(),
         };
         let cases: Vec<(ChelisSrcSpec, &str)> = vec![
             (
@@ -14728,6 +16038,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
                 package: base_pkg(),
                 dependencies: BTreeMap::new(),
                 chelis_src: Some(src.clone()),
+                conform: None,
                 artifacts: BTreeMap::new(),
             };
             let err = validate_manifest(&manifest).expect_err(&format!("{src:?} must be rejected"));
@@ -14743,6 +16054,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
                 crates: vec!["chelis-ir".to_string(), "chelis-types".to_string()],
                 pin_commit: Some("b741149b23db7c05849ebd8f5cccc5ce95ca626b".to_string()),
             }),
+            conform: None,
             artifacts: BTreeMap::new(),
         };
         validate_manifest(&ok).expect("well-formed [chelis-src] must pass");

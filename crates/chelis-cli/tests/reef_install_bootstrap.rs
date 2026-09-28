@@ -431,18 +431,18 @@ fn phaseA_item7_bootstrap_oracle() {
     oracle_cli_mutex_with_from_github_and_from_monorepo();
 }
 
-/// Linear chain A -> B -> C: install A, B, C in any input order.
-/// Expected install order: C, B, A (deps before dependents).
+/// Linear chain a -> b -> c: install each package in any input order.
+/// Expected install order: c, b, a (dependencies before dependents).
 fn oracle_linear_chain_topo_order() {
     let shells = vec![
-        SyntheticShell::new("chelis-lang", "A", "v0.2.0", "0.2.0", vec![("B", "0.2.0")]),
-        SyntheticShell::new("chelis-lang", "B", "v0.2.0", "0.2.0", vec![("C", "0.2.0")]),
-        SyntheticShell::new("chelis-lang", "C", "v0.2.0", "0.2.0", vec![]),
+        SyntheticShell::new("chelis-lang", "a", "v0.2.0", "0.2.0", vec![("b", "0.2.0")]),
+        SyntheticShell::new("chelis-lang", "b", "v0.2.0", "0.2.0", vec![("c", "0.2.0")]),
+        SyntheticShell::new("chelis-lang", "c", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    // Submit in input order [A, B, C] — the topo sort must reorder.
+    // Submit in input order [a, b, c] — the topo sort must reorder.
     let input_strings: Vec<String> = shells.iter().map(|s| s.spec_string()).collect();
     let inputs: Vec<&str> = input_strings.iter().map(|s| s.as_str()).collect();
     let installed =
@@ -451,12 +451,12 @@ fn oracle_linear_chain_topo_order() {
     let order = harness.install_order();
     assert_eq!(
         order,
-        vec!["C", "B", "A"],
+        vec!["c", "b", "a"],
         "linear chain must install dependencies before dependents"
     );
     assert_eq!(installed.len(), 3);
     // Registry-state sanity check.
-    for repo in &["A", "B", "C"] {
+    for repo in &["a", "b", "c"] {
         assert!(
             registry
                 .join(format!("packages/{repo}/0.2.0/{repo}-0.2.0.chb"))
@@ -478,26 +478,26 @@ fn oracle_diamond_topo_order() {
     let shells = vec![
         SyntheticShell::new(
             "chelis-lang",
-            "DA",
+            "diamond-a",
             "v0.2.0",
             "0.2.0",
-            vec![("DB", "0.2.0"), ("DC", "0.2.0")],
+            vec![("diamond-b", "0.2.0"), ("diamond-c", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
-            "DB",
+            "diamond-b",
             "v0.2.0",
             "0.2.0",
-            vec![("DD", "0.2.0")],
+            vec![("diamond-d", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
-            "DC",
+            "diamond-c",
             "v0.2.0",
             "0.2.0",
-            vec![("DD", "0.2.0")],
+            vec![("diamond-d", "0.2.0")],
         ),
-        SyntheticShell::new("chelis-lang", "DD", "v0.2.0", "0.2.0", vec![]),
+        SyntheticShell::new("chelis-lang", "diamond-d", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
@@ -514,20 +514,20 @@ fn oracle_diamond_topo_order() {
             .unwrap_or_else(|| panic!("{needle} not in install order: {order:?}"))
     };
     assert!(
-        pos("DD") < pos("DB"),
-        "DD must be installed before DB, got: {order:?}"
+        pos("diamond-d") < pos("diamond-b"),
+        "diamond-d must be installed before diamond-b, got: {order:?}"
     );
     assert!(
-        pos("DD") < pos("DC"),
-        "DD must be installed before DC, got: {order:?}"
+        pos("diamond-d") < pos("diamond-c"),
+        "diamond-d must be installed before diamond-c, got: {order:?}"
     );
     assert!(
-        pos("DB") < pos("DA"),
-        "DB must be installed before DA, got: {order:?}"
+        pos("diamond-b") < pos("diamond-a"),
+        "diamond-b must be installed before diamond-a, got: {order:?}"
     );
     assert!(
-        pos("DC") < pos("DA"),
-        "DC must be installed before DA, got: {order:?}"
+        pos("diamond-c") < pos("diamond-a"),
+        "diamond-c must be installed before diamond-a, got: {order:?}"
     );
 }
 
@@ -536,17 +536,17 @@ fn oracle_cycle_named() {
     let shells = vec![
         SyntheticShell::new(
             "chelis-lang",
-            "ZA",
+            "cycle-a",
             "v0.2.0",
             "0.2.0",
-            vec![("ZB", "0.2.0")],
+            vec![("cycle-b", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
-            "ZB",
+            "cycle-b",
             "v0.2.0",
             "0.2.0",
-            vec![("ZA", "0.2.0")],
+            vec![("cycle-a", "0.2.0")],
         ),
     ];
     let harness = fixture_for_shells(&shells);
@@ -559,15 +559,21 @@ fn oracle_cycle_named() {
     let msg = err.to_string();
     match err {
         chelis_reef::BootstrapError::Cycle { cycle } => {
-            // Cycle members must be named (both ZA and ZB present).
+            // Cycle members must be named.
             let joined = cycle.join(",");
-            assert!(joined.contains("ZA"), "cycle must name ZA: {joined}");
-            assert!(joined.contains("ZB"), "cycle must name ZB: {joined}");
+            assert!(
+                joined.contains("cycle-a"),
+                "cycle must name cycle-a: {joined}"
+            );
+            assert!(
+                joined.contains("cycle-b"),
+                "cycle must name cycle-b: {joined}"
+            );
         }
         other => panic!("expected BootstrapError::Cycle, got: {other:?}"),
     }
     assert!(
-        msg.contains("ZA") && msg.contains("ZB"),
+        msg.contains("cycle-a") && msg.contains("cycle-b"),
         "Display must name all cycle members: {msg}"
     );
     // Registry stays untouched on cycle (we never reached the install loop).
@@ -578,10 +584,10 @@ fn oracle_cycle_named() {
 fn oracle_missing_dep_named() {
     let shells = vec![SyntheticShell::new(
         "chelis-lang",
-        "MA",
+        "missing-a",
         "v0.2.0",
         "0.2.0",
-        vec![("MB", "0.2.0")],
+        vec![("missing-b", "0.2.0")],
     )];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
@@ -593,13 +599,13 @@ fn oracle_missing_dep_named() {
     let msg = err.to_string();
     match err {
         chelis_reef::BootstrapError::MissingDependency { dependent, missing } => {
-            assert_eq!(dependent, "MA");
-            assert_eq!(missing, "MB");
+            assert_eq!(dependent, "missing-a");
+            assert_eq!(missing, "missing-b");
         }
         other => panic!("expected MissingDependency, got: {other:?}"),
     }
     assert!(
-        msg.contains("MA") && msg.contains("MB"),
+        msg.contains("missing-a") && msg.contains("missing-b"),
         "Display must name both dependent and missing dep: {msg}"
     );
 }
@@ -643,27 +649,26 @@ fn oracle_default_list_path() {
 /// Per-shell atomicity: shell 2 of 3 fails validation; shell 1 fully
 /// installed, shell 2 leaves no orphans, shell 3 not attempted.
 fn oracle_per_shell_atomicity_preserved() {
-    // Build three shells. Shell PB advertises a corrupt shell payload
+    // Build three shells. atomic-b advertises a corrupt shell payload
     // (the shell's archive_sha256 disagrees with the on-wire archive
-    // bytes). The bootstrap topo order will be PC, PB, PA — so PC
-    // installs successfully, PB fails validation, PA never runs.
-    //
-    // Topology: PA -> PB -> PC.
+    // bytes). The bootstrap topo order will be atomic-c, atomic-b,
+    // atomic-a. The first package installs, the second fails, and the
+    // third never runs.
     let pa = SyntheticShell::new(
         "chelis-lang",
-        "PA",
+        "atomic-a",
         "v0.2.0",
         "0.2.0",
-        vec![("PB", "0.2.0")],
+        vec![("atomic-b", "0.2.0")],
     );
     let pb = SyntheticShell::new(
         "chelis-lang",
-        "PB",
+        "atomic-b",
         "v0.2.0",
         "0.2.0",
-        vec![("PC", "0.2.0")],
+        vec![("atomic-c", "0.2.0")],
     );
-    let pc = SyntheticShell::new("chelis-lang", "PC", "v0.2.0", "0.2.0", vec![]);
+    let pc = SyntheticShell::new("chelis-lang", "atomic-c", "v0.2.0", "0.2.0", vec![]);
 
     // Stand up wiremock manually so PB can be served with a tampered
     // shell (archive_sha256 set to a wrong value).
@@ -673,9 +678,9 @@ fn oracle_per_shell_atomicity_preserved() {
         let archive_id = archive_asset_id(idx);
         let shell_id = shell_asset_id(idx);
         let archive_bytes = shell.archive_bytes();
-        // Tamper PB's shell: bind the shell to a DIFFERENT archive_sha
+        // Tamper atomic-b's shell with a different archive hash.
         // than the on-wire archive. Validation step catches this.
-        let shell_bytes = if shell.repo == "PB" {
+        let shell_bytes = if shell.repo == "atomic-b" {
             let bogus_sha = "0".repeat(64);
             build_test_shell_bytes(shell.repo, shell.version, &bogus_sha)
         } else {
@@ -747,7 +752,7 @@ fn oracle_per_shell_atomicity_preserved() {
         Some("unit-test-token"),
         &registry,
     )
-    .expect_err("PB validation must fail");
+    .expect_err("atomic-b validation must fail");
 
     // Error must be wrapped Validation/Fetch carrying the
     // archive_sha256 disagreement message.
@@ -759,13 +764,18 @@ fn oracle_per_shell_atomicity_preserved() {
         other => panic!("expected Validation-class error, got: {other:?}"),
     }
 
-    // PC was installed before PB tried; PC's bytes must be on disk and
-    // index.json must mention PC.
+    // atomic-c was installed before atomic-b tried.
     assert!(
-        registry.join("packages/PC/0.2.0/PC-0.2.0.chb").exists(),
-        "PC must be installed before PB validation fired"
+        registry
+            .join("packages/atomic-c/0.2.0/atomic-c-0.2.0.chb")
+            .exists(),
+        "atomic-c must be installed before atomic-b validation fired"
     );
-    assert!(registry.join("packages/PC/0.2.0/PC-0.2.0.tar.zst").exists());
+    assert!(
+        registry
+            .join("packages/atomic-c/0.2.0/atomic-c-0.2.0.tar.zst")
+            .exists()
+    );
 
     // PB's shell-bytes endpoint was hit (recorded), but the install
     // step failed; the package directory MAY exist with copied bytes
@@ -774,28 +784,28 @@ fn oracle_per_shell_atomicity_preserved() {
     let index_text = fs::read_to_string(registry.join("index.json")).expect("index.json present");
     let index: serde_json::Value = serde_json::from_str(&index_text).unwrap();
     assert!(
-        index["packages"]["PC"].is_array(),
-        "index must have PC after a successful first install"
+        index["packages"]["atomic-c"].is_array(),
+        "index must have atomic-c after a successful first install"
     );
     assert!(
-        index["packages"]["PB"].is_null() || !index["packages"]["PB"].is_array(),
-        "index must NOT have PB after validation failure: {index}"
+        index["packages"]["atomic-b"].is_null() || !index["packages"]["atomic-b"].is_array(),
+        "index must not have atomic-b after validation failure: {index}"
     );
     assert!(
-        index["packages"]["PA"].is_null() || !index["packages"]["PA"].is_array(),
-        "PA must NOT be in the index. It was not attempted: {index}"
+        index["packages"]["atomic-a"].is_null() || !index["packages"]["atomic-a"].is_array(),
+        "atomic-a must not be in the index because it was not attempted: {index}"
     );
 
     // Order recording: PC happened, PB happened (it reaches the
     // shell-bytes fetch endpoint before validation fires), PA never.
     let order = harness.install_order();
     assert!(
-        order.contains(&"PC".to_string()),
-        "PC was attempted: {order:?}"
+        order.contains(&"atomic-c".to_string()),
+        "atomic-c was attempted: {order:?}"
     );
     assert!(
-        !order.contains(&"PA".to_string()),
-        "PA must NOT be attempted after PB fails: {order:?}"
+        !order.contains(&"atomic-a".to_string()),
+        "atomic-a must not be attempted after atomic-b fails: {order:?}"
     );
 }
 
@@ -881,24 +891,24 @@ fn phaseA_item7_three_shell_cycle_named() {
     let shells = vec![
         SyntheticShell::new(
             "chelis-lang",
-            "T3A",
+            "t3a",
             "v0.2.0",
             "0.2.0",
-            vec![("T3B", "0.2.0")],
+            vec![("t3b", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
-            "T3B",
+            "t3b",
             "v0.2.0",
             "0.2.0",
-            vec![("T3C", "0.2.0")],
+            vec![("t3c", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
-            "T3C",
+            "t3c",
             "v0.2.0",
             "0.2.0",
-            vec![("T3A", "0.2.0")],
+            vec![("t3a", "0.2.0")],
         ),
     ];
     let harness = fixture_for_shells(&shells);
@@ -913,7 +923,7 @@ fn phaseA_item7_three_shell_cycle_named() {
         chelis_reef::BootstrapError::Cycle { cycle } => {
             // All three nodes named.
             let joined = cycle.join(" ");
-            for needle in ["T3A", "T3B", "T3C"] {
+            for needle in ["t3a", "t3b", "t3c"] {
                 assert!(
                     joined.contains(needle),
                     "cycle must name {needle}: {joined}"
@@ -1078,12 +1088,12 @@ fn phaseA_item7_auth_failure_aborts_before_first_install() {
     let shells = vec![
         SyntheticShell::new(
             "chelis-lang",
-            "AuthA",
+            "auth-a",
             "v0.2.0",
             "0.2.0",
-            vec![("AuthB", "0.2.0")],
+            vec![("auth-b", "0.2.0")],
         ),
-        SyntheticShell::new("chelis-lang", "AuthB", "v0.2.0", "0.2.0", vec![]),
+        SyntheticShell::new("chelis-lang", "auth-b", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
@@ -1115,32 +1125,32 @@ fn phaseA_item7_idempotence_byte_identical_state() {
     let shells = vec![
         SyntheticShell::new(
             "chelis-lang",
-            "idemA",
+            "idem-a",
             "v0.2.0",
             "0.2.0",
-            vec![("idemB", "0.2.0")],
+            vec![("idem-b", "0.2.0")],
         ),
-        SyntheticShell::new("chelis-lang", "idemB", "v0.2.0", "0.2.0", vec![]),
+        SyntheticShell::new("chelis-lang", "idem-b", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let inputs = ["chelis-lang/idemA@v0.2.0", "chelis-lang/idemB@v0.2.0"];
+    let inputs = ["chelis-lang/idem-a@v0.2.0", "chelis-lang/idem-b@v0.2.0"];
 
     // First run.
     lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect("first run");
     let first_archive =
-        fs::read(registry.join("packages/idemA/0.2.0/idemA-0.2.0.tar.zst")).unwrap();
-    let first_shell = fs::read(registry.join("packages/idemA/0.2.0/idemA-0.2.0.chb")).unwrap();
+        fs::read(registry.join("packages/idem-a/0.2.0/idem-a-0.2.0.tar.zst")).unwrap();
+    let first_shell = fs::read(registry.join("packages/idem-a/0.2.0/idem-a-0.2.0.chb")).unwrap();
     let first_index = fs::read_to_string(registry.join("index.json")).unwrap();
 
     // Second run against the same registry.
     lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect("second run");
     let second_archive =
-        fs::read(registry.join("packages/idemA/0.2.0/idemA-0.2.0.tar.zst")).unwrap();
-    let second_shell = fs::read(registry.join("packages/idemA/0.2.0/idemA-0.2.0.chb")).unwrap();
+        fs::read(registry.join("packages/idem-a/0.2.0/idem-a-0.2.0.tar.zst")).unwrap();
+    let second_shell = fs::read(registry.join("packages/idem-a/0.2.0/idem-a-0.2.0.chb")).unwrap();
     let second_index = fs::read_to_string(registry.join("index.json")).unwrap();
 
     assert_eq!(
@@ -1157,36 +1167,36 @@ fn phaseA_item7_order_independence_of_input_list() {
     let shells = vec![
         SyntheticShell::new(
             "chelis-lang",
-            "OA",
+            "order-a",
             "v0.2.0",
             "0.2.0",
-            vec![("OB", "0.2.0")],
+            vec![("order-b", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
-            "OB",
+            "order-b",
             "v0.2.0",
             "0.2.0",
-            vec![("OC", "0.2.0")],
+            vec![("order-c", "0.2.0")],
         ),
-        SyntheticShell::new("chelis-lang", "OC", "v0.2.0", "0.2.0", vec![]),
+        SyntheticShell::new("chelis-lang", "order-c", "v0.2.0", "0.2.0", vec![]),
     ];
 
     let permutations = [
         vec![
-            "chelis-lang/OA@v0.2.0",
-            "chelis-lang/OB@v0.2.0",
-            "chelis-lang/OC@v0.2.0",
+            "chelis-lang/order-a@v0.2.0",
+            "chelis-lang/order-b@v0.2.0",
+            "chelis-lang/order-c@v0.2.0",
         ],
         vec![
-            "chelis-lang/OC@v0.2.0",
-            "chelis-lang/OB@v0.2.0",
-            "chelis-lang/OA@v0.2.0",
+            "chelis-lang/order-c@v0.2.0",
+            "chelis-lang/order-b@v0.2.0",
+            "chelis-lang/order-a@v0.2.0",
         ],
         vec![
-            "chelis-lang/OB@v0.2.0",
-            "chelis-lang/OA@v0.2.0",
-            "chelis-lang/OC@v0.2.0",
+            "chelis-lang/order-b@v0.2.0",
+            "chelis-lang/order-a@v0.2.0",
+            "chelis-lang/order-c@v0.2.0",
         ],
     ];
 
@@ -1204,7 +1214,11 @@ fn phaseA_item7_order_independence_of_input_list() {
     for order in &observed_orders {
         assert_eq!(
             order,
-            &vec!["OC".to_string(), "OB".to_string(), "OA".to_string()],
+            &vec![
+                "order-c".to_string(),
+                "order-b".to_string(),
+                "order-a".to_string(),
+            ],
             "topo order must depend only on dep graph, not input order"
         );
     }

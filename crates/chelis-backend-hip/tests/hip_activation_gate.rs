@@ -481,3 +481,11 @@ fn an_untaken_arms_restamp_is_refused() {
         );
     }
 }
+
+#[test]
+fn an_untaken_arms_integer_abs_checks_only_activated_operands() {
+    let host = emit("def main(x: tensor[4, i64], y: tensor[4, i64], s: tensor[f32]) -> tensor[4, i64] = if lt(tensor_to_scalar(s), 0.0f32) then abs(x) else y\n").expect("gated integer abs");
+    assert!(host.contains("kernel_abs_i64_gated_0"));
+    assert!(host.contains("numeric trap: overflow in abs at i64"));
+    assert!(host.contains("chelis_record_numeric_failure"));
+}

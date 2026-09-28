@@ -51,6 +51,29 @@ class CanonicalBundleEnvironmentTests(unittest.TestCase):
         self.assertEqual(environment["PATH"], "/test/bin")
 
 
+class CargoTargetDirectoryTests(unittest.TestCase):
+    def test_default_target_is_under_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(regen.cargo_target_dir(repository), repository / "target")
+
+    def test_absolute_target_stays_absolute(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"
+            target = Path(temporary) / "agent-target"
+            with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}, clear=True):
+                self.assertEqual(regen.cargo_target_dir(repository), target)
+
+    def test_relative_target_resolves_from_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": "target/agent"}, clear=True):
+                self.assertEqual(
+                    regen.cargo_target_dir(repository), repository / "target/agent"
+                )
+
+
 class RuntimeLockRegenerationTests(unittest.TestCase):
     def make_package(self, root: Path) -> Path:
         package = root / "chelis-std"

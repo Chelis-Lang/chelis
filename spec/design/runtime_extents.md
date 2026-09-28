@@ -934,6 +934,20 @@ it into executable helpers; a helper's result metadata cannot reconstruct the
 lost provenance after a split. Existing native arithmetic lowering remains in
 place where it already carries the source correctly.
 
+The host/C bitwise family uses that same scalar extent contract after its
+Tier-2 lowering: every [05-OP-47] operation over a `shape()`-derived `i64`
+value, runtime scalar parameter, or computed scalar from an inline cast,
+helper call, or tensor conversion supplies a rank-zero integer node to
+`RtDim::Node`. Admission checks the lowered scalar result rather than the
+syntax of its operands. A reshape consumes
+the operation's exact result and observes its shift trap before allocation or
+claim checking. The bitwise result cannot fall through to an unresolved
+wildcard output dimension merely because it is not one of the static-fold
+arithmetic operations. Eval and compiled C execute all five bitwise kinds as
+computed reshape targets across direct, bound, and inline producer forms; the existing
+prepared/context and false-claim
+controls continue to check their host boundary.
+
 Stages execute at their original source positions. The preceding graph segment
 executes eager expressions even when their values are unused and exports only
 values required after the cut. A completion dependency retains that execution

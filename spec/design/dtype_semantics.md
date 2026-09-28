@@ -1665,7 +1665,7 @@ contract; it does not complete binding or runtime obligations.
 
 #### Final wire and binding contract handoff
 
-**Current integration state.** Execution version 4 and WireDag version 19 are
+**Current integration state.** Execution version 4 and WireDag version 21 are
 the source contract for spec/10 §§3.2–3.5. Measured at WireDag version 16, the
 executed wire baseline contains 97 distinct numeric leaves: 80 verified
 transports and 17 numeric operations, with zero exception rows. It includes the shape-dependency and opaque
@@ -2316,8 +2316,14 @@ environments carry exact `ScalarValue`s, including every post-#956 public
 wire scalar variant without dtype substitution. The exact trap grammar is
 public module data and the active Phase 2 corpus asserts byte-exact
 diagnostics. Integer `abs` lowers to the typed trapping kernel, integer
-`floor`/`ceil`/`round` lower to identity, and the C, HIP, and Metal emitters
-remain loud instead of routing integer `abs` through float-only templates.
+`floor`/`ceil`/`round` lower to identity. Direct integer `abs` uses exact
+signed-width kernels in C, HIP, and Metal, with minimum-value traps. Fusion
+keeps integer `abs` materialized; externally supplied fused integer `abs`
+remains rejected. The Metal `integer_abs_guard` manual gate executes literal
+and parameter-weight gradients through these kernels. HIP executes kernel
+bodies with device-intrinsic shims in default tests; real HIP execution still
+requires its hardware gate. Metal activation-gated integer `abs` remains
+rejected under the remaining Metal integer-Abs capability in #693.
 The reduction follow-up routes ordinary, windowed, and argument reductions,
 plus the overlapping window adjoint, through the same sealed boundary:
 consumers retain only shape and ordered index-group planning. Declared-width

@@ -12,9 +12,9 @@
 //!
 //! The lanes: E is `eval_selected`, whose DAG evaluator runs the kernel that
 //! holds each runtime `if`, computing both arms; C is the selected C entry,
-//! compiled and run natively on the same inputs. The compiled lane refuses a
-//! kernel over the runtime extent `*` (chelis#600), so its rows use the
-//! per-row shapes, whose extent is a `pad` by a runtime count. Each row is
+//! compiled and run natively on the same inputs. The compiled per-row cases
+//! include a `pad` by a runtime count; the selected C entry validates its
+//! extent sources instead of rejecting every unsized dimension. Each row is
 //! collected before the assertion, so one red row never hides a sibling.
 #![allow(deprecated)]
 #[path = "../../../tests/support/wire_values.rs"]
@@ -294,9 +294,9 @@ impl Rows {
 const CONDITION: (&str, &str) = ("lt(0.5f32, s)", "lt(s, 0.5f32)");
 
 /// `selected` calls `g`, whose runtime `if` arm applies `grad(h)` to `x`;
-/// `h` ascribes the extent-4 `pad` of `x` as extent 3. The compiled lane
-/// refuses a Tensor-lane entry over the runtime extent `*` (chelis#600), so
-/// the C rows of this shape are the per-row ones below.
+/// `h` ascribes the extent-4 `pad` of `x` as extent 3. These evaluator rows
+/// use anonymous runtime input axes; the C rows of this shape are the
+/// per-row cases below, with a runtime-computed pad extent.
 fn grad_in_arm(condition: &str) -> String {
     format!(
         "def h(x: tensor[*, f32]) -> tensor[f32] = {{\n  y: tensor[3, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  sum(y, 0i32)\n}}\ndef g(x: tensor[*, f32]) -> tensor[*, f32] = {{\n  s = tensor_to_scalar(sum(copy(x), 0i32))\n  if {condition} then grad(h)(x) else x\n}}\ndef selected(x: tensor[*, f32]) -> tensor[*, f32] = g(x)\n"
@@ -490,6 +490,79 @@ fn a_vmapped_arms_local_ascription_checks_only_when_a_row_takes_the_arm() {
         }
     }
     rows.assert_empty();
+}
+
+/// Spec/04 §4.7: runtime extents retain their meaning across transforms.
+/// Each compiled artifact is reused at two widths, so static specialization
+/// cannot stand in for the C backend's real extent-source representation.
+#[test]
+fn selected_transforms_execute_representable_runtime_extents() {
+    let grad = "def loss(x: tensor[width, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
+                def selected(x: tensor[width, f32]) -> tensor[width, f32] = grad(loss)(x)\n";
+    let mapped = "def row(x: tensor[width, f32]) -> tensor[f32] = {\n\
+                    n = shape(&x, 0i32)\n\
+                    sum(pad(x, [[0i64, n]], 1.0f32), 0i32)\n\
+                  }\n\
+                  def selected(xs: tensor[2, width, f32]) -> tensor[2, f32] = vmap(row)(xs)\n";
+    for (source, input_name, mapped) in [(grad, "x", false), (mapped, "xs", true)] {
+        let artifact = compile_c(source);
+        assert_eq!(artifact.entry_lane_decline, None);
+        assert_eq!(artifact.host_entry_name, "chelis_main");
+        assert_eq!(artifact.inputs.len(), 1);
+        assert_eq!(artifact.inputs[0].name, input_name);
+        assert_eq!(artifact.outputs.len(), 1);
+        for width in [2, 3] {
+            let input = Input {
+                name: input_name,
+                shape: if mapped { vec![2, width] } else { vec![width] },
+                data: (1..=if mapped { 2 * width } else { width })
+                    .map(|value| value as f32)
+                    .collect(),
+            };
+            let expected: Vec<f64> = if mapped {
+                input
+                    .data
+                    .chunks(width as usize)
+                    .map(|row| row.iter().copied().map(f64::from).sum::<f64>() + width as f64)
+                    .collect()
+            } else {
+                input
+                    .data
+                    .iter()
+                    .map(|value| 2.0 * f64::from(*value))
+                    .collect()
+            };
+            let inputs = [input];
+            assert_eq!(values(&select(source, &inputs).unwrap()), expected);
+            assert_eq!(run_c(&artifact, &inputs).unwrap(), expected);
+        }
+    }
+}
+
+/// Admitting runtime extents does not authorize a window output whose
+/// extent the compiled backend cannot represent (spec/05 §2.3.1).
+#[test]
+fn selected_transform_rejects_unrepresentable_window_extent() {
+    let source = "def row(x: tensor[width, f32]) -> tensor[*, f32] = reduce_window_max(x, [2i64], [1i64])\n\
+                  def selected(xs: tensor[2, width, f32]) -> tensor[2, *, f32] = vmap(row)(xs)\n";
+    let error = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.into(),
+        target: CompileTarget::C,
+        entry_name: Some("selected".into()),
+    })
+    .expect_err("an unrepresentable window output must remain a typed rejection");
+    assert_eq!(error.errors[0].kind().as_str(), "unsupported_feature");
+    assert!(
+        error.errors[0]
+            .message
+            .contains("requires statically-known"),
+        "{error:?}"
+    );
+    assert!(
+        error.errors[0].message.contains("reduce_window"),
+        "{error:?}"
+    );
 }
 
 /// One abort row: `(threshold, which arms or rows are taken, expected)`,

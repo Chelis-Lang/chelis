@@ -103,6 +103,8 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "checked_reshape_extent",
         "checked_unit_axis",
         "mod",
+        // Version 20 (chelis#2631): one tagged signed-integer bitwise family.
+        "bitwise",
         // Version 16 (chelis#1464): the guarded abort that keeps a
         // transformed `fail(...)` branch from becoming a placeholder value.
         "guarded_fail",
@@ -118,7 +120,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "split_n",
         // Version 19 (chelis#2413): the key join of a where-lowered branch.
         "key_select",
-        // Version 20: represented runtime integer range.
+        // Version 21: represented runtime integer range and List-map captures.
         "iota",
         "list_map_capture",
         "ordered_adjoint_sum",
@@ -129,7 +131,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         WIRE_DAG_SCHEMA_VERSION, 21,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 76);
+    assert_eq!(actual.len(), 77);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"
