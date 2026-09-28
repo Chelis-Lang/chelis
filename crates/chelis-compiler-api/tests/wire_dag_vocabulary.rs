@@ -120,14 +120,16 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "key_select",
         // Version 20: represented runtime integer range.
         "iota",
+        "list_map_capture",
+        "ordered_adjoint_sum",
     ];
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 20,
+        WIRE_DAG_SCHEMA_VERSION, 21,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 74);
+    assert_eq!(actual.len(), 76);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"

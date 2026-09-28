@@ -498,7 +498,7 @@ fn parity_grad_runtime_basis() {
     drive_parity(&path, true);
     assert_eq!(
         run_eval(&path),
-        b"out = tensor(shape=[3], data=[0.0, 3.0, 0.0])\n"
+        b"out = tensor(shape=[3], data=[0.0, 3.0, 0.0])\ncapture = tensor(shape=[1], data=[0.0])\n"
     );
 }
 

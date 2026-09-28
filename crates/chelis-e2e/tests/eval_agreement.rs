@@ -279,6 +279,8 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Count { .. }
         // [05-OP-54]: runtime range materializes exact signed i64 elements.
         | RiscOp::Iota
+        | RiscOp::ListMapCapture { .. }
+        | RiscOp::OrderedAdjointSum { .. }
         | RiscOp::MaxReduce { .. }
         | RiscOp::MinReduce { .. }
         | RiscOp::ProdReduce { .. }

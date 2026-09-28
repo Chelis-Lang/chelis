@@ -1263,7 +1263,9 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         ),
         RiscOp::Stride { strides } => bounds(ExtentSlot::StrideStep, &mut strides.iter()),
         RiscOp::SplitN { count } => bounds(ExtentSlot::SplitCount, &mut std::iter::once(count)),
-        RiscOp::Iota
+        RiscOp::ListMapCapture { .. }
+        | RiscOp::OrderedAdjointSum { .. }
+        | RiscOp::Iota
         | RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul
@@ -2106,6 +2108,50 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         // Check arity.
         let arity = node.inputs.len();
         match &node.op {
+            RiscOp::ListMapCapture { first } => {
+                let valid = arity == 2
+                    && node.output_type.dims.len() == 1
+                    && node.output_type.precision.is_float()
+                    && dag.get(node.inputs[0]).is_some_and(|source| {
+                        source.output_type.dims.is_empty()
+                            && source.output_type.precision == node.output_type.precision
+                    })
+                    && dag.get(node.inputs[1]).is_some_and(|carrier| {
+                        carrier.output_type.dims.len() == 1
+                            && (*first
+                                || matches!(carrier.op, RiscOp::ListMapCapture { first: true }))
+                    });
+                if !valid {
+                    errors.push(format!("ListMapCapture at node {} requires a float scalar and rank-one invocation carrier", node.id.0));
+                }
+            }
+            RiscOp::OrderedAdjointSum { groups } => {
+                if !node.output_type.dims.is_empty()
+                    || !node.output_type.precision.is_float()
+                    || groups.contains(&0)
+                    || groups
+                        .iter()
+                        .try_fold(0usize, |sum, width| sum.checked_add(*width))
+                        != Some(arity)
+                {
+                    errors.push(format!("OrderedAdjointSum at node {} has invalid group arity or scalar float output", node.id.0));
+                } else {
+                    let mut offset = 0;
+                    for &width in groups {
+                        let inputs = &node.inputs[offset..offset + width];
+                        for input in inputs {
+                            if !dag.get(*input).is_some_and(|input| {
+                                input.output_type.precision == node.output_type.precision
+                                    && (input.output_type.dims.len() == 1
+                                        || (width == 1 && input.output_type.dims.is_empty()))
+                            }) {
+                                errors.push(format!("OrderedAdjointSum at node {} requires own-dtype scalar or rank-one contributions", node.id.0));
+                            }
+                        }
+                        offset += width;
+                    }
+                }
+            }
             RiscOp::Iota => {
                 if node
                     .owner

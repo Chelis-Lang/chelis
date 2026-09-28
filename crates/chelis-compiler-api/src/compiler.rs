@@ -6872,6 +6872,10 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
             },
         },
         RiscOp::Iota => WireRiscOp::Iota,
+        RiscOp::ListMapCapture { first } => WireRiscOp::ListMapCapture { first: *first },
+        RiscOp::OrderedAdjointSum { groups } => WireRiscOp::OrderedAdjointSum {
+            groups: groups.clone(),
+        },
         RiscOp::FoldIn => WireRiscOp::FoldIn {},
         RiscOp::KeySelect => WireRiscOp::KeySelect {},
         RiscOp::SplitN { count } => WireRiscOp::SplitN {
@@ -7454,7 +7458,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 20);
+        assert_eq!(json["schema_version"], 21);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()
@@ -7530,6 +7534,103 @@ mod tests {
         let json = serde_json::to_value(&wire).unwrap();
         let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn ordered_list_capture_wire_round_trip_and_malformed_groups() {
+        let mut dag = Dag::new();
+        let owner = dag.declare("ordered_list");
+        let scalar = TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        };
+        let vector = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let source = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "source".into(),
+            },
+            vec![],
+            scalar.clone(),
+            None,
+        );
+        let carrier = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "carrier".into(),
+            },
+            vec![],
+            vector.clone(),
+            None,
+        );
+        let capture = dag.add_node(
+            owner,
+            RiscOp::ListMapCapture { first: true },
+            vec![source, carrier],
+            vector,
+            None,
+        );
+        let sum = dag.add_node(
+            owner,
+            RiscOp::OrderedAdjointSum { groups: vec![2] },
+            vec![capture, capture],
+            scalar,
+            None,
+        );
+        dag.add_root(sum);
+        let json = serde_json::to_value(wire_dag(&dag).unwrap()).unwrap();
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert!(matches!(
+            decoded.nodes[2].op,
+            WireRiscOp::ListMapCapture { .. }
+        ));
+        assert!(
+            matches!(&decoded.nodes[3].op, WireRiscOp::OrderedAdjointSum { groups } if groups == &[2])
+        );
+        for (node, field, replacement) in [
+            (
+                2,
+                "op",
+                serde_json::json!({"kind": "list_map_capture", "first": false}),
+            ),
+            (2, "inputs", serde_json::json!([0])),
+            (
+                2,
+                "output_type",
+                serde_json::json!({"dims": [], "precision": "f32"}),
+            ),
+            (3, "inputs", serde_json::json!([2, 0])),
+            (
+                3,
+                "op",
+                serde_json::json!({"kind": "ordered_adjoint_sum", "groups": [0, 2]}),
+            ),
+            (
+                3,
+                "op",
+                serde_json::json!({"kind": "ordered_adjoint_sum", "groups": [1]}),
+            ),
+            (
+                3,
+                "op",
+                serde_json::json!({"kind": "ordered_adjoint_sum", "groups": [usize::MAX, 2]}),
+            ),
+            (
+                3,
+                "output_type",
+                serde_json::json!({"dims": [], "precision": "f64"}),
+            ),
+        ] {
+            let mut malformed = json.clone();
+            malformed["nodes"][node][field] = replacement;
+            assert!(
+                WireDag::from_validated_json(&malformed.to_string()).is_err(),
+                "{malformed}"
+            );
+        }
     }
 
     fn runtime_iota_wire_fixture() -> Dag {

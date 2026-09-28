@@ -98,6 +98,112 @@ fn runtime_builder_captures_receive_their_exact_cotangent() {
     assert_both(&source, &[3.0], "capture_cotangent");
 }
 
+// spec/06 §2.4: List callbacks expose invocation-ordered consumer edges,
+// including repeated input slots, to the shared capture's single +0 tree.
+#[test]
+fn runtime_capture_accumulation_preserves_the_executed_consumer_tree() {
+    for (callback, coefficients, expected, stem) in [
+        (
+            "mul(s, 1.0f32)",
+            "100000000000000000000.0f32, -100000000000000000000.0f32, 3.0f32",
+            0.0,
+            "capture_cancel",
+        ),
+        (
+            "s",
+            "100000000000000000000.0f32, -100000000000000000000.0f32, 3.0f32",
+            0.0,
+            "capture_identity",
+        ),
+        (
+            "add(s, s)",
+            "100000000000000000000.0f32, -100000000000000000000.0f32, 3.0f32",
+            0.0,
+            "capture_repeated_slot",
+        ),
+        (
+            "mul(s, 1.0f32)",
+            "100000000000000000000.0f32, 3.0f32, -100000000000000000000.0f32",
+            0.0,
+            "capture_permuted",
+        ),
+        ("add(s, s)", "2.0f32, 3.0f32, 5.0f32", 20.0, "capture_small"),
+    ] {
+        let source = format!(
+            r#"
+def loss[n](theta: tensor[n, f32], scale: tensor[1, f32]) -> f32 = {{
+  s = tensor_to_scalar(sum(scale, 0i32))
+  weights = to_tensor(map(fn (i: i64) -> {callback}, range(0i64, shape(theta, 0i32))))
+  tensor_to_scalar(sum(mul(theta, weights), 0i32))
+}}
+out = grad(loss, wrt=scale)(to_tensor([{coefficients}]), to_tensor([2.0f32]))
+"#
+        );
+        assert_both(&source, &[expected], stem);
+    }
+}
+
+#[test]
+fn runtime_capture_tree_interleaves_the_map_with_outside_consumers() {
+    assert_both(
+        r#"
+def loss[n](theta: tensor[n, f32], scale: tensor[1, f32]) -> f32 = {
+  s = tensor_to_scalar(sum(scale, 0i32))
+  before = mul(s, 3.0f32)
+  weights = to_tensor(map(fn (i: i64) -> mul(s, 1.0f32), range(0i64, shape(theta, 0i32))))
+  after = mul(s, 0.0f32)
+  add(add(before, tensor_to_scalar(sum(mul(theta, weights), 0i32))), after)
+}
+out = grad(loss, wrt=scale)(to_tensor([100000000000000000000.0f32, -100000000000000000000.0f32, 3.0f32]), to_tensor([2.0f32]))
+"#,
+        &[6.0],
+        "capture_outside",
+    );
+}
+
+#[test]
+fn runtime_capture_tree_rounds_each_pair_at_the_capture_dtype() {
+    assert_both(
+        r#"
+def loss[n](theta: tensor[n, f16], scale: tensor[1, f16]) -> f16 = {
+  s = tensor_to_scalar(cast(sum(scale, 0i32), f16))
+  weights = to_tensor(map(fn (i: i64) -> mul(s, 1.0f16), range(0i64, shape(theta, 0i32))))
+  tensor_to_scalar(sum(mul(theta, weights), 0i32))
+}
+out = grad(loss, wrt=scale)(to_tensor([2048.0f16, -2048.0f16, 0.5f16]), to_tensor([2.0f16]))
+"#,
+        &[0.0],
+        "capture_half_width",
+    );
+}
+
+#[test]
+fn runtime_capture_tree_preserves_inactive_and_empty_rows() {
+    for (values, expected, stem) in [
+        (
+            "to_tensor([3.0f32, 5.0f32, 7.0f32])",
+            10.0,
+            "capture_inactive",
+        ),
+        (
+            "insert(scalar_to_tensor(0.0f32), 0i32, 0i64)",
+            0.0,
+            "capture_empty",
+        ),
+    ] {
+        let source = format!(
+            r#"
+def loss[n](theta: tensor[n, f32], scale: tensor[1, f32]) -> f32 = {{
+  s = tensor_to_scalar(sum(scale, 0i32))
+  weights = to_tensor(map(fn (i: i64) -> if eq(i, 1i64) then 0.0f32 else mul(s, 1.0f32), range(0i64, shape(theta, 0i32))))
+  tensor_to_scalar(sum(mul(theta, weights), 0i32))
+}}
+out = grad(loss, wrt=scale)({values}, to_tensor([2.0f32]))
+"#
+        );
+        assert_both(&source, &[expected], stem);
+    }
+}
 #[test]
 fn runtime_builder_handles_a_different_extent_and_nonzero_selected_index() {
     let source = format!(
@@ -226,4 +332,54 @@ fn captured_cotangent_keeps_the_false_forward_range_claim() {
         );
         assert!(text.contains("axis 0"), "{text}");
     }
+}
+
+#[test]
+fn distinct_maps_of_the_same_carrier_keep_invocation_order() {
+    assert_both(
+        r#"
+def loss[n](theta: tensor[n, f32], scale: tensor[1, f32]) -> f32 = {
+  s = tensor_to_scalar(sum(scale, 0i32))
+  indices = range(0i64, shape(theta, 0i32))
+  first = to_tensor(map(fn (i: i64) -> mul(s, 1.0f32), indices))
+  second = to_tensor(map(fn (i: i64) -> mul(s, 1.0f32), indices))
+  add(tensor_to_scalar(sum(mul(theta, first), 0i32)), tensor_to_scalar(sum(mul(theta, second), 0i32)))
+}
+out = grad(loss, wrt=scale)(to_tensor([100000000000000000000.0f32, -100000000000000000000.0f32, 3.0f32]), to_tensor([2.0f32]))
+"#,
+        &[3.0],
+        "capture_two_maps",
+    );
+}
+
+#[test]
+fn recursive_parameter_cotangent_keeps_its_ordered_capture_leaf() {
+    assert_both(
+        r#"
+def loss[n](theta: tensor[n, f32], params: (tensor[1, f32], tensor[1, f32])) -> f32 = {
+  s = tensor_to_scalar(sum(params.0, 0i32))
+  alias = s
+  weights = to_tensor(map(fn (i: i64) -> add(s, alias), range(0i64, shape(theta, 0i32))))
+  tensor_to_scalar(sum(mul(theta, weights), 0i32))
+}
+out = (grad(loss, wrt=params)(to_tensor([100000000000000000000.0f32, -100000000000000000000.0f32, 3.0f32]), (to_tensor([2.0f32]), to_tensor([4.0f32])))).0
+"#,
+        &[0.0],
+        "capture_recursive_leaf",
+    );
+}
+
+#[test]
+fn authored_expand_keeps_its_existing_sum_adjoint() {
+    assert_both(
+        r#"
+def loss[n](theta: tensor[n, f32], scale: tensor[1, f32]) -> f32 = {
+  weights = insert(sum(scale, 0i32), 0i32, shape(theta, 0i32))
+  tensor_to_scalar(sum(mul(theta, weights), 0i32))
+}
+out = grad(loss, wrt=scale)(to_tensor([100000000000000000000.0f32, -100000000000000000000.0f32, 3.0f32]), to_tensor([2.0f32]))
+"#,
+        &[3.0],
+        "ordinary_expand_control",
+    );
 }

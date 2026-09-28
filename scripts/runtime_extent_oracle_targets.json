@@ -1371,16 +1371,23 @@
         "mode": "all"
       },
       "expected": [
+        "authored_expand_keeps_its_existing_sum_adjoint",
         "callbacks_with_observable_checks_require_ordered_execution",
         "captured_cotangent_keeps_the_false_forward_range_claim",
         "composed_generic_basis_has_the_exact_jacobian_row",
+        "distinct_maps_of_the_same_carrier_keep_invocation_order",
         "empty_runtime_basis_has_an_empty_cotangent",
         "independent_builder_invocations_keep_distinct_runtime_extents",
         "literal_basis_remains_the_exact_gradient_control",
         "range_map_basis_has_the_exact_isolated_gradient",
+        "recursive_parameter_cotangent_keeps_its_ordered_capture_leaf",
         "represented_list_aliases_and_nested_maps_keep_their_source",
         "runtime_builder_captures_receive_their_exact_cotangent",
-        "runtime_builder_handles_a_different_extent_and_nonzero_selected_index"
+        "runtime_builder_handles_a_different_extent_and_nonzero_selected_index",
+        "runtime_capture_accumulation_preserves_the_executed_consumer_tree",
+        "runtime_capture_tree_interleaves_the_map_with_outside_consumers",
+        "runtime_capture_tree_preserves_inactive_and_empty_rows",
+        "runtime_capture_tree_rounds_each_pair_at_the_capture_dtype"
       ]
     },
     {
@@ -1394,6 +1401,10 @@
       },
       "expected": [
         "anonymous_batch_comparisons_keep_physical_input_authority",
+        "list_capture_has_an_actual_axis_and_rejects_a_false_claim",
+        "ordered_cotangent_groups_preserve_rows_and_separate_invocations",
+        "ordered_cotangent_rejects_malformed_groups_and_dtype_rank",
+        "ordered_cotangent_tree_rounds_at_each_active_float_width",
         "runtime_iota_inactive_scalar_arm_does_not_read_overflowing_endpoints",
         "runtime_iota_keeps_exact_i64_values_and_independent_lengths",
         "runtime_iota_rejects_a_false_result_extent_claim",
@@ -1413,6 +1424,7 @@
         "mode": "all"
       },
       "expected": [
+        "ordered_cotangent_native_groups_check_actual_column_lengths",
         "runtime_iota_native_exact_values_and_counts",
         "runtime_iota_native_inactive_arm_does_not_read_overflowing_endpoints",
         "runtime_iota_native_overflow_precedes_allocation"

@@ -560,6 +560,8 @@ fn reject_random_selection_parameters(
 pub fn risc_op_name(op: &RiscOp) -> &'static str {
     match op {
         RiscOp::Iota => "range",
+        RiscOp::ListMapCapture { .. } => "list_map_capture",
+        RiscOp::OrderedAdjointSum { .. } => "ordered_adjoint_sum",
         RiscOp::Add => "add",
         RiscOp::Sub => "sub",
         RiscOp::Mul => "mul",
@@ -711,7 +713,13 @@ fn grad_dag_result(
     // Contributions wait here until reverse traversal reaches their input.
     // Keeping the consumer ordinal and input slot makes the normative order
     // explicit instead of inheriting reverse traversal order.
-    let mut pending: UnordMap<NodeId, Vec<(usize, usize, NodeId)>> = UnordMap::new();
+    #[derive(Clone)]
+    struct Contribution {
+        order: (usize, usize, usize),
+        value: NodeId,
+        invocation: Option<NodeId>,
+    }
+    let mut pending: UnordMap<NodeId, Vec<Contribution>> = UnordMap::new();
     // Seed the gradient at `output` (∂output/∂output = 1). This is a
     // backward node corresponding to the forward `output`, so it
     // carries the grad marker.
@@ -735,22 +743,102 @@ fn grad_dag_result(
         .map(|(position, node)| (node, position))
         .collect();
     for &node_id in topo.iter().rev() {
+        let node = forward.get(node_id).expect("topological node exists");
+        if let RiscOp::ListMapCapture { first } = node.op {
+            // This is a lexical read, not a forward numerical operation.
+            // Do not introduce a per-row +0, contract each consumer column,
+            // or round a partial capture sum. Queue every original edge on
+            // the shared scalar, keyed by invocation and callback edge.
+            let invocation = if first { node.id } else { node.inputs[1] };
+            if let Some(contributions) = pending.remove(&node_id) {
+                if wrt.contains(&node_id) {
+                    let mut selected = contributions.clone();
+                    selected.sort_by_key(|contribution| contribution.order);
+                    let gradient = balanced_adjoint_sum(
+                        &mut dag,
+                        node,
+                        selected
+                            .into_iter()
+                            .map(|contribution| contribution.value)
+                            .collect(),
+                    );
+                    adjoints.insert(node_id, gradient);
+                }
+                let input = forward.get(node.inputs[0]).expect("capture source");
+                for contribution in contributions {
+                    if contribution.invocation.is_some() {
+                        return Err(
+                            "nested List invocation cotangents require nested provenance"
+                                .to_string()
+                                .into(),
+                        );
+                    }
+                    let before_mask = dag.len();
+                    let value = mask_to_activation(&mut dag, node, input, contribution.value)?;
+                    stamp_grad_marker(&mut dag, before_mask, node);
+                    pending.entry(input.id).or_default().push(Contribution {
+                        order: (
+                            topo_positions[&invocation],
+                            contribution.order.0,
+                            contribution.order.2,
+                        ),
+                        value,
+                        invocation: Some(invocation),
+                    });
+                }
+            }
+            continue;
+        }
         let grad_out = if node_id == output {
             seed
         } else {
             let Some(mut contributions) = pending.remove(&node_id) else {
                 continue;
             };
-            contributions.sort_by_key(|(consumer, slot, _)| (*consumer, *slot));
-            let node = forward.get(node_id).expect("topological node exists");
-            balanced_adjoint_sum(
-                &mut dag,
-                node,
-                contributions
-                    .into_iter()
-                    .map(|(_, _, contribution)| contribution)
-                    .collect(),
-            )
+            contributions.sort_by_key(|contribution| contribution.order);
+            if contributions
+                .iter()
+                .any(|contribution| contribution.invocation.is_some())
+            {
+                if !node.output_type.dims.is_empty() || !node.output_type.precision.is_float() {
+                    return Err("ordered List capture cotangent must target a float scalar"
+                        .to_string()
+                        .into());
+                }
+                let mut groups = Vec::new();
+                let mut inputs = Vec::new();
+                let mut previous_invocation = None;
+                for contribution in contributions {
+                    if contribution.invocation.is_some()
+                        && contribution.invocation == previous_invocation
+                    {
+                        *groups.last_mut().expect("preceding invocation group") += 1;
+                    } else {
+                        groups.push(1);
+                    }
+                    previous_invocation = contribution.invocation;
+                    inputs.push(contribution.value);
+                }
+                let before = dag.len();
+                let sum = dag.add_node(
+                    node.owner,
+                    RiscOp::OrderedAdjointSum { groups },
+                    inputs,
+                    node.output_type.clone(),
+                    None,
+                );
+                stamp_grad_marker(&mut dag, before, node);
+                sum
+            } else {
+                balanced_adjoint_sum(
+                    &mut dag,
+                    node,
+                    contributions
+                        .into_iter()
+                        .map(|contribution| contribution.value)
+                        .collect(),
+                )
+            }
         };
         adjoints.insert(node_id, grad_out);
 
@@ -833,10 +921,11 @@ fn grad_dag_result(
                 })
                 .expect("adjoint input belongs to its forward node");
             used_slots[input_slot] = true;
-            pending
-                .entry(input_id)
-                .or_default()
-                .push((consumer_position, input_slot, grad_node));
+            pending.entry(input_id).or_default().push(Contribution {
+                order: (consumer_position, 0, input_slot),
+                value: grad_node,
+                invocation: None,
+            });
         }
     }
 
@@ -1215,6 +1304,7 @@ fn compute_adjoints(
 ) -> Option<Vec<(NodeId, NodeId)>> {
     match &node.op {
         RiscOp::Iota => Some(vec![]),
+        RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => None,
         // --- Binary elementwise ---
         RiscOp::Add => {
             let a = node.inputs[0];

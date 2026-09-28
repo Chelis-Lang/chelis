@@ -2906,6 +2906,14 @@ struct SemanticRegistration {
 /// final-authority registry above instead.
 const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
     SemanticRegistration {
+        callable: "[compiler-ir-numeric] chelis_ir::dag::RiscOp::ListMapCapture(first: bool, source: tensor[p], invocation: tensor[n, q]) -> tensor[n, p]",
+        atom: "[05-OP-55]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-ir-numeric] chelis_ir::dag::RiscOp::OrderedAdjointSum(groups: Vec<usize>, contributions: Vec<tensor[p] | tensor[n, p]>) -> tensor[p]",
+        atom: "[05-OP-55]",
+    },
+    SemanticRegistration {
         callable: "[compiler-ir-numeric] chelis_ir::dag::RiscOp::Iota(start: tensor[i64], end: tensor[i64]) -> tensor[count, i64]",
         atom: "[05-OP-54]",
     },
@@ -6613,6 +6621,19 @@ fn planted_prelude_adt_with_f64_variant_is_detected() {
 fn runtime_iota_is_registered_against_range_atom() {
     let row = SEMANTIC_REGISTRATIONS.iter().find(|row| row.callable == "[compiler-ir-numeric] chelis_ir::dag::RiscOp::Iota(start: tensor[i64], end: tensor[i64]) -> tensor[count, i64]").expect("Iota numeric registration");
     assert_eq!(row.atom, "[05-OP-54]");
+}
+
+#[test]
+fn ordered_list_cotangents_are_registered_against_callback_atom() {
+    for identity in ["ListMapCapture", "OrderedAdjointSum"] {
+        let prefix = format!("[compiler-ir-numeric] chelis_ir::dag::RiscOp::{identity}(");
+        let rows = SEMANTIC_REGISTRATIONS
+            .iter()
+            .filter(|row| row.callable.starts_with(&prefix))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1, "exact numeric identity {identity}");
+        assert_eq!(rows[0].atom, "[05-OP-55]");
+    }
 }
 
 #[test]

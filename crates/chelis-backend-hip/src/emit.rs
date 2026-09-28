@@ -1521,6 +1521,17 @@ impl HipEmitter {
             Self::elem_kind(&n.output_type)
         };
         Ok(match op {
+            RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op(format!("{:?}", node.op)),
+                    "ordered List capture cotangents",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        2515,
+                        "HIP ordered List capture cotangents are not implemented"
+                    ),
+                ));
+            }
             RiscOp::Iota => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op("Iota".into()),
@@ -2359,6 +2370,17 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
+            RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op(format!("{:?}", node.op)),
+                    "ordered List capture cotangents",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        2515,
+                        "HIP ordered List capture cotangents are not implemented"
+                    ),
+                ));
+            }
             RiscOp::Iota => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op("Iota".into()),
@@ -5053,7 +5075,7 @@ impl HipEmitter {
     #[allow(dead_code)]
     fn node_is_statically_contiguous(dag: VerifiedDagView<'_>, id: NodeId) -> bool {
         match &dag.get(id).unwrap().op {
-            RiscOp::Iota => true,
+            RiscOp::Iota | RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => true,
             RiscOp::Load { .. } => false,
             RiscOp::Const { .. }
             | RiscOp::ConstTensor { .. }

@@ -788,7 +788,9 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         return false;
     };
     match &node.op {
-        RiscOp::Iota
+        RiscOp::ListMapCapture { .. }
+        | RiscOp::OrderedAdjointSum { .. }
+        | RiscOp::Iota
         | RiscOp::Load { .. }
         | RiscOp::Const { .. }
         | RiscOp::ConstTensor { .. }

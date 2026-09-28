@@ -386,6 +386,25 @@ all rebuild/import rows. The existing B2b-0 receipt proves seven named IR
 passes on transforming fixtures, not lowering-side `splice_dag`, imports or
 the new contract carrier. B2b-1 extends those tests before changing the carrier.
 
+##### Runtime List capture contributions (#2419)
+
+Check-free scalar List maps use `ListMapCapture`, separate from authored
+`Expand`. The first capture owns the invocation identity; later captures
+reference it through an ordinary remapped input edge. CSE preserves these
+identities. AD queues each callback consumer/input-slot column on the original
+shared scalar. `OrderedAdjointSum` interleaves columns by invocation row and
+orders entire invocations among outside consumers, then evaluates spec/06
+§2.4's single positive-zero-prefixed tree at the captured dtype. It never sums
+rows or columns separately. Both operations have exact [05-OP-55] numeric
+registrations and WireDag 21 representations. The invocation carrier's actual
+axis supplies allocation extent; result claims remain checked obligations.
+
+`issue_2419_range_tensor_ad` covers Eval/native C cancellation, repeated reads,
+outside consumers, distinct maps, recursive float parameters, inactive/empty
+rows and f16 rounding. Higher-order differentiation of the ordered accumulator
+and batching an existing invocation require further provenance and reject
+loudly; this is not closure of the recursive List/AD tracker #2515.
+
 ##### Mapped gradient entry witnesses and artifact closure (#1932)
 
 Ordinary `grad` closure does not discharge the mapped path. Before

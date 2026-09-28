@@ -12805,11 +12805,12 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
         }
-        let vmapped = match vmap::vectorize_axis0_with_captures(
-            &subctx.dag,
-            batch_dim.clone(),
-            &captured_loads,
-        ) {
+        let vectorize = if ordered_scalar_map {
+            vmap::vectorize_list_map
+        } else {
+            vmap::vectorize_axis0_with_captures
+        };
+        let vmapped = match vectorize(&subctx.dag, batch_dim.clone(), &captured_loads) {
             Ok(dag) => dag,
             Err(message) => raise_lowering_error(
                 format!("`vmap` lowering failed: {message}"),

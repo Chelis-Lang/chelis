@@ -175,3 +175,58 @@ fn runtime_iota_native_inactive_arm_does_not_read_overflowing_endpoints() {
     let result = compile_and_run("inactive", &source, &harness);
     assert!(result.status.success(), "{result:?}");
 }
+
+#[test]
+fn ordered_cotangent_native_groups_check_actual_column_lengths() {
+    let mut dag = Dag::new();
+    let owner = dag.declare("runtime_iota");
+    let mut inputs = Vec::new();
+    for name in ["first", "second"] {
+        inputs.push(dag.add_node(
+            owner,
+            RiscOp::Load { name: name.into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named(name.into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        ));
+    }
+    let root = dag.add_node(
+        owner,
+        RiscOp::OrderedAdjointSum { groups: vec![2] },
+        inputs,
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(root);
+    let source = support::codegen(&dag, "runtime_iota").unwrap().c_source;
+    for (first_count, second_count) in [(3, 3), (0, 0), (3, 4)] {
+        let body = format!(
+            r#"
+    float data[] = {{1.0e20f, -1.0e20f, 3.0f, 0.0f}};
+    int64_t first = {first_count}, second = {second_count};
+    chelis_tensor *inputs[2] = {{
+        chelis_tensor_entry_borrow(1, &first, CHELIS_DTYPE_F32, data, sizeof(data)),
+        chelis_tensor_entry_borrow(1, &second, CHELIS_DTYPE_F32, data, sizeof(data))
+    }}, *outputs[1] = {{0}};
+    runtime_iota(inputs, 2, outputs, 1);
+    return ((const float*)chelis_tensor_read_view(outputs[0]).data)[0] != 0.0f;
+"#
+        );
+        let result = compile_and_run("ordered_groups", &source, &harness(&body));
+        if first_count == second_count {
+            assert!(result.status.success(), "{result:?}");
+        } else {
+            assert!(!result.status.success(), "{result:?}");
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("different lengths"),
+                "{result:?}"
+            );
+        }
+    }
+}

@@ -253,3 +253,218 @@ fn runtime_iota_inactive_scalar_arm_does_not_read_overflowing_endpoints() {
     .unwrap();
     assert_eq!(result[&root].shape, vec![0]);
 }
+
+fn ordered_sum_program(precision: Prim, groups: Vec<usize>, ranks: &[usize]) -> Dag {
+    let mut dag = Dag::new();
+    let owner = dag.declare("ordered_cotangent");
+    let inputs = ranks
+        .iter()
+        .enumerate()
+        .map(|(index, rank)| {
+            dag.add_node(
+                owner,
+                RiscOp::Load {
+                    name: format!("x{index}").into(),
+                },
+                vec![],
+                TensorType {
+                    precision,
+                    dims: (0..*rank)
+                        .map(|_| DimInfo::Named("*".into(), None))
+                        .collect(),
+                },
+                None,
+            )
+        })
+        .collect();
+    let root = dag.add_node(
+        owner,
+        RiscOp::OrderedAdjointSum { groups },
+        inputs,
+        TensorType {
+            precision,
+            dims: vec![],
+        },
+        None,
+    );
+    dag.add_root(root);
+    dag
+}
+
+#[test]
+fn ordered_cotangent_tree_rounds_at_each_active_float_width() {
+    for (precision, large, small) in [
+        (Prim::F16, 2048.0, 0.5),
+        (Prim::Bf16, 256.0, 0.25),
+        (Prim::F32, 1.0e20, 3.0),
+        (Prim::F64, 1.0e20, 3.0),
+    ] {
+        let dag = ordered_sum_program(precision, vec![1], &[1]);
+        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        for data in [vec![large, -large, small], vec![]] {
+            let values = eval_tensor_roots_with_strict(&dag, dag.roots(), |_| {
+                Some(TensorValue::from_vec(vec![data.len()], data.clone()))
+            })
+            .unwrap();
+            assert_eq!(
+                values[&dag.roots()[0]].first_f64_lossy_or_zero().to_bits(),
+                0.0f64.to_bits(),
+                "{precision:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ordered_cotangent_groups_preserve_rows_and_separate_invocations() {
+    for (groups, expected) in [(vec![2], 0.0), (vec![1, 1], 3.0)] {
+        let dag = ordered_sum_program(Prim::F32, groups, &[1, 1]);
+        let values = eval_tensor_roots_with_strict(&dag, dag.roots(), |_| {
+            Some(TensorValue::from_vec(vec![3], vec![1.0e20, -1.0e20, 3.0]))
+        })
+        .unwrap();
+        assert_eq!(values[&dag.roots()[0]].first_f64_lossy_or_zero(), expected);
+    }
+}
+
+#[test]
+fn ordered_cotangent_rejects_malformed_groups_and_dtype_rank() {
+    for (precision, groups, ranks) in [
+        (Prim::F32, vec![0, 2], vec![1, 1]),
+        (Prim::F32, vec![usize::MAX, 2], vec![1, 1]),
+        (Prim::F32, vec![1], vec![1, 1]),
+        (Prim::F32, vec![2], vec![0, 1]),
+        (Prim::F32, vec![1], vec![2]),
+        (Prim::Int64, vec![1], vec![1]),
+    ] {
+        let dag = ordered_sum_program(precision, groups, &ranks);
+        assert!(!chelis_ir::verify::verify(&dag).is_empty());
+    }
+    let dag = ordered_sum_program(Prim::F32, vec![2], &[1, 1]);
+    let error = eval_tensor_roots_with_strict(&dag, dag.roots(), |name| {
+        let count = if name == "x0" { 2 } else { 3 };
+        Some(TensorValue::from_vec(vec![count], vec![1.0; count]))
+    })
+    .unwrap_err();
+    assert!(error.contains("different lengths"), "{error}");
+    assert!(
+        chelis_ir::grad::grad_dag(&dag, dag.roots()[0], &[chelis_ir::dag::NodeId(0)]).is_none(),
+        "higher-order accumulation must not fall back to ordinary Sum"
+    );
+    let error = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap_err();
+    assert!(error.contains("nested invocation provenance"), "{error}");
+}
+
+#[test]
+fn list_capture_has_an_actual_axis_and_rejects_a_false_claim() {
+    let mut dag = Dag::new();
+    let owner = dag.declare("list_capture");
+    let source = dag.add_node(
+        owner,
+        RiscOp::Load { name: "s".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let carrier = dag.add_node(
+        owner,
+        RiscOp::Load { name: "xs".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("*".into(), None)],
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    let root = dag.add_node(
+        owner,
+        RiscOp::ListMapCapture { first: true },
+        vec![source, carrier],
+        TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(root);
+    assert!(chelis_ir::verify::verify(&dag).is_empty());
+    for count in [0, 2, 3, 4] {
+        let result = eval_tensor_roots_with_strict(&dag, dag.roots(), |name| match name {
+            "s" => Some(TensorValue::scalar(2.0)),
+            "xs" => Some(TensorValue::from_storage(
+                vec![count],
+                scalar_storage(vec![0; count]),
+            )),
+            _ => None,
+        });
+        if count == 3 {
+            assert_eq!(result.unwrap()[&root].to_f64_lossy_vec(), vec![2.0; 3]);
+        } else {
+            assert!(
+                result.is_err(),
+                "accepted carrier length {count} against a literal claim of 3"
+            );
+        }
+    }
+    for inputs in [vec![source], vec![carrier, source]] {
+        let mut malformed = dag.clone();
+        malformed.node_mut(root).unwrap().inputs = inputs;
+        assert!(!chelis_ir::verify::verify(&malformed).is_empty());
+    }
+    let mut malformed = dag.clone();
+    malformed.node_mut(root).unwrap().op = RiscOp::ListMapCapture { first: false };
+    assert!(!chelis_ir::verify::verify(&malformed).is_empty());
+    let second = dag.add_node(
+        owner,
+        RiscOp::ListMapCapture { first: true },
+        vec![source, carrier],
+        dag.get(root).unwrap().output_type.clone(),
+        None,
+    );
+    dag.add_root(second);
+    let optimized = chelis_ir::optimize::common_subexpr_eliminate(&dag);
+    assert_eq!(
+        optimized
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::ListMapCapture { .. }))
+            .count(),
+        2,
+        "independent List invocations cannot merge"
+    );
+    let loss = dag.add_node(
+        owner,
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![root],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let gradient = chelis_ir::grad::grad_dag(&dag, loss, &[root, source]).unwrap();
+    let values =
+        eval_tensor_roots_with_strict(&gradient.dag, gradient.dag.roots(), |name| match name {
+            "s" => Some(TensorValue::scalar(2.0)),
+            "xs" => Some(TensorValue::from_storage(
+                vec![3],
+                scalar_storage(vec![0; 3]),
+            )),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        values[&gradient.grad_nodes[&root]].to_f64_lossy_vec(),
+        vec![1.0; 3]
+    );
+    assert_eq!(
+        values[&gradient.grad_nodes[&source]].to_f64_lossy_vec(),
+        vec![3.0]
+    );
+}

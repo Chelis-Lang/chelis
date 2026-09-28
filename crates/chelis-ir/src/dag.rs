@@ -732,6 +732,22 @@ pub enum RiscOp {
     /// The runtime length is max(end-start, 0), checked in mathematical
     /// integers before allocation. Integer endpoints have no cotangent.
     Iota,
+    /// A scalar lexical read in a runtime List map. The first capture is the
+    /// invocation identity and reads its rank-one carrier in input 1. Later
+    /// captures name that first capture in input 1. CSE preserves identities.
+    /// Input 1's first axis supplies the result length in either case.
+    /// Unlike authored Expand, AD retains each consumer edge until it reaches
+    /// input 0, interleaving edges by invocation row before accumulation.
+    ListMapCapture {
+        first: bool,
+    },
+    /// spec/06 §2.4's positive-zero-prefixed, own-dtype adjacent-pair tree.
+    /// Each group consumes this many consecutive inputs. Rank-one inputs in
+    /// one group are interleaved row first, then input order; a scalar group
+    /// has exactly one input. Groups follow canonical forward order.
+    OrderedAdjointSum {
+        groups: Vec<usize>,
+    },
     // --- Binary elementwise ---
     Add,
     /// Direct element-wise subtraction. Integer execution checks the exact
@@ -1625,7 +1641,9 @@ impl RiscOp {
             // preconditions under [04-NUM-9], not callable Table-A operations.
             // Its tagged requirements and shape-only dependency are checked
             // by the IR verifier and the runtime-extent oracle.
-            Self::Iota
+            Self::ListMapCapture { .. }
+            | Self::OrderedAdjointSum { .. }
+            | Self::Iota
             | Self::ExtentWitness { .. }
             | Self::CheckedReshapeExtent { .. }
             | Self::CheckedUnitAxis { .. }
@@ -1986,7 +2004,10 @@ impl RiscOp {
             // index; it is an internal lowering marker (dag.rs) consumed
             // before backend emission and is not part of the numeric
             // forward-bound surface.
-            RiscOp::OneHot { .. } | RiscOp::Iota => false,
+            RiscOp::OneHot { .. }
+            | RiscOp::Iota
+            | RiscOp::ListMapCapture { .. }
+            | RiscOp::OrderedAdjointSum { .. } => false,
 
             // `Shape` reads a runtime axis extent as a discrete integer
             // scalar derived from tensor metadata, not a bound over the
@@ -2260,6 +2281,9 @@ impl DagNode {
         };
         match &self.op {
             RiscOp::Iota => RuntimeCheck::OperandValues,
+            RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
+                RuntimeCheck::Ungated
+            }
             RiscOp::Add | RiscOp::Sub | RiscOp::Mul | RiscOp::Neg | RiscOp::Abs => {
                 value_check(integer)
             }
@@ -3183,6 +3207,14 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
         name.is_empty() || name == "*"
     }
     match &node.op {
+        RiscOp::ListMapCapture { .. } => match node.output_type.dims.first() {
+            Some(DimInfo::Named(symbol, None))
+                if !is_anon(symbol) && shape_source_for_axis(dag, node.id, 0).is_none() =>
+            {
+                vec![(symbol.clone(), 0)]
+            }
+            _ => Vec::new(),
+        },
         RiscOp::Iota => match node.output_type.dims.first() {
             Some(DimInfo::Named(symbol, None)) if !is_anon(symbol) => vec![(symbol.clone(), 0)],
             _ => Vec::new(),
@@ -3253,7 +3285,7 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
 /// `axis_sources::check_rendered_dim_origins` refuses.
 pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
     match &node.op {
-        RiscOp::Iota => vec![0],
+        RiscOp::Iota | RiscOp::ListMapCapture { .. } => vec![0],
         RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => {
             (0..node.output_type.dims.len())
                 .filter(|axis| shape_source_for_axis(dag, node.id, *axis).is_none())

@@ -4120,6 +4120,52 @@ where
                     draw_keys(node, 2, &values)?,
                 )?
             }
+            RiscOp::ListMapCapture { .. } => {
+                let count = values[&node.inputs[1]].shape[0];
+                let source = &values[&node.inputs[0]];
+                TensorValue::from_storage(
+                    vec![count],
+                    source.storage().reuse_gather(&vec![0; count]),
+                )
+            }
+            RiscOp::OrderedAdjointSum { groups } => {
+                let mut leaves = vec![
+                    finalize_tensor(
+                        "adjoint",
+                        node.output_type.precision,
+                        RawTensor::Float(vec![0.0]),
+                    )
+                    .map_err(|e| e.to_string())?,
+                ];
+                let mut offset = 0;
+                for &width in groups {
+                    let inputs = &node.inputs[offset..offset + width];
+                    let count = values[&inputs[0]].len();
+                    if inputs.iter().any(|input| values[input].len() != count) {
+                        return Err("ordered List cotangent columns have different lengths".into());
+                    }
+                    for row in 0..count {
+                        for input in inputs {
+                            leaves.push(values[input].storage().reuse_gather(&[row]));
+                        }
+                    }
+                    offset += width;
+                }
+                while leaves.len() > 1 {
+                    leaves = leaves
+                        .chunks(2)
+                        .map(|pair| {
+                            if pair.len() == 1 {
+                                Ok(pair[0].clone())
+                            } else {
+                                float_tensor_binop(FloatBinOp::Add, &pair[0], &pair[1])
+                                    .map_err(|e| e.to_string())
+                            }
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                }
+                TensorValue::from_storage(vec![], leaves.pop().expect("positive-zero base"))
+            }
             RiscOp::Iota => {
                 let endpoint = |slot| {
                     values[&node.inputs[slot]]

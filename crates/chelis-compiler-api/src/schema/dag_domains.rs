@@ -256,7 +256,9 @@ pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
         ),
         WireRiscOp::Stride { strides } => bounds(ExtentSlot::StrideStep, &mut strides.iter()),
         WireRiscOp::SplitN { count } => bounds(ExtentSlot::SplitCount, &mut std::iter::once(count)),
-        WireRiscOp::Iota
+        WireRiscOp::ListMapCapture { .. }
+        | WireRiscOp::OrderedAdjointSum { .. }
+        | WireRiscOp::Iota
         | WireRiscOp::Add
         | WireRiscOp::Sub
         | WireRiscOp::Mul
@@ -670,7 +672,7 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                 // [05-OP-71]: a split's count axis, as an expansion's size;
                 // the split checks it before any key exists.
                 WireRiscOp::SplitN { .. } => result_axis + 1 == node.output_type.dims.len(),
-                WireRiscOp::Iota => result_axis == 0,
+                WireRiscOp::Iota | WireRiscOp::ListMapCapture { .. } => result_axis == 0,
                 _ => same_shape_result_relation_is_supported(dag, node),
             };
             if !supported || result_axis >= node.output_type.dims.len() {

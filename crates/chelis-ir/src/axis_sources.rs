@@ -418,6 +418,11 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
     let rank = node.output_type.dims.len();
     match &node.op {
         RiscOp::Iota => op_computed(id, rank),
+        RiscOp::ListMapCapture { .. } => vec![AxisSource::InputAxis {
+            input: 1,
+            axis: RtAxis::Lit(0),
+        }],
+        RiscOp::OrderedAdjointSum { .. } => vec![],
         // --- Binary and unary elementwise: shape preserving ---
         RiscOp::Add
         | RiscOp::Sub
@@ -1592,11 +1597,11 @@ fn axis_claim(dim: &DimInfo) -> Option<DimClaim> {
 /// A set axis and a pass-through axis can both carry `AxisSource::InputAxis`,
 /// because a folded `shape()` read is exactly "this axis's extent is that
 /// tensor's axis". They are distinguished here rather than by inspecting the
-/// variant, and the match is deliberately small: `Expand` and `Reshape` are
-/// the only owners whose `RtDim` may be `InputAxis` (C1.7's owner matrix), so
-/// every other `InputAxis` source is a forwarded axis.
+/// variant. Expand, Reshape, and ListMapCapture insert or set axes; the
+/// latter reads its invocation carrier's first axis rather than an RtDim.
 fn sets_axis(op: &RiscOp, axis: usize) -> bool {
     match op {
+        RiscOp::ListMapCapture { .. } => axis == 0,
         RiscOp::Expand { axis: set, .. } => axis == *set,
         // A `Reshape` target mints a fresh extent only when it computes one.
         // C4.2 lists the four target carriers, and C2.4 says a reshape-only
@@ -1629,6 +1634,10 @@ fn sets_axis(op: &RiscOp, axis: usize) -> bool {
 /// extent, and `sets_axis` does not make either a witness on a `Reshape`.
 pub(crate) fn expand_or_reshape_carrier(op: &RiscOp, axis: usize) -> Option<&RtDim> {
     let carrier = match op {
+        RiscOp::ListMapCapture { .. } if axis == 0 => &RtDim::InputAxis {
+            tensor: 1,
+            axis: RtAxis::Lit(0),
+        },
         RiscOp::Expand { axis: set, size } if axis == *set => size,
         RiscOp::Reshape { new_shape } => new_shape.get(axis)?,
         _ => return None,

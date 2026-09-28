@@ -714,7 +714,9 @@ fn classify_nodes(
                         source: node.inputs[0],
                     },
                 },
-                RiscOp::Iota
+                RiscOp::ListMapCapture { .. }
+                | RiscOp::OrderedAdjointSum { .. }
+                | RiscOp::Iota
                 | RiscOp::Const { .. }
                 | RiscOp::ConstTensor { .. }
                 | RiscOp::Shape { .. }
