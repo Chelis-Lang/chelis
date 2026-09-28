@@ -50,19 +50,31 @@ def assert_hosted_coverage(test, workflow, nightly):
         test.assertEqual(len(steps), 1, command)
         test.assertEqual(steps[0].get("if"), "matrix.shard == 1")
         test.assertFalse(steps[0].get("continue-on-error", False))
-    # The featureless workspace run skips the ownership-ledger targets, so
-    # shard 1 runs the gate's commands verbatim. The CLI command rebuilds
-    # ./target/debug/chelis, which shard 2's smoke steps run.
-    for command in (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS):
-        steps = [step for step in macos["steps"] if step.get("run") == " ".join(command)]
-        test.assertEqual(len(steps), 1, command)
-        test.assertEqual(steps[0].get("if"), "matrix.shard == 1")
-        test.assertFalse(steps[0].get("continue-on-error", False))
+    # The featureless workspace shards skip the ownership-ledger targets, so
+    # their own job runs the gate's commands verbatim, the CLI command last
+    # because it rebuilds ./target/debug/chelis.
+    ledger = jobs["macos-ownership-ledger"]
+    test.assertEqual(ledger["runs-on"], "macos-latest")
+    test.assertNotIn("if", ledger)
+    test.assertFalse(ledger.get("continue-on-error", False))
+    commands = [step.get("run") for step in ledger["steps"] if step.get("run", "").startswith("cargo ")]
+    test.assertEqual(
+        commands,
+        [" ".join(gate.OWNERSHIP_LEDGER_API_TESTS), " ".join(gate.OWNERSHIP_LEDGER_CLI_TESTS)],
+    )
+    for step in ledger["steps"]:
+        test.assertNotIn("if", step)
+        test.assertFalse(step.get("continue-on-error", False))
     aggregate = jobs["macos-smoke"]
     test.assertIn("macos-workspace-shard", aggregate["needs"])
+    test.assertIn("macos-ownership-ledger", aggregate["needs"])
     test.assertEqual(aggregate.get("if"), "always()")
     test.assertFalse(aggregate.get("continue-on-error", False))
-    command = "python3 scripts/ci_require_success.py macos-workspace-shard=${{ needs.macos-workspace-shard.result }}"
+    command = (
+        "python3 scripts/ci_require_success.py"
+        " macos-workspace-shard=${{ needs.macos-workspace-shard.result }}"
+        " macos-ownership-ledger=${{ needs.macos-ownership-ledger.result }}"
+    )
     steps = [step for step in aggregate["steps"] if step.get("run") == command]
     test.assertEqual(len(steps), 1)
     test.assertNotIn("if", steps[0])
@@ -165,17 +177,17 @@ class HostedCoverageTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     assert_hosted_coverage(self, self.workflow, workflow)
 
-    def test_ownership_ledger_must_run_on_macos_shard_one_as_the_gate_spells_it(self):
+    def test_ownership_ledger_must_run_on_macos_as_the_gate_spells_it(self):
         for command in (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS):
-            for change in ("missing", "shard-two", "ignore-failure", "profile"):
+            for change in ("missing", "skipped", "ignore-failure", "profile"):
                 with self.subTest(command=command[4], change=change):
                     workflow = copy.deepcopy(self.nightly)
-                    steps = workflow["jobs"]["macos-workspace-shard"]["steps"]
+                    steps = workflow["jobs"]["macos-ownership-ledger"]["steps"]
                     step = next(step for step in steps if step.get("run") == " ".join(command))
                     if change == "missing":
                         steps.remove(step)
-                    elif change == "shard-two":
-                        step["if"] = "matrix.shard == 2"
+                    elif change == "skipped":
+                        step["if"] = "false"
                     elif change == "ignore-failure":
                         step["continue-on-error"] = True
                     else:
@@ -183,8 +195,19 @@ class HostedCoverageTests(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         assert_hosted_coverage(self, self.workflow, workflow)
 
+    def test_the_ledger_cli_command_runs_after_the_compiler_api_command(self):
+        workflow = copy.deepcopy(self.nightly)
+        steps = workflow["jobs"]["macos-ownership-ledger"]["steps"]
+        api, cli = (
+            next(index for index, step in enumerate(steps) if step.get("run") == " ".join(command))
+            for command in (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS)
+        )
+        steps[api], steps[cli] = steps[cli], steps[api]
+        with self.assertRaises(AssertionError):
+            assert_hosted_coverage(self, self.workflow, workflow)
+
     def test_macos_producer_and_aggregate_cannot_be_skipped_or_made_nonblocking(self):
-        for job_name in ("macos-workspace-shard", "macos-smoke"):
+        for job_name in ("macos-workspace-shard", "macos-ownership-ledger", "macos-smoke"):
             for key, value in (("if", "false"), ("continue-on-error", True)):
                 with self.subTest(job=job_name, key=key):
                     workflow = copy.deepcopy(self.nightly)
@@ -193,7 +216,7 @@ class HostedCoverageTests(unittest.TestCase):
                         assert_hosted_coverage(self, self.workflow, workflow)
 
     def test_macos_aggregate_must_enforce_the_shard_result(self):
-        for change in ("remove", "skip", "ignore-failure", "wrong-result"):
+        for change in ("remove", "skip", "ignore-failure", "wrong-result", "wrong-ledger-result"):
             with self.subTest(change=change):
                 workflow = copy.deepcopy(self.nightly)
                 steps = workflow["jobs"]["macos-smoke"]["steps"]
@@ -204,8 +227,10 @@ class HostedCoverageTests(unittest.TestCase):
                     step["if"] = "false"
                 elif change == "ignore-failure":
                     step["continue-on-error"] = True
-                else:
+                elif change == "wrong-result":
                     step["run"] = step["run"].replace("needs.macos-workspace-shard.result", "needs.changes.result")
+                else:
+                    step["run"] = step["run"].replace("needs.macos-ownership-ledger.result", "needs.changes.result")
                 with self.assertRaises(AssertionError):
                     assert_hosted_coverage(self, self.workflow, workflow)
 

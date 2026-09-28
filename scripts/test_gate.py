@@ -2430,7 +2430,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("if: matrix.shard == 2", shard_block)
         self.assertIn("name: macOS Smoke", aggregate_block)
         self.assertIn(
-            "needs: [macos-workspace-shard]", aggregate_block
+            "needs: [macos-workspace-shard, macos-ownership-ledger]", aggregate_block
         )
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 
