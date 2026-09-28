@@ -479,8 +479,8 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-backend-c/src/host_emit.rs",
-        1,
-        "proven-structural: tensor-helper root count floor (max(1))",
+        0,
+        "chelis#1361: verified output types replace the missing-helper count fallback",
     ),
     (
         Pat::UnwrapOrNumericLiteral,

@@ -3424,3 +3424,8 @@ packages = ["tree-sitter-chelis"]
 prefix = "grammars/tree-sitter-chelis-deep/"
 disposition = "packages"
 packages = ["tree-sitter-chelis"]
+
+[[path_rule]]
+prefix = "examples/grad_host_results.ch"
+disposition = "packages"
+packages = ["chelis-cli"]

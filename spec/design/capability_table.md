@@ -642,3 +642,15 @@ in the §C6 family registry. Neither path is a grandfathered exemption.
 [#1313]: https://github.com/Chelis-Lang/chelis/issues/1313
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
 [#2339]: https://github.com/Chelis-Lang/chelis/issues/2339
+
+### C tensor-helper result materialization
+
+The host boundary materializes each verified tensor-helper output according to its
+resolved host result type. Numeric and bool scalars use [05-OP-31]'s exact tagged
+extraction; scalar keys use the key carrier. Rank-zero tensor results retain their
+tensor identity. Tuples reconstruct their fields in output order and transfer each
+output owner once. A rank, dtype, or result-arity disagreement is a codegen error.
+`host_tensor_results` executes the scalar dtype matrix, rank-zero and tuple controls;
+`issue_1361_host_results` checks scalar-gradient consumption on Eval and native C.
+This boundary does not add first-class transform support. Random calls take explicit
+keys; spec/02 §P5a rejects the retired `with seed` handler.
