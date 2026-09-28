@@ -300,6 +300,44 @@ fn bitwise_grad_rejects_a_selected_discrete_path() {
     }
 }
 
+/// [05-OP-47], [05-OP-63], [06] §7.5: a comparison sends zero cotangents
+/// through its operands, but does not erase a forbidden selected conversion.
+/// The same forward bitwise predicate is valid when its integer input is
+/// independent of the differentiated parameter.
+#[test]
+fn bitwise_grad_comparison_keeps_selected_cast_rejection() {
+    for op in ["bitand", "bitor", "bitxor", "shl", "shr"] {
+        let selected = format!(
+            "def loss(x: tensor[f32]) -> tensor[f32] = if eq({op}(cast(tensor_to_scalar(x), i32), 1i32), 0i32) then mul(x, scalar_to_tensor(2.0f32)) else mul(x, scalar_to_tensor(3.0f32))\n\
+             out = print((grad(loss))(scalar_to_tensor(2.0f32)))\n"
+        );
+        let eval_error = eval_first_line(&selected).expect_err("selected cast must reject");
+        assert!(
+            eval_error.contains("cast") && eval_error.contains("non-differentiable"),
+            "{op}: {eval_error}"
+        );
+        let (built, c_error, _) = c_build_outcome(&selected, &format!("selected_control_{op}"));
+        assert!(
+            !built && c_error.contains("cast") && c_error.contains("non-differentiable"),
+            "{op}: {c_error}"
+        );
+
+        let independent = format!(
+            "def loss(x: tensor[f32], n: i32) -> tensor[f32] = if eq({op}(n, 1i32), 0i32) then mul(x, scalar_to_tensor(2.0f32)) else mul(x, scalar_to_tensor(3.0f32))\n\
+             out = print((grad(loss, wrt=x))(scalar_to_tensor(2.0f32), 2i32))\n"
+        );
+        let expected = if op == "bitand" { "2.0" } else { "3.0" };
+        assert_eq!(
+            eval_first_line(&independent).expect("independent control"),
+            expected
+        );
+        assert_eq!(
+            c_first_line(&independent, &format!("independent_control_{op}")),
+            expected
+        );
+    }
+}
+
 #[test]
 fn bitwise_vmap_reports_first_negative_count() {
     for op in ["shl", "shr"] {
