@@ -1236,6 +1236,13 @@ prefix = "examples/signed_seed.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
 
+# The keyed state wrapper is executed by chelis-cli::key_pair_host_staging and
+# chelis-cli::parity, and enters the executable and formatter corpora.
+[[path_rule]]
+prefix = "examples/keyed_state_wrapper.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 # Illustrative source read by chelis-e2e::example_corpus_validate and
 # chelis-surf's fmt_idempotent_on_repo_ch_corpus.
 [[path_rule]]
