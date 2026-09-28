@@ -2374,7 +2374,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const",
-      "sample": "float fill_val = chelis_f32_from_bits(0x{bits:08x}u);"
+      "sample": "float fill_val = chelis_f32_from_bits(0x{:08x}u);"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const_tensor",
@@ -2681,18 +2681,6 @@
       "sample": "{DEVICE_HELPERS}extern \"C\" __global__ void {kernel_name}( const {index_ty} *indices, const float ..."
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/dtype.rs|owner=host_const_fill_body",
-      "sample": "{{ float *p = (float*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = {value_lit}; }}"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan >::emit_binary",
-      "sample": "{{ __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {}, {out_buf} }}; chelis_metal_launch({pso_..."
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan >::emit_reduce",
-      "sample": "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; chelis_metal_launch({pso_var}..."
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan >::emit_root_writeback",
       "sample": "{{ int64_t shape_{idx}[{}] = {{ {shape_lit} }};"
     },
@@ -2702,7 +2690,7 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan >::emit_unary",
-      "sample": "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; chelis_metal_launch({pso_var}..."
+      "sample": "if (*((uint32_t*)[{status} contents]) != 0) chelis_numeric_trap({trap:?});"
     },
     {
       "identity": "kind=narrow-metadata|path=crates/chelis-python/src/lib.rs|owner=DLTensor::ndim",

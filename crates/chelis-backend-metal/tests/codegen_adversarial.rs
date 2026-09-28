@@ -63,8 +63,7 @@ fn assert_emits_real_kernel(src: &str, label: &str) {
 fn m7_zero_element_tensor_does_not_panic() {
     // n=0 is a corner case for the host-side memcpy and the device buffer.
     // The runtime header bumps zero-length allocations to 1 byte, so the
-    // pipeline shouldn't crash; the kernel's `if (tid >= n) return;` guard
-    // means no thread does work.
+    // output remains allocated, while shared launch planning emits no work.
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -87,6 +86,7 @@ fn m7_zero_element_tensor_does_not_panic() {
     let result = codegen_metal(&dag, "zero");
     let src = &result.mm_source;
     assert_emits_real_kernel(src, "zero-element add");
+    assert!(!src.contains("chelis_metal_launch("), "{src}");
     // Allocation bytes should be `0u * sizeof(float)` — runtime tolerates 0.
     assert!(
         src.contains("0u * sizeof(float)"),

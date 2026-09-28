@@ -1,0 +1,1 @@
+Fix exact integer `abs` on HIP and Metal at every signed width, preserving minimum-value overflow traps and integer-weight gradients. Device integer-to-float casts round once at the target width, and integer constants retain their exact values. Empty Metal pointwise outputs retain their shape without issuing a zero-work dispatch.
