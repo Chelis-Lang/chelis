@@ -582,13 +582,6 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::RustFormatNarrowing,
-        "crates/chelis-e2e/src/bench.rs",
-        2,
-        "bench verdict notes (accuracy gap, tolerance target) - report \
-         prose, not stored-value rendering",
-    ),
-    (
-        Pat::RustFormatNarrowing,
         "crates/chelis-e2e/src/bin/train_mnist.rs",
         5,
         "training progress prints (loss/accuracy at {:.4}) - a manual \

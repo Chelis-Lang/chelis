@@ -6,11 +6,9 @@ Build the Chelis programming language from zero to MNIST-on-CPU and beyond.
 This plan is written for a small team working with coding agents.
 Each phase has a concrete deliverable, verification target, and red-team checkpoint.
 
-**Current status:** Phase 0 complete.
-Phases 0a-0i complete.
-Phases 1a-1f implemented.
-Phase 1 is structurally complete for its shipped fixed-workload deliverable, with known
-backend limitations carried forward explicitly rather than treated as hidden blockers.
+Phase 0 provides the language and CPU foundation. Phase 1 provides the HIP
+backend and executable grammar validator, subject to the backend limitations
+below.
 
 **Repo:** `chelis-lang/chelis` (Rust workspace)
 **Domain:** `chelis.ch`
@@ -31,7 +29,7 @@ backend limitations carried forward explicitly rather than treated as hidden blo
 | **0g** | `grad` transformation (reverse-mode AD on DAG) | ✅ Complete |
 | **0h** | End-to-end: MNIST on CPU + spec test suite | ✅ Complete |
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
-| **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | Structurally complete with known limitations carried forward |
+| **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | HIP backend and validator available; [target gates](../../docs/phase_oracles.md) |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
 | **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, data loading/tokenization, `Std.Time`/`Std.Decimal`, SKILL.md v2 |  |
 | **4** | ML & AI coding: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
@@ -143,16 +141,13 @@ Interactive execution policy:
 **Deliverable:** GPU execution through a single HIP backend plus executable grammar
 validation tooling.
 
-**Current shipped boundary:** the HIP backend work through Phase 1e is in `main`.
-That includes HIP code generation, fusion, device memory planning, segmented and staged
-reduction paths, hipBLAS-backed specialization for contiguous rank ≥ 2 `f32` matmul, and the
-fixed-workload benchmark oracle with checked-in results. `chelis validate` from 1f is
-now shipped too. The fixed Phase 1e benchmark set (`mnist`, `linreg`,
-`transformer_block`) compiles and runs on both backends, so the intended Phase 1
-deliverable is met for the shipped models.
+**Backend and validator coverage:** The HIP backend provides code generation, fusion,
+device memory planning, segmented and staged reductions, and hipBLAS-backed
+specialization for contiguous rank ≥ 2 `f32` matmul. `chelis validate` provides
+executable grammar validation. Backend correctness is exercised through the
+target-specific tests and manual gates in [`docs/phase_oracles.md`](../../docs/phase_oracles.md).
 
-**Known carried-forward limitations:** these are real debt and must stay documented, but
-they do not block Phase 2 language work.
+**Backend limitations:**
 
 - symbolic dimensions are implemented on the stable tensor ABI in both backends, so
   supported Phase 1 models bind batch/sequence-style dims from input metadata at runtime
@@ -189,17 +184,6 @@ and Tide tooling.
 - specialize contiguous rank ≥ 2 `f32` matmul patterns to hipBLAS-backed helpers
 - keep irregular flattening/autotuning out of Phase 1d
 
-### 1e: Benchmarks and Real Models
-
-- benchmark fixed executable workloads already supported by the shipped surface
-- current benchmark set: MNIST MLP, linear regression, transformer-block-style forward pass
-- compare against the reference C backend for correctness
-- keep PyTorch as a local/manual comparison dependency through the repo `py/` env, not a CI requirement
-- target credibility, not premature parity with PyTorch
-
-Phase 1e is now implemented through `chelis-e2e`'s `bench_phase1e` oracle and the
-checked-in `benchmarks/results/latest.json` / `benchmarks/RESULTS.md` artifacts.
-
 ### 1f: Executable Grammar
 
 - `chelis validate --surf file.ch`
@@ -213,7 +197,7 @@ It is not a proposal to rewrite the Surf parser.
 
 ## Phase 2
 
-**Prerequisite:** the shipped Phase 1 fixed-workload deliverable is in place.
+**Prerequisite:** the Phase 1 HIP backend and grammar validator are available.
 **Deliverable:** language maturity features and interactive tooling.
 The detailed implementation plan lives in `spec/design/chelis_phase2_plan.md`.
 
@@ -223,10 +207,8 @@ PyTorch for specific workloads. A researcher should be able to write, type-check
 differentiate, compile, train, and debug a model - with AI assistance - using only the
 Chelis toolchain.
 
-**Carry-forward fixes before Phase 2 proper:** symbolic dimensions in both backends
-and the Deep dotted path round-trip gap. These are explicit debt from the shipped
-Phase 1 boundary, not hidden blockers. (HIP/Metal `pad`/`shrink`, formerly listed
-here, are implemented and verified by the `gpu_correctness` oracle.)
+**Backend and syntax dependencies:** symbolic dimensions in both backends
+and Deep dotted path round-tripping.
 
 **Critical path:** 2a -> 2b -> 2c. The Tide tooling track (2e -> 2f -> 2g) can run in
 parallel with the type-system track once 2e has enough compiler API surface.
@@ -235,7 +217,7 @@ parallel with the type-system track once 2e has enough compiler API surface.
 
 | Sub-phase | Doc | Summary |
 |---|---|---|
-| Phase 1 carry-forward fixes | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Symbolic dims, dotted Deep round-trip (HIP/Metal `pad`/`shrink` done — `gpu_correctness` oracle) |
+| Phase 1 dependencies | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Symbolic dimensions and dotted Deep round-tripping |
 | 2a: Algebraic Effects | [chelis_phase2_plan.md](chelis_phase2_plan.md) | shipped subset: `Random` / `Resource(D)` boundary effects, `Diff` as capability, `Accum` internal-only |
 | 2b: Linear Types | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Lightweight uniqueness, borrowing, explicit `copy`, safe buffer reuse |
 | 2c: Macro System | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Hygienic expansion before all LLM-facing operations, provenance metadata |

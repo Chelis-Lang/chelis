@@ -639,7 +639,6 @@ version = "0.18.11"
 dependencies = [
  "assert_cmd",
  "chelis-backend-c",
- "chelis-backend-hip",
  "chelis-compiler-api",
  "chelis-deep",
  "chelis-effects",

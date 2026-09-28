@@ -1,6 +1,11 @@
 # Phase 1e Results
 
-Authoritative oracle:
+Historical capture from April 2026. The Phase 1e runner and PyTorch scripts have
+been retired; the commands and setup below describe the original capture and do
+not run on current `main`. The [JSON report](results.json) preserves its raw
+measurements and skip reasons.
+
+Original oracle:
 
 ```sh
 cargo run --release -p chelis-e2e --bin bench_phase1e -- --model all --emit-json benchmarks/results/latest.json
@@ -17,7 +22,7 @@ CI policy:
 
 - `cargo test --workspace` does not install PyTorch.
 - When the repo-local benchmark Python env is absent, Phase 1e emits explicit PyTorch `skipped` reports with a setup hint.
-- Checked-in `benchmarks/results/latest.json` is the manual local comparison artifact.
+- The archived `results.json` is the manual local comparison artifact.
 
 ## Capture
 
@@ -50,7 +55,7 @@ CI policy:
 - These timings measure the benchmarked train/forward execution loops after benchmark data loading, tensor allocation/setup, and parameter initialization; they are not isolated kernel timings.
 - The PyTorch comparison scripts now run on ROCm GPU when `torch.cuda.is_available()` succeeds in the repo-local env.
 - The benchmark runner strips the stale `HSA_OVERRIDE_GFX_VERSION=11.0.0` shell override before invoking PyTorch; without that cleanup this machine misreports as `gfx1100` and the ROCm PyTorch lane fails with an invalid kernel image.
-- Timings vary noticeably between captures; `benchmarks/results/latest.json` is the authoritative machine-readable artifact for the exact measured run.
+- Timings vary noticeably between captures; `results.json` is the machine-readable artifact for the exact measured run.
 - The HIP lane beats the generated CPU lane on the two training workloads in this capture.
 - The transformer forward workload is still slower on HIP than on the generated CPU lane in this capture; Phase 1e accepts that because correctness and architecture validation are the primary gate.
-- `benchmarks/results/latest.json` is the machine-readable source of truth for the recorded metrics and explicit skip reasons.
+- `results.json` is the machine-readable source of truth for the recorded metrics and explicit skip reasons.

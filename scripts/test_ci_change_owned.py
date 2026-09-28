@@ -1052,7 +1052,6 @@ class SchemaTests(unittest.TestCase):
             "editors/",
             "nix/",
             "devenv/",
-            "benchmarks/",
         }
         self.assertFalse(
             broad_unsupported & {rule.prefix for rule in config.path_rules}

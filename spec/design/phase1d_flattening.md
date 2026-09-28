@@ -96,6 +96,5 @@ Supporting evidence:
 
 ### Deferred Follow-Ups
 
-- benchmark the optimized reduction and hipBLAS paths against the C backend and PyTorch (Phase 1e)
 - add monotonic-threshold autotuning once the kernel selection surface is stable
 - consider LMAD-style memory-layout reasoning only if profiling shows coalescing/layout is the next bottleneck

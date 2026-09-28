@@ -1,5 +1,9 @@
 # Phase 1: Futhark-Style GPU Backend — Expanded Plan
 
+Historical plan only. Current backend gates are indexed in
+[`docs/phase_oracles.md`](../../../docs/phase_oracles.md); the Phase 1e
+fixed-workload runner has been retired.
+
 ## Context
 
 Phase 1 extends the Chelis compiler to target GPUs via HIP. The architecture follows Futhark: the compiler emits C host code with embedded HIP kernel strings. At runtime, `hiprtc` JIT-compiles the kernel strings and dispatches them to whatever GPU is present. HIP runs natively on AMD GPUs and targets NVIDIA GPUs via HIP's CUDA translation layer — one kernel emitter, both vendors.
@@ -90,13 +94,13 @@ The fusion pass lives in `chelis-ir` (not the HIP backend) because fusion is a D
 
 | Sub-phase | Doc | Summary |
 |---|---|---|
-| Symbolic Dimensions | [phase1_symbolic_dims.md](phase1_symbolic_dims.md) | IR supports `Concrete \| Symbolic` dims; do first to unblock GPU backend |
-| 1a: Kernel Codegen | [phase1a_kernel_codegen.md](phase1a_kernel_codegen.md) | Single RISC op → HIP kernel, runs on GPU, correct output |
-| 1b: Fusion | [phase1b_fusion.md](phase1b_fusion.md) | Adjacent DAG nodes → single kernel launches |
-| 1c: Memory Planning | [phase1c_memory_planning.md](phase1c_memory_planning.md) | Buffer reuse, minimize host↔device transfers |
-| 1d: Optimized Reductions + hipBLAS | [phase1d_flattening.md](phase1d_flattening.md) | Optimized reductions, hipBLAS, thread block sizing (no flattening needed) |
+| Symbolic Dimensions | [phase1_symbolic_dims.md](../phase1_symbolic_dims.md) | IR supports `Concrete \| Symbolic` dims; do first to unblock GPU backend |
+| 1a: Kernel Codegen | [phase1a_kernel_codegen.md](../phase1a_kernel_codegen.md) | Single RISC op → HIP kernel, runs on GPU, correct output |
+| 1b: Fusion | [phase1b_fusion.md](../phase1b_fusion.md) | Adjacent DAG nodes → single kernel launches |
+| 1c: Memory Planning | [phase1c_memory_planning.md](../phase1c_memory_planning.md) | Buffer reuse, minimize host↔device transfers |
+| 1d: Optimized Reductions + hipBLAS | [phase1d_flattening.md](../phase1d_flattening.md) | Optimized reductions, hipBLAS, thread block sizing (no flattening needed) |
 | 1e: Benchmarks | [phase1e_benchmarks.md](phase1e_benchmarks.md) | Fixed MNIST + linreg + transformer workloads, recorded perf/correctness |
-| 1f: Executable Grammar | [phase1f_executable_grammar.md](phase1f_executable_grammar.md) | PEG-based `chelis validate` conformance tool |
+| 1f: Executable Grammar | [phase1f_executable_grammar.md](../phase1f_executable_grammar.md) | PEG-based `chelis validate` conformance tool |
 
 ---
 

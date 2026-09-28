@@ -194,7 +194,7 @@ Authoritative Phase 1a oracle:
 cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
 ```
 
-Current implementation:
+HIP kernel execution:
 
 - kernel source strings for the Phase 1a execution surface:
   elementwise ops, reductions, fill, and cast
@@ -238,7 +238,7 @@ Authoritative Phase 1c oracle:
 cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
 ```
 
-Current implementation:
+HIP memory planning:
 
 - greedy slot reuse for non-overlapping storage lifetimes in `chelis-backend-hip/src/memory.rs`
 - unique input copies transferred once, with repeated `Load(name)` nodes aliasing the first copy
@@ -270,37 +270,6 @@ Current implementation:
 - non-contiguous matmul-shaped DAGs fall back to the generic reduction path
 - `chelis build --target hip` surfaces the required `-lhipblas` link flag when hipBLAS specialization is emitted
 
-### Phase 1e: Benchmarks and Reference Comparison (complete)
-
-Authoritative Phase 1e oracle:
-
-```sh
-cargo run --release -p chelis-e2e --bin bench_phase1e -- --model all --emit-json benchmarks/results/latest.json
-```
-
-Current implementation:
-
-- fixed-workload benchmark runner in `chelis-e2e`, not a general-purpose harness
-- real compiled-backend execution for Chelis CPU and Chelis HIP benchmark lanes
-- executable benchmark examples for linear regression and a transformer-block-style forward path
-- checked-in PyTorch reference scripts under `benchmarks/pytorch/`
-- benchmark PyTorch lane resolves through `CHELIS_BENCH_PYTHON` or the repo-local `py/.venv`
-  prepared with the gfx1151 ROCm nightly install command documented in `benchmarks/RESULTS.md`
-- PyTorch benchmark invocations strip stale `HSA_OVERRIDE_GFX_VERSION` shell overrides and
-  export the ROCm SDK library path needed by the nightly wheel set
-- checked-in benchmark artifacts:
-  - `benchmarks/results/latest.json`
-  - `benchmarks/RESULTS.md`
-- benchmark scope constrained to the shipped op surface:
-  - `linreg` training
-  - `mnist` training + inference on a fixed subset
-  - `transformer` forward pass
-- missing HIP, PyTorch, or MNIST dataset prerequisites are surfaced as explicit skips in the emitted JSON rather than aborting the oracle
-- CI keeps PyTorch out of the default gate; the local checked-in artifact is the PyTorch comparison proof
-- the full `bench_phase1e --model all` integration test is `#[ignore]` and run manually via
-  `cargo test -p chelis-e2e --test bench_phase1e -- --ignored`; the default workspace gate
-  keeps only the fast structural smoke coverage
-
 ### Phase 1f: Executable Grammar (complete)
 
 Authoritative Phase 1f oracle:
@@ -309,7 +278,7 @@ Authoritative Phase 1f oracle:
 cargo test -p chelis-e2e --test example_corpus_validate
 ```
 
-Current implementation:
+Executable grammar validation:
 
 - `chelis validate --surf file.ch` validates Surf syntax against the PEG conformance grammar
 - `chelis validate --deep file.dp` validates Deep syntax plus the closed tag/metadata/arity rules
@@ -318,10 +287,8 @@ Current implementation:
 - the oracle suite checks agreement across executable examples, illustrative syntax examples,
   `SKILL.md`, curated positive spec fixtures, and curated negative fixtures
 
-Phase 1 implementation work is now present through 1f.
-The shipped fixed-workload Phase 1 deliverable is met: the benchmark models used by
-Phase 1e compile and run on both backends, and the executable-grammar surface from 1f
-is shipped. Known carried-forward limitations remain explicit:
+GPU execution and executable grammar validation have dedicated tests and manual gates.
+Backend limitations:
 
 - symbolic dimensions are implemented on the stable tensor ABI for both backends:
   generated functions bind symbolic names from input tensor metadata at runtime and

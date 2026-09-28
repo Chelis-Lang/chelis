@@ -43,7 +43,7 @@ The transfer plan is a list of `(tensor, direction, timing)` triples emitted alo
 
 **Memory coalescing and layout transformations:**
 
-`permute` and `reshape` are currently metadata-only operations (stride reordering, shape change). On GPU, this means data stays in its original memory layout and kernels read via strided indexing. That's correct but can be slow — non-coalesced memory access on GPU is a significant performance penalty. The pragmatic Phase 1 approach: always use strided indexing (correct, simple), profile, and add physical transposition only where non-coalesced access is measured as a bottleneck. Don't try to build a full memory descriptor system for Phase 1. Track coalescing as a profiling target in Phase 1e.
+`permute` and `reshape` are currently metadata-only operations (stride reordering, shape change). On GPU, this means data stays in its original memory layout and kernels read via strided indexing. That's correct but can be slow — non-coalesced memory access on GPU is a significant performance penalty. The pragmatic Phase 1 approach: always use strided indexing (correct, simple), profile, and add physical transposition only where non-coalesced access is measured as a bottleneck. Don't try to build a full memory descriptor system for Phase 1.
 
 **Memory budget mode (stretch goal):**
 
