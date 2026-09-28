@@ -712,7 +712,7 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        30,
+        29,
         "chelis#1650 removed five List-conversion Debug interpolations; \
          declared derived-Debug residue carriers: Err(format!) \
          type-mismatch diagnostics over Value/Prim shapes, the tensor \
@@ -722,7 +722,9 @@ const BASELINE: &[Entry] = &[
          pad_sequences_to diagnostics; Phase 2 deleted eleven more \
          closure-dispatch mismatch/debug paths when host arithmetic moved \
          to typed kernel errors; chelis#1299 removed two obsolete 2D \
-         shape-debug diagnostics when convolution became rank-generic",
+         shape-debug diagnostics when convolution became rank-generic; \
+         chelis#2631 consolidated two bitwise/shift mismatch diagnostics \
+         into one shared tagged-kernel dispatcher",
     ),
     (
         Pat::RustDebugNumericFormat,
