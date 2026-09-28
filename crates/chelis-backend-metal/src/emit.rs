@@ -264,6 +264,7 @@ pub(crate) fn allocation_nodes(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
                 | RiscOp::Relu
                 | RiscOp::Add
                 | RiscOp::Mul
+                | RiscOp::Bitwise(_)
                 | RiscOp::ReluAdjoint
                 | RiscOp::Sum { axis: 0, .. }
                 | RiscOp::MaxReduce { axis: 0 }
@@ -296,7 +297,6 @@ pub(crate) fn emit_verified_dag(
     func_name: &str,
 ) -> Result<EmitResult, Unsupported> {
     let dag = plan.dag();
-    reject_bitwise(dag)?;
     reject_direct_nonnumeric(dag)?;
     reject_guarded_fail(dag)?;
     reject_f64(dag)?;
@@ -346,23 +346,6 @@ fn reject_direct_nonnumeric(dag: VerifiedDagView<'_>) -> Result<(), Unsupported>
             "the Metal exact comparison, Bool8 logical, and raw stored-bit where kernels are not implemented; use `--target c` or `--target hip`"
         ),
     ))
-}
-
-fn reject_bitwise(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
-    for node in dag.nodes() {
-        if let RiscOp::Bitwise(kind) = node.op {
-            return Err(Unsupported::new(
-                UnsupportedKind::Op(kind.name().to_string()),
-                format!("the Metal kernel set (node {})", node.id.0),
-                Stage::Codegen("metal"),
-                chelis_types::unimplemented_rejection!(
-                    2702,
-                    "exact signed-width bitwise tensor kernels have no Metal implementation; select the C target"
-                ),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// chelis#1464 / [05-OP-68]: a guarded abort has no Metal kernel. A GPU
@@ -1015,6 +998,7 @@ impl<'plan> Emitter<'plan> {
 
             // Binary elementwise (M2 first cut: add, mul).
             RiscOp::Add | RiscOp::Mul | RiscOp::ReluAdjoint => self.emit_binary(dag, node),
+            RiscOp::Bitwise(kind) => self.emit_bitwise(node, *kind),
 
             RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where => Err(format!(
                 "Metal direct nonnumeric node {id} reached emission after the #2266 typed capability rejection"
@@ -1139,6 +1123,11 @@ impl<'plan> Emitter<'plan> {
                 ));
             }
         };
+        if n > u32::MAX as usize {
+            return Err(format!(
+                "Metal M2 emit ({ctx}): rank-1 element count exceeds the uint32 device indexing limit"
+            ));
+        }
         Ok((n, ty.precision))
     }
 
@@ -1647,6 +1636,121 @@ impl<'plan> Emitter<'plan> {
             allocation,
         });
         let _ = dag;
+        Ok(())
+    }
+
+    /// Exact [05-OP-47] lane. Keep this independent of the older Add/Mul
+    /// template, whose arithmetic-width contract is a separate capability.
+    fn emit_bitwise(
+        &mut self,
+        node: &DagNode,
+        kind: chelis_types::BitwiseKind,
+    ) -> Result<(), String> {
+        if node.inputs.len() != 2 {
+            return Err(format!("Metal bitwise node {} needs two inputs", node.id.0));
+        }
+        let lhs = self
+            .plan_of(node.inputs[0])
+            .ok_or_else(|| format!("Metal bitwise lhs {} not materialized", node.inputs[0].0))?
+            .clone();
+        let rhs = self
+            .plan_of(node.inputs[1])
+            .ok_or_else(|| format!("Metal bitwise rhs {} not materialized", node.inputs[1].0))?
+            .clone();
+        let (n, prec) = self.require_static_rank1(&node.output_type, "bitwise")?;
+        if !matches!(prec, Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64) {
+            return Err(format!(
+                "Metal bitwise requires signed integer dtype, found {}",
+                prec.name()
+            ));
+        }
+        if lhs.n != n || rhs.n != n || lhs.prec != prec || rhs.prec != prec {
+            return Err(format!(
+                "Metal bitwise node {} requires equal shape and dtype",
+                node.id.0
+            ));
+        }
+        let id = node.id.0;
+        let msl_ty = dtype::msl_type(prec);
+        let kernel_name = format!("k_bitwise_{}_{}_{}", kind.name(), prec.name(), id);
+        let pso = format!("pso_{id}");
+        let mut params = vec![
+            kernels::input_param(0, msl_ty, "a"),
+            kernels::input_param(1, msl_ty, "b"),
+            kernels::output_param(2, msl_ty, "out"),
+        ];
+        if kind.is_shift() {
+            params.push("device atomic_uint* shift_error [[buffer(3)]]".to_string());
+        }
+        let source = kernels::elementwise_kernel_for(
+            &kernel_name,
+            &params,
+            &kernels::bitwise_body(kind, prec),
+            &[prec],
+        );
+        self.kernels.push((
+            pso.clone(),
+            kernel_name.clone(),
+            Self::prepend_span_comments_to_kernel_source(node, source),
+        ));
+
+        let out = format!("buf_{id}");
+        let allocation = self.claim_allocation(node.id)?;
+        let bytes = format!("{n}u * {}", dtype::host_sizeof_expr(prec));
+        self.push_span_comments(node);
+        self.body
+            .push(format!("// node {id} = bitwise {}", kind.name()));
+        self.body.push(format!(
+            "id<MTLBuffer> {out} = chelis_metal_alloc({bytes});"
+        ));
+        self.body.push(format!(
+            "id<MTLComputePipelineState> {pso} = chelis_metal_get_pipeline({pso}_src, @\"{kernel_name}\");"
+        ));
+        self.body.push(format!("uint32_t n_{id} = {n}u;"));
+        if kind.is_shift() {
+            let status = format!("shift_status_buf_{id}");
+            self.body.push(format!(
+                "id<MTLBuffer> {status} = chelis_metal_alloc_status_word(sizeof(uint32_t));"
+            ));
+            self.extra_peak_device_bytes += dtype::metal_elem_size(Prim::Int32);
+            self.body
+                .push(format!("*((uint32_t*)[{status} contents]) = UINT32_MAX;"));
+            self.body.push(format!(
+                "{{ __unsafe_unretained id<MTLBuffer> bufs[4] = {{ {}, {}, {out}, {status} }}; \
+                 chelis_metal_launch({pso}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 4, &n_{id}, sizeof(uint32_t)); }}",
+                lhs.buf, rhs.buf
+            ));
+            self.body.push(format!(
+                "uint32_t shift_first_{id} = *((uint32_t*)[{status} contents]);"
+            ));
+            let host_ty = match prec {
+                Prim::Int8 => "int8_t",
+                Prim::Int16 => "int16_t",
+                Prim::Int32 => "int32_t",
+                Prim::Int64 => "int64_t",
+                _ => unreachable!("validated signed precision"),
+            };
+            self.body.push(format!(
+                "if (shift_first_{id} != UINT32_MAX) {{ char message[128]; \
+                 snprintf(message, sizeof(message), \"shift amount must be non-negative, got %lld\", \
+                 (long long)((const {host_ty}*)[{} contents])[shift_first_{id}]); \
+                 chelis_numeric_trap(message); }}",
+                rhs.buf
+            ));
+        } else {
+            self.body.push(format!(
+                "{{ __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {}, {out} }}; \
+                 chelis_metal_launch({pso}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 3, &n_{id}, sizeof(uint32_t)); }}",
+                lhs.buf, rhs.buf
+            ));
+        }
+        self.plans[id] = Some(TensorPlan {
+            buf: out,
+            prec,
+            n,
+            shape: vec![n],
+            allocation,
+        });
         Ok(())
     }
 

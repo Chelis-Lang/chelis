@@ -119,6 +119,49 @@ pub fn output_param(idx: usize, ty: &str, name: &str) -> String {
     format!("device {ty}* {name} [[buffer({idx})]]")
 }
 
+/// Per-lane [05-OP-47] arithmetic. `as_type` preserves the low width bits
+/// when the unsigned result has the signed tensor's representation. Shift
+/// failure records the first logical index; the synchronized host then reads
+/// that exact right operand from its typed buffer for the required diagnostic.
+pub fn bitwise_body(kind: chelis_types::BitwiseKind, prec: Prim) -> String {
+    use chelis_types::BitwiseKind;
+    let (signed, unsigned, width) = match prec {
+        Prim::Int8 => ("char", "uchar", 8),
+        Prim::Int16 => ("short", "ushort", 16),
+        Prim::Int32 => ("int", "uint", 32),
+        Prim::Int64 => ("long", "ulong", 64),
+        other => panic!("[05-OP-47] Metal kernel requires integer dtype, got {other:?}"),
+    };
+    let count = if kind.is_shift() {
+        format!(
+            "    {signed} signed_count = b[tid];\n    \
+             if (signed_count < 0) {{ atomic_fetch_min_explicit(shift_error, tid, memory_order_relaxed); return; }}\n    \
+             uint count = signed_count >= {width} ? {width}u : uint(signed_count);\n"
+        )
+    } else {
+        String::new()
+    };
+    let value = match kind {
+        BitwiseKind::And => "av & bv".to_string(),
+        BitwiseKind::Or => "av | bv".to_string(),
+        BitwiseKind::Xor => "av ^ bv".to_string(),
+        BitwiseKind::ShiftLeft => {
+            format!("count >= {width}u ? {unsigned}(0) : {unsigned}(av << count)")
+        }
+        BitwiseKind::ShiftRight => format!(
+            "count >= {width}u ? (a[tid] < 0 ? {unsigned}(~{unsigned}(0)) : {unsigned}(0)) : \
+             (count == 0u ? av : {unsigned}((av >> count) | \
+             (a[tid] < 0 ? ({unsigned}(~{unsigned}(0)) << ({width}u - count)) : {unsigned}(0))))"
+        ),
+    };
+    format!(
+        "{count}    {unsigned} av = {unsigned}(a[tid]);\n    \
+         {unsigned} bv = {unsigned}(b[tid]);\n    \
+         {unsigned} bits = {unsigned}({value});\n    \
+         out[tid] = as_type<{signed}>(bits);"
+    )
+}
+
 /// Map a Chelis precision to the MSL type spelling. Thin re-export of
 /// [`crate::dtype::msl_type`] kept here so existing call sites compile
 /// without churn.

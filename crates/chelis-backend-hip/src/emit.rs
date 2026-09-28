@@ -95,6 +95,11 @@ use crate::fusion::{FusedReuseMechanics, HipFusedReuse};
 use crate::kernels;
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
+enum NumericTrapReport<'a> {
+    Static(&'a str),
+    NegativeShift { result: usize, c_type: &'static str },
+}
+
 pub(crate) struct PeakDeviceBytesBreakdown {
     pub formula: String,
     pub estimate: Option<usize>,
@@ -1561,7 +1566,9 @@ impl HipEmitter {
                 Self::dtype_kernel_suffix(operand_prec())
             )),
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
-            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
+            RiscOp::Bitwise(kind) => {
+                Some(format!("kernel_{}_{}", kind.name(), operand_prec().name()))
+            }
             RiscOp::TruncDiv => Some(format!(
                 "kernel_trunc_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -1971,7 +1978,13 @@ impl HipEmitter {
             // operands only — native `/` is exactly the C truncating
             // quotient, so it reuses the typed binary template.
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
-            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
+            RiscOp::Bitwise(kind) => kernels::binary_bitwise_typed(
+                self.kernel_rank,
+                name,
+                *kind,
+                operand_prec(),
+                take_gate(),
+            ),
             RiscOp::TruncDiv => {
                 let prec = operand_prec();
                 debug_assert!(
@@ -2442,7 +2455,7 @@ impl HipEmitter {
                     &resolved_kernel_name()?,
                     &node.inputs,
                     &node.output_type,
-                    trap.as_deref(),
+                    trap.as_deref().map(NumericTrapReport::Static),
                 )
             }
             RiscOp::Mul => self.emit_binary_launch(
@@ -2462,7 +2475,16 @@ impl HipEmitter {
             // chelis#178: floor / truncating integer division launch like
             // any other binary elementwise kernel.
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
-            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
+            RiscOp::Bitwise(kind) => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+                kind.is_shift().then_some(NumericTrapReport::NegativeShift {
+                    result: id,
+                    c_type: Self::dtype_c_type(node.output_type.precision),
+                }),
+            ),
             RiscOp::FloorDiv | RiscOp::TruncDiv => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -3195,7 +3217,7 @@ impl HipEmitter {
         kernel_name: &str,
         inputs: &[NodeId],
         ty: &TensorType,
-        numeric_trap: Option<&str>,
+        numeric_trap: Option<NumericTrapReport<'_>>,
     ) {
         let a = inputs[0].0;
         let b = inputs[1].0;
@@ -3238,14 +3260,14 @@ impl HipEmitter {
         ));
         let module = format!("mod_{kernel_name}");
         let grid = format!("t{id}_size / 256 + (t{id}_size % 256 != 0)");
-        if let Some(message) = numeric_trap {
+        if let Some(report) = numeric_trap {
             self.emit_numeric_trap_kernel_launch_expr(
                 &module,
                 kernel_name,
                 &grid,
                 "256",
                 "args",
-                message,
+                report,
             );
         } else {
             self.emit_kernel_launch_expr(&module, kernel_name, &grid, "256", "args");
@@ -3364,7 +3386,7 @@ impl HipEmitter {
                 &grid,
                 "256",
                 "args",
-                message,
+                NumericTrapReport::Static(message),
             );
         } else {
             self.emit_kernel_launch_expr(&module, kernel_name, &grid, "256", "args");
@@ -4898,7 +4920,7 @@ impl HipEmitter {
         grid_expr: &str,
         block_expr: &str,
         args_var: &str,
-        trap_message: &str,
+        report: NumericTrapReport<'_>,
     ) {
         self.line("{");
         self.indent += 1;
@@ -4922,9 +4944,26 @@ impl HipEmitter {
         self.line("CHELIS_HIP_CHECK(hipMemcpyDtoH(&chelis_numeric_flag, chelis_numeric_flag_symbol, sizeof(chelis_numeric_flag)));");
         self.line("CHELIS_HIP_CHECK(hipMemcpyDtoH(&chelis_numeric_index, chelis_numeric_index_symbol, sizeof(chelis_numeric_index)));");
         self.line("if ((chelis_numeric_flag == 0) != (chelis_numeric_index == ~0ULL)) { fprintf(stderr, \"HIP error: inconsistent numeric trap record\\n\"); abort(); }");
-        self.line(&format!(
-            "if (chelis_numeric_flag != 0) chelis_numeric_trap(\"{trap_message}\");"
-        ));
+        match report {
+            NumericTrapReport::Static(trap_message) => self.line(&format!(
+                "if (chelis_numeric_flag != 0) chelis_numeric_trap(\"{trap_message}\");"
+            )),
+            NumericTrapReport::NegativeShift { result, c_type } => {
+                self.line("if (chelis_numeric_flag != 0) {");
+                self.indent += 1;
+                self.line(&format!("{c_type} chelis_shift_count = 0;"));
+                self.line(&format!(
+                    "CHELIS_HIP_CHECK(hipMemcpyDtoH(&chelis_shift_count, \
+                     (hipDeviceptr_t)((char*)p_t{result} + chelis_numeric_index * sizeof({c_type})), \
+                     sizeof(chelis_shift_count)));"
+                ));
+                self.line("char chelis_shift_message[128];");
+                self.line("snprintf(chelis_shift_message, sizeof(chelis_shift_message), \"shift amount must be non-negative, got %lld\", (long long)chelis_shift_count);");
+                self.line("chelis_numeric_trap(chelis_shift_message);");
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -5108,18 +5147,6 @@ impl HipEmitter {
             chelis_types::unimplemented_rejection!(
                 2360,
                 "a guarded abort reaching device kernel selection has no device form; it is emitted host-side"
-            ),
-        )
-    }
-
-    fn bitwise_unsupported(node: &DagNode, kind: chelis_types::BitwiseKind) -> Unsupported {
-        Unsupported::new(
-            UnsupportedKind::Op(kind.name().to_string()),
-            format!("the HIP kernel set (node {})", node.id.0),
-            Stage::Codegen("hip"),
-            chelis_types::unimplemented_rejection!(
-                2702,
-                "exact signed-width bitwise tensor kernels have no HIP implementation; select the C target"
             ),
         )
     }

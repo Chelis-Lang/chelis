@@ -677,6 +677,84 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
+/// [05-OP-47] uses exact signed storage bits, never the floating numeric
+/// channel or C++ signed-left-shift semantics. A failed shift writes its
+/// offending count into the private output slot; the host reads the first
+/// failed logical element after synchronization before exposing that slot.
+pub fn binary_bitwise_typed(
+    rank: usize,
+    kernel_name: &str,
+    kind: chelis_types::BitwiseKind,
+    precision: chelis_types::types::Prim,
+    gate: Option<&OperandGate>,
+) -> String {
+    use chelis_types::types::Prim;
+    let (signed, unsigned, width) = match precision {
+        Prim::Int8 => ("int8_t", "uint8_t", 8),
+        Prim::Int16 => ("int16_t", "uint16_t", 16),
+        Prim::Int32 => ("int32_t", "uint32_t", 32),
+        Prim::Int64 => ("int64_t", "uint64_t", 64),
+        other => panic!("[05-OP-47] HIP kernel requires integer dtype, got {other:?}"),
+    };
+    let a = OperandGate::read(gate, 0, "a[idx_a]", signed);
+    let b = OperandGate::read(gate, 1, "b[idx_b]", signed);
+    let result = match kind {
+        chelis_types::BitwiseKind::And => "av & bv".to_string(),
+        chelis_types::BitwiseKind::Or => "av | bv".to_string(),
+        chelis_types::BitwiseKind::Xor => "av ^ bv".to_string(),
+        chelis_types::BitwiseKind::ShiftLeft => {
+            format!("count >= {width} ? ({unsigned})0 : ({unsigned})(av << count)")
+        }
+        chelis_types::BitwiseKind::ShiftRight => format!(
+            "count >= {width} ? (a_signed < 0 ? ({unsigned})~({unsigned})0 : ({unsigned})0) : \
+             (count == 0 ? av : ({unsigned})((av >> count) | \
+             (a_signed < 0 ? (({unsigned})~({unsigned})0 << ({width} - count)) : ({unsigned})0)))"
+        ),
+    };
+    let count = if kind.is_shift() {
+        format!(
+            "  {signed} signed_count = {b};\n  \
+             if (signed_count < 0) {{\n    out[i] = signed_count;\n    \
+             chelis_record_numeric_failure((unsigned long long)i);\n    return;\n  }}\n  \
+             unsigned int count = signed_count >= {width} ? {width} : (unsigned int)signed_count;\n"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{DEVICE_HELPERS}{helper}\
+extern \"C\" __global__ void {kernel_name}(
+    const {signed} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const {signed} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    {signed} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size{params}) {{
+{build_a_s}
+{build_b_s}
+{build_out_sh}
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+{active}  chelis_device_metadata indices[{rank}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  {signed} a_signed = {a};
+{count}  {unsigned} av = ({unsigned})a_signed;
+  {unsigned} bv = ({unsigned}){b};
+  {unsigned} bits = ({unsigned})({result});
+  __builtin_memcpy(&out[i], &bits, sizeof(bits));
+}}
+",
+        helper = OperandGate::helper(gate),
+        params = OperandGate::params(gate, rank),
+        active = OperandGate::prologue(gate, rank),
+        a_strides = stride_params(rank, "a"),
+        b_strides = stride_params(rank, "b"),
+        out_shape = shape_params(rank, "out"),
+        build_a_s = build_array(rank, "a_s", "a", "s"),
+        build_b_s = build_array(rank, "b_s", "b", "s"),
+        build_out_sh = build_array(rank, "out_sh", "out", "sh"),
+    )
+}
+
 /// WS-A2 thin wrapper for the legacy `ElemKind`-based call sites and
 /// for callers that already have an `ElemKind` in hand. Forwards to the
 /// dtype-parameterized [`binary_elementwise_typed`] using the
