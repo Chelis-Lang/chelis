@@ -9660,6 +9660,7 @@ mod shell_type_variable_canonicalization_tests {
     #[test]
     fn scheme_restrictions_follow_structural_alpha_renaming_across_namespaces() {
         let first = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![TypeVar(9), TypeVar(42)],
             tvar_restrictions: vec![
@@ -9671,6 +9672,7 @@ mod shell_type_variable_canonicalization_tests {
             body: representative_type(9, 42, 9, 9),
         };
         let second = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![TypeVar(701), TypeVar(3)],
             tvar_restrictions: vec![
@@ -9710,6 +9712,7 @@ mod shell_type_variable_canonicalization_tests {
     fn unrestricted_and_monomorphic_schemes_emit_an_empty_ledger() {
         for scheme in [
             Scheme {
+                result_origin: None,
                 constraints: vec![],
                 tvars: vec![TypeVar(33)],
                 tvar_restrictions: vec![],
@@ -9734,6 +9737,7 @@ mod shell_type_variable_canonicalization_tests {
     #[test]
     fn restriction_for_a_variable_absent_from_the_body_is_rejected() {
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![TypeVar(5)],
             tvar_restrictions: vec![(TypeVar(5), TypeVarRestriction::ActiveFloat)],
@@ -9756,6 +9760,7 @@ mod shell_type_variable_canonicalization_tests {
 
         fn checked_len(element: u32) -> Scheme {
             Scheme {
+                result_origin: None,
                 tvars: vec![TypeVar(element)],
                 tvar_restrictions: vec![],
                 dvars: vec![],
@@ -9804,6 +9809,7 @@ mod shell_type_variable_canonicalization_tests {
             result: Type::Var(TypeVar(0)),
         };
         let scheme = Scheme {
+            result_origin: None,
             tvars: vec![TypeVar(0), TypeVar(1)],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -9835,6 +9841,7 @@ mod shell_type_variable_canonicalization_tests {
         use chelis_types::types::CollectionConstraint;
 
         let scheme = Scheme {
+            result_origin: None,
             tvars: vec![TypeVar(0), TypeVar(1)],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -9867,6 +9874,7 @@ mod shell_type_variable_canonicalization_tests {
             Box::new(Type::Prim(chelis_types::types::Prim::Int64)),
         );
         let obligated = |constraint: CollectionConstraint| Scheme {
+            result_origin: None,
             tvars: vec![TypeVar(4)],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -9887,6 +9895,7 @@ mod shell_type_variable_canonicalization_tests {
         }))
         .expect("the index-obligated scheme canonicalizes");
         let unconstrained = canonical_shell_scheme(&Scheme {
+            result_origin: None,
             tvars: vec![TypeVar(4)],
             tvar_restrictions: vec![],
             dvars: vec![],

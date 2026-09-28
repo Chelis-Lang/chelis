@@ -571,25 +571,30 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             Ok(declared) => declared,
             Err(witness) => propagate(&witness),
         };
-        if let Err(error) = unify(&result, &declared, subst) {
-            let mut diagnostic = CheckError::new(
-                check_error_kind_from_type_error_kind(&error.kind),
-                format!(
-                    "expression ascription does not match value: {}",
-                    error.message
-                ),
-                vec![format!(
-                    "Declared expression type is {declared}; inferred value type is {result}"
-                )],
-            );
-            if let Some(location) = TypeDiagnosticLocation::from_expr(authored_type.expression())
-                .or_else(|| TypeDiagnosticLocation::from_expr(expr))
-            {
-                diagnostic = location.attach(diagnostic);
+        if product.defer_result_type_constraint(&result, &declared, subst) {
+            result
+        } else {
+            if let Err(error) = unify(&result, &declared, subst) {
+                let mut diagnostic = CheckError::new(
+                    check_error_kind_from_type_error_kind(&error.kind),
+                    format!(
+                        "expression ascription does not match value: {}",
+                        error.message
+                    ),
+                    vec![format!(
+                        "Declared expression type is {declared}; inferred value type is {result}"
+                    )],
+                );
+                if let Some(location) =
+                    TypeDiagnosticLocation::from_expr(authored_type.expression())
+                        .or_else(|| TypeDiagnosticLocation::from_expr(expr))
+                {
+                    diagnostic = location.attach(diagnostic);
+                }
+                errors.push(diagnostic);
             }
-            errors.push(diagnostic);
+            declared
         }
-        declared
     } else {
         result
     };
@@ -847,12 +852,16 @@ pub(super) fn infer_var(
             // the copies (`group_link::sibling_instance`).
             let holed = env.is_holed_group_reference(name, &scheme);
             let unsigned = !holed && product.is_unsigned_group_reference(name, &scheme);
-            let sibling = (holed || unsigned) && product.references_a_sibling(name);
+            let sibling = unsigned || (holed && product.references_a_sibling(name));
+            // Unsigned self-references also wait for component linking, so a
+            // concrete recursive argument cannot erase the body's raw input
+            // identities before result origins have been captured.
             let (instantiated, copies) = if sibling {
                 super::group_link::sibling_instance(&scheme, env, vg, subst)
             } else {
                 (env.instantiate_scheme(&scheme, vg, subst), Vec::new())
             };
+            product.import_result_constraints(subst);
             if !called {
                 forbid_keys_a_builtin_value_does_not_admit(name, &instantiated.ty, subst);
             }

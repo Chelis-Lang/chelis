@@ -270,6 +270,64 @@ fn key_builtin_alias_contracts_survive_exported_contexts() {
     }
 }
 
+/// Key contracts must keep operand and result equality after callable transport
+/// and local result publication, including a source-free checker context.
+#[test]
+fn tensor_key_alias_results_retain_operation_contracts() {
+    let live =
+        build_type_env_from_library(&surf_program("def untouched(x: i64) -> i64 = x\n")).unwrap();
+    let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
+    for context in [&live, &restored] {
+        for source in [
+            "def good(s: tensor[2, i64]) -> tensor[2, key] = { op: (tensor[2, i64] -> tensor[2, key]) = key_from_seed\n result = op(s)\n result }",
+            "def good(k: tensor[2, key]) -> (tensor[2, key], tensor[2, key]) = { op: (tensor[2, key] -> (tensor[2, key], tensor[2, key])) = split_key\n result = op(k)\n result }",
+            "def good(k: tensor[2, key]) -> tensor[2, *, key] = { op: tensor[2, key] -> i64 -> tensor[2, *, key] = split_keys\n result = op(k, 3i64)\n result }",
+            "def good(k: tensor[2, key], n: tensor[2, i64]) -> tensor[2, key] = { op: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n result = op(k, n)\n result }",
+        ] {
+            context_verdict(context, source)
+                .unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
+        }
+        for source in [
+            "def bad(s: tensor[2, i64]) -> tensor[3, key] = { op: (tensor[2, i64] -> tensor[2, key]) = key_from_seed\n result = op(s)\n result }",
+            "def bad(k: tensor[2, key]) -> (tensor[2, key], tensor[3, key]) = { op: (tensor[2, key] -> (tensor[2, key], tensor[2, key])) = split_key\n result = op(k)\n result }",
+            "def bad(k: tensor[2, key]) -> tensor[3, *, key] = { op: tensor[2, key] -> i64 -> tensor[2, *, key] = split_keys\n result = op(k, 3i64)\n result }",
+            "def bad(k: tensor[2, key], n: tensor[3, i64]) = { op: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n result = op(k, n)\n result }",
+            "def bad(k: tensor[2, key], n: tensor[2, i64]) -> tensor[3, key] = { op: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n result = op(k, n)\n result }",
+            "def bad(k: tensor[2, key]) = { op: tensor[2, key] -> tensor[2, i64] -> tensor[2, key] = fold_in\n result = op(k, 1i64)\n result }",
+            "def bad(k: tensor[2, key]) = { op: tensor[2, key] -> i64 -> tensor[2, *, key] = split_keys\n result = op(k, 3i32)\n result }",
+        ] {
+            assert!(
+                context_verdict(context, source).is_err(),
+                "must reject: {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cached_result_origins_distinguish_concrete_keys_from_generic_parameters() {
+    let library = surf_program(
+        "def singleton(k: key) -> List[key] = {\n  empty: List[key] = Nil\n  Cons(k, empty)\n}\n\
+         def dup[a](x: a) -> (a, a) = (x, x)\n\
+         def get[a]() -> (a) -> (a, a) = dup\n",
+    );
+    let live = build_type_env_from_library(&library).unwrap();
+    let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
+    for context in [&live, &restored] {
+        context_verdict(context, "def good(k: key) -> List[key] = singleton(k)\n").unwrap();
+        context_verdict(context, "def good(x: i64) -> (i64, i64) = (get())(x)\n").unwrap();
+        let errors = context_verdict(context, "def bad(k: key) -> (key, key) = (get())(k)\n")
+            .expect_err("a generic remains key-free after origin transport");
+        assert!(
+            errors.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::KeyReuse)
+                    && error.message.contains("generic `get`")
+            }),
+            "{errors:?}"
+        );
+    }
+}
+
 fn verdict(source: &str) -> Result<(), Vec<CheckError>> {
     let decls = parse_str(source).expect("fixture parses");
     let deep = desugar_program(&decls).expect("fixture desugars");

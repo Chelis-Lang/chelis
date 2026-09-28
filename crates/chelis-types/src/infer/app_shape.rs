@@ -1215,9 +1215,16 @@ pub(super) fn infer_reduce_window_app(
     // output shape. It does not own a separate dtype-admission policy: consume
     // the checked fallback scheme through the same helper as ordinary calls.
     product.record_call_operand_contracts(&func_ty, Some(name), &route_arg_tys, env, subst);
-    if let Err(rejected) =
-        unify_checked_call_contract(expr, &func_ty, &route_arg_tys, vg, subst, errors, product)
-    {
+    if let Err(rejected) = unify_checked_call_contract(
+        expr,
+        &func_ty,
+        &route_arg_tys,
+        None,
+        vg,
+        subst,
+        errors,
+        product,
+    ) {
         return rejected;
     }
     product.record_call_result_contracts(&func_ty, Some(name), env, subst);

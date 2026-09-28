@@ -298,7 +298,7 @@ fn sweep_recursive_collection_contracts(
             }
             close_declaration(
                 &mut scratch,
-                CloseScope::Declaration,
+                CloseScope::ComponentMember,
                 env,
                 var_gen,
                 subst,
@@ -316,6 +316,7 @@ fn sweep_recursive_collection_contracts(
             return;
         }
 
+        close_component(&mut scratch, env, var_gen, subst, adt_reg, errors);
         super::recursion::finish_group(subst, errors);
         if errors.iter_since(sweep_checkpoint).next().is_some() {
             component_scope.abort(env, var_gen, subst);
@@ -324,7 +325,7 @@ fn sweep_recursive_collection_contracts(
         component_scope.complete(env, var_gen, subst);
         let schemes = deferred_bindings
             .into_iter()
-            .map(|binding| generalize_deferred_recursive_binding(binding, env, subst))
+            .map(|binding| generalize_deferred_recursive_binding(binding, env, subst, &mut scratch))
             .collect::<Vec<_>>();
         debug_assert!(schemes.iter().all(|(name, scheme)| {
             scheme.constraints.len()
@@ -678,7 +679,9 @@ pub(super) fn infer_program_with_product_in_session(
                 .complete(&mut env, &vg, &mut subst);
             let schemes = deferred_bindings
                 .into_iter()
-                .map(|binding| generalize_deferred_recursive_binding(binding, &env, &subst))
+                .map(|binding| {
+                    generalize_deferred_recursive_binding(binding, &env, &subst, &mut product)
+                })
                 .collect::<Vec<_>>();
             for (name, scheme) in schemes {
                 env.bind(name, scheme);
@@ -1753,7 +1756,12 @@ pub(super) fn infer_ir_program_with_state(
             let schemes = deferred_bindings
                 .into_iter()
                 .map(|binding| {
-                    generalize_deferred_recursive_binding(binding, &state.env, &state.subst)
+                    generalize_deferred_recursive_binding(
+                        binding,
+                        &state.env,
+                        &state.subst,
+                        &mut product,
+                    )
                 })
                 .collect::<Vec<_>>();
             for (name, scheme) in schemes {
