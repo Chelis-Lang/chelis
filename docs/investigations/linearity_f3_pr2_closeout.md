@@ -99,7 +99,7 @@ array and `score` reflects the linearity penalty.
 
 ## Cross-references
 
-- §5 entry: `docs/gap_synthesis.md` Linearity-F3. PR 2 marks this
+- §5 entry: `docs/archive/reports/gap_synthesis.md` Linearity-F3. PR 2 marks this
   entry Closed.
 - PR 1 diagnosis: `docs/investigations/linearity_f3_module_skip_diagnosis.md`.
 - PR 1 (merged): GitHub PR #65.

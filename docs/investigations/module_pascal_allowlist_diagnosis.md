@@ -145,7 +145,7 @@ automatically:
 Either path eliminates the per-shell hand edit. **This is a
 recommendation for the orchestrator, not a §5 entry.** The orchestrator
 decides whether to file the recommendation as a §5 entry in
-`docs/gap_synthesis.md`.
+`docs/archive/reports/gap_synthesis.md`.
 
 ## What this PR does **not** do
 

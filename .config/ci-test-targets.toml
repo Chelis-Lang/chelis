@@ -3,6 +3,24 @@
 # are consumed by scripts/ci_change_owned.py and fail closed when stale.
 version = 3
 
+[[path_rule]]
+prefix = "py/src/chelis_tools/loc_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the local LOC report CLI tests"
+tracking_issue = "chelis#413"
+
+[[path_rule]]
+prefix = "py/tests/test_loc_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the local LOC report CLI tests"
+tracking_issue = "chelis#413"
+
 # chelis#845: shared skill source and generated agent symlinks are checked by
 # the script-unit skill metadata/link contract.
 [[path_rule]]
@@ -1795,15 +1813,6 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit locks the ecosystem workflow's immutable inputs, strict source builds, and no-auto-fetch commands"
 tracking_issue = "chelis#2268"
-
-[[path_rule]]
-prefix = ".github/workflows/loc-report.yml"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "script-unit holds this workflow's reviewed registration as running no command the per-PR gate owns; it validates that membership, not a command inventory"
-tracking_issue = "chelis#2232"
 
 [[path_rule]]
 prefix = ".github/workflows/loud-unsupported-nightly.yml"

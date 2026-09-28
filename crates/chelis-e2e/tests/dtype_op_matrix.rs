@@ -73,12 +73,8 @@ unsafe fn exact_value_bool(value: chelis_value) -> bool {
 
 // ---- `chelis_tensor_to_scalar` (read-side) ------------------------------
 //
-// Anchor op A.  Reads a rank-0 tensor of any supported precision and
-// returns the value as f64.  Pre-migration the body reads `*data as
-// f64` unconditionally (data was `*mut f32`); post-migration it
-// dispatches on `chelis_dtype(t)` and selects the typed read.  Bool and i32
-// storage today is 4-byte f32-encoded so those arms route through
-// `f32::data_ptr_unchecked`.
+// Each fixture checks that a rank-0 tensor retains its dtype and exact
+// stored value through scalar extraction.
 
 #[test]
 fn tensor_to_scalar_f32() {
@@ -126,7 +122,7 @@ fn tensor_to_scalar_i64() {
 fn tensor_to_scalar_i32() {
     unsafe {
         let t = alloc_scalar(CHELIS_DTYPE_I32);
-        // RT-4 F1: i32 tensors now use genuine i32 storage.
+        // i32 tensors use i32 storage.
         *i32::data_ptr_unchecked(t) = 42;
         let out = chelis_tensor_to_scalar(t);
         assert_eq!(out.dtype, CHELIS_DTYPE_I32);
@@ -161,12 +157,8 @@ fn tensor_to_scalar_bool_false() {
 
 // ---- `TensorElement::fill` (write-side) --------------------------------
 //
-// Anchor op B.  Each precision's `chelis_fill_*` extern symbol thins
-// to `T::fill(t, val)` after migration.  The pre-migration body and
-// the post-migration default-trait expansion compile to bit-identical
-// code (cast `.data` to typed pointer, loop over `size`).  This
-// fixture asserts every element of a freshly-allocated tensor reads
-// back as the filled value via the trait's typed pointer.
+// Each fixture reads every element of a filled tensor through its
+// dtype-matched pointer.
 
 #[test]
 fn fill_f32_vector() {
@@ -209,13 +201,7 @@ fn fill_i64_vector() {
 
 #[test]
 fn fill_i32_vector() {
-    // i32 storage today is 4-byte f32-encoded.  The trait impl for
-    // i32 has `DTYPE = CHELIS_DTYPE_I32`, so `i32::fill` writes i32 bytes
-    // into the buffer.  A round-trip through `i32::data_ptr_unchecked`
-    // reads them back as i32 -- this exercises the trait surface
-    // even though the runtime's other I32 accessors still treat the
-    // storage as f32-encoded.  Filed under the §5 follow-on for i32
-    // storage representation migration.
+    // i32 storage is read and written through i32 accessors.
     unsafe {
         let t = alloc_vec(8, CHELIS_DTYPE_I32);
         i32::fill(t, 12_345_i32);
@@ -348,34 +334,17 @@ fn data_ptr_match_succeeds() {
     }
 }
 
-// ---- Cross-validation fixtures for PR 2 migrated ops --------------------
+// ---- Runtime operation fixtures -----------------------------------------
 //
-// Each op gets one fixture per semantically-meaningful precision per
-// Contract 3 of `docs/design/compiler_cleanup_0_7_8_spec_lock.md`.
-// The fixtures exercise the runtime function directly via its extern
-// symbol and assert byte-exact round-trip through the trait's typed
-// pointer.
-//
-// I32 and BOOL fixtures write through `data_as_f32` (the f32-encoded
-// storage convention) and read back the same way, matching the
-// migrated runtime's CHELIS_DTYPE_I32 / CHELIS_DTYPE_BOOL dispatch arms.  The
-// fixtures lock the post-migration behavior; pre-migration the F64
-// and I64 fixtures would have failed because the f32-strided read
-// silently truncated 8-byte storage to 4-byte chunks.
-//
-// PR 3 host_emit code-generation site fixtures live at
-// `crates/chelis-backend-c/tests/host_emit_dtype_dispatch.rs` because
-// they exercise the `host_emit::emit_host_program` pure-function
-// surface directly, separate from the runtime-symbol path covered
-// here.  Matrix completion remains on the W2 PR 4 plan.
+// These fixtures call public runtime symbols and check values through
+// dtype-matched accessors. Host emission is tested separately in
+// `crates/chelis-backend-c/tests/host_emit_dtype_dispatch.rs`.
 
 /// Allocate a rank-1 length-`n` tensor and fill it with values from
 /// `vals` interpreted as the tensor's storage convention for `dtype`:
-///   - F32 / I32 / BOOL: writer stores `value as f32` (existing
-///     f32-encoded storage for I32 / BOOL).
-///   - F64: writer stores `f64` bytes.
-///   - I64: writer stores `i64` bytes (treating each `f64` slot as
-///     `value as i64`).
+///   - F32 and F64: writer stores values in the matching float format.
+///   - I32 and I64: writer stores values in the matching integer format.
+///   - BOOL: writer stores canonical one-byte Boolean values.
 unsafe fn alloc_vec_with_values(dtype: chelis_dtype, vals: &[f64]) -> *mut chelis_tensor {
     unsafe {
         let t = alloc_vec(vals.len() as i64, dtype);
@@ -399,8 +368,6 @@ unsafe fn alloc_vec_with_values(dtype: chelis_dtype, vals: &[f64]) -> *mut cheli
                 }
             }
             CHELIS_DTYPE_I32 => {
-                // RT-4 F1: i32 tensors now use genuine i32 storage
-                // (4 bytes), not the legacy f32-encoded convention.
                 let p = i32::data_ptr_unchecked(t);
                 for (i, v) in vals.iter().enumerate() {
                     *p.add(i) = *v as i32;
@@ -476,8 +443,7 @@ fn list_from_tensor_f32() {
 
 #[test]
 fn list_from_tensor_f64_full_precision() {
-    // The f64 round-trip is the bug repro: pre-migration this would
-    // have read 4 bytes as f32 and lost the full mantissa.
+    // A value outside f32 precision distinguishes an f64 read.
     const F64_VAL: f64 = 1.234_567_890_123_456_7_f64;
     unsafe {
         let t = alloc_vec_with_values(CHELIS_DTYPE_F64, &[F64_VAL, -F64_VAL]);
@@ -557,8 +523,7 @@ fn concat_f32_round_trip() {
 
 #[test]
 fn concat_f64_preserves_full_precision() {
-    // Pre-migration this fixture would fail: each per-element copy
-    // was a 4-byte f32-strided read, dropping the upper 4 bytes.
+    // Concatenation preserves values that cannot be represented as f32.
     const A: f64 = 1.234_567_890_123_456_7_f64;
     const B: f64 = -1.732_050_807_568_877_3_f64;
     unsafe {
@@ -725,9 +690,8 @@ fn gather_f32_round_trip() {
 fn cmplt_f64_full_precision() {
     // lhs and rhs differ by an amount that survives at f64 precision
     // (>= 1 ULP at 1e10) but rounds away in f32 (24-bit mantissa
-    // saturates well before 1e10).  Pre-migration read both as f32:
-    // they tie and the strict `<` returns 0.0.  Post-migration reads
-    // at f64 and returns 1.0.
+    // saturates well before 1e10). The comparison must use f64
+    // values and return true.
     const LHS: f64 = 1.0e10_f64;
     const RHS: f64 = 1.0e10_f64 + 1.0;
     unsafe {
@@ -947,10 +911,8 @@ fn cumsum_f32_round_trip() {
 
 #[test]
 fn sort_f64_full_precision() {
-    // Two f64 values that round to the same f32; sort would have
-    // produced a stable-but-meaningless order under the
-    // pre-migration f32 read.
-    const A: f64 = 1.0e16_f64 + 1.0;
+    // These values differ at f64 precision but round to the same f32.
+    const A: f64 = 1.0e16_f64 + 2.0;
     const B: f64 = 1.0e16_f64;
     unsafe {
         let t = alloc_vec_with_values(CHELIS_DTYPE_F64, &[A, B]);
@@ -992,7 +954,7 @@ fn sort_f32_round_trip() {
         assert_eq!(read_at(values, 0), 1.0);
         assert_eq!(read_at(values, 1), 2.0);
         assert_eq!(read_at(values, 2), 3.0);
-        // Indices tensor is CHELIS_DTYPE_I32 (f32-encoded).
+        // Indices use i32 storage.
         assert_eq!(read_at(idx, 0), 1.0);
         assert_eq!(read_at(idx, 1), 2.0);
         assert_eq!(read_at(idx, 2), 0.0);
@@ -1135,8 +1097,7 @@ fn clamp_f64_preserves_full_precision() {
     // SAMPLE has an f64 fractional part that survives at f64
     // precision (well below 2^53) but is lost in any f32-mediated
     // read.  HI_F is large enough that SAMPLE is in bounds so the
-    // clamp returns SAMPLE unchanged; pre-migration the f32 read
-    // would have rounded it to the nearest representable f32.
+    // clamp returns SAMPLE unchanged at f64 precision.
     const HI_F: f64 = 1.0e15_f64;
     const SAMPLE: f64 = 5.0e10_f64 + 0.5;
     unsafe {
@@ -1200,8 +1161,7 @@ unsafe fn alloc_vec2(dtype: chelis_dtype, vals: &[f64]) -> *mut chelis_tensor {
 fn einsum_dot_product_f64() {
     // Pick values that exercise f64 reads (the LHS / RHS inputs need
     // the full mantissa) while keeping the accumulated dot product
-    // representable.  The pre-migration f32 read would have rounded
-    // SAMPLE to the nearest f32, producing a different product.
+    // representable. An f32-mediated read would change the product.
     const SAMPLE: f64 = 1.234_567_890_123_456_7_f64;
     unsafe {
         let lhs = alloc_vec2(CHELIS_DTYPE_F64, &[SAMPLE, 0.5]);
@@ -1247,42 +1207,20 @@ fn einsum_dot_product_f32() {
     }
 }
 
-// ---- Bool runtime_fail assertions for ops that reject bool --------------
-//
-// `cumsum`, `sort`, `clamp`, `trace`, and `einsum` are documented in
-// Contract 3 as numeric-only ops.  The migrated runtime calls
-// `runtime_fail!` for the CHELIS_DTYPE_BOOL arm.  `runtime_fail!` invokes
-// `std::process::exit(1)` which kills the test process, so these
-// negative-path arms cannot be exercised from a unit test without
-// special harness machinery (subprocess-based fixtures, or a
-// `runtime_fail` mode switch).  The full-corpus integration tests
-// catch the runtime_fail via end-to-end CLI exit-code checks; this
-// matrix locks the byte-exact passing arms only.
-//
-// PR 4 (matrix completion) may revisit the bool-rejection coverage
-// if it needs a dedicated runtime_fail subprocess harness.  PR 3
-// (host_emit code-generation site fixtures) covers the emitted-C
-// pointer-typing invariant at
-// `crates/chelis-backend-c/tests/host_emit_dtype_dispatch.rs` and
-// does not need the subprocess harness.
-
-// ---- Multi-op composition fixtures (W2 PR 4) ----------------------------
+// ---- Multi-op composition fixtures --------------------------------------
 //
 // The 60 single-op fixtures above each exercise one runtime accessor
 // site.  Real Chelis programs chain ops: a reshape feeds into a
 // concat, a gather feeds into a cumsum, a where feeds into a sort.
 // Each chained step re-reads through the dtype dispatch tree; a bug
-// in any one site can corrupt the downstream step silently because
-// the intermediate buffer is sized correctly but contains f32-strided
-// values.
+// in any one site can corrupt a downstream value.
 //
 // These compositions lock the end-to-end property at byte-exact f64
 // precision: the f64 mantissa survives through every intermediate
 // step.  Each fixture picks a value whose lower mantissa bits cannot
 // be expressed in f32 (e.g. `1.234_567_890_123_456_7`), so any
 // f32-strided intermediate read drops the precision and the final
-// assertion fails.  Pre-migration these fixtures would have failed
-// at whichever step in the chain still used the f32-strided accessor.
+// assertion fails.
 //
 // Compositions covered below:
 //   * `concat -> gather`           : write to wide buffer then index
@@ -1648,10 +1586,8 @@ fn compose_where_then_einsum_i64_dot_product_precision() {
 #[test]
 fn compose_cmplt_then_where_f64_preserves_precision() {
     // cmplt produces a bool tensor; feed that bool as the cond into
-    // `where` against two f64 sources.  Pre-migration this chain
-    // could fail two ways: cmplt comparing the f64 inputs at f32
-    // resolution (producing wrong booleans), or the where reading
-    // f64 sources at f32 width.
+    // `where` against two f64 sources. Both the comparison and the
+    // selected value must retain f64 precision.
     const LHS: f64 = 1.0e10_f64;
     const RHS: f64 = 1.0e10_f64 + 1.0;
     const PICK_T: f64 = 1.234_567_890_123_456_7_f64;
@@ -1727,9 +1663,8 @@ fn compose_list_from_tensor_round_trip_f64_precision() {
 
 // ---- Bool-output composition checks --------------------------------
 //
-// `cmplt` produces a bool tensor; the bool storage is f32-encoded.
-// Compose cmplt with another op that reads the bool input to lock
-// the round-trip through bool storage.
+// `cmplt` produces canonical one-byte bool storage. Compose it with
+// a bool-reading operation to check the round-trip.
 
 #[test]
 fn compose_cmplt_then_where_bool_round_trip() {

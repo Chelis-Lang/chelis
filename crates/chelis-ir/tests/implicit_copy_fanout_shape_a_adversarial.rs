@@ -1,13 +1,5 @@
-//! Wave 3 terminal red team for the 0.7.8 compiler-cleanup workstream.
-//!
-//! Adversarial fixtures for the implicit-copy fan-out v3 closures (PR #91)
-//! and the broader Shape A scope that v3 explicitly deferred.
-//!
-//! The broader Shape A fixtures originally pinned the deferred-shape
-//! TypeMismatch as `expect_err`; the 0.7.9 cleanup closed
-//! `Linearity-ShapeABroadReturn-F1` and they now expect `Ok` clean
-//! lowering.  Each fixture has a single pinned expected outcome that
-//! catches regressions in either direction.
+//! Implicit-copy fan-out fixtures for borrowed values returned as
+//! owned values. Each case must type-check and lower cleanly.
 
 use chelis_ir::dag::Dag;
 use chelis_ir::lower::try_lower_program;
@@ -28,20 +20,11 @@ fn surf_to_dag(source: &str) -> Result<Dag, String> {
 }
 
 // ============================================================
-// §3.5 Shape A broader-scope adversarial fixtures
-// (Per the v3 diagnosis these are explicitly OUT of scope for PR #91.
-// Pinned to confirm the deferred-shape boundary is honest.)
+// Borrowed-input return shapes
 // ============================================================
 
-/// Shape A literal narrow form already covered by `shape_a_borrow_return_position_lowers_cleanly`.
-/// This fixture covers the let-tail-return shape called out in the
-/// diagnosis's sibling sweep as a §5-candidate follow-on.
-///
-/// PR #91's diagnosis flagged `def f(x: &T) -> T = { y = x; y }` as OUT
-/// of v3 scope.  The 0.7.9 cleanup closed `Linearity-ShapeABroadReturn-F1`
-/// by extending `shape_a_relaxed_return` with the `descend_to_tail_var`
-/// helper, so the let-tail shape now lowers cleanly. Companion fixtures
-/// in `implicit_copy_shape_a_broader_return.rs` pin the broader coverage.
+/// A borrowed value returned through a let-tail binding lowers as
+/// an owned result.
 #[test]
 fn shape_a_let_tail_return_lowers_cleanly() {
     let source = r#"
@@ -60,9 +43,8 @@ def identity_via_let[a](x: &tensor[a, f32]) -> tensor[a, f32] = {
     );
 }
 
-/// Shape A with `if` tail-return.  The 0.7.9 broader-Shape-A fix's
-/// descent walks both branches of the desugared `(if cond then_e else_e)`
-/// triple and accepts when both resolve to the same bare-var name.
+/// An `if` whose branches return the same borrowed value also
+/// produces an owned result.
 #[test]
 fn shape_a_if_tail_return_lowers_cleanly() {
     let source = r#"

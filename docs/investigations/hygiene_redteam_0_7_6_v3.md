@@ -184,7 +184,7 @@ listed test was actually run and exits cleanly:
 Close the 0.7.6 toolchain hygiene workstream. V3 surfaces no
 high-severity regression from the 20+-PR merge train; the two new
 findings (Linearity-F4 alias-consume bypass; Decompile-F1 module
-PascalCase loss) belong in §5 of `docs/gap_synthesis.md` alongside
+PascalCase loss) belong in §5 of `docs/archive/reports/gap_synthesis.md` alongside
 Linearity-F1/F2 and Vocabulary-F1/F2. No V4 pass is recommended.
 
 §5 re-prioritization suggested:

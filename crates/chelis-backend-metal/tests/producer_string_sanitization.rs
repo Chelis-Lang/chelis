@@ -1,5 +1,4 @@
-//! Tests for `spec/upstream-bugs/producer-string-sanitization.md` —
-//! every producer-supplied string flowing into a Metal `// ...` comment
+//! Every producer-supplied string flowing into a Metal `// ...` comment
 //! is routed through `chelis_ir::span_sanitize::sanitize_for_comment`,
 //! not just span IDs.
 //!

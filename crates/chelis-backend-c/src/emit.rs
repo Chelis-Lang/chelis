@@ -613,8 +613,7 @@ impl CEmitter {
         // stem) flows into both an identifier context (the `void {name}(...)`
         // declarator) and a format-string context (the `fprintf(stderr,
         // "{name}: ...")` runtime-error reports). The format-string context
-        // requires escaping `%`, `\\`, `"`, and control bytes per
-        // spec/upstream-bugs/producer-string-sanitization.md. The identifier
+        // requires escaping `%`, `\\`, `"`, and control bytes. The identifier
         // context inherits whatever the upstream chooses; if `func_name`
         // contains non-identifier bytes the emitted C will fail to compile,
         // which is the desired outcome (loud failure, not silent injection).
@@ -2351,7 +2350,7 @@ impl CEmitter {
     ) {
         // Producer-supplied strings flowing into the fprintf format string
         // baked into a `"..."` C string literal. Sanitize once per emission
-        // boundary per spec/upstream-bugs/producer-string-sanitization.md.
+        // boundary.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
 
         // The shared IR plan follows ABI slots, interleaves each input's

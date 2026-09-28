@@ -1,5 +1,4 @@
-//! Tests for `spec/upstream-bugs/producer-string-sanitization.md` —
-//! every producer-supplied string flowing into a HIP-backend `printf`-
+//! Every producer-supplied string flowing into a HIP-backend `printf`-
 //! style format string is routed through
 //! `chelis_ir::span_sanitize::sanitize_for_format_string`.
 //!

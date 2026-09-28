@@ -5701,7 +5701,7 @@ class RoutingInventoryReconciliationTests(unittest.TestCase):
             if path.suffix in {".yml", ".yaml"} and path.is_file()
         ]
 
-        self.assertGreater(len(workflows), 20, "workflow discovery found too few")
+        self.assertGreaterEqual(len(workflows), 20, "workflow discovery found too few")
         self.assert_all_routed(workflows, what="workflow files")
 
     def test_every_control_artifact_the_detector_names_is_routed(self) -> None:

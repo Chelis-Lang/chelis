@@ -259,7 +259,7 @@ Executable examples should move toward the implicit style. Fixture baseline upda
 must record before/after fitness data in machine-readable CSV or JSON. Expected deltas
 from newly visible copy costs are documented; unexpected IR or fitness deltas block the
 integration merge. The current executable-example baseline lives in
-`docs/copy_drop_fixture_fitness_baseline.json`.
+`crates/chelis-cli/tests/fixtures/copy_drop_fixture_fitness_baseline.json`.
 
 ## IR Consumer Audit
 

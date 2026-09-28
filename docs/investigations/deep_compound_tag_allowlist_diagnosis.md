@@ -160,7 +160,7 @@ emitted by `crates/chelis-deep/src/printer.rs`. Authoritative list in
 ## Recommendations (orchestrator decides whether to file §5 entries)
 
 These are **recommendations** for the orchestrator. Per workstream
-rules the diagnosis does not file `docs/gap_synthesis.md` entries
+rules the diagnosis does not file `docs/archive/reports/gap_synthesis.md` entries
 directly.
 
 1. **Centralize the closed-tag vocabulary in one Rust constant**

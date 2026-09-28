@@ -1,7 +1,7 @@
 # Implicit-copy Shape A broader return: tail-position coercion
 
 Tracks the diagnosis of `Linearity-ShapeABroadReturn-F1` from
-`docs/gap_synthesis.md`, the §5 follow-on filed against PR #91's
+`docs/archive/reports/gap_synthesis.md`, the §5 follow-on filed against PR #91's
 diagnosis note (`implicit_copy_fanout_v3_diagnosis.md`, "Sibling
 sweep findings"). Fixtures live in
 `crates/chelis-ir/tests/implicit_copy_shape_a_broader_return.rs`.
