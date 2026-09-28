@@ -1,5 +1,8 @@
 # FlukeBall Upstream Issues — Resolution Tracker
 
+> Historical Phase 2 issue resolution record. The linked GitHub issues own
+> their current state.
+
 Filed from the FlukeBall Phase 2 hardening review. All 13 issues resolved 2026-06-25.
 
 ## Chelis (Chelis-Lang/chelis)

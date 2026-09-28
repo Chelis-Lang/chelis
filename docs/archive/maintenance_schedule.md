@@ -1,5 +1,8 @@
 # Maintenance schedule
 
+> Historical record of the completed May 2026 Node runtime migration.
+> Consult the workflows and their dependency updates for current action pins.
+
 Scheduled maintenance items with hard external deadlines. Items get
 removed once the corresponding work has shipped.
 

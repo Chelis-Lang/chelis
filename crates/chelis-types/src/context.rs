@@ -138,8 +138,16 @@ pub struct TypeEnv {
 // be instantiated at a key. v6 records whether each mark's generic is a value
 // binding; reading v5 as function generics would change a value binding's
 // suggested repair after a round trip.
-// v7 carries scalar/tensor key-operation relations in builtin schemes.
-const TYPE_ENV_FORMAT_VERSION: u32 = 7;
+// v7 carries result-equation origins with every generalized scheme. Omitting
+// them would let a cached helper turn a result check into a Grad input binding.
+// v8 requires transported fold/scan accumulator and result contracts.
+// v7 could serialize an alias with an unconstrained result slot.
+// v9 keeps every result-equality scope component wholly shared or quantified.
+// v8 could freshen an input while retaining its monomorphic published result.
+// v10 combines those origins with scalar/tensor key-operation relations.
+// Neither scalar-only v9 nor origin-free key-relation v7 snapshots can be reused.
+// v11 separates raw-origin restrictions from the solved public signature.
+const TYPE_ENV_FORMAT_VERSION: u32 = 11;
 
 #[derive(Serialize)]
 struct TypeEnvWireRef<'a> {
@@ -317,6 +325,21 @@ mod tests {
     use super::*;
     use crate::types::{Dim, Prim, Scheme, TensorPrec, Type, TypeVarRestriction};
     use crate::unify::unify;
+
+    #[test]
+    fn result_origin_is_mandatory_in_schemes_and_contexts() {
+        let scheme = Scheme::mono(Type::Prim(Prim::F32));
+        let mut wire = serde_json::to_value(&scheme).unwrap();
+        wire.as_object_mut().unwrap().remove("result_origin");
+        assert!(serde_json::from_value::<Scheme>(wire).is_err());
+        let mut wire = serde_json::to_value(TypeEnv::empty()).unwrap();
+        for version in [6, 7, 8, 9, 10] {
+            wire["format_version"] = serde_json::json!(version);
+            assert!(serde_json::from_value::<TypeEnv>(wire.clone()).is_err());
+        }
+        let wire = bincode::serialize(&TypeEnv::empty()).unwrap();
+        assert!(bincode::deserialize::<TypeEnv>(&wire).is_ok());
+    }
 
     #[test]
     fn dimension_snapshot_rejects_obsolete_direct_encoding_and_missing_summary() {

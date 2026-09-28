@@ -27,12 +27,11 @@ pub(super) enum TypeDerivation {
         field: String,
     },
     /// `grad` of the target, differentiating the parameters `wrt` selects, or
-    /// every parameter without it, reading the `frozen` variables as the call
-    /// saw them ([`decide_grad`]). The projected type is the type the call
+    /// every parameter without it, using their final inferred types. The
+    /// projected type is the type the call
     /// published: the gradient's function type.
     Grad {
         wrt: Option<Vec<usize>>,
-        frozen: Vec<TypeVar>,
     },
 }
 
@@ -65,8 +64,8 @@ pub(super) enum DerivationStep {
     Pending,
     /// `projected` is bound to the projected type or to a rejection's witness.
     Decided,
-    /// A `grad` whose types revealed further variables that its recursive
-    /// group determines (chelis#2626). It is to be carried again as this
+    /// A `grad` whose types revealed further unresolved parameter variables
+    /// or recursive-group output variables. It is carried again as this
     /// derivation over these operands: the operand's type as it was read,
     /// then each awaited variable.
     Awaits {
@@ -81,9 +80,9 @@ pub(super) enum DerivationStep {
 /// still a variable. Otherwise binds `projected` to the projected type, or
 /// reports why the target has none and binds `projected` to that report's
 /// witness, and returns [`DerivationStep::Decided`]. A `grad` waits again on a
-/// variable `awaits_group` says its recursive group still determines
-/// ([`DerivationStep::Awaits`]); where nothing can wait any more, the caller
-/// passes an `awaits_group` that is always false.
+/// parameter variable, or an output variable `awaits_group` says its group
+/// still determines ([`DerivationStep::Awaits`]). At declaration close,
+/// `defer_parameters` and `awaits_group` both disallow further waiting.
 ///
 /// The diagnostics are the access rule's own for every shape `infer_access`
 /// and `infer_tuple_get` reject once the target is known: this runs on a target
@@ -104,6 +103,7 @@ pub(super) fn resolve_type_derivation(
     source: &Type,
     projected: &Type,
     awaits_group: &dyn Fn(&Type, &Subst) -> bool,
+    defer_parameters: bool,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
@@ -157,11 +157,13 @@ pub(super) fn resolve_type_derivation(
         // The rule `infer_grad` runs on an operand it knows, so a `grad`
         // decided here and one decided at the call cannot disagree. What the
         // call waited on has bound, or its group has completed and nothing
-        // waits any more. A bound variable can resolve to a type that holds
-        // another variable of the group, which the rule waits on again.
-        (Type::Fn(args, _), TypeDerivation::Grad { wrt, frozen }) => {
+        // waits any more. A bound variable can reveal another unresolved
+        // component, which the rule waits on again.
+        (Type::Fn(args, _), TypeDerivation::Grad { wrt }) => {
             // An operand that was a variable at the call published a variable
             // for the gradient, which applications since may have constrained.
+            // Result ascriptions stay on the separate result-constraint ledger
+            // until this derivation settles; they cannot supply these inputs.
             // The gradient's parameters are the operand's, as they are for a
             // call that published the function itself, so tie them first and
             // decide on what those applications determined.
@@ -172,20 +174,20 @@ pub(super) fn resolve_type_derivation(
                 let _ = unify(&slot, &witness, subst);
                 return DerivationStep::Decided;
             }
-            match decide_grad(source, wrt.as_deref(), frozen, awaits_group, adt_reg, subst) {
+            match decide_grad(
+                source,
+                wrt.as_deref(),
+                awaits_group,
+                defer_parameters,
+                adt_reg,
+                subst,
+            ) {
                 GradDecision::Decided(decided) => decided,
-                GradDecision::Awaits {
-                    operand,
-                    awaited,
-                    frozen,
-                } => {
+                GradDecision::Awaits { operand, awaited } => {
                     let mut operands = vec![operand];
                     operands.extend(awaited);
                     return DerivationStep::Awaits {
-                        derivation: TypeDerivation::Grad {
-                            wrt: wrt.clone(),
-                            frozen,
-                        },
+                        derivation: TypeDerivation::Grad { wrt: wrt.clone() },
                         operands,
                     };
                 }

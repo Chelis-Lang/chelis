@@ -150,6 +150,55 @@ fn lambda_pipe_stages_preserve_lexical_bindings() {
     }
 }
 
+// [04] §8.3: returned closures keep lexical captures. [05-HOST-1]: a
+// computed callee still evaluates an unused actual before entering its body.
+#[test]
+fn computed_closures_keep_captures_and_eager_arguments() {
+    for body in [
+        "{\n later = y |> fn (x: i64) -> fn (y: i64) -> x\n alias = later\n alias(ACTUAL)\n}",
+        "((fn (x: i64) -> fn (y: i64) -> x)(y))(ACTUAL)",
+        "{\n pair = ((fn (x: i64) -> y), 7i64)\n selected = pair.0\n selected(ACTUAL)\n}",
+    ] {
+        for (actual, succeeds) in [("9i64", true), ("trunc_div(9i64, z)", false)] {
+            let body = body.replace("ACTUAL", actual);
+            let source = format!("def f(y: i64, z: i64) -> i64 = {body}\nout = f(3i64, 0i64)\n");
+            let out = checked_eval(&source);
+            assert_eq!(out.status.success(), succeeds, "{source}\n{out:?}");
+            if succeeds {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&out.stdout).expect("eval JSON");
+                assert_eq!(value["roots"][0]["value"]["value"]["value"], 3, "{source}");
+            } else {
+                assert!(
+                    String::from_utf8_lossy(&out.stderr).contains("division by zero"),
+                    "{source}\n{out:?}"
+                );
+            }
+        }
+    }
+    for (actual, succeeds) in [("9i64", true), ("trunc_div(9i64, 0i64)", false)] {
+        let source = format!(
+            "pair = ((fn (x: i64) -> 3i64), 7i64)\nselected = pair.0\nout = selected({actual})\n"
+        );
+        let out = checked_eval(&source);
+        assert_eq!(out.status.success(), succeeds, "{source}\n{out:?}");
+        if succeeds {
+            let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("eval JSON");
+            let last = value["roots"]
+                .as_array()
+                .expect("roots")
+                .last()
+                .expect("out");
+            assert_eq!(last["value"]["value"]["value"], 3, "{value}");
+        } else {
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("division by zero"),
+                "{source}\n{out:?}"
+            );
+        }
+    }
+}
+
 // Calling a lambda evaluates its argument before its body, even if the
 // body uses that parameter conditionally, later, or inside another lambda.
 #[test]

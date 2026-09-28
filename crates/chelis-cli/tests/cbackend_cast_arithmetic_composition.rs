@@ -1,19 +1,7 @@
 //! C-backend multi-op cast + arithmetic composition fixtures.
 //!
-//! W2 PR 4 of the 0.7.8 compiler cleanup workstream
-//! (`CRuntime-F32Coupling`).  The cast+arithmetic shape
-//! `add(cast(t, f64), cast(t, f64))` is the canonical reproducer for
-//! the bug class closed by PRs #64, #67, #72, #84, #86, and #87:
-//! whenever the chain reads through a non-migrated f32-strided
-//! accessor, the f64 mantissa silently truncates and the C-backend
-//! output diverges from `chelis eval`.
-//!
-//! W2 PR 3's agent reported observing this corruption before applying
-//! their host_emit migration; verification on the current `main`
-//! (post-PR #87 merge) confirms the chain produces byte-exact f64
-//! output through the DAG-emitted kernel path.  These fixtures lock
-//! the property so any future regression in either the runtime or
-//! the host_emit code paths surfaces here.
+//! Cast and tensor arithmetic compositions preserve f64 precision
+//! and agree with the evaluator on the C backend.
 //!
 //! Each fixture:
 //!   1. Writes a small `.ch` program that combines `cast` with a

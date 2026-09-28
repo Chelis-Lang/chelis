@@ -418,6 +418,12 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
     let id = node.id;
     let rank = node.output_type.dims.len();
     match &node.op {
+        RiscOp::Iota => op_computed(id, rank),
+        RiscOp::ListMapCapture { .. } => vec![AxisSource::InputAxis {
+            input: 1,
+            axis: RtAxis::Lit(0),
+        }],
+        RiscOp::OrderedAdjointSum { .. } => vec![],
         // --- Binary and unary elementwise: shape preserving ---
         RiscOp::Add
         | RiscOp::Sub
@@ -1593,11 +1599,11 @@ fn axis_claim(dim: &DimInfo) -> Option<DimClaim> {
 /// A set axis and a pass-through axis can both carry `AxisSource::InputAxis`,
 /// because a folded `shape()` read is exactly "this axis's extent is that
 /// tensor's axis". They are distinguished here rather than by inspecting the
-/// variant, and the match is deliberately small: `Expand` and `Reshape` are
-/// the only owners whose `RtDim` may be `InputAxis` (C1.7's owner matrix), so
-/// every other `InputAxis` source is a forwarded axis.
+/// variant. Expand, Reshape, and ListMapCapture insert or set axes; the
+/// latter reads its invocation carrier's first axis rather than an RtDim.
 fn sets_axis(op: &RiscOp, axis: usize) -> bool {
     match op {
+        RiscOp::ListMapCapture { .. } => axis == 0,
         RiscOp::Expand { axis: set, .. } => axis == *set,
         // A `Reshape` target mints a fresh extent only when it computes one.
         // C4.2 lists the four target carriers, and C2.4 says a reshape-only
@@ -1630,6 +1636,10 @@ fn sets_axis(op: &RiscOp, axis: usize) -> bool {
 /// extent, and `sets_axis` does not make either a witness on a `Reshape`.
 pub(crate) fn expand_or_reshape_carrier(op: &RiscOp, axis: usize) -> Option<&RtDim> {
     let carrier = match op {
+        RiscOp::ListMapCapture { .. } if axis == 0 => &RtDim::InputAxis {
+            tensor: 1,
+            axis: RtAxis::Lit(0),
+        },
         RiscOp::Expand { axis: set, size } if axis == *set => size,
         RiscOp::Reshape { new_shape } => new_shape.get(axis)?,
         _ => return None,
@@ -2824,6 +2834,8 @@ pub enum LocalGuardObservation {
 /// those are the owner's producers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputedAxisExtent {
+    /// [05-OP-54]: max(end - start, 0), reading exact i64 inputs 0 and 1.
+    RangeSpan,
     /// `shrink`'s half-open span on one axis: the extent is `end - start`
     /// (`spec/05-risc-primitives.md` section 2.4).
     ///
@@ -2976,6 +2988,7 @@ fn op_computed_axis_origin_bounded(
 /// the evaluator and the legacy movement failure on C.
 pub fn op_computed_axis_extent(op: &RiscOp, axis: usize) -> Option<ComputedAxisExtent> {
     match op {
+        RiscOp::Iota if axis == 0 => Some(ComputedAxisExtent::RangeSpan),
         RiscOp::Shrink { bounds } => {
             bounds
                 .get(axis)
@@ -3050,6 +3063,7 @@ pub fn static_op_computed_axis_extent(dag: &Dag, node: NodeId, axis: usize) -> O
         }
     };
     match op_computed_axis_extent(&owner.op, axis)? {
+        ComputedAxisExtent::RangeSpan => None,
         ComputedAxisExtent::ShrinkSpan {
             start,
             end,

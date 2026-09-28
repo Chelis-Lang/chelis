@@ -1,11 +1,5 @@
-//! Wave 3 terminal red team for the 0.7.8 compiler-cleanup workstream.
-//!
-//! Adversarial fixtures probing the linearity §5 closures shipped in
-//! PRs #83 and #90: typed `ConsumeKind`, multi-level alias chains,
-//! and tuple-destructure linearity (single-level + nested).
-//!
-//! Each fixture has a pinned expected outcome; see the surrounding
-//! doc comment for the shape under test.
+//! Multi-level alias chains and tuple-destructure components obey
+//! the same consume and borrow rules as direct bindings.
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
@@ -27,16 +21,14 @@ fn assert_linearity_clean(source: &str) {
 }
 
 // ============================================================
-// §3.2 Linearity-AliasedConsume-F1 multi-level alias chains
+// Multi-level alias chains
 // ============================================================
 
 /// Three-level alias chain: `let z = y; let y_x = x; let w = z`.
 /// Then `realize(w)` consumes the underlying `x` value through three
 /// chain hops, so a later `add(x, w)` must error.
 ///
-/// This pushes past the existing two-level fixture in
-/// `linearity_aliased_consume.rs::aliased_consume_bypass_errors_after_fix`
-/// to confirm `resolve_alias_chain` walks past depth 1.
+/// `resolve_alias_chain` must follow every link to the source.
 #[test]
 fn alias_chain_three_levels_propagates_consume() {
     let errors = linearity_errors(
@@ -162,9 +154,7 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
 /// inner; realize(a); realize(a)` should error on double consume of
 /// the inner-tuple component `a`.
 ///
-/// Pin: this is the central Linearity-F2 generalization. PR #83's
-/// fixture only covers single-level destructure; the diagnosis cites
-/// `tuple_get_element_type` as recursive — verify behavior.
+/// This exercises recursive component tracking across two levels.
 #[test]
 fn nested_tuple_destructure_double_realize_errors() {
     let errors = linearity_errors(

@@ -10062,22 +10062,9 @@ fn compile_check_in_exec_context(
         .map_err(|e| e.to_string())
 }
 
-/// Compile the synth_decls once and return a `PreparedEval` handle so
-/// per-test evals share the compile. Routes through the legacy
-/// `compile_with_reef_graph` + `prepare_eval` path for the
-/// `ReefGraph` variant, and `prepare_eval_in_context` for the
-/// `Context` variant.
-///
-/// Phase G' (final) — with the linearity divergence root-caused (the
-/// monolithic `annotate_ir_program` was masking real
-/// use-after-consume violations because it built with an empty
-/// `AdtRegistry`; see `docs/archive/rca/lin_rca_report.md`) and chelis-std + the
-/// CLI test fixtures rewritten to use `&t` / `copy(t)` at the right
-/// sites, the `Context` arm now goes through
-/// `prepare_eval_in_context(ctx, source)`. Per-file work drops from
-/// "full pipeline on ~50 modules" to "parse + check + lower the test
-/// file's ~10 lines." The `ReefGraph` arm stays on the legacy path
-/// for direct workers that were not handed a compiled context.
+/// Compile synthesized declarations once and share the result across
+/// tests. `Context` uses `prepare_eval_in_context`; `ReefGraph` uses
+/// `compile_with_reef_graph` and `prepare_eval`.
 #[derive(Clone)]
 enum PreparedTestEval {
     Legacy(chelis_compiler_api::compiler::PreparedEval),

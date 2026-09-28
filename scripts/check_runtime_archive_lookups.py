@@ -426,14 +426,13 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs",
-        "linker-search",
+        "archive-name",
         lines=(
-            '.arg("-lchelis_runtime")',
+            '.arg(out_dir.join("libchelis_runtime.a"))',
         ),
-        disposition="lookup",
-        tracking="chelis#1354",
+        disposition="not-lookup",
         reason=(
-            "an entirely ignored HIP gate links `-L. -lchelis_runtime` in its `chelis build` output directory; linking the staged archive by path needs its manual-gate row and wired docs/manual_gates.md entry in the same change"
+            "links the exact runtime archive staged by `chelis build` in `out_dir` before the HIP libraries"
         ),
     ),
     Row(
@@ -854,14 +853,13 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "crates/chelis-cli/tests/std_io_pipeline.rs",
-        "linker-search",
+        "archive-name",
         lines=(
-            'cmd.args(["-L.", "-lchelis_runtime"]);',
+            'cmd.arg(out_dir.join("libchelis_runtime.a"));',
         ),
-        disposition="lookup",
-        tracking="chelis#1354",
+        disposition="not-lookup",
         reason=(
-            "an entirely ignored manual gate links `-L. -lchelis_runtime` in its `chelis build` output directory; linking the staged archive by path needs its manual-only or manual-gate row in the same change"
+            "links the exact runtime archive staged by `chelis build` in `out_dir` before the remaining link flags"
         ),
     ),
     Row(
@@ -969,20 +967,21 @@ REVIEWED: tuple[Row, ...] = (
             "/// `lib/libchelis_runtime.a` in the tarball.",
             "/// Ship `lib/libchelis_runtime.a` as a symlink to a sibling holding",
             '"archive": "libchelis_runtime.a",',
+            'let exported_archive = runtime_export.join("libchelis_runtime.a");',
             'let archive = root.join("lib/libchelis_runtime.a");',
             'root.join("lib/libchelis_runtime.real"),',
             'std::os::unix::fs::symlink("libchelis_runtime.real", &archive).unwrap();',
         ),
         disposition="not-lookup",
         reason=(
-            "builds fixture release tarballs whose `lib/` holds the archive, including a symlinked archive `chelisup` must refuse, and a fake export's receipt"
+            "builds fixture release tarballs with a shipped `lib/` archive, an exact fake-export archive, a symlinked archive `chelisup` must refuse, and a fake export receipt"
         ),
     ),
     Row(
         "crates/chelisup/tests/common/mod.rs",
         "runtime-variable",
         lines=(
-            "/// `<dir>` (and, like the real export, refuses a set `CHELIS_RUNTIME_DIR`).",
+            "/// refuses a set `CHELIS_RUNTIME_DIR`). Other invocations echo their args.",
             '\\x20 if [ -n \\"${{CHELIS_RUNTIME_DIR+set}}\\" ]; then\\n\\',
             "\\x20   echo 'error: CHELIS_RUNTIME_DIR is set' >&2; exit 1\\n\\",
         ),
@@ -998,6 +997,9 @@ REVIEWED: tuple[Row, ...] = (
             '"match `chelis runtime export` (libchelis_runtime.a sha256 {})",',
             'assert!(toolchain.join("lib/libchelis_runtime.a").is_file());',
             '"ships lib/libchelis_runtime.a with SHA-256",',
+            '"runtime export has no usable libchelis_runtime.a",',
+            '"runtime export reports libchelis_runtime.a with SHA-256",',
+            '"runtime export has no usable libchelis_runtime.a: libchelis_runtime.a is not a regular file",',
             '"no usable lib/libchelis_runtime.a: lib/libchelis_runtime.a is not a regular file",',
             '"no usable lib/libchelis_runtime.a: lib is not a directory",',
         ),

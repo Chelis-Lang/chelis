@@ -230,10 +230,10 @@ Finding F1 below.
 - **Severity:** LOW.
 - **Shape:** PR #91's diagnosis explicitly notes that `let/if/match`
   tail-return Shape A is OUT of v3 scope and a §5-candidate follow-on,
-  but I find no §5 entry for it in `docs/gap_synthesis.md`. The
+  but I find no §5 entry for it in `docs/archive/reports/gap_synthesis.md`. The
   diagnosis says "Out of v3 scope; document as a candidate for a
   follow-on entry" but no entry was opened.
-- **Verification:** `grep -i "shape.a.broader\|Shape-A-Broader\|Let-Tail-Return\|broader.shape.a" docs/gap_synthesis.md` returns zero hits. The implicit-copy v3 diagnosis at
+- **Verification:** `grep -i "shape.a.broader\|Shape-A-Broader\|Let-Tail-Return\|broader.shape.a" docs/archive/reports/gap_synthesis.md` returns zero hits. The implicit-copy v3 diagnosis at
   `docs/investigations/implicit_copy_fanout_v3_diagnosis.md` lines
   117-122 names three deferred body shapes (`bare var`, `let y = x in
   y`, `if/match tail`) and calls them §5 candidates.

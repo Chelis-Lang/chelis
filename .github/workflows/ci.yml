@@ -456,6 +456,7 @@ jobs:
           scripts.test_regenerate_conformance_assets
           scripts.test_gate.DocsOnlySkipTests
           scripts.test_gate.CiParityTests
+          scripts.test_gate_local.LocalCommandListTests
           scripts.test_gate.RejectionAuthorityPrBoundaryTests
 
       # Split from the verdict so the identity step can sit between them:
@@ -785,6 +786,12 @@ jobs:
 
       - name: Script unit tests (scripts/test_*.py)
         run: python scripts/ci_script_tests.py pr
+
+      - name: Install local tooling test dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -e 'py[test]'
+
+      - name: Local LOC report tests
+        run: python -m pytest py/tests/test_loc_report.py -q
 
       # Keep the privacy and source-usage construction boundary in script-unit
       # without querying mutable GitHub issue state. The always-running Docs
@@ -1480,10 +1487,6 @@ jobs:
       - name: Preserve integration context for an owner-only rebase
         if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration != 'true'
         run: echo "trusted rebase selected no package integration frontier"
-
-  # NOTE: the LOC report moved to its own weekly workflow
-  # (.github/workflows/loc-report.yml) so it no longer commits a bot
-  # commit to main on every merge. See WS-7 / spend-trim.
 
   test-telemetry:
     name: CI Test Telemetry

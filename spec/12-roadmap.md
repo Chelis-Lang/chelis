@@ -96,17 +96,15 @@ design in `spec/design/differentiable_language.md`.
 | Phase | Deliverable | Status |
 |---|---|---|
 | **D0** | Spec lock — `spec/design/differentiable_language.md` | ✅ Complete |
-| **D1** | Control-flow AD (`if`, `match`, `while`, `for`, recursion). Depends on the IR-SelectOp-F1 and IR-MatchLowering-F1 §5 entries in `docs/gap_synthesis.md`. | Planned; static-scrutinee `match` slice shipped (chelis#520), plus static-condition `if` pruning and bounded static recursion unrolling (chelis#620), both in `spec/06-transformations.md` §2.10.1. Runtime-condition control flow (runtime-scrutinee `match`, runtime-condition ADT branches) remains gated on `RiscOp::Select` (chelis#618) |
-| **D2** | ADT and record gradients (field-wise extension + higher-order). Depends on IR-FirstClassFn-F1. | Planned; field-wise ADT-gradient slice shipped in the eval lane, including a multi-argument ADT-alongside-tensor payload (`grad(model_forward, wrt=params)(x, params)`) (chelis#520, `spec/06-transformations.md` §2.10.1). Compiled-lane ADT-param export and higher-order ADT gradients remain roadmap work |
+| **D1** | Control-flow AD (`if`, `match`, `while`, `for`, recursion). Requires compiled conditional and ADT branch representation as described in `spec/design/differentiable_language.md`. | Planned; static-scrutinee `match` slice shipped (chelis#520), plus static-condition `if` pruning and bounded static recursion unrolling (chelis#620), both in `spec/06-transformations.md` §2.10.1. Runtime-condition control flow (runtime-scrutinee `match`, runtime-condition ADT branches) remains gated on `RiscOp::Select` (chelis#618) |
+| **D2** | ADT and record gradients (field-wise extension + higher-order). Depends on first-class function values in compiled IR, as described in `spec/design/differentiable_language.md`. | Planned; field-wise ADT-gradient slice shipped in the eval lane, including a multi-argument ADT-alongside-tensor payload (`grad(model_forward, wrt=params)(x, params)`) (chelis#520, `spec/06-transformations.md` §2.10.1). Compiled-lane ADT-param export and higher-order ADT gradients remain roadmap work |
 | **D3** | Effect-aware AD (state, raises, capability, stochastic sample-effect dispatch for reparam / REINFORCE / pathwise). | Planned |
 | **D4** | Implicit differentiation (`fix`, `argmin`, `solve` markers + IFT-derived gradients). | Planned |
 | **D5** | Differentiability typing (`Differentiable` / `PartiallyDifferentiable` / `NonDifferentiable` type-level marker, inference, property attachment). | Planned |
 | **D6** | Documentation, examples, `chelis-diff` shell library, on-ramp for PyTorch/JAX users. | Planned |
 
 Phases D1–D5 are sequential because each builds on the prior; D6 can
-develop in parallel with D5 once D4 lands. Committing to D1 reclassifies
-IR-SelectOp-F1, IR-MatchLowering-F1, and IR-FirstClassFn-F1 from
-"surface-when-forced" to required prerequisites.
+develop in parallel with D5 once D4 lands.
 
 ## Hydronnx — ONNX shell (committed scope)
 
@@ -128,10 +126,10 @@ shell consumes, owned by the ONNX project, not by Chelis.
 | **H4** | Type-discipline integration: dimension types on loaded signatures, call-site type checking, property attachment, AD composition where operators support it, composition with other Chelis code. | Planned |
 | **H5** | Documentation, examples per strong-fit category (image classification, object detection, tabular forecasting), property examples, performance framing, ONNX-Runtime → hydronnx migration guide. | Planned |
 
-Dependencies on the IR §5 entries (`IR-FirstClassFn-F1`,
-`IR-SelectOp-F1`, `IR-MatchLowering-F1` in `docs/gap_synthesis.md`)
+Dependencies on first-class function values, compiled conditional selection,
+and ADT branch lowering (see `spec/design/hydronnx.md`)
 are non-blocking for v0.1: dynamic-graph ONNX operators (If, Loop,
-Scan) extend Hydronnx's operator coverage when those entries close
+Scan) extend Hydronnx's operator coverage when those capabilities land
 (and when the differentiable-language Phase D1 control-flow AD work
 lands), but they are explicitly out of the v0.1 operator subset.
 Fusion, kernel authoring, and MLIR-backend work are performance

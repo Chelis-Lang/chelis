@@ -174,4 +174,10 @@ def compiler_fixed_field_contracts():
         "literal-witness-requirement",
         "alloc::vec::Vec",
     )
+    add(
+        schema + "WireRiscOp::OrderedAdjointSum.groups",
+        "NonnegativeCount",
+        "adjoint-contribution-group-count",
+        "alloc::vec::Vec",
+    )
     return tuple(sorted(contracts, key=lambda c: c.field))

@@ -45,6 +45,25 @@ pub fn vectorize_axis0_with_node_map_and_captures(
     batch_dim: DimInfo,
     captured_loads: &UnordSet<String>,
 ) -> Result<(Dag, Vec<NodeId>), String> {
+    vectorize_axis0_impl(dag, batch_dim, captured_loads, false)
+}
+
+/// List callbacks retain scalar capture-edge provenance for reverse mode;
+/// authored vmap continues to use the ordinary Expand adjoint.
+pub fn vectorize_list_map(
+    dag: &Dag,
+    batch_dim: DimInfo,
+    captured_loads: &UnordSet<String>,
+) -> Result<Dag, String> {
+    vectorize_axis0_impl(dag, batch_dim, captured_loads, true).map(|(dag, _)| dag)
+}
+
+fn vectorize_axis0_impl(
+    dag: &Dag,
+    batch_dim: DimInfo,
+    captured_loads: &UnordSet<String>,
+    list_map: bool,
+) -> Result<(Dag, Vec<NodeId>), String> {
     let mut out = Dag::new();
     out.inherit_declarations(dag);
     let concrete_batch = match &batch_dim {
@@ -75,6 +94,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         .collect::<UnordSet<NodeId>>();
     let mut mapped_ids = Vec::with_capacity(dag.nodes().len());
     let mut expanded_shared = UnordMap::<NodeId, NodeId>::new();
+    let mut list_invocation = None;
 
     for node in dag.nodes() {
         let shared = shared_bound_nodes.contains(&node.id);
@@ -101,6 +121,17 @@ pub fn vectorize_axis0_with_node_map_and_captures(
             prepend_batch_type(&node.output_type, &batch_dim)
         };
         let op = match &node.op {
+            RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
+                return Err(
+                    "batching an ordered List cotangent requires nested invocation provenance"
+                        .into(),
+                );
+            }
+            RiscOp::Iota => {
+                return Err(
+                    "runtime range inside vmap requires a shared cardinality representation".into(),
+                );
+            }
             RiscOp::Sum { axis, accumulator } => RiscOp::Sum {
                 axis: axis + 1,
                 accumulator: *accumulator,
@@ -307,13 +338,34 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                     )
                 }
             };
+            let (capture_op, expand_inputs) = if list_map
+                && node.output_type.precision.is_float()
+                && read_nodes.contains(&node.id)
+            {
+                if !node.output_type.dims.is_empty() {
+                    return Err("ordered List capture must be scalar".into());
+                }
+                let first = list_invocation.is_none();
+                let invocation = list_invocation
+                    .or(batch_witness)
+                    .ok_or("List map has no invocation carrier")?;
+                (RiscOp::ListMapCapture { first }, vec![raw, invocation])
+            } else {
+                (RiscOp::Expand { axis: 0, size }, expand_inputs)
+            };
             let new_id = out.add_node(
                 owner,
-                RiscOp::Expand { axis: 0, size },
+                capture_op,
                 expand_inputs,
                 output_type,
                 node.span_id.clone(),
             );
+            if matches!(
+                out.get(new_id).unwrap().op,
+                RiscOp::ListMapCapture { first: true }
+            ) {
+                list_invocation = Some(new_id);
+            }
             mapped_ids.push(new_id);
             let remapped_shape_deps = remap_shape_deps(node.id, &node.shape_deps, &mapped_ids)?;
             let remapped_result_claims =
@@ -329,15 +381,23 @@ pub fn vectorize_axis0_with_node_map_and_captures(
             continue;
         }
 
-        // A non-shared constant tensor has one authored payload, not one
+        // A non-shared constant has one authored payload, not one
         // payload per mapped lane. Preserve that payload at its original
         // type and make the old node's mapped identity an explicit batch
         // broadcast. Merely prepending the batch dimension while cloning the
         // flat storage creates a malformed constant whose cardinality no
         // longer matches its declared type (chelis#1932).
-        if !shared && matches!(node.op, RiscOp::ConstTensor { .. }) {
+        if !shared
+            && (matches!(node.op, RiscOp::ConstTensor { .. })
+                || (matches!(node.op, RiscOp::Const { .. }) && node.output_type.dims.is_empty()))
+        {
+            let raw_owner = if matches!(node.op, RiscOp::Const { .. }) {
+                crate::dag::Owner::new(owner.decl, None)
+            } else {
+                owner
+            };
             let raw = out.add_node(
-                owner,
+                raw_owner,
                 node.op.clone(),
                 Vec::new(),
                 node.output_type.clone(),
@@ -407,6 +467,16 @@ pub fn vectorize_axis0_with_node_map_and_captures(
             // returns the mapping. The remap below is therefore the
             // correctness step, not a no-op that happens to look like one.
             new_node.shape_deps = remapped_shape_deps;
+            // A scalar comparison has no axes to witness before batching.
+            // Its new anonymous batch axis belongs to its actual operand,
+            // just as the corresponding source-level tensor operation does.
+            if !shared
+                && matches!(new_node.op, RiscOp::Compare(_) | RiscOp::Logical(_))
+                && let Some(&source) = new_node.inputs.first()
+                && !new_node.shape_deps.contains(&source)
+            {
+                new_node.shape_deps.push(source);
+            }
             new_node.result_claim_deps = remapped_result_claims;
         }
         if let Some(reusable_input) = node.reusable_input {

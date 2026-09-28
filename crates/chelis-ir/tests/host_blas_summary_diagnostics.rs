@@ -1,23 +1,20 @@
-//! Wave 6 / W6 Task A — BLAS-rejection structured diagnostic oracle.
+//! BLAS helper summary and structured rejection tests.
 //!
 //! Sibling of `host_sparse_summary_diagnostics.rs`. Drives the BLAS
 //! summary recognizer (`try_summarize_blas_helper_for_test`) on
 //! synthetic helper DAGs that exercise the six BLAS-prefixed
-//! rejection variants added in W6 Task A. The Surf surface cannot
-//! reach every one of these (the type checker blocks
-//! precision-mismatched matmul calls before lowering); the synthetic
-//! DAG path is the only way to drive each rejection case under a
-//! pattern-match contract.
+//! rejection variants. The type checker blocks some malformed matmul
+//! calls before lowering, so synthetic DAGs exercise those cases.
 //!
 //! ## Categories covered here (six BLAS-prefixed variants)
 //!
 //!   1. `BlasMultipleRoots` — synthetic two-root matmul-near DAG.
-//!   2. `BlasOutputPrecisionMismatch` — F64 matmul helper output.
+//!   2. `BlasOutputPrecisionMismatch` — unsupported matmul output precision.
 //!   3. `BlasNotMatmulPattern` — root is Sum (matmul-near) but the
 //!      recognizer cannot fold to BlasMatmul, OR root is BlasMatmul
 //!      with malformed input count / precision.
 //!   4. `BlasNonLoadOperand` — matmul operand is not a direct Load.
-//!   5. `BlasInputPrecisionMismatch` — helper input precision != F32.
+//!   5. `BlasInputPrecisionMismatch` — unsupported helper input precision.
 //!   6. `BlasDimensionBindingFailure` — batch/M/N/K cannot bind to inputs.
 //!
 //! ## Pattern-match contract
@@ -168,30 +165,17 @@ fn f32_matmul_helper_returns_ok_with_summary() {
 }
 
 // =========================================================================
-// Category 2: BlasOutputPrecisionMismatch
+// Supported and unsupported output precisions
 // =========================================================================
 
 #[test]
-#[ignore = "WS-A2: F64 BLAS matmul is admitted (cblas_dgemm); BlasOutputPrecisionMismatch no longer fires for F64."]
-fn blas_output_precision_mismatch_f64_emits_structured_rejection() {
-    // F64 matmul subgraph: the recognizer's matmul-near pre-check
-    // fires (Sum(Mul(Expand, Expand)) shape) AND the output is F64,
-    // so the recognizer emits BlasOutputPrecisionMismatch.
+fn f64_matmul_helper_returns_ok_with_summary() {
     let (dag, inputs, output) = build_matmul_helper(Prim::F64);
     let attempt = try_summarize_blas_helper_for_test(&dag, &inputs, &output);
-    let rejection = expect_rejected(attempt);
-
-    assert_eq!(
-        rejection.rejection_class,
-        SummaryRejectionClass::BlasOutputPrecisionMismatch,
-    );
-    let SummaryRejectionDetail::BlasOutputPrecisionMismatch { observed } = rejection.detail else {
-        panic!(
-            "expected SummaryRejectionDetail::BlasOutputPrecisionMismatch, got {:?}",
-            rejection.detail,
-        );
-    };
-    assert_eq!(observed, Prim::F64);
+    let summary = attempt.expect("f64 matmul helper must summarize");
+    assert_eq!(summary.output.precision, Prim::F64);
+    assert_eq!(summary.input_tys[0].precision, Prim::F64);
+    assert_eq!(summary.input_tys[1].precision, Prim::F64);
 }
 
 #[test]
@@ -346,9 +330,8 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
 //
 // Subcase A: root is matmul-near (Sum-of-Mul-of-Expand-of-Expand) but
 // `specialize_for_blas` could not fold to BlasMatmul because one
-// operand is not a contiguous-leaf matrix (the W5 P0 fix keeps non-F32
-// matmuls in the same boat; here we trigger it with an embedded
-// constant, which makes the IR-level matcher route differently).
+// operand is not a contiguous-leaf matrix. An embedded constant
+// exercises this path.
 //
 // Subcase B: root op is BlasMatmul but its rank/precision is malformed
 // (we hand-construct a `RiscOp::BlasMatmul` with one input instead of two).
@@ -577,10 +560,7 @@ fn blas_non_load_operand_const_rhs_emits_structured_rejection() {
 /// precisions for input[0] and input[1]. Caller declares matching
 /// `inputs` so `helper_load_input_index` succeeds and the recognizer
 /// reaches the input-precision gate. Useful for driving
-/// `BlasInputPrecisionMismatch` without going through
-/// `specialize_for_blas`'s W5 P0 precision filter (which would
-/// otherwise leave the body as a Sum/Mul/Expand chain and we'd hit
-/// `BlasNotMatmulPattern` first).
+/// `BlasInputPrecisionMismatch` directly.
 fn build_handcrafted_blas_with_load_prims(
     lhs_prim: Prim,
     rhs_prim: Prim,
@@ -622,37 +602,6 @@ fn build_handcrafted_blas_with_load_prims(
 
     let inputs = vec![input("a", lhs_ty), input("b", rhs_ty)];
     (dag, inputs, out_ty)
-}
-
-#[test]
-#[ignore = "WS-A2: F64 BLAS matmul is admitted (cblas_dgemm); F64 inputs no longer trigger BlasInputPrecisionMismatch."]
-fn blas_input_precision_mismatch_helper_has_f64_declared_input_emits_structured_rejection() {
-    // Hand-built BlasMatmul with F32 output but input[0] Load is F64
-    // (declared input matches). The recognizer's BlasMatmul-root
-    // gate passes, both operands resolve via helper_load_input_index
-    // (matching name + type), and the input-precision gate fires for
-    // input_index = 0.
-    let (dag, inputs, output) =
-        build_handcrafted_blas_with_load_prims(Prim::F64, Prim::F32, Prim::F32);
-    let attempt = try_summarize_blas_helper_for_test(&dag, &inputs, &output);
-    let rejection = expect_rejected(attempt);
-
-    assert_eq!(
-        rejection.rejection_class,
-        SummaryRejectionClass::BlasInputPrecisionMismatch,
-    );
-    let SummaryRejectionDetail::BlasInputPrecisionMismatch {
-        input_index,
-        observed,
-    } = rejection.detail
-    else {
-        panic!(
-            "expected SummaryRejectionDetail::BlasInputPrecisionMismatch, got {:?}",
-            rejection.detail,
-        );
-    };
-    assert_eq!(input_index, 0);
-    assert_eq!(observed, Prim::F64);
 }
 
 #[test]

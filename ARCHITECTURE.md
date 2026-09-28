@@ -1,233 +1,70 @@
 # Architecture
 
-This document orients new developers and coding agents to the Chelis compiler as it
-exists today.
-For project-level decisions, read `spec/design/chelis_canonical_reference.md` first.
-This file explains how the workspace is structured and how a source file moves through
-the compiler.
+Chelis has two source syntaxes and one checked compiler pipeline. This page
+maps the implemented workspace; the
+[canonical project reference](spec/design/chelis_canonical_reference.md)
+owns project-level decisions, and the [numbered specs](spec/00-context.md)
+own language semantics.
 
-## Current Status
-
-Phase 0f (C backend codegen) is in progress.
-Phases 0a-0e are complete.
-The active work is backend emission, runtime support, BLAS integration, and numerical
-validation.
-
-## Compilation Pipeline
+## Source to checked program
 
 ```text
-  .ch source          .dp source
-      |                    |
-  [Surf Lexer]        [Deep Lexer]
-      |                    |
-  [Surf Parser]       [Deep Parser]
-      |                    |
-  Surf AST            Deep AST
-      |                    |
-  [Desugarer] -------->   |
-                           |
-                    [Type Checker]
-                           |
-                    Typed Deep AST
-                           |
-                    [Effect Checker]
-                           |
-                   [Linearity Checker]
-                           |
-                      [Lowering]
-                           |
-                       RISC DAG
-                           |
-              [Optimize / Transform / Evaluate]
-                           |
-                 +---------+----------+
-                 |                    |
-          [IR Evaluator]      [C Code Emitter]
-                 |                    |
-          Interactive result      C source code
-                                       |
-                                [gcc / clang]
-                                       |
-                                  Executable
+Surf (.ch) → parse → desugar ─┐
+                              ├→ expanded Deep → type analysis → effects and
+Deep (.dp) → parse ────────────┘                  linearity checks → checked program
+                                                                 ↓
+                                                    lower → RISC DAG
 ```
 
-Both source forms converge at Deep.
-The type checker runs on Deep, lowering produces the RISC DAG, and then the pipeline
-forks:
+Surf is the readable syntax. Deep is the canonical machine-facing syntax.
+Surf macros expand before semantic analysis; both source paths enter the
+pipeline as expanded Deep. `chelis-surf` and `chelis-deep` own their respective
+parsers, `chelis-types` owns type analysis, and `chelis-effects` owns effect
+checking. Linearity checking follows type analysis. For file inputs, the CLI
+runs its formatter and blocking lint checks before the compiler pipeline.
 
-- interactive workflows use the IR evaluator
-- production builds emit C and compile it with the system toolchain
+`chelis-pipeline-core` owns the typed transitions from a prepared Deep
+program through semantic checks and lowering. Successful checks produce a
+`CheckedCompilation`; lowering produces a `LoweredCompilation` with the DAG
+and root metadata. A rejected program cannot yield either success artifact.
+`chelis-compiler-api::pipeline` is the public facade. It prepares source and
+offers three goals: type analysis, full semantic checking, and lowering.
+For CLI file checks and builds, Reef links Surf declarations; the CLI passes
+them through the compiler API for desugaring and macro expansion. For
+`chelis reef build`, Reef expands linked declarations and uses the semantic
+core directly.
 
-This split is deliberate.
-Chelis does not plan a second general-purpose JIT backend unless measured latency makes
-it necessary.
+`chelis-ir` owns the compact RISC DAG, transforms, verification, and the local
+evaluator. Backend preparation verifies the DAG and applies target-specific
+checks before emission.
 
-### Canonical Pipeline Owner
+## Execution and build paths
 
-`chelis-pipeline-core` owns type analysis, effect checks, linearity checks, root metadata, and lowering.
+| CLI path | Result |
+|---|---|
+| `chelis eval` | Checks and lowers the program, then executes it with the local IR evaluator. `--target eval`, `c`, `hip`, or `metal` selects the target's capability and root manifest; it does not run generated native or GPU code. |
+| `chelis build --target c` | Emits C source and a header, stages the C runtime artifacts, and prints the native compile command. C is the default build target. |
+| `chelis build --target hip` | Emits C++ host source and a header with embedded HIP kernels, stages the HIP and C runtime artifacts, and prints an `hipcc` command. The HIP runtime compiles kernels with `hiprtc` when the resulting program runs. |
+| `chelis build --target metal` | Emits Objective-C++ host source (`.mm`) and a header with embedded Metal Shading Language kernels, stages the Metal and C runtime artifacts, and prints a `clang++` command. The resulting program compiles kernels through Metal when it runs. |
 
-`chelis_compiler_api::pipeline` remains the public facade. It owns source preparation, dynamic goals, cancellation, host policy, and backend policy.
+Build emits files and compile instructions. A native compiler is a separate
+step. The C backend handles CPU execution and runtime integration; the HIP
+and Metal backends generate GPU helpers alongside host code where the
+program requires them. A target may reject a program it cannot lower or
+emit. The [backend guide](docs/book/src/backends.md) covers user-facing
+commands and target limits.
 
-Consumers select one closed goal:
+## Workspace map
 
-- `TypeAnalysis` returns fitness and one type-inference product.
-- `FullCheck` adds effect and linearity checks.
-- `Lower` adds DAG lowering and canonical root metadata.
+| Area | Primary crates |
+|---|---|
+| Source syntax and macros | `chelis-surf`, `chelis-deep`, `chelis-macros` |
+| Semantic pipeline | `chelis-types`, `chelis-effects`, `chelis-pipeline-core`, `chelis-compiler-api` |
+| DAG, transforms, evaluation | `chelis-ir` |
+| Native emission and runtime | `chelis-backend-c`, `chelis-backend-hip`, `chelis-backend-metal`, `chelis-runtime` |
+| User entrypoints and packages | `chelis-cli`, `chelis-reef`, `chelisup` |
 
-`CheckedCompilation` exists only after all semantic checks accept the program.
-`CheckedLibrary` binds one type environment to its semantically accepted program.
-A composable contextual analysis retains the exact checked library that produced it.
-A library-extension analysis also retains the combined type environment from its type session.
-Contextual composition consumes the bound product and accepts no replacement library or environment.
-Contextual lowering accepts only a core-bound lowered library. It rejects a library with another proof identity.
-The core exports no function that adopts separate prepared, environment, or checked products.
-Public semantic completion accepts only `SemanticContext::Isolated`.
-Contextual completion requires an analysis that already retains its checked library.
-Library type products share one opaque identity derived from accepted checked source.
-A lowered library retains the same identity in an immutable core artifact.
-Only `lower_library(&CheckedLibrary)` constructs that artifact.
-Cache parsing requires the identities and the declared-type map to match.
-It reruns semantic checks without another type-inference session.
-It reruns the lower phase and compares the canonical payload with the cache payload.
-`LoweredCompilation` contains one checked compilation and its DAG products.
-A rejection does not contain a checked or lowered success product.
-The core and compiler API crates forbid unsafe code.
-
-The CLI retains style policy, Reef preparation, JSON, exit codes, target selection, and backend emission.
-Backend emitters remain final target-specific correctness boundaries.
-
-`chelis-reef` passes linked expanded Deep to the core. It retains package links, name policy, archives, and schemas.
-
-The source guard checks five production roots. It does not claim coverage for all workspace crates.
-The detailed inventory is in `docs/investigations/compiler_pipeline_inventory.md`.
-The `std` blocker inventory is in `docs/investigations/pipeline_core_std_blockers.md`.
-
-## Crate Dependency Graph
-
-```text
-chelis-cli ───────────────┐
-chelis-e2e ───────────────┤
-chelis-tide ──────────────┼──> chelis-compiler-api
-chelis-python ────────────┘          │
-                                     ├──> chelis-pipeline-core
-                                     ├──> chelis-reef ──> chelis-pipeline-core
-                                     ├──> chelis-surf and chelis-macros
-                                     └──> target backends
-
-chelis-pipeline-core
-    ├──> chelis-deep
-    ├──> chelis-types
-    ├──> chelis-effects
-    └──> chelis-ir
-```
-
-The dependency graph is a strict DAG.
-The compiler API and Reef use the dependency-bottom semantic core.
-The core has exactly four direct production dependencies.
-
-## Crates
-
-### `chelis-deep`
-
-Parses and prints Deep, the canonical machine-facing syntax.
-Deep is the compiler's common representation and the target produced by Surf
-desugaring.
-
-### `chelis-surf`
-
-Parses Surf and desugars it into Deep.
-It also owns best-effort decompilation back to Surf.
-
-### `chelis-types`
-
-Implements Hindley-Milner inference extended with named tensor dimensions, precision
-tracking, and fitness-oriented error reporting.
-
-#### Type-inference module map
-
-`crates/chelis-types/src/infer/mod.rs` defines the public facade and the shared imports.
-Its child modules have these roles:
-
-- `stack.rs` owns stack growth and recursion protection.
-- `checked.rs` owns checked-program construction, metadata, and totality finalization.
-- `program.rs` owns the public check entry points and the inference schedules.
-- `declarations.rs` owns declaration collection, dependency analysis, and signature schedules.
-- `validate.rs`, `static_value.rs`, and `annotate.rs` own IR checks and type annotation.
-- `expr.rs` owns expression dispatch and common expression helpers.
-- `expr_function.rs` owns functions, definitions, local bindings, conditionals, and pipes.
-- `expr_pattern.rs` owns match and pattern inference.
-- `expr_record.rs` owns tuples, records, access, updates, and casts.
-- `expr_transform.rs` owns gradient and vector-map inference.
-- `app.rs` owns generic calls and dispatch to operation families.
-- `app_numeric.rs` owns numeric rules and precision diagnostics.
-- `app_tensor.rs` owns tensor signature checks.
-- `app_shape.rs` and `app_shape_helpers.rs` own shape rules and static shape readers.
-- `app_collection.rs` owns collection rules and constructor helpers.
-- `app_post.rs` applies operation-family checks after generic unification.
-
-The source guard is in `crates/chelis-types/src/source_arch.rs`.
-It rejects the legacy `src/infer.rs` path, a missing role module, or a source file with more than 3,000 lines.
-
-### `chelis-ir`
-
-Defines the RISC DAG, lowering, verification, optimization passes, transform passes,
-and the IR evaluator used for interactive execution.
-
-### `chelis-backend-c`
-
-Emits C from the DAG, performs BLAS-oriented lowering decisions, and manages runtime
-and memory-planning concerns for the reference backend.
-
-### `chelis-cli`
-
-Exposes the compiler pipeline as commands such as `build`, `check`, `deep`, `surf`,
-`eval`, and `tide`.
-
-## Where to Start
-
-If you are working on the current phase, start with:
-
-1. `spec/design/chelis_canonical_reference.md`
-2. `spec/05-risc-primitives.md`
-3. `spec/08-backends.md`
-4. `spec/12-roadmap.md`
-
-Then inspect:
-
-- `crates/chelis-ir`
-- `crates/chelis-backend-c`
-- `crates/chelis-cli`
-
-If you are extending the language front end, read `spec/02-surf-syntax.md`,
-`spec/03-deep-syntax.md`, and `spec/04-type-system.md` in order.
-
-## Design Constraints
-
-### Deep Is Canonical
-
-Surf is for supervision.
-Deep is the canonical compiler-facing syntax.
-Every Deep node has the form `(tag {} children...)`, which keeps generation and
-transformation regular for both agents and compiler passes.
-
-### Small IR, Rich Surface
-
-High-level language constructs lower into a compact RISC DAG rather than requiring a
-large backend surface area.
-That keeps `grad`, optimization, and backend emission tractable.
-
-### Pure Stage Boundaries
-
-Compilation stages should remain pure functions from inputs to outputs.
-Avoid global mutable state and long-lived compiler objects with implicit sequencing.
-This keeps the design easy to test now and makes a later `salsa` migration mechanical
-rather than architectural.
-
-### Evaluator First for Interactivity
-
-Tide and `chelis eval` should go through the IR evaluator first.
-If interactive latency later needs more work, the escalation order is:
-
-1. cache compiled C artifacts
-2. use a persistent compiler helper
-3. only then evaluate a JIT backend
+For implementation details, see the
+[compiler pipeline inventory](docs/investigations/compiler_pipeline_inventory.md).
+For a language change, start with the owning numbered spec and follow
+[spec sync](agent-skills/spec-sync/SKILL.md).

@@ -56,7 +56,8 @@ This document is the contract every subsequent phase implements against. It supe
 
 ### Phase 1: Control flow AD
 
-Closes the IR-SelectOp-F1 and IR-MatchLowering-F1 §5 entries from the broader compiler work, plus extends them with AD rules.
+Requires compiled conditional selection and ADT branch lowering, plus AD rules
+for both. The language rules remain in `spec/06-transformations.md`.
 
 **Scope.**
 
@@ -67,7 +68,10 @@ Closes the IR-SelectOp-F1 and IR-MatchLowering-F1 §5 entries from the broader c
 
 **Backend changes.**
 
-The C and HIP backends gain support for `RiscOp::Select { cond, true_val, false_val }` (closes IR-SelectOp-F1). The match lowering closes IR-MatchLowering-F1 with the tag-compare-and-branch pattern plus structural destructuring primitives. The backends emit trajectory-storage code for loops in reverse-mode AD contexts.
+The C and HIP backends gain support for `RiscOp::Select { cond, true_val, false_val }`.
+Match lowering uses tag comparison and branching plus structural destructuring
+primitives. The backends emit trajectory-storage code for loops in reverse-mode
+AD contexts.
 
 **Tests.**
 
@@ -82,7 +86,8 @@ Numerical agreement between forward-pass-then-backward-pass and an analytical gr
 
 ### Phase 2: ADT and record gradients
 
-Closes the gradient story for user-defined data structures. Composes with IR-FirstClassFn-F1 from the existing §5 list.
+Closes the gradient story for user-defined data structures. It also requires
+first-class function values in compiled IR for higher-order functions.
 
 **Scope.**
 
@@ -90,7 +95,7 @@ Closes the gradient story for user-defined data structures. Composes with IR-Fir
 - Constructors and field accessors get gradient rules automatically. Forward pass: standard construction and access. Backward pass: gradient through the field comes from the corresponding field of the gradient struct.
 - ADT pattern matching gets gradient rules. Pattern matches on a variant produce gradients that flow back to that variant's payload.
 - Sum-type ADTs (where different variants have different payloads) get gradient struct shapes where the gradient corresponds to whichever variant was constructed. Other variants contribute zero gradients to inactive components.
-- Higher-order functions (functions taking functions, returning functions) get AD rules. Composes with IR-FirstClassFn-F1.
+- Higher-order functions (functions taking functions, returning functions) get AD rules once compiled IR supports first-class function values.
 
 **Tests.**
 
@@ -192,9 +197,9 @@ The capability shipped in Phases 1-5 needs to be discoverable and usable.
 ```
 Phase 0 (spec lock)
    ↓
-Phase 1 (control flow AD)  ←──── depends on IR-SelectOp-F1, IR-MatchLowering-F1
+Phase 1 (control flow AD)  ←──── compiled selection and ADT branch lowering
    ↓
-Phase 2 (ADT/record gradients)  ←──── depends on IR-FirstClassFn-F1
+Phase 2 (ADT/record gradients)  ←──── first-class function values in compiled IR
    ↓
 Phase 3 (effect-aware AD)
    ↓
@@ -207,7 +212,10 @@ Phase 6 (docs, examples, ecosystem)
 
 Phases 1-5 are sequential because each builds on the prior. Phase 6 can develop in parallel with Phase 5 once Phase 4 lands.
 
-The dependency on the existing §5 entries (IR-SelectOp-F1, IR-MatchLowering-F1, IR-FirstClassFn-F1) means those workstreams move from "deferred until customer shape forces" to "required for the differentiable-language direction." If this direction is committed to, those §5 entries get prioritized.
+Compiled selection, ADT branch lowering, and first-class function values in
+compiled IR are required for this direction. The original gap descriptions are
+preserved in `docs/archive/reports/gap_synthesis.md`; this design owns their
+role in the phase sequence.
 
 ## Workstream sizing
 
@@ -265,3 +273,36 @@ This spec doesn't make the strategic decision. It scopes the work concretely so 
 Seven phases, sequenced by dependency. Phase 0 is the spec lock. Phases 1-5 are the implementation. Phase 6 is documentation and ecosystem. The work composes with existing Chelis commitments and unlocks a distinct audience the existing framework landscape doesn't serve well.
 
 Total scope is substantial but bounded. Decision to commit is separate from this spec; if committed, this spec is the implementation roadmap.
+
+## Host selectors in numeric lowering
+
+The numbered spec/06 sections 2.1, 2.7, and 2.10.1 control this boundary.
+`LoweredValue::HostConstant` retains exact strings beside numeric nodes through
+helper inlining, lexical capture rebasing, and recursive aggregates. Equality
+and inequality consume this carrier without putting strings in the RISC DAG.
+Top-level tuples and ADTs retain their declaring initializer, including nested
+host fields and numeric producers; a tensor Load cannot carry that structure.
+Host-runtime Grad arguments and captures use the same carrier; structured
+cotangents replace host leaves with unit. `examples/grad_host_selectors.ch`
+exercises both branch outcomes in Eval and C.
+
+This implements the exact-selector portion of [#2552](https://github.com/Chelis-Lang/chelis/issues/2552).
+Runtime host-valued control still requires an executable host stage. Coral's
+Hamt also computes string hashes using operations whose [05-OP-58] contract
+structurally rejects differentiation; accepting that graph needs a contract
+decision or an explicit `stop_gradient` boundary, beyond selector preservation.
+Numeric lowering rejects those string operations at their own identities with
+the [05-OP-58] authority, before a placeholder can cause a comparison error.
+An unmatched builtin application declines numeric lowering instead of becoming
+a synthetic input Load. Exact host arguments do not implement their consumer;
+the host path retains its effects and order, including discarded observations.
+Computed function values are classified for host execution before declaration
+lowering; statically resolved literal callables can still inline. A numeric
+probe declines an unresolved callee rather than substituting its final argument.
+
+Finite `to_list`/`map`/`zip` producers admitted by numeric AD materialize
+recursive List values with tensor leaves. Their bindings retain evaluated
+values and callback traps; conversion consumes those values without replaying
+callbacks. Slice selection assembles tensors without arithmetic on stored bits.
+Builtin callable references participate in admission, subject to lexical
+shadowing and the numeric resolver's supported operations.

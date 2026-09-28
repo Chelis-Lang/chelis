@@ -1,28 +1,15 @@
-# Local Downstream Gates
+# Script owners
 
-`nautilus_local_gate.py` runs Chelis against the real Nautilus checkout with a
-local compiler binary instead of a release artifact.
+Run Python tools with this worktree's `.venv/bin/python`. Commands and gate
+coverage are listed in [`docs/local_gate.md`](../docs/local_gate.md).
 
-Typical local loop:
+| Area | Owner |
+|---|---|
+| Local validation | [`gate.py`](gate.py), [`test_gate.py`](test_gate.py) |
+| Generated artifacts | [`regen_all.py`](regen_all.py), [`test_regen_all.py`](test_regen_all.py); each leg names its writer and checks |
+| CI selection and contracts | [`ci_change_owned.py`](ci_change_owned.py), [`.config/ci-test-targets.toml`](../.config/ci-test-targets.toml), [`docs/ci_validation.md`](../docs/ci_validation.md) |
+| Releases | [`changelog.py`](changelog.py), [`bump_compiler_pins.py`](bump_compiler_pins.py), [`changelog.d/README.md`](../changelog.d/README.md) |
+| Local downstream checks | [`nautilus_local_gate.py`](nautilus_local_gate.py), [`docs/manual_gates.md`](../docs/manual_gates.md) |
 
-```sh
-cargo build -p chelis-cli
-python3 scripts/nautilus_local_gate.py baseline
-python3 scripts/nautilus_local_gate.py tensor-grad
-python3 scripts/nautilus_local_gate.py tensor-fold
-python3 scripts/nautilus_local_gate.py eval-imports
-```
-
-Notes:
-
-- By default it uses `target/debug/chelis` and a sibling `../nautilus`
-  checkout.
-- `baseline` is the shipped-surface proof: it delegates to Nautilus's
-  `tests/run_static_checks.py` and `tests/run_numeric_tests.py`.
-- `eval-imports` works on a temporary copy of Nautilus so it can rewrite the
-  `reef.toml` compiler pin to the local Chelis version without touching the real
-  downstream checkout.
-- `tensor-grad` and `tensor-fold` are local blocker canaries for the native C
-  build path. They exist to keep blocker debugging local and cheap; release
-  publishing should happen only after the relevant canaries and the baseline are
-  green.
+The `loc-report` command is owned by [`py/src/chelis_tools/loc_report.py`](../py/src/chelis_tools/loc_report.py).
+It prints Markdown to stdout; pass `--output PATH` to save a report.

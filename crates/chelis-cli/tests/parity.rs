@@ -463,7 +463,7 @@ fn parity_grad_disconnected() {
     drive_parity(&path, true);
     assert_eq!(
         run_eval(&path),
-        b"out = tensor(shape=[2, 3], data=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])\n"
+        b"out = tensor(shape=[2, 3], data=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])\ninferred_zero = tensor(shape=[2], data=[0.0, 0.0])\n"
     );
 }
 
@@ -509,6 +509,16 @@ fn parity_grad_fused_zero() {
 }
 
 #[test]
+fn parity_grad_runtime_basis() {
+    let path = examples_root().join("grad_runtime_basis.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"out = tensor(shape=[3], data=[0.0, 3.0, 0.0])\ncapture = tensor(shape=[1], data=[0.0])\n"
+    );
+}
+
+#[test]
 fn parity_vmap_shape_value() {
     let path = examples_root().join("vmap_shape_value.ch");
     drive_parity(&path, true);
@@ -551,6 +561,11 @@ fn parity_dropout_fixed_stream() {
         b"main.0 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 2.0])\nmain.1 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\n",
     );
     drive_parity(&path, true);
+}
+
+#[test]
+fn parity_key_builtin_aliases() {
+    drive_parity(&examples_root().join("key_builtin_aliases.ch"), true);
 }
 
 #[test]
@@ -910,6 +925,13 @@ fn parity_generic_host_permutation() {
 #[test]
 fn parity_grad_host_results() {
     drive_parity(&examples_root().join("grad_host_results.ch"), true);
+}
+
+#[test]
+fn parity_grad_host_selectors() {
+    let path = examples_root().join("grad_host_selectors.ch");
+    drive_parity(&path, true);
+    assert_eq!(run_eval(&path), b"selected = tensor(shape=[2], data=[1.0, 1.0])\nother = tensor(shape=[2], data=[-1.0, -1.0])\n");
 }
 
 #[test]

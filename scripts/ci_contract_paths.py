@@ -32,6 +32,7 @@ CI_CONTRACT_EXACT_PATHS: frozenset[str] = frozenset(
         "scripts/test_diagnostic_kind_oracle.py",
         "scripts/test_dtype_phase4b_oracle.py",
         "scripts/test_gate.py",
+        "scripts/test_gate_local.py",
         "scripts/test_hosted_validation.py",
         "scripts/test_phase3_test_change_report.py",
         "scripts/test_phase4b_change_report.py",

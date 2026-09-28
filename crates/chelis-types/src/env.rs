@@ -727,6 +727,7 @@ impl Env {
         // which each in-group use then owes.
         let shared = self.instantiate_scheme(
             &Scheme {
+                result_origin: None,
                 constraints: Vec::new(),
                 ..header.clone()
             },
@@ -755,6 +756,7 @@ impl Env {
             })
             .collect::<Vec<_>>();
         let provisional = Scheme {
+            result_origin: None,
             tvar_restrictions: hole_tvars
                 .iter()
                 .filter_map(|var| {
@@ -1064,22 +1066,69 @@ impl Env {
         var_gen: &mut VarGen,
         inference_subst: &Subst,
     ) -> InstantiatedScheme {
+        let origin = scheme.result_origin.as_ref();
+        let mut tvars = origin.map_or(&scheme.tvars, |origin| &origin.tvars).clone();
+        let mut dvars = origin.map_or(&scheme.dvars, |origin| &origin.dvars).clone();
+        let mut rvars = origin.map_or(&scheme.rvars, |origin| &origin.rvars).clone();
+        // The raw graph owns shared identity. A recursive group's solved
+        // signature may mention additional variables, but must not freshen a
+        // variable the origin deliberately kept shared with its producer.
+        let carried_origin = origin.map(|origin| {
+            Type::Tuple(
+                std::iter::once(origin.body.clone())
+                    .chain(
+                        origin
+                            .equations
+                            .iter()
+                            .flat_map(|equation| equation.types())
+                            .cloned(),
+                    )
+                    .collect(),
+            )
+        });
+        let shared_tvars = carried_origin.as_ref().map(free_tvars).unwrap_or_default();
+        let shared_dvars = carried_origin.as_ref().map(free_dvars).unwrap_or_default();
+        let shared_rvars = carried_origin.as_ref().map(free_rvars).unwrap_or_default();
+        for var in &scheme.tvars {
+            if !tvars.contains(var) && !shared_tvars.contains(var) {
+                tvars.push(*var);
+            }
+        }
+        for var in &scheme.dvars {
+            if !dvars.contains(var) && !shared_dvars.contains(var) {
+                dvars.push(*var);
+            }
+        }
+        for var in &scheme.rvars {
+            if !rvars.contains(var) && !shared_rvars.contains(var) {
+                rvars.push(*var);
+            }
+        }
         let mut subst = Subst::new();
-        let mut tvar_mapping = Vec::with_capacity(scheme.tvars.len());
-        for &tv in &scheme.tvars {
+        let mut tvar_mapping = Vec::with_capacity(tvars.len());
+        for &tv in &tvars {
             let fresh = var_gen.fresh_type();
             subst
                 .insert_type(tv, fresh.clone())
                 .expect("a fresh quantified type-variable renaming is valid");
-            if let Type::Var(fresh_var) = fresh
-                && let Some((_, restriction)) = scheme
+            if let Type::Var(fresh_var) = fresh {
+                // Raw origins and published signatures can use different
+                // representatives. Rename both restriction ledgers with the
+                // same quantifiers; neither view may erase the other's domain.
+                for (_, restriction) in scheme
                     .tvar_restrictions
                     .iter()
-                    .find(|(restricted, _)| *restricted == tv)
-            {
-                inference_subst
-                    .narrow_tvar_restriction(fresh_var, *restriction)
-                    .expect("a fresh instantiation variable carries no prior dtype bound");
+                    .chain(
+                        origin
+                            .into_iter()
+                            .flat_map(|origin| &origin.tvar_restrictions),
+                    )
+                    .filter(|(restricted, _)| *restricted == tv)
+                {
+                    inference_subst
+                        .narrow_tvar_restriction(fresh_var, *restriction)
+                        .expect("a checked scheme's restriction ledgers are compatible");
+                }
             }
             // [04-LIN-10]: a generic's type parameter stays key-free at every
             // instantiation. The mark lives on the quantified variable, which
@@ -1103,7 +1152,7 @@ impl Env {
         // inserted below, so a constraint whose carried type mentions one gets
         // that variable renamed too.
         let mut dvar_mapping = Vec::with_capacity(scheme.dvars.len());
-        for &dv in &scheme.dvars {
+        for &dv in &dvars {
             // Mint the variable directly rather than destructuring
             // `fresh_dim()`: that is `Dim::Var(fresh_dvar())` today, but a
             // pattern match would silently drop the mapping entry (and the
@@ -1122,7 +1171,7 @@ impl Env {
             }
         }
         let mut rvar_mapping = Vec::with_capacity(scheme.rvars.len());
-        for &rv in &scheme.rvars {
+        for &rv in &rvars {
             // Each rank var instantiates to a fresh sole-`Rank` shape so every
             // call site gets its own rank (Tier-2 rank polymorphism).
             let fresh_rv = var_gen.fresh_rvar();
@@ -1133,8 +1182,25 @@ impl Env {
             let renamed = constraint.map_types(|ty| subst.apply(ty));
             inference_subst.record_collection_contract(renamed);
         }
+        if let Some(origin) = origin {
+            for equation in &origin.equations {
+                inference_subst.record_result_constraint(equation.map_types(|ty| subst.apply(ty)));
+            }
+            // Origin controls when an equation may supply input evidence; it
+            // never replaces the checked signature's required equalities.
+            // Instantiate both views together and retain their compatibility
+            // as a result constraint, so it cannot admit an unresolved Grad.
+            if origin.body != scheme.body {
+                inference_subst.record_result_constraint(
+                    crate::types::ResultConstraint::Annotation {
+                        actual: subst.apply(&origin.body),
+                        declared: subst.apply(&scheme.body),
+                    },
+                );
+            }
+        }
         InstantiatedScheme {
-            ty: subst.apply(&scheme.body),
+            ty: subst.apply(origin.map_or(&scheme.body, |origin| &origin.body)),
             tvars: tvar_mapping,
             dvars: dvar_mapping,
             rvars: rvar_mapping,
@@ -1196,7 +1262,7 @@ impl Env {
 
     /// Generalize a type over variables not free in the environment.
     pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
-        self.generalize_owned(ty, subst, None)
+        self.generalize_owned(ty, subst, None, &[])
     }
 
     /// Generalize one deferred declaration using only the contract instances
@@ -1211,7 +1277,20 @@ impl Env {
         subst: &Subst,
         owned_contracts: &[crate::unify::CollectionContractId],
     ) -> Scheme {
-        self.generalize_owned(ty, subst, Some(owned_contracts))
+        self.generalize_owned(ty, subst, Some(owned_contracts), &[])
+    }
+
+    /// Generalize the raw type and its deferred equalities as one scoped
+    /// graph. An equality component containing a shared variable stays shared;
+    /// a fresh instantiation must never copy only part of that component.
+    pub(crate) fn generalize_with_result_constraints(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+        equations: &[ResultConstraint],
+    ) -> Scheme {
+        self.generalize_owned(ty, subst, owned_contracts, equations)
     }
 
     fn generalize_owned(
@@ -1219,8 +1298,10 @@ impl Env {
         ty: &Type,
         subst: &Subst,
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+        equations: &[ResultConstraint],
     ) -> Scheme {
-        let (level_scheme, ledger_removals) = self.generalize_by_levels(ty, subst, owned_contracts);
+        let (mut level_scheme, ledger_removals) =
+            self.generalize_by_levels(ty, subst, owned_contracts);
         #[cfg(feature = "generalize-sweep-oracle")]
         GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
             if enabled.get() {
@@ -1251,6 +1332,8 @@ impl Env {
                 );
             }
         });
+        crate::result_scope::ResultScope::new(equations)
+            .retain_closed_quantifiers(&mut level_scheme);
         // Transport contracts this scheme now owns have moved off the
         // inference-local contract ledger. Each later instantiation installs a
         // fresh renamed instance with its own application identity.
@@ -1261,17 +1344,17 @@ impl Env {
         if !ledger_removals.is_empty() {
             subst.take_collection_contracts(&ledger_removals);
         }
-        // [04-LIN-10]: every variable a definition or `let` binding quantifies
-        // is a generic's type parameter and is never instantiated at a
-        // key-carrying type. Marking here, in the one generalization
-        // mechanism, rather than at each binding site means no binding route
-        // can publish a generic without the rule; the binding sites only add
-        // the generic's name for the diagnostic
-        // ([`Subst::name_generic_parameters`]). A variable that already
-        // carries a mark keeps it, so a generic stored in a tuple or a data
-        // value and then generalized still names the generic it came from.
-        for tv in &level_scheme.tvars {
-            subst.forbid_key_instantiation(*tv, GenericParameter::default());
+        // [04-LIN-10]: an authored generic stays key-free. A checked key
+        // operation's closed relation alone may select a key-carrying value.
+        // Raw origin quantifiers also include equation-local intermediates;
+        // their caller marks the solved public parameters after publication.
+        if equations.is_empty() {
+            let closed_key_variables = closed_key_relation_variables(&level_scheme);
+            for tv in &level_scheme.tvars {
+                if !closed_key_variables.contains(tv) {
+                    subst.forbid_key_instantiation(*tv, GenericParameter::default());
+                }
+            }
         }
         level_scheme
     }
@@ -1388,6 +1471,7 @@ impl Env {
             .collect();
         (
             Scheme {
+                result_origin: None,
                 tvars,
                 tvar_restrictions,
                 dvars: ty_dvars
@@ -1415,11 +1499,12 @@ impl Env {
     /// feature.
     ///
     /// It is a reference for *which variables the environment leaves free*, not
-    /// for which of those may be quantified. Two exclusions are therefore
+    /// for which of those may be quantified. Inference-state exclusions are
     /// mirrored here deliberately rather than inherited: a recursive group's
     /// instantiation variables (`tvar_pinned`), a pending operand gate's
     /// result variables, and an authored dimension binder still owned by the
-    /// active declaration level. These are properties of inference state that
+    /// active declaration level, and a live recursive group's level. These are
+    /// properties of inference state that
     /// no environment sweep can observe, so omitting one here would make the
     /// oracle disagree with a correct production path. Keep the exclusions in
     /// step with their production owners.
@@ -1456,11 +1541,18 @@ impl Env {
         // parity assertion in `generalize` keeps comparing like with like.
         let (pending_t, pending_d, pending_r) = subst.pending_gate_vars();
         let current_level = subst.current_level();
+        // A group's provisional hole scheme carries temporary quantifiers
+        // for its in-group references. The ordinary environment sweep sees
+        // those as bound and can mistake a same-level use for a free let
+        // variable. [04-INF-5] keeps the hole monomorphic until the whole
+        // group closes; group_level is the exact lifetime of that obligation.
+        let group_level = self.group_level();
         let generalizable = |v: TypeVar| {
             !env_tvars.contains(&v)
                 && !crate::infer::recursion::tvar_pinned(v)
                 && !pending_t.contains(&v)
                 && !(active_tvars.contains(&v) && subst.level_of_tvar(v) <= current_level)
+                && !group_level.is_some_and(|group| subst.level_of_tvar(v) <= group)
         };
         let ty_tvars = free_tvars(&ty);
         let mut tvars = ty_tvars
@@ -1488,6 +1580,7 @@ impl Env {
             .collect();
         (
             Scheme {
+                result_origin: None,
                 tvars,
                 tvar_restrictions,
                 dvars: free_dvars(&ty)
@@ -1515,6 +1608,83 @@ impl Env {
             split.ledger_removals,
         )
     }
+}
+
+/// Variables selected solely by a checked key operation's closed relation.
+/// A relation with no matching callable in the value, or a variable also used
+/// outside that callable, cannot grant any exception to [04-LIN-10].
+pub(crate) fn closed_key_relation_variables(scheme: &Scheme) -> UnordSet<TypeVar> {
+    fn outside_callable(ty: &Type, callable: &Type, outside: &mut UnordSet<TypeVar>) -> bool {
+        if ty == callable {
+            return true;
+        }
+        match ty {
+            Type::Fn(args, ret) => {
+                let mut found = outside_callable(ret, callable, outside);
+                for arg in args {
+                    found |= outside_callable(arg, callable, outside);
+                }
+                found
+            }
+            Type::Ref(inner) => outside_callable(inner, callable, outside),
+            Type::Adt(_, args) | Type::Tuple(args) => {
+                let mut found = false;
+                for arg in args {
+                    found |= outside_callable(arg, callable, outside);
+                }
+                found
+            }
+            Type::KindedAdt(_, args) => {
+                let mut found = false;
+                for arg in args {
+                    if let NominalArg::Type(arg) = arg {
+                        found |= outside_callable(arg, callable, outside);
+                    }
+                }
+                found
+            }
+            other => {
+                outside.extend(free_tvars(other));
+                false
+            }
+        }
+    }
+
+    let mut closed = UnordSet::new();
+    for relation in &scheme.constraints {
+        if !matches!(
+            relation,
+            CollectionConstraint::KeyFromSeed { .. }
+                | CollectionConstraint::SplitKey { .. }
+                | CollectionConstraint::SplitKeys { .. }
+                | CollectionConstraint::FoldIn { .. }
+        ) {
+            continue;
+        }
+        let callable = crate::unify::collection_contract_callable_type(relation);
+        let mut outside = UnordSet::new();
+        if !outside_callable(&scheme.body, &callable, &mut outside) {
+            continue;
+        }
+        // The scheme can own several checked collection relations whose
+        // variables unify. A variable carried by another relation is not
+        // selected solely by this key operation, even when that other
+        // callable is absent from the scheme body's visible shape.
+        for other in &scheme.constraints {
+            if std::ptr::eq(other, relation) {
+                continue;
+            }
+            for carried in other.carried_types() {
+                outside.extend(free_tvars(carried));
+            }
+        }
+        for var in free_tvars(&callable) {
+            if scheme.tvars.contains(&var) && !outside.contains(&var) {
+                closed.insert(var);
+            }
+        }
+    }
+    closed
 }
 
 /// chelis#1654: what one generalization decided about the pending collection
@@ -1654,6 +1824,7 @@ mod module_scope_tests {
             result: result.clone(),
         };
         let checked = Scheme {
+            result_origin: None,
             tvars: Vec::new(),
             tvar_restrictions: Vec::new(),
             dvars: Vec::new(),
@@ -1746,6 +1917,32 @@ mod module_scope_tests {
             "the authored dimension becomes a quantifier only at its declaration boundary"
         );
         assert_eq!(declaration_scheme.rvars, vec![authored_rank]);
+    }
+
+    #[test]
+    fn recursive_group_variable_is_monomorphic_until_group_close() {
+        // [04-INF-5]: a provisional group hole is monomorphic inside its
+        // group and can be quantified after closure if Γ does not own it.
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        let group = subst.enter_level(&var_gen);
+        let body_var = var_gen.fresh_tvar();
+        let body = Type::Fn(vec![Type::Var(body_var)], Box::new(Type::Var(body_var)));
+        let mut captured = Env::new();
+        captured.begin_group_level(subst.current_level());
+        let in_group = captured.generalize(&body, &subst);
+        assert!(in_group.tvars.is_empty());
+        captured.end_holed_group();
+        subst.leave_level(group, &var_gen);
+
+        let published = captured.generalize(&body, &subst);
+        assert_eq!(published.tvars, vec![body_var]);
+        // Installing a monomorphic outer binding also lowers its free
+        // variable to that binding's level, as ordinary inference does.
+        subst.lower_type_to_current(&body);
+        captured.bind("outer".to_string(), Scheme::mono(Type::Var(body_var)));
+        let captured_scheme = captured.generalize(&body, &subst);
+        assert!(captured_scheme.tvars.is_empty());
     }
 }
 
@@ -1888,12 +2085,94 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn closed_key_variables_require_the_exact_owned_callable() {
+        let operand = Type::Var(TypeVar(1));
+        let result = Type::Var(TypeVar(2));
+        let relation = CollectionConstraint::KeyFromSeed {
+            operand: operand.clone(),
+            result: result.clone(),
+        };
+        let callable = crate::unify::collection_contract_callable_type(&relation);
+        let mut scheme = Scheme {
+            tvars: vec![TypeVar(1), TypeVar(2)],
+            tvar_restrictions: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            constraints: vec![relation],
+            result_origin: None,
+            body: callable.clone(),
+        };
+        assert_eq!(
+            closed_key_relation_variables(&scheme).into_sorted(),
+            vec![TypeVar(1), TypeVar(2)]
+        );
+
+        // A function that also exposes the operation's result variable as
+        // ordinary data has authored a generic key-carrying surface. The
+        // checked relation grants no exception to that occurrence.
+        scheme.body = Type::Tuple(vec![callable.clone(), result]);
+        assert_eq!(
+            closed_key_relation_variables(&scheme).into_sorted(),
+            vec![TypeVar(1)]
+        );
+        scheme.constraints.clear();
+        assert!(closed_key_relation_variables(&scheme).is_empty());
+        scheme.body = callable;
+        assert!(closed_key_relation_variables(&scheme).is_empty());
+    }
+
+    #[test]
+    fn shared_collection_constraint_keeps_key_relation_variable_key_free() {
+        let env = Env::new();
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        let level = subst.enter_level(&var_gen);
+        let operand = var_gen.fresh_type();
+        let result = var_gen.fresh_type();
+        let key_relation = CollectionConstraint::SplitKey {
+            operand: operand.clone(),
+            result: result.clone(),
+        };
+        let list = Type::Adt("List".to_string(), vec![operand.clone()]);
+        let append_relation = CollectionConstraint::Append {
+            list: list.clone(),
+            value: operand.clone(),
+            result: list,
+        };
+        subst.record_collection_contract(key_relation.clone());
+        subst.record_collection_contract(append_relation.clone());
+        subst.leave_level(level, &var_gen);
+
+        let scheme = env.generalize(
+            &crate::unify::collection_contract_callable_type(&key_relation),
+            &subst,
+        );
+        assert_eq!(scheme.constraints, vec![key_relation, append_relation]);
+        let Type::Var(operand_var) = operand else {
+            unreachable!()
+        };
+        let Type::Var(result_var) = result else {
+            unreachable!()
+        };
+        assert_eq!(
+            closed_key_relation_variables(&scheme).into_sorted(),
+            vec![result_var],
+            "a second owned constraint exposes the operand as an ordinary generic"
+        );
+        assert!(
+            subst.key_free_origin(operand_var).is_some(),
+            "[04-LIN-10] must forbid key instantiation of the shared operand"
+        );
+    }
+
     /// A scheme exercising every quantifier kind, with a restriction on one
     /// type variable and none on the other, so a route that drops
     /// restrictions and a route that installs them indiscriminately are both
     /// distinguishable from the correct one.
     fn restricted_scheme() -> Scheme {
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![TypeVar(1), TypeVar(2)],
             tvar_restrictions: vec![(TypeVar(2), TypeVarRestriction::ActiveFloat)],
@@ -1966,6 +2245,7 @@ mod tests {
         let quantified = DimVar(9);
         let quantified_rank = RankVar(10);
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
@@ -2163,6 +2443,7 @@ mod tests {
         let quantified_dim = DimVar(20);
         let quantified_rank = RankVar(30);
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![quantified_type],
             tvar_restrictions: vec![],
@@ -2199,6 +2480,7 @@ mod tests {
         let outer_dim = DimVar(22);
         let outer_rank = RankVar(32);
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![quantified_type],
             tvar_restrictions: vec![],
@@ -2240,6 +2522,7 @@ mod tests {
         let target_dim = DimVar(51);
         let target_rank = RankVar(61);
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],

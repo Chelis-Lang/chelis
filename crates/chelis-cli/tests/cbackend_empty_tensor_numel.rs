@@ -1,42 +1,6 @@
-//! C-backend coverage for `numel(to_tensor([]))` returning the wrong value
-//! via the runtime path (Runtime-EmptyTensorNumel-F1, pre-0.7.8 release
-//! blocker, sibling of `eval_empty_tensor_numel`).
-//!
-//! ## Background
-//!
-//! The host evaluator and the C runtime each had their own clamp that
-//! inflated a zero-element shape product back to one. `eval_empty_tensor_numel`
-//! covers the host path; this file covers the C runtime path. The bug surface
-//! lives in `crates/chelis-runtime/src/lib.rs::chelis_alloc_tensor` (and
-//! `chelis_alloc_view`):
-//!
-//! ```rust
-//! if tensor.size == 0 {
-//!     tensor.size = 1;
-//! }
-//! ```
-//!
-//! After multiplying shape components, the runtime clamped a 0-size tensor
-//! back to size 1 "for allocation safety", but allocation safety is already
-//! handled by `bytes.max(1)` on the `posix_memalign` call. The clamp only
-//! corrupted `chelis_tensor_numel`'s return value.
-//!
-//! ## Fixture
-//!
-//! `cbackend_numel_empty_tensor_matches_eval`:
-//!   1. Eval `numel(to_tensor(empty_values))` with `empty_values: List[f32]` and
-//!      assert stdout is `0`.
-//!   2. Build the same program with `chelis build --target c`, compile with
-//!      gcc, run the binary; assert stdout is `result = 0`.
-//!   3. Assert the numeric values agree across lanes.
-//!
-//! Eval and the C runtime use different print formats (eval prints the bare
-//! value, the C emitter prefixes the binding name), so the fixture compares
-//! the extracted numeric value rather than raw stdout. The bug surface is a
-//! runtime clamp shared by both lanes through their respective numel
-//! reporting paths (eval reads TensorValue.shape; the C emitter calls
-//! `chelis_tensor_numel` on the runtime struct). A fix that only addressed
-//! one lane would show as a value mismatch here.
+//! C-backend and evaluator parity for `numel` on empty tensors.
+//! A rank-one empty tensor has zero elements on both lanes. The
+//! fixture compares numeric values because their stdout formats differ.
 
 use assert_cmd::Command;
 use std::fs;

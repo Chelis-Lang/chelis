@@ -625,8 +625,8 @@ mod tests {
     const TEST_SOURCE_DIGEST: [u8; 32] = [0x5a; 32];
 
     #[test]
-    fn cache_format_version_tracks_the_key_operand_random_nodes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 35);
+    fn cache_format_version_tracks_the_ordered_list_operations_and_result_origins() {
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 41);
     }
 
     #[test]
@@ -636,7 +636,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let context = build_stdlib_context(&decls).expect("sample context must build");
         let current_path = stdlib_cache_path(dir.path(), current_key);
-        for version in [19, 20, 21, 23] {
+        for version in [19, 20, 21, 23, 36, 37, 38, 39, 40] {
             let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, version);
             assert_ne!(current_key, preceding_key);
             let preceding_path = stdlib_cache_path(dir.path(), preceding_key);

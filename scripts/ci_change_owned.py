@@ -861,6 +861,8 @@ COMMAND_SEPARATORS = {"&&", "||", ";", "|"}
 PLAIN_WORD = re.compile(r"[A-Za-z0-9_.,/:=-]+")
 ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 NEXTEST_RUN = ("cargo", "nextest", "run")
+# This wrapper verifies the ROCm hipBLAS environment, then execs `cargo test`.
+HIP_TEST_WRAPPER = ("scripts/hip_test.py",)
 # The value-taking options each runner accepts before ``--``, by role, and the
 # harness options and flags after it. A bare word is a test-name filter.
 CARGO_TEST_RUNNERS: dict[tuple[str, ...], dict[str, str]] = {
@@ -924,7 +926,7 @@ def _arguments(
 
 
 def _cargo_test_run(segment: list[str]) -> CargoTestRun:
-    """Classify one command segment as a Cargo test run, or reject it."""
+    """Classify a direct or HIP-wrapped Cargo test run, or reject it."""
     for word in segment:
         if not PLAIN_WORD.fullmatch(word):
             raise ValueError(f"unrecognized word {word!r}")
@@ -932,17 +934,23 @@ def _cargo_test_run(segment: list[str]) -> CargoTestRun:
     # target, or compile its tests out, so none is accepted before the runner.
     if segment and ENV_ASSIGNMENT.fullmatch(segment[0]):
         raise ValueError(f"environment assignment {segment[0]!r}")
-    runner = next(
-        (
-            runner
-            for runner in CARGO_TEST_RUNNERS
-            if tuple(segment[: len(runner)]) == runner
-        ),
-        None,
-    )
-    if runner is None:
-        raise ValueError("not `cargo test` or `cargo nextest run`")
-    args = segment[len(runner) :]
+    if tuple(segment[: len(HIP_TEST_WRAPPER)]) == HIP_TEST_WRAPPER:
+        # The wrapper forwards these arguments to `cargo test`; it has no
+        # subcommand or environment-only mode in a validated test invocation.
+        runner = ("cargo", "test")
+        args = segment[len(HIP_TEST_WRAPPER) :]
+    else:
+        runner = next(
+            (
+                runner
+                for runner in CARGO_TEST_RUNNERS
+                if tuple(segment[: len(runner)]) == runner
+            ),
+            None,
+        )
+        if runner is None:
+            raise ValueError("not `cargo test` or `cargo nextest run`")
+        args = segment[len(runner) :]
     split = args.index("--") if "--" in args else len(args)
     arguments = _arguments(
         args[:split], CARGO_TEST_RUNNERS[runner], CARGO_TEST_RUNNER_FLAGS[runner]

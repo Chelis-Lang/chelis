@@ -1289,8 +1289,8 @@ develop in parallel with D5 once D4 lands.
 | Phase | Deliverable | Notes |
 |---|---|---|
 | **D0** | Spec lock at `spec/design/differentiable_language.md` | ✅ Complete |
-| **D1** | AD through `if`, `match`, `while`, `for`, recursion. C/HIP backends gain `RiscOp::Select` and ADT-tagged match lowering; reverse-mode loops emit trajectory storage. | Depends on `IR-SelectOp-F1` and `IR-MatchLowering-F1` (`docs/gap_synthesis.md` §5). Committing reclassifies them from surface-when-forced to required. |
-| **D2** | Field-wise gradient ADTs/records and higher-order function AD. | Depends on `IR-FirstClassFn-F1`. |
+| **D1** | AD through `if`, `match`, `while`, `for`, recursion. C/HIP backends gain `RiscOp::Select` and ADT-tagged match lowering; reverse-mode loops emit trajectory storage. | Depends on compiled conditional and ADT branch representation as described in `spec/design/differentiable_language.md`. |
+| **D2** | Field-wise gradient ADTs/records and higher-order function AD. | Depends on first-class function values in compiled IR, as described in `spec/design/differentiable_language.md`. |
 | **D3** | Effect-aware AD: pure / `state` / `raises` / `capability` / `sample` (reparam, REINFORCE, pathwise). Unlocks Chelis-as-PPL substrate. | Composes with the Phase 2a effect work; does not add new effects, just gradient rules per effect. |
 | **D4** | Implicit differentiation via `fix`, `argmin`, `solve` markers (IFT-derived gradients, KKT for `argmin`). | Differentiable simulation / optimization-as-a-layer use cases. |
 | **D5** | Type-level differentiability: `Differentiable`, `PartiallyDifferentiable`, `NonDifferentiable` annotations + inference. Composes with the existing property-verification harness. | Connects to `spec/design/chelis_property_spec.md` for gradient-behavior properties (e.g. `Lipschitz(K)`). |
@@ -1340,9 +1340,9 @@ quantized formats) ship as the dtype build-out delivers host-side precision.
 Dependencies on other Chelis workstreams are deliberately non-blocking where
 possible:
 
-- The `IR-FirstClassFn-F1` / `IR-SelectOp-F1` / `IR-MatchLowering-F1` §5 entries
-  in `docs/gap_synthesis.md` extend Hydronnx's operator coverage (If, Loop,
-  Scan) when they close; v0.1 explicitly excludes those operators.
+- First-class function values, compiled conditional selection, and ADT branch
+  lowering in `spec/design/hydronnx.md` extend operator coverage (If, Loop,
+  Scan) when those capabilities land; v0.1 explicitly excludes those operators.
 - The differentiable-language Phase D1 control-flow AD work unlocks AD through
   dynamic-graph operators once those operators load.
 - Fusion, kernel authoring, and MLIR-backend work are performance enhancers
@@ -1379,7 +1379,7 @@ separate. Phasing is sequenced by dependency: K1 → K2 → K3 → K4 → K5 →
 | **K3** | Lowering pass from kernel IR to Triton's MLIR dialect. Each tile-level operation has a defined Triton IR equivalent; output validates against Triton's IR specification. | Orthogonal to Phase 5c (Triton backend for whole-program RISC-DAG emission) — see distinction note below. |
 | **K4** | Build integration. Triton compiler invocation from the Chelis build pipeline; kernel artifacts (compiled PTX or AMDGCN) get produced and linked. The Triton dependency is handled cleanly by the build system. | Touches `chelis build` and the manifest surface; needs coordination with the reef/build infrastructure. |
 | **K5** | Runtime integration. Kernel calls from tensor-level Chelis lower to launches against Triton artifacts via the existing HIP/CUDA backend machinery for argument marshaling and grid configuration. | Memory-layout matching at the kernel boundary is where this milestone fails silently rather than loudly — a mismatch corrupts kernel inputs/outputs without any compile-time signal, so the K5 oracle has to actually run the kernel and compare results. |
-| **K6** | First production kernel: FlashAttention-shaped fused attention kernel written in Kerrent, replacing the current attention decomposition. Transformer inference becomes competitive with PyTorch+CUDA for the attention block. | Customer-visible proof point; closes the dominant transformer performance gap identified in `docs/gap_synthesis.md` §Concrete cost picture. |
+| **K6** | First production kernel: FlashAttention-shaped fused attention kernel written in Kerrent, replacing the current attention decomposition. Transformer inference becomes competitive with PyTorch+CUDA for the attention block. | Customer-visible proof point; the original cost estimate is recorded in `docs/archive/reports/gap_synthesis.md` §Concrete cost picture. |
 
 **Phase 5c distinction.** Phase 5c (§5c: Triton Backend, above) describes a
 whole-program backend that emits Chelis's RISC DAG to Triton IR — i.e.,
