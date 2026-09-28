@@ -874,6 +874,10 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
 fn append_key_callable_helpers(out: &mut Vec<String>) {
     out.push(
         r#"
+// The operation identity is in the checked host type. This private value is
+// only an ABI witness; independent calls select concrete callback surfaces.
+typedef struct { const void *zero; } chelis_key_callable;
+
 static inline chelis_tuple *__chelis_key_pair(chelis_key left, chelis_key right) {
     chelis_value halves[2] = {
         chelis_value_take_tensor(chelis_key_tensor(left)),
@@ -5586,6 +5590,21 @@ impl<'a> HostEmitter<'a> {
         site: &ProjectedHostSite<'a>,
         result_claims: Option<&str>,
     ) -> Result<(), Unsupported> {
+        if args.is_empty()
+            && let HostType::KeyBuiltinCallable(op) = ty
+        {
+            if op.symbol() != name {
+                return Err(invalid_abi_shape(
+                    format!("closed key callable identity {op:?} disagrees with `{name}`"),
+                    "C host key callable selection",
+                ));
+            }
+            self.lines.push(format!(
+                "{}{target} = (chelis_key_callable){{ NULL }};",
+                self.indent
+            ));
+            return Ok(());
+        }
         if args.is_empty() && matches!(ty, HostType::Callback(_, _)) {
             let symbol = key_callable_symbol(name, ty).ok_or_else(|| {
                 invalid_abi_shape(
@@ -9622,6 +9641,11 @@ impl<'a> HostEmitter<'a> {
             HostType::Unit => {
                 "chelis_value_take_tuple(chelis_tuple_from_values(NULL, 0))".to_string()
             }
+            // The callable's operation identity is retained by its checked
+            // host type. An aggregate stores only a zero-payload witness.
+            HostType::KeyBuiltinCallable(_) => {
+                "chelis_value_take_tuple(chelis_tuple_from_values(NULL, 0))".to_string()
+            }
             HostType::Callback(_, _) => {
                 return Err(unsupported_value_boxing(ty, "boxing a resolved host value"));
             }
@@ -9643,6 +9667,17 @@ impl<'a> HostEmitter<'a> {
         ty: &HostType,
         value_expr: &str,
     ) -> Result<(), Unsupported> {
+        if matches!(ty, HostType::KeyBuiltinCallable(_)) {
+            self.lines.push(format!(
+                "{}chelis_tuple_release(chelis_tuple_take_value({value_expr}));",
+                self.indent
+            ));
+            self.lines.push(format!(
+                "{}{target} = (chelis_key_callable){{ NULL }};",
+                self.indent
+            ));
+            return Ok(());
+        }
         let expr = match ty {
             HostType::Int8 => format!(
                 "(int8_t)chelis_host_scalar_as_i64(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_I8)"
@@ -9688,6 +9723,7 @@ impl<'a> HostEmitter<'a> {
                     "unboxing a resolved host value",
                 ));
             }
+            HostType::KeyBuiltinCallable(_) => unreachable!("handled before scalar unboxing"),
         };
         self.lines
             .push(format!("{}{target} = {expr};", self.indent));
@@ -10461,6 +10497,7 @@ fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
         | HostType::Bool
         | HostType::String
         | HostType::Key
+        | HostType::KeyBuiltinCallable(_)
         | HostType::Callback(_, _)
         | HostType::Dict(_, _)
         | HostType::MappedFile
@@ -10596,6 +10633,7 @@ fn checked_cast_abi_axis(ty: &HostType) -> Result<(Prim, CheckedCastSurface), Un
         HostType::Tensor(tensor) => Ok((tensor.precision, CheckedCastSurface::Tensor)),
         HostType::String
         | HostType::Key
+        | HostType::KeyBuiltinCallable(_)
         | HostType::Callback(_, _)
         | HostType::Adt(_, _)
         | HostType::List(_)

@@ -20,6 +20,7 @@ use chelis_ir::host::{
     HostExprKind, HostFunction, HostMatchArm, HostParam, HostPatternBinding, HostProgram,
     HostTensorHelper,
 };
+use chelis_ir::host_type_state::KeyBuiltinCallable;
 use chelis_ir::ownership::{
     HostSiteId, HostSiteKind, VerifiedHostAction, VerifiedHostEmission, VerifiedHostFunctionView,
     VerifiedHostSiteActionKind, VerifiedHostTensorHelperView,
@@ -57,6 +58,10 @@ pub(crate) enum HostAbiType {
     /// builtin or an already admitted callable alias. Function results,
     /// fields, and container elements still reject function values.
     Callback(Vec<HostAbiType>, Box<HostAbiType>),
+    /// A closed, unspecialized operation. Its identity is fixed in the type;
+    /// the private C value is an inert witness until a checked call selects
+    /// one concrete callback signature.
+    KeyBuiltinCallable(KeyBuiltinCallable),
     Adt(String, Vec<HostAbiType>),
     List(Box<HostAbiType>),
     Dict(Box<HostAbiType>, Box<HostAbiType>),
@@ -176,6 +181,7 @@ impl HostAbiType {
             ConcreteHostType::Function(_, _) => {
                 return Err(unsupported_function_value(ty, "C host ABI value selection"));
             }
+            ConcreteHostType::KeyBuiltinCallable(op) => Self::KeyBuiltinCallable(*op),
             ConcreteHostType::Adt(name, args) => Self::Adt(
                 name.clone(),
                 args.iter()
@@ -231,6 +237,7 @@ impl HostAbiType {
             Self::String => Some("chelis_string"),
             Self::Key => Some("chelis_key"),
             Self::Callback(_, _) => None,
+            Self::KeyBuiltinCallable(_) => Some("chelis_key_callable"),
             Self::Adt(_, _) => Some("chelis_adt*"),
             Self::List(_) => Some("chelis_list*"),
             Self::Dict(_, _) => Some("chelis_dict*"),
@@ -263,6 +270,7 @@ impl HostAbiType {
             | Self::Key
             | Self::Unit
             | Self::Callback(_, _) => None,
+            Self::KeyBuiltinCallable(_) => None,
             Self::String => Some("(chelis_string){ NULL }"),
             Self::Adt(_, _)
             | Self::List(_)
@@ -475,6 +483,12 @@ fn project_function(
     function: VerifiedHostFunctionView<'_>,
     declared_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiFunction, Unsupported> {
+    if matches!(function.ret_ty(), ConcreteHostType::KeyBuiltinCallable(_)) {
+        return Err(unsupported_function_value(
+            function.ret_ty(),
+            "C host public function result",
+        ));
+    }
     let mut allowed_callbacks = declared_callbacks.clone();
     for param in function.params() {
         if matches!(param.ty, ConcreteHostType::Function(_, _)) {
@@ -851,6 +865,17 @@ fn project_callback_argument(
             "C host callback argument selection",
         ));
     };
+    if let ConcreteHostType::KeyBuiltinCallable(op) = actual {
+        return Ok(HostAbiExpr {
+            kind: HostAbiExprKind::Builtin {
+                name: op.symbol().to_string(),
+                args: Vec::new(),
+                ty: HostAbiType::try_callback_signature(expected)?,
+            },
+            span_id: expr.span_id,
+            merged_spans: expr.merged_spans,
+        });
+    }
     if &actual != expected {
         return Err(invalid_callback_shape(format!(
             "callback `{name}` has type {actual:?}, expected {expected:?}"

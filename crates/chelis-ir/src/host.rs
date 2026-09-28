@@ -24,7 +24,7 @@ use chelis_vocab::EffectKind;
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_type_state::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
-    HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, decode_host_type,
+    HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, KeyBuiltinCallable, decode_host_type,
 };
 use crate::lower::top_level_lowering_map;
 
@@ -7998,17 +7998,18 @@ fn lower_host_expr_kind(
             // operation identity in host IR so a later alias or shadow
             // cannot change what it calls. The backend materializes the
             // corresponding capture-free function pointer from this node.
-            if matches!(
-                name.as_str(),
-                "key_from_seed" | "split_key" | "split_keys" | "fold_in"
-            ) && !scope.contains_key(&name)
+            if let Some(op) = KeyBuiltinCallable::from_symbol(&name)
+                && !scope.contains_key(&name)
                 && program.def_named(&name).is_none()
-                && matches!(ty, HostTypeTerm::Fn(_, _))
             {
                 return Ok(HostExpr::new(HostExprKind::Builtin {
                     name,
                     args: Vec::new(),
-                    ty,
+                    ty: if ty.is_unresolved() {
+                        HostTypeTerm::KeyBuiltinCallable(op)
+                    } else {
+                        ty
+                    },
                 }));
             }
             if name == "Nil" {
@@ -12192,6 +12193,27 @@ fn lower_app_host_expr(
         .filter(|_| checked_ty.is_unresolved())
         .cloned()
         .unwrap_or(checked_ty);
+    if let Some(HostTypeTerm::KeyBuiltinCallable(op)) = scope.get(&name) {
+        // This identity came from the resolved value's producer, including
+        // aliases and tuple projections. The application metadata selects
+        // its concrete result; the alias's spelling selects nothing.
+        let args = kids[1..]
+            .iter()
+            .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ty = if explicit_ty.is_unresolved() {
+            infer_builtin_host_type(op.symbol(), &args).ok_or_else(|| {
+                host_expr_lowering_error(app_expr, "checked key call has no concrete result type")
+            })?
+        } else {
+            explicit_ty
+        };
+        return Ok(HostExpr::new(HostExprKind::Builtin {
+            name: op.symbol().to_string(),
+            args,
+            ty,
+        }));
+    }
     // Std.Io.Json owns canonical object observation. Keep generic
     // `dict_entries` insertion-ordered and lower only this exact private
     // package identity to the generated-C-local sorter. The name is exact so
@@ -13323,6 +13345,9 @@ fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> 
                 span,
             ))
         }
+        // This closed operation has no single Deep function type until a
+        // checked application selects its scalar or tensor alternative.
+        HostTypeTerm::KeyBuiltinCallable(_) => None,
         HostTypeTerm::Adt(name, args) => Some(host_adt_syntax(
             name,
             args.iter()
@@ -14182,6 +14207,10 @@ fn write_canonical_host_type_key(ty: &HostTypeTerm, out: &mut String) {
             }
             out.push_str(")->");
             write_canonical_host_type_key(ret, out);
+        }
+        HostTypeTerm::KeyBuiltinCallable(op) => {
+            out.push_str("key-builtin:");
+            out.push_str(op.symbol());
         }
         HostTypeTerm::Adt(name, args) => {
             out.push_str("adt:");

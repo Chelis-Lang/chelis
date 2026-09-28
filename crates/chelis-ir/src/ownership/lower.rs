@@ -180,9 +180,10 @@ impl FormalTypePattern {
                 Self::Tensor(vec![FormalDimension::Nominal; tensor.dims.len()])
             }
             ConcreteHostType::Option(inner) => Self::Option(Box::new(Self::nominal(inner))),
-            ConcreteHostType::Scalar(_) | ConcreteHostType::MappedFile | ConcreteHostType::Unit => {
-                Self::Exact
-            }
+            ConcreteHostType::Scalar(_)
+            | ConcreteHostType::KeyBuiltinCallable(_)
+            | ConcreteHostType::MappedFile
+            | ConcreteHostType::Unit => Self::Exact,
         }
     }
 }

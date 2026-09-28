@@ -270,7 +270,7 @@ fn alias_program(seeds: &str, declarations: &str) -> String {
 }
 
 /// [04-INF-9], [05-OP-69]..[05-OP-72]: usable aliases need executable
-/// parity, not merely checker acceptance. These are pre-implementation stubs.
+/// parity as well as checker acceptance.
 #[test]
 fn unannotated_key_builtin_aliases_execute_in_eval_and_c() {
     let declarations =
@@ -293,8 +293,24 @@ fn unannotated_key_builtin_aliases_execute_in_eval_and_c() {
     }
 }
 
-/// Typed controls isolate the existing builtin-as-value lowering gap from
-/// the unannotated alias's independent checker/generalization failure.
+/// One closed alias chooses each checked call independently, including the
+/// tensor rank-zero surface, which is distinct from a scalar key.
+#[test]
+fn one_unannotated_key_alias_selects_multiple_shapes_in_eval_and_c() {
+    let source = "def main() = {\n  seed = key_from_seed\n  (seed(7i64), seed(scalar_to_tensor(8i64)), seed(to_tensor([1i64, 2i64])))\n}\n";
+    assert_alias_eval_c(
+        source,
+        &[
+            "main.0 = key(0000000000000007)".into(),
+            "main.1 = key(0000000000000008)".into(),
+            "main.2 = tensor(shape=[2], data=[key(0000000000000001), key(0000000000000002)])"
+                .into(),
+        ],
+    );
+}
+
+/// Typed controls retain the concrete callback path beside independent
+/// unannotated instantiation.
 #[test]
 fn concretely_typed_key_builtin_aliases_execute_in_eval_and_c() {
     for (seeds, shape, values, seed_ty, key_ty, children_ty) in [
@@ -319,7 +335,7 @@ fn concretely_typed_key_builtin_aliases_execute_in_eval_and_c() {
 }
 
 /// [04-INF-9]: preserve the resolved builtin through a chain, aggregate,
-/// function result, and concrete higher-order parameter in executable lanes.
+/// and concrete higher-order parameter in executable lanes.
 #[test]
 fn transported_key_builtin_aliases_execute_in_eval_and_c() {
     let (left, right) = key_reference::split(key_reference::key_from_seed(-1));
@@ -330,11 +346,24 @@ fn transported_key_builtin_aliases_execute_in_eval_and_c() {
     for source in [
         "def main() = {\n  first = split_key\n  derive = first\n  derive(key_from_seed(-1i64))\n}\n",
         "def main() = {\n  ops = (split_key, fold_in)\n  derive = ops.0\n  derive(key_from_seed(-1i64))\n}\n",
-        "def exported() = split_key\ndef main() = {\n  derive = exported()\n  derive(key_from_seed(-1i64))\n}\n",
-        "def invoke(f: key -> (key, key), k: key) -> (key, key) = f(k)\ndef main() = {\n  derive = split_key\n  invoke(derive, key_from_seed(-1i64))\n}\n",
+        "def main() = {\n  derive = split_key\n  invoke = fn (f: key -> (key, key), k: key) -> f(k)\n  invoke(derive, key_from_seed(-1i64))\n}\n",
     ] {
         assert_alias_eval_c(source, &expected);
     }
+}
+
+/// A lexical function named like the builtin keeps the lexical meaning.
+/// Choosing an operation from alias text would produce split(7) instead.
+#[test]
+fn shadowed_key_builtin_name_does_not_select_builtin_carrier() {
+    let source = "def main() = {\n  split_key = fn (k: key) -> {\n    _ = drop(k)\n    (key_from_seed(1i64), key_from_seed(2i64))\n  }\n  split_key(key_from_seed(7i64))\n}\n";
+    assert_alias_eval_c(
+        source,
+        &[
+            "main.0 = key(0000000000000001)".into(),
+            "main.1 = key(0000000000000002)".into(),
+        ],
+    );
 }
 
 /// Negative runtime twins: alias transport must not erase dynamic domain
