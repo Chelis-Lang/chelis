@@ -632,6 +632,7 @@ int main(void) {
             str(artifact_dir),
             str(source),
             str(archive),
+            "-lm",
             "-o",
             str(executable),
         ],
