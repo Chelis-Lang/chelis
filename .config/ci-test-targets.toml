@@ -926,8 +926,8 @@ tracking_issue = "chelis#1824"
 package = "chelis-python"
 name = "manual_reef_context"
 manual_gates = ["reef_context_manual_acceptance_oracle"]
-reason = "the reef-context acceptance oracle needs a populated local reef registry and Python environment that the Linux PR workers do not have"
-tracking_issue = "chelis#1824"
+reason = "the reef-context gate needs a populated local registry and the macOS Python library path unavailable to Linux PR workers"
+tracking_issue = "chelis#2694"
 
 # This target requires a real HIP workstation. Ubuntu change-owned and package
 # expansion workers must preserve the exact manual gate without attempting to
