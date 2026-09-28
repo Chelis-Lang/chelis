@@ -1499,11 +1499,12 @@ impl Env {
     /// feature.
     ///
     /// It is a reference for *which variables the environment leaves free*, not
-    /// for which of those may be quantified. Two exclusions are therefore
+    /// for which of those may be quantified. Inference-state exclusions are
     /// mirrored here deliberately rather than inherited: a recursive group's
     /// instantiation variables (`tvar_pinned`), a pending operand gate's
     /// result variables, and an authored dimension binder still owned by the
-    /// active declaration level. These are properties of inference state that
+    /// active declaration level, and a live recursive group's level. These are
+    /// properties of inference state that
     /// no environment sweep can observe, so omitting one here would make the
     /// oracle disagree with a correct production path. Keep the exclusions in
     /// step with their production owners.
@@ -1540,11 +1541,18 @@ impl Env {
         // parity assertion in `generalize` keeps comparing like with like.
         let (pending_t, pending_d, pending_r) = subst.pending_gate_vars();
         let current_level = subst.current_level();
+        // A group's provisional hole scheme carries temporary quantifiers
+        // for its in-group references. The ordinary environment sweep sees
+        // those as bound and can mistake a same-level use for a free let
+        // variable. [04-INF-5] keeps the hole monomorphic until the whole
+        // group closes; group_level is the exact lifetime of that obligation.
+        let group_level = self.group_level();
         let generalizable = |v: TypeVar| {
             !env_tvars.contains(&v)
                 && !crate::infer::recursion::tvar_pinned(v)
                 && !pending_t.contains(&v)
                 && !(active_tvars.contains(&v) && subst.level_of_tvar(v) <= current_level)
+                && !group_level.is_some_and(|group| subst.level_of_tvar(v) <= group)
         };
         let ty_tvars = free_tvars(&ty);
         let mut tvars = ty_tvars
@@ -1909,6 +1917,32 @@ mod module_scope_tests {
             "the authored dimension becomes a quantifier only at its declaration boundary"
         );
         assert_eq!(declaration_scheme.rvars, vec![authored_rank]);
+    }
+
+    #[test]
+    fn recursive_group_variable_is_monomorphic_until_group_close() {
+        // [04-INF-5]: a provisional group hole is monomorphic inside its
+        // group and can be quantified after closure if Γ does not own it.
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        let group = subst.enter_level(&var_gen);
+        let body_var = var_gen.fresh_tvar();
+        let body = Type::Fn(vec![Type::Var(body_var)], Box::new(Type::Var(body_var)));
+        let mut captured = Env::new();
+        captured.begin_group_level(subst.current_level());
+        let in_group = captured.generalize(&body, &subst);
+        assert!(in_group.tvars.is_empty());
+        captured.end_holed_group();
+        subst.leave_level(group, &var_gen);
+
+        let published = captured.generalize(&body, &subst);
+        assert_eq!(published.tvars, vec![body_var]);
+        // Installing a monomorphic outer binding also lowers its free
+        // variable to that binding's level, as ordinary inference does.
+        subst.lower_type_to_current(&body);
+        captured.bind("outer".to_string(), Scheme::mono(Type::Var(body_var)));
+        let captured_scheme = captured.generalize(&body, &subst);
+        assert!(captured_scheme.tvars.is_empty());
     }
 }
 
