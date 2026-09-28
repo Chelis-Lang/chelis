@@ -900,9 +900,30 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 // historical marker set would suppress its eventual terminal.
                 self.moved.remove(&owner);
                 self.register(owner)?;
-                self.name_owner(owner, name)
+                self.name_owner(owner, name)?;
+                // A resolved key-builtin value enters this lexical scope as
+                // a function pointer. Calls through its alias have the same
+                // affine argument modes as the checked builtin contract;
+                // treating it as an ordinary owner makes `alias(k)` look
+                // like an unknown direct callee before C projection.
+                if let ConcreteHostType::Function(params, _) = &self.info(owner)?.ty {
+                    let modes = vec![ParamMode::Owned; params.len()];
+                    self.callback_modes.insert(owner, modes);
+                    self.scope_mut()?
+                        .names
+                        .insert(name.to_string(), Place::Callback(owner));
+                }
+                Ok(())
             }
-            Value::Named(owner) => self.name_owner(owner, name),
+            Value::Named(owner) => {
+                self.name_owner(owner, name)?;
+                if self.callback_modes.contains_key(&owner) {
+                    self.scope_mut()?
+                        .names
+                        .insert(name.to_string(), Place::Callback(owner));
+                }
+                Ok(())
+            }
             Value::Callback(owner) => {
                 self.scope_mut()?
                     .names

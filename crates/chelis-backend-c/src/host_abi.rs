@@ -49,13 +49,13 @@ pub(crate) enum HostAbiType {
     /// `bits` are the key's 64 bits. It is never an integer: it has no
     /// arithmetic, cast or comparison (spec/04 section 1.1).
     Key,
-    /// A typed C function-pointer parameter or direct callback argument.
+    /// A typed C function pointer for a declared callback or a resolved
+    /// compiler key-builtin value.
     ///
-    /// This is deliberately not a general value representation.  The only
-    /// constructor is [`Self::try_callback_signature`], and projection uses
-    /// it only for declared callback parameters and statically-known callback
-    /// arguments.  Function results, bindings, fields, and container elements
-    /// all cross [`Self::try_from_concrete`], which rejects function values.
+    /// This is deliberately not a general value representation. Projection
+    /// admits a local binding only when its initializer is a resolved key
+    /// builtin or an already admitted callable alias. Function results,
+    /// fields, and container elements still reject function values.
     Callback(Vec<HostAbiType>, Box<HostAbiType>),
     Adt(String, Vec<HostAbiType>),
     List(Box<HostAbiType>),
@@ -462,7 +462,11 @@ pub(crate) fn project_binding(
         name: binding.name,
         display_name: binding.display_name,
         display_roots: binding.display_roots,
-        ty: HostAbiType::try_from_concrete(&binding.ty)?,
+        ty: if matches!(binding.ty, ConcreteHostType::Function(_, _)) {
+            HostAbiType::try_callback_signature(&binding.ty)?
+        } else {
+            HostAbiType::try_from_concrete(&binding.ty)?
+        },
         value: project_expr(binding.value, allowed_callbacks)?,
     })
 }
@@ -585,9 +589,14 @@ fn project_expr(
                 .collect::<Result<Vec<_>, _>>()?,
             HostAbiType::try_from_concrete(&ty)?,
         ),
-        ConcreteHostExprKind::Var(name, ty) => {
-            HostAbiExprKind::Var(name, HostAbiType::try_from_concrete(&ty)?)
-        }
+        ConcreteHostExprKind::Var(name, ty) => HostAbiExprKind::Var(
+            name.clone(),
+            if matches!(ty, ConcreteHostType::Function(_, _)) && allowed_callbacks.contains(&name) {
+                HostAbiType::try_callback_signature(&ty)?
+            } else {
+                HostAbiType::try_from_concrete(&ty)?
+            },
+        ),
         ConcreteHostExprKind::Call {
             function,
             args,
@@ -641,13 +650,24 @@ fn project_expr(
             if chelis_ir::host::is_host_unresolved_marker(&name) {
                 return Err(unsupported_callable_use(&name));
             }
+            let abi_ty = if args.is_empty()
+                && matches!(
+                    name.as_str(),
+                    "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+                )
+                && matches!(ty, ConcreteHostType::Function(_, _))
+            {
+                HostAbiType::try_callback_signature(&ty)?
+            } else {
+                HostAbiType::try_from_concrete(&ty)?
+            };
             HostAbiExprKind::Builtin {
                 name,
                 args: args
                     .into_iter()
                     .map(|expr| project_expr(expr, allowed_callbacks))
                     .collect::<Result<Vec<_>, _>>()?,
-                ty: HostAbiType::try_from_concrete(&ty)?,
+                ty: abi_ty,
             }
         }
         ConcreteHostExprKind::AdtConstruct { ctor, fields, ty } => HostAbiExprKind::AdtConstruct {
@@ -723,14 +743,34 @@ fn project_expr(
                 .transpose()?,
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
-        ConcreteHostExprKind::Let { bindings, body, ty } => HostAbiExprKind::Let {
-            bindings: bindings
-                .into_iter()
-                .map(|binding| project_binding(binding, allowed_callbacks))
-                .collect::<Result<Vec<_>, _>>()?,
-            body: Box::new(project_expr(*body, allowed_callbacks)?),
-            ty: HostAbiType::try_from_concrete(&ty)?,
-        },
+        ConcreteHostExprKind::Let { bindings, body, ty } => {
+            let mut visible = allowed_callbacks.clone();
+            let mut projected = Vec::with_capacity(bindings.len());
+            for binding in bindings {
+                let admitted = matches!(binding.ty, ConcreteHostType::Function(_, _))
+                    && match &binding.value.kind {
+                        ConcreteHostExprKind::Builtin { name, args, .. } => {
+                            args.is_empty()
+                                && matches!(
+                                    name.as_str(),
+                                    "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+                                )
+                        }
+                        ConcreteHostExprKind::Var(name, _) => visible.contains(name),
+                        _ => false,
+                    };
+                let projected_binding = project_binding(binding, &visible)?;
+                if admitted {
+                    visible.insert(projected_binding.name.clone());
+                }
+                projected.push(projected_binding);
+            }
+            HostAbiExprKind::Let {
+                bindings: projected,
+                body: Box::new(project_expr(*body, &visible)?),
+                ty: HostAbiType::try_from_concrete(&ty)?,
+            }
+        }
         ConcreteHostExprKind::RetainedInvocation { bindings, body, ty } => {
             HostAbiExprKind::RetainedInvocation {
                 bindings: bindings

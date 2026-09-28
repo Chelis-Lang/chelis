@@ -1441,6 +1441,53 @@ impl<'a> EvalContext<'a> {
             self.result_producer = ResultProducer::interface_load(&value);
             return Ok(value);
         }
+        // The checked key operations are values as well as direct call
+        // heads. Capture the resolved operation now: a later lexical alias
+        // or shadow must not change which operation the callable invokes.
+        // The wrapper is compiler-owned and has no source-level body or
+        // captures. Its parameters and result come from the checked value
+        // type, never from a guessed scalar default.
+        if matches!(
+            name,
+            "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+        ) && self.active_builtin_symbol(name)
+            && let Some(signature) = node.metadata.ty().map(|ty| ty.expression())
+            && let Some(types) = checked_function_children(signature)
+            && let Some((return_type, param_types)) = types.split_last()
+        {
+            let params = (0..param_types.len())
+                .map(|index| format!("__chelis_key_arg_{index}"))
+                .collect::<Vec<_>>();
+            let span = node.expr.span();
+            let mut call = Vec::with_capacity(params.len() + 1);
+            call.push(Expr::node(
+                DeepTag::Var,
+                chelis_deep::Metadata::default(),
+                vec![Expr::Atom(Atom::Name(name.to_string()), span)],
+                span,
+            ));
+            call.extend(params.iter().map(|param| {
+                Expr::node(
+                    DeepTag::Var,
+                    chelis_deep::Metadata::default(),
+                    vec![Expr::Atom(Atom::Name(param.clone()), span)],
+                    span,
+                )
+            }));
+            let body = Expr::node(DeepTag::App, chelis_deep::Metadata::default(), call, span);
+            return Ok(RuntimeValue::Closure {
+                checked_function: Box::new(node.expr.clone()),
+                params,
+                param_types: param_types.iter().cloned().map(Some).collect(),
+                return_type: Some(return_type.clone()),
+                checked_signature: Some(signature.clone()),
+                invocation_contracts: Box::default(),
+                body,
+                env: self.bindings.capture(),
+                precision_env: self.precision_bindings.clone(),
+                def_name: None,
+            });
+        }
         if name == "Nil" {
             return Ok(RuntimeValue::List(Vec::new().into()));
         }

@@ -242,6 +242,8 @@ pub(crate) fn emit_host_abi_program(
     // elements through `chelis_key_at`.
     append_uniform_sample_helper(&mut body);
     body.push(String::new());
+    append_key_callable_helpers(&mut body);
+    body.push(String::new());
     append_tensor_print_helper(&mut body);
     body.push(String::new());
     append_tensor_math_helpers(&mut body);
@@ -862,6 +864,130 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     ] {
         out.push(line.to_string());
     }
+}
+
+/// Capture-free C entry points for the four checked key operations when they
+/// occur as values. Their names are compiler-private; host IR retains the
+/// builtin identity and the checked function type selects one exact surface.
+/// The tensor entries accept runtime rank and extents because rank-polymorphic
+/// aliases may be specialized at more than one call site.
+fn append_key_callable_helpers(out: &mut Vec<String>) {
+    out.push(
+        r#"
+static inline chelis_tuple *__chelis_key_pair(chelis_key left, chelis_key right) {
+    chelis_value halves[2] = {
+        chelis_value_take_tensor(chelis_key_tensor(left)),
+        chelis_value_take_tensor(chelis_key_tensor(right))
+    };
+    chelis_tuple *pair = chelis_tuple_from_values(halves, 2);
+    chelis_value_release(halves[0]);
+    chelis_value_release(halves[1]);
+    return pair;
+}
+
+static inline chelis_key __chelis_key_callable_seed_scalar(int64_t seed) {
+    return chelis_key_from_seed_bits(seed);
+}
+static inline chelis_tuple *__chelis_key_callable_split_scalar(chelis_key key) {
+    return __chelis_key_pair(
+        chelis_key_derive_value(key, 0ULL),
+        chelis_key_derive_value(key, 1ULL));
+}
+static inline chelis_tensor *__chelis_key_callable_children_scalar(chelis_key key, int64_t count) {
+    return chelis_split_keys_tensor(key, count);
+}
+static inline chelis_key __chelis_key_callable_fold_scalar(chelis_key key, int64_t index) {
+    return chelis_key_fold_in(key, index);
+}
+static inline chelis_tensor *__chelis_key_callable_seed_tensor(chelis_tensor *seeds) {
+    chelis_read_view input = chelis_tensor_read_view(seeds);
+    int64_t rank = chelis_tensor_rank(seeds);
+    if (input.dtype != CHELIS_DTYPE_I64) abort();
+    int64_t shape[rank > 0 ? rank : 1];
+    for (int64_t axis = 0; axis < rank; ++axis) shape[axis] = chelis_tensor_shape(seeds, axis);
+    chelis_tensor *out = chelis_alloc(rank, rank ? shape : NULL, CHELIS_DTYPE_KEY);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(out);
+    chelis_write_view view = chelis_tensor_write_view(guard);
+    for (int64_t i = 0; i < input.count; ++i)
+        ((uint64_t *)view.data)[i] = (uint64_t)((const int64_t *)input.data)[i];
+    chelis_tensor_end_write(guard);
+    chelis_tensor_release(seeds);
+    return out;
+}
+static inline chelis_tuple *__chelis_key_callable_split_tensor(chelis_tensor *keys) {
+    chelis_read_view input = chelis_tensor_read_view(keys);
+    int64_t rank = chelis_tensor_rank(keys);
+    if (input.dtype != CHELIS_DTYPE_KEY) abort();
+    int64_t shape[rank > 0 ? rank : 1];
+    for (int64_t axis = 0; axis < rank; ++axis) shape[axis] = chelis_tensor_shape(keys, axis);
+    chelis_tensor *left = chelis_alloc(rank, rank ? shape : NULL, CHELIS_DTYPE_KEY);
+    chelis_tensor *right = chelis_alloc(rank, rank ? shape : NULL, CHELIS_DTYPE_KEY);
+    chelis_tensor_write *left_guard = chelis_tensor_begin_write(left);
+    chelis_tensor_write *right_guard = chelis_tensor_begin_write(right);
+    chelis_write_view left_view = chelis_tensor_write_view(left_guard);
+    chelis_write_view right_view = chelis_tensor_write_view(right_guard);
+    for (int64_t i = 0; i < input.count; ++i) {
+        uint64_t source = ((const uint64_t *)input.data)[i];
+        ((uint64_t *)left_view.data)[i] = chelis_key_derive(source, 0ULL);
+        ((uint64_t *)right_view.data)[i] = chelis_key_derive(source, 1ULL);
+    }
+    chelis_tensor_end_write(left_guard);
+    chelis_tensor_end_write(right_guard);
+    chelis_value halves[2] = { chelis_value_take_tensor(left), chelis_value_take_tensor(right) };
+    chelis_tuple *pair = chelis_tuple_from_values(halves, 2);
+    chelis_value_release(halves[0]);
+    chelis_value_release(halves[1]);
+    chelis_tensor_release(keys);
+    return pair;
+}
+static inline chelis_tensor *__chelis_key_callable_children_tensor(chelis_tensor *keys, int64_t count) {
+    if (count < 0) chelis_numeric_trap("numeric trap: domain in split_keys at i64");
+    chelis_read_view input = chelis_tensor_read_view(keys);
+    int64_t rank = chelis_tensor_rank(keys);
+    if (input.dtype != CHELIS_DTYPE_KEY) abort();
+    int64_t shape[rank + 1];
+    for (int64_t axis = 0; axis < rank; ++axis) shape[axis] = chelis_tensor_shape(keys, axis);
+    shape[rank] = count;
+    chelis_tensor *out = chelis_alloc(rank + 1, shape, CHELIS_DTYPE_KEY);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(out);
+    chelis_write_view view = chelis_tensor_write_view(guard);
+    for (int64_t i = 0; i < input.count; ++i) {
+        uint64_t source = ((const uint64_t *)input.data)[i];
+        for (int64_t j = 0; j < count; ++j)
+            ((uint64_t *)view.data)[i * count + j] =
+                chelis_key_derive(chelis_key_derive(source, 2ULL), (uint64_t)j);
+    }
+    chelis_tensor_end_write(guard);
+    chelis_tensor_release(keys);
+    return out;
+}
+static inline chelis_tensor *__chelis_key_callable_fold_tensor(chelis_tensor *keys, chelis_tensor *indices) {
+    chelis_read_view input = chelis_tensor_read_view(keys);
+    chelis_read_view index = chelis_tensor_read_view(indices);
+    int64_t rank = chelis_tensor_rank(keys);
+    if (input.dtype != CHELIS_DTYPE_KEY || index.dtype != CHELIS_DTYPE_I64
+        || chelis_tensor_rank(indices) != rank) abort();
+    int64_t shape[rank > 0 ? rank : 1];
+    for (int64_t axis = 0; axis < rank; ++axis) {
+        shape[axis] = chelis_tensor_shape(keys, axis);
+        if (chelis_tensor_shape(indices, axis) != shape[axis])
+            chelis_numeric_trap("numeric trap: domain in fold_in at i64");
+    }
+    chelis_tensor *out = chelis_alloc(rank, rank ? shape : NULL, CHELIS_DTYPE_KEY);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(out);
+    chelis_write_view view = chelis_tensor_write_view(guard);
+    for (int64_t i = 0; i < input.count; ++i)
+        ((uint64_t *)view.data)[i] = chelis_key_derive(
+            chelis_key_derive(((const uint64_t *)input.data)[i], 2ULL),
+            (uint64_t)((const int64_t *)index.data)[i]);
+    chelis_tensor_end_write(guard);
+    chelis_tensor_release(keys);
+    chelis_tensor_release(indices);
+    return out;
+}
+"#
+        .to_string(),
+    );
 }
 
 /// Translation-unit-local support for Std.Io.Json's canonical object
@@ -1580,6 +1706,65 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
     out.push("        }".to_string());
     out.push("    }".to_string());
     out.push("}".to_string());
+}
+
+/// The only C callback signatures a resolved key operation can carry.
+fn key_callable_symbol(name: &str, ty: &HostType) -> Option<&'static str> {
+    let HostType::Callback(params, result) = ty else {
+        return None;
+    };
+    let scalar = match (name, params.as_slice(), result.as_ref()) {
+        ("key_from_seed", [HostType::Int64], HostType::Key) => {
+            Some("__chelis_key_callable_seed_scalar")
+        }
+        ("split_key", [HostType::Key], HostType::Tuple(halves))
+            if matches!(halves.as_slice(), [HostType::Key, HostType::Key]) =>
+        {
+            Some("__chelis_key_callable_split_scalar")
+        }
+        ("split_keys", [HostType::Key, HostType::Int64], HostType::Tensor(out))
+            if out.precision == Prim::Key =>
+        {
+            Some("__chelis_key_callable_children_scalar")
+        }
+        ("fold_in", [HostType::Key, HostType::Int64], HostType::Key) => {
+            Some("__chelis_key_callable_fold_scalar")
+        }
+        _ => None,
+    };
+    if scalar.is_some() {
+        return scalar;
+    }
+    match (name, params.as_slice(), result.as_ref()) {
+        ("key_from_seed", [HostType::Tensor(seeds)], HostType::Tensor(out))
+            if seeds.precision == Prim::Int64 && out.precision == Prim::Key =>
+        {
+            Some("__chelis_key_callable_seed_tensor")
+        }
+        ("split_key", [HostType::Tensor(keys)], HostType::Tuple(halves))
+            if keys.precision == Prim::Key
+                && matches!(
+                    halves.as_slice(),
+                    [HostType::Tensor(left), HostType::Tensor(right)]
+                        if left.precision == Prim::Key && right.precision == Prim::Key
+                ) =>
+        {
+            Some("__chelis_key_callable_split_tensor")
+        }
+        ("split_keys", [HostType::Tensor(keys), HostType::Int64], HostType::Tensor(out))
+            if keys.precision == Prim::Key && out.precision == Prim::Key =>
+        {
+            Some("__chelis_key_callable_children_tensor")
+        }
+        ("fold_in", [HostType::Tensor(keys), HostType::Tensor(indices)], HostType::Tensor(out))
+            if keys.precision == Prim::Key
+                && indices.precision == Prim::Int64
+                && out.precision == Prim::Key =>
+        {
+            Some("__chelis_key_callable_fold_tensor")
+        }
+        _ => None,
+    }
 }
 
 /// Render a tensor element by first recovering the exact tagged scalar.
@@ -3423,9 +3608,10 @@ fn container_operand_is_moved(
 /// Resolve the one verifier-authorized direct call at a host `Call` site.
 ///
 /// A diagnostic label or an intrinsic/indirect application cannot authorize
-/// consuming-call terminal motion. Missing or duplicated structural call
-/// identity therefore fails closed before the emitter writes any pre-call
-/// action.
+/// a *direct* call. Missing or duplicated structural direct-call identity
+/// fails closed here; the general pre-call hook below separately admits a
+/// verifier-authorized indirect callback application.
+#[cfg(test)]
 pub(crate) fn direct_call_action_index(site: &ProjectedHostSite<'_>) -> Result<usize, Unsupported> {
     let mut direct_call = None;
     for (index, action) in site.directives.iter().enumerate() {
@@ -3447,6 +3633,31 @@ pub(crate) fn direct_call_action_index(site: &ProjectedHostSite<'_>) -> Result<u
     direct_call.ok_or_else(|| {
         invalid_abi_shape(
             "verified user-function call site has no direct-call authority".to_string(),
+            "verified C host ownership emission",
+        )
+    })
+}
+
+fn verified_call_action_index(site: &ProjectedHostSite<'_>) -> Result<usize, Unsupported> {
+    let mut call = None;
+    for (index, action) in site.directives.iter().enumerate() {
+        if matches!(
+            action,
+            VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                kind: VerifiedApplyKind::DirectCall { .. } | VerifiedApplyKind::IndirectCall,
+                ..
+            })
+        ) && call.replace(index).is_some()
+        {
+            return Err(invalid_abi_shape(
+                "verified call site contains multiple call authorities".to_string(),
+                "verified C host ownership emission",
+            ));
+        }
+    }
+    call.ok_or_else(|| {
+        invalid_abi_shape(
+            "verified call site has no direct or indirect call authority".to_string(),
             "verified C host ownership emission",
         )
     })
@@ -3940,7 +4151,7 @@ impl<'a> HostEmitter<'a> {
     /// argument payloads first; this hook preserves that verified ordering
     /// instead of retaining an argument after the owned callee has consumed it.
     fn emit_pre_call_actions(&mut self, site: &ProjectedHostSite<'a>) -> Result<(), Unsupported> {
-        let direct_call_index = direct_call_action_index(site)?;
+        let call_index = verified_call_action_index(site)?;
         if !self.pre_emitted_clone_sites.insert(site.id) {
             return Err(invalid_abi_shape(
                 "verified call site emitted its pre-call actions twice".to_string(),
@@ -3958,13 +4169,13 @@ impl<'a> HostEmitter<'a> {
                     operation,
                     owner,
                     ..
-                }) if index < direct_call_index => {
+                }) if index < call_index => {
                     self.emit_owner_drop(owner.owner())?;
                     self.pre_emitted_terminals.insert((site.id, *operation));
                 }
                 VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
                     operation, ..
-                }) if index < direct_call_index => {
+                }) if index < call_index => {
                     self.pre_emitted_terminals.insert((site.id, *operation));
                 }
                 _ => {}
@@ -5375,6 +5586,17 @@ impl<'a> HostEmitter<'a> {
         site: &ProjectedHostSite<'a>,
         result_claims: Option<&str>,
     ) -> Result<(), Unsupported> {
+        if args.is_empty() && matches!(ty, HostType::Callback(_, _)) {
+            let symbol = key_callable_symbol(name, ty).ok_or_else(|| {
+                invalid_abi_shape(
+                    format!("checked key callable `{name}` has incompatible C signature {ty:?}"),
+                    "C host key callable selection",
+                )
+            })?;
+            self.lines
+                .push(format!("{}{target} = {symbol};", self.indent));
+            return Ok(());
+        }
         // A checker-stamped float literal is represented as a cast around
         // its lexical f64 image. Materialize that literal directly at the
         // declared width: this both preserves the one-rounding contract and

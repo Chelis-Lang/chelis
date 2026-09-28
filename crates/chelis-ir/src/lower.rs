@@ -6391,6 +6391,10 @@ impl ResolvedFunction {
 #[derive(Clone)]
 enum CallableExpr {
     Plain(ResolvedFunction),
+    /// Resolved key operation carried through a checked value binding. The
+    /// original operation identity is captured when the value is formed;
+    /// an alias's spelling never selects the lowered primitive.
+    KeyBuiltin(String),
     Vmap {
         fn_expr: ResolvedFunction,
         axis: usize,
@@ -8003,6 +8007,7 @@ impl<'program> LowerCtx<'program> {
         };
         match callable {
             CallableExpr::Plain(fn_expr) => CallableExpr::Plain(function(fn_expr)),
+            CallableExpr::KeyBuiltin(name) => CallableExpr::KeyBuiltin(name.clone()),
             CallableExpr::Vmap { fn_expr, axis } => CallableExpr::Vmap {
                 fn_expr: function(fn_expr),
                 axis: *axis,
@@ -10726,6 +10731,18 @@ impl<'program> LowerCtx<'program> {
                 app_span,
                 inlining_name,
             )),
+            CallableExpr::KeyBuiltin(name) => Some(if name == "split_key" {
+                if args.len() != 1 {
+                    raise_lowering_error(
+                        "checked split_key callable has wrong arity",
+                        Some(app_span),
+                        self.current_span_id.clone(),
+                    );
+                }
+                self.lower_split_key(&args[0])
+            } else {
+                LoweredValue::Node(self.lower_builtin_app(&name, args, ty, app_span))
+            }),
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
             }
@@ -10903,6 +10920,12 @@ impl<'program> LowerCtx<'program> {
                     }
                     return Some(callable);
                 }
+                if matches!(
+                    name.as_str(),
+                    "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+                ) {
+                    return Some(CallableExpr::KeyBuiltin(name));
+                }
                 None
             }
             DeepTag::Vmap => {
@@ -10960,6 +10983,7 @@ impl<'program> LowerCtx<'program> {
                         }
                         // `vmap(parameter)` is G2 territory.
                         CallableExpr::Parameter { .. } => None,
+                        CallableExpr::KeyBuiltin(_) => None,
                     })
             }
             DeepTag::Grad => self

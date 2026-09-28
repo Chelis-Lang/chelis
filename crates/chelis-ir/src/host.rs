@@ -7993,6 +7993,24 @@ fn lower_host_expr_kind(
                 .ok_or_else(|| host_expr_lowering_error(expr, "a `var` node has no symbol"))?
                 .to_string();
             let ty = expr_host_type(expr, program, scope);
+            // An unshadowed key operation in value position is a checked
+            // callable, not a lexical C variable. Keep its registered
+            // operation identity in host IR so a later alias or shadow
+            // cannot change what it calls. The backend materializes the
+            // corresponding capture-free function pointer from this node.
+            if matches!(
+                name.as_str(),
+                "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+            ) && !scope.contains_key(&name)
+                && program.def_named(&name).is_none()
+                && matches!(ty, HostTypeTerm::Fn(_, _))
+            {
+                return Ok(HostExpr::new(HostExprKind::Builtin {
+                    name,
+                    args: Vec::new(),
+                    ty,
+                }));
+            }
             if name == "Nil" {
                 return Ok(HostExpr::new(HostExprKind::List(
                     Vec::new(),
