@@ -161,9 +161,10 @@ entry contracts:
 - **The callable surface** (`compile_for_execution`, backing Python's
   `compile_and_load`) treats `entry_name` STRICTLY as a def selector. An unknown
   `entry_name`, an ambiguous default (multiple tensor defs, none named `main`),
-  a program with top-level (non-`def`) value bindings, or a `grad`/`vmap`
-  transform entry that cannot be entry-scoped is a loud error; this surface
-  never returns metadata merged from every def (the chelis#817 defect class)
+  a program with top-level (non-`def`) value bindings, or a selected entry
+  whose checked body cannot lower to one standalone tensor result is a loud
+  error; this surface never returns metadata merged from every def (the
+  chelis#817 defect class)
   and never silently ignores the requested entry.
 - **The C-source surface** (`compile`, backing tide's `/compile`, cove's live
   pane, and Python's `chelis.compile()`) keeps the legacy whole-program
@@ -185,7 +186,7 @@ runtime symbol in the `chelis_*` namespace (`chelis_runtime.h` declares
 carries `chelis_main` so the loader (`dlsym`) and generated header stay consistent.
 
 Outside the entry-scoped lane — the host-program lane that owns top-level globals
-and scalar/`grad` entries, the free-form pure-DAG path taken by a program that
+and non-tensor entries, the free-form pure-DAG path taken by a program that
 lowers no host program (such as a single fully-DAG-lowerable `def`), and the
 C-source surface's whole-program fallback when the entry lane declines —
 `entry_name` becomes the output symbol after sanitization only: `main` maps to

@@ -1,8 +1,8 @@
 //! [04-LIN-3,4,7,8]: unused internal owners terminate without consuming caller borrows.
 mod ownership_support;
-use ownership_support::{balanced, emit, emit_selected, run};
+use ownership_support::{GeneratedProgram, balanced, emit, emit_selected, run};
 
-fn constant_gradient(n: usize) {
+fn constant_gradient_fixture(n: usize) -> (GeneratedProgram, String) {
     let source = format!(
         "\
 def loss(x: tensor[{n}, f32]) -> f32 = 3.0f32
@@ -10,22 +10,24 @@ def derivative(x: tensor[{n}, f32]) -> tensor[{n}, f32] = grad(loss)(x)
 "
     );
     let c = emit_selected(&source, "derivative");
-    let loss = c.symbol("loss").to_string();
-    let derivative = c.symbol("derivative").to_string();
-    assert!(c.contains(&format!("float {loss}(")));
-    assert!(c.contains(&format!("chelis_tensor* {derivative}(")));
-    assert!(!c.contains("float loss("));
-    assert!(!c.contains("chelis_tensor* derivative("));
+    // A selected tensor entry exports the fixed four-argument ABI. Its loss
+    // and source-named derivative are internal to the single-root DAG.
+    let entry = c.symbol("chelis_main");
+    assert!(c.declaration("chelis_main").contains("void chelis_main("));
+    assert!(c.contains(&format!("void {entry}(")));
+    assert!(!c.header().contains("chelis_tensor* derivative("));
     let driver = format!(
         r#"
 int main(void) {{
     chelis_tensor *x = input({n});
+    chelis_tensor *inputs[] = {{x}}, *outputs[] = {{NULL}};
     const float original[2] = {{-3, -1}}, zero[2] = {{0, 0}};
     for (int i = 0; i < 16; ++i) {{
-        assert({loss}(x) == 3.0f);
-        chelis_tensor *dx = {derivative}(x);
-        tensor_bits(dx, {n}, zero);
-        chelis_tensor_release(dx);
+        {entry}(inputs, 1, outputs, 1);
+        assert(outputs[0] != NULL);
+        tensor_bits(outputs[0], {n}, zero);
+        chelis_tensor_release(outputs[0]);
+        outputs[0] = NULL;
         tensor_bits(x, {n}, original);
     }}
     chelis_tensor_release(x);
@@ -33,6 +35,11 @@ int main(void) {{
 }}
 "#
     );
+    (c, driver)
+}
+
+fn constant_gradient(n: usize) {
+    let (c, driver) = constant_gradient_fixture(n);
     balanced(&run(&c, &driver));
 }
 
@@ -44,6 +51,17 @@ fn unused_owned_tensor_entry_and_constant_gradient_balance() {
 #[test]
 fn unused_empty_tensor_entry_and_constant_gradient_balance() {
     constant_gradient(0);
+}
+
+#[test]
+fn selected_constant_gradient_ledger_detects_unreleased_results() {
+    let (c, driver) = constant_gradient_fixture(2);
+    let release = "        chelis_tensor_release(outputs[0]);";
+    assert_eq!(driver.matches(release).count(), 1);
+    let leaking = driver.replacen(release, "", 1);
+    let summary = run(&c, &leaking);
+    assert!(summary["live_owners"].as_u64().unwrap() > 0, "{summary}");
+    assert!(summary["allocations"] != summary["finalized"], "{summary}");
 }
 
 #[test]

@@ -100,6 +100,12 @@ assertion failures unless an explicit different success condition is given.
 | `cooperative_unwind_precedes_the_backstop_on_an_idle_box` | `chelis-cli` | `cargo nextest run -p chelis-cli --test issue_914_eval_timeout cooperative_unwind_precedes_the_backstop_on_an_idle_box -- --ignored` | An otherwise idle box: one-minute load average below the core count. Expected: `chelis eval --timeout 2` on a slow program unwinds cooperatively, so stderr carries the documented timeout message and NOT the watchdog's `forced exit` suffix. This is a quality-of-implementation property with a load precondition the default suite cannot hold, which is why it is ignored rather than asserted in CI (chelis#1607). | chelis#1607 |
 | `a_starved_box_falls_back_to_the_forced_exit` | `chelis-cli` | `cargo nextest run -p chelis-cli --test issue_914_eval_timeout a_starved_box_falls_back_to_the_forced_exit --test-threads=1 -- --ignored` | An otherwise idle box to start with. The row oversubscribes every core tenfold for a few seconds and will make the machine briefly unresponsive, so run it alone. Expected: the watchdog's hard-exit backstop fires and stderr carries both the documented prefix and the `forced exit` suffix. The negative twin of the row above: without it, deleting every cancellation poll would leave that row green on a fast box. | chelis#1607 |
 
+## Compiler feature acceptance gates
+
+| Gate | Command | Expected success | Owner |
+|---|---|---|---|
+| Keyed randomness corpus | `.venv/bin/python scripts/keyed_randomness_oracle.py` | `KEYED RANDOMNESS ORACLE: PASS` and a fresh exact-SHA receipt with all 91 selected identities passing, none failed/skipped/unrun, and the retired-dispatch tripwire passing. Requires a clean committed task worktree, its uv Python 3.11, Cargo/nextest and a native C toolchain. Manual: not dispatched by default CI. [Corpus and limits](keyed_randomness_oracle.md); `par` is a typed refusal, and shell release is separate. | chelis#2413 |
+
 ## Developer-environment acceptance gates
 
 These executable/manual gates are not ignored Rust tests. Run them from one

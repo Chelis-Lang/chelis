@@ -53,23 +53,18 @@ def loss(k: key, x: tensor[4,f32]) -> f32 = with device("cpu") {
 def derivative(x: tensor[4,f32]) -> tensor[4,f32] = grad(loss, wrt=x)(key_from_seed(42i64),x)
 def unused_gpu(x: tensor[4,f32]) -> tensor[4,f32] = with device("gpu:0") { mul(x,x) }
 "#;
-    let ordinary = compile_for_execution(request(source, "derivative")).unwrap_err();
+    let ordinary = compile_for_execution(request(source, "derivative")).unwrap();
     let mut projections = 0;
     let traced = compile_for_execution_with_trace(request(source, "derivative"), |_| {
         projections += 1;
     })
-    .unwrap_err();
-    assert_eq!(projections, 0);
-    assert_eq!(ordinary.stage, "effects");
-    assert_eq!(traced.stage, ordinary.stage);
-    assert!(ordinary.errors.iter().all(|error| {
-        error.kind() == chelis_vocab::DiagnosticKind::BuildTargetMismatch
-            && error.message.contains("resource region `gpu:0`")
-            && !error.message.contains("resource region `cpu`")
-    }));
+    .unwrap();
+    assert_eq!(projections, 1);
+    assert_eq!(ordinary.inputs.len(), 1);
+    assert_eq!(ordinary.outputs.len(), 1);
     assert_eq!(
-        serde_json::to_value(traced.errors).unwrap(),
-        serde_json::to_value(ordinary.errors).unwrap()
+        serde_json::to_value(traced.artifact()).unwrap(),
+        serde_json::to_value(ordinary).unwrap()
     );
 }
 
@@ -135,23 +130,20 @@ fn tracing_preserves_forward_failure_beside_planned_dropout() {
 }
 
 #[test]
-fn later_compiler_failure_never_returns_an_earlier_projection() {
+fn selected_vmap_returns_one_projection_only_after_success() {
     let source = "def process(x: tensor[4,f32]) -> tensor[4,f32] = relu(x)\ndef batch_process(xs: tensor[8,4,f32]) -> tensor[8,4,f32] = xs |> vmap(process)";
-    let ordinary = compile_for_execution(request(source, "batch_process")).unwrap_err();
+    let ordinary = compile_for_execution(request(source, "batch_process")).unwrap();
     let mut calls = 0;
-    let error = compile_for_execution_with_trace(request(source, "batch_process"), |_| {
+    let traced = compile_for_execution_with_trace(request(source, "batch_process"), |_| {
         calls += 1;
         "apparently valid projection"
     })
-    .unwrap_err();
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(traced.projection(), &"apparently valid projection");
     assert_eq!(
-        calls, 1,
-        "exercise a failure after observation, not an early rejection"
-    );
-    assert_eq!(ordinary.stage, error.stage);
-    assert_eq!(
-        serde_json::to_value(ordinary.errors).unwrap(),
-        serde_json::to_value(error.errors).unwrap()
+        serde_json::to_value(ordinary).unwrap(),
+        serde_json::to_value(traced.artifact()).unwrap()
     );
 }
 

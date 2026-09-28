@@ -95,10 +95,9 @@ def _numpy(out):
 
 
 def _scalar(root_value):
-    """Extract a Python float from an EvaluatedRoot.value (a scalar float or a
-    TensorValue with a `.data` tuple)."""
+    """Extract a Python float from an EvaluatedRoot scalar or TensorValue."""
     data = getattr(root_value, "data", None)
-    if data is not None:
+    if isinstance(data, tuple):
         return float(data[0])
     return float(root_value)
 

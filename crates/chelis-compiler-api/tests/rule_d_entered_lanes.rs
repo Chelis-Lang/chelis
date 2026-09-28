@@ -1331,7 +1331,7 @@ fn vmap_in_arm(condition: &str) -> String {
 /// The vmap batching pass at its call site (spec/10 §3): a vmapped body
 /// spliced into an arm runs under the arm's activation, so when the arm is
 /// not taken no row checks. The taken twin traps. The compiled-execution
-/// lane refuses a transform entry (chelis#1138), so this is the evaluator's.
+/// evaluator and compiled entry lanes have separate lowering paths.
 ///
 /// Evidentiary status: REGRESSION TEST. At eb608d063 the untaken arm's
 /// vmapped cast traps.
