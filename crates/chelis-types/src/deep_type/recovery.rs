@@ -174,10 +174,12 @@ impl DeepTypeResolver<'_, '_> {
                 ),
             ));
         }
-        let dimensions: Vec<_> = children[..children.len() - 1]
-            .iter()
-            .map(|child| self.resolve_dim(vg, errors, child))
-            .collect();
+        // A loop rather than `map(..).collect()`: the extraction cannot translate a
+        // map closure that holds these mutable borrows across the collect.
+        let mut dimensions = Vec::with_capacity(children.len() - 1);
+        for child in &children[..children.len() - 1] {
+            dimensions.push(self.resolve_dim(vg, errors, child));
+        }
         let outer = std::mem::replace(&mut self.resolving_tensor_precision, true);
         let precision = self.recover_type(vg, errors, &children[children.len() - 1]);
         self.resolving_tensor_precision = outer;
