@@ -2285,7 +2285,7 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             "checked key callable scalar and tensor C execution",
             (
                 "cargo", "nextest", "run", "-p", "chelis-compiler-api",
-                "--test", "key_tensor_forms",
+                "--features", "ownership-ledger", "--test", "key_tensor_forms",
             ),
         ),
         OracleLeg(
