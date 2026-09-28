@@ -18,6 +18,7 @@ authenticated [GitHub CLI](https://cli.github.com) are currently required.
 ```sh
 gh auth login
 gh release download --repo Chelis-Lang/chelis --pattern chelisup.sh --output - | sh
+# If the bootstrap says ~/.chelis/bin is not on PATH:
 export PATH="$HOME/.chelis/bin:$PATH"
 release_tag="$(gh release view --repo Chelis-Lang/chelis --json tagName --jq .tagName)"
 chelisup install "${release_tag#v}"

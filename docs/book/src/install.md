@@ -32,7 +32,8 @@ instead:
 sh crates/chelisup/bootstrap/chelisup.sh   # installs ~/.chelis/bin/chelisup
 ```
 
-Then put `~/.chelis/bin` on your PATH (the bootstrap prints the exact line):
+If the bootstrap reports that `~/.chelis/bin` is not on your PATH, add it
+(the bootstrap prints the exact line):
 
 ```sh
 export PATH="$HOME/.chelis/bin:$PATH"   # add to ~/.profile, ~/.bashrc, or ~/.zshrc
