@@ -2,8 +2,8 @@
 mod key_reference;
 mod ownership_support;
 
-use chelis_compiler_api::compiler::eval_selected;
-use chelis_compiler_api::schema::{EvalRequest, SourceKind};
+use chelis_compiler_api::compiler::{compile, eval_selected};
+use chelis_compiler_api::schema::{CompileRequest, CompileTarget, EvalRequest, SourceKind};
 use std::collections::BTreeMap;
 
 fn tensor(shape: &[usize], keys: &[u64]) -> String {
@@ -350,6 +350,41 @@ fn transported_key_builtin_aliases_execute_in_eval_and_c() {
     ] {
         assert_alias_eval_c(source, &expected);
     }
+}
+
+/// A public aggregate cannot export unspecialized builtin identity through
+/// a zero-payload callable witness. Local aggregates remain executable above.
+#[test]
+fn exported_aggregate_of_key_callables_rejects_before_public_c_abi() {
+    let source = "def exported() = (split_key, fold_in)\ndef main() = {\n  ops = exported()\n  derive = ops.0\n  mix = ops.1\n  (derive(key_from_seed(7i64)), mix(key_from_seed(8i64), 1i64))\n}\n";
+    let eval_error = eval_selected(
+        EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            bindings: BTreeMap::new(),
+        },
+        &["main".into()],
+    )
+    .err()
+    .expect("Eval must reject an exported unspecialized aggregate");
+    assert!(
+        format!("{eval_error:?}")
+            .contains("builtin `split_key` is not supported by IR evaluation as a value"),
+        "{eval_error:?}"
+    );
+    let error = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("key-aggregate-export".into()),
+    })
+    .err()
+    .expect("an exported aggregate must not erase callable identity at the C ABI");
+    assert!(
+        format!("{error:?}")
+            .contains("host type did not resolve before the code-generation boundary"),
+        "{error:?}"
+    );
 }
 
 /// A lexical function named like the builtin keeps the lexical meaning.

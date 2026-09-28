@@ -55,8 +55,9 @@ pub(crate) enum HostAbiType {
     ///
     /// This is deliberately not a general value representation. Projection
     /// admits a local binding only when its initializer is a resolved key
-    /// builtin or an already admitted callable alias. Function results,
-    /// fields, and container elements still reject function values.
+    /// builtin or an already admitted callable alias. Ordinary function
+    /// results and container elements have no callback-value ABI; the closed
+    /// key-builtin carrier below is a separate internal representation.
     Callback(Vec<HostAbiType>, Box<HostAbiType>),
     /// A closed, unspecialized operation. Its identity is fixed in the type;
     /// the private C value is an inert witness until a checked call selects
