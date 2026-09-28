@@ -2009,6 +2009,13 @@ impl CEmitter {
         specs
     }
 
+    pub(crate) fn output_types(dag: VerifiedDagView<'_>) -> Vec<TensorType> {
+        Self::output_specs(dag)
+            .into_iter()
+            .map(|output| dag.get(output.id).expect("output node").output_type.clone())
+            .collect()
+    }
+
     pub(crate) fn output_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
         Self::output_specs(dag)
             .into_iter()

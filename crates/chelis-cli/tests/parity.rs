@@ -885,3 +885,8 @@ fn parity_comparator_rejects_non_tensor_diff() {
 fn parity_generic_host_permutation() {
     drive_parity(&examples_root().join("generic_host_permutation.ch"), true);
 }
+
+#[test]
+fn parity_grad_host_results() {
+    drive_parity(&examples_root().join("grad_host_results.ch"), true);
+}
