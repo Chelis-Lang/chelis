@@ -36,6 +36,7 @@ pub(super) fn auto_borrow_call_arg_types(
 /// scheme, but they must still consume the scheme's argument restrictions.
 /// Keeping unification and family-failure cleanup here prevents such a route
 /// from becoming a second admission mechanism.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn unify_checked_call_contract(
     site: &deep::Expr,
     func_ty: &Type,
