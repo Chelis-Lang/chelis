@@ -603,6 +603,10 @@ fn checked_library_round_trip_preserves_result_constraint_origins() {
         "def forward_grad(p) -> (f32 -> f32) = p",
         "def forward_grad(p) = index(append([p], grad(fn (w: f32) -> 1.0f32)), 0i64)",
         "def forward_grad(p) = index(concat([p], [grad(fn (w: f32) -> 1.0f32)]), 0i64)",
+        "def forward_grad(p) = index(dict_values(dict_insert(dict_of([(\"a\", grad(fn (w: f32) -> 1.0f32))]), \"b\", p)), 0i64)",
+        "def forward_grad(p) = index(dict_values(dict_merge(dict_of([(\"a\", p)]), dict_of([(\"b\", grad(fn (w: f32) -> 1.0f32))]))), 0i64)",
+        "def forward_grad(p) = fold(fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), p, [1i64])",
+        "def forward_grad(p) = index(scan(fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), p, [1i64]), 0i64)",
         "def forward_grad(p, flag: bool) = sibling(p, flag)\ndef sibling(p, flag: bool) = if flag then p else forward_grad(grad(fn (w: f32) -> 1.0f32), true)",
         "def forward_grad(p, flag: bool) = if flag then {\n d: (f32 -> f32) = p\n d\n} else forward_grad(p, true)",
     ] {
@@ -794,5 +798,136 @@ fn collection_value_holes_cannot_inherit_a_known_gradient_element() {
                 accepted,
             );
         }
+    }
+}
+
+// [05-OP-56] requires equal value types; spec/06 §2.2 makes that
+// equality a result constraint, including before a helper is instantiated.
+#[test]
+fn dictionary_operation_equalities_preserve_result_origin() {
+    for expression in [
+        "dict_insert(dict_of([(\"a\", known)]), \"b\", g)",
+        "dict_insert(dict_of([(\"a\", g)]), \"b\", known)",
+        "dict_merge(dict_of([(\"a\", g)]), dict_of([(\"b\", known)]))",
+        "dict_merge(dict_of([(\"a\", known)]), dict_of([(\"b\", g)]))",
+    ] {
+        for (parameter, application, accepted) in [
+            ("w: f32", "", true),
+            ("w", "zero = g(2.0f32)\n", true),
+            ("w", "zero = g(true)\n", false),
+            ("w", "", false),
+        ] {
+            check(
+                &format!(
+                    "def main() = {{\n g = grad(fn ({parameter}) -> 1.0f32)\n known = grad(fn (w: f32) -> 1.0f32)\n {application}{expression}\n}}"
+                ),
+                accepted,
+            );
+        }
+    }
+}
+
+#[test]
+fn dictionary_operation_origins_survive_helper_publication() {
+    for expression in [
+        "dict_insert(dict_of([(\"a\", grad(fn (w: f32) -> 1.0f32))]), \"b\", p)",
+        "dict_merge(dict_of([(\"a\", p)]), dict_of([(\"b\", grad(fn (w: f32) -> 1.0f32))]))",
+    ] {
+        for (parameter, application, accepted) in [
+            ("w: f32", "", true),
+            ("w", "(2.0f32)", true),
+            ("w", "(true)", false),
+            ("w", "", false),
+        ] {
+            check(
+                &format!(
+                    "def pick(p) = index(dict_values({expression}), 0i64)\ndef main() = (pick(grad(fn ({parameter}) -> 1.0f32))){application}"
+                ),
+                accepted,
+            );
+        }
+    }
+}
+
+#[test]
+fn dictionary_operation_origins_retain_required_value_equality() {
+    for expression in [
+        "dict_insert(dict_of([(\"a\", 1.0f32)]), \"b\", p)",
+        "dict_merge(dict_of([(\"a\", p)]), dict_of([(\"b\", 1.0f32)]))",
+    ] {
+        for (value, accepted) in [("2.0f32", true), ("true", false)] {
+            check(
+                &format!("def main() = {{\n p = {value}\n {expression}\n}}"),
+                accepted,
+            );
+            check(
+                &format!("def pick(p) = {expression}\ndef main() = pick({value})"),
+                accepted,
+            );
+        }
+    }
+}
+
+#[test]
+fn callback_accumulator_results_preserve_result_origin() {
+    for operation in ["fold", "scan"] {
+        for (parameter, application, accepted) in [
+            ("w: f32", "", true),
+            ("w", "zero = g(2.0f32)\n", true),
+            ("w", "zero = g(true)\n", false),
+            ("w", "", false),
+        ] {
+            check(
+                &format!(
+                    "def main() = {{\n g = grad(fn ({parameter}) -> 1.0f32)\n known = grad(fn (w: f32) -> 1.0f32)\n {application}{operation}(fn (acc, item: i64) -> known, g, [1i64])\n}}"
+                ),
+                accepted,
+            );
+        }
+    }
+}
+
+#[test]
+fn callback_accumulator_results_keep_applications_and_required_equality() {
+    for operation in ["fold", "scan"] {
+        let projection = if operation == "scan" {
+            "index(r, 0i64)"
+        } else {
+            "r"
+        };
+        for (parameter, application, accepted) in [
+            ("w: f32", "", true),
+            ("w", "(2.0f32)", true),
+            ("w", "(true)", false),
+            ("w", "", false),
+        ] {
+            check(
+                &format!(
+                    "def pick(p) = {{\n r = {operation}(fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), p, [1i64])\n {projection}\n}}\ndef main() = (pick(grad(fn ({parameter}) -> 1.0f32))){application}"
+                ),
+                accepted,
+            );
+        }
+        for (value, accepted) in [("2.0f32", true), ("true", false)] {
+            check(
+                &format!(
+                    "def main() = {operation}(fn (acc, item: i64) -> 1.0f32, {value}, [1i64])"
+                ),
+                accepted,
+            );
+        }
+        // Calling the accumulator itself remains a real parameter binding.
+        check(
+            &format!(
+                "def main() = {operation}(fn (acc, item: i64) -> {{\n zero = acc(2.0f32)\n acc\n}}, grad(fn (w) -> 1.0f32, wrt=w), [1i64])"
+            ),
+            true,
+        );
+        check(
+            &format!(
+                "def main() = {operation}(fn (acc, item: i64) -> {{\n zero = acc(true)\n acc\n}}, grad(fn (w) -> 1.0f32, wrt=w), [1i64])"
+            ),
+            false,
+        );
     }
 }

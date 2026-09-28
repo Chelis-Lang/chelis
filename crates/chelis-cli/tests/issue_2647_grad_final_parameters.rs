@@ -60,6 +60,12 @@ fn incorrect_gradient_payloads_fail_at_checking() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("grad.ch");
     for source in [
+        "def main() = dict_insert(dict_of([(\"a\", grad(fn (w: f32) -> 1.0f32))]), \"b\", grad(fn (w) -> 1.0f32))",
+        "def main() = dict_merge(dict_of([(\"a\", grad(fn (w) -> 1.0f32))]), dict_of([(\"b\", grad(fn (w: f32) -> 1.0f32))]))",
+        "def pick(p) = index(dict_values(dict_insert(dict_of([(\"a\", grad(fn (w: f32) -> 1.0f32))]), \"b\", p)), 0i64)\ndef main() = pick(grad(fn (w) -> 1.0f32))",
+        "def pick(p) = index(dict_values(dict_merge(dict_of([(\"a\", p)]), dict_of([(\"b\", grad(fn (w: f32) -> 1.0f32))]))), 0i64)\ndef main() = pick(grad(fn (w) -> 1.0f32))",
+        "def main() = fold(fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), grad(fn (w) -> 1.0f32), [1i64])",
+        "def main() = scan(fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), grad(fn (w) -> 1.0f32), [1i64])",
         "def main() = concat([grad(fn (w) -> 1.0f32)], [grad(fn (w: f32) -> 1.0f32)])",
         "def main() = append([grad(fn (w) -> 1.0f32)], grad(fn (w: f32) -> 1.0f32))",
         "def first(p, flag: bool) = second(p, flag)\ndef second(p, flag: bool) = if flag then p else first(1.0f32, true)\ndef main() -> bool = first(true, false)\nout = main()",

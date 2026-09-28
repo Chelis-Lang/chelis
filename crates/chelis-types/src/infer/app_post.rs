@@ -155,6 +155,97 @@ pub(super) fn finish_unified_app(
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
 ) -> Type {
+    if let Some(rule) = func_name
+        .as_deref()
+        .and_then(builtins::builtin_decl)
+        .and_then(|decl| {
+            decl.capability.sibling_cases.iter().find_map(
+                |case| match builtins::case_value_equality(case.case) {
+                    builtins::ValueEquality::Aggregate(rule) => Some(rule),
+                    builtins::ValueEquality::CallbackApplication
+                    | builtins::ValueEquality::NoAggregateEquality => None,
+                },
+            )
+        })
+    {
+        // Concat has a tensor overload; its selector and call-site shape
+        // evidence remain below. Every other registered aggregate uses only
+        // the immutable decision API before ordinary dispatch can mutate types.
+        if rule != builtins::AggregateRule::Concat {
+            let name = func_name
+                .as_deref()
+                .expect("registered aggregate has a name");
+            if arg_tys
+                .iter()
+                .any(|ty| matches!(subst.apply(ty), Type::Error(_)))
+            {
+                return subst.apply(&ret_tv);
+            }
+            let operands = match rule {
+                builtins::AggregateRule::Fold | builtins::AggregateRule::Scan => {
+                    if arg_tys.len() != 3 {
+                        return report_builtin_arity(errors, node, name, 3, arg_tys.len());
+                    }
+                    let element = vg.fresh_type();
+                    if let Err(error) = unify(
+                        &arg_tys[2],
+                        &Type::Adt("List".to_string(), vec![element.clone()]),
+                        subst,
+                    ) {
+                        return report(errors, error.into());
+                    }
+                    // Invoke the callback with the initial accumulator. Its
+                    // result is an independent slot: equality with the next
+                    // accumulator belongs to the aggregate rule below.
+                    let callback_result = match unify_checked_call_contract(
+                        &kids[1],
+                        &arg_tys[0],
+                        &[arg_tys[1].clone(), element],
+                        vg,
+                        subst,
+                        errors,
+                        product,
+                    ) {
+                        Ok(result) => result,
+                        Err(rejected) => return rejected,
+                    };
+                    if rule == builtins::AggregateRule::Scan {
+                        vec![
+                            Type::Adt("List".to_string(), vec![arg_tys[1].clone()]),
+                            Type::Adt("List".to_string(), vec![callback_result]),
+                        ]
+                    } else {
+                        vec![arg_tys[1].clone(), callback_result]
+                    }
+                }
+                builtins::AggregateRule::Append
+                | builtins::AggregateRule::DictInsert
+                | builtins::AggregateRule::DictMerge
+                | builtins::AggregateRule::Concat => arg_tys.clone(),
+            };
+            match rule.decide(&operands, &ret_tv, subst) {
+                Ok(Some(equation)) => {
+                    subst.record_result_constraint(equation);
+                    return subst.apply(&ret_tv);
+                }
+                Ok(None) => {
+                    let name = func_name
+                        .as_deref()
+                        .expect("registered aggregate has a name");
+                    return UnresolvedOperandSite::new(node, kids, name, env).defer(
+                        &arg_tys,
+                        &ret_tv,
+                        product,
+                        ret_tv.clone(),
+                    );
+                }
+                Err(mut error) => {
+                    error.message = with_node_provenance(node, error.message);
+                    return report(errors, *error);
+                }
+            }
+        }
+    }
     let mut result_ty = subst.apply(&ret_tv);
     let checked_rule = checked_inference_rule(func_name.as_deref());
     let mut checked_route_observed = false;
@@ -1356,47 +1447,6 @@ pub(super) fn finish_unified_app(
                     }
                 }
             }
-            "append" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                let list_arg = subst.apply(&arg_tys[0]);
-                let value_arg = subst.apply(&arg_tys[1]);
-                match list_arg {
-                    Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                        return publish_collection_equation(
-                            &CollectionConstraint::Append {
-                                list: Type::Adt(name, args),
-                                value: value_arg,
-                                result: result_ty.clone(),
-                            },
-                            node,
-                            subst,
-                            errors,
-                        )
-                        .unwrap_or_else(|| {
-                            site.defer(&arg_tys, &result_ty, product, result_ty.clone())
-                        });
-                    }
-                    Type::Error(_) => return result_ty,
-                    Type::Var(_) => {
-                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                    }
-                    other => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(
-                                    node,
-                                    format!("append expects List input, got {other}"),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            }
             "concat" => {
                 if arg_tys.len() != 2 {
                     return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
@@ -1776,94 +1826,6 @@ pub(super) fn finish_unified_app(
                     return report(errors, te.into());
                 }
                 return Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
-            }
-            "fold" => {
-                if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
-                }
-                let acc_ty = vg.fresh_type();
-                let elem_ty = vg.fresh_type();
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[0]),
-                    &Type::Fn(
-                        vec![acc_ty.clone(), elem_ty.clone()],
-                        Box::new(acc_ty.clone()),
-                    ),
-                    subst,
-                ) {
-                    return report(
-                        errors,
-                        collection_helper_type_error(
-                            node,
-                            "fold",
-                            "expects a callback whose accumulator/result type matches the initial accumulator",
-                            te,
-                        ),
-                    );
-                }
-                if let Err(te) = unify(&subst.apply(&arg_tys[1]), &acc_ty.clone(), subst) {
-                    return report(
-                        errors,
-                        collection_helper_type_error(
-                            node,
-                            "fold",
-                            "expects a callback whose accumulator/result type matches the initial accumulator",
-                            te,
-                        ),
-                    );
-                }
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[2]),
-                    &Type::Adt("List".to_string(), vec![elem_ty]),
-                    subst,
-                ) {
-                    return report(errors, te.into());
-                }
-                return subst.apply(&acc_ty);
-            }
-            "scan" => {
-                if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
-                }
-                let acc_ty = vg.fresh_type();
-                let elem_ty = vg.fresh_type();
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[0]),
-                    &Type::Fn(
-                        vec![acc_ty.clone(), elem_ty.clone()],
-                        Box::new(acc_ty.clone()),
-                    ),
-                    subst,
-                ) {
-                    return report(
-                        errors,
-                        collection_helper_type_error(
-                            node,
-                            "scan",
-                            "expects a callback whose accumulator/result type matches the initial accumulator",
-                            te,
-                        ),
-                    );
-                }
-                if let Err(te) = unify(&subst.apply(&arg_tys[1]), &acc_ty.clone(), subst) {
-                    return report(
-                        errors,
-                        collection_helper_type_error(
-                            node,
-                            "scan",
-                            "expects a callback whose accumulator/result type matches the initial accumulator",
-                            te,
-                        ),
-                    );
-                }
-                if let Err(te) = unify(
-                    &subst.apply(&arg_tys[2]),
-                    &Type::Adt("List".to_string(), vec![elem_ty]),
-                    subst,
-                ) {
-                    return report(errors, te.into());
-                }
-                return Type::Adt("List".to_string(), vec![subst.apply(&acc_ty)]);
             }
             "tensor_scan" => {
                 // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
@@ -2330,101 +2292,6 @@ pub(super) fn finish_unified_app(
                                     node,
                                     format!(
                                         "dict_remove expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            }
-            "dict_insert" => {
-                if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
-                }
-                match (
-                    subst.apply(&arg_tys[0]),
-                    subst.apply(&arg_tys[1]),
-                    subst.apply(&arg_tys[2]),
-                ) {
-                    (Type::Adt(name, args), key_ty, value_ty)
-                        if name == "Dict" && args.len() == 2 =>
-                    {
-                        if let Err(te) = unify(&args[0], &key_ty, subst) {
-                            return report(errors, te.into());
-                        }
-                        if let Err(te) = unify(&args[1], &value_ty, subst) {
-                            return report(errors, te.into());
-                        }
-                        return Type::Adt(
-                            "Dict".to_string(),
-                            vec![subst.apply(&args[0]), subst.apply(&args[1])],
-                        );
-                    }
-                    (Type::Error(_), _, _) | (_, Type::Error(_), _) | (_, _, Type::Error(_)) => {
-                        return result_ty;
-                    }
-                    // chelis#2523: see `dict_get`.
-                    (Type::Var(_), _, _) | (_, Type::Var(_), _) | (_, _, Type::Var(_)) => {
-                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                    }
-                    (dict_ty, key_ty, value_ty) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(
-                                    node,
-                                    format!(
-                                        "dict_insert expects Dict[K, V], K, and V, got {dict_ty}, {key_ty}, and {value_ty}"
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            }
-            "dict_merge" => {
-                if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
-                }
-                match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
-                    (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
-                        if lhs_name == "Dict"
-                            && rhs_name == "Dict"
-                            && lhs_args.len() == 2
-                            && rhs_args.len() == 2 =>
-                    {
-                        if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
-                            return report(errors, te.into());
-                        }
-                        if let Err(te) = unify(&lhs_args[1], &rhs_args[1], subst) {
-                            return report(errors, te.into());
-                        }
-                        return Type::Adt(
-                            "Dict".to_string(),
-                            vec![subst.apply(&lhs_args[0]), subst.apply(&lhs_args[1])],
-                        );
-                    }
-                    // chelis#1512: an upstream failure keeps the early
-                    // return, so the cascade still suppresses. Order matters:
-                    // an (Error, Var) pair must suppress, not suspend.
-                    (Type::Error(_), _) | (_, Type::Error(_)) => {
-                        return result_ty;
-                    }
-                    (Type::Var(_), _) | (_, Type::Var(_)) => {
-                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
-                    }
-                    (lhs_ty, rhs_ty) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(
-                                    node,
-                                    format!(
-                                        "dict_merge expects matching Dict inputs, got {lhs_ty} and {rhs_ty}"
                                     ),
                                 ),
                                 vec![],

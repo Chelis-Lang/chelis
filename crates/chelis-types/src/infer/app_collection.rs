@@ -22,6 +22,118 @@ pub(super) fn collection_helper_type_error(
     )
 }
 
+/// The single decision boundary for operations that combine stored values.
+/// The immutable substitution is intentional: equality is checked privately,
+/// then emitted as an origin equation, never committed as operand evidence.
+/// Direct calls and transported list contracts both enter this boundary.
+impl builtins::AggregateRule {
+    pub(super) fn decide(
+        self,
+        operands: &[Type],
+        result: &Type,
+        subst: &Subst,
+    ) -> Result<Option<ResultConstraint>, Box<CheckError>> {
+        use builtins::AggregateRule;
+        let arity = match self {
+            AggregateRule::Append
+            | AggregateRule::Concat
+            | AggregateRule::DictMerge
+            | AggregateRule::Fold
+            | AggregateRule::Scan => 2,
+            AggregateRule::DictInsert => 3,
+        };
+        let name = match self {
+            AggregateRule::Append => "append",
+            AggregateRule::Concat => "concat",
+            AggregateRule::DictInsert => "dict_insert",
+            AggregateRule::DictMerge => "dict_merge",
+            AggregateRule::Fold => "fold",
+            AggregateRule::Scan => "scan",
+        };
+        if operands.len() != arity {
+            return Err(Box::new(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("{name} expects {arity} arguments, got {}", operands.len()),
+                vec![],
+            )));
+        }
+        let operands = operands
+            .iter()
+            .map(|ty| subst.apply(ty))
+            .collect::<Vec<_>>();
+        if operands.iter().any(|ty| matches!(ty, Type::Error(_))) {
+            return Ok(None);
+        }
+        let inputs = match (self, operands.as_slice()) {
+            (AggregateRule::Fold | AggregateRule::Scan, [initial, callback_result]) => {
+                vec![initial.clone(), callback_result.clone()]
+            }
+            (AggregateRule::Append, [list @ Type::Adt(name, args), value])
+                if name == "List" && args.len() == 1 =>
+            {
+                vec![
+                    list.clone(),
+                    Type::Adt("List".to_string(), vec![value.clone()]),
+                ]
+            }
+            (AggregateRule::Concat, [left @ Type::Adt(a, aa), right @ Type::Adt(b, ba)])
+                if a == "List" && b == "List" && aa.len() == 1 && ba.len() == 1 =>
+            {
+                vec![left.clone(), right.clone()]
+            }
+            (AggregateRule::DictInsert, [dict @ Type::Adt(name, args), key, value])
+                if name == "Dict" && args.len() == 2 =>
+            {
+                vec![
+                    dict.clone(),
+                    Type::Adt("Dict".to_string(), vec![key.clone(), value.clone()]),
+                ]
+            }
+            (AggregateRule::DictMerge, [left @ Type::Adt(a, aa), right @ Type::Adt(b, ba)])
+                if a == "Dict" && b == "Dict" && aa.len() == 2 && ba.len() == 2 =>
+            {
+                vec![left.clone(), right.clone()]
+            }
+            // Unknown constructors still owe the operation's admission rule;
+            // a value hole inside a known constructor owes only the equation.
+            (_, values) if values.iter().any(|ty| matches!(ty, Type::Var(_))) => return Ok(None),
+            _ => {
+                return Err(Box::new(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!(
+                        "{name} expects compatible collection operands, got {}",
+                        operands
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    vec![],
+                )));
+            }
+        };
+        let mut compatibility = subst.clone();
+        for input in &inputs[1..] {
+            unify(&inputs[0], input, &mut compatibility)
+                .map_err(|error| {
+                    let message = match self {
+                    AggregateRule::Fold | AggregateRule::Scan => format!("{name} expects a callback whose accumulator/result type matches the initial accumulator; {}", error.message),
+                    AggregateRule::Append => format!("append expects a value of the list's element type; {}", error.message),
+                    AggregateRule::Concat => format!("concat expects matching List inputs; {}", error.message),
+                    AggregateRule::DictInsert | AggregateRule::DictMerge => format!("{name} requires matching stored value types; {}", error.message),
+                    };
+                    let mut diagnostic: CheckError = error.into();
+                    diagnostic.message = message;
+                    Box::new(diagnostic)
+                })?;
+        }
+        Ok(Some(ResultConstraint::Join {
+            inputs,
+            result: result.clone(),
+        }))
+    }
+}
+
 /// Decide a transported checked collection contract against settled operands.
 ///
 /// Scheme instantiation installs a fresh relation instance on the
@@ -85,28 +197,9 @@ pub(crate) fn decide_collection_constraint(
                 other => Err(format!("index expects List input, got {other}")),
             }
         }
-        CollectionConstraint::Append { list, value, .. } => match list {
-            // Membership needs the list constructor; its element and the
-            // appended value may still be holes governed by the result join.
-            Type::Var(_) => Ok(None),
-            Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                if let Err(te) = unify(&args[0], value, &mut subst.clone()) {
-                    // Name the rule. A bare unification message reads as a
-                    // precision mismatch between two types the source never
-                    // mentions together, and the eager arms all name the
-                    // builtin they rejected for.
-                    return Err(format!(
-                        "append expects a value of the list's element type, got {list} and {value}; {}",
-                        te.message
-                    ));
-                }
-                Ok(joined(vec![
-                    list.clone(),
-                    Type::Adt("List".to_string(), vec![value.clone()]),
-                ]))
-            }
-            other => Err(format!("append expects List input, got {other}")),
-        },
+        CollectionConstraint::Append { list, value, .. } => builtins::AggregateRule::Append
+            .decide(&[list.clone(), value.clone()], &result, subst)
+            .map_err(|error| error.message),
         CollectionConstraint::Concat { lhs, rhs, .. } => match (lhs, rhs) {
             (Type::Var(_), _) | (_, Type::Var(_)) => Ok(None),
             (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
@@ -115,16 +208,9 @@ pub(crate) fn decide_collection_constraint(
                     && lhs_args.len() == 1
                     && rhs_args.len() == 1 =>
             {
-                // The element equation, not just `(List, List)` membership:
-                // `concat(List[f32], List[i64])` satisfies membership and
-                // violates the rule.
-                if let Err(te) = unify(&lhs_args[0], &rhs_args[0], &mut subst.clone()) {
-                    return Err(format!(
-                        "concat expects matching List inputs, got {lhs} and {rhs}; {}",
-                        te.message
-                    ));
-                }
-                Ok(joined(vec![lhs.clone(), rhs.clone()]))
+                builtins::AggregateRule::Concat
+                    .decide(&[lhs.clone(), rhs.clone()], &result, subst)
+                    .map_err(|error| error.message)
             }
             (Type::Adt(lhs_name, lhs_args), Type::Prim(Prim::Int32))
                 if lhs_name == "List" && lhs_args.len() == 1 =>
@@ -407,4 +493,58 @@ pub(super) fn prepare_constructor_application(
     }
 
     Ok(ctor_lookup_name)
+}
+
+#[cfg(test)]
+mod aggregate_origin_tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_aggregate_returns_equality_without_operand_bindings() {
+        use builtins::{AggregateRule, ValueEquality};
+        let mut rules = Vec::new();
+        for declaration in builtins::BUILTINS {
+            for case in declaration.capability.sibling_cases {
+                if let ValueEquality::Aggregate(rule) = builtins::case_value_equality(case.case)
+                    && !rules.contains(&rule)
+                {
+                    rules.push(rule);
+                }
+            }
+        }
+        for rule in rules {
+            let mut vg = VarGen::default();
+            let input = vg.fresh_type();
+            let result = vg.fresh_type();
+            let unknown = Type::Fn(vec![input.clone()], Box::new(vg.fresh_type()));
+            let known = Type::Fn(vec![Type::Prim(Prim::F32)], Box::new(Type::Prim(Prim::F32)));
+            let list = |value| Type::Adt("List".to_string(), vec![value]);
+            let dict = |value| Type::Adt("Dict".to_string(), vec![Type::Prim(Prim::String), value]);
+            let operands = match rule {
+                AggregateRule::Append => vec![list(known), unknown],
+                AggregateRule::Concat => vec![list(unknown), list(known)],
+                AggregateRule::DictInsert => vec![dict(known), Type::Prim(Prim::String), unknown],
+                AggregateRule::DictMerge => vec![dict(unknown), dict(known)],
+                AggregateRule::Fold => vec![unknown, known],
+                AggregateRule::Scan => vec![list(unknown), list(known)],
+            };
+            let subst = Subst::new();
+            let equation = rule.decide(&operands, &result, &subst).unwrap().unwrap();
+            assert_eq!(subst.apply(&input), input, "{rule:?} bound an input");
+            assert_eq!(subst.apply(&result), result, "{rule:?} bound its result");
+            let ResultConstraint::Join { inputs, result } = equation else {
+                panic!("{rule:?} did not preserve its result equality");
+            };
+            // The equation remains required: a conflicting later application
+            // must fail, even though the operation could not bind the input.
+            let mut applied = subst.clone();
+            unify(&input, &Type::Prim(Prim::Bool), &mut applied).unwrap();
+            assert!(
+                inputs
+                    .iter()
+                    .any(|ty| unify(&result, ty, &mut applied).is_err()),
+                "{rule:?} erased a required equality"
+            );
+        }
+    }
 }

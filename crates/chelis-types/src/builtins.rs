@@ -306,6 +306,118 @@ pub enum BuiltinSiblingCaseId {
     EqRecursive,
     NeqRecursive,
 }
+/// Whether a nonnumeric builtin equates stored values or actually invokes a
+/// callback. Exhaustive over the closed semantic cases: a new case must decide
+/// its equality role before it compiles. Numeric-only cases cannot contain
+/// callable values and have no aggregate equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValueEquality {
+    Aggregate(AggregateRule),
+    CallbackApplication,
+    NoAggregateEquality,
+}
+
+/// Aggregate equality is decided with an immutable substitution and returned
+/// as a ResultConstraint. Only the origin replay may bind its variables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AggregateRule {
+    Append,
+    Concat,
+    DictInsert,
+    DictMerge,
+    Fold,
+    Scan,
+}
+
+pub(crate) const fn case_value_equality(case: BuiltinSiblingCaseId) -> ValueEquality {
+    use BuiltinSiblingCaseId as Case;
+    match case {
+        Case::FoldList => ValueEquality::Aggregate(AggregateRule::Fold),
+        Case::ScanList => ValueEquality::Aggregate(AggregateRule::Scan),
+        Case::AppendList => ValueEquality::Aggregate(AggregateRule::Append),
+        Case::ConcatList => ValueEquality::Aggregate(AggregateRule::Concat),
+        Case::DictInsert => ValueEquality::Aggregate(AggregateRule::DictInsert),
+        Case::DictMerge => ValueEquality::Aggregate(AggregateRule::DictMerge),
+        Case::MapList
+        | Case::FilterList
+        | Case::TensorScan
+        | Case::PartitionList
+        | Case::FlatMapList => ValueEquality::CallbackApplication,
+        Case::PrintRecursive
+        | Case::FailString
+        | Case::DebugRecursive
+        | Case::TestAssertBool
+        | Case::TestAssertEq
+        | Case::TestAssertEqTensor
+        | Case::TestAssertCloseTensor
+        | Case::ReadFile
+        | Case::WriteFile
+        | Case::ReadLines
+        | Case::ReadBytes
+        | Case::FileExists
+        | Case::ListDir
+        | Case::MmapFile
+        | Case::MmapRead
+        | Case::MmapLen
+        | Case::ProcessRun
+        | Case::ParseCsv
+        | Case::ToCsv
+        | Case::CsvF64s
+        | Case::CsvInts
+        | Case::CsvStrs
+        | Case::CsvNrows
+        | Case::CsvCols
+        | Case::CsvF64
+        | Case::CsvInt
+        | Case::CsvStr
+        | Case::CharCode
+        | Case::CharFromCode
+        | Case::StringLen
+        | Case::StringConcat
+        | Case::StringSlice
+        | Case::StringContains
+        | Case::StringStartsWith
+        | Case::StringEndsWith
+        | Case::StringTrim
+        | Case::ToStringUnit
+        | Case::ToStringScalar
+        | Case::ToStringTensor
+        | Case::ToStringList
+        | Case::ToStringTuple
+        | Case::ToStringDict
+        | Case::ToStringOption
+        | Case::ToStringAdt
+        | Case::ToStringFunction
+        | Case::ToInt
+        | Case::ToFloat
+        | Case::LenList
+        | Case::LenDict
+        | Case::IndexList
+        | Case::ConcatTensors
+        | Case::TakeList
+        | Case::SkipList
+        | Case::DropValue
+        | Case::ChunkList
+        | Case::RangeList
+        | Case::FlattenList
+        | Case::ZipList
+        | Case::EnumerateList
+        | Case::DictOf
+        | Case::DictGet
+        | Case::DictContains
+        | Case::DictRemove
+        | Case::DictKeys
+        | Case::DictValues
+        | Case::DictEntries
+        | Case::ToTensorList
+        | Case::ToListTensor
+        | Case::PadSequences
+        | Case::PadSequencesTo
+        | Case::SplitTensor
+        | Case::EqRecursive
+        | Case::NeqRecursive => ValueEquality::NoAggregateEquality,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BuiltinSiblingCaseDecl {
@@ -3345,50 +3457,11 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_binop("range", &mut env, &mut vg);
     generic_binop("map", &mut env, &mut vg);
     generic_binop("filter", &mut env, &mut vg);
-    let fold_acc = vg.fresh_tvar();
-    let fold_item = vg.fresh_tvar();
-    let fold_ret = vg.fresh_tvar();
-    env.bind(
-        "fold".to_string(),
-        Scheme {
-            result_origin: None,
-            constraints: vec![],
-            tvars: vec![fold_acc, fold_item, fold_ret],
-            tvar_restrictions: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Var(fold_acc),
-                    Type::Var(fold_item),
-                    Type::Var(fold_ret),
-                ],
-                Box::new(Type::Var(fold_ret)),
-            ),
-        },
-    );
-    let scan_acc = vg.fresh_tvar();
-    let scan_item = vg.fresh_tvar();
-    let scan_ret = vg.fresh_tvar();
-    env.bind(
-        "scan".to_string(),
-        Scheme {
-            result_origin: None,
-            constraints: vec![],
-            tvars: vec![scan_acc, scan_item, scan_ret],
-            tvar_restrictions: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Var(scan_acc),
-                    Type::Var(scan_item),
-                    Type::Var(scan_ret),
-                ],
-                Box::new(Type::Var(scan_ret)),
-            ),
-        },
-    );
+    // Each operand and the result have independent scheme slots. The
+    // registered aggregate rule owns callback application and the separate
+    // accumulator/result equality.
+    generic_triop("fold", &mut env, &mut vg);
+    generic_triop("scan", &mut env, &mut vg);
     // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
     // The actual constraint shape (scalar `T`, callback signature, i64 `n`,
     // tensor return) is enforced by the special-case arm in
