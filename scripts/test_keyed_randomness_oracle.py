@@ -25,6 +25,9 @@ class ReceiptTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.target = self.root / "target/agents/2413-keyed-oracle"
         self.target.mkdir(parents=True)
+        config = self.root / ".config/nextest.toml"
+        config.parent.mkdir()
+        config.write_text('[profile.ci-full.junit]\npath = "junit.xml"\n')
         self.binary = self.target / "probe"
         self.binary.write_text("fixture")
         self.suite = oracle.Suite("chelis-types", "probe", ("good", "negative"), ("checker",))
@@ -127,13 +130,15 @@ class ReceiptTests(unittest.TestCase):
             oracle.check_retirement(self.root)
 
     def test_command_pins_exact_binary_and_test_names_and_overrides_default_filter(self):
-        command = oracle.nextest_command("list", (self.suite,))
+        config = self.root / "isolated.toml"
+        command = oracle.nextest_command("list", (self.suite,), config)
         self.assertIn("--ignore-default-filter", command)
         self.assertIn("--message-format", command)
+        self.assertEqual(command[command.index("--config-file") + 1], str(config))
         expression = command[command.index("-E") + 1]
         self.assertIn("binary_id(=chelis-types::probe)", expression)
         self.assertIn("test(=negative)", expression)
-        run = oracle.nextest_command("run", (self.suite,))
+        run = oracle.nextest_command("run", (self.suite,), config)
         self.assertIn("--no-fail-fast", run)
         self.assertEqual(run[run.index("--retries") + 1], "0")
 
@@ -150,7 +155,7 @@ class ReceiptTests(unittest.TestCase):
             targets = {target["name"]: target for target in manifest.get("test", [])}
             for action in ("list", "run"):
                 with self.subTest(package=package, action=action):
-                    command = oracle.nextest_command(action, suites)
+                    command = oracle.nextest_command(action, suites, self.root / "isolated.toml")
                     if package == "chelis-compiler-api":
                         self.assertIn("--features", command)
                         self.assertEqual(command[command.index("--features") + 1],
@@ -169,6 +174,16 @@ class ReceiptTests(unittest.TestCase):
         for command in self.last_commands:
             with self.subTest(command=command):
                 self.assertIn("--locked", command)
+
+    def test_nextest_junit_store_is_isolated_and_fail_closed_on_config_drift(self):
+        config = oracle.isolated_nextest_config(self.root, self.root, self.target)
+        settings = tomllib.loads(config.read_text())
+        self.assertEqual(settings["store"]["dir"], str(self.target / "nextest"))
+        self.assertEqual(settings["profile"]["ci-full"]["junit"]["path"], "junit.xml")
+        source = self.root / ".config/nextest.toml"
+        source.write_text(source.read_text() + '\n[store]\ndir = "target/nextest"\n')
+        with self.assertRaisesRegex(oracle.OracleFailure, "receipt routing"):
+            oracle.isolated_nextest_config(self.root, self.root, self.target)
 
     def execute(self, *, end_sha="a" * 40, failure=None, missing_junit=False, failed_case=False):
         evidence = self.root / f"evidence-{len(list(self.root.glob('evidence-*')))}"

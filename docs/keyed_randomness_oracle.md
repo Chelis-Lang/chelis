@@ -35,6 +35,10 @@ they are not automatic proof of every possible dispatch route. Keep this
 directory with the acceptance record. A nonzero child may leave partial
 receipts, which never produce PASS.
 
+The runner copies the checked-in nextest config into that run directory and
+sets its store to the isolated target. It refuses a changed store or JUnit
+layout until the receipt routing is reviewed.
+
 Each build/list/run command has a 1,800-second wall-clock cap; `--timeout N`
 changes that per-command bound. The runner kills the command's process group
 on timeout/interruption. Test execution uses two nextest workers. It does not

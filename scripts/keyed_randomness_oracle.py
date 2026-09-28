@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import tomllib
 import xml.etree.ElementTree as ET
 
 
@@ -182,7 +183,7 @@ def expected_tests(suites: tuple[Suite, ...]) -> set[str]:
     return set(identities)
 
 
-def nextest_command(action: str, suites: tuple[Suite, ...]) -> list[str]:
+def nextest_command(action: str, suites: tuple[Suite, ...], config: Path) -> list[str]:
     expected_tests(suites)
     packages = {suite.package for suite in suites}
     if len(packages) != 1:
@@ -192,7 +193,7 @@ def nextest_command(action: str, suites: tuple[Suite, ...]) -> list[str]:
         for suite in suites
     )
     package = next(iter(packages))
-    command = ["cargo", "nextest", action, "--locked", "-p", package]
+    command = ["cargo", "nextest", action, "--locked", "--config-file", str(config), "-p", package]
     if package == "chelis-compiler-api":
         # Native execution targets require the instrumented carried runtime.
         command.extend(["--features", "chelis-compiler-api/ownership-ledger"])
@@ -202,6 +203,16 @@ def nextest_command(action: str, suites: tuple[Suite, ...]) -> list[str]:
     command.extend(["--message-format", "json"] if action == "list" else
                    ["--no-fail-fast", "--retries", "0", "--test-threads", "2"])
     return command
+
+
+def isolated_nextest_config(root: Path, output: Path, target: Path) -> Path:
+    source = (root / ".config/nextest.toml").read_text()
+    settings = tomllib.loads(source)
+    if "store" in settings or settings.get("profile", {}).get("ci-full", {}).get("junit", {}).get("path") != "junit.xml":
+        raise OracleFailure("Nextest store/JUnit config changed; review oracle receipt routing")
+    config = output / "nextest-isolated.toml"
+    config.write_text(source + "\n[store]\ndir = " + json.dumps(str(target / "nextest")) + "\n")
+    return config
 
 
 def validate_listing(packet: dict, suites: tuple[Suite, ...], root: Path, target: Path) -> set[str]:
@@ -329,16 +340,17 @@ def execute(root: Path, output: Path, environment: dict[str, str], timeout: int,
         run_command(["cargo", "build", "--locked", "-p", "chelis-cli", "-p", "chelis-runtime"],
                     root, environment, output, "build", timeout)
         target = Path(environment["CARGO_TARGET_DIR"])
+        config = isolated_nextest_config(root, output, target)
         junit = target / "nextest/ci-full/junit.xml"
         for package in dict.fromkeys(suite.package for suite in suites):
             group = tuple(suite for suite in suites if suite.package == package)
-            listed = run_command(nextest_command("list", group), root, environment, output,
+            listed = run_command(nextest_command("list", group, config), root, environment, output,
                                  f"{package}-list", timeout)
             selected = validate_listing(json.loads(listed), group, root, target)
             junit.unlink(missing_ok=True)
             run_error = None
             try:
-                run_command(nextest_command("run", group), root, environment, output,
+                run_command(nextest_command("run", group, config), root, environment, output,
                             f"{package}-run", timeout)
             except OracleFailure as error:
                 run_error = error
