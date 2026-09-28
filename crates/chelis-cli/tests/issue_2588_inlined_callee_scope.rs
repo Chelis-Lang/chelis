@@ -145,6 +145,35 @@ def main() -> tensor[1, f32] = {\n  y = to_tensor([10.0f32])\n  grad(f)(add(to_t
     assert_both_lanes(source, "main", "tensor(shape=[1], data=[2.0])");
 }
 
+/// A formal and a callee's top-level read may have the same source spelling.
+/// The two values have distinct lexical origins through AD and native code.
+#[test]
+fn grad_formal_does_not_replace_a_callee_global_with_the_same_name() {
+    let source = "y = to_tensor([2.0f32, 3.0f32])\n\
+def h(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, y)\n\
+def loss(y: tensor[2, f32]) -> tensor[f32] = sum(h(y), 0i32)\n\
+def main() -> tensor[2, f32] = grad(loss)(to_tensor([1.0f32, 1.0f32]))\n";
+    assert_both_lanes(source, "main", "tensor(shape=[2], data=[2.0, 3.0])");
+}
+
+#[test]
+fn ordinary_formal_does_not_replace_a_callee_global_with_the_same_name() {
+    let source = "y = to_tensor([2.0f32, 3.0f32])\n\
+def h(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, y)\n\
+def loss(y: tensor[2, f32]) -> tensor[f32] = sum(h(y), 0i32)\n\
+out = loss(to_tensor([1.0f32, 1.0f32]))\n";
+    assert_both_lanes(source, "out", "5.0");
+}
+
+#[test]
+fn transform_in_global_block_reads_global_beside_a_same_named_local() {
+    let source = "w = to_tensor([3.0f32, 5.0f32])\n\
+def inner(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, w)\n\
+def loss(x: tensor[2, f32]) -> tensor[f32] = sum(inner(x), 0i32)\n\
+out = {\n  w = to_tensor([7.0f32, 11.0f32])\n  grad(loss)(to_tensor([1.0f32, 2.0f32]))\n}\n";
+    assert_both_lanes(source, "out", "tensor(shape=[2], data=[3.0, 5.0])");
+}
+
 /// A transform in a top-level value's block runs through the host
 /// interpreter's transform route on the evaluator. On the compiled lane these
 /// have no lowering that can name the top-level value beside the shadowing
