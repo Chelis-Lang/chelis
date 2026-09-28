@@ -1,0 +1,1 @@
+C host calls materialize tensor-helper results at their resolved scalar, tensor, or tuple types, preserving exact dtypes and releasing temporary scalar tensors. Invalid result rank, dtype, and arity combinations fail during code generation.

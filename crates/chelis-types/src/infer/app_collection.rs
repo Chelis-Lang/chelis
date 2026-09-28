@@ -101,7 +101,12 @@ impl builtins::AggregateRule {
                 return Err(Box::new(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     format!(
-                        "{name} expects compatible collection operands, got {}",
+                        "{}; got {}",
+                        match self {
+                            AggregateRule::Append =>
+                                "append expects List input and a compatible value".to_string(),
+                            _ => format!("{name} expects compatible collection operands"),
+                        },
                         operands
                             .iter()
                             .map(ToString::to_string)
@@ -134,6 +139,27 @@ impl builtins::AggregateRule {
     }
 }
 
+/// A decided contract distinguishes a produced-value equality from an
+/// ordinary operation signature. The latter is used only after scalar/tensor
+/// key admission: it contains no callable input or result whose origin could
+/// be inferred backwards. It must settle before generic key-free marking.
+pub(crate) enum CollectionDecision {
+    ResultOrigin(ResultConstraint),
+    RequiredEquality { actual: Type, expected: Type },
+}
+
+impl CollectionDecision {
+    pub(crate) fn publish(self, subst: &mut Subst) -> Result<(), TypeError> {
+        match self {
+            Self::ResultOrigin(equation) => {
+                subst.record_result_constraint(equation);
+                Ok(())
+            }
+            Self::RequiredEquality { actual, expected } => unify(&actual, &expected, subst),
+        }
+    }
+}
+
 /// Decide a transported checked collection contract against settled operands.
 ///
 /// Scheme instantiation installs a fresh relation instance on the
@@ -148,9 +174,9 @@ impl builtins::AggregateRule {
 /// function value carries the generic operation rule; its application
 /// contributes the axis expression and any statically visible list elements.
 ///
-/// `Ok(Some(equation))` is the required result relation. The shared origin
-/// ledger owns its equality; deciding a collection rule never binds an input
-/// from another element or from the published result. `Ok(None)` means an operand is
+/// `Ok(Some(decision))` distinguishes origin equations from ordinary key
+/// signatures. Only the origin ledger propagates equality between stored
+/// elements or from a published aggregate result. `Ok(None)` means an operand is
 /// still undecided -- a variable, or an error witness whose diagnostic is
 /// already owned upstream -- and the caller suspends or suppresses. `Err` is
 /// the rule's own rejection text.
@@ -159,13 +185,13 @@ pub(crate) fn decide_collection_constraint(
     constraint: &CollectionConstraint,
     tensor_concat: Option<&TensorConcatCallEvidence>,
     subst: &Subst,
-) -> Result<Option<ResultConstraint>, String> {
+) -> Result<Option<CollectionDecision>, String> {
     let result = constraint.result().clone();
     let joined = |inputs| {
-        Some(ResultConstraint::Join {
+        Some(CollectionDecision::ResultOrigin(ResultConstraint::Join {
             inputs,
             result: result.clone(),
-        })
+        }))
     };
     let applied = constraint.map_types(|ty| subst.apply(ty));
     if applied
@@ -176,6 +202,72 @@ pub(crate) fn decide_collection_constraint(
         return Ok(None);
     }
     match &applied {
+        CollectionConstraint::KeyFromSeed {
+            operand: Type::Var(_),
+            ..
+        }
+        | CollectionConstraint::SplitKey {
+            operand: Type::Var(_),
+            ..
+        }
+        | CollectionConstraint::SplitKeys {
+            operand: Type::Var(_),
+            ..
+        }
+        | CollectionConstraint::FoldIn {
+            operand: Type::Var(_),
+            ..
+        } => Ok(None),
+        CollectionConstraint::KeyFromSeed { operand, .. } => {
+            key_operation_surface(operand, Prim::Int64).map(|ty| {
+                Some(CollectionDecision::RequiredEquality {
+                    actual: result.clone(),
+                    expected: ty,
+                })
+            })
+        }
+        CollectionConstraint::SplitKey { operand, .. } => {
+            let half = key_operation_surface(operand, Prim::Key)?;
+            Ok(Some(CollectionDecision::RequiredEquality {
+                actual: result.clone(),
+                expected: Type::Tuple(vec![half.clone(), half]),
+            }))
+        }
+        CollectionConstraint::SplitKeys { operand, count, .. } => {
+            let key = key_operation_surface(operand, Prim::Key)?;
+            let mut compatibility = subst.clone();
+            unify(count, &Type::Prim(Prim::Int64), &mut compatibility).map_err(|e| e.message)?;
+            let mut dims = match key {
+                Type::Tensor(dims, _) => dims,
+                _ => vec![],
+            };
+            dims.push(Dim::Wildcard);
+            Ok(Some(CollectionDecision::RequiredEquality {
+                actual: Type::Tuple(vec![count.clone(), result.clone()]),
+                expected: Type::Tuple(vec![
+                    Type::Prim(Prim::Int64),
+                    Type::Tensor(dims, TensorPrec::Concrete(Prim::Key)),
+                ]),
+            }))
+        }
+        CollectionConstraint::FoldIn { operand, index, .. } => {
+            let key = key_operation_surface(operand, Prim::Key)?;
+            let expected = match &key {
+                Type::Tensor(dims, _) => {
+                    Type::Tensor(dims.clone(), TensorPrec::Concrete(Prim::Int64))
+                }
+                _ => Type::Prim(Prim::Int64),
+            };
+            let mut compatibility = subst.clone();
+            unify(index, &expected, &mut compatibility).map_err(|e| format!("fold_in requires exactly equal shapes and scalar/tensor surfaces ([05-OP-72]): {}", e.message))?;
+            // Keep the input shape equality and the result relation in one
+            // equation. A private validation must not discard bindings that
+            // later applications or local result publication still require.
+            Ok(Some(CollectionDecision::RequiredEquality {
+                actual: Type::Tuple(vec![index.clone(), result.clone()]),
+                expected: Type::Tuple(vec![expected, key]),
+            }))
+        }
         CollectionConstraint::Len { operand, .. } => match operand {
             Type::Var(_) => Ok(None),
             Type::Adt(name, _) if name == "List" || name == "Dict" => {
@@ -199,6 +291,7 @@ pub(crate) fn decide_collection_constraint(
         }
         CollectionConstraint::Append { list, value, .. } => builtins::AggregateRule::Append
             .decide(&[list.clone(), value.clone()], &result, subst)
+            .map(|decision| decision.map(CollectionDecision::ResultOrigin))
             .map_err(|error| error.message),
         CollectionConstraint::Concat { lhs, rhs, .. } => match (lhs, rhs) {
             (Type::Var(_), _) | (_, Type::Var(_)) => Ok(None),
@@ -210,6 +303,7 @@ pub(crate) fn decide_collection_constraint(
             {
                 builtins::AggregateRule::Concat
                     .decide(&[lhs.clone(), rhs.clone()], &result, subst)
+                    .map(|decision| decision.map(CollectionDecision::ResultOrigin))
                     .map_err(|error| error.message)
             }
             (Type::Adt(lhs_name, lhs_args), Type::Prim(Prim::Int32))
@@ -238,7 +332,11 @@ pub(super) fn publish_collection_equation(
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<Type> {
     match decide_collection_constraint(constraint, None, subst) {
-        Ok(Some(equation)) => subst.record_result_constraint(equation),
+        Ok(Some(decision)) => {
+            if let Err(error) = decision.publish(subst) {
+                errors.push(error.into());
+            }
+        }
         Ok(None) => return None,
         Err(message) => {
             return Some(report(
@@ -252,6 +350,20 @@ pub(super) fn publish_collection_equation(
         }
     }
     Some(constraint.result().clone())
+}
+
+fn key_operation_surface(operand: &Type, input: Prim) -> Result<Type, String> {
+    match operand {
+        Type::Prim(p) if *p == input => Ok(Type::Prim(Prim::Key)),
+        Type::Tensor(dims, TensorPrec::Concrete(p)) if *p == input => {
+            Ok(Type::Tensor(dims.clone(), TensorPrec::Concrete(Prim::Key)))
+        }
+        other => Err(format!(
+            "key operation expects {} or a tensor of {}, got {other}",
+            input.name(),
+            input.name()
+        )),
+    }
 }
 
 /// Static source evidence used by the tensor overload of a consumed checked

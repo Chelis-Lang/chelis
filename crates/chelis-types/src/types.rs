@@ -759,7 +759,7 @@ impl fmt::Display for EffectSet {
     }
 }
 
-/// The checked operand/result relation of a first-class collection operation.
+/// The checked operand/result relation of a first-class builtin operation.
 ///
 /// Builtin schemes own these contracts. Aliasing, higher-order passage,
 /// import, and serialization retain them; applying the value consumes and
@@ -798,12 +798,32 @@ pub enum CollectionConstraint {
     /// `List[e]` giving `List[e]`, or a `List[tensor[..]]` and an `i32`
     /// axis giving a tensor.
     Concat { lhs: Type, rhs: Type, result: Type },
+    /// [05-OP-69]: scalar i64 -> key, or tensor[D,i64] -> tensor[D,key].
+    KeyFromSeed { operand: Type, result: Type },
+    /// [05-OP-70]: each half preserves the key operand's surface and shape.
+    SplitKey { operand: Type, result: Type },
+    /// [05-OP-71]: append one runtime count axis to a key's shape.
+    SplitKeys {
+        operand: Type,
+        count: Type,
+        result: Type,
+    },
+    /// [05-OP-72]: equal scalar/tensor surfaces and exactly equal shapes.
+    FoldIn {
+        operand: Type,
+        index: Type,
+        result: Type,
+    },
 }
 
 impl CollectionConstraint {
     /// The builtin this constraint belongs to, for diagnostics.
     pub fn builtin(&self) -> &'static str {
         match self {
+            Self::KeyFromSeed { .. } => "key_from_seed",
+            Self::SplitKey { .. } => "split_key",
+            Self::SplitKeys { .. } => "split_keys",
+            Self::FoldIn { .. } => "fold_in",
             Self::Len { .. } => "len",
             Self::Index { .. } => "index",
             Self::Append { .. } => "append",
@@ -816,6 +836,9 @@ impl CollectionConstraint {
     /// not what it waits on.
     pub fn operands(&self) -> Vec<&Type> {
         match self {
+            Self::KeyFromSeed { operand, .. } | Self::SplitKey { operand, .. } => vec![operand],
+            Self::SplitKeys { operand, count, .. } => vec![operand, count],
+            Self::FoldIn { operand, index, .. } => vec![operand, index],
             Self::Len { operand, .. } => vec![operand],
             Self::Index { list, index, .. } => vec![list, index],
             Self::Append { list, value, .. } => vec![list, value],
@@ -827,6 +850,19 @@ impl CollectionConstraint {
     /// decide which variables a pending constraint keeps monomorphic.
     pub fn carried_types(&self) -> Vec<&Type> {
         match self {
+            Self::KeyFromSeed { operand, result } | Self::SplitKey { operand, result } => {
+                vec![operand, result]
+            }
+            Self::SplitKeys {
+                operand,
+                count,
+                result,
+            } => vec![operand, count, result],
+            Self::FoldIn {
+                operand,
+                index,
+                result,
+            } => vec![operand, index, result],
             Self::Len { operand, result } => vec![operand, result],
             Self::Index {
                 list,
@@ -845,7 +881,11 @@ impl CollectionConstraint {
     /// The result the suspended call already handed its consumer.
     pub fn result(&self) -> &Type {
         match self {
-            Self::Len { result, .. }
+            Self::KeyFromSeed { result, .. }
+            | Self::SplitKey { result, .. }
+            | Self::SplitKeys { result, .. }
+            | Self::FoldIn { result, .. }
+            | Self::Len { result, .. }
             | Self::Index { result, .. }
             | Self::Append { result, .. }
             | Self::Concat { result, .. } => result,
@@ -856,6 +896,32 @@ impl CollectionConstraint {
     /// quantifier renaming; discharge passes the current substitution.
     pub fn map_types(&self, f: impl Fn(&Type) -> Type) -> Self {
         match self {
+            Self::KeyFromSeed { operand, result } => Self::KeyFromSeed {
+                operand: f(operand),
+                result: f(result),
+            },
+            Self::SplitKey { operand, result } => Self::SplitKey {
+                operand: f(operand),
+                result: f(result),
+            },
+            Self::SplitKeys {
+                operand,
+                count,
+                result,
+            } => Self::SplitKeys {
+                operand: f(operand),
+                count: f(count),
+                result: f(result),
+            },
+            Self::FoldIn {
+                operand,
+                index,
+                result,
+            } => Self::FoldIn {
+                operand: f(operand),
+                index: f(index),
+                result: f(result),
+            },
             Self::Len { operand, result } => Self::Len {
                 operand: f(operand),
                 result: f(result),
@@ -1038,7 +1104,7 @@ pub struct Scheme {
     /// Quantified rank variables (Tier-2 rank polymorphism). Usually empty.
     #[serde(default)]
     pub rvars: Vec<RankVar>,
-    /// Checked collection-operation relations transported by this function
+    /// Checked builtin-operation relations transported by this function
     /// value and renamed at each instantiation. Usually empty.
     ///
     /// Deliberately NOT `#[serde(default)]`. A default would let a scheme

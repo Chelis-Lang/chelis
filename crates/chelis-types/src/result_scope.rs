@@ -134,6 +134,16 @@ impl ResultScope {
         }));
     }
 
+    /// A declared binder keeps ownership when deferred equalities change the
+    /// representative variable in its published signature.
+    pub(crate) fn shares_type_component(&self, left: TypeVar, right: TypeVar) -> bool {
+        left == right
+            || self.components.iter().any(|component| {
+                component.contains(&Variable::Type(left))
+                    && component.contains(&Variable::Type(right))
+            })
+    }
+
     pub(crate) fn retain_closed_quantifiers(&self, scheme: &mut Scheme) {
         let mut quantified = scheme
             .tvars

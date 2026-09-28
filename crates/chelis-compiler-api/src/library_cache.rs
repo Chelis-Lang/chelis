@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_the_single_node_spelling() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 23);
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 24);
     }
 
     #[test]
@@ -652,7 +652,7 @@ mod tests {
         let decls = sample_decls("different_key");
         let stdlib_key = key(5);
         let current_key = library_cache_key(&decls, stdlib_key);
-        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 22);
+        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 23);
         assert_ne!(current_key, preceding_key);
 
         let context = build_library_context(&stdlib_context, &decls)

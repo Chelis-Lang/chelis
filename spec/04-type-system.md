@@ -1621,7 +1621,11 @@ anchored → the anchor's index), mirroring named-axis reduction.
 sequences — never unordered "rows"); the reduced axis is a retained name; and a
 rank-poly def body is restricted by the §4.2 Body-Discipline check to
 *name-trackable* operations only — shape-identity (elementwise) ops,
-named-axis reductions, and named-axis insert. A *positional* shape-rewriter
+named-axis reductions, named-axis insert, and the key derivations
+[05-OP-69]–[05-OP-72]. Each tensor result of a key derivation preserves
+the complete operand shape as an ordered prefix; only `split_keys` appends
+an axis, at the trailing end, with the count extent. No derivation reorders
+or removes an axis, including inside an opaque spread. A *positional* shape-rewriter
 (`permute`, `reshape`, `matmul`, positional `gather`) is rejected inside a
 `..r` body: its output shape is not name-trackable at symbolic rank, so it
 could hide an untracked transposition. For the name-tracked ops the procedural

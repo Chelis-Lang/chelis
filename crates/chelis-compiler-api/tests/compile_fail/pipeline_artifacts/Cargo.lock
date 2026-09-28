@@ -169,6 +169,7 @@ name = "chelis-compiler-api"
 version = "0.18.11"
 dependencies = [
  "bincode",
+ "chelis-abi",
  "chelis-backend-c",
  "chelis-backend-hip",
  "chelis-deep",

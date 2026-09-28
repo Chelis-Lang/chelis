@@ -6,6 +6,7 @@ mod emitted_expr;
 mod generated_header;
 mod host_abi;
 mod host_emit;
+pub mod integer_float;
 pub mod memory;
 pub mod toolchain;
 

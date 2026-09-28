@@ -352,10 +352,14 @@ prints names in that order. Its fixture-based eval/C coverage is
 
 ### 3.7 Integer / bitwise elementwise
 
-`mod`, `bitand`, `bitor`, `bitxor`, `shl`, `shr` — integer-only, host-lane,
-no AD. Shifts use declared-width two's-complement semantics; counts at or
-above the width fully shift out the value, while negative counts trap
-([04-NUM-13]).
+`mod`, `bitand`, `bitor`, `bitxor`, `shl`, `shr` — integer-only. The bitwise
+family executes at declared width in Eval and compiled C, including as a
+computed integer extent for `reshape`. `grad` preserves bitwise forward
+coefficients that are independent of its selected data path and rejects a
+selected discrete bitwise path. `vmap` maps bitwise values elementwise. HIP
+and Metal bitwise kernels remain unavailable. Shifts use declared-width
+two's-complement semantics; counts at or above the width fully shift out the
+value, while negative counts trap ([04-NUM-13]).
 
 ### 3.8 Decimal rounding — **eval-only**
 

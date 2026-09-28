@@ -173,6 +173,46 @@ class ReceiptTests(unittest.TestCase):
             tuple(row["args"]),
         )
 
+    def test_integer_unary_inherited_legs_preserve_exact_positive_and_negative_floors(self):
+        packet = oracle.frozen_manifest(oracle.MANIFEST.read_bytes(), oracle.MANIFEST_SHA256)
+        rows = {row['name']: row for row in packet['legs']}
+        expected = {
+            'integer-to-float exact finalization execution': [
+                'chelis-backend-c::integer_float::tests::emitted_integer_rounding_matches_finalizer_without_double_rounding',
+                'chelis-backend-c::integer_float::tests::integer_rounding_rejects_non_float_target',
+            ],
+            'integer unary device lowering and trap controls': [
+                'chelis-backend-hip::integer_abs::emitted_hip_integer_kernels_execute_exactly_with_device_intrinsic_shims',
+                'chelis-backend-hip::integer_abs::integer_constants_stay_exact_before_abs',
+                'chelis-backend-hip::integer_abs::lowered_integer_abs_gradient_emits_checked_hip_kernel_and_typed_cast',
+                'chelis-backend-hip::integer_abs::uncanonicalized_integer_rounding_is_rejected_at_the_ir_boundary',
+                'chelis-backend-metal::integer_abs_guard::activated_integer_abs_is_refused_before_emission_without_a_gate',
+                'chelis-backend-metal::integer_abs_guard::empty_pointwise_dispatches_are_omitted_without_omitting_output_allocations',
+                'chelis-backend-metal::integer_abs_guard::exact_integer_constants_and_abs_cover_scalar_empty_and_rank_two_shapes',
+                'chelis-backend-metal::integer_abs_guard::integer_abs_then_float_cast_has_distinct_typed_kernels_at_every_width',
+                'chelis-backend-metal::integer_abs_guard::integer_abs_uses_checked_kernel_and_fused_abs_stays_rejected',
+                'chelis-backend-metal::integer_abs_guard::literal_integer_unary_gradients_lower_without_zero_placeholders',
+                'chelis-backend-metal::integer_abs_guard::lowered_integer_abs_gradient_reaches_typed_metal_kernels',
+            ],
+        }
+        inherited = dict(oracle.phase1_legs())
+        for name, required in expected.items():
+            self.assertTrue(name in rows, name)
+            self.assertEqual(rows[name]['required'], required)
+            self.assertEqual(rows[name]['args'], list(inherited[name]))
+            self.assertEqual(oracle.require_frozen_selection(required, required), [])
+            removed_leg = copy.deepcopy(packet)
+            removed_leg['legs'] = [row for row in removed_leg['legs'] if row['name'] != name]
+            with self.subTest(removed_leg=name), self.assertRaisesRegex(oracle.OracleFailure, 'leg inventory drifted'):
+                oracle.validate_manifest(removed_leg)
+            for identity in required:
+                with self.subTest(missing=identity), self.assertRaisesRegex(oracle.OracleFailure, 'lost identities'):
+                    oracle.require_frozen_selection([case for case in required if case != identity], required)
+                changed = copy.deepcopy(packet)
+                next(row for row in changed['legs'] if row['name'] == name)['required'].remove(identity)
+                with self.subTest(tampered_floor=identity), self.assertRaisesRegex(oracle.OracleFailure, 'reviewed selection digest differs'):
+                    oracle.frozen_manifest((json.dumps(changed, indent=2) + '\n').encode(), oracle.MANIFEST_SHA256)
+
     def test_failed_process_cannot_publish_a_passing_transcript(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -758,6 +758,8 @@ pub enum RiscOp {
     /// Exact signed remainder, with DivZero traps at the stored width
     /// and dividend-sign semantics under [05-OP-64].
     Mod,
+    /// Exact signed-width [05-OP-47] operation.
+    Bitwise(chelis_types::BitwiseKind),
     /// Identity-preserving comparison with Bool output ([05-OP-36]).
     Compare(ComparisonKind),
     /// Bool-only eager logical operation ([05-OP-26..28]).
@@ -1255,6 +1257,11 @@ pub enum RiscAtomIdentity {
     FloorDiv,
     TruncDiv,
     Mod,
+    BitAnd,
+    BitOr,
+    BitXor,
+    ShiftLeft,
+    ShiftRight,
     CmpLt,
     Lt,
     Eq,
@@ -1330,6 +1337,11 @@ impl RiscAtomIdentity {
         Self::FloorDiv,
         Self::TruncDiv,
         Self::Mod,
+        Self::BitAnd,
+        Self::BitOr,
+        Self::BitXor,
+        Self::ShiftLeft,
+        Self::ShiftRight,
         Self::CmpLt,
         Self::Lt,
         Self::Eq,
@@ -1405,6 +1417,11 @@ impl RiscAtomIdentity {
             Self::FloorDiv => "floor_div",
             Self::TruncDiv => "trunc_div",
             Self::Mod => "mod",
+            Self::BitAnd => "bitand",
+            Self::BitOr => "bitor",
+            Self::BitXor => "bitxor",
+            Self::ShiftLeft => "shl",
+            Self::ShiftRight => "shr",
             Self::CmpLt => "cmplt",
             Self::Lt => "lt",
             Self::Eq => "eq",
@@ -1547,6 +1564,13 @@ impl RiscOp {
             Self::FloorDiv => Semantic(Id::FloorDiv),
             Self::TruncDiv => Semantic(Id::TruncDiv),
             Self::Mod => Semantic(Id::Mod),
+            Self::Bitwise(kind) => Semantic(match kind {
+                chelis_types::BitwiseKind::And => Id::BitAnd,
+                chelis_types::BitwiseKind::Or => Id::BitOr,
+                chelis_types::BitwiseKind::Xor => Id::BitXor,
+                chelis_types::BitwiseKind::ShiftLeft => Id::ShiftLeft,
+                chelis_types::BitwiseKind::ShiftRight => Id::ShiftRight,
+            }),
             Self::Compare(kind) => Semantic(match kind {
                 ComparisonKind::CmpLt => Id::CmpLt,
                 ComparisonKind::Lt => Id::Lt,
@@ -1967,7 +1991,7 @@ impl RiscOp {
             // `Floor`/`Ceil`/`Round` they have a step-function envelope,
             // but the integer-quotient semantics are not part of the
             // pinned real-valued forward-bound surface today.
-            RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => false,
+            RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod | RiscOp::Bitwise(_) => false,
 
             // [05-OP-6] `cast_trunc` is the same shape as the integer
             // quotients above: piecewise constant with an integer output,
@@ -2257,6 +2281,7 @@ impl DagNode {
                 value_check(integer)
             }
             RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => value_check(integer),
+            RiscOp::Bitwise(kind) => value_check(kind.is_shift()),
             // Float-only since chelis#178; its one float check is a lowered
             // `mean`'s count, which the node alone cannot tell apart.
             RiscOp::Div if integer => RuntimeCheck::OperandValues,
@@ -4644,6 +4669,7 @@ mod tests {
             RiscOp::FloorDiv,
             RiscOp::TruncDiv,
             RiscOp::Mod,
+            RiscOp::Bitwise(chelis_types::BitwiseKind::And),
             RiscOp::Compare(ComparisonKind::Eq),
             RiscOp::Logical(LogicalKind::And),
             RiscOp::Where,
@@ -4956,8 +4982,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            66,
-            "one_of_every_risc_op must list all 66 classified samples"
+            67,
+            "one_of_every_risc_op must list all 67 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -4989,7 +5015,7 @@ mod tests {
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 32,
+            excluded, 33,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -5059,6 +5085,10 @@ mod tests {
             RiscOp::Compare(ComparisonKind::Lte),
             RiscOp::Logical(LogicalKind::Or),
             RiscOp::Logical(LogicalKind::Not),
+            RiscOp::Bitwise(chelis_types::BitwiseKind::Or),
+            RiscOp::Bitwise(chelis_types::BitwiseKind::Xor),
+            RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftLeft),
+            RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftRight),
         ]);
         discovery_cases.extend(
             [

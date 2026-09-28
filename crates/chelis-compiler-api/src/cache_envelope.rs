@@ -93,7 +93,8 @@ impl CachePayload for crate::LibraryContext {
     // V21: generalized checker schemes retain result-equation origins.
     // V22: checked fold/scan aliases retain accumulator/result equations.
     // V23: result-origin quantifiers preserve complete scope components.
-    const FORMAT_VERSION: u32 = 23;
+    // V24: result-origin schemes also carry scalar/tensor key relations.
+    const FORMAT_VERSION: u32 = 24;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -137,7 +138,8 @@ impl CachePayload for crate::StdLibContext {
     // V36: generalized checker schemes retain result-equation origins.
     // V37: checked fold/scan aliases retain accumulator/result equations.
     // V38: result-origin quantifiers preserve complete scope components.
-    const FORMAT_VERSION: u32 = 38;
+    // V39: result-origin schemes also carry scalar/tensor key relations.
+    const FORMAT_VERSION: u32 = 39;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

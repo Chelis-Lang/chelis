@@ -129,6 +129,9 @@ impl InferenceProduct {
             .copied()
             .filter(|variable| free.contains(variable))
             .collect();
+        for variable in &scheme.tvars {
+            subst.forbid_key_instantiation(*variable, crate::unify::GenericParameter::default());
+        }
         scheme.result_origin = Some(origin);
         scheme
     }

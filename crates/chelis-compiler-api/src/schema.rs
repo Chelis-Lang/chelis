@@ -2139,7 +2139,10 @@ pub struct WireRecordPatternField {
 ///   version-18 graph may hold that bridge operation, which has no
 ///   version-19 spelling, so it is rejected like every other earlier
 ///   version.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 19;
+/// - `20`: the five signed integer bitwise identities share one tagged
+///   `Bitwise` operation. A version-19 reader does not know that operation,
+///   so the complete graph is rejected before node decoding.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 20;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2459,7 +2462,7 @@ impl WireDag {
                         )));
                     }
                 }
-                WireRiscOp::Mod => {
+                WireRiscOp::Mod | WireRiscOp::Bitwise { .. } => {
                     if node.inputs.len() != 2
                         || !Prim::parse_interchange_name(&node.output_type.precision)
                             .is_some_and(|prim| prim.is_integer())
@@ -2483,8 +2486,8 @@ impl WireDag {
                         })
                     {
                         return Err(WireDagContractError::new(format!(
-                            "WireDag Mod node {} requires two earlier inputs with its integer dtype and shape",
-                            node.id
+                            "WireDag {:?} node {} requires two earlier inputs with its integer dtype and shape",
+                            node.op, node.id
                         )));
                     }
                 }
@@ -3334,6 +3337,7 @@ fn wire_axis_origin(
         | WireRiscOp::FloorDiv
         | WireRiscOp::TruncDiv
         | WireRiscOp::Mod
+        | WireRiscOp::Bitwise { .. }
         | WireRiscOp::MaxElem
         | WireRiscOp::MinElem
         | WireRiscOp::ExtremaAdjoint { .. }
@@ -3860,6 +3864,9 @@ pub enum WireRiscOp {
     FloorDiv,
     TruncDiv,
     Mod,
+    Bitwise {
+        bitwise: chelis_types::BitwiseKind,
+    },
     Compare {
         comparison: WireComparisonKind,
     },

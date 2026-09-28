@@ -118,7 +118,12 @@ fn wrong_dtype_seeds_reject_before_execution_and_computed_i64_seeds_check() {
              to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)\n"
         )
     };
-    for seed in ["-1i32", "1.0f64", "true", "\"seed\""] {
+    for (seed, dtype) in [
+        ("-1i32", "i32"),
+        ("1.0f64", "f64"),
+        ("true", "bool"),
+        ("\"seed\"", "string"),
+    ] {
         let dir = tempdir().unwrap();
         let path = dir.path().join("rejected.ch");
         common::write_file(&path, &program(seed));
@@ -137,7 +142,9 @@ fn wrong_dtype_seeds_reject_before_execution_and_computed_i64_seeds_check() {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert!(
-                diagnostics.contains("expected i64"),
+                diagnostics.contains(&format!(
+                    "key operation expects i64 or a tensor of i64, got {dtype}"
+                )),
                 "{seed}: {diagnostics}"
             );
         }

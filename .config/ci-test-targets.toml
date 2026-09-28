@@ -1236,6 +1236,12 @@ prefix = "examples/signed_seed.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
 
+# CLI parity, executable-example checking, and formatter corpus coverage.
+[[path_rule]]
+prefix = "examples/tensor_key_operations.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 # Illustrative source read by chelis-e2e::example_corpus_validate and
 # chelis-surf's fmt_idempotent_on_repo_ch_corpus.
 [[path_rule]]
@@ -1614,6 +1620,26 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "the configuration-closure positive and negative controls execute in script-unit"
 tracking_issue = "chelis#2168"
+
+# The runtime-archive lookup guard scans the whole repository from its
+# script-unit test.
+[[path_rule]]
+prefix = "scripts/check_runtime_archive_lookups.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the runtime-archive lookup guard is imported and run against the repository by its script-unit tests"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/test_check_runtime_archive_lookups.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the runtime-archive lookup guard's repository scan and planted-lookup controls execute in script-unit"
+tracking_issue = "chelis#1354"
 
 # Exact implementation paths for the initial chelis#1824 mechanism. These
 # avoid granting authority to unrelated future files under scripts/, .github/
@@ -3392,6 +3418,11 @@ prefix = "examples/grad_disconnected.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+[[path_rule]]
+prefix = "examples/grad_bitwise.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 # chelis#2119: tree-sitter-chelis/build.rs compiles this grammar's parser and
 # external scanner into the crate, so its Rust/tree-sitter parity corpus is
 # what a scanner or grammar edit must re-run.
@@ -3404,3 +3435,8 @@ packages = ["tree-sitter-chelis"]
 prefix = "grammars/tree-sitter-chelis-deep/"
 disposition = "packages"
 packages = ["tree-sitter-chelis"]
+
+[[path_rule]]
+prefix = "examples/grad_host_results.ch"
+disposition = "packages"
+packages = ["chelis-cli"]

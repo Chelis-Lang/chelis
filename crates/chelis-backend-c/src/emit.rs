@@ -1491,6 +1491,18 @@ impl CEmitter {
             // is integer-only, so this is exactly C truncating division.
             RiscOp::TruncDiv => self.emit_binary(id, "/", &node.inputs, &node.output_type),
             RiscOp::Mod => self.emit_binary(id, "%", &node.inputs, &node.output_type),
+            RiscOp::Bitwise(kind) => self.emit_binary(
+                id,
+                match kind {
+                    chelis_types::BitwiseKind::And => "&",
+                    chelis_types::BitwiseKind::Or => "|",
+                    chelis_types::BitwiseKind::Xor => "^",
+                    chelis_types::BitwiseKind::ShiftLeft => "shl",
+                    chelis_types::BitwiseKind::ShiftRight => "shr",
+                },
+                &node.inputs,
+                &node.output_type,
+            ),
             // chelis#178: `floor_div` rounds the quotient toward -inf.
             // Integer operands use native `/` plus a remainder-sign
             // correction; float operands use `floorf(a / b)`.
@@ -2007,6 +2019,13 @@ impl CEmitter {
             }
         }
         specs
+    }
+
+    pub(crate) fn output_types(dag: VerifiedDagView<'_>) -> Vec<TensorType> {
+        Self::output_specs(dag)
+            .into_iter()
+            .map(|output| dag.get(output.id).expect("output node").output_type.clone())
+            .collect()
     }
 
     pub(crate) fn output_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
@@ -3095,13 +3114,20 @@ impl CEmitter {
         // `chelis_int_div_guard`, which aborts with the same clean diagnostic
         // the evaluator emits. Float `/` is IEEE-754 (`1.0/0.0 == inf`) and
         // is never guarded; `+`/`*`/`fmaxf` never divide.
-        let checked_int = ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/" | "%");
+        let checked_int =
+            ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/" | "%" | "shl" | "shr");
         let canonical_nan = match ty.precision {
             Prim::F32 => Some("chelis_f32_from_bits(UINT32_C(0x7fc00000))"),
             Prim::F64 => Some("chelis_f64_from_bits(UINT64_C(0x7ff8000000000000))"),
             _ => None,
         };
         let elem_expr = |lhs: String, rhs: String| -> String {
+            if matches!(op, "shl" | "shr") {
+                let bits = Self::integer_width(ty.precision);
+                return format!(
+                    "({et})chelis_int_{op}((int64_t)({lhs}), (int64_t)({rhs}), {bits})"
+                );
+            }
             if is_relu_adjoint {
                 // [05-OP-43]: select g only for +0 < x. Selection preserves
                 // the exact stored cotangent bits and emits exact +0 for
@@ -3178,12 +3204,17 @@ impl CEmitter {
         // An integer-div guard introduces a function call with side effects,
         // which is not safely vectorizable; only the non-guarded ops keep the
         // `simd` clause.
-        let pragma = if checked_int {
-            "#pragma omp parallel for"
+        // Shift errors include the offending count. Visit logical elements
+        // in order so different negative counts cannot race the diagnostic.
+        let serial_shift = matches!(op, "shl" | "shr");
+        let pragma = if serial_shift {
+            None
+        } else if checked_int {
+            Some("#pragma omp parallel for")
         } else {
-            "#pragma omp parallel for simd"
+            Some("#pragma omp parallel for simd")
         };
-        self.open_element_loop(id, "i", &format!("t{id}_size"), Some(pragma));
+        self.open_element_loop(id, "i", &format!("t{id}_size"), pragma);
         let contiguous = elem_expr(
             self.gated(format!("__in_a_{id}[i]"), 0),
             self.gated(format!("__in_b_{id}[i]"), 1),
@@ -3197,7 +3228,7 @@ impl CEmitter {
             id,
             "i",
             &format!("t{id}_size"),
-            Some("#pragma omp parallel for"),
+            (!serial_shift).then_some("#pragma omp parallel for"),
         );
         self.line(&format!("int64_t idx_a = i * t{id}_input{a}_step;"));
         self.line(&format!("int64_t idx_b = i * t{id}_input{b}_step;"));
@@ -9508,6 +9539,34 @@ mod tests {
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("memcpy(t1_data, t0_data, (size_t)t1_byte_capacity); /* store: out */"));
+    }
+
+    #[test]
+    fn bitwise_shift_loops_preserve_first_negative_count() {
+        for kind in [
+            chelis_types::BitwiseKind::ShiftLeft,
+            chelis_types::BitwiseKind::ShiftRight,
+        ] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let ty = tensor_ty(&[2], Prim::Int64);
+            let inputs = ["values", "counts"].map(|name| {
+                dag.add_node(
+                    decl,
+                    RiscOp::Load { name: name.into() },
+                    vec![],
+                    ty.clone(),
+                    None,
+                )
+            });
+            dag.add_node(decl, RiscOp::Bitwise(kind), inputs.to_vec(), ty, None);
+            let c = emit_test_dag(&dag, "test_fn").expect("emit shifts");
+            assert!(c.contains(&format!("chelis_int_{}", kind.name())));
+            // Distinct negative counts render distinct errors. Both contiguous
+            // and strided paths must visit elements in logical order; macOS
+            // without OpenMP cannot expose this race through execution alone.
+            assert!(!c.contains("#pragma omp"), "{kind:?}: {c}");
+        }
     }
 
     /// chelis#759 / [05-OP-6]: the truncating rung's conversion loop must

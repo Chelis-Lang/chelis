@@ -116,7 +116,7 @@ fn grad_program(weight_op: &str, print_form: bool) -> String {
 }
 
 // ===========================================================================
-// chelis#722 - evaluator support; the compiled half waits for Phase 3
+// chelis#722 - exact integer unary values through Grad in Eval and C
 // ===========================================================================
 
 /// The correct gradient is `w = abs(weights) = [100, 200, 300, 400]`.
@@ -162,6 +162,24 @@ fn eval_grad_through_int_ceil_and_round_is_the_true_gradient() {
         assert!(
             line.contains("data=[-100.0, 200.0, -300.0, 400.0]"),
             "grad of sum(x*{op}(w)) wrt x must be the exact integer weights; got: {line}"
+        );
+    }
+}
+
+/// Integer `floor`, `ceil`, and `round` are identity operations. Their
+/// compiled gradients must retain the signed weights instead of a fabricated
+/// zero or a float-kernel conversion.
+#[test]
+fn c_grad_through_int_floor_ceil_round_is_the_true_gradient() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    for op in ["floor", "ceil", "round"] {
+        let line = c_first_line(&grad_program(op, false), &format!("grad_{op}_int"))
+            .unwrap_or_else(|error| panic!("compiled {op} gradient must run: {error}"));
+        assert!(
+            line.contains("data=[-100.0, 200.0, -300.0, 400.0]"),
+            "compiled grad of sum(x*{op}(w)) must retain the signed integer weights; got: {line}"
         );
     }
 }

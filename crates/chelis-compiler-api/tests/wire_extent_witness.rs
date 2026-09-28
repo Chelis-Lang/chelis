@@ -770,6 +770,60 @@ fn remainder_wire_roundtrip_requires_exact_integer_operands() {
     }
 }
 
+#[test]
+fn bitwise_wire_roundtrip_rejects_wrong_shape_dtype_and_identity() {
+    for kind in [
+        chelis_types::BitwiseKind::And,
+        chelis_types::BitwiseKind::Or,
+        chelis_types::BitwiseKind::Xor,
+        chelis_types::BitwiseKind::ShiftLeft,
+        chelis_types::BitwiseKind::ShiftRight,
+    ] {
+        for prim in ["int8", "int16", "int32", "int64"] {
+            let mut dag = fixture();
+            for (index, node) in dag.nodes.iter_mut().enumerate() {
+                node.op = if index == 2 {
+                    WireRiscOp::Bitwise { bitwise: kind }
+                } else {
+                    WireRiscOp::Load {
+                        name: format!("x{index}"),
+                    }
+                };
+                node.inputs = if index == 2 { vec![0, 1] } else { vec![] };
+                node.shape_deps.clear();
+                node.output_type = WireTensorType {
+                    dims: vec![],
+                    precision: prim.into(),
+                };
+            }
+            let json = serde_json::to_value(&dag).unwrap();
+            let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+            assert!(
+                matches!(decoded.nodes[2].op, WireRiscOp::Bitwise { bitwise } if bitwise == kind)
+            );
+            assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+            for mutation in 0..5 {
+                let mut bad = json.clone();
+                match mutation {
+                    0 => bad["nodes"][2]["inputs"] = serde_json::json!([0]),
+                    1 => bad["nodes"][2]["output_type"]["precision"] = "f32".into(),
+                    2 => bad["nodes"][0]["output_type"]["precision"] = "bool".into(),
+                    3 => {
+                        bad["nodes"][1]["output_type"]["dims"] =
+                            serde_json::json!([{"kind":"lit", "size":2}])
+                    }
+                    4 => bad["nodes"][2]["op"]["bitwise"] = "unknown_operation".into(),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    WireDag::from_validated_json(&bad.to_string()).is_err(),
+                    "accepted mutation {mutation}: {bad}"
+                );
+            }
+        }
+    }
+}
+
 /// wire v11 / chelis#1374: a witness's NAMED claim survives transport with its
 /// binder, its role and its requirement edge intact.
 ///

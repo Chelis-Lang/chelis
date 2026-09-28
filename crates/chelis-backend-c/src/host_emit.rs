@@ -388,9 +388,9 @@ pub(crate) fn emit_host_abi_program(
                     .expect("projected function helper retains verified child")
             })
             .collect::<Vec<_>>();
-        let helper_output_counts = verified_helpers
+        let helper_output_types = verified_helpers
             .iter()
-            .map(|verified| CEmitter::output_labels(verified.dag()).len().max(1))
+            .map(|verified| CEmitter::output_types(verified.dag()))
             .collect::<Vec<_>>();
         match emit_function(
             &mut fn_buf,
@@ -405,7 +405,7 @@ pub(crate) fn emit_host_abi_program(
             projected
                 .function_owner_bindings(function_index)
                 .expect("projected function retains verified body-owner bindings"),
-            &helper_output_counts,
+            &helper_output_types,
             &verified_helpers,
             external_helpers,
             &captured_globals,
@@ -470,12 +470,12 @@ pub(crate) fn emit_host_abi_program(
 
     if !program.globals.is_empty() {
         let hoisted: UnordSet<&str> = captured_globals.iter().map(String::as_str).collect();
-        let helper_output_counts = (0..program.global_tensor_helpers.len())
+        let helper_output_types = (0..program.global_tensor_helpers.len())
             .map(|helper| {
                 let verified = projected
                     .global_tensor_helper(helper)
                     .expect("projected global helper retains verified child");
-                CEmitter::output_labels(verified.dag()).len().max(1)
+                CEmitter::output_types(verified.dag())
             })
             .collect::<Vec<_>>();
         let helper_result_origins = (0..program.global_tensor_helpers.len())
@@ -495,7 +495,7 @@ pub(crate) fn emit_host_abi_program(
             &hoisted,
             projected.root_sites(),
             &internal_names,
-            &helper_output_counts,
+            &helper_output_types,
             helper_result_origins,
             external_helpers,
         )?;
@@ -2543,7 +2543,7 @@ fn emit_function(
     internal_linkage: bool,
     ownership_sites: &[ProjectedHostSite<'_>],
     owner_bindings: &[(VerifiedOwnerId, String)],
-    helper_output_counts: &[usize],
+    helper_output_types: &[Vec<TensorType>],
     verified_helpers: &[VerifiedHostTensorHelperView<'_>],
     external_helpers: &UnordSet<String>,
     captured_globals: &[String],
@@ -2577,7 +2577,7 @@ fn emit_function(
         function_specializations.clone(),
         HostTensorHelpers {
             helpers: &function.tensor_helpers,
-            output_counts: helper_output_counts,
+            output_types: helper_output_types,
             result_origins: verified_helpers
                 .iter()
                 .copied()
@@ -2811,7 +2811,7 @@ fn emit_main(
     hoisted: &UnordSet<&str>,
     ownership_sites: &[ProjectedHostSite<'_>],
     internal_names: &UnordMap<String, String>,
-    helper_output_counts: &[usize],
+    helper_output_types: &[Vec<TensorType>],
     helper_result_origins: Vec<Option<String>>,
     external_helpers: &UnordSet<String>,
 ) -> Result<(), Unsupported> {
@@ -2828,7 +2828,7 @@ fn emit_main(
         function_specializations(program),
         HostTensorHelpers {
             helpers: &program.global_tensor_helpers,
-            output_counts: helper_output_counts,
+            output_types: helper_output_types,
             result_origins: helper_result_origins,
         },
         ownership_sites,
@@ -3326,7 +3326,7 @@ struct HostEmitter<'a> {
     emitted_names: UnordMap<String, String>,
     function_specializations: UnordMap<String, HostFunctionSpecialization>,
     tensor_helpers: &'a [HostTensorHelper],
-    tensor_helper_output_counts: &'a [usize],
+    tensor_helper_output_types: &'a [Vec<TensorType>],
     tensor_helper_result_origins: Vec<Option<String>>,
     expression_sites: Vec<ProjectedHostSite<'a>>,
     expression_site_index: usize,
@@ -3349,7 +3349,7 @@ struct HostEmitter<'a> {
 
 struct HostTensorHelpers<'a> {
     helpers: &'a [HostTensorHelper],
-    output_counts: &'a [usize],
+    output_types: &'a [Vec<TensorType>],
     result_origins: Vec<Option<String>>,
 }
 
@@ -3468,7 +3468,7 @@ impl<'a> HostEmitter<'a> {
             emitted_names,
             function_specializations,
             tensor_helpers: tensor_helpers.helpers,
-            tensor_helper_output_counts: tensor_helpers.output_counts,
+            tensor_helper_output_types: tensor_helpers.output_types,
             tensor_helper_result_origins: tensor_helpers.result_origins,
             expression_sites: ownership_sites
                 .iter()
@@ -5442,6 +5442,93 @@ impl<'a> HostEmitter<'a> {
             let arg_ty = expected_builtin_arg_ty(name, ty, index).unwrap_or(inferred_ty);
             self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
             arg_vars.push((arg_name, arg_ty));
+        }
+
+        // Tensor key forms preserve the checked rank; split_keys appends one
+        // axis. Read every extent before allocation and every element through
+        // the dtype-tagged views, as the tensor kernel emitter does.
+        if matches!(
+            name,
+            "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+        ) && let HostType::Tensor(input_ty) = &arg_vars[0].1
+        {
+            let rank = input_ty.dims.len();
+            let out_rank = rank + usize::from(name == "split_keys");
+            let prefix = self.next_temp("key_tensor");
+            let ind = self.indent.clone();
+            let input = &arg_vars[0].0;
+            self.lines.push(format!(
+                "{ind}chelis_read_view {prefix}_in = chelis_tensor_read_view({input});"
+            ));
+            let dtype = if name == "key_from_seed" {
+                "CHELIS_DTYPE_I64"
+            } else {
+                "CHELIS_DTYPE_KEY"
+            };
+            self.lines.push(format!("{ind}if ({prefix}_in.dtype != {dtype} || chelis_tensor_rank({input}) != {rank}) abort();"));
+            self.lines
+                .push(format!("{ind}int64_t {prefix}_shape[{}];", out_rank.max(1)));
+            for axis in 0..rank {
+                self.lines.push(format!(
+                    "{ind}{prefix}_shape[{axis}] = chelis_tensor_shape({input}, {axis});"
+                ));
+            }
+            if name == "fold_in" {
+                let index = &arg_vars[1].0;
+                self.lines.push(format!(
+                    "{ind}chelis_read_view {prefix}_index = chelis_tensor_read_view({index});"
+                ));
+                self.lines.push(format!("{ind}if ({prefix}_index.dtype != CHELIS_DTYPE_I64 || chelis_tensor_rank({index}) != {rank}) abort();"));
+                for axis in 0..rank {
+                    self.lines.push(format!("{ind}if (chelis_tensor_shape({index}, {axis}) != {prefix}_shape[{axis}]) {{ fprintf(stderr, \"fold_in requires exactly equal key and index shapes ([05-OP-72])\\n\"); chelis_numeric_trap(\"numeric trap: domain in fold_in at i64\"); }}"));
+                }
+            }
+            if name == "split_keys" {
+                let count = &arg_vars[1].0;
+                self.lines.push(format!("{ind}if ({count} < 0) chelis_numeric_trap(\"numeric trap: domain in split_keys at i64\");"));
+                self.lines
+                    .push(format!("{ind}{prefix}_shape[{rank}] = {count};"));
+            }
+            let halves = if name == "split_key" { 2 } else { 1 };
+            for half in 0..halves {
+                self.lines.push(format!("{ind}chelis_tensor *{prefix}_{half} = chelis_alloc({out_rank}, {prefix}_shape, CHELIS_DTYPE_KEY);"));
+                self.lines.push(format!("{ind}chelis_tensor_write *{prefix}_guard_{half} = chelis_tensor_begin_write({prefix}_{half});"));
+                self.lines.push(format!("{ind}chelis_write_view {prefix}_out_{half} = chelis_tensor_write_view({prefix}_guard_{half});"));
+                let source = format!("((const uint64_t *){prefix}_in.data)[i]");
+                let value = match name {
+                    "key_from_seed" => format!("(uint64_t)((const int64_t *){prefix}_in.data)[i]"),
+                    "split_key" => format!("chelis_key_derive({source}, {half}ULL)"),
+                    "fold_in" => format!(
+                        "chelis_key_derive(chelis_key_derive({source}, 2ULL), (uint64_t)((const int64_t *){prefix}_index.data)[i])"
+                    ),
+                    "split_keys" => {
+                        format!("chelis_key_derive(chelis_key_derive({source}, 2ULL), (uint64_t)j)")
+                    }
+                    _ => unreachable!(),
+                };
+                if name == "split_keys" {
+                    self.lines.push(format!("{ind}for (int64_t i = 0; i < {prefix}_in.count; ++i) for (int64_t j = 0; j < {prefix}_shape[{rank}]; ++j) ((uint64_t *){prefix}_out_{half}.data)[i * {prefix}_shape[{rank}] + j] = {value};"));
+                } else {
+                    self.lines.push(format!("{ind}for (int64_t i = 0; i < {prefix}_in.count; ++i) ((uint64_t *){prefix}_out_{half}.data)[i] = {value};"));
+                }
+                self.lines.push(format!(
+                    "{ind}chelis_tensor_end_write({prefix}_guard_{half});"
+                ));
+            }
+            if name == "split_key" {
+                self.lines.push(format!("{ind}chelis_value {prefix}_halves[2] = {{ chelis_value_take_tensor({prefix}_0), chelis_value_take_tensor({prefix}_1) }};"));
+                self.lines.push(format!(
+                    "{ind}{target} = chelis_tuple_from_values({prefix}_halves, 2);"
+                ));
+                for half in 0..2 {
+                    self.lines.push(format!(
+                        "{ind}chelis_value_release({prefix}_halves[{half}]);"
+                    ));
+                }
+            } else {
+                self.lines.push(format!("{ind}{target} = {prefix}_0;"));
+            }
+            return Ok(());
         }
 
         // [05-OP-69]..[05-OP-72]: the key operations over host scalar keys,
@@ -7596,22 +7683,27 @@ impl<'a> HostEmitter<'a> {
             }
             inputs_name
         };
-        // Issue #309: a helper whose body has more than one DAG root
-        // (the canonical case is a multi-`wrt` `grad`) writes one
-        // tensor per root into `outputs[0..n_out]` and its emitted
-        // wrapper asserts `n_out == roots().len()`. Size the output
-        // array and the `n_out` argument from the helper's actual root
-        // count; the prior hard-coded `[1]` / `n_out = 1` both crashed
-        // the helper's arity guard for a multi-output grad and left the
-        // downstream `.N` projection reading a single tensor as if it
-        // were a tuple. When the call is tuple-typed, box each output
-        // tensor and assemble a real `chelis_tuple` so the subsequent
-        // `chelis_tuple_get` projection has a correctly-typed receiver.
-        let root_count = self
-            .tensor_helper_output_counts
+        // The verified emitter's output order includes stores as well as roots.
+        // A result slot is always a tensor; its destination remains a logical
+        // scalar, tensor, or tuple. Validate that boundary before emitting it.
+        let output_types = self
+            .tensor_helper_output_types
             .get(helper)
-            .copied()
-            .unwrap_or(1);
+            .ok_or_else(|| {
+                invalid_abi_shape(
+                    "tensor helper has no verified outputs".into(),
+                    "tensor helper result",
+                )
+            })?
+            .clone();
+        let root_count = output_types.len();
+        validate_tensor_result(ty, &mut output_types.iter())?;
+        if root_count == 0 || tensor_result_leaf_count(ty) != root_count {
+            return Err(invalid_abi_shape(
+                format!("tensor helper has {root_count} outputs for result type {ty:?}"),
+                "tensor helper result",
+            ));
+        }
         self.lines.push(format!(
             "{}chelis_tensor *{}[{}] = {{ NULL }};",
             self.indent, outputs_name, root_count
@@ -7631,50 +7723,7 @@ impl<'a> HostEmitter<'a> {
             helper_name,
             helper_args.join(", ")
         ));
-        if let HostType::Tuple(parts) = ty
-            && root_count > 1
-        {
-            let values_name = self.next_temp("tuple_values");
-            self.lines.push(format!(
-                "{}chelis_value {}[{}];",
-                self.indent, values_name, root_count
-            ));
-            for index in 0..root_count {
-                // Each helper output slot is a `chelis_tensor*`; box it as
-                // a tensor value regardless of the tuple part annotation
-                // (a multi-root tensor helper only ever produces tensors).
-                let elem_ty = parts
-                    .get(index)
-                    .filter(|part| matches!(part, HostType::Tensor(_)))
-                    .cloned()
-                    .unwrap_or(HostType::Tensor(TensorType {
-                        dims: Vec::new(),
-                        precision: Prim::F32,
-                    }));
-                let slot_expr = format!("{outputs_name}[{index}]");
-                self.lines.push(format!(
-                    "{}{}[{index}] = {};",
-                    self.indent,
-                    values_name,
-                    self.box_value_expr(&slot_expr, &elem_ty)?
-                ));
-            }
-            self.lines.push(format!(
-                "{}{target} = chelis_tuple_from_values({}, {});",
-                self.indent, values_name, root_count
-            ));
-            // The tuple retains its fields; release each helper output's
-            // temporary boxed owner, just as for an ordinary tuple literal.
-            for index in 0..root_count {
-                self.lines.push(format!(
-                    "{}chelis_value_release({values_name}[{index}]);",
-                    self.indent
-                ));
-            }
-        } else {
-            self.lines
-                .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
-        }
+        self.materialize_tensor_result(target, ty, &outputs_name, &mut 0)?;
         for (_, boxed) in tensor_args {
             if let Some(boxed) = boxed {
                 self.lines
@@ -7691,6 +7740,73 @@ impl<'a> HostEmitter<'a> {
         }
         if self.external_helpers.contains(&base) {
             self.emit_result_claim_guard(target, ty, result_claims);
+        }
+        Ok(())
+    }
+
+    /// Consume each owned helper output exactly once. Tensor leaves transfer
+    /// their owner; scalar leaves extract before releasing it; tuples retain
+    /// their boxed fields before the temporary field owners are released.
+    fn materialize_tensor_result(
+        &mut self,
+        target: &str,
+        ty: &HostType,
+        outputs: &str,
+        next: &mut usize,
+    ) -> Result<(), Unsupported> {
+        if let HostType::Tuple(parts) = ty {
+            let values = self.next_temp("tuple_values");
+            if parts.is_empty() {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tuple_from_values(NULL, 0);",
+                    self.indent
+                ));
+                return Ok(());
+            }
+            self.lines.push(format!(
+                "{}chelis_value {values}[{}];",
+                self.indent,
+                parts.len()
+            ));
+            for (index, part) in parts.iter().enumerate() {
+                let value = self.next_temp("helper_result");
+                self.lines
+                    .push(format!("{}{} {value};", self.indent, c_type(part)?));
+                self.materialize_tensor_result(&value, part, outputs, next)?;
+                self.lines.push(format!(
+                    "{}{values}[{index}] = {};",
+                    self.indent,
+                    self.box_value_expr(&value, part)?
+                ));
+            }
+            self.lines.push(format!(
+                "{}{target} = chelis_tuple_from_values({values}, {});",
+                self.indent,
+                parts.len()
+            ));
+            for index in 0..parts.len() {
+                self.lines.push(format!(
+                    "{}chelis_value_release({values}[{index}]);",
+                    self.indent
+                ));
+            }
+            return Ok(());
+        }
+        let slot = format!("{outputs}[{}]", *next);
+        *next += 1;
+        if matches!(ty, HostType::Tensor(_)) {
+            self.lines
+                .push(format!("{}{target} = {slot};", self.indent));
+        } else {
+            let value = if *ty == HostType::Key {
+                format!("chelis_key_of_tensor({slot})")
+            } else {
+                scalar_carrier_value_expr(&format!("chelis_tensor_to_scalar({slot})"), ty)?
+            };
+            self.lines
+                .push(format!("{}{target} = {value};", self.indent));
+            self.lines
+                .push(format!("{}chelis_tensor_release({slot});", self.indent));
         }
         Ok(())
     }
@@ -10389,6 +10505,45 @@ fn scalar_carrier_expr(value: &str, ty: &HostType) -> Result<String, Unsupported
     Ok(expr)
 }
 
+fn tensor_result_leaf_count(ty: &HostType) -> usize {
+    match ty {
+        HostType::Tuple(parts) => parts.iter().map(tensor_result_leaf_count).sum(),
+        _ => 1,
+    }
+}
+
+fn validate_tensor_result<'a>(
+    ty: &HostType,
+    outputs: &mut impl Iterator<Item = &'a TensorType>,
+) -> Result<(), Unsupported> {
+    if let HostType::Tuple(parts) = ty {
+        for part in parts {
+            validate_tensor_result(part, outputs)?;
+        }
+        return Ok(());
+    }
+    let output = outputs.next().ok_or_else(|| {
+        invalid_abi_shape(
+            format!("missing tensor helper output for {ty:?}"),
+            "tensor helper result",
+        )
+    })?;
+    let valid = match ty {
+        HostType::Tensor(expected) => {
+            expected.precision == output.precision && expected.dims.len() == output.dims.len()
+        }
+        HostType::Key => output.dims.is_empty() && output.precision == Prim::Key,
+        _ => output.dims.is_empty() && checked_cast_abi_scalar_prim(ty)? == output.precision,
+    };
+    if !valid {
+        return Err(invalid_abi_shape(
+            format!("tensor helper output {output:?} cannot materialize as {ty:?}"),
+            "tensor helper result",
+        ));
+    }
+    Ok(())
+}
+
 /// Project the exact tagged runtime scalar back to the resolved host scalar
 /// type. The expected dtype is always checked before reading the payload.
 fn scalar_carrier_value_expr(value: &str, ty: &HostType) -> Result<String, Unsupported> {
@@ -10974,7 +11129,7 @@ mod expression_dispatch_tests {
             UnordMap::new(),
             HostTensorHelpers {
                 helpers: &[],
-                output_counts: &[],
+                output_types: &[],
                 result_origins: Vec::new(),
             },
             &[],

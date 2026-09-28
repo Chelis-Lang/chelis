@@ -44,6 +44,9 @@ A disconnected differentiable scalar or tensor receives exact zeros with its
 actual argument's dtype and ordered shape, including empty axes and rank zero. See
 [`grad_disconnected.ch`](../examples/grad_disconnected.ch).
 
+[`grad_bitwise.ch`](../examples/grad_bitwise.ch) demonstrates exact discrete
+coefficients retained in the forward graph under `grad` and `vmap`.
+
 Source-level `grad` returns gradients only, not `(value, grad)`.
 For a multi-parameter function, the gradient payload is flattened:
 
@@ -969,6 +972,15 @@ declared cast adjoint. A [05-OP-42] `stop_gradient` node is a barrier:
 traversal contributes the shape-preserving exact zero for its argument and
 does not enter the argument's subgraph, so a structurally rejected operation
 inside it does not stop construction.
+
+A signed-integer operation whose atom assigns the `IntegerArithmeticOutput`
+structural rejection passes exact zero to its operands when reached only by an
+exact-zero control cotangent; this does not request its forward-only adjoint.
+Traversal still visits those operands, so a structural rejection such as a
+float-to-integer cast beneath the operation is reported. If any path reaches
+that same operation outside the exact-zero control path, its
+`IntegerArithmeticOutput` rejection applies. Other operations retain their
+own atom's disposition, including a structural rejection on a zero path.
 
 ### 7.6 Verification
 

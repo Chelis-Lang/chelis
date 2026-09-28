@@ -806,10 +806,15 @@ fn discharge_collection_constraint(
 ) -> CollectionDischarge {
     match crate::infer::decide_collection_constraint(constraint, tensor_concat, subst) {
         Ok(None) => CollectionDischarge::Unresolved,
-        Ok(Some(equation)) => {
-            subst.record_result_constraint(equation);
-            CollectionDischarge::Settled(Some(constraint.result().clone()))
-        }
+        Ok(Some(decision)) => match decision.publish(subst) {
+            Ok(()) => CollectionDischarge::Settled(Some(constraint.result().clone())),
+            Err(error) => {
+                subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                    error: error.into(),
+                });
+                CollectionDischarge::Settled(None)
+            }
+        },
         Err(message) => {
             subst.record_operand_gate_failure(OperandGateFailure::Decision {
                 error: crate::errors::CheckError::new(
@@ -1344,21 +1349,45 @@ impl Subst {
         binders: &UnordMap<TypeVar, String>,
     ) {
         let binders = binders.to_sorted();
+        let origin_scope = scheme
+            .result_origin
+            .as_ref()
+            .map(|origin| crate::result_scope::ResultScope::new(&origin.equations));
         let mut marks = self
             .key_free_tvars
             .lock()
             .expect("subst.key_free_tvars poisoned");
-        for tv in scheme
-            .result_origin
-            .as_ref()
-            .map_or(&scheme.tvars, |origin| &origin.tvars)
-        {
+        // Equation-local origin quantifiers are not additional generic
+        // parameters. An explicitly authored binder can still name every
+        // representative of its equality component, including raw origins.
+        let mut variables = scheme.tvars.clone();
+        if let Some(origin) = &scheme.result_origin {
+            for variable in &origin.tvars {
+                if !variables.contains(variable) {
+                    variables.push(*variable);
+                }
+            }
+        }
+        for tv in &variables {
             let binder = binders
                 .iter()
                 .find(|(declared, _)| {
-                    **declared == *tv || self.apply(&Type::Var(**declared)) == Type::Var(*tv)
+                    **declared == *tv
+                        || self.apply(&Type::Var(**declared)) == Type::Var(*tv)
+                        || origin_scope.as_ref().is_some_and(|scope| {
+                            scope.shares_type_component(**declared, *tv)
+                                || match self.apply(&Type::Var(**declared)) {
+                                    Type::Var(resolved) => {
+                                        scope.shares_type_component(resolved, *tv)
+                                    }
+                                    _ => false,
+                                }
+                        })
                 })
                 .map(|(_, name)| (*name).clone());
+            if binder.is_none() && !scheme.tvars.contains(tv) {
+                continue;
+            }
             let named_elsewhere = marks
                 .get(tv)
                 .is_some_and(|existing| existing.generic.is_some());

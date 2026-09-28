@@ -82,6 +82,20 @@ class SourceUniverseTests(unittest.TestCase):
         self.assertIn("root.glob(pattern)", candidates)
         self.assertNotIn("ls-files", candidates)
 
+    def test_integer_float_source_is_registered_and_removal_fails_closed(self) -> None:
+        source = "crates/chelis-backend-c/src/integer_float.rs"
+        self.assertIn(source, oracle.INVENTORY_SOURCES)
+        oracle._assert_source_list_current(REPO_ROOT)
+        with mock.patch.object(
+            oracle,
+            "INVENTORY_SOURCES",
+            tuple(path for path in oracle.INVENTORY_SOURCES if path != source),
+        ):
+            with self.assertRaises(oracle.OracleFailure) as caught:
+                oracle._assert_source_list_current(REPO_ROOT)
+        self.assertEqual(caught.exception.code, oracle.SOURCE_LIST_FAILURE.code)
+        self.assertIn(source, str(caught.exception))
+
     def test_the_universe_holds_the_phase2_owned_sources(self) -> None:
         for source in (
             "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h",
@@ -1163,6 +1177,39 @@ class ManifestTests(unittest.TestCase):
             for command in commands
         ))
 
+    def test_integer_unary_final_forms_are_exact_and_require_execution_controls(self) -> None:
+        expected = (
+            ("crates/chelis-backend-c/src/integer_float.rs", "backend-element-spelling", "integer_to_float_bits"),
+            ("crates/chelis-backend-hip/src/kernels.rs", "backend-element-spelling", "cast_integer_to_float"),
+            ("crates/chelis-backend-metal/src/emit.rs", "backend-element-spelling", "Emitter < 'plan >::emit_expand"),
+            ("crates/chelis-backend-metal/src/emit.rs", "backend-element-spelling", "Emitter < 'plan >::emit_integer_float_cast"),
+        )
+        self.assertEqual(oracle.INTEGER_UNARY_BACKEND_FINAL_FORMS, expected)
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        for path, kind, owner in expected:
+            self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+            self.assertFalse(oracle.owner_module_final_form(kind, path + ".other", owner))
+            self.assertFalse(oracle.owner_module_final_form("load-store-template", path, owner))
+            self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
+        self.assertIn(
+            "cargo nextest run -p chelis-backend-c --lib -E test(integer_float::tests::)",
+            commands,
+        )
+        self.assertIn(
+            "cargo nextest run -p chelis-backend-hip -p chelis-backend-metal "
+            "--test integer_abs --test integer_abs_guard",
+            commands,
+        )
+        probes = {probe["lane"]: probe for probe in oracle.hardware_probe_manifest()}
+        for lane, command in (
+            ("hip-integer-unary", "scripts/hip_test.py -p chelis-backend-hip --test integer_abs -- --ignored --test-threads=1"),
+            ("metal-integer-unary", "cargo test -p chelis-backend-metal --test integer_abs_guard -- --ignored --test-threads=1"),
+        ):
+            self.assertEqual(probes[lane]["command"], command)
+            self.assertEqual(probes[lane]["status"], "manual-required")
+
     def test_uniform_sampler_helper_keeps_op8_authority_and_gpu_execution(self) -> None:
         path, kind, owner = oracle.UNIFORM_RANDOM_BACKEND_FINAL_FORMS[0]
         self.assertEqual(owner, "NUMERIC_DEVICE_HELPERS")
@@ -1455,7 +1502,7 @@ class RedTeamRegressionTests(unittest.TestCase):
         native = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
         self.assertIn(
-            "Seventy-eight are Rust and eleven are C, C++, or Objective-C sources",
+            "Seventy-nine are Rust and eleven are C, C++, or Objective-C sources",
             source,
         )
-        self.assertEqual((rust, native), (78, 11))
+        self.assertEqual((rust, native), (79, 11))

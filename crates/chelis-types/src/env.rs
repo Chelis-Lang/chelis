@@ -1344,8 +1344,14 @@ impl Env {
         // ([`Subst::name_generic_parameters`]). A variable that already
         // carries a mark keeps it, so a generic stored in a tuple or a data
         // value and then generalized still names the generic it came from.
-        for tv in &level_scheme.tvars {
-            subst.forbid_key_instantiation(*tv, GenericParameter::default());
+        // Raw origin carriers also quantify equation-local variables whose
+        // solved type is concrete. Only the published scheme's actual generic
+        // parameters owe [04-LIN-10]; the origin caller marks those after
+        // solving its equations privately.
+        if equations.is_empty() {
+            for tv in &level_scheme.tvars {
+                subst.forbid_key_instantiation(*tv, GenericParameter::default());
+            }
         }
         level_scheme
     }

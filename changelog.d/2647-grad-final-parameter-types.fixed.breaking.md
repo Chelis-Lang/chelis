@@ -8,3 +8,5 @@ callable's type is determined later; neither does a typed sibling branch or
 aggregate. Helpers retain this distinction through generalization, recursion,
 record updates, collection operations, and cached checking environments, while
 retaining the ordinary type equalities required by their checked signatures.
+Result-origin transport also preserves concrete key values and the declared
+owner of generic key restrictions.
