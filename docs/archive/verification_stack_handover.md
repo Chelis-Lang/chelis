@@ -1,5 +1,9 @@
 # Verification Stack: Handover State
 
+> Historical handover snapshot dated 2026-07-06. For current behavior, use
+> [`chelis_property_spec.md`](../../spec/design/chelis_property_spec.md)
+> and [`manual_gates.md`](../manual_gates.md).
+
 **Date:** 2026-07-06
 **Chelis version:** 0.14.0 (`origin/main` at `3a7e1932` after #622 for this handover polish)
 **Beacon version:** 0.1.6 was the last verified cross-repo witness; this
@@ -139,7 +143,7 @@ CHELIS_BEACON_BIN=/path/to/chelis-beacon cargo test -p chelis-prove --test beaco
 
 **Toolchain:** `stable` (pinned in `rust-toolchain.toml`, no version lock).
 **Python:** `.venv/bin/python` (uv-managed, 3.11+). Required for PyO3 link step.
-**Prerequisites:** See `README.md` §Prerequisites.
+**Prerequisites:** See the repository's [`README.md`](../../README.md) §Prerequisites.
 
 ---
 

@@ -3,7 +3,7 @@
 Owning plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`,
 "W1 — Linearity layer correctness, PR 1".
 
-Phase 0 spec lock: `docs/design/compiler_cleanup_0_7_8_spec_lock.md`.
+Phase 0 spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`.
 
 §5 entries closed by this PR (text edits filed by the orchestrator after
 merge): `Linearity-F1`, `Linearity-F2`, `Linearity-AliasedConsume-F1`.
@@ -311,8 +311,8 @@ warning channel to cover them.
 ## References
 
 - Plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`
-- Phase 0 spec lock: `docs/design/compiler_cleanup_0_7_8_spec_lock.md`
-- §5 entries: `docs/gap_synthesis.md` rows for `Linearity-F1`,
+- Phase 0 spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`
+- §5 entries: `docs/archive/reports/gap_synthesis.md` rows for `Linearity-F1`,
   `Linearity-F2`, `Linearity-AliasedConsume-F1`
 - F3 PR 1 plumbing reference: commit `c7469d9` in `git log` —
   `LinearityInfo::warnings` field, `Checker::push_diagnostic`

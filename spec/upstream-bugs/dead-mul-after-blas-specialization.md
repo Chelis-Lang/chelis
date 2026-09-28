@@ -173,7 +173,7 @@ shows `direct = 128 bytes` for an 8×16 @ 16×4 matmul: the dead
 
 ## Related gaps
 
-This is the sixth gap in `docs/identified_gaps.md`. It interacts
+This is the sixth gap in `docs/archive/reports/identified_gaps.md`. It interacts
 with:
 
 - **Gap 1 — C-backend memory planning.** Even with a memory

@@ -61,7 +61,7 @@ fn pipe_copy_with_statically_typed_tensor_typechecks() {
     );
 }
 
-/// TypeCheck-PipeCast-F1 (gap_synthesis.md §5): `x |> cast(f32)` is
+/// TypeCheck-PipeCast-F1 (docs/archive/reports/gap_synthesis.md §5): `x |> cast(f32)` is
 /// the same shape of bug — the parser synthesizes
 /// `fn (v) -> (cast v f32)` and `infer_cast` rejects the fresh-var
 /// body before pipe-stage unification runs. The pipe-stage parameter

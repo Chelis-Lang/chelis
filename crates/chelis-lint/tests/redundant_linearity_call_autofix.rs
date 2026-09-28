@@ -185,7 +185,7 @@ result = f(to_tensor([1.0, 2.0]))
 /// passes `chelis check` and evaluates identically.
 ///
 /// Excludes tuple/record destructure programs per the Linearity-F2 silent
-/// false-negative (see `docs/gap_synthesis.md` §5). Programs whose pre-fix
+/// false-negative (see `docs/archive/reports/gap_synthesis.md` §5). Programs whose pre-fix
 /// form does not type-check are skipped — they aren't a legitimate target
 /// for the autofix invariant.
 #[test]

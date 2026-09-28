@@ -1482,10 +1482,6 @@ jobs:
         if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration != 'true'
         run: echo "trusted rebase selected no package integration frontier"
 
-  # NOTE: the LOC report moved to its own weekly workflow
-  # (.github/workflows/loc-report.yml) so it no longer commits a bot
-  # commit to main on every merge. See WS-7 / spend-trim.
-
   test-telemetry:
     name: CI Test Telemetry
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}

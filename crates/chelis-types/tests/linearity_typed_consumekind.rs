@@ -6,7 +6,7 @@
 //! consumes (realize / app-arg / pipe-stage / closure-capture /
 //! match-scrutinee) by string-prefixing the `ConsumeSite::description`
 //! on `"binding "` at `crates/chelis-types/src/linearity.rs:726`. The
-//! brittleness was filed as `Linearity-F1` in `docs/gap_synthesis.md`.
+//! brittleness was filed as `Linearity-F1` in `docs/archive/reports/gap_synthesis.md`.
 //! The fix replaces the string check with a typed
 //! `enum ConsumeKind { Aliasing, Structural }` field on `ConsumeSite`.
 //!

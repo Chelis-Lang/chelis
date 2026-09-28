@@ -5,7 +5,7 @@
 **Owning phase:** Phase 3h (core numeric primitives); replace-scatter work tracked under W2-A
 **Discovered by:** Adversarial test for cross-library AD claim
 (`crates/chelis-ir/tests/grad_gather_contract.rs`,
-`docs/identified_gaps.md` Gap 3)
+`docs/archive/reports/identified_gaps.md` Gap 3)
 
 ## Summary
 

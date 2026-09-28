@@ -1,6 +1,6 @@
 //! Wave 5 red-team — Locks the §5 Remaining Work Register's
 //! "BLAS summary recognizer is still silent on near-eligible rejections"
-//! gap, per `docs/gap_synthesis.md` §5 / M5-follow-up entry:
+//! gap, recorded in `docs/archive/reports/gap_synthesis.md` §5 / M5-follow-up entry:
 //!
 //! > **Sibling sweep / new follow-up:** the BLAS summary recognizer
 //! > (`summarize_blas_helper_from_parts`) is still silent on near-eligible

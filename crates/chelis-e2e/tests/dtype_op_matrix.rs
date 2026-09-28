@@ -351,7 +351,7 @@ fn data_ptr_match_succeeds() {
 // ---- Cross-validation fixtures for PR 2 migrated ops --------------------
 //
 // Each op gets one fixture per semantically-meaningful precision per
-// Contract 3 of `docs/design/compiler_cleanup_0_7_8_spec_lock.md`.
+// Contract 3 of `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`.
 // The fixtures exercise the runtime function directly via its extern
 // symbol and assert byte-exact round-trip through the trait's typed
 // pointer.

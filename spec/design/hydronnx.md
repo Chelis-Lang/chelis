@@ -211,7 +211,10 @@ Hydronnx composes with other ongoing Chelis work; some phases benefit from featu
 
 **Dtype build-out.** Phase 2's operator translation requires f32, f64, i32, i64 to be working end-to-end. The current dtype work delivers these. Future dtype support (bf16, f16, i8, i16, quantized) extends hydronnx's operator coverage when those land.
 
-**IR architectural workstreams.** IR-FirstClassFn-F1, IR-SelectOp-F1, IR-MatchLowering-F1 don't strictly gate hydronnx, but some ONNX operators (If, Loop, Scan) won't translate cleanly until the IR work lands. The v0.1 spec excludes those operators; later versions add them as the IR work ships.
+**IR architectural workstreams.** First-class function values, compiled
+conditional selection, and ADT branch lowering do not strictly gate Hydronnx,
+but some ONNX operators (If, Loop, Scan) require that IR work. The v0.1 spec
+excludes those operators; later versions add them as the IR work ships.
 
 **Kernel authorship and MLIR backend.** Hydronnx ships without these dependencies. Performance is what it is until those land. Loaded models automatically benefit when the optimization infrastructure ships; no changes to hydronnx required.
 

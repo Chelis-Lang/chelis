@@ -62,7 +62,7 @@ enum BindingState {
 ///
 /// Replaces the string-prefix check on `ConsumeSite::description`
 /// (formerly at `read_or_error`) with a typed field. Phase 0 spec
-/// lock (`docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 1)
+/// lock (`spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md` Contract 1)
 /// pins this as two variants; tuple-destructure tmp bindings are
 /// handled as `Aliasing` (for the `let __chelis_tmp = (var ...)`
 /// shape) or `Structural` (for the `(tuple-get ...)` reads) by the
@@ -2146,7 +2146,7 @@ impl Checker {
         // remain hard errors here: once a value is truly gone,
         // borrow-reads of it would alias freed storage at runtime.
         //
-        // Linearity-F1 (`docs/gap_synthesis.md`) replaced the prior
+        // Linearity-F1 (PR #83) replaced the prior
         // string-prefix check on the description with this typed
         // discrimination via `ConsumeKind`.  The description text
         // stays for diagnostic rendering only.

@@ -9,7 +9,7 @@
 //! state was keyed by name only, so a structural consume on `alias`
 //! did not propagate to `x`'s scope entry. The V3 final red team
 //! filed this as `Linearity-AliasedConsume-F1` in
-//! `docs/gap_synthesis.md`. (Since chelis#1209, checker state is
+//! `docs/archive/reports/gap_synthesis.md`. (Since chelis#1209, checker state is
 //! keyed by per-binding generation id and the alias link stores the
 //! id it was taken against.)
 //!

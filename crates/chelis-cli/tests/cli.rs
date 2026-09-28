@@ -330,7 +330,7 @@ def main(x: tensor[2, f32]) -> tensor[2, f32] = double(x)
 
 #[test]
 fn cost_json_fixture_baseline_matches_documented_examples() {
-    let baseline_path = example_path("../../docs/copy_drop_fixture_fitness_baseline.json");
+    let baseline_path = example_path("tests/fixtures/copy_drop_fixture_fitness_baseline.json");
     let baseline: Value =
         serde_json::from_str(&fs::read_to_string(&baseline_path).expect("read baseline"))
             .expect("baseline json");

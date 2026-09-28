@@ -71,8 +71,8 @@ pub const CHELIS_DTYPE_KEY: chelis_dtype = RuntimeDType::Key.id() as chelis_dtyp
 // `<T>::data_ptr_unchecked` after an outer match on `(*t).dtype()`,
 // or through `<T>::data_ptr` when the dtype is not yet verified.
 //
-// See `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 2
-// for the locked surface. Each implementation uses the element type
+// See `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md` Contract 2
+// for the historical workstream contract. Each implementation uses the element type
 // that matches its `RuntimeDType::repr()` value.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

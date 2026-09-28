@@ -9,7 +9,7 @@ leading axes or non-uniform leading strides.
 **Filed:** 2026-05-08
 **Owning phase:** Phase 3h / language ergonomics
 **Discovered by:** Canonical heads-as-dimension MHA expressibility
-test (`docs/identified_gaps.md` Gap 4)
+test (`docs/archive/reports/identified_gaps.md` Gap 4)
 
 ## Summary
 

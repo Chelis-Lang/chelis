@@ -101,7 +101,7 @@ no fixture replacement.
 Per §2.3 of the plan, the surrounding `lower_unrepresentable` sites in
 `lower.rs` are also potential future workstreams. Recommendations,
 **not** §5 entries (orchestrator decides whether to file in
-`docs/gap_synthesis.md`):
+`docs/archive/reports/gap_synthesis.md`):
 
 | Gap                                       | Location               |
 |-------------------------------------------|------------------------|

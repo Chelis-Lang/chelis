@@ -382,7 +382,7 @@ def boundary_contract_errors() -> list[str]:
     )
     errors.extend(
         _forbid(
-            "docs/gap_synthesis.md",
+            "docs/archive/reports/gap_synthesis.md",
             ("signed `int32` / `int64`",),
         )
     )

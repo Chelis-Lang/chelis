@@ -7425,8 +7425,9 @@ impl<'a> HostEmitter<'a> {
     // `switch (target->dtype)` and read/write through typed pointer
     // casts in every arm.
     //
-    // Per `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract
-    // 2 the supported precisions are f32, f64, i32, i64, and bool.
+    // The original 0.7.8 workstream's supported precisions were f32,
+    // f64, i32, i64, and bool (see
+    // `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md` Contract 2).
     // Each arm selects an element type that matches its representation.
     // CHELIS_DTYPE_BOOL uses the canonical one-byte `uint8_t` payload.
     // CHELIS_DTYPE_F32 uses `(float*)`, CHELIS_DTYPE_I32 uses `(int32_t*)`,
