@@ -29,8 +29,10 @@ program through semantic checks and lowering. Successful checks produce a
 and root metadata. A rejected program cannot yield either success artifact.
 `chelis-compiler-api::pipeline` is the public facade. It prepares source and
 offers three goals: type analysis, full semantic checking, and lowering.
-Reef prepares and links package source before passing expanded Deep to this
-pipeline.
+For CLI file checks and builds, Reef links Surf declarations; the CLI passes
+them through the compiler API for desugaring and macro expansion. For
+`chelis reef build`, Reef expands linked declarations and uses the semantic
+core directly.
 
 `chelis-ir` owns the compact RISC DAG, transforms, verification, and the local
 evaluator. Backend preparation verifies the DAG and applies target-specific
