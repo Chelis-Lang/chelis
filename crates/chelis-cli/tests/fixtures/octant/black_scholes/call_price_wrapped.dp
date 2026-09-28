@@ -9,9 +9,7 @@
 ; `d_1`/`d_2`, and the local `normal_cdf` stub — is hand-authored because
 ; Octant currently emits each LaTeX equation as a top-level value
 ; binding and does not factor free vars into function parameters or
-; wrap multi-equation programs into a single function def. See
-; `spec/upstream-bugs/octant-no-function-def-emission.md` in the
-; Octant repo for the upstream tracking entry.
+; wrap multi-equation programs into a single function def.
 ;
 ; Type-shape choice (S6, post-step-6 rewrite): natural scalar
 ; `(t-prim {} f32)` throughout (parameters, locals, literals). This

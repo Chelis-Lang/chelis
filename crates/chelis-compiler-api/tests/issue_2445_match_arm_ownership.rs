@@ -168,3 +168,22 @@ fn an_as_pattern_keeps_its_constructor_in_the_selected_pass() {
         "a = 100\n",
     );
 }
+
+/// [04-PAT-2], chelis#2724: leaving the staged tensor candidate for host
+/// matching must not leak its initializer's ADT or a returned tuple/State.
+#[test]
+fn staged_initializer_and_resumed_state_finalize_every_owner() {
+    let source = include_str!("../../../examples/staged_adt_control.ch");
+    assert_balanced(
+        "initialized_state",
+        source,
+        "main = tensor(shape=[2, 1], data=[1.0, 2.0])\n",
+    );
+    let resumed = source.replace("(x, State { seed })", "(x, State { seed: add(seed, 1i64) })")
+        .replace("  pair.0", "  next = wrapped(pair.0, pair.1)\n  match next.1 with { | State { seed } => mul(next.0, insert(insert(scalar_to_tensor(cast(seed, f32)), 0i32, 2i64), 1i32, 1i64)) }");
+    assert_balanced(
+        "resumed_state",
+        &resumed,
+        "main = tensor(shape=[2, 1], data=[2.0, 4.0])\n",
+    );
+}

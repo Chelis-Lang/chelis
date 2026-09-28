@@ -386,12 +386,36 @@ all rebuild/import rows. The existing B2b-0 receipt proves seven named IR
 passes on transforming fixtures, not lowering-side `splice_dag`, imports or
 the new contract carrier. B2b-1 extends those tests before changing the carrier.
 
+##### Runtime List capture contributions (#2419)
+
+Check-free scalar List maps use `ListMapCapture`, separate from authored
+`Expand`. The first capture owns the invocation identity; later captures
+reference it through an ordinary remapped input edge. CSE preserves these
+identities. AD queues each callback consumer/input-slot column on the original
+shared scalar. `OrderedAdjointSum` interleaves columns by invocation row and
+orders entire invocations among outside consumers, then evaluates spec/06
+§2.4's single positive-zero-prefixed tree at the captured dtype. It never sums
+rows or columns separately. Both operations have exact [05-OP-55] numeric
+registrations and WireDag 21 representations. The invocation carrier's actual
+axis supplies allocation extent; result claims remain checked obligations.
+The wire group arities use sealed `NonnegativeCount` values and are validated
+against the contribution input count before a consumer slices any group.
+
+`issue_2419_range_tensor_ad` covers Eval/native C cancellation, repeated reads,
+outside consumers, distinct maps, recursive float parameters, inactive/empty
+rows and f16 rounding. Higher-order differentiation of the ordered accumulator
+and batching an existing invocation require further provenance and reject
+loudly; this is not closure of the recursive List/AD tracker #2515.
+
 ##### Mapped gradient entry witnesses and artifact closure (#1932)
 
 Ordinary `grad` closure does not discharge the mapped path. Before
 differentiation, `vmap(grad(f))` lowers the authored activation signature and
 forms its complete ordered entry-witness set exactly as the corresponding
-unmapped call does. Vectorization remaps each witness input, claim,
+unmapped call does. A constant body still retains one mapped formal as a
+shape-only dependency through AD pruning: its caller owns the symbolic batch
+extent even when the differentiated body never reads the formal's value.
+Vectorization remaps each witness input, claim,
 requirement, shape dependency and rendered dimension origin through the
 `vectorize_axis0_with_node_map` result. Cotangent packing and the final
 `splice_dag` retain those remapped dependencies even when the cotangent is
@@ -910,6 +934,20 @@ it into executable helpers; a helper's result metadata cannot reconstruct the
 lost provenance after a split. Existing native arithmetic lowering remains in
 place where it already carries the source correctly.
 
+The host/C bitwise family uses that same scalar extent contract after its
+Tier-2 lowering: every [05-OP-47] operation over a `shape()`-derived `i64`
+value, runtime scalar parameter, or computed scalar from an inline cast,
+helper call, or tensor conversion supplies a rank-zero integer node to
+`RtDim::Node`. Admission checks the lowered scalar result rather than the
+syntax of its operands. A reshape consumes
+the operation's exact result and observes its shift trap before allocation or
+claim checking. The bitwise result cannot fall through to an unresolved
+wildcard output dimension merely because it is not one of the static-fold
+arithmetic operations. Eval and compiled C execute all five bitwise kinds as
+computed reshape targets across direct, bound, and inline producer forms; the existing
+prepared/context and false-claim
+controls continue to check their host boundary.
+
 Stages execute at their original source positions. The preceding graph segment
 executes eager expressions even when their values are unused and exports only
 values required after the cut. A completion dependency retains that execution
@@ -945,6 +983,12 @@ identity into direct calls while respecting nested binders. Later shadowing cann
 retarget the call. Calls into staged definitions retain the shared plan instead of
 re-extracting a tensor-only helper. Host control boundaries are an explicit
 planner result, so a fallback cannot silently retry whole-function DAG lowering.
+A match whose scrutinee is an opaque host value, or whose selected pattern has
+a runtime guard, retains the complete match in host control before any arm is
+visited. The host evaluates the scrutinee once and executes only the selected
+arm under [04-PAT-2]; the staged attempt cannot hoist arm-local sources or
+reinterpret the host ADT as a static constructor. Static unguarded constructor
+selection continues to lower only its chosen arm.
 Random handlers retain host scope, each tensor segment consumes the live handled
 stream, and CSE preserves distinct activated draws.
 

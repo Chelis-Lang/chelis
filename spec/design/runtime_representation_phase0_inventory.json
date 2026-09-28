@@ -2062,7 +2062,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary",
-      "sample": "({et})chelis_int_checked_add((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {overflow:?})"
+      "sample": "({et})chelis_int_{op}((int64_t)({lhs}), (int64_t)({rhs}), {bits})"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary_func",
@@ -2234,7 +2234,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_builtin",
-      "sample": "float activation `{name}` resolved to non-float result type `{ty:?}`"
+      "sample": "{ind}chelis_tensor *{prefix}_{half} = chelis_alloc({out_rank}, {prefix}_shape, CHELIS_DTYPE_KEY);"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_checked_tensor_cast",
@@ -2662,7 +2662,7 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_builtin",
-      "sample": "`cast_trunc` resolved to {source:?} -> {target:?}; [05-OP-6] is float-to-integer only"
+      "sample": "{ind}int64_t {prefix}_shape[{}];"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_json_canonical_object_helpers",

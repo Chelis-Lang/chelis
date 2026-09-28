@@ -11,12 +11,8 @@
 //!
 //! ## Two emission contexts
 //!
-//! - [`sanitize_for_comment`] — the canonical helper for any producer-
-//!   supplied string interpolated into a `// ...` line comment. Originally
-//!   built for the `// span: <id>` site; today it is the architectural
-//!   shared sanitizer for every `format!("// ... {x}", ...)` callsite
-//!   where `x` is producer-supplied. See
-//!   `spec/upstream-bugs/producer-string-sanitization.md`.
+//! - [`sanitize_for_comment`] — for producer-supplied strings
+//!   interpolated into `// ...` line comments.
 //! - [`sanitize_for_format_string`] — for producer-supplied strings
 //!   interpolated into a C/HIP `printf`/`fprintf` format string at compile
 //!   time (i.e., into the format itself, not as a `%s` runtime argument).
@@ -26,13 +22,9 @@
 //!
 //! ## Verbatim-preservation contract
 //!
-//! The contract for a clean span ID. Every code point allowed by the
-//! spec. Is **verbatim preservation**. Audit invariant: the `// span:
-//! <id>` text in generated C / HIP / Metal source is byte-identical to the
-//! span ID a customer sees in the upstream `.spans.json` sidecar for any
-//! well-behaved input. [`sanitize_for_comment`] returns `Cow::Borrowed`
-//! in that case, both as a zero-copy fast path and as an enforcement of
-//! the invariant. Clean spans are not rewritten.
+//! A clean span ID is preserved verbatim. The `// span: <id>` text in
+//! generated C, HIP, and Metal source matches the ID in `.spans.json`.
+//! [`sanitize_for_comment`] returns `Cow::Borrowed` in this case.
 //!
 //! For forbidden code points, each is replaced with its canonical
 //! backslash-escape (`\n` for U+000A LF, `\r` for U+000D CR, `\0` for
@@ -86,9 +78,7 @@ fn escape_forbidden(b: u8) -> String {
 /// producer-supplied string (span IDs, IR identifier-derived names, type
 /// names, anything else flowing through from upstream) should route the
 /// interpolated value through this function first. The contract is
-/// agnostic to the source field. The parameter name `s` (formerly
-/// `span`) reflects the broadened scope per
-/// `spec/upstream-bugs/producer-string-sanitization.md`.
+/// agnostic to the source field.
 ///
 /// Returns `Cow::Borrowed(s)` (zero-copy) when `s` contains no
 /// forbidden code points. This is the common case (well-formed Deep
@@ -186,8 +176,6 @@ fn escape_forbidden_in_format_string(b: u8) -> String {
 /// strictly format-time interpolation; runtime-data is safe by virtue
 /// of `%s` substitution itself.
 ///
-/// See `spec/upstream-bugs/producer-string-sanitization.md` for the
-/// architectural rule.
 pub fn sanitize_for_format_string(s: &str) -> Cow<'_, str> {
     let needs_escape = s
         .as_bytes()

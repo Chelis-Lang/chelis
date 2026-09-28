@@ -727,6 +727,27 @@ pub struct ExtentClaim {
 /// A RISC primitive operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RiscOp {
+    /// [05-OP-54]: a tensor carrier for the half-open i64 `range(start, end)`.
+    /// Inputs are two exact rank-zero i64 values; output is rank-one i64.
+    /// The runtime length is max(end-start, 0), checked in mathematical
+    /// integers before allocation. Integer endpoints have no cotangent.
+    Iota,
+    /// A scalar lexical read in a runtime List map. The first capture is the
+    /// invocation identity and reads its rank-one carrier in input 1. Later
+    /// captures name that first capture in input 1. CSE preserves identities.
+    /// Input 1's first axis supplies the result length in either case.
+    /// Unlike authored Expand, AD retains each consumer edge until it reaches
+    /// input 0, interleaving edges by invocation row before accumulation.
+    ListMapCapture {
+        first: bool,
+    },
+    /// spec/06 §2.4's positive-zero-prefixed, own-dtype adjacent-pair tree.
+    /// Each group consumes this many consecutive inputs. Rank-one inputs in
+    /// one group are interleaved row first, then input order; a scalar group
+    /// has exactly one input. Groups follow canonical forward order.
+    OrderedAdjointSum {
+        groups: Vec<usize>,
+    },
     // --- Binary elementwise ---
     Add,
     /// Direct element-wise subtraction. Integer execution checks the exact
@@ -758,6 +779,8 @@ pub enum RiscOp {
     /// Exact signed remainder, with DivZero traps at the stored width
     /// and dividend-sign semantics under [05-OP-64].
     Mod,
+    /// Exact signed-width [05-OP-47] operation.
+    Bitwise(chelis_types::BitwiseKind),
     /// Identity-preserving comparison with Bool output ([05-OP-36]).
     Compare(ComparisonKind),
     /// Bool-only eager logical operation ([05-OP-26..28]).
@@ -1255,6 +1278,11 @@ pub enum RiscAtomIdentity {
     FloorDiv,
     TruncDiv,
     Mod,
+    BitAnd,
+    BitOr,
+    BitXor,
+    ShiftLeft,
+    ShiftRight,
     CmpLt,
     Lt,
     Eq,
@@ -1330,6 +1358,11 @@ impl RiscAtomIdentity {
         Self::FloorDiv,
         Self::TruncDiv,
         Self::Mod,
+        Self::BitAnd,
+        Self::BitOr,
+        Self::BitXor,
+        Self::ShiftLeft,
+        Self::ShiftRight,
         Self::CmpLt,
         Self::Lt,
         Self::Eq,
@@ -1405,6 +1438,11 @@ impl RiscAtomIdentity {
             Self::FloorDiv => "floor_div",
             Self::TruncDiv => "trunc_div",
             Self::Mod => "mod",
+            Self::BitAnd => "bitand",
+            Self::BitOr => "bitor",
+            Self::BitXor => "bitxor",
+            Self::ShiftLeft => "shl",
+            Self::ShiftRight => "shr",
             Self::CmpLt => "cmplt",
             Self::Lt => "lt",
             Self::Eq => "eq",
@@ -1547,6 +1585,13 @@ impl RiscOp {
             Self::FloorDiv => Semantic(Id::FloorDiv),
             Self::TruncDiv => Semantic(Id::TruncDiv),
             Self::Mod => Semantic(Id::Mod),
+            Self::Bitwise(kind) => Semantic(match kind {
+                chelis_types::BitwiseKind::And => Id::BitAnd,
+                chelis_types::BitwiseKind::Or => Id::BitOr,
+                chelis_types::BitwiseKind::Xor => Id::BitXor,
+                chelis_types::BitwiseKind::ShiftLeft => Id::ShiftLeft,
+                chelis_types::BitwiseKind::ShiftRight => Id::ShiftRight,
+            }),
             Self::Compare(kind) => Semantic(match kind {
                 ComparisonKind::CmpLt => Id::CmpLt,
                 ComparisonKind::Lt => Id::Lt,
@@ -1620,7 +1665,10 @@ impl RiscOp {
             // preconditions under [04-NUM-9], not callable Table-A operations.
             // Its tagged requirements and shape-only dependency are checked
             // by the IR verifier and the runtime-extent oracle.
-            Self::ExtentWitness { .. }
+            Self::ListMapCapture { .. }
+            | Self::OrderedAdjointSum { .. }
+            | Self::Iota
+            | Self::ExtentWitness { .. }
             | Self::CheckedReshapeExtent { .. }
             | Self::CheckedUnitAxis { .. }
             | Self::OneHot { .. }
@@ -1967,7 +2015,7 @@ impl RiscOp {
             // `Floor`/`Ceil`/`Round` they have a step-function envelope,
             // but the integer-quotient semantics are not part of the
             // pinned real-valued forward-bound surface today.
-            RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => false,
+            RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod | RiscOp::Bitwise(_) => false,
 
             // [05-OP-6] `cast_trunc` is the same shape as the integer
             // quotients above: piecewise constant with an integer output,
@@ -1980,7 +2028,10 @@ impl RiscOp {
             // index; it is an internal lowering marker (dag.rs) consumed
             // before backend emission and is not part of the numeric
             // forward-bound surface.
-            RiscOp::OneHot { .. } => false,
+            RiscOp::OneHot { .. }
+            | RiscOp::Iota
+            | RiscOp::ListMapCapture { .. }
+            | RiscOp::OrderedAdjointSum { .. } => false,
 
             // `Shape` reads a runtime axis extent as a discrete integer
             // scalar derived from tensor metadata, not a bound over the
@@ -2253,10 +2304,15 @@ impl DagNode {
             }
         };
         match &self.op {
+            RiscOp::Iota => RuntimeCheck::OperandValues,
+            RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
+                RuntimeCheck::Ungated
+            }
             RiscOp::Add | RiscOp::Sub | RiscOp::Mul | RiscOp::Neg | RiscOp::Abs => {
                 value_check(integer)
             }
             RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => value_check(integer),
+            RiscOp::Bitwise(kind) => value_check(kind.is_shift()),
             // Float-only since chelis#178; its one float check is a lowered
             // `mean`'s count, which the node alone cannot tell apart.
             RiscOp::Div if integer => RuntimeCheck::OperandValues,
@@ -3176,6 +3232,18 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
         name.is_empty() || name == "*"
     }
     match &node.op {
+        RiscOp::ListMapCapture { .. } => match node.output_type.dims.first() {
+            Some(DimInfo::Named(symbol, None))
+                if !is_anon(symbol) && shape_source_for_axis(dag, node.id, 0).is_none() =>
+            {
+                vec![(symbol.clone(), 0)]
+            }
+            _ => Vec::new(),
+        },
+        RiscOp::Iota => match node.output_type.dims.first() {
+            Some(DimInfo::Named(symbol, None)) if !is_anon(symbol) => vec![(symbol.clone(), 0)],
+            _ => Vec::new(),
+        },
         RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => node
             .output_type
             .dims
@@ -3242,6 +3310,7 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
 /// `axis_sources::check_rendered_dim_origins` refuses.
 pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
     match &node.op {
+        RiscOp::Iota | RiscOp::ListMapCapture { .. } => vec![0],
         RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => {
             (0..node.output_type.dims.len())
                 .filter(|axis| shape_source_for_axis(dag, node.id, *axis).is_none())
@@ -4644,6 +4713,7 @@ mod tests {
             RiscOp::FloorDiv,
             RiscOp::TruncDiv,
             RiscOp::Mod,
+            RiscOp::Bitwise(chelis_types::BitwiseKind::And),
             RiscOp::Compare(ComparisonKind::Eq),
             RiscOp::Logical(LogicalKind::And),
             RiscOp::Where,
@@ -4956,8 +5026,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            66,
-            "one_of_every_risc_op must list all 66 classified samples"
+            67,
+            "one_of_every_risc_op must list all 67 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -4989,7 +5059,7 @@ mod tests {
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 32,
+            excluded, 33,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -5059,6 +5129,10 @@ mod tests {
             RiscOp::Compare(ComparisonKind::Lte),
             RiscOp::Logical(LogicalKind::Or),
             RiscOp::Logical(LogicalKind::Not),
+            RiscOp::Bitwise(chelis_types::BitwiseKind::Or),
+            RiscOp::Bitwise(chelis_types::BitwiseKind::Xor),
+            RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftLeft),
+            RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftRight),
         ]);
         discovery_cases.extend(
             [

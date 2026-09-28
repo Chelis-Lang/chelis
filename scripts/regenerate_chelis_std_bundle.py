@@ -29,6 +29,8 @@ Flags:
             five-output set to equal the first pass and the two passes to
             equal each other, then restore the exact committed bytes.
 
+The script honors CARGO_TARGET_DIR when it locates the built chelis binary.
+
 Exit codes:
   0  success (artifacts up-to-date or successfully regenerated)
   1  build/copy failed; stderr carries the underlying tool output.
@@ -75,6 +77,14 @@ def chelis_std_version(repo: Path) -> str:
     with manifest_path.open("rb") as f:
         manifest = tomllib.load(f)
     return manifest["package"]["version"]
+
+
+def cargo_target_dir(repo: Path) -> Path:
+    """Resolve Cargo's target directory against the repository root."""
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", repo / "target"))
+    if not target_dir.is_absolute():
+        target_dir = repo / target_dir
+    return target_dir
 
 
 def owned_generated_outputs(repo: Path, version: str) -> tuple[Path, ...]:
@@ -159,7 +169,7 @@ def regenerate(repo: Path, *, debug: bool, show_diff: bool = True) -> int:
         print("ERROR: cargo build failed", file=sys.stderr)
         return 1
 
-    chelis_bin = repo / "target" / profile_dir / "chelis"
+    chelis_bin = cargo_target_dir(repo) / profile_dir / "chelis"
     if not chelis_bin.is_file():
         print(
             f"ERROR: chelis binary not found at {chelis_bin} after build",
@@ -170,7 +180,7 @@ def regenerate(repo: Path, *, debug: bool, show_diff: bool = True) -> int:
     # Step 2: build chelis-std as a reef package. The build emits
     # packages/chelis-std/dist/chelis-std-<version>.{tar.zst,chb}.
     print(
-        f"[2/6] {chelis_bin.relative_to(repo)} reef build packages/chelis-std/",
+        f"[2/6] {chelis_bin} reef build packages/chelis-std/",
         file=sys.stderr,
     )
     rc = subprocess.run(

@@ -708,10 +708,6 @@ NON_GATE_WORKFLOWS = {
     # It runs nothing the per-PR gate owns and never runs on PR/push, so it
     # is out of the gate.py quartet scope by design.
     "ecosystem-drift.yml",
-    # LOC report moved out of ci.yml's per-merge path into its own weekly
-    # scheduled workflow; it commits a docs/loc_report.md bot commit and runs
-    # nothing the per-PR gate owns, so it is out of gate.py scope by design.
-    "loc-report.yml",
     # Producer for the durable prebuilt-cvc5 Release asset the smt lanes LINK
     # (scripts/ci_cvc5_cache.py). Builds cvc5 from source and publishes a
     # Release; it runs no cargo/chelis command the per-PR gate owns, only on a
@@ -3886,23 +3882,21 @@ class IntegrationPlanHandoffTests(unittest.TestCase):
 
 class DocsOnlySkipTests(unittest.TestCase):
     """chelis#419: heavy jobs skip on docs-only PRs via a JOB-LEVEL `if`
-    keyed on the `changes` job output, never `paths-ignore` (a path-
-    filtered required check hangs pending forever -> merge deadlock). A
-    skipped required job reports its context as success, so the skip
-    direction is safe; the `if` must also fail SAFE (run the heavy job)
-    when the `changes` job did not succeed, or a broken detector would
-    silently skip the gate on a code PR."""
+    keyed on `changes`; the Python distribution lane is an explicit exception.
+    A skipped required check reports success, so only that consumer lane runs
+    on docs-only changes, and its aggregate requires the consumer result."""
 
     # Jobs that must skip on a docs-only PR.
     HEAVY_GATED_JOBS = {
         "lint-rust",
-        "script-unit",
         "ci-fast",
         "integration-plan",
         "backend-sanitizers",
         "smt-build",
         "smt-build-glibc231",
     }
+    # The hosted Python consumer is required even when the change is docs-only.
+    DOCS_ONLY_RUN_JOBS = {"script-unit"}
     # These workers inherit the docs-only disposition through a required
     # upstream job rather than reading `docs_only` directly.
     DEPENDENCY_GATED_JOBS = {"change-owned-shard"}
@@ -3982,6 +3976,43 @@ class DocsOnlySkipTests(unittest.TestCase):
                 cond,
                 f"'{job}' if must include !cancelled(): {cond!r}",
             )
+
+    def test_python_distribution_lane_runs_on_docs_only_changes(self):
+        attrs = _parse_job_attrs()
+        condition = attrs["script-unit"].get("if", "")
+        self.assertIn("needs.changes.outputs.docs_only == 'true'", condition)
+        self.assertIn(
+            "needs.changes.outputs.candidate_preflight == 'success'",
+            condition,
+        )
+        self.assertIn("script-unit", self.DOCS_ONLY_RUN_JOBS)
+
+        block = _ci_job_block("script-unit")
+        self.assertIn("|| 'ubuntu-latest'", block)
+        self.assertIn(
+            "CARGO_TARGET_DIR: ${{ github.workspace }}/target/python-wheel-smoke/cargo",
+            block,
+        )
+        smoke = _ci_step_block(block, "Build and exercise Python distributions")
+        self.assertIn("python bindings/python/tests/python_wheel_smoke.py", smoke)
+        self.assertIn("--crossed-bundle", smoke)
+        self.assertIn('--receipt "$CARGO_TARGET_DIR/wheel-smoke.json"', smoke)
+        upload = _ci_step_block(block, "Upload Python distribution evidence")
+        self.assertIn("if: always()", upload)
+        self.assertIn("wheel-smoke-failures/**", upload)
+
+    def test_lint_aggregate_requires_docs_only_distribution_lane(self):
+        attrs = _parse_job_attrs()
+        condition = attrs["lint-and-unit"].get("if", "")
+        self.assertIn("needs.changes.outputs.docs_only == 'true'", condition)
+        step = _ci_step_block(
+            _ci_job_block("lint-and-unit"),
+            "Require the selected lint and unit frontier",
+        )
+        self.assertIn('if [ "$DOCS_ONLY" != "true" ]', step)
+        self.assertIn('args+=("lint-rust=${{ needs.lint-rust.result }}")', step)
+        self.assertIn('[ "$DOCS_ONLY" = "true" ]; then', step)
+        self.assertIn('args+=("script-unit=${{ needs.script-unit.result }}")', step)
 
     def test_change_owned_worker_inherits_the_docs_disposition(self):
         attrs = _parse_job_attrs()
@@ -4186,14 +4217,14 @@ class DocsOnlySkipTests(unittest.TestCase):
             | self.HEAVY_REPORT_JOBS
             | self.CHANGE_GATED_JOBS
             | self.IMPLEMENTATION_ALWAYS_RUN_JOBS
+            | self.DOCS_ONLY_RUN_JOBS
             | self.ALWAYS_RUN_JOBS
         )
         unclassified = set(attrs) - classified
         self.assertEqual(
             unclassified,
             set(),
-            f"ci.yml job(s) {unclassified} are not classified docs-only-"
-            f"skip vs always-run; decide explicitly (chelis#419)",
+            f"skip, docs-only-run, or always-run; decide explicitly (chelis#419)",
         )
 
 

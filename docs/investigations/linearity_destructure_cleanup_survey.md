@@ -3,7 +3,7 @@
 Owning plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`,
 "Wave 2 — Linearity cascade cleanup" (sections W2-cascade.1 / .2 / .3).
 
-Phase 0 spec lock: `docs/design/compiler_cleanup_0_7_8_spec_lock.md`
+Phase 0 spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`
 Contract 1 (typed `ConsumeKind`) and the F3 deprecation-window
 reference at `docs/investigations/linearity_f3_pr2_closeout.md`.
 
@@ -118,10 +118,10 @@ upgrade to a chelis release that includes this cascade.
 ## References
 
 - Plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`
-- Phase 0 spec lock: `docs/design/compiler_cleanup_0_7_8_spec_lock.md`
+- Phase 0 spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`
 - W1 diagnosis: `docs/investigations/linearity_typed_consumekind_diagnosis.md`
 - F3 closeout reference: `docs/investigations/linearity_f3_pr2_closeout.md`
-- §5 entry: `docs/gap_synthesis.md` row for `Linearity-F2`
+- §5 entry: `docs/archive/reports/gap_synthesis.md` row for `Linearity-F2`
 - Survey driver: `crates/chelis-cli/tests/linearity_destructure_corpus_survey.rs`
   (lived during W2-cascade.1; removed in W2-cascade.3 alongside the
   warnings channel)

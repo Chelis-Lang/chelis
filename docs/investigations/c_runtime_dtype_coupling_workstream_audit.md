@@ -94,7 +94,7 @@ cast+arithmetic composition matrix at
 
 ### Single-op accessor matrix (precisions × ops)
 
-Per Contract 3 of `docs/design/compiler_cleanup_0_7_8_spec_lock.md`,
+Per Contract 3 of `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`,
 the supported precisions are `f32, f64, i32, i64, bool`; bf16, f16,
 i8, i16 are out of scope per the open-questions resolution in
 Phase 0 (PR #79).
@@ -216,7 +216,7 @@ the default `cargo test --workspace` path; no manual gate is required.
 
 After this PR merges, the orchestrator should:
 
-1. Mark `CRuntime-F32Coupling` as Closed in `docs/gap_synthesis.md`,
+1. Mark `CRuntime-F32Coupling` as Closed in `docs/archive/reports/gap_synthesis.md`,
    citing this audit note.
 2. Leave `CRuntime-I32Storage-F1`, `CRuntime-BoolStorage-F1`, and
    `CRuntime-I8I16-F1` Open (no work this workstream; surface-when-forced).

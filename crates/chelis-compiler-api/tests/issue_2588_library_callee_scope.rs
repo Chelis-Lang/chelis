@@ -27,7 +27,7 @@ fn eval_root(client: &str, root: &str) -> EvalResult {
     std::fs::write(
         directory.path().join("reef.toml"),
         format!(
-            "[package]\nname = \"library_scope\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
+            "[package]\nname = \"library-scope\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
         ),
     )
     .unwrap();

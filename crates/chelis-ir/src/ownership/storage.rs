@@ -714,7 +714,10 @@ fn classify_nodes(
                         source: node.inputs[0],
                     },
                 },
-                RiscOp::Const { .. }
+                RiscOp::ListMapCapture { .. }
+                | RiscOp::OrderedAdjointSum { .. }
+                | RiscOp::Iota
+                | RiscOp::Const { .. }
                 | RiscOp::ConstTensor { .. }
                 | RiscOp::Shape { .. }
                 | RiscOp::ExtentWitness { .. }
@@ -727,6 +730,7 @@ fn classify_nodes(
                 | RiscOp::FloorDiv
                 | RiscOp::TruncDiv
                 | RiscOp::Mod
+                | RiscOp::Bitwise(_)
                 | RiscOp::Compare(_)
                 | RiscOp::Logical(_)
                 | RiscOp::Where

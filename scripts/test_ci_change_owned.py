@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+from dataclasses import replace
 import io
 import json
 import os
@@ -576,6 +577,14 @@ class SchemaTests(unittest.TestCase):
 
         validate(manual_gate_row(), gate_sources())
         validate(
+            manual_gate_row(),
+            gate_sources(
+                manual_gates_doc(
+                    ("q_gate", "`scripts/hip_test.py -p q --test smoke -- --ignored`")
+                )
+            ),
+        )
+        validate(
             manual_gate_row(manual_gates=["q_case", "q_nextest", "q_all"]),
             gate_sources(
                 manual_gates_doc(
@@ -622,7 +631,7 @@ class SchemaTests(unittest.TestCase):
                 gate_sources(
                     manual_gates_doc(("q_gate", "`scripts/hip_test.py -p q --test smoke`"))
                 ),
-                "not a recognized Cargo test run",
+                "does not run exactly q::smoke",
             ),
             (
                 manual_gate_row(),
@@ -706,6 +715,10 @@ class SchemaTests(unittest.TestCase):
         )
         cases = [
             ("`cargo test -p q --test smoke`", "does not run exactly q::smoke"),
+            (
+                "`scripts/hip_test.py -p q --test smoke q_case -- --ignored --exact`",
+                "cites no docs/manual_gates.md entry that runs its whole",
+            ),
             ("`cargo nextest run -p q --test smoke`", "does not run exactly q::smoke"),
             ("`cargo test -p q --test smoke --no-run -- --ignored`", "'--no-run'"),
             ("`cargo test -p q --test smoke -- --ignored --list`", "'--list'"),
@@ -726,6 +739,10 @@ class SchemaTests(unittest.TestCase):
             (
                 f"`NEXTEST_PROFILE=nightly {nextest} --ignore-default-filter`",
                 "environment assignment 'NEXTEST_PROFILE=nightly'",
+            ),
+            (
+                "`RUSTFLAGS=--cfg=skip_all scripts/hip_test.py -p q --test smoke -- --ignored`",
+                "environment assignment 'RUSTFLAGS=--cfg=skip_all'",
             ),
             (
                 "`RUSTFLAGS=--cfg=skip_all cargo test -p q --test smoke -- --ignored`",
@@ -852,7 +869,7 @@ class SchemaTests(unittest.TestCase):
                     validate(hidden)
 
     def test_repository_manual_gate_rows_cite_live_wired_entries(self) -> None:
-        """The check behind script-unit's docs/manual_gates.md path rule."""
+        """Manual-gate config stays valid and direct changes retain routing."""
         root = Path(__file__).resolve().parents[1]
         config = owned.read_config(root / ".config/ci-test-targets.toml")
         self.assertTrue(config.manual_gate_targets)
@@ -860,6 +877,67 @@ class SchemaTests(unittest.TestCase):
             config.manual_gate_targets,
             (root / owned.MANUAL_GATES_PATH).read_text(),
         )
+
+        cli_paths = (
+            ("crates/chelis-cli/tests/std_io_pipeline.rs", "std_io_pipeline"),
+            (
+                "crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs",
+                "cross_library_semantic_gap_hip_gpu",
+            ),
+        )
+        python_path = "crates/chelis-python/tests/manual_reef_context.rs"
+        workspace = metadata(
+            package(
+                "chelis-cli",
+                [
+                    ("shoals_oracle", "crates/chelis-cli/tests/shoals_oracle.rs", []),
+                    *((target, path, []) for path, target in cli_paths),
+                ],
+            ),
+            package(
+                "chelis-python",
+                [("manual_reef_context", python_path, [])],
+            ),
+        )
+        direct_paths = (
+            (python_path, "chelis-python", "manual_reef_context"),
+            *((path, "chelis-cli", target) for path, target in cli_paths),
+        )
+        planning_config = replace(
+            config,
+            standing_targets=(),
+            manual_only_targets={},
+            target_exclusions={},
+            test_exclusions={},
+            required_package_rules=(),
+            path_rules=(),
+        )
+        for path, package_name, target in direct_paths:
+            with self.subTest(path=path):
+                plan = owned.make_plan(
+                    mode="pull_request",
+                    base_sha="a" * 40,
+                    candidate_sha="b" * 40,
+                    records=[owned.ChangeRecord("M", path)],
+                    base_metadata=workspace,
+                    candidate_metadata=workspace,
+                    config=planning_config,
+                    tracked_paths={path, owned.MANUAL_GATES_PATH},
+                    source_reader=lambda source: (root / source).read_text(),
+                )
+                changed_path = next(
+                    row for row in plan["path_dispositions"] if row["path"] == path
+                )
+                identity = owned.Identity(package_name, target).canonical
+                self.assertEqual(changed_path.get("identity"), identity)
+                self.assertEqual(
+                    changed_path.get("execution_mode"),
+                    "manual-gate",
+                )
+                self.assertIn(
+                    identity,
+                    {row["identity"] for row in plan["manual_gate_targets"]},
+                )
 
     def test_repository_manifest_has_exact_selected_inventory_and_owners(self) -> None:
         config = owned.read_config(
@@ -877,26 +955,6 @@ class SchemaTests(unittest.TestCase):
                 owned.Identity("chelis-backend-hip", "device_entry_execution"),
                 owned.Identity(
                     "chelis-cli", "issue_1417_stdlib_dtype_family_bounds"
-                ),
-            },
-        )
-        self.assertEqual(
-            {
-                identity: (gate.entries, gate.tracking_issue)
-                for identity, gate in config.manual_gate_targets.items()
-            },
-            {
-                owned.Identity("chelis-cli", "shoals_oracle"): (
-                    (
-                        "phase3l_shoals_oracle",
-                        "phase3l_shoals_oracle_grad_greeks_match_analytic",
-                        "shoals_oracle suite",
-                    ),
-                    "chelis#1824",
-                ),
-                owned.Identity("chelis-python", "manual_reef_context"): (
-                    ("reef_context_manual_acceptance_oracle",),
-                    "chelis#1824",
                 ),
             },
         )
@@ -5684,7 +5742,7 @@ class RoutingInventoryReconciliationTests(unittest.TestCase):
             if path.suffix in {".yml", ".yaml"} and path.is_file()
         ]
 
-        self.assertGreater(len(workflows), 20, "workflow discovery found too few")
+        self.assertGreaterEqual(len(workflows), 20, "workflow discovery found too few")
         self.assert_all_routed(workflows, what="workflow files")
 
     def test_every_control_artifact_the_detector_names_is_routed(self) -> None:

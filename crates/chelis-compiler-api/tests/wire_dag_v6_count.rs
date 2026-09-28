@@ -93,7 +93,7 @@ fn assert_contract_rejects_encode_and_decode(dag: &WireDag, expected: &str) {
 
 #[test]
 fn current_wire_dag_count_round_trips_canonical_axes() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 19);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 21);
     let dag = count_dag(vec![2, 0]);
     let json = serde_json::to_string(&dag).expect("canonical Count must encode");
     assert!(json.contains(&format!(r#""schema_version":{WIRE_DAG_SCHEMA_VERSION}"#)));
@@ -122,8 +122,16 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
             Some(18),
         ),
         (
+            r#"{"schema_version":19,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
+            Some(19),
+        ),
+        (
             r#"{"schema_version":20,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
             Some(20),
+        ),
+        (
+            r#"{"schema_version":22,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
+            Some(22),
         ),
     ];
 
@@ -156,7 +164,7 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
         );
     }
 
-    let current_unknown = r#"{"schema_version":19,"declarations":["entry"],"nodes":[{"id":0,"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#;
+    let current_unknown = r#"{"schema_version":21,"declarations":["entry"],"nodes":[{"id":0,"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#;
     assert!(matches!(
         WireDag::from_validated_json(current_unknown),
         Err(WireDagDecodeError::Parse(_))

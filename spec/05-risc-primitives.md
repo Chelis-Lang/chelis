@@ -1081,8 +1081,6 @@ path.
 | `split_keys` | `(key, i64) -> tensor[n, key]`; `(tensor[D,key], i64) -> tensor[D ++ [n],key]` | `n` child keys ([05-OP-71]); `n` is the count's extent under spec/04 §4.7.2 |
 | `fold_in` | `(key, i64) -> key`; `(tensor[D,key], tensor[D,i64]) -> tensor[D,key]` | The child key of an integer ([05-OP-72]) |
 
-(The tensor forms are not fully implemented; see chelis#2656.)
-
 > **[05-RNG-2]** A key is a 64-bit word. For a key `k` and a 64-bit word
 > `j`, `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`, where
 > `rotl64(x, r)` rotates `x` left by `r` bits modulo `2^64` and `splitmix64`
@@ -3317,6 +3315,8 @@ path even though bare `round` under `grad` remains a structural
 > interpretation differs from an unbounded arithmetic result.
 >
 > Adjoint: These discrete operations structurally reject differentiation.
+> A bitwise expression independent of the selected differentiated parameters
+> remains an executed forward coefficient; no adjoint is demanded of it.
 >
 > Accumulator: None.
 

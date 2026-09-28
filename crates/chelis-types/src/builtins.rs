@@ -306,6 +306,118 @@ pub enum BuiltinSiblingCaseId {
     EqRecursive,
     NeqRecursive,
 }
+/// Whether a nonnumeric builtin equates stored values or actually invokes a
+/// callback. Exhaustive over the closed semantic cases: a new case must decide
+/// its equality role before it compiles. Numeric-only cases cannot contain
+/// callable values and have no aggregate equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValueEquality {
+    Aggregate(AggregateRule),
+    CallbackApplication,
+    NoAggregateEquality,
+}
+
+/// Aggregate equality is decided with an immutable substitution and returned
+/// as a ResultConstraint. Only the origin replay may bind its variables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AggregateRule {
+    Append,
+    Concat,
+    DictInsert,
+    DictMerge,
+    Fold,
+    Scan,
+}
+
+pub(crate) const fn case_value_equality(case: BuiltinSiblingCaseId) -> ValueEquality {
+    use BuiltinSiblingCaseId as Case;
+    match case {
+        Case::FoldList => ValueEquality::Aggregate(AggregateRule::Fold),
+        Case::ScanList => ValueEquality::Aggregate(AggregateRule::Scan),
+        Case::AppendList => ValueEquality::Aggregate(AggregateRule::Append),
+        Case::ConcatList => ValueEquality::Aggregate(AggregateRule::Concat),
+        Case::DictInsert => ValueEquality::Aggregate(AggregateRule::DictInsert),
+        Case::DictMerge => ValueEquality::Aggregate(AggregateRule::DictMerge),
+        Case::MapList
+        | Case::FilterList
+        | Case::TensorScan
+        | Case::PartitionList
+        | Case::FlatMapList => ValueEquality::CallbackApplication,
+        Case::PrintRecursive
+        | Case::FailString
+        | Case::DebugRecursive
+        | Case::TestAssertBool
+        | Case::TestAssertEq
+        | Case::TestAssertEqTensor
+        | Case::TestAssertCloseTensor
+        | Case::ReadFile
+        | Case::WriteFile
+        | Case::ReadLines
+        | Case::ReadBytes
+        | Case::FileExists
+        | Case::ListDir
+        | Case::MmapFile
+        | Case::MmapRead
+        | Case::MmapLen
+        | Case::ProcessRun
+        | Case::ParseCsv
+        | Case::ToCsv
+        | Case::CsvF64s
+        | Case::CsvInts
+        | Case::CsvStrs
+        | Case::CsvNrows
+        | Case::CsvCols
+        | Case::CsvF64
+        | Case::CsvInt
+        | Case::CsvStr
+        | Case::CharCode
+        | Case::CharFromCode
+        | Case::StringLen
+        | Case::StringConcat
+        | Case::StringSlice
+        | Case::StringContains
+        | Case::StringStartsWith
+        | Case::StringEndsWith
+        | Case::StringTrim
+        | Case::ToStringUnit
+        | Case::ToStringScalar
+        | Case::ToStringTensor
+        | Case::ToStringList
+        | Case::ToStringTuple
+        | Case::ToStringDict
+        | Case::ToStringOption
+        | Case::ToStringAdt
+        | Case::ToStringFunction
+        | Case::ToInt
+        | Case::ToFloat
+        | Case::LenList
+        | Case::LenDict
+        | Case::IndexList
+        | Case::ConcatTensors
+        | Case::TakeList
+        | Case::SkipList
+        | Case::DropValue
+        | Case::ChunkList
+        | Case::RangeList
+        | Case::FlattenList
+        | Case::ZipList
+        | Case::EnumerateList
+        | Case::DictOf
+        | Case::DictGet
+        | Case::DictContains
+        | Case::DictRemove
+        | Case::DictKeys
+        | Case::DictValues
+        | Case::DictEntries
+        | Case::ToTensorList
+        | Case::ToListTensor
+        | Case::PadSequences
+        | Case::PadSequencesTo
+        | Case::SplitTensor
+        | Case::EqRecursive
+        | Case::NeqRecursive => ValueEquality::NoAggregateEquality,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BuiltinSiblingCaseDecl {
@@ -1140,27 +1252,26 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
-    // [05-OP-69]..[05-OP-72]: the random key operations. Each scheme is
-    // monomorphic in its key and count operands, and the affine key rule
-    // ([04-LIN-9]) is the linearity checker's, not the signature's.
+    // [05-OP-69]..[05-OP-72]: schemes carry the scalar/tensor relation;
+    // the affine key rule ([04-LIN-9]) is the linearity checker's.
     BuiltinDecl {
         name: "key_from_seed",
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::GenericAccepted {
-            reason: "the monomorphic signature (i64) -> key fully determines this builtin type",
+            reason: "the transported key-operation relation determines scalar and tensor forms",
         },
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::OrderedPrefix,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "split_key",
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::GenericAccepted {
-            reason: "the monomorphic signature (key) -> (key, key) fully determines this builtin type",
+            reason: "the transported key-operation relation determines scalar and tensor forms",
         },
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::OrderedPrefix,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1168,17 +1279,17 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::OrderedPrefix,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "fold_in",
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::GenericAccepted {
-            reason: "the monomorphic signature (key, i64) -> key fully determines this builtin type",
+            reason: "the transported key-operation relation determines scalar and tensor forms",
         },
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::OrderedPrefix,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2291,6 +2402,10 @@ pub enum ShapeClass {
     /// it rejects a non-existent/ambiguous axis or a positional index at
     /// symbolic rank, so no transposition can slip past.
     NameTracked,
+    /// Every tensor result retains the complete operand shape in order,
+    /// possibly appending trailing axes. Checked operation relations own
+    /// the exact output surface, including tuples of same-shaped tensors.
+    OrderedPrefix,
     /// Rewrites/reorders the shape positionally, is shape-parameterized, or is a
     /// non-tensor/host op whose output shape is *not* name-trackable at symbolic
     /// rank. Forbidden inside a rank-poly body: against an opaque spread there
@@ -2300,14 +2415,15 @@ pub enum ShapeClass {
 
 /// Classify a builtin's shape semantics for the Body-Discipline check.
 ///
-/// `Identity` and `NameTracked` are explicit allowlists; everything else falls
+/// `Identity`, `NameTracked`, and `OrderedPrefix` are explicit allowlists; other ops fall
 /// through to `Rewriting`. That default is the safe direction — a builtin that
-/// is not *provably* shape-identity or name-tracked is rejected inside a
+/// is not proven to preserve symbolic axis order is rejected inside a
 /// rank-poly body, so a missed classification can only over-reject, never open
 /// a §4.2 hole. The `shape_class_identity_set_is_pinned` test pins the sets so
 /// any change is deliberate.
 pub fn shape_class(name: &str) -> ShapeClass {
     match name {
+        "key_from_seed" | "split_key" | "split_keys" | "fold_in" => ShapeClass::OrderedPrefix,
         // Pure elementwise — output shape == input shape (precision may change
         // for comparisons/logical). No axis argument, no reordering.
         "add" | "mul" | "sub" | "div" | "floor_div" | "trunc_div" | "mod" | "max_elem"
@@ -2408,6 +2524,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         // "whole tensor as one type variable" shape.
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![tv],
             tvar_restrictions: operand_value_restrictions(name, &[tv]),
@@ -2426,6 +2543,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let _dv = vg.fresh_dvar();
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![tv],
             tvar_restrictions: operand_value_restrictions(name, &[tv]),
@@ -2461,6 +2579,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![tv, output],
             tvar_restrictions: operand_value_restrictions(name, &[tv]),
@@ -2483,6 +2602,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let _dv = vg.fresh_dvar();
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![tv],
             tvar_restrictions: vec![],
@@ -2500,6 +2620,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let _dv = vg.fresh_dvar();
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![tv],
             tvar_restrictions: vec![],
@@ -2516,6 +2637,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let t3 = vg.fresh_tvar();
         let epsilon = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![t1, t2, t3, epsilon],
             tvar_restrictions: operand_value_restrictions(name, &[t1, t2, t3, epsilon]),
@@ -2539,6 +2661,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let t2 = vg.fresh_tvar();
         let out = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![t1, t2, out],
             tvar_restrictions: operand_value_restrictions(name, &[t1, t2]),
@@ -2556,6 +2679,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let out = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![input, out],
             tvar_restrictions: operand_value_restrictions(name, &[input]),
@@ -2579,6 +2703,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![input, out],
             tvar_restrictions: operand_value_restrictions(name, &[input]),
@@ -2596,6 +2721,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let out = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![input, out],
             tvar_restrictions: vec![],
@@ -2620,6 +2746,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let rank = vg.fresh_rvar();
         let input = Type::Tensor(vec![Dim::Rank(rank)], TensorPrec::Var(precision));
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![precision],
             tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
@@ -2642,6 +2769,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     fn tensor_with_bounds(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![input],
             tvar_restrictions: vec![],
@@ -2667,6 +2795,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let kernel = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![input, kernel, output],
             tvar_restrictions: vec![],
@@ -2694,6 +2823,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     fn tensor_reduce(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![input],
             tvar_restrictions: operand_value_restrictions(name, &[input]),
@@ -2711,6 +2841,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: match name {
                 "len" => vec![CollectionConstraint::Len {
                     operand: Type::Var(input),
@@ -2732,6 +2863,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let rhs = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: match name {
                 "index" => vec![CollectionConstraint::Index {
                     list: Type::Var(lhs),
@@ -2768,6 +2900,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let c = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
             tvar_restrictions: vec![],
@@ -2787,6 +2920,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let c = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
             tvar_restrictions: vec![],
@@ -2806,6 +2940,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let c = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
             tvar_restrictions: vec![],
@@ -2825,6 +2960,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let c = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
             tvar_restrictions: vec![],
@@ -2848,6 +2984,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let c = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
             tvar_restrictions: vec![],
@@ -2869,6 +3006,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let e = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, d, e, output],
             tvar_restrictions: vec![],
@@ -2895,6 +3033,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let d = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, d, output],
             tvar_restrictions: vec![],
@@ -2912,6 +3051,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![input, output],
             tvar_restrictions: vec![],
@@ -2928,6 +3068,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     fn generic_unop_borrow_same(name: &str, env: &mut Env, vg: &mut VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![tv],
             tvar_restrictions: vec![],
@@ -2943,6 +3084,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let rhs = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![lhs, rhs, output],
             tvar_restrictions: vec![],
@@ -2991,52 +3133,57 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("round", &mut env, &mut vg);
     tensor_with_bounds("uniform_like", &mut env, &mut vg);
 
-    // [05-OP-69]..[05-OP-72] (spec/05 section 2.7): the random key
-    // operations. The key operand of `split_key`, `split_keys` and `fold_in`
-    // is owned, never borrowed: [04-LIN-9] makes every key affine, and these
-    // are its consuming uses. `split_keys`'s extent is its count `n`
-    // ([05-OP-71]); its application's result extent is decided from the
-    // count by `check_split_keys_signature`, spec/04 section 4.7.2's
-    // `expand` rule, and the scheme's dimension only types the builtin named
-    // as a value.
-    let key = Type::Prim(Prim::Key);
-    let count = Type::Prim(Prim::Int64);
-    env.bind(
-        "key_from_seed".to_string(),
-        Scheme::mono(Type::Fn(vec![count.clone()], Box::new(key.clone()))),
-    );
-    env.bind(
-        "split_key".to_string(),
-        Scheme::mono(Type::Fn(
-            vec![key.clone()],
-            Box::new(Type::Tuple(vec![key.clone(), key.clone()])),
-        )),
-    );
-    env.bind(
-        "fold_in".to_string(),
-        Scheme::mono(Type::Fn(
-            vec![key.clone(), count.clone()],
-            Box::new(key.clone()),
-        )),
-    );
-    let key_rows = vg.fresh_dvar();
-    env.bind(
-        "split_keys".to_string(),
-        Scheme {
-            constraints: vec![],
-            tvars: vec![],
-            tvar_restrictions: vec![],
-            dvars: vec![key_rows],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![key, count],
-                Box::new(Type::Tensor(
-                    vec![Dim::Var(key_rows)],
-                    TensorPrec::Concrete(Prim::Key),
-                )),
-            ),
-        },
-    );
+    // [05-OP-69]..[05-OP-72]: direct calls specialize these checked
+    // scalar/tensor relations at each application.
+    for name in ["key_from_seed", "split_key", "split_keys", "fold_in"] {
+        let input = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let extra = vg.fresh_tvar();
+        let operand = Type::Var(input);
+        let result = Type::Var(output);
+        let mut args = vec![operand.clone()];
+        let mut tvars = vec![input, output];
+        let constraint = match name {
+            "key_from_seed" => CollectionConstraint::KeyFromSeed {
+                operand,
+                result: result.clone(),
+            },
+            "split_key" => CollectionConstraint::SplitKey {
+                operand,
+                result: result.clone(),
+            },
+            "split_keys" => {
+                args.push(Type::Prim(Prim::Int64));
+                CollectionConstraint::SplitKeys {
+                    operand,
+                    count: Type::Prim(Prim::Int64),
+                    result: result.clone(),
+                }
+            }
+            "fold_in" => {
+                args.push(Type::Var(extra));
+                tvars.push(extra);
+                CollectionConstraint::FoldIn {
+                    operand,
+                    index: Type::Var(extra),
+                    result: result.clone(),
+                }
+            }
+            _ => unreachable!(),
+        };
+        env.bind(
+            name.to_string(),
+            Scheme {
+                result_origin: None,
+                constraints: vec![constraint],
+                tvars,
+                tvar_restrictions: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                body: Type::Fn(args, Box::new(result)),
+            },
+        );
+    }
 
     cmplt_sig("cmplt", &mut env, &mut vg);
 
@@ -3115,6 +3262,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "test_assert".to_string(),
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
@@ -3131,6 +3279,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(
             "test_assert_eq".to_string(),
             Scheme {
+                result_origin: None,
                 constraints: vec![],
                 tvars: vec![value],
                 tvar_restrictions: vec![],
@@ -3159,6 +3308,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(
             "test_assert_close_tensor".to_string(),
             Scheme {
+                result_origin: None,
                 constraints: vec![],
                 tvars: vec![precision],
                 tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
@@ -3182,6 +3332,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(
             "test_assert_eq_tensor".to_string(),
             Scheme {
+                result_origin: None,
                 constraints: vec![],
                 tvars: vec![tensor_tv],
                 tvar_restrictions: vec![],
@@ -3201,6 +3352,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "char_code".to_string(),
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
@@ -3215,6 +3367,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "char_from_code".to_string(),
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
@@ -3233,6 +3386,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "string_contains".to_string(),
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
@@ -3247,6 +3401,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "string_starts_with".to_string(),
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
@@ -3261,6 +3416,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "string_ends_with".to_string(),
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
@@ -3295,6 +3451,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(
             "drop".to_string(),
             Scheme {
+                result_origin: None,
                 constraints: vec![],
                 tvars: vec![consumed],
                 tvar_restrictions: vec![],
@@ -3308,55 +3465,64 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_binop("range", &mut env, &mut vg);
     generic_binop("map", &mut env, &mut vg);
     generic_binop("filter", &mut env, &mut vg);
-    let fold_acc = vg.fresh_tvar();
-    let fold_item = vg.fresh_tvar();
-    let fold_ret = vg.fresh_tvar();
-    env.bind(
-        "fold".to_string(),
-        Scheme {
-            constraints: vec![],
-            tvars: vec![fold_acc, fold_item, fold_ret],
-            tvar_restrictions: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
+    // [05-OP-55]/[04-INF-9]: every function value carries its complete
+    // callback/collection signature. Applying the callback binds its A and T
+    // inputs; equality between A and the callback's result is a result-origin
+    // equation, so a known returned value cannot admit an unresolved Grad.
+    for (name, list_result) in [("fold", false), ("scan", true)] {
+        let initial = vg.fresh_tvar();
+        let item = vg.fresh_tvar();
+        let callback_result = vg.fresh_tvar();
+        let published = vg.fresh_tvar();
+        let list = |ty| Type::Adt("List".to_string(), vec![ty]);
+        let output = |ty| if list_result { list(ty) } else { ty };
+        let signature = |callback_result, result| {
+            Type::Fn(
                 vec![
-                    Type::Var(fold_acc),
-                    Type::Var(fold_item),
-                    Type::Var(fold_ret),
+                    Type::Fn(
+                        vec![Type::Var(initial), Type::Var(item)],
+                        Box::new(callback_result),
+                    ),
+                    Type::Var(initial),
+                    list(Type::Var(item)),
                 ],
-                Box::new(Type::Var(fold_ret)),
-            ),
-        },
-    );
-    let scan_acc = vg.fresh_tvar();
-    let scan_item = vg.fresh_tvar();
-    let scan_ret = vg.fresh_tvar();
-    env.bind(
-        "scan".to_string(),
-        Scheme {
-            constraints: vec![],
-            tvars: vec![scan_acc, scan_item, scan_ret],
-            tvar_restrictions: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Var(scan_acc),
-                    Type::Var(scan_item),
-                    Type::Var(scan_ret),
-                ],
-                Box::new(Type::Var(scan_ret)),
-            ),
-        },
-    );
+                Box::new(result),
+            )
+        };
+        env.bind(
+            name.to_string(),
+            Scheme {
+                body: signature(Type::Var(initial), output(Type::Var(initial))),
+                tvars: vec![initial, item],
+                tvar_restrictions: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                constraints: vec![],
+                result_origin: Some(ResultOrigin {
+                    body: signature(Type::Var(callback_result), Type::Var(published)),
+                    tvars: vec![initial, item, callback_result, published],
+                    tvar_restrictions: vec![],
+                    dvars: vec![],
+                    rvars: vec![],
+                    equations: vec![ResultConstraint::Join {
+                        inputs: vec![
+                            output(Type::Var(initial)),
+                            output(Type::Var(callback_result)),
+                        ],
+                        result: Type::Var(published),
+                    }],
+                }),
+            },
+        );
+    }
     // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
     // The actual constraint shape (scalar `T`, callback signature, i64 `n`,
     // tensor return) is enforced by the special-case arm in
     // `crates/chelis-types/src/infer.rs` so error reporting can pinpoint each
     // role independently. This loose generic scheme is the type-env entry
     // point; it lets the inference engine see three argument slots and a
-    // return slot it will overwrite. Same shape as `fold`/`scan` above.
+    // return slot it will overwrite. This scalar-only rule does not carry
+    // the callable accumulator equality of `fold`/`scan`.
     let tensor_scan_a = vg.fresh_tvar();
     let tensor_scan_b = vg.fresh_tvar();
     let tensor_scan_c = vg.fresh_tvar();
@@ -3364,6 +3530,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "tensor_scan".to_string(),
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![tensor_scan_a, tensor_scan_b, tensor_scan_c, tensor_scan_ret],
             tvar_restrictions: vec![],
@@ -3495,6 +3662,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         "Some".to_string(),
         "Option".to_string(),
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![option_tvar],
             tvar_restrictions: vec![],
@@ -3507,6 +3675,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         "None".to_string(),
         "Option".to_string(),
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![option_tvar],
             tvar_restrictions: vec![],
@@ -3542,25 +3711,29 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
     let list_tvar = vg.fresh_tvar();
     let list_type = Type::Adt("List".to_string(), vec![Type::Var(list_tvar)]);
 
+    let cons_type = Type::Fn(
+        vec![Type::Var(list_tvar), list_type.clone()],
+        Box::new(list_type.clone()),
+    );
+
     env.bind_constructor(
         "Cons".to_string(),
         "List".to_string(),
         Scheme {
+            result_origin: ResultOrigin::aggregate(&cons_type, &[list_tvar], &[], &[], vg),
             constraints: vec![],
             tvars: vec![list_tvar],
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
-                vec![Type::Var(list_tvar), list_type.clone()],
-                Box::new(list_type.clone()),
-            ),
+            body: cons_type,
         },
     );
     env.bind_constructor(
         "Nil".to_string(),
         "List".to_string(),
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![list_tvar],
             tvar_restrictions: vec![],
@@ -3722,6 +3895,8 @@ mod tests {
         for name in BUILTIN_NAMES {
             let expected = if identity.contains(name) {
                 ShapeClass::Identity
+            } else if ["key_from_seed", "split_key", "split_keys", "fold_in"].contains(name) {
+                ShapeClass::OrderedPrefix
             } else if name_tracked.contains(name) {
                 ShapeClass::NameTracked
             } else {

@@ -484,6 +484,43 @@ enum ReefCommand {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
+    /// Check or apply registered Reef document schema upgrades
+    Upgrade {
+        /// Report required migration steps without file writes.
+        #[arg(long)]
+        check: bool,
+        /// Apply required migration steps through atomic file replacement.
+        #[arg(long)]
+        inplace: bool,
+        /// Package root. Defaults to the current directory.
+        #[arg(long, value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Stop after this supported manifest schema.
+        #[arg(long, value_name = "SCHEMA")]
+        manifest_to: Option<chelis_reef::ManifestSchemaVersion>,
+        /// Stop after this supported lock schema.
+        #[arg(long, value_name = "SCHEMA")]
+        lock_to: Option<chelis_reef::LockSchemaVersion>,
+    },
+    /// Refresh one package or the complete Reef dependency graph.
+    Update {
+        /// Optional package to refresh. Other locked packages stay fixed unless required.
+        package: Option<String>,
+        /// Disable remote providers. The command uses local candidates only.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Report current and available Reef package versions without final writes.
+    Outdated {
+        /// Optional package to inspect.
+        package: Option<String>,
+        /// Emit a stable JSON report.
+        #[arg(long)]
+        json: bool,
+        /// Disable remote providers. The command uses local candidates only.
+        #[arg(long)]
+        offline: bool,
+    },
     /// Build package artifacts (.chb + .tar.zst).
     ///
     /// By default, missing-from-registry dependencies are
@@ -4674,6 +4711,72 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                 "Initialized Reef package `{name}` at {}",
                 root.canonicalize().unwrap_or(root).display()
             );
+        }
+        ReefCommand::Upgrade {
+            check,
+            inplace,
+            path,
+            manifest_to,
+            lock_to,
+        } => {
+            let mode = match (check, inplace) {
+                (true, false) => chelis_reef::UpgradeMode::Check,
+                (false, true) => chelis_reef::UpgradeMode::InPlace,
+                _ => {
+                    return Err(
+                        "`chelis reef upgrade` requires exactly one of `--check` or `--inplace`"
+                            .into(),
+                    );
+                }
+            };
+            let root = path.unwrap_or_else(|| PathBuf::from("."));
+            let report = chelis_reef::upgrade_documents(&root, mode, manifest_to, lock_to)?;
+            if report.steps.is_empty() {
+                println!("Reef documents are current.");
+            } else {
+                for step in report.steps {
+                    println!("{step}");
+                }
+            }
+        }
+        ReefCommand::Update { package, offline } => {
+            let report = chelis_reef::update_project(Path::new("."), package.as_deref(), !offline)?;
+            if report.changes.is_empty() {
+                println!("All Reef packages are current.");
+            } else {
+                for change in report.changes {
+                    println!(
+                        "Updated {} {} -> {}",
+                        change.package,
+                        change.previous.as_deref().unwrap_or("<none>"),
+                        change.selected
+                    );
+                }
+            }
+        }
+        ReefCommand::Outdated {
+            package,
+            json,
+            offline,
+        } => {
+            let report =
+                chelis_reef::outdated_project(Path::new("."), package.as_deref(), !offline)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if report.packages.is_empty() {
+                println!("All Reef packages are current.");
+            } else {
+                for package in report.packages {
+                    println!(
+                        "{}: current={}, compatible={}, incompatible={}, blocked={}",
+                        package.package,
+                        package.current.as_deref().unwrap_or("<none>"),
+                        package.newest_compatible.as_deref().unwrap_or("<none>"),
+                        package.newest_incompatible.as_deref().unwrap_or("<none>"),
+                        package.blocked.as_deref().unwrap_or("<none>")
+                    );
+                }
+            }
         }
         ReefCommand::Build {
             path,
@@ -9959,22 +10062,9 @@ fn compile_check_in_exec_context(
         .map_err(|e| e.to_string())
 }
 
-/// Compile the synth_decls once and return a `PreparedEval` handle so
-/// per-test evals share the compile. Routes through the legacy
-/// `compile_with_reef_graph` + `prepare_eval` path for the
-/// `ReefGraph` variant, and `prepare_eval_in_context` for the
-/// `Context` variant.
-///
-/// Phase G' (final) — with the linearity divergence root-caused (the
-/// monolithic `annotate_ir_program` was masking real
-/// use-after-consume violations because it built with an empty
-/// `AdtRegistry`; see `docs/archive/rca/lin_rca_report.md`) and chelis-std + the
-/// CLI test fixtures rewritten to use `&t` / `copy(t)` at the right
-/// sites, the `Context` arm now goes through
-/// `prepare_eval_in_context(ctx, source)`. Per-file work drops from
-/// "full pipeline on ~50 modules" to "parse + check + lower the test
-/// file's ~10 lines." The `ReefGraph` arm stays on the legacy path
-/// for direct workers that were not handed a compiled context.
+/// Compile synthesized declarations once and share the result across
+/// tests. `Context` uses `prepare_eval_in_context`; `ReefGraph` uses
+/// `compile_with_reef_graph` and `prepare_eval`.
 #[derive(Clone)]
 enum PreparedTestEval {
     Legacy(chelis_compiler_api::compiler::PreparedEval),

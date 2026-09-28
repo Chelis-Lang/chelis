@@ -369,6 +369,9 @@ impl AdtRegistry {
                 (
                     variant.name.clone(),
                     Scheme {
+                        result_origin: ResultOrigin::aggregate(
+                            &ctor_type, &all_tvars, &all_dvars, &all_rvars, vg,
+                        ),
                         constraints: vec![],
                         tvars: all_tvars.clone(),
                         tvar_restrictions: vec![],

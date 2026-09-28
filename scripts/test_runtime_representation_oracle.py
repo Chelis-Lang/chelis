@@ -1150,6 +1150,26 @@ class ManifestTests(unittest.TestCase):
             for command in commands
         ))
 
+    def test_key_callable_load_store_owner_requires_exact_execution_controls(self) -> None:
+        path = "crates/chelis-backend-c/src/host_emit.rs"
+        kind = "load-store-template"
+        owner = "append_key_callable_helpers"
+        self.assertEqual(oracle.KEY_CALLABLE_BACKEND_FINAL_FORMS, ((path, kind, owner),))
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+        self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+        self.assertFalse(oracle.owner_module_final_form("backend-element-spelling", path, owner))
+        self.assertFalse(oracle.owner_module_final_form(kind, path.replace("host_emit.rs", "emit.rs"), owner))
+        self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        self.assertIn(
+            (
+                "cargo", "nextest", "run", "-p", "chelis-compiler-api",
+                "--features", "ownership-ledger", "--test", "key_tensor_forms",
+            ),
+            commands,
+        )
+
     def test_exact_reduction_backend_owners_require_exact_execution_controls(self) -> None:
         expected = (
             (
@@ -1174,6 +1194,34 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(any(
             "chelis-backend-c" in command
             and "issue_1281_exact_reductions" in command
+            for command in commands
+        ))
+
+    def test_list_map_backend_owners_bind_to_exact_op55_execution(self) -> None:
+        path = "crates/chelis-backend-c/src/emit.rs"
+        expected = (
+            (path, "load-store-template", "CEmitter::emit_list_map_capture"),
+            (path, "backend-element-spelling", "CEmitter::emit_ordered_adjoint_sum"),
+        )
+        self.assertEqual(oracle.LIST_MAP_BACKEND_FINAL_FORMS, expected)
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        for owner_path, kind, owner in expected:
+            self.assertTrue(oracle.owner_module_final_form(kind, owner_path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, owner_path, owner + "_unchecked"))
+            self.assertFalse(oracle.owner_module_final_form("width-arithmetic", owner_path, owner))
+            self.assertIn({"kind": kind, "owner": owner}, forms[owner_path])
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
+        self.assertTrue(any(
+            "chelis-backend-c" in command
+            and "issue_570_runtime_iota" in command
+            and "ordered_cotangent_native_groups_check_actual_column_lengths" in command
+            for command in commands
+        ))
+        self.assertTrue(any(
+            "chelis-cli" in command
+            and "issue_2419_range_tensor_ad" in command
+            and "runtime_capture_tree_rounds_each_pair_at_the_capture_dtype" in command
+            and "runtime_capture_tree_preserves_inactive_and_empty_rows" in command
             for command in commands
         ))
 

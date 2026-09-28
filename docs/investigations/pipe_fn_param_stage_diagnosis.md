@@ -206,7 +206,7 @@ any callable expression per `spec/01-nomenclature.md` §3.6), but each
 is a substantially larger architectural fork than G10 — they need
 either a real `Call` op in the DAG or a host-lane fallback for
 arbitrary control-flow-produced callables. **Recommend** (not file) a
-§5 entry in `docs/gap_synthesis.md` for "pipe stage = arbitrary
+§5 entry in `docs/archive/reports/gap_synthesis.md` for "pipe stage = arbitrary
 callable expression"; orchestrator decides.
 
 The host-lane summary G12 (`crates/chelis-ir/src/host.rs:1314`,

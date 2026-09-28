@@ -118,6 +118,10 @@ pub(super) fn infer_match(
                 match &result_ty {
                     None => result_ty = Some(body_ty),
                     Some(prev) => {
+                        if let Some(joined) = product.defer_result_join(prev, &body_ty, vg, subst) {
+                            result_ty = Some(joined);
+                            continue;
+                        }
                         if let Err(te) = unify(prev, &body_ty, subst) {
                             errors.push(te.into());
                         }

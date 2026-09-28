@@ -294,14 +294,14 @@ fn native_context_eval_json_uses_the_same_execution_codec() {
     std::fs::write(
         root.join("reef.toml"),
         format!(
-            "[package]\nname = \"json_control\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"JsonControl\"\n",
+            "[package]\nname = \"json-control\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"JsonControl\"\n",
             chelis_compiler_api::COMPILER_VERSION
         ),
     )
     .unwrap();
     std::fs::write(
         root.join("reef.lock"),
-        "dependencies = []\n\n[package]\nname = \"json_control\"\nversion = \"0.1.0\"\n",
+        "dependencies = []\n\n[package]\nname = \"json-control\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
     std::fs::write(

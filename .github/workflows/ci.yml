@@ -456,6 +456,7 @@ jobs:
           scripts.test_regenerate_conformance_assets
           scripts.test_gate.DocsOnlySkipTests
           scripts.test_gate.CiParityTests
+          scripts.test_gate_local.LocalCommandListTests
           scripts.test_gate.RejectionAuthorityPrBoundaryTests
 
       # Split from the verdict so the identity step can sit between them:
@@ -756,10 +757,11 @@ jobs:
     defaults:
       run:
         shell: chelis-ci-shell run {0}
-    # Reserve 25 minutes for cold hosted Devenv realization.
-    timeout-minutes: 35
+    # The hosted wheel consumer intentionally runs for docs-only changes too:
+    # distribution behavior needs an executable receipt on every pull request.
+    timeout-minutes: 90
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_script_unit == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_script_unit == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true') || needs.changes.outputs.docs_only == 'true') }}
     permissions:
       contents: read
     steps:
@@ -785,6 +787,12 @@ jobs:
       - name: Script unit tests (scripts/test_*.py)
         run: python scripts/ci_script_tests.py pr
 
+      - name: Install local tooling test dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -e 'py[test]'
+
+      - name: Local LOC report tests
+        run: python -m pytest py/tests/test_loc_report.py -q
+
       # Keep the privacy and source-usage construction boundary in script-unit
       # without querying mutable GitHub issue state. The always-running Docs
       # Phase 4B oracle owns fresh compiler closure and generated agreement;
@@ -794,6 +802,27 @@ jobs:
 
       - name: Python binding ingress unit tests
         run: python -m unittest discover -s bindings/python/tests -p 'test_*.py'
+
+      - name: Build and exercise Python distributions
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/python-wheel-smoke/cargo
+          CARGO_INCREMENTAL: 0
+        if: ${{ !cancelled() }}
+        run: >-
+          python bindings/python/tests/python_wheel_smoke.py
+          --crossed-bundle
+          --receipt "$CARGO_TARGET_DIR/wheel-smoke.json"
+
+      - name: Upload Python distribution evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-wheel-smoke
+          path: |
+            target/python-wheel-smoke/cargo/wheel-smoke.json
+            target/python-wheel-smoke/cargo/wheel-smoke-failures/**
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload script selection and timings
         if: always()
@@ -818,7 +847,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, lint-rust, script-unit]
-    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true')) || needs.changes.outputs.docs_only == 'true') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -829,12 +858,16 @@ jobs:
           REBASE_LANE: ${{ needs.changes.outputs.rebase_lane }}
           RUN_RUST: ${{ needs.changes.outputs.rebase_run_rust }}
           RUN_SCRIPT_UNIT: ${{ needs.changes.outputs.rebase_run_script_unit }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
         run: |
           args=()
-          if [ "$REBASE_LANE" != "targeted" ] || [ "$RUN_RUST" = "true" ]; then
+          if [ "$DOCS_ONLY" != "true" ] &&
+             { [ "$REBASE_LANE" != "targeted" ] || [ "$RUN_RUST" = "true" ]; }; then
             args+=("lint-rust=${{ needs.lint-rust.result }}")
           fi
-          if [ "$REBASE_LANE" != "targeted" ] || [ "$RUN_SCRIPT_UNIT" = "true" ]; then
+          if [ "$REBASE_LANE" != "targeted" ] ||
+             [ "$RUN_SCRIPT_UNIT" = "true" ] ||
+             [ "$DOCS_ONLY" = "true" ]; then
             args+=("script-unit=${{ needs.script-unit.result }}")
           fi
           if [ "${#args[@]}" -eq 0 ]; then
@@ -1454,10 +1487,6 @@ jobs:
       - name: Preserve integration context for an owner-only rebase
         if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration != 'true'
         run: echo "trusted rebase selected no package integration frontier"
-
-  # NOTE: the LOC report moved to its own weekly workflow
-  # (.github/workflows/loc-report.yml) so it no longer commits a bot
-  # commit to main on every merge. See WS-7 / spend-trim.
 
   test-telemetry:
     name: CI Test Telemetry

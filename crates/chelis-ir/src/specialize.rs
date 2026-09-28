@@ -788,7 +788,10 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         return false;
     };
     match &node.op {
-        RiscOp::Load { .. }
+        RiscOp::ListMapCapture { .. }
+        | RiscOp::OrderedAdjointSum { .. }
+        | RiscOp::Iota
+        | RiscOp::Load { .. }
         | RiscOp::Const { .. }
         | RiscOp::ConstTensor { .. }
         | RiscOp::Add
@@ -798,6 +801,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
         | RiscOp::Mod
+            | RiscOp::Bitwise(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where

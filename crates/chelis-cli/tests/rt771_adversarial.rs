@@ -145,14 +145,22 @@ fn assert_both_agree(tag: &str, seed_expr: &str, seed: i64) {
 #[test]
 fn rt_2a_negative_seed_rejected_both_lanes() {
     // Unsuffixed negative seeds remain rejected: their dtype is not i64.
-    assert_both_reject("2a", "-1", "expected i64, got i32");
+    assert_both_reject(
+        "2a",
+        "-1",
+        "key operation expects i64 or a tensor of i64, got i32",
+    );
     assert_both_reject("2a", "-2147483649", "out of range for default i32");
 }
 
 #[test]
 fn rt_2c_float_seed_rejected_both_lanes() {
     // 1.5 is an f32 literal, not an i64 seed.
-    assert_both_reject("2c", "1.5", "expected i64, got f32");
+    assert_both_reject(
+        "2c",
+        "1.5",
+        "key operation expects i64 or a tensor of i64, got f32",
+    );
 }
 
 #[test]
@@ -164,7 +172,11 @@ fn rt_2d_cast_wrapped_seed_reaches_the_key_at_full_width_in_both_lanes() {
 
 #[test]
 fn rt_2e_i32_computed_seed_rejected_and_i64_computed_seed_agrees() {
-    assert_both_reject("2e", "add(2147483647, 1)", "expected i64, got i32");
+    assert_both_reject(
+        "2e",
+        "add(2147483647, 1)",
+        "key operation expects i64 or a tensor of i64, got i32",
+    );
     assert_both_agree("2e", "add(2147483647i64, 1i64)", 2_147_483_648);
 }
 

@@ -2035,6 +2035,7 @@ fn install_exact_op35_dependency_contracts(
         env.bind(
             "uniform_like".to_string(),
             Scheme {
+                result_origin: None,
                 constraints: vec![],
                 tvars: vec![template, low, high],
                 tvar_restrictions: vec![],
@@ -2066,6 +2067,7 @@ fn install_exact_op35_dependency_contracts(
         env.bind(
             helper.to_string(),
             Scheme {
+                result_origin: None,
                 constraints: vec![],
                 tvars: vec![tensor],
                 tvar_restrictions: vec![],
@@ -2114,7 +2116,8 @@ pub(super) fn collect_user_def_names(items: &[&deep::Expr]) -> UnordSet<String> 
 /// Walk a rank-polymorphic def's body and reject any call whose output shape is
 /// not *name-trackable* at symbolic rank. Admitted: shape-identity (elementwise)
 /// builtins and named-axis reductions (the procedural arm verifies those drop a
-/// named axis and carry the rest through). Rejected: positional shape-rewriting
+/// named axis and carry the rest through), and checked ordered-prefix key
+/// derivations. Rejected: positional shape-rewriting
 /// builtins (`permute`/`reshape`/`matmul`/…), and any user/non-builtin/computed
 /// callee not proven rank-safe — against a spread `..r` there are no named axes
 /// left to catch an untracked transposition/reshape, so admitting one would
@@ -2167,6 +2170,8 @@ pub(super) fn check_rank_body_discipline(
                     vec![],
                 ));
             }
+            // OrderedPrefix relations retain every operand axis and may only
+            // append trailing axes, including in each tuple result component.
             // Identity (elementwise) or NameTracked (named-axis reduction /
             // named-axis expand) builtin — admissible. For a NameTracked op
             // the procedural inference arm (`check_reduction_signature` /
@@ -2180,7 +2185,9 @@ pub(super) fn check_rank_body_discipline(
                 if builtins::BUILTIN_NAMES.contains(&name)
                     && matches!(
                         builtins::shape_class(name),
-                        builtins::ShapeClass::Identity | builtins::ShapeClass::NameTracked
+                        builtins::ShapeClass::Identity
+                            | builtins::ShapeClass::NameTracked
+                            | builtins::ShapeClass::OrderedPrefix
                     ) => {}
             // A named builtin that rewrites shape positionally (not name-tracked).
             Some(name) if builtins::BUILTIN_NAMES.contains(&name) => {
@@ -2192,7 +2199,7 @@ pub(super) fn check_rank_body_discipline(
                          `..r` there are no named axes left to catch a transposition or reshape \
                          (spec/04-type-system.md \u{00a7}4.2). A `..r` body may call shape-identity \
                          (elementwise) operations, named-axis reductions, and the named-axis \
-                         `expand` and `insert` forms only."
+                         `expand` and `insert` forms, and ordered-prefix key derivations only."
                     ),
                     vec![format!(
                         "remove the `{name}` call from the rank-polymorphic body, or use \
@@ -2254,9 +2261,19 @@ pub(super) fn generalize_deferred_recursive_binding(
     binding: DeferredRecursiveBinding,
     env: &Env,
     subst: &Subst,
+    product: &mut InferenceProduct,
 ) -> (String, Scheme) {
-    let scheme =
+    let mut scheme =
         env.generalize_with_collection_contracts(&binding.ty, subst, &binding.owned_contracts);
+    if let Some(raw) = product.group_result_origins.remove(&binding.name) {
+        if raw.result_origin.is_some() {
+            scheme.constraints = raw.constraints;
+        }
+        scheme.result_origin = raw.result_origin;
+        // The origin owns restrictions on its raw representatives. The
+        // freshly generalized public scheme already carries the restrictions
+        // on its solved signature; mixing the ledgers exports hidden IDs.
+    }
     subst.name_generic_parameters(&scheme, &binding.name, &binding.binder_names);
     (binding.name, scheme)
 }
@@ -2512,7 +2529,19 @@ pub(super) fn infer_top_level(
             }
             declared_ty
         } else if let Some(decl_ty) = declared_ty {
-            let unify_result = unify(&body_ty, &decl_ty, subst);
+            product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+            // Omitted results and prior checked sweep signatures are inference
+            // identities. Only authored annotations add result-only equations.
+            let inferred_result = recursive_expected.is_published()
+                || matches!(&decl_ty, Type::Fn(_, result)
+                if matches!(result.as_ref(), Type::Var(var) if !declared_type_names.contains_key(var)));
+            let unify_result = if !inferred_result
+                && product.defer_result_type_constraint(&body_ty, &decl_ty, subst)
+            {
+                Ok(())
+            } else {
+                unify(&body_ty, &decl_ty, subst)
+            };
             let resolved_body = subst.apply(&body_ty);
             let resolved_decl = subst.apply(&decl_ty);
             // Declared-dim rigidity check (TypeCheck-FreeDimVarUnification-F1
@@ -2738,6 +2767,9 @@ pub(super) fn infer_top_level(
         // chelis#631: same discipline for list-literal lengths.
         note_list_literal_binding(env, &name, &kids[1]);
         if defer_recursive_binding {
+            product
+                .group_result_origins
+                .insert(name.clone(), Scheme::mono(scheme_body.clone()));
             Some(DeferredRecursiveBinding {
                 name,
                 ty: scheme_body,
@@ -2746,8 +2778,13 @@ pub(super) fn infer_top_level(
             })
         } else {
             let owned_contracts = subst.collection_contract_ids_since(collection_contract_mark);
-            let scheme =
-                env.generalize_with_collection_contracts(&scheme_body, subst, &owned_contracts);
+            let scheme = product.generalize_result_origins(
+                &scheme_body,
+                env,
+                subst,
+                Some(&owned_contracts),
+                errors,
+            );
             subst.name_generic_parameters(&scheme, &name, &declared_type_names);
             env.bind(name, scheme);
             None

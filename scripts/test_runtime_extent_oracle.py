@@ -458,6 +458,32 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         ):
             ORACLE.remove_local_ascription_provenance(duplicate)
 
+    def test_local_ascription_eval_observation_mutation_matches_production_source(
+        self,
+    ) -> None:
+        source = ORACLE._LOCAL_ASCRIPTION_EVAL_SOURCE.read_text()
+        mutated = ORACLE.remove_local_ascription_eval_observation(source)
+        self.assertNotEqual(mutated, source)
+        self.assertNotIn(ORACLE._LOCAL_ASCRIPTION_EVAL_OBSERVATION, mutated)
+        self.assertEqual(
+            mutated.count(ORACLE._LOCAL_ASCRIPTION_EVAL_OBSERVATION_REMOVED),
+            1,
+        )
+        self.assertIn("fn local_guard_verdict(", mutated)
+        self.assertIn("    Ok(())\n}", mutated)
+
+        missing = source.replace(ORACLE._LOCAL_ASCRIPTION_EVAL_OBSERVATION, "", 1)
+        with self.assertRaisesRegex(
+            ORACLE.OracleFailure, "mutation anchor is missing or ambiguous"
+        ):
+            ORACLE.remove_local_ascription_eval_observation(missing)
+
+        duplicate = source + ORACLE._LOCAL_ASCRIPTION_EVAL_OBSERVATION
+        with self.assertRaisesRegex(
+            ORACLE.OracleFailure, "mutation anchor is missing or ambiguous"
+        ):
+            ORACLE.remove_local_ascription_eval_observation(duplicate)
+
     def test_specializer_region_mutations_remove_only_the_selected_barrier(
         self,
     ) -> None:

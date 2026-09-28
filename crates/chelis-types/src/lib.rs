@@ -9,6 +9,7 @@
 
 pub mod adt;
 pub mod agreement;
+pub mod bitwise;
 pub mod cancel;
 pub mod context;
 pub(crate) mod deep_type;
@@ -24,6 +25,7 @@ pub mod linearity;
 pub mod manifest;
 pub mod observation;
 pub(crate) mod opacity;
+mod result_scope;
 pub(crate) mod session;
 #[cfg(feature = "checkpoint-compile-probe")]
 #[doc(hidden)]
@@ -50,6 +52,7 @@ mod builtins;
 #[cfg(test)]
 mod source_arch;
 
+pub use bitwise::{BitwiseError, BitwiseKind, bitwise_scalar, bitwise_tensor};
 pub use builtins::{
     AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinCapabilityDecl, BuiltinDecl,
     BuiltinInferenceRule, BuiltinSemanticDomain, BuiltinSiblingCaseDecl, BuiltinSiblingCaseId,

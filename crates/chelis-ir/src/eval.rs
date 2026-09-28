@@ -4077,6 +4077,19 @@ where
                 let rhs = &values[&node.inputs[1]];
                 binary_elementwise(ElementwiseBinOp::FloorDiv, lhs, rhs)?
             }
+            RiscOp::Bitwise(kind) => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                require_matching_comparison_shapes(lhs, rhs)?;
+                let storage = chelis_types::bitwise_tensor(*kind, lhs.storage(), rhs.storage())
+                    .map_err(|error| error.to_string())?;
+                TensorValue::from_storage(lhs.shape.clone(), storage)
+            }
+            RiscOp::Mod => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                binary_elementwise(ElementwiseBinOp::Mod, lhs, rhs)?
+            }
             // chelis#178: truncating (round-toward-zero) integer division.
             // `(a / b).trunc()` matches C/Rust integer `/` for the
             // integer-valued operands this op is restricted to.
@@ -4085,11 +4098,6 @@ where
             // float operands), so a zero divisor always traps with the shared
             // diagnostic — matching `host_ops::eval_trunc_div` and the C
             // backend guard.
-            RiscOp::Mod => {
-                let lhs = &values[&node.inputs[0]];
-                let rhs = &values[&node.inputs[1]];
-                binary_elementwise(ElementwiseBinOp::Mod, lhs, rhs)?
-            }
             RiscOp::TruncDiv => {
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
@@ -4119,6 +4127,95 @@ where
                     &values[&node.inputs[1]],
                     draw_keys(node, 2, &values)?,
                 )?
+            }
+            RiscOp::ListMapCapture { .. } => {
+                let count = values[&node.inputs[1]].shape[0];
+                let source = &values[&node.inputs[0]];
+                TensorValue::from_storage(
+                    vec![count],
+                    source.storage().reuse_gather(&vec![0; count]),
+                )
+            }
+            RiscOp::OrderedAdjointSum { groups } => {
+                let mut leaves = vec![
+                    finalize_tensor(
+                        "adjoint",
+                        node.output_type.precision,
+                        RawTensor::Float(vec![0.0]),
+                    )
+                    .map_err(|e| e.to_string())?,
+                ];
+                let mut offset = 0;
+                for &width in groups {
+                    let inputs = &node.inputs[offset..offset + width];
+                    let count = values[&inputs[0]].len();
+                    if inputs.iter().any(|input| values[input].len() != count) {
+                        return Err("ordered List cotangent columns have different lengths".into());
+                    }
+                    for row in 0..count {
+                        for input in inputs {
+                            leaves.push(values[input].storage().reuse_gather(&[row]));
+                        }
+                    }
+                    offset += width;
+                }
+                while leaves.len() > 1 {
+                    leaves = leaves
+                        .chunks(2)
+                        .map(|pair| {
+                            if pair.len() == 1 {
+                                Ok(pair[0].clone())
+                            } else {
+                                float_tensor_binop(FloatBinOp::Add, &pair[0], &pair[1])
+                                    .map_err(|e| e.to_string())
+                            }
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                }
+                TensorValue::from_storage(vec![], leaves.pop().expect("positive-zero base"))
+            }
+            RiscOp::Iota => {
+                let endpoint = |slot| {
+                    values[&node.inputs[slot]]
+                        .storage()
+                        .scalar_at(0)
+                        .as_i64_exact()
+                        .ok_or_else(|| "iota requires exact i64 scalar endpoints".to_string())
+                };
+                let start = endpoint(0)?;
+                let end = endpoint(1)?;
+                let count = if end <= start {
+                    0
+                } else {
+                    end.checked_sub(start).ok_or_else(|| {
+                        NumericTrap::Overflow {
+                            op: "range",
+                            prim: Prim::Int64,
+                        }
+                        .to_string()
+                    })?
+                };
+                let count = usize::try_from(count).map_err(|_| {
+                    NumericTrap::Overflow {
+                        op: "range",
+                        prim: Prim::Int64,
+                    }
+                    .to_string()
+                })?;
+                admit_result("range", &[count], Prim::Int64)?;
+                let mut elements = Vec::new();
+                elements
+                    .try_reserve_exact(count)
+                    .map_err(|_| "range allocation failed".to_string())?;
+                for index in 0..count {
+                    // count and the last element were bounded by the exact endpoints.
+                    elements.push(start + i64::try_from(index).expect("range index fits i64"));
+                }
+                TensorValue::from_storage(
+                    vec![count],
+                    finalize_tensor("range", Prim::Int64, RawTensor::Int(elements))
+                        .map_err(|e| e.to_string())?,
+                )
             }
             RiscOp::UniformLike => {
                 check_draw_extents(&bound_dag, node, &values)?;
@@ -4779,6 +4876,7 @@ fn inactive_disagreeing_elementwise(
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
+            | RiscOp::Bitwise(_)
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::Compare(_)
@@ -5286,6 +5384,30 @@ fn computed_axis_extent_value(
     resolved_stride_steps: Option<&[std::num::NonZeroUsize]>,
 ) -> Result<Option<usize>, String> {
     match computed {
+        crate::axis_sources::ComputedAxisExtent::RangeSpan => {
+            let start = values[&node.inputs[0]]
+                .storage()
+                .scalar_at(0)
+                .as_i64_exact()
+                .ok_or("range requires i64")?;
+            let end = values[&node.inputs[1]]
+                .storage()
+                .scalar_at(0)
+                .as_i64_exact()
+                .ok_or("range requires i64")?;
+            let count = if end <= start {
+                0
+            } else {
+                end.checked_sub(start).ok_or_else(|| {
+                    NumericTrap::Overflow {
+                        op: "range",
+                        prim: Prim::Int64,
+                    }
+                    .to_string()
+                })?
+            };
+            Ok(usize::try_from(count).ok())
+        }
         crate::axis_sources::ComputedAxisExtent::ShrinkSpan {
             start,
             end,

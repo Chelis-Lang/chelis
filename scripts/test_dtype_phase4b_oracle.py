@@ -80,7 +80,9 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
         cases = (
-            ("spec/10-serialization.md", "Schema version 19 is explicitly\npresent", "wire v19 presence"),
+            ("spec/10-serialization.md", "Schema version 21 is explicitly\npresent", "wire v21 presence"),
+            ("spec/10-serialization.md", "versions 1 through 20", "wire old-version rejection"),
+            ("spec/10-serialization.md", "and every future version are decode errors before any IR\nnode is consumed", "wire future-version rejection"),
             ("spec/10-serialization.md", "`schema_version: 4`", "execution v4 exactness"),
             ("spec/10-serialization.md", "f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
             ("spec/10-serialization.md", "No codec normalizes a NaN payload or a signed zero.", "wire bit preservation"),

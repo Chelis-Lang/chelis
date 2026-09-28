@@ -185,35 +185,37 @@ fn rejection_is_identical_and_does_not_certify_empty_observations() {
 }
 
 #[test]
-fn gradient_host_observation_exposes_verified_nested_helpers() {
+fn selected_tensor_gradient_observes_verified_entry_dag() {
     let source = r#"
 def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))
 def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0
 "#;
     let ordinary = compile_for_execution(request(source, CompileTarget::C, Some("dloss"))).unwrap();
     let mut count = 0;
-    let mut helpers = 0;
     let observed = compile_for_execution_with_observer(
         request(source, CompileTarget::C, Some("dloss")),
         &mut |observation| {
             count += 1;
-            let SelectedEmission::Host(selected) = observation.selected else {
-                panic!("gradient entry must preserve host routing");
+            let SelectedEmission::Dag { unfused, selected } = observation.selected else {
+                panic!("tensor gradient entry must have a standalone DAG");
             };
-            for i in 0..selected.function_count() {
-                let function = selected.function(i).unwrap();
-                for j in 0..function.tensor_helper_count() {
-                    let dag = function.tensor_helper(j).unwrap().dag();
-                    assert!(!dag.roots().is_empty());
-                    assert!(dag.actions().len() >= dag.nodes().len());
-                    helpers += 1;
-                }
-            }
+            assert_eq!(unfused.roots().len(), 1);
+            assert_eq!(selected.roots().len(), 1);
+            assert!(selected.actions().len() >= selected.nodes().len());
+            let mut loads = selected
+                .nodes()
+                .iter()
+                .filter_map(|node| match &node.op {
+                    RiscOp::Load { name } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            loads.sort();
+            assert_eq!(loads, ["w", "x"]);
         },
     )
     .unwrap();
     assert_eq!(count, 1);
-    assert!(helpers > 0);
     assert_eq!(
         serde_json::to_value(ordinary).unwrap(),
         serde_json::to_value(observed).unwrap()
@@ -301,27 +303,29 @@ fn tuple_gradient_retains_actual_lowering_without_retaining_dead_emitted_functio
 }
 
 #[test]
-fn observation_does_not_turn_a_later_failure_into_success() {
+fn selected_vmap_observation_preserves_callable_artifact() {
     let source = r#"
 def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)
 def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = xs |> vmap(process)
 "#;
-    let ordinary = compile_for_execution(request(source, CompileTarget::C, Some("batch_process")))
-        .unwrap_err();
+    let ordinary =
+        compile_for_execution(request(source, CompileTarget::C, Some("batch_process"))).unwrap();
     let mut count = 0;
     let observed = compile_for_execution_with_observer(
         request(source, CompileTarget::C, Some("batch_process")),
-        &mut |_| count += 1,
+        &mut |observation| {
+            count += 1;
+            let SelectedEmission::Dag { selected, .. } = observation.selected else {
+                panic!("selected vmap must emit its own tensor DAG");
+            };
+            assert_eq!(selected.roots().len(), 1);
+        },
     )
-    .unwrap_err();
+    .unwrap();
+    assert_eq!(count, 1);
     assert_eq!(
-        count, 1,
-        "the legacy fallback is observed before the strict entry decline"
-    );
-    assert_eq!(ordinary.stage, observed.stage);
-    assert_eq!(
-        serde_json::to_value(ordinary.errors).unwrap(),
-        serde_json::to_value(observed.errors).unwrap()
+        serde_json::to_value(ordinary).unwrap(),
+        serde_json::to_value(observed).unwrap()
     );
 }
 

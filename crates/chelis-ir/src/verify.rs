@@ -437,7 +437,7 @@ pub(crate) fn verify_mapped_gradient_closure(
                 "vectorization node map gives multiple source nodes the identity {mapped_id:?}"
             ));
         }
-        let expected_deps = source_node
+        let mut expected_deps = source_node
             .shape_deps
             .iter()
             .map(|dep| {
@@ -449,6 +449,17 @@ pub(crate) fn verify_mapped_gradient_closure(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // A scalar predicate acquires its first batch axis during vmap. The
+        // mapped comparison/logical node records the operand that owns that
+        // physical axis; this is a new dependency, not a lost source edge.
+        if matches!(source_node.op, RiscOp::Compare(_) | RiscOp::Logical(_))
+            && source_node.output_type.dims.is_empty()
+            && mapped_node.output_type.dims.len() == 1
+            && let Some(&axis_source) = mapped_node.inputs.first()
+            && !expected_deps.contains(&axis_source)
+        {
+            expected_deps.push(axis_source);
+        }
         if mapped_node.shape_deps != expected_deps {
             return Err(format!(
                 "activation shape dependencies of {:?} were not preserved by vectorization",
@@ -1263,13 +1274,17 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         ),
         RiscOp::Stride { strides } => bounds(ExtentSlot::StrideStep, &mut strides.iter()),
         RiscOp::SplitN { count } => bounds(ExtentSlot::SplitCount, &mut std::iter::once(count)),
-        RiscOp::Add
+        RiscOp::ListMapCapture { .. }
+        | RiscOp::OrderedAdjointSum { .. }
+        | RiscOp::Iota
+        | RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul
         | RiscOp::Div
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
         | RiscOp::Mod
+        | RiscOp::Bitwise(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where
@@ -2105,6 +2120,84 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         // Check arity.
         let arity = node.inputs.len();
         match &node.op {
+            RiscOp::ListMapCapture { first } => {
+                let valid = arity == 2
+                    && node.output_type.dims.len() == 1
+                    && node.output_type.precision.is_float()
+                    && dag.get(node.inputs[0]).is_some_and(|source| {
+                        source.output_type.dims.is_empty()
+                            && source.output_type.precision == node.output_type.precision
+                    })
+                    && dag.get(node.inputs[1]).is_some_and(|carrier| {
+                        carrier.output_type.dims.len() == 1
+                            && (*first
+                                || matches!(carrier.op, RiscOp::ListMapCapture { first: true }))
+                    });
+                if !valid {
+                    errors.push(format!("ListMapCapture at node {} requires a float scalar and rank-one invocation carrier", node.id.0));
+                }
+            }
+            RiscOp::OrderedAdjointSum { groups } => {
+                if !node.output_type.dims.is_empty()
+                    || !node.output_type.precision.is_float()
+                    || groups.contains(&0)
+                    || groups
+                        .iter()
+                        .try_fold(0usize, |sum, width| sum.checked_add(*width))
+                        != Some(arity)
+                {
+                    errors.push(format!("OrderedAdjointSum at node {} has invalid group arity or scalar float output", node.id.0));
+                } else {
+                    let mut offset = 0;
+                    for &width in groups {
+                        let inputs = &node.inputs[offset..offset + width];
+                        for input in inputs {
+                            if !dag.get(*input).is_some_and(|input| {
+                                input.output_type.precision == node.output_type.precision
+                                    && (input.output_type.dims.len() == 1
+                                        || (width == 1 && input.output_type.dims.is_empty()))
+                            }) {
+                                errors.push(format!("OrderedAdjointSum at node {} requires own-dtype scalar or rank-one contributions", node.id.0));
+                            }
+                        }
+                        offset += width;
+                    }
+                }
+            }
+            RiscOp::Iota => {
+                if node
+                    .owner
+                    .activation
+                    .and_then(|id| dag.get(id))
+                    .is_some_and(|active| !active.output_type.dims.is_empty())
+                {
+                    errors.push(format!(
+                        "iota at node {} requires scalar activation",
+                        node.id.0
+                    ));
+                }
+                if arity != 2 {
+                    errors.push(format!("iota at node {} requires two inputs", node.id.0));
+                }
+                for &input in &node.inputs {
+                    if let Some(input) = dag.get(input)
+                        && (input.output_type.precision != Prim::Int64
+                            || !input.output_type.dims.is_empty())
+                    {
+                        errors.push(format!(
+                            "iota at node {} requires rank-zero i64 endpoints",
+                            node.id.0
+                        ));
+                    }
+                }
+                if node.output_type.precision != Prim::Int64 || node.output_type.dims.len() != 1 {
+                    errors.push(format!(
+                        "iota at node {} requires rank-one i64 output",
+                        node.id.0
+                    ));
+                }
+            }
+
             RiscOp::Compare(kind) => {
                 if arity != 2 {
                     errors.push(format!(
@@ -2358,6 +2451,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
+            | RiscOp::Bitwise(_)
             | RiscOp::MaxElem
             | RiscOp::MinElem => {
                 if arity != 2 {
@@ -2367,9 +2461,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
 
-                if matches!(node.op, RiscOp::Mod) && !node.output_type.precision.is_integer() {
+                if matches!(node.op, RiscOp::Mod | RiscOp::Bitwise(_))
+                    && !node.output_type.precision.is_integer()
+                {
                     errors.push(format!(
-                        "mod at node {} requires an integer dtype",
+                        "integer binary op at node {} requires an integer dtype",
                         node.id.0
                     ));
                 }
@@ -2386,7 +2482,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         ));
                     }
 
-                    if matches!(node.op, RiscOp::Mod)
+                    if matches!(node.op, RiscOp::Mod | RiscOp::Bitwise(_))
                         && (node.output_type.precision != lhs.output_type.precision
                             || node.output_type.dims.len() != lhs.output_type.dims.len()
                             || node
@@ -2397,7 +2493,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                 .any(|(out, input)| !dims_compatible(out, input)))
                     {
                         errors.push(format!(
-                            "mod at node {} output must match its input shape and dtype",
+                            "integer binary op at node {} output must match its input shape and dtype",
                             node.id.0
                         ));
                     }

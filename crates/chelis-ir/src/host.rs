@@ -24,7 +24,7 @@ use chelis_vocab::EffectKind;
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_type_state::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
-    HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, decode_host_type,
+    HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, KeyBuiltinCallable, decode_host_type,
 };
 use crate::lower::top_level_lowering_map;
 
@@ -1384,7 +1384,7 @@ pub struct HostSparseOpSummary {
 }
 
 // =========================================================================
-// W4-A — M5(c) structured rejection diagnostics
+// Structured helper-summary rejection diagnostics
 // =========================================================================
 //
 // `SummaryRejection` is the public diagnostic shape emitted when a
@@ -1396,9 +1396,7 @@ pub struct HostSparseOpSummary {
 // string. The acceptance oracle for this contract is
 // `crates/chelis-cli/tests/cross_library_semantic_gap_diagnostics.rs`.
 //
-// Variant naming mirrors W3-B's seven enumerated rejection categories
-// (see `crates/chelis-ir/tests/host_sparse_summary.rs` and the cli
-// counterparts in `crates/chelis-cli/tests/cross_library_sparse_summaries.rs`):
+// Sparse helper rejections have seven specific categories:
 //
 //   1. `MultipleRoots`               — helper body has multiple DAG roots
 //   2. `MultipleReturnPaths`         — helper body branches via if/then/else
@@ -1408,10 +1406,8 @@ pub struct HostSparseOpSummary {
 //   6. `PayloadDTypeMismatch`        — values/target/updates/output disagree
 //   7. `WildcardDim`                 — `Named("*", None)` placeholder in input/output
 //
-// Three additional variants (`UnrecognizedShape`, `NonContiguousLayout`,
-// `RankMismatch`) are reserved for future helper-shape categories that
-// the current summarizer does not check today but the plan's pinned
-// shape names explicitly.
+// `UnrecognizedShape`, `NonContiguousLayout`, and `RankMismatch`
+// reserve more specific categories for helper-shape failures.
 
 /// Identifies the rejected helper for diagnostic attribution.
 ///
@@ -1569,32 +1565,14 @@ pub enum SummaryRejectionClass {
     /// mismatches through `NonLoadOperand` (the type-equality check on
     /// the Load op fails); reserved for future explicit rank checks.
     RankMismatch,
-    // ---------------------------------------------------------------
-    // W6 Task A — BLAS-recognizer rejection classes.
-    //
-    // The BLAS recognizer (`try_summarize_blas_helper` in
-    // `crates/chelis-ir/src/host.rs`) exposes six structural failure
-    // points where a helper-DAG that *almost* matched
-    // `RiscOp::BlasMatmul` was rejected. Each is a distinct
-    // BLAS-prefixed variant: the source recognizer is encoded in the
-    // variant name so tooling pattern-matching on the enum sees both
-    // "what shape failed" and "which recognizer rejected it" without
-    // needing to inspect an out-of-band recognizer-identity tag.
-    //
-    // The variant names are NOT collapsed with the sparse-named
-    // equivalents (`MultipleRoots`, `NonLoadOperand`) even though the
-    // detail payload shapes coincide today; future divergence is
-    // cheap to absorb when each path owns its own variant.
-    // ---------------------------------------------------------------
+    // BLAS-prefixed classes identify the recognizer as well as the
+    // rejected shape without a separate recognizer tag.
     /// BLAS helper DAG (post-specialize) has more than one root.
     /// Mirrors `MultipleRoots` for sparse helpers but identifies the
     /// BLAS recognizer as the source.
     BlasMultipleRoots,
-    /// BLAS helper's declared output precision is not `f32`. Today
-    /// the recognizer requires `f32` output for the BlasMatmul
-    /// path; non-`f32` outputs (e.g. an `f64` matmul helper) silently
-    /// skipped through `Option::None` before W6 — now they are
-    /// diagnosed.
+    /// BLAS helper's declared output precision is not supported by
+    /// the matmul summary.
     BlasOutputPrecisionMismatch,
     /// The helper's specialized DAG root is not `RiscOp::BlasMatmul`,
     /// so the recognizer could not extract `batch_dims`, `m`, `n`,
@@ -1606,10 +1584,8 @@ pub enum SummaryRejectionClass {
     /// helper input. Mirrors `NonLoadOperand` for sparse helpers but
     /// identifies the BLAS recognizer as the source.
     BlasNonLoadOperand,
-    /// At least one of the helper's input tensors has precision other
-    /// than `f32`. Today the recognizer requires every helper input to
-    /// be `f32`; mixed-precision inputs (e.g. an `f32 @ i8` quantized
-    /// matmul helper) silently skipped before W6.
+    /// At least one helper input has a precision unsupported by the
+    /// matmul summary.
     BlasInputPrecisionMismatch,
     /// One of `batch_dims`, `m`, `n`, `k` could not be bound to any
     /// helper input dim by name. The recognizer requires every
@@ -1700,14 +1676,8 @@ pub enum SummaryRejectionDetail {
     /// NonContiguousLayout, RankMismatch). Carries no structured
     /// information today.
     Reserved,
-    // ---------------------------------------------------------------
-    // W6 Task A — BLAS-recognizer detail payloads.
-    //
-    // Each variant mirrors a `SummaryRejectionClass::Blas*` variant.
-    // The payloads name the observed-precision / failing-dim values
-    // so tooling can distinguish e.g. "f64 helper rejected" from
-    // "i32 helper rejected" without re-running the recognizer.
-    // ---------------------------------------------------------------
+    // Each BLAS payload mirrors a `SummaryRejectionClass::Blas*`
+    // variant and carries the observed precision or failing dimension.
     BlasMultipleRoots {
         /// Number of DAG roots observed in the helper's
         /// post-specialize body.
@@ -1835,11 +1805,8 @@ impl fmt::Display for SummaryRejectionDetail {
     }
 }
 
-/// Public diagnostic shape for a rejected summary callsite. This is
-/// the central correctness contract of W4-A. Downstream consumers
-/// (CLI diagnostic reporter, red-team tests, future tooling) MUST
-/// pattern-match on the enum variants and struct fields rather than
-/// parsing the `Display` rendering.
+/// Public diagnostic shape for a rejected summary callsite. Downstream
+/// consumers match the enum variants and fields, not `Display` text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummaryRejection {
     pub rejection_class: SummaryRejectionClass,
@@ -2903,30 +2870,6 @@ pub fn function_has_tensor_signature(program: &ConcreteHostProgram, name: &str) 
                 .iter()
                 .all(|param| matches!(param.ty, ConcreteHostType::Tensor(_)))
     })
-}
-
-/// Does the named entry def's body use a `grad`/`vmap`/`vmap-grad` form?
-///
-/// Such an entry MUST stay on the host lane even though it is
-/// tensor-signature and [`lower_named_tensor_entry_dag`] *can* produce a
-/// DAG for it: the host lane owns the multi-root grad-tuple emission
-/// (assembling a real `chelis_tuple` from per-`wrt` gradient outputs, see
-/// #309), which the single-root entry-scoped kernel path does not.
-///
-/// This is deliberately narrower than "the body needs the host runtime":
-/// a DAG-lowerable host-runtime builtin such as `concat` lowers cleanly
-/// through `lower_named_tensor_entry_dag` (that IS the #818 fix), so it is
-/// NOT excluded here. Only genuinely host-lane-owned forms are.
-pub fn named_entry_uses_grad_like(program: &CheckedProgram, name: &str) -> bool {
-    // A whole-program entry owns its session, so nothing outside this crate
-    // has to know one exists (chelis#1835).
-    let session = HostLoweringSession::new(program);
-    let program = &session;
-    let defs = cached_program_defs(program);
-    match lookup_program_def(&defs, name) {
-        Some(body) => expr_contains_grad_like(body),
-        None => false,
-    }
 }
 
 /// Does the checked program bind any top-level VALUE binding — a
@@ -5151,11 +5094,6 @@ const HOST_ONLY_BUILTINS: &[&str] = &[
     "to_string",
     "to_int",
     "to_float",
-    "bitand",
-    "bitor",
-    "bitxor",
-    "shl",
-    "shr",
     "rank",
     "numel",
     "len",
@@ -6632,10 +6570,7 @@ fn finish_tensor_helper_product(
             None | Some(Err(SparseSummaryAttempt::NotEligible)) => (None, None),
             Some(Err(SparseSummaryAttempt::Rejected(rejection))) => (None, Some(rejection)),
         };
-    // W6 Task A — drive the BLAS recognizer through the structured
-    // entry point so a BLAS-near rejection threads through to
-    // `summary_rejection` as a `Blas*` `SummaryRejection` (rather
-    // than the prior silent `Option::None` drop).
+    // A BLAS-near rejection becomes a structured `summary_rejection`.
     let (blas_specialization, blas_rejection) =
         match summarizable.then(|| try_summarize_blas_helper(&dag, &inputs, &output)) {
             Some(Ok(spec)) => (Some(HostTensorSpecialization::BlasMatmul(spec)), None),
@@ -6874,7 +6809,7 @@ fn lower_staged_host_plan(
     Ok(result)
 }
 
-/// Outcome of the structured BLAS-helper recognizer (W6 Task A).
+/// Outcome of the structured BLAS-helper recognizer.
 /// Mirrors `SparseSummaryAttempt`: distinguishes "not even a BLAS
 /// helper" (silent skip) from "near-eligible but rejected for a
 /// specific structural reason" (emit a diagnostic).
@@ -6919,22 +6854,19 @@ pub fn try_summarize_blas_helper_for_test(
 /// `RiscOp::Load`s referencing helper inputs.
 ///
 /// Rejection cases — each maps to a `SummaryRejectionClass::Blas*`
-/// variant (the six W6 Task A variants):
+/// variant:
 ///
-///   * `BlasOutputPrecisionMismatch` — helper output precision is not `f32`
+///   * `BlasOutputPrecisionMismatch` — helper output precision is unsupported
 ///   * `BlasMultipleRoots` — specialized DAG has more than one root
 ///   * `BlasNotMatmulPattern` — root op is not `BlasMatmul`, or its
 ///     operand count / output precision doesn't match the BlasMatmul
 ///     shape
 ///   * `BlasNonLoadOperand` — a matmul operand is not a direct `Load`
-///   * `BlasInputPrecisionMismatch` — a helper input has precision
-///     other than `f32`
+///   * `BlasInputPrecisionMismatch` — a helper input precision is unsupported
 ///   * `BlasDimensionBindingFailure` — a matmul dim (batch/M/N/K)
 ///     cannot be bound to any helper input
 ///
-/// The pre-eligibility check that produces `NotEligible` (silent skip,
-/// not a diagnostic) fires when the specialized DAG has zero roots —
-/// the body had nothing for the BLAS recognizer to look at.
+/// `NotEligible` means the helper has no BLAS-near shape to diagnose.
 fn try_summarize_blas_helper(
     dag: &crate::Dag,
     inputs: &[HostTensorInput],
@@ -6997,9 +6929,8 @@ fn try_summarize_blas_helper(
     }
     // From here we are committed: the specialized DAG is BLAS-near
     // and has exactly one root. Output-precision is the next gate.
-    // WS-A1/A2/A3 lift: f32 (sgemm), f64 (dgemm), bf16/f16 (hipblasGemmEx
-    // with f32 accumulator) are all admitted; integer matmul is rejected
-    // upstream at the type checker per spec §5.7.2.
+    // The summary admits f32, f64, bf16, and f16. Integer matmul is
+    // rejected by the type checker (spec §5.7.2).
     if !matches!(
         output.precision,
         Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
@@ -7079,9 +7010,7 @@ fn try_summarize_blas_helper(
         .iter()
         .map(|input| input.ty.clone())
         .collect::<Vec<_>>();
-    // WS-A1/A2/A3: admit f32 (sgemm), f64 (dgemm), bf16/f16 (hipblasGemmEx
-    // with f32 accumulator). Integer matmul is rejected upstream at the
-    // type checker per spec §5.7.2 so it never reaches here.
+    // Helper inputs use the same supported precision set as outputs.
     if let Some((input_index, ty)) = input_tys
         .iter()
         .enumerate()
@@ -7993,6 +7922,25 @@ fn lower_host_expr_kind(
                 .ok_or_else(|| host_expr_lowering_error(expr, "a `var` node has no symbol"))?
                 .to_string();
             let ty = expr_host_type(expr, program, scope);
+            // An unshadowed key operation in value position is a checked
+            // callable, not a lexical C variable. Keep its registered
+            // operation identity in host IR so a later alias or shadow
+            // cannot change what it calls. The backend materializes the
+            // corresponding capture-free function pointer from this node.
+            if let Some(op) = KeyBuiltinCallable::from_symbol(&name)
+                && !scope.contains_key(&name)
+                && program.def_named(&name).is_none()
+            {
+                return Ok(HostExpr::new(HostExprKind::Builtin {
+                    name,
+                    args: Vec::new(),
+                    ty: if ty.is_unresolved() {
+                        HostTypeTerm::KeyBuiltinCallable(op)
+                    } else {
+                        ty
+                    },
+                }));
+            }
             if name == "Nil" {
                 return Ok(HostExpr::new(HostExprKind::List(
                     Vec::new(),
@@ -9466,6 +9414,10 @@ pub(crate) fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
         name,
         Some(
             "copy"
+                | "key_from_seed"
+                | "split_key"
+                | "split_keys"
+                | "fold_in"
                 | "to_tensor"
                 | "scalar_to_tensor"
                 | "pad_sequences"
@@ -12170,6 +12122,27 @@ fn lower_app_host_expr(
         .filter(|_| checked_ty.is_unresolved())
         .cloned()
         .unwrap_or(checked_ty);
+    if let Some(HostTypeTerm::KeyBuiltinCallable(op)) = scope.get(&name) {
+        // This identity came from the resolved value's producer, including
+        // aliases and tuple projections. The application metadata selects
+        // its concrete result; the alias's spelling selects nothing.
+        let args = kids[1..]
+            .iter()
+            .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ty = if explicit_ty.is_unresolved() {
+            infer_builtin_host_type(op.symbol(), &args).ok_or_else(|| {
+                host_expr_lowering_error(app_expr, "checked key call has no concrete result type")
+            })?
+        } else {
+            explicit_ty
+        };
+        return Ok(HostExpr::new(HostExprKind::Builtin {
+            name: op.symbol().to_string(),
+            args,
+            ty,
+        }));
+    }
     // Std.Io.Json owns canonical object observation. Keep generic
     // `dict_entries` insertion-ordered and lower only this exact private
     // package identity to the generated-C-local sorter. The name is exact so
@@ -13301,6 +13274,9 @@ fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> 
                 span,
             ))
         }
+        // This closed operation has no single Deep function type until a
+        // checked application selects its scalar or tensor alternative.
+        HostTypeTerm::KeyBuiltinCallable(_) => None,
         HostTypeTerm::Adt(name, args) => Some(host_adt_syntax(
             name,
             args.iter()
@@ -14160,6 +14136,10 @@ fn write_canonical_host_type_key(ty: &HostTypeTerm, out: &mut String) {
             }
             out.push_str(")->");
             write_canonical_host_type_key(ret, out);
+        }
+        HostTypeTerm::KeyBuiltinCallable(op) => {
+            out.push_str("key-builtin:");
+            out.push_str(op.symbol());
         }
         HostTypeTerm::Adt(name, args) => {
             out.push_str("adt:");
@@ -17026,26 +17006,6 @@ fn expr_reaches_forward_fail(
     }
 }
 
-/// Does this Deep expr contain a `grad`/`vmap`/`vmap-grad` node anywhere?
-/// Entry-point routing uses the whole-expression answer because transformed
-/// result packaging is host-owned; the forward-fail gate above intentionally
-/// uses the more precise subtree-aware traversal instead.
-fn expr_contains_grad_like(expr: &Expr) -> bool {
-    record_host_work(|profile| profile.grad_scan_nodes += 1);
-    match expr {
-        Expr::Node(list, _) => {
-            matches!(list.tag(), DeepTag::Grad | DeepTag::Vmap)
-                || list.children_slice().iter().any(expr_contains_grad_like)
-        }
-        Expr::UnknownForm(data) => {
-            data.head == "vmap-grad" || data.children.iter().any(expr_contains_grad_like)
-        }
-        Expr::BareList(items, _) => items.iter().any(expr_contains_grad_like),
-        Expr::MetaExpr(meta, _) => expr_contains_grad_like(&meta.expr),
-        Expr::Atom(_, _) | Expr::Map(_, _) => false,
-    }
-}
-
 fn expr_contains_vmap_grad(expr: &Expr) -> bool {
     match expr {
         Expr::Node(list, _) => {
@@ -19381,6 +19341,62 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         _ => None,
     });
     match name {
+        // A specialized host body must recover the same scalar/tensor
+        // relation as the checked builtin scheme, including each tuple
+        // component. Polymorphic rank slots remain ordered until inlining.
+        "key_from_seed" | "split_key" | "split_keys" | "fold_in" => {
+            let expected = if name == "key_from_seed" {
+                Prim::Int64
+            } else {
+                Prim::Key
+            };
+            let key = match arg_tys.first()? {
+                HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim)) if *prim == expected => {
+                    HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Key))
+                }
+                HostTypeTerm::Tensor(tensor) if tensor.precision == expected => {
+                    let mut tensor = tensor.clone();
+                    tensor.precision = Prim::Key;
+                    HostTypeTerm::Tensor(tensor)
+                }
+                HostTypeTerm::PolymorphicTensor(tensor)
+                    if tensor.precision == HostPrecisionTerm::Concrete(expected) =>
+                {
+                    let mut tensor = tensor.clone();
+                    tensor.precision = HostPrecisionTerm::Concrete(Prim::Key);
+                    HostTypeTerm::PolymorphicTensor(tensor)
+                }
+                other if other.is_unresolved() => return Some(fresh_host_inference()),
+                _ => return None,
+            };
+            Some(match name {
+                "split_key" => HostTypeTerm::Tuple(vec![key.clone(), key]),
+                "split_keys" => {
+                    let count = DimInfo::Named("*".into(), None);
+                    match key {
+                        HostTypeTerm::Tensor(mut tensor) => {
+                            tensor.dims.push(count);
+                            HostTypeTerm::Tensor(tensor)
+                        }
+                        HostTypeTerm::PolymorphicTensor(mut tensor) => {
+                            match &mut tensor.shape {
+                                HostShapeTerm::Concrete(dims) => dims.push(count),
+                                HostShapeTerm::Polymorphic(slots) => {
+                                    slots.push(HostShapeSlot::Dim(count))
+                                }
+                            }
+                            HostTypeTerm::PolymorphicTensor(tensor)
+                        }
+                        HostTypeTerm::Scalar(_) => HostTypeTerm::Tensor(TensorType {
+                            dims: vec![count],
+                            precision: Prim::Key,
+                        }),
+                        _ => unreachable!("key surface was resolved above"),
+                    }
+                }
+                _ => key,
+            })
+        }
         // [05-OP-8] and [05-OP-37]: a draw's result has the type of its
         // data operand, which follows the key. Position decides it: the key
         // is itself a rank-zero key tensor wherever it was projected from a

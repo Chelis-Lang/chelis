@@ -759,7 +759,7 @@ impl fmt::Display for EffectSet {
     }
 }
 
-/// The checked operand/result relation of a first-class collection operation.
+/// The checked operand/result relation of a first-class builtin operation.
 ///
 /// Builtin schemes own these contracts. Aliasing, higher-order passage,
 /// import, and serialization retain them; applying the value consumes and
@@ -798,12 +798,32 @@ pub enum CollectionConstraint {
     /// `List[e]` giving `List[e]`, or a `List[tensor[..]]` and an `i32`
     /// axis giving a tensor.
     Concat { lhs: Type, rhs: Type, result: Type },
+    /// [05-OP-69]: scalar i64 -> key, or tensor[D,i64] -> tensor[D,key].
+    KeyFromSeed { operand: Type, result: Type },
+    /// [05-OP-70]: each half preserves the key operand's surface and shape.
+    SplitKey { operand: Type, result: Type },
+    /// [05-OP-71]: append one runtime count axis to a key's shape.
+    SplitKeys {
+        operand: Type,
+        count: Type,
+        result: Type,
+    },
+    /// [05-OP-72]: equal scalar/tensor surfaces and exactly equal shapes.
+    FoldIn {
+        operand: Type,
+        index: Type,
+        result: Type,
+    },
 }
 
 impl CollectionConstraint {
     /// The builtin this constraint belongs to, for diagnostics.
     pub fn builtin(&self) -> &'static str {
         match self {
+            Self::KeyFromSeed { .. } => "key_from_seed",
+            Self::SplitKey { .. } => "split_key",
+            Self::SplitKeys { .. } => "split_keys",
+            Self::FoldIn { .. } => "fold_in",
             Self::Len { .. } => "len",
             Self::Index { .. } => "index",
             Self::Append { .. } => "append",
@@ -816,6 +836,9 @@ impl CollectionConstraint {
     /// not what it waits on.
     pub fn operands(&self) -> Vec<&Type> {
         match self {
+            Self::KeyFromSeed { operand, .. } | Self::SplitKey { operand, .. } => vec![operand],
+            Self::SplitKeys { operand, count, .. } => vec![operand, count],
+            Self::FoldIn { operand, index, .. } => vec![operand, index],
             Self::Len { operand, .. } => vec![operand],
             Self::Index { list, index, .. } => vec![list, index],
             Self::Append { list, value, .. } => vec![list, value],
@@ -827,6 +850,19 @@ impl CollectionConstraint {
     /// decide which variables a pending constraint keeps monomorphic.
     pub fn carried_types(&self) -> Vec<&Type> {
         match self {
+            Self::KeyFromSeed { operand, result } | Self::SplitKey { operand, result } => {
+                vec![operand, result]
+            }
+            Self::SplitKeys {
+                operand,
+                count,
+                result,
+            } => vec![operand, count, result],
+            Self::FoldIn {
+                operand,
+                index,
+                result,
+            } => vec![operand, index, result],
             Self::Len { operand, result } => vec![operand, result],
             Self::Index {
                 list,
@@ -845,7 +881,11 @@ impl CollectionConstraint {
     /// The result the suspended call already handed its consumer.
     pub fn result(&self) -> &Type {
         match self {
-            Self::Len { result, .. }
+            Self::KeyFromSeed { result, .. }
+            | Self::SplitKey { result, .. }
+            | Self::SplitKeys { result, .. }
+            | Self::FoldIn { result, .. }
+            | Self::Len { result, .. }
             | Self::Index { result, .. }
             | Self::Append { result, .. }
             | Self::Concat { result, .. } => result,
@@ -856,6 +896,32 @@ impl CollectionConstraint {
     /// quantifier renaming; discharge passes the current substitution.
     pub fn map_types(&self, f: impl Fn(&Type) -> Type) -> Self {
         match self {
+            Self::KeyFromSeed { operand, result } => Self::KeyFromSeed {
+                operand: f(operand),
+                result: f(result),
+            },
+            Self::SplitKey { operand, result } => Self::SplitKey {
+                operand: f(operand),
+                result: f(result),
+            },
+            Self::SplitKeys {
+                operand,
+                count,
+                result,
+            } => Self::SplitKeys {
+                operand: f(operand),
+                count: f(count),
+                result: f(result),
+            },
+            Self::FoldIn {
+                operand,
+                index,
+                result,
+            } => Self::FoldIn {
+                operand: f(operand),
+                index: f(index),
+                result: f(result),
+            },
             Self::Len { operand, result } => Self::Len {
                 operand: f(operand),
                 result: f(result),
@@ -887,9 +953,152 @@ impl CollectionConstraint {
     }
 }
 
+/// A result equation retains its direction through function generalization.
+/// It checks a produced value; it cannot supply an unresolved Grad input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ResultConstraint {
+    Annotation { actual: Type, declared: Type },
+    Join { inputs: Vec<Type>, result: Type },
+}
+
+impl ResultConstraint {
+    pub(crate) fn map_types(&self, mut map: impl FnMut(&Type) -> Type) -> Self {
+        match self {
+            Self::Annotation { actual, declared } => Self::Annotation {
+                actual: map(actual),
+                declared: map(declared),
+            },
+            Self::Join { inputs, result } => Self::Join {
+                inputs: inputs.iter().map(&mut map).collect(),
+                result: map(result),
+            },
+        }
+    }
+
+    pub(crate) fn types(&self) -> Vec<&Type> {
+        match self {
+            Self::Annotation { actual, declared } => vec![actual, declared],
+            Self::Join { inputs, result } => inputs.iter().chain(std::iter::once(result)).collect(),
+        }
+    }
+}
+
+/// The input type and result equations before result-only inference solved
+/// a helper's published signature. Each use instantiates these together.
+/// Quantifiers are closed over the scope components of these equations;
+/// unquantified variables retain identity with their inference producer even
+/// when the conventional solved signature no longer mentions them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResultOrigin {
+    pub body: Type,
+    pub tvars: Vec<TypeVar>,
+    /// Restrictions belong to these raw quantifiers; the published scheme
+    /// has a separately normalized restriction ledger for its solved body.
+    pub tvar_restrictions: Vec<(TypeVar, TypeVarRestriction)>,
+    pub dvars: Vec<DimVar>,
+    pub rvars: Vec<RankVar>,
+    pub equations: Vec<ResultConstraint>,
+}
+
+impl ResultOrigin {
+    pub(crate) fn aggregate(
+        body: &Type,
+        tvars: &[TypeVar],
+        dvars: &[DimVar],
+        rvars: &[RankVar],
+        vg: &mut VarGen,
+    ) -> Option<Self> {
+        let Type::Fn(params, result) = body else {
+            return None;
+        };
+        let mut occurrences = std::collections::BTreeMap::<TypeVar, Vec<Type>>::new();
+        fn split(
+            ty: &Type,
+            variables: &[TypeVar],
+            occurrences: &mut std::collections::BTreeMap<TypeVar, Vec<Type>>,
+            vg: &mut VarGen,
+        ) -> Type {
+            match ty {
+                Type::Var(var) if variables.contains(var) => {
+                    let fresh = vg.fresh_type();
+                    occurrences.entry(*var).or_default().push(fresh.clone());
+                    fresh
+                }
+                Type::Fn(args, ret) => Type::Fn(
+                    args.iter()
+                        .map(|ty| split(ty, variables, occurrences, vg))
+                        .collect(),
+                    Box::new(split(ret, variables, occurrences, vg)),
+                ),
+                Type::Tuple(items) => Type::Tuple(
+                    items
+                        .iter()
+                        .map(|ty| split(ty, variables, occurrences, vg))
+                        .collect(),
+                ),
+                Type::Adt(name, args) => Type::Adt(
+                    name.clone(),
+                    args.iter()
+                        .map(|ty| split(ty, variables, occurrences, vg))
+                        .collect(),
+                ),
+                Type::KindedAdt(name, args) => Type::KindedAdt(
+                    name.clone(),
+                    args.iter()
+                        .map(|arg| match arg {
+                            NominalArg::Type(ty) => {
+                                NominalArg::Type(split(ty, variables, occurrences, vg))
+                            }
+                            NominalArg::Dimension(_) => arg.clone(),
+                        })
+                        .collect(),
+                ),
+                Type::Ref(inner) => Type::Ref(Box::new(split(inner, variables, occurrences, vg))),
+                Type::Tensor(dims, TensorPrec::Var(var)) if variables.contains(var) => {
+                    let Type::Var(fresh) = split(&Type::Var(*var), variables, occurrences, vg)
+                    else {
+                        unreachable!()
+                    };
+                    Type::Tensor(dims.clone(), TensorPrec::Var(fresh))
+                }
+                _ => ty.clone(),
+            }
+        }
+        let params = params
+            .iter()
+            .map(|ty| split(ty, tvars, &mut occurrences, vg))
+            .collect();
+        let mut quantified = tvars.to_vec();
+        let equations = occurrences
+            .into_iter()
+            .map(|(var, inputs)| {
+                quantified.extend(inputs.iter().filter_map(|ty| match ty {
+                    Type::Var(var) => Some(*var),
+                    _ => None,
+                }));
+                ResultConstraint::Join {
+                    inputs,
+                    result: Type::Var(var),
+                }
+            })
+            .collect::<Vec<_>>();
+        (!equations.is_empty()).then(|| Self {
+            body: Type::Fn(params, result.clone()),
+            tvars: quantified,
+            tvar_restrictions: Vec::new(),
+            dvars: dvars.to_vec(),
+            rvars: rvars.to_vec(),
+            equations,
+        })
+    }
+}
+
 /// A polymorphic type scheme: ∀ tvars, dvars. body
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scheme {
+    /// Mandatory on the wire: old snapshots must not erase result origin.
+    #[serde(deserialize_with = "deserialize_result_origin")]
+    pub result_origin: Option<ResultOrigin>,
     pub tvars: Vec<TypeVar>,
     /// Domain restrictions for quantified type variables. Entries are kept
     /// in quantifier order for deterministic serialization.
@@ -899,7 +1108,7 @@ pub struct Scheme {
     /// Quantified rank variables (Tier-2 rank polymorphism). Usually empty.
     #[serde(default)]
     pub rvars: Vec<RankVar>,
-    /// Checked collection-operation relations transported by this function
+    /// Checked builtin-operation relations transported by this function
     /// value and renamed at each instantiation. Usually empty.
     ///
     /// Deliberately NOT `#[serde(default)]`. A default would let a scheme
@@ -911,10 +1120,17 @@ pub struct Scheme {
     pub body: Type,
 }
 
+fn deserialize_result_origin<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ResultOrigin>, D::Error> {
+    Option::<ResultOrigin>::deserialize(deserializer)
+}
+
 impl Scheme {
     /// A monomorphic scheme (no quantified variables).
     pub fn mono(ty: Type) -> Scheme {
         Scheme {
+            result_origin: None,
             tvars: vec![],
             tvar_restrictions: vec![],
             dvars: vec![],

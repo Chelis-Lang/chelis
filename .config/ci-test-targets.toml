@@ -3,6 +3,24 @@
 # are consumed by scripts/ci_change_owned.py and fail closed when stale.
 version = 3
 
+[[path_rule]]
+prefix = "py/src/chelis_tools/loc_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the local LOC report CLI tests"
+tracking_issue = "chelis#413"
+
+[[path_rule]]
+prefix = "py/tests/test_loc_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the local LOC report CLI tests"
+tracking_issue = "chelis#413"
+
 # chelis#845: shared skill source and generated agent symlinks are checked by
 # the script-unit skill metadata/link contract.
 [[path_rule]]
@@ -215,6 +233,25 @@ cadence = "pull_request and push"
 reason = "the managed-interpreter acceptance roster and unsafe-fallback guard execute in script-unit"
 tracking_issue = "chelis#1955"
 
+# The keyed corpus is manual; its receipt contract runs in script-unit.
+[[path_rule]]
+prefix = "scripts/keyed_randomness_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes selection, execution-receipt, timeout and retirement negative controls; full keyed acceptance is an explicit manual gate"
+tracking_issue = "chelis#2413"
+
+[[path_rule]]
+prefix = "scripts/test_keyed_randomness_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the keyed randomness acceptance runner contract tests without compiling its manual corpus"
+tracking_issue = "chelis#2413"
+
 # The completion runner consumes these exact runtime-extent corpus inputs.
 [[path_rule]]
 prefix = "scripts/runtime_extent_oracle.py"
@@ -354,6 +391,11 @@ tracking_issue = "chelis#908"
 
 [[path_rule]]
 prefix = "examples/grad_extent_claim.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/grad_runtime_basis.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
@@ -905,12 +947,13 @@ cadence = "pull_request and exact-candidate workflow_dispatch when directly modi
 reason = "the runtime-dependent HIP CPU-fixture suite is entirely ignored and must execute explicitly against the exact-head runtime archive when its target changes"
 tracking_issue = "chelis#1863"
 
-# These all-ignored targets need prerequisites no Linux PR worker has. A direct
-# modification is listed with its ignored tests, rejected if an active test
-# appears, and reported as a manual gate that PR CI did not execute. Each
-# `manual_gates` value is a docs/manual_gates.md row whose command runs exactly
-# this target's ignored tests, and one of them runs all of them with no name
-# filter; an uncited row that runs it makes this row stale.
+# These all-ignored targets either need prerequisites no Linux PR worker has or
+# exceed the default inner-loop budget. A direct modification is listed with
+# its ignored tests, rejected if an active test appears, and reported as a
+# manual gate that PR CI did not execute. Each `manual_gates` value is a
+# docs/manual_gates.md row whose command runs exactly this target's ignored
+# tests, and one of them runs all of them with no name filter; an uncited row
+# that runs it makes this row stale.
 [[manual_gate_target]]
 package = "chelis-cli"
 name = "shoals_oracle"
@@ -923,11 +966,25 @@ reason = "the Shoals finance-oracle rows need a Shoals checkout that the Linux P
 tracking_issue = "chelis#1824"
 
 [[manual_gate_target]]
+package = "chelis-cli"
+name = "std_io_pipeline"
+manual_gates = ["phase3g_text_pipeline_acceptance_oracle", "std_io_pipeline std IO suite"]
+reason = "the entirely ignored Phase 3g Std.Io acceptance suite exceeds the default inner-loop budget"
+tracking_issue = "chelis#1354"
+
+[[manual_gate_target]]
+package = "chelis-cli"
+name = "cross_library_semantic_gap_hip_gpu"
+manual_gates = ["cross_library_semantic_gap_hip_gpu suite"]
+reason = "the two ignored matmul checks require an AMD HIP GPU, hipcc, and hipBLAS unavailable to Linux PR workers"
+tracking_issue = "chelis#1354"
+
+[[manual_gate_target]]
 package = "chelis-python"
 name = "manual_reef_context"
 manual_gates = ["reef_context_manual_acceptance_oracle"]
-reason = "the reef-context acceptance oracle needs a populated local reef registry and Python environment that the Linux PR workers do not have"
-tracking_issue = "chelis#1824"
+reason = "the reef-context gate needs a populated local registry and the macOS Python library path unavailable to Linux PR workers"
+tracking_issue = "chelis#2694"
 
 # This target requires a real HIP workstation. Ubuntu change-owned and package
 # expansion workers must preserve the exact manual gate without attempting to
@@ -1071,6 +1128,17 @@ packages = ["chelis-types", "chelis-compiler-api"]
 # chelis-python's execution-wire facade tests import it.
 [[path_rule]]
 prefix = "bindings/python/chelis/"
+disposition = "packages"
+packages = ["chelis-python"]
+
+# These PEP 517 inputs choose the features used to build chelis-python wheels.
+[[path_rule]]
+prefix = "bindings/python/pyproject.toml"
+disposition = "packages"
+packages = ["chelis-python"]
+
+[[path_rule]]
+prefix = "bindings/python/build_backend/"
 disposition = "packages"
 packages = ["chelis-python"]
 
@@ -1236,6 +1304,30 @@ prefix = "examples/signed_seed.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
 
+# Forward staged ADT selection is checked through public Eval/C and parity.
+[[path_rule]]
+prefix = "examples/staged_adt_control.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# The keyed state wrapper is executed by chelis-cli::key_pair_host_staging and
+# chelis-cli::parity, and enters the executable and formatter corpora.
+[[path_rule]]
+prefix = "examples/keyed_state_wrapper.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# CLI parity, executable-example checking, and formatter corpus coverage.
+[[path_rule]]
+prefix = "examples/key_builtin_aliases.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/tensor_key_operations.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 # Illustrative source read by chelis-e2e::example_corpus_validate and
 # chelis-surf's fmt_idempotent_on_repo_ch_corpus.
 [[path_rule]]
@@ -1337,6 +1429,24 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "the materialization-case selection and expectations are imported by PR script-unit census controls"
 tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_fixed_roles.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit executes the exact fixed-field role admission and rejection controls"
+tracking_issue = "chelis#729"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_fixed_roles.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit executes the exact fixed-field role admission and rejection controls"
+tracking_issue = "chelis#729"
 
 [[path_rule]]
 prefix = "scripts/capacity_census_wire_artifact.py"
@@ -1736,15 +1846,6 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit locks the ecosystem workflow's immutable inputs, strict source builds, and no-auto-fetch commands"
 tracking_issue = "chelis#2268"
-
-[[path_rule]]
-prefix = ".github/workflows/loc-report.yml"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "script-unit holds this workflow's reviewed registration as running no command the per-PR gate owns; it validates that membership, not a command inventory"
-tracking_issue = "chelis#2232"
 
 [[path_rule]]
 prefix = ".github/workflows/loud-unsupported-nightly.yml"
@@ -3013,6 +3114,24 @@ reason = "the Rust policy job's lint-and-unit gate stage runs the pipeline-core 
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/regenerate_chelis_std_bundle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust policy job's lint-and-unit gate stage runs the chelis-std bundle regeneration check twice against the committed outputs"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_regenerate_chelis_std_bundle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the bundle regeneration unit tests; the real fixed-point class stays on the nightly script lane"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "rust-toolchain.toml"
 disposition = "packages"
 packages = [
@@ -3430,6 +3549,11 @@ prefix = "examples/grad_disconnected.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+[[path_rule]]
+prefix = "examples/grad_bitwise.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 # chelis#2119: tree-sitter-chelis/build.rs compiles this grammar's parser and
 # external scanner into the crate, so its Rust/tree-sitter parity corpus is
 # what a scanner or grammar edit must re-run.
@@ -3445,5 +3569,10 @@ packages = ["tree-sitter-chelis"]
 
 [[path_rule]]
 prefix = "examples/grad_host_results.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/grad_host_selectors.ch"
 disposition = "packages"
 packages = ["chelis-cli"]

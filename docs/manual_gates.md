@@ -65,6 +65,7 @@ assertion failures unless an explicit different success condition is given.
 | `eval_interrupt_latency_manual_acceptance_oracle` | `chelis-python` | `cargo nextest run -p chelis-python --test manual_eval_interrupt -- --ignored` | Repo-root `.venv` (`uv venv --python 3.11`) and `uv` on PATH; `bindings/python` installed via `uv pip install` (the test installs it). Expected: probe prints `ALL PASS: 4/4`, with SIGINT-to-`KeyboardInterrupt` under 250 ms during evaluation and under 1 s during a front-end-dominated compile (measured 11.5 ms and 9.8 ms). Takes several minutes (installs the extension, then interrupts a running eval and a running compile, the latter after timing an uncancelled baseline). Skips with a message if `.venv` or `uv` is missing. | chelis#914, chelis#930 |
 | `build_hip_runs_scalar_string_foundation_and_matches_eval_output` | `chelis-cli` | `cargo test -p chelis-cli --test cli build_hip_runs_scalar_string_foundation_and_matches_eval_output -- --ignored` | HIP-capable GPU + `hipcc`; expected: compiled HIP binary stdout matches `chelis eval --file` stdout | 3c |
 | `phase3m_rust_runtime_hip_manual_gate` | `chelis-cli` | `cargo test -p chelis-cli --test cli phase3m_rust_runtime_hip_manual_gate -- --ignored` | HIP-capable GPU + `hipcc`; expected: build emits `libchelis_runtime.a` + `chelis_runtime.h` + `chelis_hip_runtime.h`, no `chelis_runtime.c`, compiled binary matches eval stdout | 3m |
+| `cross_library_semantic_gap_hip_gpu` suite | `chelis-cli` | `scripts/hip_test.py -p chelis-cli --test cross_library_semantic_gap_hip_gpu -- --ignored --test-threads=1` | HIP-capable GPU + `hipcc` + hipBLAS; use the wrapper to set the ROCm environment. Expected: both ignored user-`def` matmul tests execute on HIP and match the CPU reference | Wave 3 W3-A / M5(a) |
 | `phase3h_numeric_acceptance_oracle` | `chelis-cli` | `cargo test -p chelis-cli --test cli phase3h_numeric_acceptance_oracle -- --ignored --exact --nocapture` | Default C toolchain and OpenBLAS. Expected: generated C builds, links, and matches eval output for the numeric Phase 3h surface. Runtime is over the default inner-loop budget. | 3h |
 | `reef_std_embedding_module_checks_and_builds` | `chelis-cli` | `cargo test -p chelis-cli --test cli reef_std_embedding_module_checks_and_builds -- --ignored --exact --nocapture` | Default C toolchain. Expected: Std.Embedding publishes, checks, builds to C, and emits valid C artifacts. Runtime is over the default inner-loop budget. | 3h |
 | Phase G compiled-context microbench | `chelis-compiler-api` | `cargo test -p chelis-compiler-api --test compiled_context microbench_in_context_is_at_least_10x_faster_than_prepare_eval_for_50_snippets -- --ignored --exact --nocapture` | None beyond default toolchain. Expected: 50-snippet compiled-context eval is at least 10x faster than independent `prepare_eval` calls. Runtime is over the default inner-loop budget and the assertion is performance-sensitive. | Phase G |
@@ -100,11 +101,19 @@ assertion failures unless an explicit different success condition is given.
 | `cooperative_unwind_precedes_the_backstop_on_an_idle_box` | `chelis-cli` | `cargo nextest run -p chelis-cli --test issue_914_eval_timeout cooperative_unwind_precedes_the_backstop_on_an_idle_box -- --ignored` | An otherwise idle box: one-minute load average below the core count. Expected: `chelis eval --timeout 2` on a slow program unwinds cooperatively, so stderr carries the documented timeout message and NOT the watchdog's `forced exit` suffix. This is a quality-of-implementation property with a load precondition the default suite cannot hold, which is why it is ignored rather than asserted in CI (chelis#1607). | chelis#1607 |
 | `a_starved_box_falls_back_to_the_forced_exit` | `chelis-cli` | `cargo nextest run -p chelis-cli --test issue_914_eval_timeout a_starved_box_falls_back_to_the_forced_exit --test-threads=1 -- --ignored` | An otherwise idle box to start with. The row oversubscribes every core tenfold for a few seconds and will make the machine briefly unresponsive, so run it alone. Expected: the watchdog's hard-exit backstop fires and stderr carries both the documented prefix and the `forced exit` suffix. The negative twin of the row above: without it, deleting every cancellation poll would leave that row green on a fast box. | chelis#1607 |
 
+## Runtime bundle device acceptance
+
 For runtime bundle identity (#1354), the full
 `.venv/bin/python scripts/runtime_bundle_oracle.py` acceptance runner records
 the HIP and Metal commands above as **unrun** while verifying their host staging.
 Its `PASS` does not claim device execution; run the two device gates on their
 respective hardware and record those results separately.
+
+## Compiler feature acceptance gates
+
+| Gate | Command | Expected success | Owner |
+|---|---|---|---|
+| Keyed randomness corpus | `.venv/bin/python scripts/keyed_randomness_oracle.py` | `KEYED RANDOMNESS ORACLE: PASS` and a fresh exact-SHA receipt with all 91 selected identities passing, none failed/skipped/unrun, and the retired-dispatch tripwire passing. Requires a clean committed task worktree, its uv Python 3.11, Cargo/nextest and a native C toolchain. Manual: not dispatched by default CI. [Corpus and limits](keyed_randomness_oracle.md); `par` is a typed refusal, and shell release is separate. | chelis#2413 |
 
 ## Developer-environment acceptance gates
 

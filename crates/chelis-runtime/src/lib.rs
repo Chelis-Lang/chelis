@@ -53,27 +53,13 @@ pub const CHELIS_DTYPE_I64: chelis_dtype = RuntimeDType::I64.id() as chelis_dtyp
 // matching macros in `crates/chelis-runtime/include/chelis_runtime.h`.
 pub const CHELIS_DTYPE_BF16: chelis_dtype = RuntimeDType::Bf16.id() as chelis_dtype;
 pub const CHELIS_DTYPE_F16: chelis_dtype = RuntimeDType::F16.id() as chelis_dtype;
-// WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
-// `chelis_alloc` consults these so the backing buffer is sized at the
-// correct element width (1 byte for i8, 2 bytes for i16) rather than the
-// f32-default 4 bytes. Generated C code reinterprets `t->data` to
-// `int8_t*` / `int16_t*` for direct element access.
+// `chelis_alloc` uses these dtypes to size the backing buffer at their
+// element widths (one byte for i8, two bytes for i16).
 pub const CHELIS_DTYPE_I8: chelis_dtype = RuntimeDType::I8.id() as chelis_dtype;
 pub const CHELIS_DTYPE_I16: chelis_dtype = RuntimeDType::I16.id() as chelis_dtype;
 // chelis#2413: a random key ([05-RNG-2]) is an opaque 64-bit word stored
 // through [`KeyWord`], never an integer tensor.
 pub const CHELIS_DTYPE_KEY: chelis_dtype = RuntimeDType::Key.id() as chelis_dtype;
-
-// `TensorElement` trait.  Closes the architectural piece of the
-// `CRuntime-F32Coupling` §5 entry by giving each Rust primitive a
-// typed accessor on `chelis_tensor` and a `Result`-returning dtype
-// check.  Migrated call sites read or write the data buffer through
-// `<T>::data_ptr_unchecked` after an outer match on `(*t).dtype()`,
-// or through `<T>::data_ptr` when the dtype is not yet verified.
-//
-// See `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 2
-// for the locked surface. Each implementation uses the element type
-// that matches its `RuntimeDType::repr()` value.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtypeMismatch {

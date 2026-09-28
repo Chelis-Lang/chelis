@@ -1,6 +1,7 @@
 {
   "schema": 1,
   "issues": [
+    { "number": 570, "kind": "issue", "state": "open" },
     { "number": 600, "kind": "issue", "state": "open" },
     { "number": 689, "kind": "issue", "state": "open" },
     { "number": 693, "kind": "issue", "state": "open" },
@@ -12,7 +13,6 @@
     { "number": 951, "kind": "issue", "state": "open" },
     { "number": 1058, "kind": "issue", "state": "open" },
     { "number": 1059, "kind": "issue", "state": "open" },
-    { "number": 1138, "kind": "issue", "state": "open" },
     { "number": 1192, "kind": "issue", "state": "open" },
     { "number": 1277, "kind": "issue", "state": "open" },
     { "number": 1298, "kind": "issue", "state": "open" },
@@ -28,7 +28,9 @@
     { "number": 2413, "kind": "issue", "state": "open" },
     { "number": 2493, "kind": "issue", "state": "open" },
     { "number": 2503, "kind": "issue", "state": "open" },
+    { "number": 2515, "kind": "issue", "state": "open" },
     { "number": 2583, "kind": "issue", "state": "open" },
-    { "number": 2651, "kind": "issue", "state": "open" }
+    { "number": 2651, "kind": "issue", "state": "open" },
+    { "number": 2702, "kind": "issue", "state": "open" }
   ]
 }

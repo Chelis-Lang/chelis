@@ -1441,6 +1441,74 @@ impl<'a> EvalContext<'a> {
             self.result_producer = ResultProducer::interface_load(&value);
             return Ok(value);
         }
+        // The checked key operations are values as well as direct call
+        // heads. Capture the resolved operation now: a later lexical alias
+        // or shadow must not change which operation the callable invokes.
+        // The wrapper is compiler-owned and has no source-level body or
+        // captures. Its parameters and result come from the checked value
+        // type, never from a guessed scalar default.
+        if matches!(
+            name,
+            "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+        ) && self.active_builtin_symbol(name)
+        {
+            // An unannotated checked alias can retain the closed operation
+            // relation without one selected `TFn` on this value node. Its
+            // identity and arity are fixed here; the checked application
+            // decides the scalar/tensor alternative from its arguments.
+            let signature = node.metadata.ty().map(|ty| ty.expression());
+            let types = signature.and_then(checked_function_children);
+            let (return_type, param_types) =
+                types
+                    .and_then(<[Expr]>::split_last)
+                    .map_or((None, Vec::new()), |(ret, params)| {
+                        (
+                            Some(ret.clone()),
+                            params.iter().cloned().map(Some).collect(),
+                        )
+                    });
+            let arity = if matches!(name, "key_from_seed" | "split_key") {
+                1
+            } else {
+                2
+            };
+            let params = (0..arity)
+                .map(|index| format!("__chelis_key_arg_{index}"))
+                .collect::<Vec<_>>();
+            let span = node.expr.span();
+            let mut call = Vec::with_capacity(params.len() + 1);
+            call.push(Expr::node(
+                DeepTag::Var,
+                chelis_deep::Metadata::default(),
+                vec![Expr::Atom(Atom::Name(name.to_string()), span)],
+                span,
+            ));
+            call.extend(params.iter().map(|param| {
+                Expr::node(
+                    DeepTag::Var,
+                    chelis_deep::Metadata::default(),
+                    vec![Expr::Atom(Atom::Name(param.clone()), span)],
+                    span,
+                )
+            }));
+            let body = Expr::node(DeepTag::App, chelis_deep::Metadata::default(), call, span);
+            return Ok(RuntimeValue::Closure {
+                checked_function: Box::new(node.expr.clone()),
+                params,
+                param_types: if param_types.is_empty() {
+                    vec![None; arity]
+                } else {
+                    param_types
+                },
+                return_type,
+                checked_signature: types.and_then(|_| signature.cloned()),
+                invocation_contracts: Box::default(),
+                body,
+                env: self.bindings.capture(),
+                precision_env: self.precision_bindings.clone(),
+                def_name: None,
+            });
+        }
         if name == "Nil" {
             return Ok(RuntimeValue::List(Vec::new().into()));
         }
@@ -2973,6 +3041,81 @@ impl<'a> EvalContext<'a> {
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
+        if matches!(
+            name,
+            "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+        ) && let Some(RuntimeValue::Tensor(input)) = args.first()
+            && (!input.value.shape.is_empty()
+                || arg_type_exprs
+                    .first()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|ty| {
+                        matches!(
+                            ty.carrier(),
+                            ExprCarrier::DecodedNode(DeepTag::TTensor, _, _)
+                        )
+                    }))
+        {
+            // A lowered scalar key can also use a rank-zero tensor carrier.
+            // Preserve its scalar operation contract using the checked type.
+            use chelis_types::dtype_semantics::{
+                KeyHalf, fold_in_storage, key_from_seed_storage, split_key_storage,
+                split_keys_storage,
+            };
+            let shape = &input.value.shape;
+            let storage = input.value.storage();
+            let tensor = |shape: Vec<usize>, storage| {
+                RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+                    shape, storage,
+                )))
+            };
+            let computed = match name {
+                "key_from_seed" => key_from_seed_storage(storage),
+                "split_key" => {
+                    let left =
+                        split_key_storage(storage, KeyHalf::Left).map_err(|e| e.to_string())?;
+                    let right =
+                        split_key_storage(storage, KeyHalf::Right).map_err(|e| e.to_string())?;
+                    return Ok(RuntimeValue::Tuple(
+                        vec![tensor(shape.clone(), left), tensor(shape.clone(), right)].into(),
+                    ));
+                }
+                "fold_in" => {
+                    let index = expect_tensor_arg(args, 1)?;
+                    if shape != &index.value.shape {
+                        return Err(format!(
+                            "fold_in requires exactly equal key and index shapes ([05-OP-72])\n{}",
+                            chelis_types::NumericTrap::Domain {
+                                op: "fold_in",
+                                prim: Prim::Int64,
+                            }
+                        ));
+                    }
+                    fold_in_storage(storage, index.value.storage())
+                }
+                "split_keys" => {
+                    let count = expect_i64_key_operand(args, 1, "split_keys")?
+                        .as_i64_exact()
+                        .ok_or("split_keys expects i64")?;
+                    let count = usize::try_from(count).map_err(|_| {
+                        chelis_types::NumericTrap::Domain {
+                            op: "split_keys",
+                            prim: Prim::Int64,
+                        }
+                        .to_string()
+                    })?;
+                    check_split_keys_declared_extent(result_type_expr, count)?;
+                    let mut shape = shape.clone();
+                    shape.push(count);
+                    admit_host_key_result(&shape)?;
+                    let storage = split_keys_storage(storage, count).map_err(|e| e.to_string())?;
+                    return Ok(tensor(shape, storage));
+                }
+                _ => unreachable!(),
+            }
+            .map_err(|e| e.to_string())?;
+            return Ok(tensor(shape.clone(), computed));
+        }
         match name {
             // [05-OP-69]..[05-OP-72]: the key operations over the scalar key
             // value, with the kernels every lane shares.
@@ -3010,6 +3153,7 @@ impl<'a> EvalContext<'a> {
                     .to_string()
                 })?;
                 check_split_keys_declared_extent(result_type_expr, count)?;
+                admit_host_key_result(&[count])?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(
                         vec![count],
@@ -3112,11 +3256,11 @@ impl<'a> EvalContext<'a> {
                 }
                 _ => bool_unop(args, |value| !value),
             },
-            "bitand" => bit_int_binop(args, |lhs, rhs| lhs & rhs),
-            "bitor" => bit_int_binop(args, |lhs, rhs| lhs | rhs),
-            "bitxor" => bit_int_binop(args, |lhs, rhs| lhs ^ rhs),
-            "shl" => int_shift_binop(args, IntShiftOp::Left),
-            "shr" => int_shift_binop(args, IntShiftOp::Right),
+            "bitand" => bitwise_binop(args, chelis_types::BitwiseKind::And),
+            "bitor" => bitwise_binop(args, chelis_types::BitwiseKind::Or),
+            "bitxor" => bitwise_binop(args, chelis_types::BitwiseKind::Xor),
+            "shl" => bitwise_binop(args, chelis_types::BitwiseKind::ShiftLeft),
+            "shr" => bitwise_binop(args, chelis_types::BitwiseKind::ShiftRight),
             "string_len" => {
                 let value = expect_string_arg(args, 0)?;
                 Ok(RuntimeValue::int64(value.chars().count() as i64))
@@ -4941,11 +5085,35 @@ pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Re
     returned.expect("the root comparison returns a result")
 }
 
-/// One evaluated argument as the kernel `Load` its declared parameter names.
-/// A tensor finalizes at the declared element dtype, the same ingress the
-/// interpreter applies to its own frame (chelis#729); a scalar becomes an
-/// exact rank-0 tensor at the declared prim, the way `scalar_to_tensor` builds
-/// one and the way the C wrapper boxes a scalar parameter.
+/// [05-OP-33]: admit the complete result before deriving any keys.
+fn admit_host_key_result(shape: &[usize]) -> Result<(), String> {
+    use chelis_abi::metadata::{MetadataError, ShapeMetadata};
+    let admitted = shape
+        .iter()
+        .map(|n| i64::try_from(*n).map_err(|_| MetadataError::Overflow("extent exceeds i64")))
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|dims| ShapeMetadata::contiguous(&dims, chelis_vocab::RuntimeDType::Key))
+        .and_then(|metadata| metadata.bytes().allocation().map(|_| metadata));
+    let metadata = admitted.map_err(|error| {
+        let trap = match error {
+            MetadataError::Domain(_) => chelis_types::NumericTrap::Domain {
+                op: "split_keys",
+                prim: Prim::Int64,
+            },
+            MetadataError::Overflow(_) => chelis_types::NumericTrap::Overflow {
+                op: "split_keys",
+                prim: Prim::Int64,
+            },
+        };
+        format!("{error}\n{trap}")
+    })?;
+    metadata
+        .elements()
+        .scratch_len::<chelis_types::RandomKey>()
+        .map_err(|_| "Domain: chelis_alloc tensor allocation failed".to_string())?;
+    Ok(())
+}
+
 /// The scalar key operand of a key operation or draw: a key value, or the
 /// rank-0 key tensor a kernel returns for one.
 fn expect_key_arg(
@@ -5006,7 +5174,9 @@ fn check_split_keys_declared_extent(
         _ => None,
     };
     let Some(declared) = result_type_expr.and_then(|ty| match ty.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TTensor, _, [dim, _precision]) => literal_extent(dim),
+        ExprCarrier::DecodedNode(DeepTag::TTensor, _, parts) => {
+            parts.iter().rev().nth(1).and_then(literal_extent)
+        }
         _ => None,
     }) else {
         return Ok(());
@@ -5020,6 +5190,11 @@ fn check_split_keys_declared_extent(
     }
 }
 
+/// One evaluated argument as the kernel `Load` its declared parameter names.
+/// A tensor finalizes at the declared element dtype, the same ingress the
+/// interpreter applies to its own frame (chelis#729); a scalar becomes an
+/// exact rank-0 tensor at the declared prim, the way `scalar_to_tensor` builds
+/// one and the way the C wrapper boxes a scalar parameter.
 fn stage_kernel_argument(
     def: &str,
     param: &str,
@@ -5952,7 +6127,7 @@ mod legacy_capture_order_tests {
     fn declaration_exact_and_unique_resolution_never_populates_an_ambiguous_alias() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("src")).unwrap();
-        std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"identity_frames\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", crate::COMPILER_VERSION)).unwrap();
+        std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"identity-frames\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", crate::COMPILER_VERSION)).unwrap();
         for (module, value) in [("Left", 3), ("Right", 5)] {
             std::fs::write(directory.path().join("src").join(format!("{}.ch", module.to_lowercase())), format!("module Probe.{module}\nexport (value, unique_{value})\nvalue = {{ _ = print(\"{module}\")\n {value} }}\nunique_{value} = {value}\n")).unwrap();
         }

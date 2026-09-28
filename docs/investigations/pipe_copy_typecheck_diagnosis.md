@@ -14,7 +14,7 @@ case `x |> realize` passes today, so the discrimination is internal to
 the type-checker's per-builtin inference arms.
 
 The same shape of bug is recorded as `TypeCheck-PipeCast-F1` in
-`docs/gap_synthesis.md` §5 for the one-arg `cast(type)` pipe-stage
+`docs/archive/reports/gap_synthesis.md` §5 for the one-arg `cast(type)` pipe-stage
 form synthesized by PR #42 (Item 2b extras dispatch H). The narrower
 fix option (b) noted in that entry also closes Finding 4.
 
@@ -161,7 +161,7 @@ into `cast`, etc.) because by the time the body is inferred the
 parameter has been bound to a real type.
 
 This option also matches the recommendation in the
-`TypeCheck-PipeCast-F1` §5 entry of `docs/gap_synthesis.md`.
+`TypeCheck-PipeCast-F1` §5 entry of `docs/archive/reports/gap_synthesis.md`.
 
 ## Selected fix
 
@@ -191,7 +191,7 @@ The fix commit:
   (`pipe_copy_with_statically_typed_tensor_typechecks`,
   `pipe_cast_with_statically_typed_tensor_typechecks`) in
   `crates/chelis-types/tests/pipe_copy_typecheck.rs` to running.
-* Updates `docs/gap_synthesis.md` §5 to mark
+* Updates `docs/archive/reports/gap_synthesis.md` §5 to mark
   `TypeCheck-PipeCast-F1` closed.
 
 The existing `copy_rejects_scalar` and
@@ -210,5 +210,5 @@ on that path.
   (`realize`) and ~4523 (`copy`), and `infer_cast` near line ~9036.
 * Pipe loop: `crates/chelis-types/src/infer.rs::infer_pipe`.
 * Fixtures: `crates/chelis-types/tests/pipe_copy_typecheck.rs`.
-* Related entries: `docs/gap_synthesis.md` §5 row
+* Related entries: `docs/archive/reports/gap_synthesis.md` §5 row
   `TypeCheck-PipeCast-F1`.

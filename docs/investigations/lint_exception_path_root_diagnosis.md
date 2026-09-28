@@ -186,7 +186,7 @@ After the fix, both fixtures unignore.
 ## References
 
 - gap-synthesis entry: `Lint-ExceptionPathRoot-F1` in
-  `docs/gap_synthesis.md`.
+  `docs/archive/reports/gap_synthesis.md`.
 - PR #93 sibling-sweep note:
   `docs/investigations/lint_cli_path_walk_diagnosis.md`, lines 104 to
   122.

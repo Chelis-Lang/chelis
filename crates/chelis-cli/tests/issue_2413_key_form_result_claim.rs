@@ -22,10 +22,9 @@
 //!   only way to put `f` under a selected root with tensor inputs: the
 //!   evaluator on `eval_selected(g)` and `g`'s selected C entry, which is
 //!   the four-argument Tensor entry for both bodies. For a draw from the
-//!   parameter, `g` is a Tensor-lane root and the evaluator is the DAG
-//!   evaluator. For `split_key` then a draw, the destructuring callee keeps
-//!   `g` on the host lane in the evaluator (the host interpreter), while
-//!   `compile_for_execution` still lowers `g` to its Tensor entry.
+//!   parameter or from `split_key`, `g` is a Tensor-lane root and the
+//!   evaluator is the DAG evaluator. Tensor key operations preserve the
+//!   selected root's tensor path through destructuring.
 //!
 //! Expected draws come from the `key_ref` transcription of
 //! `briefs/switch-design-probes/key_ref.py`, never from a lane. Every row is
@@ -96,7 +95,9 @@ const SHAPES: &[Shape] = &[
               dropout(a, x, 0.5f32)\n}\n",
         key: left_half,
         effects: false,
-        g_lane: Some(Lane::Host),
+        // `split_key` now lowers both halves into the tensor DAG, so this
+        // selector reaches the tensor lane with the same result-claim guard.
+        g_lane: Some(Lane::Tensor),
     },
     Shape {
         name: "draw_from_a_key_parameter_between_effects",

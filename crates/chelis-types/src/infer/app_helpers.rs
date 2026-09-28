@@ -36,10 +36,12 @@ pub(super) fn auto_borrow_call_arg_types(
 /// scheme, but they must still consume the scheme's argument restrictions.
 /// Keeping unification and family-failure cleanup here prevents such a route
 /// from becoming a second admission mechanism.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn unify_checked_call_contract(
     site: &deep::Expr,
     func_ty: &Type,
     arg_tys: &[Type],
+    diagnostic_context: Option<(&str, &str)>,
     vg: &mut VarGen,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
@@ -68,6 +70,9 @@ pub(super) fn unify_checked_call_contract(
                 return Err(rejected);
             }
             let mut error: CheckError = te.into();
+            if let Some((operation, contract)) = diagnostic_context {
+                error.message = format!("{operation} {contract}; {}", error.message);
+            }
             if let Some(id) = site.span_id() {
                 error.span_offset = parse_span_offset(id);
                 error.span_id = Some(id.to_string());
