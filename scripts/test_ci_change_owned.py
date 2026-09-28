@@ -878,18 +878,32 @@ class SchemaTests(unittest.TestCase):
             (root / owned.MANUAL_GATES_PATH).read_text(),
         )
 
-        path = "crates/chelis-python/tests/manual_reef_context.rs"
-        workspace = metadata(
-            package(
-                "chelis-python",
-                [("manual_reef_context", path, [])],
-            ),
-            package(
-                "chelis-cli",
-                [("shoals_oracle", "crates/chelis-cli/tests/shoals_oracle.rs", [])],
+        cli_paths = (
+            ("crates/chelis-cli/tests/std_io_pipeline.rs", "std_io_pipeline"),
+            (
+                "crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs",
+                "cross_library_semantic_gap_hip_gpu",
             ),
         )
-        minimal = replace(
+        python_path = "crates/chelis-python/tests/manual_reef_context.rs"
+        workspace = metadata(
+            package(
+                "chelis-cli",
+                [
+                    ("shoals_oracle", "crates/chelis-cli/tests/shoals_oracle.rs", []),
+                    *((target, path, []) for path, target in cli_paths),
+                ],
+            ),
+            package(
+                "chelis-python",
+                [("manual_reef_context", python_path, [])],
+            ),
+        )
+        direct_paths = (
+            (python_path, "chelis-python", "manual_reef_context"),
+            *((path, "chelis-cli", target) for path, target in cli_paths),
+        )
+        planning_config = replace(
             config,
             standing_targets=(),
             manual_only_targets={},
@@ -898,21 +912,32 @@ class SchemaTests(unittest.TestCase):
             required_package_rules=(),
             path_rules=(),
         )
-        plan = owned.make_plan(
-            mode="pull_request",
-            base_sha="a" * 40,
-            candidate_sha="b" * 40,
-            records=[owned.ChangeRecord("M", path)],
-            base_metadata=workspace,
-            candidate_metadata=workspace,
-            config=minimal,
-            tracked_paths={path, owned.MANUAL_GATES_PATH},
-            source_reader=lambda path: (root / path).read_text(),
-        )
-        changed_path = next(
-            row for row in plan["path_dispositions"] if row["path"] == path
-        )
-        self.assertEqual(changed_path.get("execution_mode"), "manual-gate")
+        for path, package_name, target in direct_paths:
+            with self.subTest(path=path):
+                plan = owned.make_plan(
+                    mode="pull_request",
+                    base_sha="a" * 40,
+                    candidate_sha="b" * 40,
+                    records=[owned.ChangeRecord("M", path)],
+                    base_metadata=workspace,
+                    candidate_metadata=workspace,
+                    config=planning_config,
+                    tracked_paths={path, owned.MANUAL_GATES_PATH},
+                    source_reader=lambda source: (root / source).read_text(),
+                )
+                changed_path = next(
+                    row for row in plan["path_dispositions"] if row["path"] == path
+                )
+                identity = owned.Identity(package_name, target).canonical
+                self.assertEqual(changed_path.get("identity"), identity)
+                self.assertEqual(
+                    changed_path.get("execution_mode"),
+                    "manual-gate",
+                )
+                self.assertIn(
+                    identity,
+                    {row["identity"] for row in plan["manual_gate_targets"]},
+                )
 
     def test_repository_manifest_has_exact_selected_inventory_and_owners(self) -> None:
         config = owned.read_config(
