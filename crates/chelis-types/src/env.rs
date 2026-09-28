@@ -1575,6 +1575,18 @@ pub(crate) fn closed_key_relation_variables(scheme: &Scheme) -> UnordSet<TypeVar
         if !outside_callable(&scheme.body, &callable, &mut outside) {
             continue;
         }
+        // The scheme can own several checked collection relations whose
+        // variables unify. A variable carried by another relation is not
+        // selected solely by this key operation, even when that other
+        // callable is absent from the scheme body's visible shape.
+        for other in &scheme.constraints {
+            if std::ptr::eq(other, relation) {
+                continue;
+            }
+            for carried in other.carried_types() {
+                outside.extend(free_tvars(carried));
+            }
+        }
         for var in free_tvars(&callable) {
             if scheme.tvars.contains(&var) && !outside.contains(&var) {
                 closed.insert(var);
@@ -1989,6 +2001,50 @@ mod tests {
         assert!(closed_key_relation_variables(&scheme).is_empty());
         scheme.body = callable;
         assert!(closed_key_relation_variables(&scheme).is_empty());
+    }
+
+    #[test]
+    fn shared_collection_constraint_keeps_key_relation_variable_key_free() {
+        let env = Env::new();
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        let level = subst.enter_level(&var_gen);
+        let operand = var_gen.fresh_type();
+        let result = var_gen.fresh_type();
+        let key_relation = CollectionConstraint::SplitKey {
+            operand: operand.clone(),
+            result: result.clone(),
+        };
+        let list = Type::Adt("List".to_string(), vec![operand.clone()]);
+        let append_relation = CollectionConstraint::Append {
+            list: list.clone(),
+            value: operand.clone(),
+            result: list,
+        };
+        subst.record_collection_contract(key_relation.clone());
+        subst.record_collection_contract(append_relation.clone());
+        subst.leave_level(level, &var_gen);
+
+        let scheme = env.generalize(
+            &crate::unify::collection_contract_callable_type(&key_relation),
+            &subst,
+        );
+        assert_eq!(scheme.constraints, vec![key_relation, append_relation]);
+        let Type::Var(operand_var) = operand else {
+            unreachable!()
+        };
+        let Type::Var(result_var) = result else {
+            unreachable!()
+        };
+        assert_eq!(
+            closed_key_relation_variables(&scheme).into_sorted(),
+            vec![result_var],
+            "a second owned constraint exposes the operand as an ordinary generic"
+        );
+        assert!(
+            subst.key_free_origin(operand_var).is_some(),
+            "[04-LIN-10] must forbid key instantiation of the shared operand"
+        );
     }
 
     /// A scheme exercising every quantifier kind, with a restriction on one
