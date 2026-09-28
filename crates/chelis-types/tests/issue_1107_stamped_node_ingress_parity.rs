@@ -769,13 +769,14 @@ fn seeded_key_program(seed_prim: &str) -> String {
 /// `seed_literal_form`, which read its seed `lit` only as an `Expr::List` and
 /// so never fired the i64-suffix rule on the stamped ingress. The handler is
 /// gone; its key-form analogue is the seed literal of `key_from_seed`, whose
-/// width both ingresses must read from the same `type:` metadata.
+/// width both ingresses must read from the same `type:` metadata. The checked
+/// scalar/tensor seed relation reports its admitted domain at this boundary.
 /// DISPOSITION LOCK (the defective reader was deleted with the handler).
 #[test]
 fn unsuffixed_seed_literal_is_rejected_on_both_ingresses() {
     assert_agree_and_reject(
         &seeded_key_program("i32"),
-        "precision mismatch: expected i64, got i32",
+        "key operation expects i64 or a tensor of i64, got i32",
         "key_from_seed at an i32 literal",
     );
 }
