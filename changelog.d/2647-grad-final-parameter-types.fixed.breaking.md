@@ -12,3 +12,6 @@ Result-origin transport also preserves concrete key values and the declared
 owner of generic key restrictions.
 Published schemes keep dtype bounds on the correct variables; concrete
 first-order value annotations remain available to subsequent shape checks.
+Independent declared callable inputs and results remain available to ordinary
+generic instantiation, branch unification, and transforms without using a
+gradient result constraint to infer its selected parameters.

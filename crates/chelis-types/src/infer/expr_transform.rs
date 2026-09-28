@@ -22,6 +22,7 @@ pub(super) fn infer_grad(
     }
 
     let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     let resolved = subst.apply(&f_ty);
     if let Type::Error(w) = &resolved {
         return propagate(w);
@@ -574,6 +575,7 @@ pub(super) fn infer_vmap(
     let axis = axis as usize;
 
     let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     if let Some(member) = vmap_batches_a_group_variable(&f_ty, subst, product) {
         return report(errors, vmap_group_member_fence(node, member));
     }

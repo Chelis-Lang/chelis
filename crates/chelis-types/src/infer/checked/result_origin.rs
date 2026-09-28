@@ -15,13 +15,21 @@ impl InferenceProduct {
         &mut self,
         actual: &Type,
         declared: &Type,
-        subst: &Subst,
+        subst: &mut Subst,
     ) -> bool {
-        if resolved(actual, subst) == resolved(declared, subst)
-            || ((crate::env::free_tvars(&resolved(actual, subst)).is_empty()
-                || is_closed_first_order(&resolved(declared, subst)))
-                && !self.result_has_pending_producer(actual, subst))
-        {
+        // Reject an incompatible annotation through its owning syntax boundary,
+        // before a deferred replay could replace its diagnostic.
+        if unify(actual, declared, &mut subst.clone()).is_err() {
+            return false;
+        }
+        let mut ready_parts = subst.clone();
+        let Ok(ready) = self.unify_ready_result_parts(actual, declared, &mut ready_parts) else {
+            // The annotation owner reports the failed equality against the
+            // unchanged substitution, just as for the full compatibility check.
+            return false;
+        };
+        *subst = ready_parts;
+        if ready {
             return false;
         }
         self.result_type_constraints.push(ResultTypeConstraint {
@@ -29,6 +37,54 @@ impl InferenceProduct {
             declared: declared.clone(),
         });
         true
+    }
+
+    /// Equality is ready per structural slot. A callable can have an ordinary
+    /// annotated parameter beside a result whose semantic producer still waits.
+    /// Its result equation must not turn those independent slots into one wait.
+    fn unify_ready_result_parts(
+        &self,
+        actual: &Type,
+        declared: &Type,
+        subst: &mut Subst,
+    ) -> Result<bool, TypeError> {
+        let actual = resolved(actual, subst);
+        let declared = resolved(declared, subst);
+        if actual == declared {
+            return Ok(true);
+        }
+        let pairs: Option<Vec<(&Type, &Type)>> = match (&actual, &declared) {
+            (Type::Fn(a, ar), Type::Fn(b, br)) if a.len() == b.len() => Some(
+                a.iter()
+                    .zip(b)
+                    .chain(std::iter::once((ar.as_ref(), br.as_ref())))
+                    .collect(),
+            ),
+            (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
+                Some(a.iter().zip(b).collect())
+            }
+            (Type::Adt(a, aa), Type::Adt(b, ba)) if a == b && aa.len() == ba.len() => {
+                Some(aa.iter().zip(ba).collect())
+            }
+            (Type::Ref(a), Type::Ref(b)) => Some(vec![(a.as_ref(), b.as_ref())]),
+            _ => None,
+        };
+        if let Some(pairs) = pairs {
+            let mut ready = true;
+            for (actual, declared) in pairs {
+                ready &= self.unify_ready_result_parts(actual, declared, subst)?;
+            }
+            return Ok(ready);
+        }
+        if !self.result_has_pending_producer(&actual, subst)
+            && !self.result_has_pending_producer(&declared, subst)
+            && (crate::env::free_tvars(&actual).is_empty() || is_closed_first_order(&declared))
+        {
+            unify(&actual, &declared, subst)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn result_has_pending_producer(&self, actual: &Type, subst: &Subst) -> bool {
@@ -253,25 +309,46 @@ impl InferenceProduct {
         binding_only: bool,
     ) -> bool {
         let mut variables = crate::env::free_tvars(&resolved(actual, subst));
-        let mut visited = Vec::new();
+        variables.sort_unstable();
+        variables.dedup();
         loop {
-            let before = visited.len();
+            let before = variables.len();
             for check in &self.deferred_shape_checks {
-                if visited.contains(&check.id)
-                    || !crate::env::free_tvars(&resolved(&check.result_ty, subst))
-                        .iter()
-                        .any(|variable| variables.contains(variable))
+                if !crate::env::free_tvars(&resolved(&check.result_ty, subst))
+                    .iter()
+                    .any(|variable| variables.contains(variable))
                 {
                     continue;
                 }
-                visited.push(check.id);
                 if matches!(check.rule, DeferredShapeRule::ResultJoin { .. }) {
-                    variables.extend(
-                        check
+                    // A raw value hole remains the owner of the callable
+                    // fields exposed by a join. Resolving that hole to a fresh
+                    // skeleton is not a parameter annotation or application.
+                    if !binding_only
+                        && !self.result_inputs_closed
+                        && check
                             .arg_tys
                             .iter()
-                            .flat_map(|ty| crate::env::free_tvars(&resolved(ty, subst))),
-                    );
+                            .any(|input| matches!(input, Type::Var(_)))
+                        && !is_closed_first_order(&resolved(&check.result_ty, subst))
+                    {
+                        return true;
+                    }
+                    let published = resolved(&check.result_ty, subst);
+                    let mut corresponding = Vec::new();
+                    for variable in variables.clone() {
+                        for input in &check.arg_tys {
+                            corresponding_types(
+                                &Type::Var(variable),
+                                &published,
+                                &resolved(input, subst),
+                                &mut corresponding,
+                            );
+                        }
+                    }
+                    variables.extend(corresponding.iter().flat_map(crate::env::free_tvars));
+                    variables.sort_unstable();
+                    variables.dedup();
                     continue;
                 }
                 // These rules derive a type from an operand: their output is not
@@ -289,7 +366,7 @@ impl InferenceProduct {
                     return true;
                 }
             }
-            if visited.len() == before {
+            if variables.len() == before {
                 return false;
             }
         }
@@ -345,6 +422,67 @@ impl InferenceProduct {
         Some(published)
     }
 
+    /// A structural join can determine an ordinary parameter slot before its
+    /// result producer settles. A raw value hole carrying a callable remains
+    /// indivisible: exposing its shape must not erase its origin for later use.
+    fn settle_ready_join_parts(
+        &self,
+        inputs: &[Type],
+        published: &Type,
+        subst: &mut Subst,
+    ) -> Result<(), TypeError> {
+        if inputs.iter().any(|input| {
+            matches!(input, Type::Var(_))
+                && !matches!(resolved(input, subst), Type::Var(_))
+                && !is_closed_first_order(&resolved(input, subst))
+        }) {
+            return Ok(());
+        }
+        let inputs: Vec<_> = inputs.iter().map(|ty| resolved(ty, subst)).collect();
+        let published = resolved(published, subst);
+        let fields = |ty: &Type| -> Option<Vec<Type>> {
+            match (&published, ty) {
+                (Type::Fn(args, _), Type::Fn(other, ret)) if args.len() == other.len() => Some(
+                    other
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once((**ret).clone()))
+                        .collect(),
+                ),
+                (Type::Tuple(args), Type::Tuple(other)) if args.len() == other.len() => {
+                    Some(other.clone())
+                }
+                (Type::Adt(name, args), Type::Adt(other_name, other))
+                    if name == other_name && args.len() == other.len() =>
+                {
+                    Some(other.clone())
+                }
+                (Type::Ref(_), Type::Ref(other)) => Some(vec![(**other).clone()]),
+                _ => None,
+            }
+        };
+        if let Some(output_fields) = fields(&published)
+            && let Some(input_fields) = inputs.iter().map(fields).collect::<Option<Vec<_>>>()
+        {
+            for (index, field) in output_fields.iter().enumerate() {
+                let inputs = input_fields
+                    .iter()
+                    .map(|fields| fields[index].clone())
+                    .collect::<Vec<_>>();
+                self.settle_ready_join_parts(&inputs, field, subst)?;
+            }
+        } else if inputs.iter().any(is_closed_first_order)
+            && inputs
+                .iter()
+                .all(|input| !self.result_has_pending_producer_with(input, subst, true))
+        {
+            for input in &inputs {
+                unify(&published, input, subst)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn replay_result_joins(
         &mut self,
         vg: &mut VarGen,
@@ -383,6 +521,24 @@ impl InferenceProduct {
                     }
                 }
             }
+            let before_parts = (
+                resolved(&published, subst),
+                inputs
+                    .iter()
+                    .map(|input| resolved(input, subst))
+                    .collect::<Vec<_>>(),
+            );
+            if let Err(error) = self.settle_ready_join_parts(&inputs, &published, subst) {
+                errors.push(error.into());
+            }
+            progressed |= before_parts
+                != (
+                    resolved(&published, subst),
+                    inputs
+                        .iter()
+                        .map(|input| resolved(input, subst))
+                        .collect::<Vec<_>>(),
+                );
             let first_order = inputs
                 .iter()
                 .any(|ty| is_closed_first_order(&resolved(ty, subst)));
@@ -449,6 +605,14 @@ fn corresponding_types(needle: &Type, from: &Type, to: &Type, found: &mut Vec<Ty
         found.push(to.clone());
         return;
     }
+    if matches!(to, Type::Var(_))
+        && crate::env::free_tvars(needle)
+            .iter()
+            .any(|var| crate::env::free_tvars(from).contains(var))
+    {
+        found.push(to.clone());
+        return;
+    }
     match (from, to) {
         (Type::Fn(args, result), Type::Fn(other_args, other_result))
             if args.len() == other_args.len() =>
@@ -478,6 +642,13 @@ fn corresponding_types(needle: &Type, from: &Type, to: &Type, found: &mut Vec<Ty
                     corresponding_types(needle, from, to, found);
                 }
             }
+        }
+        (Type::Tensor(_, TensorPrec::Var(from)), Type::Tensor(_, to)) => {
+            let target = match to {
+                TensorPrec::Var(var) => Type::Var(*var),
+                TensorPrec::Concrete(prim) => Type::Prim(*prim),
+            };
+            corresponding_types(needle, &Type::Var(*from), &target, found);
         }
         (Type::Ref(from), Type::Ref(to)) => corresponding_types(needle, from, to, found),
         _ => {}
