@@ -705,13 +705,13 @@ feed-back is the fundamental inference loop, and doing it manually via `fold` is
 but verbose.
 
 ```chelis
-import Std.Nn.Generate
+import School.Nn.Generate
 
 -- Simple greedy generation
 generated = generate(model_fn, context, cast(512, i64))
 
 -- With sampling controls
-generated = generate_with(model_fn, context, GenerateConfig {
+generated = generate_with(key_from_seed(42i64), model_fn, context, GenerateConfig {
   max_tokens: cast(512, i64),
   temperature: 0.8,
   top_k: cast(50, i64),
@@ -725,16 +725,17 @@ Internals:
   polymorphic: `KVCache[a]`.
 - `generate` runs the autoregressive loop: call the model with cached KV, get logits for
   the next position, sample or argmax, append to the sequence, update the cache.
-- Sampling: `sample_token(logits, temperature, top_k, top_p)` applies temperature
+- Sampling: `sample_next_tokens(k, logits, config)` applies temperature
   scaling, top-k filtering (via `sort`), top-p (nucleus) filtering (via suffix-mass on
-  sorted probabilities), and categorical sampling (`Random` effect).
+  sorted probabilities), and categorical sampling with an explicit key.
 - The model function signature:
   `(input_ids: tensor[batch, seq, i64], cache: Option[KVCache[p]]) -> (logits: tensor[batch, vocab, f32], new_cache: KVCache[p])`.
 
-Effects: the shipped `generate` helper is the pure greedy surface. The more general
-`generate_with` helper currently carries `Random` because effect tracking is static at
-the function boundary, even when a runtime config sets `temperature = 0`; call sampled
-generation under `with seed(...)`.
+The greedy `generate` helper needs no key. At the explicit-key School release,
+sampled `generate_with` receives a key and splits it for each sampling step;
+the key is consumed even when a runtime config chooses greedy output. The
+sampled-noise helper accepts exact supplied uniform values so tests can check
+token selection independently of the generator.
 
 ### Std.Optim (expansion)
 
@@ -816,7 +817,8 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 - Decimal: banker's rounding matches expected behavior
 - Decimal: division with explicit rounding mode
 - Generate: greedy generation produces correct tokens for a trivial model
-- Generate: temperature sampling with seed produces reproducible output
+- Generate: temperature sampling with the same key produces reproducible output;
+  a second use of that key is rejected
 - Generate: positional record-constructor misuse is rejected in package mode
 - AdamW: zero-gradient decay still updates parameters via decoupled weight decay
 - LAMB: trust-ratio update produces the expected tensor output on a fixed probe case
@@ -1113,7 +1115,7 @@ adjoint tier.
 | Module | Contents | Key Dependencies |
 |---|---|---|
 | `Nautilus.Special` | `erf`, `erfinv`, `log_gamma`, `digamma`, `beta`, `lbeta`. Required by Distributions. | scalar math |
-| `Nautilus.Distributions` | Normal, LogNormal, Uniform, Student-t, Chi-squared, Exponential, Gamma — PDF, CDF, inverse CDF, sampling. `normal_like` is Box-Muller inside this module. | `Nautilus.Special`, `Random` effect |
+| `Nautilus.Distributions` | Normal, LogNormal, Uniform, Student-t, Chi-squared, Exponential, Gamma — PDF, CDF, inverse CDF, sampling. `normal_like` is Box-Muller inside this module. | `Nautilus.Special`, explicit keys for sampling |
 | `Nautilus.LinAlg` | SVD, PCA, eigendecomposition, Cholesky, QR, LU, solve, inverse, determinant. nalgebra-backed with hand-written adjoint rules for AD. | runtime nalgebra FFI, adjoint registry |
 
 #### P1
@@ -1129,7 +1131,7 @@ adjoint tier.
 
 | Module | Contents | Key Dependencies |
 |---|---|---|
-| `Nautilus.SDE` | SDE solvers (Euler-Maruyama, Milstein). Uses `Random` effect. | `Nautilus.ODE`, `Random`, cumsum |
+| `Nautilus.SDE` | SDE solvers (Euler-Maruyama, Milstein). Stochastic steps consume explicit keys. | `Nautilus.ODE`, keyed draws, cumsum |
 | `Nautilus.Integrate` | Numerical integration (trapezoidal, Simpson's, Gaussian quadrature) | fold, scalar math |
 | `Nautilus.Interpolation` | Linear, cubic, spline interpolation | sort, gather |
 | `Nautilus.Testing` | Hypothesis testing, confidence intervals, p-values | `Nautilus.Distributions`, `Nautilus.Stats` |
@@ -1148,8 +1150,9 @@ adjoint tier.
   `cholesky`, `solve`, `qr`, `eig` on non-degenerate inputs
 - **AD composition:** `grad` through `Nautilus.ODE.rk4`, `Nautilus.Optim.solve_qp`,
   `Nautilus.Interpolation.cubic`
-- **Effect propagation:** `Nautilus.Distributions.sample` propagates `Random`;
-  `Nautilus.Signal` stub propagates correct effect annotations
+- **Key discipline:** each sampler consumes its key once, splits keys for independent
+  draws, and has a supplied-noise helper for deterministic value tests;
+  `Nautilus.Signal` stub propagates its actual effect annotations
 - **Package gate:** `chelis reef build` produces a valid `.chb`, consumer imports and
   type-checks
 
@@ -1356,10 +1359,10 @@ requires understanding the type system's extension points).
 
 | Module | Contents | Key Dependencies |
 |---|---|---|
-| `Shoals.Pricing` | Black-Scholes analytical, Heston semi-analytical, SABR calibration, Monte Carlo engines with variance reduction. Greeks via `grad` for free — write the pricing function, `grad(price, wrt=(spot, vol, rate))` gives delta/vega/rho automatically. | `Nautilus.Distributions`, `Nautilus.SDE`, `Random` effect, cumsum |
-| `Shoals.Risk` | VaR (parametric, historical, Monte Carlo), CVaR/expected shortfall, stress testing, scenario generation | `Nautilus.Stats`, sort/quantile, `Random` effect |
+| `Shoals.Pricing` | Black-Scholes analytical, Heston semi-analytical, SABR calibration, Monte Carlo engines with variance reduction. Greeks via `grad` for free — write the pricing function, `grad(price, wrt=(spot, vol, rate))` gives delta/vega/rho automatically. | `Nautilus.Distributions`, `Nautilus.SDE`, explicit keys, cumsum |
+| `Shoals.Risk` | VaR (parametric, historical, Monte Carlo), CVaR/expected shortfall, stress testing, scenario generation | `Nautilus.Stats`, sort/quantile, explicit keys |
 | `Shoals.Curves` | Yield curve construction (bootstrap from market instruments), interpolation (linear, cubic, Nelson-Siegel), day count conventions (ACT/360, ACT/365, 30/360) | `Nautilus.Interpolation`, `Nautilus.Roots`, `Std.Time` |
-| `Shoals.Stochastic` | SDE models: GBM, Heston, SABR, jump-diffusion. Path generation using cumsum + `Nautilus.SDE`. Variance reduction (antithetic, control variates). | `Nautilus.SDE`, `Random`, cumsum, einsum |
+| `Shoals.Stochastic` | SDE models: GBM, Heston, SABR, jump-diffusion. Path generation using cumsum + `Nautilus.SDE`. Variance reduction (antithetic, control variates). | `Nautilus.SDE`, explicit keys, cumsum, einsum |
 | `Shoals.Orderbook` | Limit order book representation (price-priority sorted collections), matching logic, bid/ask spread computation, VWAP | Host-side collections, sort, `Std.Decimal` |
 
 ### What Makes This Work in Chelis
@@ -1367,15 +1370,16 @@ requires understanding the type system's extension points).
 - **Greeks for free:** `grad(black_scholes_price, wrt=(spot, vol, rate, T))` gives all
   four first-order Greeks in one backward pass. `vmap(grad(...))` gives per-instrument
   Greeks for a portfolio. No bump-and-reprice, no finite differences.
-- **Reproducible Monte Carlo:** The `Random` effect with `withSeed` handlers means every
-  simulation is exactly reproducible. Two runs with the same seed produce identical
-  paths. This is a regulatory requirement.
+- **Reproducible Monte Carlo:** `key_from_seed` and key-first draws make a
+  simulation's random inputs explicit. Two runs with the same keys and declared
+  inputs produce identical paths under [05-RNG-1]. Split child keys for separate
+  paths and draws; this reproducibility is required for audit.
 - **Typed market data:** Named tensor dimensions like `tensor[instrument, scenario, f32]`
   prevent accidentally multiplying a `[portfolio, maturity]` matrix by a
   `[maturity, scenario]` matrix when the dimensions don't match.
-- **Effect-tracked data provenance:** A function that reads from a market data feed has
-  `IO` effect. A function using Monte Carlo has `Random` effect. The type system tracks
-  what each computation depends on.
+- **Data provenance:** A function that reads from a market data feed has an
+  `IO` effect. A Monte Carlo function receives its key as an ordinary typed
+  input, so its random dependency is visible in its signature.
 
 ### Test Plan
 
@@ -1392,18 +1396,17 @@ requires understanding the type system's extension points).
 - `Shoals.Stochastic`: GBM paths satisfy known statistical properties
   (mean = spot * exp(mu*T), variance matches theory)
 - `Shoals.Orderbook`: matching logic satisfies price-time priority invariant
-- Effect tracking: MC pricing propagates `Random`, curve construction propagates `IO`
-  for market data
-- Reproducibility: same seed produces identical prices across runs
-- Manifest: `chelis manifest --check` passes for every Shoals example program (all
-  Random ops covered by seed handlers)
+- Key discipline: MC pricing consumes its key once, and curve construction
+  propagates `IO` for market data
+- Reproducibility: identical keys and declared inputs produce identical prices
+- Manifest: once `chelis manifest` is implemented, it records random operations
+  and their explicit key roots for Shoals examples
 
-**Reproducibility manifests.** The `chelis manifest` command (compiler-side pass)
-extracts all `Random`-effect-annotated operations into a structured JSON report.
-`chelis manifest --check` is a CI gate: fail the build if any random operation in a
-Shoals program is unseeded. Status: **demo-blocking, scoped, ready to build.** Full
-design: `chelis_manifest_spec.md` (concrete CLI surface and JSON schema); historical
-context in `archive/chelis_reproducibility_manifests.md`.
+**Reproducibility manifests.** `chelis_manifest_spec.md` specifies a planned
+`chelis manifest` command that follows random operations' explicit key derivations
+to a seed or entry argument and emits a structured report. It is not an existing
+Shoals CI gate. Historical context is in
+`archive/chelis_reproducibility_manifests.md`.
 
 **Canonical finance properties.** Shoals ships with a `properties/` directory of
 reference `@property` functions:
@@ -1706,27 +1709,23 @@ change — excluded or down-weighted for training). This is the labeling convent
 Phase 4a corpus-curation step relies on. Nautilus candidates for `stable`: all
 of `Nautilus.Special`, all of `Nautilus.Distributions` (pdf/cdf/inv_cdf). Candidates
 for `alpha`: `Nautilus.CurveFit`, `Nautilus.SDE` (APIs may shift when autonomous
-`Random` sampling lands). Apply the same convention to `Coral` and `Shoals` when they
+keyed sampling lands). Apply the same convention to `Coral` and `Shoals` when they
 ship.
 
-### Effect-Polymorphic Test Handlers
+### Supplied-Value Random Tests And Effect Handlers
 
-Document and standardize the pattern of replacing effects with test doubles:
+Document and standardize the two distinct patterns for test doubles:
 
-- `with seed(n) { ... }` replaces `Random` with deterministic output — already used
-  throughout Nautilus tests.
-- `with_deterministic_random(sequence) { ... }` — a test handler that returns values
-  from a fixed sequence instead of pseudorandom values. Useful for testing exact output
-  sequences.
+- A sampled function receives a key and delegates value-dependent work to a pure
+  helper that accepts sampled noise. Tests pass exact noise to that helper, while
+  same-key replay and split-child tests check the random boundary separately.
 - `with_mock_io(recorded_trace) { ... }` — a test handler for `IO` effect that returns
   recorded data instead of reading files.
 - `with_cpu_fallback { ... }` — a test handler for `Resource(GPU)` that routes all GPU
   allocations to CPU.
 
-The effect system guarantees these substitutions are type-safe: a program's behavior is
-identical modulo the handled effects (by LaCaDiLE Theorem 3, effect correctness). This
-gives property-based testing where the test harness is provably faithful to the
-production semantics.
+The supplied-noise helper is ordinary pure function composition. Effect-handler
+substitutions remain governed by the actual effects they handle.
 
 Implementation: standard library functions in `Std.Test` (or documented patterns in the
 SKILL.md if the functions are trivial). Not a compiler change — library code plus
