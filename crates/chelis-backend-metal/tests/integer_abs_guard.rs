@@ -113,6 +113,32 @@ fn lowered_integer_abs_gradient_reaches_typed_metal_kernels() {
     );
 }
 
+#[test]
+fn source_grad_and_vmap_bitwise_coefficients_reach_metal_kernels() {
+    let grad = lower_gradient_source(
+        "def loss(x: tensor[4, f32], w: tensor[4, i64], n: tensor[4, i64]) -> tensor[f32] = sum(mul(x, cast(bitxor(w, n), f32)), 0i32)\n\
+         def main(x: tensor[4, f32], w: tensor[4, i64], n: tensor[4, i64]) -> tensor[4, f32] = (grad(loss, wrt=x))(x, w, n)\n",
+    );
+    assert!(grad.nodes().iter().any(|node| matches!(node.op, RiscOp::Bitwise(chelis_types::BitwiseKind::Xor))));
+    let grad_source = try_codegen_metal(&grad, "bitwise_grad").expect("source grad device lowering").mm_source;
+    assert!(grad_source.contains("k_bitwise_bitxor_i64_"));
+
+    let mapped = lower_gradient_source(
+        "def row(w: tensor[i64], n: tensor[i64]) -> tensor[i64] = shl(w, n)\n\
+         def main(w: tensor[4, i64], n: tensor[4, i64]) -> tensor[4, i64] = vmap(row)(w, n)\n",
+    );
+    assert!(mapped.nodes().iter().any(|node| matches!(node.op, RiscOp::Bitwise(chelis_types::BitwiseKind::ShiftLeft))));
+    let mapped_source = try_codegen_metal(&mapped, "bitwise_vmap").expect("source vmap device lowering").mm_source;
+    assert!(mapped_source.contains("k_bitwise_shl_i64_"));
+
+    let control = lower_gradient_source(
+        "def row(x: tensor[f32], y: tensor[f32]) -> tensor[f32] = mul(x, y)\n\
+         def main(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = vmap(row)(x, y)\n",
+    );
+    assert!(!control.nodes().iter().any(|node| matches!(node.op, RiscOp::Bitwise(_))));
+    try_codegen_metal(&control, "non_bitwise_vmap").expect("non-bitwise control");
+}
+
 fn gradient_dag() -> Dag {
     let source = "def loss(x: tensor[4, f32], w: tensor[4, i64]) -> tensor[f32] = sum(mul(x, cast(abs(w), f32)), 0i32)\ndef main(x: tensor[4, f32], w: tensor[4, i64]) -> tensor[4, f32] = (grad(loss, wrt=x))(x, w)\n";
     lower_gradient_source(source)
