@@ -947,12 +947,13 @@ cadence = "pull_request and exact-candidate workflow_dispatch when directly modi
 reason = "the runtime-dependent HIP CPU-fixture suite is entirely ignored and must execute explicitly against the exact-head runtime archive when its target changes"
 tracking_issue = "chelis#1863"
 
-# These all-ignored targets need prerequisites no Linux PR worker has. A direct
-# modification is listed with its ignored tests, rejected if an active test
-# appears, and reported as a manual gate that PR CI did not execute. Each
-# `manual_gates` value is a docs/manual_gates.md row whose command runs exactly
-# this target's ignored tests, and one of them runs all of them with no name
-# filter; an uncited row that runs it makes this row stale.
+# These all-ignored targets either need prerequisites no Linux PR worker has or
+# exceed the default inner-loop budget. A direct modification is listed with
+# its ignored tests, rejected if an active test appears, and reported as a
+# manual gate that PR CI did not execute. Each `manual_gates` value is a
+# docs/manual_gates.md row whose command runs exactly this target's ignored
+# tests, and one of them runs all of them with no name filter; an uncited row
+# that runs it makes this row stale.
 [[manual_gate_target]]
 package = "chelis-cli"
 name = "shoals_oracle"
@@ -963,6 +964,20 @@ manual_gates = [
 ]
 reason = "the Shoals finance-oracle rows need a Shoals checkout that the Linux PR workers do not have"
 tracking_issue = "chelis#1824"
+
+[[manual_gate_target]]
+package = "chelis-cli"
+name = "std_io_pipeline"
+manual_gates = ["phase3g_text_pipeline_acceptance_oracle", "std_io_pipeline std IO suite"]
+reason = "the entirely ignored Phase 3g Std.Io acceptance suite exceeds the default inner-loop budget"
+tracking_issue = "chelis#1354"
+
+[[manual_gate_target]]
+package = "chelis-cli"
+name = "cross_library_semantic_gap_hip_gpu"
+manual_gates = ["cross_library_semantic_gap_hip_gpu suite"]
+reason = "the two ignored matmul checks require an AMD HIP GPU, hipcc, and hipBLAS unavailable to Linux PR workers"
+tracking_issue = "chelis#1354"
 
 [[manual_gate_target]]
 package = "chelis-python"
