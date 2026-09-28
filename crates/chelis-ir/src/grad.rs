@@ -239,11 +239,55 @@ fn grad_dag_checked_impl(
     // `Gather` route only to their values input, while `ScatterAdd` routes to
     // target and updates but not indices. A control scalar that is ALSO reached
     // through a genuine data edge stays live through that edge and is checked.
-    let mut live = vec![false; forward.len()];
-    live[output.0] = true;
+    let reach = cotangent_reach(forward, output);
+    let live = reach.iter().map(|&state| state != 0).collect::<Vec<_>>();
+    reject_random_selection_parameters(forward, &live, wrt)?;
+    for node in forward.nodes() {
+        if live[node.id.0]
+            && let Some(rejection) = structural_rejection(node, forward)
+            && (!is_integer_arithmetic_rejection(&rejection)
+                || reach[node.id.0] & ACTIVE_COTANGENT != 0)
+        {
+            return Err(rejection);
+        }
+    }
+
+    grad_dag_result(forward, output, wrt).map_err(|failure| match failure {
+        BackwardFailure::Rejected(error) => error,
+        BackwardFailure::Construction(why) => AdError::NotSupported {
+            op: "<unknown>",
+            reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
+        },
+    })
+}
+
+const ACTIVE_COTANGENT: u8 = 1;
+const ZERO_COTANGENT: u8 = 2;
+
+fn is_integer_arithmetic_rejection(rejection: &AdError) -> bool {
+    matches!(
+        rejection,
+        AdError::NotSupported {
+            reason: AdRejectionReason::IntegerArithmeticOutput,
+            ..
+        }
+    )
+}
+
+/// Reachability is carried with cotangent provenance. A comparison, shape
+/// query, or `where` condition sends exact zero, while other selected edges
+/// retain the ordinary structural AD obligation. Both bits may reach a
+/// shared producer; the ordinary path then takes precedence.
+fn cotangent_reach(forward: &Dag, output: NodeId) -> Vec<u8> {
+    let mut reach = vec![0; forward.len()];
+    reach[output.0] = ACTIVE_COTANGENT;
     for i in (0..forward.len()).rev() {
-        if live[i] {
+        if reach[i] != 0 {
             let node = &forward.nodes()[i];
+            let current = reach[i];
+            let mut mark = |input: NodeId, edge: u8| {
+                reach[input.0] |= edge;
+            };
             match &node.op {
                 RiscOp::Shrink { .. }
                 | RiscOp::Stride { .. }
@@ -251,15 +295,15 @@ fn grad_dag_checked_impl(
                 | RiscOp::Reshape { .. }
                 | RiscOp::Gather { .. } => {
                     if let Some(values) = node.inputs.first() {
-                        live[values.0] = true;
+                        mark(*values, current);
                     }
                 }
                 RiscOp::ScatterAdd { .. } => {
                     if let Some(target) = node.inputs.first() {
-                        live[target.0] = true;
+                        mark(*target, current);
                     }
                     if let Some(updates) = node.inputs.get(2) {
-                        live[updates.0] = true;
+                        mark(*updates, current);
                     }
                 }
                 // Key-operand draws: the key and activation are discrete
@@ -269,17 +313,17 @@ fn grad_dag_checked_impl(
                 // adjoints.
                 RiscOp::Dropout | RiscOp::DropoutReplay => {
                     if let Some(data) = node.inputs.first() {
-                        live[data.0] = true;
+                        mark(*data, current);
                     }
                 }
                 RiscOp::UniformLike => {
                     for bound in node.inputs.iter().take(3) {
-                        live[bound.0] = true;
+                        mark(*bound, current);
                     }
                 }
                 RiscOp::UniformBoundAdjoint { .. } => {
                     if let Some(cotangent) = node.inputs.get(1) {
-                        live[cotangent.0] = true;
+                        mark(*cotangent, current);
                     }
                 }
                 // A key and its i64 seed or index are discrete: nothing a
@@ -300,7 +344,7 @@ fn grad_dag_checked_impl(
                 // describes for its activation edge.
                 RiscOp::GuardedFail { .. } => {
                     if let Some(fallback) = node.inputs.get(1) {
-                        live[fallback.0] = true;
+                        mark(*fallback, current);
                     }
                 }
                 // A comparison contributes exact zero cotangents to both
@@ -308,33 +352,29 @@ fn grad_dag_checked_impl(
                 // ([06] §7.5). That includes structural rejection analysis.
                 RiscOp::Compare(_) => {
                     for input in &node.inputs {
-                        live[input.0] = true;
+                        mark(*input, ZERO_COTANGENT);
+                    }
+                }
+                RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => {
+                    for input in &node.inputs {
+                        mark(*input, ZERO_COTANGENT);
+                    }
+                }
+                RiscOp::Where => {
+                    mark(node.inputs[0], ZERO_COTANGENT);
+                    for input in node.inputs.iter().skip(1) {
+                        mark(*input, current);
                     }
                 }
                 _ => {
                     for input in &node.inputs {
-                        live[input.0] = true;
+                        mark(*input, current);
                     }
                 }
             }
         }
     }
-    reject_random_selection_parameters(forward, &live, wrt)?;
-    for node in forward.nodes() {
-        if live[node.id.0]
-            && let Some(rejection) = structural_rejection(node, forward)
-        {
-            return Err(rejection);
-        }
-    }
-
-    grad_dag_result(forward, output, wrt).map_err(|failure| match failure {
-        BackwardFailure::Rejected(error) => error,
-        BackwardFailure::Construction(why) => AdError::NotSupported {
-            op: "<unknown>",
-            reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
-        },
-    })
+    reach
 }
 
 /// Why [`grad_dag_result`] built no backward graph: a typed rejection, which
@@ -352,9 +392,10 @@ impl From<String> for BackwardFailure {
 }
 
 /// The atom-owned structural AD disposition for a forward node. Both the
-/// live-node precheck and the actual backward walk use this table: a node
-/// reached through an exact-zero cotangent must retain its named reason
-/// rather than falling into an unstructured construction error.
+/// live-node precheck and the actual backward walk use this table. A
+/// piecewise-constant conversion reached through exact zero retains its
+/// named reason; signed-integer arithmetic reached only through exact zero
+/// has no requested adjoint and passes that zero to its producers.
 fn structural_rejection(node: &DagNode, forward: &Dag) -> Option<AdError> {
     match &node.op {
         RiscOp::Logical(kind) => {
@@ -719,6 +760,7 @@ fn grad_dag_result(
     // spec/design/chelis_span_survival.md §2.3 AD row: "Forward nodes:
     // clone span_id and merged_spans."
     let mut dag = forward.clone();
+    let reach = cotangent_reach(forward, output);
     let mut adjoints: UnordMap<NodeId, NodeId> = UnordMap::new();
     // Contributions wait here until reverse traversal reaches their input.
     // Keeping the consumer ordinal and input slot makes the normative order
@@ -767,18 +809,45 @@ fn grad_dag_result(
         adjoints.insert(node_id, grad_out);
 
         let node = forward.get(node_id).unwrap().clone();
-        if let Some(rejection) = structural_rejection(&node, forward) {
+        let rejection = structural_rejection(&node, forward);
+        let zero_only_integer_arithmetic = reach[node_id.0] == ZERO_COTANGENT
+            && rejection
+                .as_ref()
+                .is_some_and(is_integer_arithmetic_rejection);
+        if let Some(rejection) = rejection
+            && !zero_only_integer_arithmetic
+        {
             return Err(BackwardFailure::Rejected(rejection));
         }
         let dag_size_before = dag.len();
-        let input_grads =
+        let input_grads = if zero_only_integer_arithmetic {
+            // The node is forward-only for an active gradient, but it was
+            // reached solely by exact zero from a control operation. Pass
+            // that zero to its producers so a no-grad conversion beneath it
+            // still receives its required structural diagnostic.
+            node.inputs
+                .iter()
+                .map(|&input_id| {
+                    let input_ty = forward.get(input_id).unwrap().output_type.clone();
+                    let zero = dag.add_node(
+                        node.owner,
+                        RiscOp::synth_const(input_ty.precision, 0.0),
+                        vec![],
+                        input_ty,
+                        None,
+                    );
+                    (input_id, zero)
+                })
+                .collect()
+        } else {
             compute_adjoints(&node, grad_out, forward, &mut dag).ok_or_else(|| {
                 format!(
                     "grad: no reverse-mode adjoint is defined for `{}` (node {})",
                     risc_op_name(&node.op),
                     node.id.0
                 )
-            })?;
+            })?
+        };
         let input_grads = input_grads
             .into_iter()
             .map(|(input_id, grad_node)| {
@@ -3546,7 +3615,10 @@ mod tests {
 
     // [06] §7.5: a comparison queues exact zero cotangents for its
     // operands, so rejection analysis must visit their producers too.
-    fn comparison_with_discrete_cast(truncating: bool) -> (Dag, NodeId, NodeId) {
+    fn comparison_with_discrete_cast(
+        truncating: bool,
+        through_integer_extrema: bool,
+    ) -> (Dag, NodeId, NodeId) {
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
@@ -3581,6 +3653,30 @@ mod tests {
             },
             None,
         );
+        let discrete = if through_integer_extrema {
+            let zero = dag.add_node(
+                owner,
+                RiscOp::synth_const(Prim::Int32, 0.0),
+                vec![],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::Int32,
+                },
+                None,
+            );
+            dag.add_node(
+                owner,
+                RiscOp::MaxElem,
+                vec![discrete, zero],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::Int32,
+                },
+                None,
+            )
+        } else {
+            discrete
+        };
         let restored = dag.add_node(
             owner,
             RiscOp::Cast {
@@ -3621,7 +3717,7 @@ mod tests {
     #[test]
     fn grad_comparison_operand_reports_its_structural_rejection() {
         for (truncating, op) in [(false, "cast"), (true, "cast_trunc")] {
-            let (dag, x, out) = comparison_with_discrete_cast(truncating);
+            let (dag, x, out) = comparison_with_discrete_cast(truncating, false);
             let error = match grad_dag_checked(&dag, out, &[x]) {
                 Ok(_) => panic!("{op} beneath comparison must reject grad"),
                 Err(error) => error,
@@ -3630,6 +3726,26 @@ mod tests {
                 error,
                 AdError::NotSupported {
                     op,
+                    reason: AdRejectionReason::PiecewiseConstant,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn grad_zero_only_integer_control_still_reports_float_to_integer_cast() {
+        for truncating in [false, true] {
+            let (dag, x, out) = comparison_with_discrete_cast(truncating, true);
+            let error = match grad_dag_checked(&dag, out, &[x]) {
+                Ok(_) => {
+                    panic!("float-to-integer cast beneath zero-only integer control must reject")
+                }
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                AdError::NotSupported {
+                    op: if truncating { "cast_trunc" } else { "cast" },
                     reason: AdRejectionReason::PiecewiseConstant,
                 }
             );

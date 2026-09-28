@@ -957,6 +957,13 @@ traversal contributes the shape-preserving exact zero for its argument and
 does not enter the argument's subgraph, so a structurally rejected operation
 inside it does not stop construction.
 
+A signed-integer arithmetic operation reached only by an exact zero control
+cotangent passes exact zero to its operands; this is not a request for its
+forward-only adjoint. Traversal still visits those operands, so a structural
+rejection such as a float-to-integer cast beneath the operation is reported.
+If any path reaches that same operation outside the exact-zero control path,
+its signed-integer adjoint is rejected.
+
 ### 7.6 Verification
 
 After constructing the backward DAG, the compiler verifies:
