@@ -89,11 +89,26 @@ type Refusal = (&'static str, fn(&mut ReleaseRuntime), &'static str);
 
 #[test]
 fn install_refuses_runtime_files_its_export_does_not_report() {
-    let cases: [Refusal; 13] = [
+    let cases: [Refusal; 18] = [
         (
             "swapped archive",
             |runtime| runtime.shipped_archive = b"another runtime".to_vec(),
             "ships lib/libchelis_runtime.a with SHA-256",
+        ),
+        (
+            "missing exported archive",
+            |runtime| runtime.exported_archive = None,
+            "runtime export has no usable libchelis_runtime.a",
+        ),
+        (
+            "crossed exported archive",
+            |runtime| runtime.exported_archive = Some(b"another runtime".to_vec()),
+            "runtime export reports libchelis_runtime.a with SHA-256",
+        ),
+        (
+            "linked exported archive",
+            |runtime| runtime.exported_archive_is_symlink = true,
+            "runtime export has no usable libchelis_runtime.a: libchelis_runtime.a is not a regular file",
         ),
         (
             "linked archive",
@@ -121,6 +136,18 @@ fn install_refuses_runtime_files_its_export_does_not_report() {
                 runtime.shipped_headers.pop();
             },
             "no usable include/chelis_math.h",
+        ),
+        (
+            "missing exported header",
+            |runtime| {
+                runtime.exported_headers.pop();
+            },
+            "runtime export has no usable chelis_math.h",
+        ),
+        (
+            "crossed exported header",
+            |runtime| runtime.exported_headers[0].1 = b"/* other */\n".to_vec(),
+            "runtime export reports chelis_runtime.h with SHA-256",
         ),
         (
             "development build",
