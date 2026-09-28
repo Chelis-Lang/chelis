@@ -83,11 +83,12 @@ Development compiler and Python builds stage the runtime they were built
 with. After changing declared runtime sources or `Cargo.lock`, rebuild
 before running `chelis build`; the freshness check names changed files.
 
-The tracked `.githooks/commit-msg` checker rejects AI authorship markers.
-Cargo-husky installs a wrapper for it when tests run, and Devenv also installs
-it on shell entry. Do not set `core.hooksPath`: that setting is shared across
-worktrees while the tracked hook belongs to a branch. The hook finds this
-checkout's managed Python or uses uv.
+The tracked `.githooks/commit-msg` hook runs
+`scripts/check_commit_message.py` to reject AI authorship markers.
+`cargo-husky` installs a wrapper for it when tests run, and Devenv also
+installs it on shell entry. Do not set `core.hooksPath`: that setting is
+shared across worktrees while the tracked hook belongs to a branch. The
+hook finds this checkout's managed Python or uses uv.
 
 ## Optional Devenv shell
 
@@ -126,6 +127,11 @@ Inside a persistent shell, use `cargo build -p chelis-cli` and
 `mdbook build docs/book` to build the user book. The
 [Nix source packages](book/src/install.md#nix-source-packages) are a separate
 source-build channel.
+
+Devenv also provides `chelis-reap-orphans` for stale build processes,
+`chelis-exec-preflight` for the macOS executable preflight,
+`chelis-z3-test` for the Linux solver gate, and `chelis-hip-test` for the
+Linux HIP manual gate.
 
 Devenv's shared Kache cache requires access to the trusted Tunnet mesh. When
 connected, supply the gateway's public placeholders:
