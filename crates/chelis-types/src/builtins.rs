@@ -2995,9 +2995,8 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("round", &mut env, &mut vg);
     tensor_with_bounds("uniform_like", &mut env, &mut vg);
 
-    // [05-OP-69]..[05-OP-72]: direct calls use checked scalar/tensor
-    // relations; aliases need an explicit function signature because
-    // [04-LIN-10] forbids generic key-carrying type instantiation.
+    // [05-OP-69]..[05-OP-72]: direct calls specialize these checked
+    // scalar/tensor relations at each application.
     for name in ["key_from_seed", "split_key", "split_keys", "fold_in"] {
         let input = vg.fresh_tvar();
         let output = vg.fresh_tvar();
