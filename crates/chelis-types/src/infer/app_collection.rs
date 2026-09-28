@@ -98,21 +98,33 @@ impl builtins::AggregateRule {
             // a value hole inside a known constructor owes only the equation.
             (_, values) if values.iter().any(|ty| matches!(ty, Type::Var(_))) => return Ok(None),
             _ => {
-                return Err(Box::new(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!(
-                        "{}; got {}",
-                        match self {
-                            AggregateRule::Append =>
-                                "append expects List input and a compatible value".to_string(),
-                            _ => format!("{name} expects compatible collection operands"),
-                        },
+                // Both eager calls and replayed contracts retain the operation's
+                // expected operand shape, including at an authored binder.
+                let message = match (self, operands.as_slice()) {
+                    (AggregateRule::Append, [list, _]) => {
+                        format!("append expects List input, got {list}")
+                    }
+                    (AggregateRule::Concat, [left, right]) => {
+                        format!("concat expects matching List inputs, got {left} and {right}")
+                    }
+                    (AggregateRule::DictInsert, [dict, key, value]) => format!(
+                        "dict_insert expects Dict[K, V], K, and V, got {dict}, {key}, and {value}"
+                    ),
+                    (AggregateRule::DictMerge, [left, right]) => {
+                        format!("dict_merge expects matching Dict inputs, got {left} and {right}")
+                    }
+                    _ => format!(
+                        "{name} expects compatible collection operands; got {}",
                         operands
                             .iter()
                             .map(ToString::to_string)
                             .collect::<Vec<_>>()
                             .join(", ")
                     ),
+                };
+                return Err(Box::new(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    message,
                     vec![],
                 )));
             }
@@ -635,6 +647,46 @@ pub(super) fn prepare_constructor_application(
 #[cfg(test)]
 mod aggregate_origin_tests {
     use super::*;
+
+    #[test]
+    fn aggregate_admission_diagnostics_name_expected_operands() {
+        use builtins::AggregateRule;
+        for (rule, operands, expected) in [
+            (
+                AggregateRule::Append,
+                vec![Type::Prim(Prim::F32), Type::Prim(Prim::Bool)],
+                "append expects List input, got f32",
+            ),
+            (
+                AggregateRule::Concat,
+                vec![Type::Prim(Prim::F32), Type::Prim(Prim::Bool)],
+                "concat expects matching List inputs, got f32 and bool",
+            ),
+            (
+                AggregateRule::DictInsert,
+                vec![
+                    Type::Prim(Prim::F32),
+                    Type::Prim(Prim::String),
+                    Type::Prim(Prim::Bool),
+                ],
+                "dict_insert expects Dict[K, V], K, and V, got f32, string, and bool",
+            ),
+            (
+                AggregateRule::DictMerge,
+                vec![Type::Prim(Prim::F32), Type::Prim(Prim::Bool)],
+                "dict_merge expects matching Dict inputs, got f32 and bool",
+            ),
+        ] {
+            let error = rule
+                .decide(&operands, &Type::Prim(Prim::Bool), &Subst::new())
+                .expect_err("invalid collection constructors must reject");
+            assert!(
+                matches!(error.kind, CheckErrorKind::TypeMismatch),
+                "{rule:?}"
+            );
+            assert_eq!(error.message, expected, "{rule:?}");
+        }
+    }
 
     #[test]
     fn every_registered_aggregate_returns_equality_without_operand_bindings() {
