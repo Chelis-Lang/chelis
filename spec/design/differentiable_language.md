@@ -265,3 +265,36 @@ This spec doesn't make the strategic decision. It scopes the work concretely so 
 Seven phases, sequenced by dependency. Phase 0 is the spec lock. Phases 1-5 are the implementation. Phase 6 is documentation and ecosystem. The work composes with existing Chelis commitments and unlocks a distinct audience the existing framework landscape doesn't serve well.
 
 Total scope is substantial but bounded. Decision to commit is separate from this spec; if committed, this spec is the implementation roadmap.
+
+## Host selectors in numeric lowering
+
+The numbered spec/06 sections 2.1, 2.7, and 2.10.1 control this boundary.
+`LoweredValue::HostConstant` retains exact strings beside numeric nodes through
+helper inlining, lexical capture rebasing, and recursive aggregates. Equality
+and inequality consume this carrier without putting strings in the RISC DAG.
+Top-level tuples and ADTs retain their declaring initializer, including nested
+host fields and numeric producers; a tensor Load cannot carry that structure.
+Host-runtime Grad arguments and captures use the same carrier; structured
+cotangents replace host leaves with unit. `examples/grad_host_selectors.ch`
+exercises both branch outcomes in Eval and C.
+
+This implements the exact-selector portion of [#2552](https://github.com/Chelis-Lang/chelis/issues/2552).
+Runtime host-valued control still requires an executable host stage. Coral's
+Hamt also computes string hashes using operations whose [05-OP-58] contract
+structurally rejects differentiation; accepting that graph needs a contract
+decision or an explicit `stop_gradient` boundary, beyond selector preservation.
+Numeric lowering rejects those string operations at their own identities with
+the [05-OP-58] authority, before a placeholder can cause a comparison error.
+An unmatched builtin application declines numeric lowering instead of becoming
+a synthetic input Load. Exact host arguments do not implement their consumer;
+the host path retains its effects and order, including discarded observations.
+Computed function values are classified for host execution before declaration
+lowering; statically resolved literal callables can still inline. A numeric
+probe declines an unresolved callee rather than substituting its final argument.
+
+Finite `to_list`/`map`/`zip` producers admitted by numeric AD materialize
+recursive List values with tensor leaves. Their bindings retain evaluated
+values and callback traps; conversion consumes those values without replaying
+callbacks. Slice selection assembles tensors without arithmetic on stored bits.
+Builtin callable references participate in admission, subject to lexical
+shadowing and the numeric resolver's supported operations.

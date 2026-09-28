@@ -928,6 +928,13 @@ fn parity_grad_host_results() {
 }
 
 #[test]
+fn parity_grad_host_selectors() {
+    let path = examples_root().join("grad_host_selectors.ch");
+    drive_parity(&path, true);
+    assert_eq!(run_eval(&path), b"selected = tensor(shape=[2], data=[1.0, 1.0])\nother = tensor(shape=[2], data=[-1.0, -1.0])\n");
+}
+
+#[test]
 fn parity_keyed_state_wrapper() {
     drive_parity(&examples_root().join("keyed_state_wrapper.ch"), true);
 }

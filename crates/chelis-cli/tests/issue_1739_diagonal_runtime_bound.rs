@@ -1663,12 +1663,71 @@ fn the_census_reader_finds_the_guard_a_block_tail_moved() {
     );
 }
 
+/// The `pick[n]` signature in grad_host_selectors retains a named result
+/// obligation. A diagonal producer makes agreement and disagreement independently
+/// observable, without removing that signature or substituting a literal claim.
+#[test]
+fn host_selector_named_result_obligation_executes_and_traps_in_both_lanes() {
+    assert!(
+        gcc_available(),
+        "native C is required for this obligation check"
+    );
+    let dir = tempdir().expect("tempdir");
+    for (key, values, producer) in [
+        ("w", "[1.0, 6.0, 11.0]", "diagonal"),
+        ("other", "[-1.0, -6.0, -11.0]", "neg"),
+    ] {
+        for (operand, agrees) in [(THREE_BY_FOUR, true), (FIVE_BY_FOUR, false)] {
+            let source = format!(
+                "def pick[n](w: tensor[n, 4, f32], name: string) -> tensor[n, f32] = if eq(name, \"w\") then diagonal(w, 0i32, 1i32) else neg(diagonal(w, 0i32, 1i32))\nout = pick(to_tensor({operand}), \"{key}\")\n"
+            );
+            let stem = format!("selector-{key}-{agrees}");
+            check_scores_one(&dir, &stem, &source);
+            let (eval_ok, stdout, stderr) = eval_source(&dir, &stem, &source);
+            let (c_ok, c_output) = build_link_run(&dir, &stem, &source);
+            let generated =
+                fs::read_to_string(dir.path().join(format!("{stem}-out/{stem}.c"))).unwrap();
+            assert_eq!(
+                emitted_guards(&generated),
+                vec![("pick".into(), "__result".into(), "0".into(), "n".into())]
+            );
+            for (lane, ok, output) in [
+                ("Eval", eval_ok, format!("{stdout}{stderr}")),
+                ("C", c_ok, c_output),
+            ] {
+                assert_eq!(ok, agrees, "{lane}: {output}");
+                if agrees {
+                    assert!(
+                        output.contains(&format!("out = tensor(shape=[3], data={values})")),
+                        "{lane}: {output}"
+                    );
+                } else {
+                    assert!(
+                        output.contains(&format!("numeric trap: domain in {producer} at i64")),
+                        "{lane}: {output}"
+                    );
+                    assert!(
+                        output
+                            .contains(&format!("extent `n`: w axis 0 = 5, {producer} axis 0 = 4")),
+                        "{lane}: {output}"
+                    );
+                    assert!(
+                        !output.contains("out ="),
+                        "{lane} exposed an invalid result: {output}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// THE CENSUS. Every executable Phase 0 example is offered to C. Recorded
 /// capability refusals are asserted; local and forwarded declared-result
-/// obligations are read back from the generated program. Authored return
-/// types check result guards; the keyed State wrapper's four local guards
-/// remain in the exact shipped census, with Eval/C controls in
-/// `key_pair_host_staging`.
+/// obligations are read back from the generated program. The host selector's
+/// named result is covered by
+/// `host_selector_named_result_obligation_executes_and_traps_in_both_lanes`.
+/// The keyed State wrapper retains four checked result axes through its tuple;
+/// positive and per-axis negative Eval/C witnesses live in `key_pair_host_staging`.
 ///
 /// Entry guards have a different contract: compare their emitted conditions
 /// and labels with an independent parameter-axis traversal of checked source
@@ -1821,6 +1880,7 @@ fn no_shipped_example_gains_a_host_lane_guard() {
     assert_eq!(
         census,
         vec![
+            "grad_host_selectors: pick guards __result axis 0 claiming n",
             "grad_runtime_basis: basis guards __result axis 0 claiming n",
             "keyed_state_wrapper: main guards __let_19 axis 0 claiming 2",
             "keyed_state_wrapper: main guards __let_19 axis 1 claiming 1",

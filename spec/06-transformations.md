@@ -264,6 +264,10 @@ A bool, signed-integer, key, string, function, resource, or recursively
 all-unit parameter is a `non_differentiable` type error. A List, tuple, or ADT with a
 differentiable leaf is legal and returns §2.1's shape-preserving cotangent;
 its discrete fields remain present as `unit`.
+The unit cotangent does not replace a discrete primal value: string selectors,
+constructor tags, and other host metadata keep their exact values and lexical
+bindings while the differentiated function executes. The operation-specific
+structural rejections above still apply to computations of those values.
 
 ### 2.7.1 Symbolic Input Dimensions in Adjoint Construction
 
