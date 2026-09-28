@@ -708,10 +708,6 @@ NON_GATE_WORKFLOWS = {
     # It runs nothing the per-PR gate owns and never runs on PR/push, so it
     # is out of the gate.py quartet scope by design.
     "ecosystem-drift.yml",
-    # LOC report moved out of ci.yml's per-merge path into its own weekly
-    # scheduled workflow; it commits a docs/loc_report.md bot commit and runs
-    # nothing the per-PR gate owns, so it is out of gate.py scope by design.
-    "loc-report.yml",
     # Producer for the durable prebuilt-cvc5 Release asset the smt lanes LINK
     # (scripts/ci_cvc5_cache.py). Builds cvc5 from source and publishes a
     # Release; it runs no cargo/chelis command the per-PR gate owns, only on a

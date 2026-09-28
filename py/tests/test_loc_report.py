@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
+from chelis_tools import loc_report
 from chelis_tools.loc_report import (
     CustomLang,
-    DEFAULT_OUTPUT,
     LangEntry,
     count_custom_files,
     format_number,
@@ -67,8 +68,40 @@ class TestShouldSkip:
         assert not should_skip(Path("/repo/.claude/commands/red-team.md"))
 
 
-def test_default_output_matches_ci_commit_path():
-    assert DEFAULT_OUTPUT == "docs/loc_report.md"
+def test_default_prints_without_writing(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(sys, "argv", ["loc-report"])
+    monkeypatch.setattr(loc_report, "find_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        loc_report, "build_report", lambda _root: [LangEntry("Rust", 1, 4, 0, 0)]
+    )
+
+    loc_report.main()
+
+    assert "| Rust | 1 | 4 |" in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_output_requires_explicit_path(monkeypatch, capsys, tmp_path):
+    output = tmp_path / "reports" / "loc.md"
+    monkeypatch.setattr(sys, "argv", ["loc-report", "--output", str(output)])
+    monkeypatch.setattr(loc_report, "find_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(loc_report, "build_report", lambda _root: [])
+
+    loc_report.main()
+
+    assert output.is_file()
+    assert "# Lines of Code Report" in output.read_text()
+    assert "Report written to" in capsys.readouterr().out
+
+
+def test_json_and_file_output_are_exclusive(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys, "argv", ["loc-report", "--json", "--output", str(tmp_path / "loc.md")]
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        loc_report.main()
+    assert list(tmp_path.iterdir()) == []
 
 
 class TestCountCustomFiles:

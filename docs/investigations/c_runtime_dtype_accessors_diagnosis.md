@@ -9,10 +9,10 @@ established.
 Owning plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`,
 W2 PR 1 brief.
 
-Spec lock: `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract
+Spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md` Contract
 2 (trait surface) and Contract 3 (op enumeration).
 
-§5 entry: `docs/gap_synthesis.md` `CRuntime-F32Coupling`.
+§5 entry: `docs/archive/reports/gap_synthesis.md` `CRuntime-F32Coupling`.
 
 PR 1 scope: introduces the trait, promotes `CHELIS_*` constants to
 `pub const`, migrates two anchor ops (`chelis_tensor_to_f64` and
@@ -38,7 +38,7 @@ silently mis-decoding 8-byte storage.
 
 Line numbers below are post-PR-1 (after `pub const` promotion and
 trait stub insertion, which shifted line numbers by ~80). The
-pre-PR-1 numbers from `compiler_cleanup_0_7_8_spec_lock.md` Contract
+pre-PR-1 numbers from `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md` Contract
 3 still apply to `main` until commit 3 of this PR lands.
 
 Migrated by PR 1 (anchor ops):
@@ -364,9 +364,9 @@ No new emergent coupling found; the plan's scope estimate stands.
 
 * Plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`,
   W2 PR 1 section.
-* Spec lock: `docs/design/compiler_cleanup_0_7_8_spec_lock.md`
+* Spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`
   Contract 2 (trait surface) and Contract 3 (op enumeration).
-* §5 entry: `docs/gap_synthesis.md` `CRuntime-F32Coupling`.
+* §5 entry: `docs/archive/reports/gap_synthesis.md` `CRuntime-F32Coupling`.
 * PR #79 orchestrator decisions: Q2 (bool routes through
   `f32::data_ptr`), Q3 (`CHELIS_*` constants `pub const`).
 * Prior bug-class diagnoses: `docs/investigations/cbackend_cast_memcpy_diagnosis.md`

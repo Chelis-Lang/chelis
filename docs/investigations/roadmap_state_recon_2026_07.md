@@ -185,7 +185,7 @@ agents and spot-verified by independent adversarial verifiers; the load-bearing 
   live Beacon shim round-trip gate (#561)"), never touched since; the v3 bump did not update the
   file. Six tests in the file carry the same ignore (lines 139/175/199/230/278/298).
 - Nuance the roadmap omits: this is not a disabled test but a **documented environment-gated
-  manual gate** (exact command at `docs/verification_stack_handover.md:136` and
+  manual gate** (exact command at `docs/archive/verification_stack_handover.md:136` and
   `docs/design/beacon_subprocess_shim.md:222`, per the repo's manual-gate policy). The substance
   stands: no CI run exercises the cross-repo seam (beacon PR#54's own text: "beacon CI never
   reads the chelis repo; the cross-repo catch is the chelis-side e2e gate, still open"), the gate
@@ -197,7 +197,7 @@ agents and spot-verified by independent adversarial verifiers; the load-bearing 
   WIRE_DAG_SCHEMA_VERSION` (currently `2`…" (the text is on line 15; roadmap cites :14 where the
   sentence begins — trivial). `docs/design/phase2_seam_contract.md:57-58`: "asserts
   `schema_version == 1`" — two versions behind. Both confirmed verbatim.
-- A **third** stale site the roadmap does not list: `docs/verification_stack_handover.md:94`
+- A **third** stale site the roadmap does not list: `docs/archive/verification_stack_handover.md:94`
   "Current state: Beacon accepts schema v2."
 
 ### C4 — what v2→v3 actually changed

@@ -6,6 +6,8 @@
 use super::*;
 use crate::context::LibraryProofId;
 
+mod result_origin;
+
 #[derive(Clone)]
 pub(super) struct DeclaredSigMetadata {
     pub(super) param_types: Vec<deep::Expr>,
@@ -47,6 +49,14 @@ pub(super) struct InferenceProduct {
     replaying_post_app: Option<(usize, usize)>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
+    /// Result annotations check what inference produces. They are not input
+    /// constraints for a suspended type derivation ([04-INF-1]). Keeping them
+    /// separate lets readiness follow a producer whose constructor or nested
+    /// parameter types are revealed later, rather than snapshotting its holes.
+    result_type_constraints: Vec<ResultTypeConstraint>,
+    result_inputs_closed: bool,
+    closing_group_types: Vec<Type>,
+    pub(super) group_result_origins: BTreeMap<String, Scheme>,
     /// [04-PAT-1]: a literal pattern first seen against a flexible type must
     /// be decided after its enclosing declaration has supplied the type.
     deferred_literal_patterns: Vec<DeferredLiteralPattern>,
@@ -157,7 +167,18 @@ impl InferredAdmissionContract {
 }
 
 #[derive(Clone)]
+struct ResultTypeConstraint {
+    actual: Type,
+    declared: Type,
+}
+
+#[derive(Clone)]
 pub(super) enum DeferredShapeRule {
+    /// Branch results agree after their semantic producers settle. The
+    /// published type carries only structure common to both branches.
+    ResultJoin {
+        last_propagated: Option<Type>,
+    },
     Matmul,
     Reduction {
         name: String,
@@ -533,6 +554,18 @@ impl InferenceProduct {
     pub(super) fn take_group_links(
         &mut self,
     ) -> (Vec<GroupReference>, Vec<(String, Type)>, Vec<SiblingLink>) {
+        self.closing_group_types = self
+            .group_provisional_types
+            .iter()
+            .map(|(_, ty)| ty.clone())
+            .chain(self.group_member_types.iter().map(|(_, ty)| ty.clone()))
+            .chain(
+                self.group_references
+                    .iter()
+                    .map(|reference| reference.ty.clone()),
+            )
+            .chain(self.sibling_links.iter().map(|link| link.ty.clone()))
+            .collect();
         self.group_provisional_types.clear();
         (
             std::mem::take(&mut self.group_references),
@@ -801,9 +834,9 @@ impl InferenceProduct {
     }
 
     pub(super) fn has_pending_shape_check_since(&self, checkpoint: u64) -> bool {
-        self.deferred_shape_checks
-            .iter()
-            .any(|check| check.id >= checkpoint)
+        self.deferred_shape_checks.iter().any(|check| {
+            check.id >= checkpoint && !matches!(check.rule, DeferredShapeRule::ResultJoin { .. })
+        })
     }
 
     /// chelis#1512: the ledger identity of one call.
@@ -1080,15 +1113,22 @@ impl InferenceProduct {
         if self.replaying_shape_checks {
             return;
         }
+        self.import_result_constraints(subst);
         self.replaying_shape_checks = true;
         // A `PostApp` replay can bind the operand another suspended check was
         // waiting on, and the pass has an order. Repeat until a pass settles
         // nothing new, so a check that became ready mid-pass is not carried
         // to `finish_deferred_shape_checks` and reported as never bound.
         loop {
-            let before = self.deferred_shape_checks.len();
+            let before = self.deferred_shape_checks.len() + self.result_type_constraints.len();
+            let joined = self.replay_result_joins(vg, subst, errors);
             self.replay_ready_shape_checks_once(vg, subst, adt_reg, errors);
-            if self.deferred_shape_checks.len() >= before {
+            let imported = self.import_result_constraints(subst);
+            self.replay_result_type_constraints(subst, errors);
+            if !joined
+                && !imported
+                && self.deferred_shape_checks.len() + self.result_type_constraints.len() >= before
+            {
                 break;
             }
         }
@@ -1105,6 +1145,10 @@ impl InferenceProduct {
         let checks = std::mem::take(&mut self.deferred_shape_checks);
         let prior_owner = self.replaying_owner.take();
         for check in checks {
+            if matches!(check.rule, DeferredShapeRule::ResultJoin { .. }) {
+                self.deferred_shape_checks.push(check);
+                continue;
+            }
             if check
                 .arg_tys
                 .iter()
@@ -1117,6 +1161,9 @@ impl InferenceProduct {
             self.replaying_owner.clone_from(&check.owner);
 
             let resolved = match &check.rule {
+                DeferredShapeRule::ResultJoin { .. } => {
+                    unreachable!("joins replay with the complete producer graph")
+                }
                 DeferredShapeRule::Matmul => {
                     check_matmul_signature(&check.arg_tys, &check.result_ty, subst, errors)
                 }
@@ -1186,6 +1233,7 @@ impl InferenceProduct {
                         &check.arg_tys[0],
                         &check.result_ty,
                         &|ty, subst| product.awaits_group_completion(ty, subst),
+                        true,
                         vg,
                         subst,
                         adt_reg,
@@ -1320,6 +1368,7 @@ impl InferenceProduct {
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
+        self.result_inputs_closed = true;
         self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
         self.finish_admission_contracts(subst, errors);
         // Every entry of a shape rule of its own (`sum`, `matmul`, ...) still
@@ -1332,7 +1381,9 @@ impl InferenceProduct {
             .filter(|check| {
                 !matches!(
                     check.rule,
-                    DeferredShapeRule::PostApp { .. } | DeferredShapeRule::Derivation(_)
+                    DeferredShapeRule::PostApp { .. }
+                        | DeferredShapeRule::Derivation(_)
+                        | DeferredShapeRule::ResultJoin { .. }
                 )
             })
             .flat_map(|check| &check.arg_tys)
@@ -1343,6 +1394,10 @@ impl InferenceProduct {
             .collect();
         for check in checks {
             let operation = match check.rule {
+                DeferredShapeRule::ResultJoin { .. } => {
+                    self.deferred_shape_checks.push(check);
+                    continue;
+                }
                 DeferredShapeRule::Matmul => "matmul".to_string(),
                 DeferredShapeRule::Reduction { name } => name,
                 DeferredShapeRule::Expand { builtin, .. } => builtin.to_string(),
@@ -1386,14 +1441,9 @@ impl InferenceProduct {
                     continue;
                 }
                 DeferredShapeRule::Derivation(ref derivation) => {
-                    // chelis#2626: a `grad` waits only on types its recursive
-                    // group determines, and the group is complete here, so
-                    // nothing waits: it is decided on the types the group
-                    // left, as the call decides them. Replaying it at every
-                    // instantiation of a variable left would admit `grad` of a
-                    // generic function, which the compiled lanes do not
-                    // implement. Only an operand that is still a variable goes
-                    // to the boundary's instantiations, where it is rejected.
+                    // Decide a gradient only after all local applications and
+                    // recursive-group links have settled. Any parameter still
+                    // unknown is rejected; it cannot be silently skipped.
                     if matches!(derivation, TypeDerivation::Grad { .. })
                         && matches!(
                             resolve_type_derivation(
@@ -1401,6 +1451,7 @@ impl InferenceProduct {
                                 &check.arg_tys[0],
                                 &check.result_ty,
                                 &|_, _| false,
+                                false,
                                 vg,
                                 subst,
                                 adt_reg,
@@ -1439,6 +1490,13 @@ impl InferenceProduct {
                 ],
             ));
         }
+        // Every semantic producer was decided above, including the universal
+        // decision for authored binders. Result annotations can now be checked
+        // without making an unresolved semantic rule appear admissible. The
+        // authored-binder checks still run after this last unification step.
+        self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+        self.result_inputs_closed = false;
+        self.closing_group_types.clear();
     }
 
     pub(super) fn record_canonical(&mut self, expr: &deep::Expr, ty: Type) {

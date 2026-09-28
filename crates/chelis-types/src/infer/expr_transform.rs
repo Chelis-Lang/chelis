@@ -22,6 +22,7 @@ pub(super) fn infer_grad(
     }
 
     let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     let resolved = subst.apply(&f_ty);
     if let Type::Error(w) = &resolved {
         return propagate(w);
@@ -42,33 +43,22 @@ pub(super) fn infer_grad(
             match decide_grad(
                 &resolved,
                 wrt.as_deref(),
-                &[],
                 &awaits_group,
+                true,
                 adt_reg,
                 subst,
             ) {
                 GradDecision::Decided(Ok(grad_ty)) => grad_ty,
                 GradDecision::Decided(Err(error)) => report(errors, *error),
-                // chelis#2626: the rule reads a variable of a group member's
-                // provisional type, which a sibling determines: the output, a
-                // differentiated parameter, or a variable inside one. Deciding
-                // it here decided it on whatever the group's declaration order
-                // had reached, so the same program was accepted in one order
-                // and rejected in another ([04-INF-5]). The call publishes the
-                // gradient's type with a fresh result, so a later application
-                // still binds the parameters, and suspends the rule on the
-                // deferred ledger until those variables bind or the group
-                // completes.
-                GradDecision::Awaits {
-                    operand,
-                    awaited,
-                    frozen,
-                } => {
+                // Publish the same parameters with a fresh gradient result,
+                // so application can bind the types before cotangent selection.
+                // This also covers recursive-group inference (chelis#2626).
+                GradDecision::Awaits { operand, awaited } => {
                     let published = Type::Fn(args.clone(), Box::new(vg.fresh_type()));
                     let mut operands = vec![operand];
                     operands.extend(awaited);
                     product.defer_shape_check(
-                        DeferredShapeRule::Derivation(TypeDerivation::Grad { wrt, frozen }),
+                        DeferredShapeRule::Derivation(TypeDerivation::Grad { wrt }),
                         Vec::new(),
                         operands,
                         published.clone(),
@@ -88,10 +78,7 @@ pub(super) fn infer_grad(
         Type::Var(_) => {
             let published = vg.fresh_type();
             product.defer_shape_check(
-                DeferredShapeRule::Derivation(TypeDerivation::Grad {
-                    wrt,
-                    frozen: Vec::new(),
-                }),
+                DeferredShapeRule::Derivation(TypeDerivation::Grad { wrt }),
                 Vec::new(),
                 vec![resolved.clone()],
                 published.clone(),
@@ -112,55 +99,28 @@ pub(super) fn infer_grad(
 pub(super) enum GradDecision {
     /// The gradient's function type, or the rule's own rejection.
     Decided(Result<Type, Box<CheckError>>),
-    /// The rule waits on `awaited`, the variables of a group member's
-    /// provisional type that it reads, each bare so that the ledger's
-    /// readiness test sees it bind. `operand` is the operand's type as the
-    /// rule read it, which a later decision starts from. `frozen` are the
-    /// variables of another kind that the rule read and decided as variables.
-    Awaits {
-        operand: Type,
-        awaited: Vec<Type>,
-        frozen: Vec<TypeVar>,
-    },
+    /// The rule waits on the variables whose final types determine the
+    /// gradient payload. Bare operands let the ledger detect readiness.
+    Awaits { operand: Type, awaited: Vec<Type> },
 }
 
-/// The one `grad` rule, for a call whose operand is known where the call is
-/// inferred and for one suspended on the deferred ledger (chelis#2626), so the
-/// two cannot drift.
+/// Decide the gradient using settled parameter types (spec/06 sections 2.1
+/// and 2.2). Unknown parameter types never mean non-differentiable: wait for
+/// application or recursive-group inference to bind them, then replay this
+/// same rule. An unresolved parameter at declaration close is a type error
+/// under [04-INF-1], rather than a guessed gradient shape (chelis#2647).
 ///
-/// The output is read first and the parameters only once the output is
-/// admitted, the order the rule always had. A differentiated parameter is one
-/// `wrt` selects, or, without `wrt`, any parameter, since whether a parameter
-/// is differentiable decides whether it contributes to the gradient's type.
-///
-/// A variable the rule reads is decided where the rule runs, as it always
-/// was: an output variable is not a floating scalar, and a parameter that is a
-/// variable, or holds one where a floating leaf would be (a tuple component, a
-/// list element, a tensor's precision), is not differentiable there. The one
-/// exception is a variable that `awaits_group` says a sibling determines
-/// ([`InferenceProduct::awaits_group_completion`]), wherever it sits in the
-/// type: which order the group is written in decides whether it is bound here
-/// yet. The rule waits on such a variable instead, and records in `frozen` the
-/// other variables it read, so that the suspended rule decides them as this
-/// one did rather than on what they bound to since.
-///
-/// A decision replayed from the ledger passes the `operand` and `frozen` it was
-/// suspended with. It reads the operand with every other variable resolved,
-/// and waits again on any variable of the group that the resolution revealed.
-///
-/// Waiting on any other variable would let the application of the gradient
-/// choose it, which is how `grad` of a generic function would be instantiated,
-/// and the compiled lanes do not implement `grad` of a generic function
-/// (chelis#2626).
+/// Output admission retains chelis#2626's recursive-group deferral. Generic
+/// output instantiation and its backend implementation remain chelis#2460.
 pub(super) fn decide_grad(
     operand: &Type,
     wrt: Option<&[usize]>,
-    frozen: &[TypeVar],
     awaits_group: &dyn Fn(&Type, &Subst) -> bool,
+    defer_parameters: bool,
     adt_reg: &AdtRegistry,
     subst: &Subst,
 ) -> GradDecision {
-    let target = held(operand, frozen, subst);
+    let target = resolved(operand, subst);
     let Type::Fn(args, ret) = &target else {
         return GradDecision::Decided(Err(grad_expects_a_function(&target)));
     };
@@ -172,7 +132,6 @@ pub(super) fn decide_grad(
     if awaited.is_empty() && !grad_output_supported(ret) {
         return GradDecision::Decided(Err(grad_output_rejection(ret)));
     }
-    let mut frozen = frozen.to_vec();
     let selected: Vec<usize> = match wrt {
         Some(indices) => indices.to_vec(),
         None => (0..args.len()).collect(),
@@ -183,58 +142,29 @@ pub(super) fn decide_grad(
         };
         for var in grad_argument_variables(arg) {
             let variable = Type::Var(var);
-            // A variable the call froze reads as the call saw it, but the
-            // same variable can also stand where a variable the call waited
-            // on resolved to, so it is waited on while the group determines
-            // it.
-            if awaits_group(&variable, subst) {
-                if !awaited.contains(&variable) {
-                    awaited.push(variable);
-                }
-            } else if !frozen.contains(&var) {
-                frozen.push(var);
+            if !defer_parameters {
+                return GradDecision::Decided(Err(Box::new(unresolved_grad_parameter(index))));
+            }
+            if !awaited.contains(&variable) {
+                awaited.push(variable);
             }
         }
     }
     if !awaited.is_empty() {
         return GradDecision::Awaits {
-            operand: target.clone(),
+            operand: target,
             awaited,
-            frozen,
         };
     }
     GradDecision::Decided(grad_function_type(args, ret, wrt, adt_reg))
 }
 
-/// `ty` with every variable resolved except the `frozen` ones, which a
-/// suspended `grad` decided where the call was inferred ([`decide_grad`]) and
-/// reads as the call saw them. A variable another one resolves to is resolved:
-/// only where the call itself saw a frozen variable is it held.
-fn held(ty: &Type, frozen: &[TypeVar], subst: &Subst) -> Type {
-    if !crate::env::free_tvars(ty)
-        .iter()
-        .any(|var| frozen.contains(var))
-    {
-        return resolved(ty, subst);
-    }
-    let hold = |ty: &Type| held(ty, frozen, subst);
-    match ty {
-        Type::Fn(args, ret) => Type::Fn(args.iter().map(hold).collect(), Box::new(hold(ret))),
-        Type::Tuple(items) => Type::Tuple(items.iter().map(hold).collect()),
-        Type::Adt(name, args) => Type::Adt(name.clone(), args.iter().map(hold).collect()),
-        Type::KindedAdt(name, args) => Type::KindedAdt(
-            name.clone(),
-            args.iter()
-                .map(|argument| match argument {
-                    NominalArg::Type(ty) => NominalArg::Type(hold(ty)),
-                    NominalArg::Dimension(_) => argument.clone(),
-                })
-                .collect(),
-        ),
-        Type::Ref(inner) => Type::Ref(Box::new(hold(inner))),
-        // A frozen variable, or a tensor at a frozen precision.
-        leaf => leaf.clone(),
-    }
+fn unresolved_grad_parameter(index: usize) -> CheckError {
+    CheckError::new(
+        CheckErrorKind::TypeMismatch,
+        format!("grad parameter {index} has an unresolved type at the declaration boundary"),
+        vec!["Annotate the parameter or apply the gradient within the enclosing declaration so its parameter types are determined; a result annotation is not a parameter binding site".to_string()],
+    )
 }
 
 /// The variables the output rule reads: the output when it is a variable, or
@@ -271,10 +201,9 @@ fn grad_argument_variables(arg: &Type) -> Vec<TypeVar> {
     }
 }
 
-/// The `grad` rule on a function type whose types it decides as they are: an
-/// output that is not a floating scalar is rejected, a variable included, and
-/// a parameter that is not differentiable, a variable included, is skipped, or
-/// rejected when `wrt` selects it.
+/// The `grad` rule after parameter classification has settled: reject a
+/// non-floating-scalar output; skip a non-differentiable parameter without
+/// `wrt`, or reject it when explicitly selected.
 fn grad_function_type(
     args: &[Type],
     ret: &Type,
@@ -646,6 +575,7 @@ pub(super) fn infer_vmap(
     let axis = axis as usize;
 
     let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     if let Some(member) = vmap_batches_a_group_variable(&f_ty, subst, product) {
         return report(errors, vmap_group_member_fence(node, member));
     }

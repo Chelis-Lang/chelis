@@ -472,6 +472,37 @@
       ]
     },
     {
+      "name": "exact C List-map capture and ordered cotangent execution",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "issue_570_runtime_iota",
+        "-E",
+        "(test(ordered_cotangent_native_groups_check_actual_column_lengths)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
+      ],
+      "required": [
+        "chelis-backend-c::issue_570_runtime_iota::ordered_cotangent_native_groups_check_actual_column_lengths"
+      ]
+    },
+    {
+      "name": "exact List-map capture compiled C parity and negative controls",
+      "args": [
+        "-p",
+        "chelis-cli",
+        "--test",
+        "issue_2419_range_tensor_ad",
+        "-E",
+        "(test(runtime_capture_accumulation_preserves_the_executed_consumer_tree) | test(runtime_capture_tree_rounds_each_pair_at_the_capture_dtype) | test(runtime_capture_tree_preserves_inactive_and_empty_rows) | test(captured_cotangent_keeps_the_false_forward_range_claim)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
+      ],
+      "required": [
+        "chelis-cli::issue_2419_range_tensor_ad::captured_cotangent_keeps_the_false_forward_range_claim",
+        "chelis-cli::issue_2419_range_tensor_ad::runtime_capture_accumulation_preserves_the_executed_consumer_tree",
+        "chelis-cli::issue_2419_range_tensor_ad::runtime_capture_tree_preserves_inactive_and_empty_rows",
+        "chelis-cli::issue_2419_range_tensor_ad::runtime_capture_tree_rounds_each_pair_at_the_capture_dtype"
+      ]
+    },
+    {
       "name": "checked C reductions and Count optimized sanitizer execution",
       "args": [
         "-p",

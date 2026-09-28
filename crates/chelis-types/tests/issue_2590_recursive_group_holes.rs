@@ -746,16 +746,9 @@ fn grad_differentiates_a_sibling_determined_parameter_in_every_order() {
     }
 }
 
-/// REGRESSION TEST (fails on `main`, `375598343` and `0db7e3c8e`, which
-/// rejected the `g`-first order). `w` is a lambda parameter whose type no
-/// sibling determines. The rule decides it where `grad` is inferred, as it
-/// always has: it is still a variable there, so it is not differentiated. In
-/// the `g`-first order the rule waits on `f`'s result and `w` has bound by the
-/// time it is decided, so the rule keeps the decision it made where it was
-/// inferred, and the outcome is the same in every order. This asserts only
-/// that; the decision itself is the pre-existing one for a parameter no
-/// sibling determines, which `chelis eval` does not follow (it returns both
-/// partial derivatives), and chelis#2626 does not change it.
+/// chelis#2647: both float parameters contribute, including the lambda's
+/// previously unknown second parameter. The authored scalar result is wrong
+/// and must reject in every recursive declaration order.
 #[test]
 fn grad_decides_a_parameter_no_sibling_determines_where_it_is_inferred() {
     let program = "def g(y: f32, n: i32) -> f32 = if eq(n, 0i32) then y else grad(fn (z, w) -> f(z, 0i32))(y, y)\n\n\
@@ -763,6 +756,10 @@ fn grad_decides_a_parameter_no_sibling_determines_where_it_is_inferred() {
          def main() -> f32 = f(3.0f32, 2i32)\n";
     let orders = declaration_orders(program);
     let first = outcome(&orders[0]);
+    assert!(
+        first.typed.is_err(),
+        "the scalar signature must reject a tuple gradient"
+    );
     for order in &orders[1..] {
         assert_eq!(outcome(order), first, "{order}");
     }
@@ -794,21 +791,9 @@ fn grad_of_an_unresolved_operand_is_decided_when_it_binds() {
     );
 }
 
-/// LOCK (every head rejects these). chelis#2626 waits only on a type in the
-/// provisional type of a group member that writes no signature, which every
-/// reference shares, so a sibling inferred first can bind it. `grad` over any
-/// other variable is decided where it is inferred, as before, and the verdict
-/// does not depend on the declaration order: over a generic function
-/// instantiated at the call, inside a generic function, over a lambda whose
-/// parameter a later application determines, and over a group member whose
-/// signature omits only some types, whose reference takes a fresh instance of
-/// them wherever it appears. Waiting on those would accept `grad` of a
-/// generic function, which the compiled lanes do not implement: with
-/// `sq[a: Float]`, `grad(sq)(3.0f32)` gives 27 in `chelis eval` but
-/// `chelis build --target c` rejects it, where the same program with
-/// `sq(x: f32) -> f32` builds and prints 27. The last program's `ev` is
-/// generic once its group completes; its twin with `ev(x: f32, n: i32) -> f32`
-/// is accepted and builds.
+/// Generic output instantiation remains chelis#2460. Parameter inference
+/// with a known scalar output is admitted by chelis#2647, even when only
+/// part of a recursive member's signature is authored.
 #[test]
 fn grad_waits_on_no_type_outside_a_provisional_group_type() {
     for program in [
@@ -819,23 +804,17 @@ fn grad_waits_on_no_type_outside_a_provisional_group_type() {
     ] {
         rejects_with(program, &["grad requires a scalar floating output"]);
     }
-    for (program, fragment) in [
-        (
-            "def g(y: f32, n: i32) -> f32 = if eq(n, 0i32) then y else grad(ev)(y, 0i32)\n\n\
+    let generic_output = "def g(y: f32, n: i32) -> f32 = if eq(n, 0i32) then y else grad(ev)(y, 0i32)\n\n\
              def ev(x, n: i32) = if eq(n, 0i32) then x else {\n  u = g(1.0f32, 0i32)\n  x\n}\n\n\
-             def main() -> f32 = g(3.0f32, 1i32)\n",
-            "grad requires a scalar floating output",
-        ),
-        (
-            "def g(y: f32, n: i32) -> f32 = if eq(n, 0i32) then y else grad(fn (z) -> f(z, 0i32))(y)\n\n\
+             def main() -> f32 = g(3.0f32, 1i32)\n";
+    for order in declaration_orders(generic_output) {
+        rejects_with(&order, &["grad requires a scalar floating output"]);
+    }
+    let inferred_parameter = "def g(y: f32, n: i32) -> f32 = if eq(n, 0i32) then y else grad(fn (z) -> f(z, 0i32))(y)\n\n\
              def f(x, n: i32) -> f32 = if eq(n, 0i32) then mul(x, mul(x, x)) else g(x, n - 1i32)\n\n\
-             def main() -> f32 = f(3.0f32, 2i32)\n",
-            "type mismatch: f32 vs ()",
-        ),
-    ] {
-        for order in declaration_orders(program) {
-            rejects_with(&order, &[fragment]);
-        }
+             def main() -> f32 = f(3.0f32, 2i32)\n";
+    for order in declaration_orders(inferred_parameter) {
+        accepts(&order);
     }
 }
 
@@ -907,30 +886,22 @@ const GRAD_BESIDE_A_LINKED_VARIABLE: &str = "def f(x, n) = if eq(n, 0i32) then 1
      def h(n: i32) -> f32 = f((2.0f32, 1i32), n)\n\n\
      def main() -> f32 = g(1)\n";
 
-/// REGRESSION TEST (fails on `main` and `448018919`: with `f`, `g`, `h` in
-/// that order both reject the `r.0` programs; `448018919` accepts the first
-/// `add(r.0, r.1)` program with `g` before `h`). A variable that no sibling
-/// determines is decided where `grad` is inferred, as a variable, however long
-/// the rule then waits on a variable of the group beside it: so the gradient
-/// of `p`'s second component, and of `w`, is `()` in every order, although the
-/// application after `grad` binds both to `f32`. In the second program `w`'s
-/// variable is also the one `f`'s parameter type resolves to, and there it is
-/// resolved. `r.0` is therefore accepted in every order, and a use of `r.1` as
-/// `f32` is rejected in every order.
+/// chelis#2647: local and group variables both use their settled types.
+/// The local float component receives a float cotangent, and the separate
+/// float parameter contributes a separate result slot.
 #[test]
 fn grad_decides_a_local_variable_where_it_is_inferred_beside_a_group_variable() {
-    for program in [GRAD_BESIDE_A_LOCAL_VARIABLE, GRAD_BESIDE_A_LINKED_VARIABLE] {
-        let orders = declaration_orders(program);
-        for order in &orders {
-            accepts(order);
+    for program in [
+        GRAD_BESIDE_A_LOCAL_VARIABLE.to_string(),
+        GRAD_BESIDE_A_LOCAL_VARIABLE.replace("\n  r.0\n}", "\n  add(r.0, r.1)\n}"),
+        GRAD_BESIDE_A_LINKED_VARIABLE.replace("\n  r.0\n}", "\n  add((r.0).0, r.1)\n}"),
+    ] {
+        for order in declaration_orders(&program) {
+            accepts(&order);
         }
-        let uses_both = program.replace("\n  r.0\n}", "\n  add(r.0, r.1)\n}");
-        let orders = declaration_orders(&uses_both);
-        let first = outcome(&orders[0]);
-        for order in &orders {
-            rejects_with(order, &["TypeMismatch", "()"]);
-            assert_eq!(outcome(order), first, "{order}");
-        }
+    }
+    for order in declaration_orders(GRAD_BESIDE_A_LINKED_VARIABLE) {
+        rejects_with(&order, &["TypeMismatch"]);
     }
 }
 

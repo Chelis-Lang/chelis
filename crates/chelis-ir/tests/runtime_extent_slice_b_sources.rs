@@ -680,7 +680,7 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
 
 /// The number of `RiscOp` variants the table below must construct. Bumping
 /// it without adding a row makes the coverage assertion fail.
-const RISC_OP_VARIANTS: usize = 73;
+const RISC_OP_VARIANTS: usize = 77;
 
 /// Adding a `RiscOp` variant breaks this match, which is what forces the
 /// table in `every_risc_op_yields_exactly_one_source_per_output_axis` to
@@ -761,8 +761,11 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::FoldIn => 69,
         RiscOp::SplitN { .. } => 70,
         RiscOp::KeySelect => 71,
-        RiscOp::GuardedFail { .. } => 71,
-        RiscOp::Bitwise(_) => 72,
+        RiscOp::Iota => 72,
+        RiscOp::ListMapCapture { .. } => 73,
+        RiscOp::OrderedAdjointSum { .. } => 74,
+        RiscOp::GuardedFail { .. } => 75,
+        RiscOp::Bitwise(_) => 76,
     }
 }
 
@@ -846,6 +849,50 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     let add = |dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, out: TensorType| {
         dag.add_node(decl, op, inputs, out, None)
     };
+
+    let endpoint = add(
+        &mut dag,
+        RiscOp::Load {
+            name: "endpoint".into(),
+        },
+        vec![],
+        scalar(Prim::Int64),
+    );
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Iota,
+        vec![endpoint, endpoint],
+        ty(vec![named("range_count")], Prim::Int64),
+    ));
+    let invocation = *nodes.last().unwrap();
+    let captured_scalar = add(
+        &mut dag,
+        RiscOp::synth_const(Prim::F32, 1.0),
+        vec![],
+        scalar(Prim::F32),
+    );
+    let capture = add(
+        &mut dag,
+        RiscOp::ListMapCapture { first: true },
+        vec![captured_scalar, invocation],
+        ty(vec![named("range_count")], Prim::F32),
+    );
+    nodes.push(capture);
+    nodes.push(add(
+        &mut dag,
+        RiscOp::OrderedAdjointSum { groups: vec![1] },
+        vec![capture],
+        scalar(Prim::F32),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::GuardedFail {
+            message: "axis-source control".into(),
+            trap_on_true: true,
+        },
+        vec![flags, f],
+        f32_23(),
+    ));
 
     // Binary elementwise.
     for op in [

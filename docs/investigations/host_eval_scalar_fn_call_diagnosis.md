@@ -4,7 +4,7 @@
 `Workstream`: 0.7.8 compiler cleanup, W3
 `Branch`: `fix/host-eval-scalar-fn-call`
 `Plan`: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`
-`Phase 0 design note`: `docs/design/compiler_cleanup_0_7_8_spec_lock.md`
+`Phase 0 design note`: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`
   (notes W3 as out of scope — no shared structural contract with W1/W2)
 
 ## Bug shape

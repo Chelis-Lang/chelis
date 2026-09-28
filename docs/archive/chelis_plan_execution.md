@@ -1,5 +1,9 @@
 # Implementation Plan — chelis_plan.md: 7 Work Items with Red-Team Milestones
 
+> Historical July 2026 execution plan. Its task status and version targets are
+> not current; use [`chelis_project_plan.md`](../../spec/design/chelis_project_plan.md)
+> and the linked issues for active planning.
+
 **Filed:** 2026-07-22
 **Status:** In progress
 
@@ -108,7 +112,9 @@ Report what is true before building.
 **Objective:** Give the BS deferral gate an entry in the canonical tracker.
 
 **Implementation:**
-- Create `docs/issue_drafts/fuzz_sampler_transcendental_cost.md`
+- The former `docs/issue_drafts/fuzz_sampler_transcendental_cost.md` draft was
+  superseded by [chelis#659](https://github.com/Chelis-Lang/chelis/issues/659)
+  and removed after that issue closed.
 - Status, gated invariants, cross-references
 
 **Acceptance:** Entry exists with current status and gated capabilities.

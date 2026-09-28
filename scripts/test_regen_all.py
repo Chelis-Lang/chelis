@@ -649,7 +649,7 @@ class NeverWritesFrozenArtifactsTests(unittest.TestCase):
             "FREEZE_SHA256",
             "loud_unsupported_tripwire.rs",
             "runtime_extent_oracle_baseline.json",
-            "copy_drop_fixture_fitness_baseline.json",
+            "crates/chelis-cli/tests/fixtures/copy_drop_fixture_fitness_baseline.json",
             "test_timing_baseline.json",
             "capacity_census_bindings.json",
             "capacity_census_wire.json",

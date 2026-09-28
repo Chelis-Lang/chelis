@@ -1,28 +1,6 @@
-//! Regression: C codegen must be byte-deterministic across runs.
-//!
-//! Per `spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md`,
-//! `chelis_backend_c::emit::CEmitter::emit_input_shape_preamble` previously
-//! iterated a `HashMap<String, TensorType>` of input parameters, whose
-//! iteration order was non-deterministic across process runs, and across
-//! compilations within a single run because each emitter call constructed a
-//! freshly seeded map. Entry validation now follows assigned ABI input slots.
-//!
-//! The user-visible symptom was that the input-validation block (NULL
-//! checks, ndim checks, fixed-axis-size checks, and symbolic-dim binding
-//! lines) emitted in different orders for different invocations of
-//! `chelis build` against the same `.dp` source, breaking byte-equal
-//! reproducible builds. A stable ABI slot order preserves determinism and
-//! decides which malformed input fails first.
-//!
-//! The two assertions below lock the invariant:
-//!   1. **Cross-process determinism.** Building the same DAG in many fresh
-//!      `CEmitter` instances within one test run produces byte-identical C.
-//!      A hash map seeded per instance, so multiple maps within one process
-//!      exercised the same non-determinism a fresh `chelis build` would have.
-//!      The assertion still holds against an ordered store; it fails if
-//!      unstable iteration returns.
-//!   2. **ABI slot order.** The input-validation block follows assigned input
-//!      slots even when their labels are deliberately not lex-sorted.
+//! C codegen emits byte-identical source for a fixed DAG, and entry
+//! validation follows ABI slot order, including when labels are not
+//! lexically sorted.
 
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};

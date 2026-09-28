@@ -78,6 +78,44 @@ fn c_insert_result_guard_owns_attribution_and_effect_order() {
     assert_producer(true);
 }
 
+/// [05-HOST-1], [05-OP-60]: exact nested host arguments preserve their
+/// observations even when the result is unused by the numeric producer.
+#[test]
+fn host_constant_observations_keep_producer_order_in_both_lanes() {
+    for observation in ["print", "debug"] {
+        for (values, agrees) in [("[0i64, 0i64]", false), ("[0i64, 0i64, 0i64]", true)] {
+            let source = candidate(values, true, false).replace(
+                "print(\"before-producer\")",
+                &format!("{observation}((\"before-producer\", (\"nested\", \"w\")))"),
+            );
+            for native in [false, true] {
+                let (ok, output) = run(&source, native);
+                assert_eq!(ok, agrees, "native={native}: {output}");
+                assert_eq!(output.matches("before-producer").count(), 1, "{output}");
+                assert_eq!(
+                    output.matches("after-producer").count(),
+                    usize::from(agrees),
+                    "{output}"
+                );
+                if agrees {
+                    assert!(
+                        output.find("before-producer") < output.find("after-producer"),
+                        "{output}"
+                    );
+                    assert!(
+                        output.contains(
+                            "out = tensor(shape=[3], data=[16777217.0, 16777217.0, 16777217.0])"
+                        ),
+                        "{output}"
+                    );
+                } else {
+                    assert_claim(&output, "insert", 2);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn input_axis_claim_still_precedes_body_on_both_lanes() {
     let source = "def opaque[n](x: tensor[n, i64]) -> tensor[*, i64] = shrink(x, [[0i64, shape(x, 0i32)]])\ndef candidate[n](a: tensor[n, i64], b: tensor[n, i64]) -> tensor[3, i64] ! { IO } = {\n _ = print(\"body-ran\")\n _ = [-9223372036854775808i64] |> to_tensor |> neg\n 0i64 |> scalar_to_tensor |> insert(0i32, shape(b, 0i32))\n}\nout = candidate(to_tensor([0i64, 0i64, 0i64]), opaque(to_tensor([0i64, 0i64])))\n";
