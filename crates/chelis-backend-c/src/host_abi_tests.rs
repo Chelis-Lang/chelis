@@ -11,6 +11,51 @@ use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 #[test]
+fn public_callable_fence_recurses_through_every_host_container() {
+    use chelis_ir::host::{HostAdtConstructorLayout, HostAdtField, HostAdtLayout};
+    use chelis_ir::host_type_state::KeyBuiltinCallable;
+
+    let callable = ConcreteHostType::KeyBuiltinCallable(KeyBuiltinCallable::Split);
+    let nested = ConcreteHostType::Tuple(vec![ConcreteHostType::Option(Box::new(
+        ConcreteHostType::List(Box::new(callable.clone())),
+    ))]);
+    let nominal = ConcreteHostType::Adt("Carrier".into(), Vec::new());
+    let layouts = vec![HostAdtLayout {
+        ty: nominal.clone(),
+        constructors: vec![HostAdtConstructorLayout {
+            name: "Carrier".into(),
+            fields: vec![HostAdtField {
+                name: Some("payload".into()),
+                ty: nested.clone(),
+            }],
+        }],
+    }];
+    for ty in [
+        callable.clone(),
+        ConcreteHostType::Tuple(vec![
+            ConcreteHostType::Scalar(Prim::Int64),
+            callable.clone(),
+        ]),
+        nested,
+        ConcreteHostType::Dict(
+            Box::new(ConcreteHostType::Scalar(Prim::Int64)),
+            Box::new(callable.clone()),
+        ),
+        ConcreteHostType::Function(vec![callable], Box::new(ConcreteHostType::Unit)),
+        nominal,
+    ] {
+        assert!(
+            crate::host_abi::public_type_contains_key_callable(&ty, &layouts),
+            "public type leaked {ty:?}"
+        );
+    }
+    assert!(!crate::host_abi::public_type_contains_key_callable(
+        &ConcreteHostType::Tuple(vec![ConcreteHostType::Scalar(Prim::Key)]),
+        &layouts,
+    ));
+}
+
+#[test]
 fn abi_conversion_accepts_only_resolved_logical_types() {
     let conversion: fn(&ConcreteHostType) -> Result<HostAbiType, Unsupported> =
         HostAbiType::try_from_concrete;

@@ -302,6 +302,7 @@ impl HostAbiType {
 pub(crate) fn project_program(
     emission: VerifiedHostEmission<'_>,
 ) -> Result<ProjectedHostProgram<'_>, Unsupported> {
+    let adt_layouts = emission.adt_layouts();
     let declared_callbacks = (0..emission.function_count())
         .filter_map(|index| emission.function(index))
         .map(|function| function.name().to_string())
@@ -324,7 +325,7 @@ pub(crate) fn project_program(
             .collect(),
         functions: (0..emission.function_count())
             .filter_map(|index| emission.function(index))
-            .map(|function| project_function(function, &declared_callbacks))
+            .map(|function| project_function(function, &declared_callbacks, adt_layouts))
             .collect::<Result<Vec<_>, _>>()?,
         summary_rejections: emission.summary_rejections().to_vec(),
         adt_layouts: emission
@@ -483,12 +484,29 @@ pub(crate) fn project_binding(
 fn project_function(
     function: VerifiedHostFunctionView<'_>,
     declared_callbacks: &UnordSet<String>,
+    adt_layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
 ) -> Result<HostAbiFunction, Unsupported> {
-    if matches!(function.ret_ty(), ConcreteHostType::KeyBuiltinCallable(_)) {
+    // Authored functions are externally declared even if unused by the
+    // program's main. A closed builtin witness has no public callable ABI:
+    // exporting it inside a tuple, option, collection or ADT would publish
+    // an inert value and lose the operation selected by the checker.
+    if function.origin() == chelis_ir::host::HostFunctionOrigin::Authored
+        && public_type_contains_key_callable(function.ret_ty(), adt_layouts)
+    {
         return Err(unsupported_function_value(
             function.ret_ty(),
             "C host public function result",
         ));
+    }
+    if function.origin() == chelis_ir::host::HostFunctionOrigin::Authored {
+        for param in function.params() {
+            if public_type_contains_key_callable(&param.ty, adt_layouts) {
+                return Err(unsupported_function_value(
+                    &param.ty,
+                    "C host public function parameter",
+                ));
+            }
+        }
     }
     let mut allowed_callbacks = declared_callbacks.clone();
     for param in function.params() {
@@ -520,6 +538,60 @@ fn project_function(
         specialization: function.specialization().cloned(),
         summary_rejections: function.summary_rejections().to_vec(),
     })
+}
+
+/// Trace both structural children and nominal fields reachable from a
+/// published type. Local values may use the private carrier; only an
+/// authored function declaration crosses this boundary.
+pub(crate) fn public_type_contains_key_callable(
+    ty: &ConcreteHostType,
+    layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
+) -> bool {
+    fn contains(
+        ty: &ConcreteHostType,
+        layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
+        visited: &mut UnordSet<String>,
+    ) -> bool {
+        match ty {
+            ConcreteHostType::KeyBuiltinCallable(_) => true,
+            ConcreteHostType::Function(params, ret) => {
+                params.iter().any(|param| contains(param, layouts, visited))
+                    || contains(ret, layouts, visited)
+            }
+            ConcreteHostType::Adt(name, args) => {
+                if args.iter().any(|arg| contains(arg, layouts, visited)) {
+                    return true;
+                }
+                if !visited.insert(name.clone()) {
+                    return false;
+                }
+                let found = layouts
+                    .iter()
+                    .filter(|layout| {
+                        matches!(&layout.ty, ConcreteHostType::Adt(layout_name, _) if layout_name == name)
+                    })
+                    .flat_map(|layout| &layout.constructors)
+                    .flat_map(|constructor| &constructor.fields)
+                    .any(|field| contains(&field.ty, layouts, visited));
+                visited.remove(name);
+                found
+            }
+            ConcreteHostType::List(inner) | ConcreteHostType::Option(inner) => {
+                contains(inner, layouts, visited)
+            }
+            ConcreteHostType::Dict(key, value) => {
+                contains(key, layouts, visited) || contains(value, layouts, visited)
+            }
+            ConcreteHostType::Tuple(items) => {
+                items.iter().any(|item| contains(item, layouts, visited))
+            }
+            ConcreteHostType::Scalar(_)
+            | ConcreteHostType::Tensor(_)
+            | ConcreteHostType::MappedFile
+            | ConcreteHostType::Unit => false,
+        }
+    }
+    contains(ty, layouts, &mut UnordSet::new())
 }
 
 fn project_value_param(param: ConcreteHostParam) -> Result<HostAbiParam, Unsupported> {

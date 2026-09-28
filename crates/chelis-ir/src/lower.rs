@@ -9072,6 +9072,40 @@ impl<'program> LowerCtx<'program> {
         Some(lowered)
     }
 
+    /// A checked key operation inside a native aggregate carries a closed
+    /// operation identity through projection. The pure DAG path needs only
+    /// that static identity. The mixed host/DAG path also gets a staged
+    /// producer, so a host consumer can read the projected value.
+    fn stage_key_builtin_tuple_item(&mut self, expr: &Expr, name: &str) -> Option<LoweredValue> {
+        use crate::host::staged::{HostSource, HostValueId, StageValue};
+        use crate::host_type_state::{HostTypeTerm, KeyBuiltinCallable};
+        let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
+            return None;
+        };
+        if kids.first().and_then(symbol_name) != Some(name)
+            || self.bindings.contains_key(name)
+            || self.program_defs.contains_key(name)
+        {
+            return None;
+        }
+        let op = KeyBuiltinCallable::from_symbol(name)?;
+        let ty = HostTypeTerm::KeyBuiltinCallable(op);
+        let id = HostValueId(self.next_host_value);
+        self.next_host_value += 1;
+        if self.host_program.is_some() {
+            self.host_stage_status
+                .set(crate::host::staged::StagingStatus::HasSources);
+            self.host_sources.push(HostSource {
+                before: self.dag.nodes().len(),
+                value: StageValue::Host(id),
+                ty: ty.clone(),
+                expression: expr.clone(),
+                captures: Vec::new(),
+            });
+        }
+        Some(LoweredValue::Host { id, ty })
+    }
+
     /// A declaration supplies obligations to its returned expression before
     /// lowering can fold the expression's independent extent source.
     ///
@@ -10585,6 +10619,8 @@ impl<'program> LowerCtx<'program> {
         // Check if func is a known built-in: (var {} name).
         if let Some((DeepTag::Var, _, func_kids)) = stamped_parts(&kids[0])
             && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_kids.first()
+            && BUILTIN_NAMES.contains(&func_name.as_str())
+            && !self.bindings.contains_key(func_name)
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
@@ -10887,6 +10923,14 @@ impl<'program> LowerCtx<'program> {
                 };
                 if let Some(callable) = local_callables.get(&name) {
                     return Some(callable.clone());
+                }
+                if !declaration
+                    && let Some(LoweredValue::Host {
+                        ty: crate::host_type_state::HostTypeTerm::KeyBuiltinCallable(op),
+                        ..
+                    }) = self.bindings.get(&name)
+                {
+                    return Some(CallableExpr::KeyBuiltin(op.symbol().to_string()));
                 }
                 // The innermost binding of the name wins (chelis#1949): a
                 // function-typed parameter is a callable, and a local value
@@ -19972,7 +20016,19 @@ impl<'program> LowerCtx<'program> {
 
     /// `(tuple {} elem1 elem2 ...)` -- not representable in the Phase 0 RISC DAG.
     fn lower_tuple(&mut self, kids: &[Expr]) -> LoweredValue {
-        LoweredValue::Tuple(kids.iter().map(|expr| self.lower_expr(expr)).collect())
+        LoweredValue::Tuple(
+            kids.iter()
+                .map(|expr| {
+                    if let Some(CallableExpr::KeyBuiltin(name)) = self.resolve_callable_expr(expr)
+                        && let Some(staged) = self.stage_key_builtin_tuple_item(expr, &name)
+                    {
+                        staged
+                    } else {
+                        self.lower_expr(expr)
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// Legacy sequential placeholder for `(par {} expr1 expr2 ...)`, retained

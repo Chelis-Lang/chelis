@@ -352,6 +352,43 @@ fn transported_key_builtin_aliases_execute_in_eval_and_c() {
     }
 }
 
+/// [04-INF-9]: the native tuple path must retain checked operation identity
+/// even when several different builtins are projected through local tuples.
+#[test]
+fn locally_aggregated_key_builtin_aliases_execute_in_eval_and_c() {
+    let (left, right) = key_reference::split(key_reference::key_from_seed(9));
+    let expected = [
+        format!("main.0 = key({left:016x})"),
+        format!("main.1 = key({right:016x})"),
+    ];
+    for source in [
+        "def main() = {\n  ops = (key_from_seed, split_key)\n  seed = ops.0\n  fork = ops.1\n  fork(seed(9i64))\n}\n",
+        "def main() = {\n  ops = ((key_from_seed, split_key), fold_in)\n  pair = ops.0\n  seed = pair.0\n  fork = pair.1\n  fork(seed(9i64))\n}\n",
+    ] {
+        assert_alias_eval_c(source, &expected);
+    }
+}
+
+/// Tuple projection preserves each operation's input contract as well as its
+/// identity. It cannot turn `split_key` into a generic callable of any type.
+#[test]
+fn locally_aggregated_key_builtin_alias_rejects_wrong_operand() {
+    let source =
+        "def main() = {\n  ops = (key_from_seed, split_key)\n  fork = ops.1\n  fork(9i64)\n}\n";
+    let error = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("key-aggregate-wrong-input".into()),
+    })
+    .expect_err("a projected split_key still requires a key operand");
+    assert_eq!(error.stage, "check", "{error:?}");
+    assert!(
+        format!("{error:?}").contains("key operation expects key or a tensor of key"),
+        "{error:?}"
+    );
+}
+
 /// A public aggregate cannot export unspecialized builtin identity through
 /// a zero-payload callable witness. Local aggregates remain executable above.
 #[test]
@@ -365,11 +402,9 @@ fn exported_aggregate_of_key_callables_rejects_before_public_c_abi() {
         },
         &["main".into()],
     )
-    .err()
-    .expect("Eval must reject an exported unspecialized aggregate");
+    .expect_err("Eval must reject an exported unspecialized aggregate");
     assert!(
-        format!("{eval_error:?}")
-            .contains("builtin `split_key` is not supported by IR evaluation as a value"),
+        format!("{eval_error:?}").contains("a host value cannot become a tensor root"),
         "{eval_error:?}"
     );
     let error = compile(CompileRequest {
@@ -378,13 +413,54 @@ fn exported_aggregate_of_key_callables_rejects_before_public_c_abi() {
         target: CompileTarget::C,
         entry_name: Some("key-aggregate-export".into()),
     })
-    .err()
-    .expect("an exported aggregate must not erase callable identity at the C ABI");
+    .expect_err("an exported aggregate must not erase callable identity at the C ABI");
     assert!(
-        format!("{error:?}")
-            .contains("host type did not resolve before the code-generation boundary"),
+        format!("{error:?}").contains("a host value cannot become a tensor root")
+            || format!("{error:?}")
+                .contains("host type did not resolve before the code-generation boundary"),
         "{error:?}"
     );
+}
+
+/// Even an unused public declaration cannot expose a private callable
+/// witness. Recurse through aggregate layers before any C header is emitted.
+#[test]
+fn unused_exported_key_callable_values_reject_before_public_c_abi() {
+    for source in [
+        "def exported() = split_key\ndef main() = 1i64\n",
+        "def exported() = (key_from_seed, split_key)\ndef main() = 1i64\n",
+        "def exported() = ((key_from_seed, split_key), (fold_in, split_keys))\ndef main() = 1i64\n",
+    ] {
+        let error = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            target: CompileTarget::C,
+            entry_name: Some("key-aggregate-export".into()),
+        })
+        .expect_err("private builtin callable must not cross public C ABI");
+        let detail = format!("{error:?}");
+        assert!(
+            detail.contains("C host public function result")
+                || detail.contains("a host value cannot become a tensor root")
+                || (source.contains("def exported() = split_key")
+                    && detail.contains("not supported by IR evaluation as a value")),
+            "{source}\n{error:?}"
+        );
+    }
+}
+
+/// #879 still rejects a concrete first-class function nested in a tuple.
+#[test]
+fn typed_ordinary_function_tuple_remains_a_loud_c_rejection() {
+    let source = "def main() = {\n  seed: i64 -> key = key_from_seed\n  ops = (seed, 1i64)\n  make = ops.0\n  make(9i64)\n}\n";
+    let error = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("key-typed-tuple".into()),
+    })
+    .expect_err("ordinary function value ABI remains unsupported");
+    assert!(format!("{error:?}").contains("chelis#879"), "{error:?}");
 }
 
 /// A lexical function named like the builtin keeps the lexical meaning.

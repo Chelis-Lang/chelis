@@ -3172,11 +3172,17 @@ lexical binding, change which callable is selected, or memoize function results.
 > **[04-LIN-10]** A function's type parameter SHALL NOT be instantiated at a
 > key-carrying type (§8.4.1), because a generic body may use a value of its
 > parameter type more than once. Every type variable that a definition's or
-> a generalized `let` binding's type scheme quantifies is such a parameter,
-> authored or inferred: an authored type binder, including one that names a
-> tensor element dtype with or without a dtype-family bound, and a variable
-> that inference leaves free in the binding's type, whatever the bound value
-> is, since a tuple or a data value can hold a closure over it. A `let`
+> a generalized `let` binding's type scheme quantifies is such a parameter
+> unless it belongs solely to an already-checked key-derivation builtin's
+> closed operation relation ([04-INF-9], [05-OP-69]..[05-OP-72]). This
+> includes an authored type binder, even one
+> that names a tensor element dtype with or without a dtype-family bound, and
+> a variable that inference leaves free in the binding's type, whatever the
+> bound value is, since a tuple or a data value can hold a closure over it.
+> A closed relation variable is selected by that operation's contract, with
+> operation identity preserved through aliases and aggregates.
+> A variable exposed outside that exact callable or shared with another
+> constraint remains a generic parameter and SHALL stay key-free. A `let`
 > binding without an ascription is generalized: `e = Nil` followed by
 > `Cons(k, e)` instantiates `e`'s type parameter at `key` and is refused,
 > while the ascribed `e: List[key] = Nil` and the value written where it is
