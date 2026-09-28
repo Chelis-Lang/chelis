@@ -1,0 +1,1358 @@
+# aeneas integration step 157 after cba11f3beb: commit 06c37fc3da5626be5d62ce616c6d89e83c6ceca6
+# first parent 7dd0038c134187d9634461fc9a890647f7cc01dd, merged b735eb76c194d076c8bb978c81787c306a31989b
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (closure state recovery: the call_once wrapper of a closure consumed by value feeds the higher levels the payloads given back at the forward return; SOUNDNESS: writes through nested borrows were lost)
+
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index dba3dd1..431d4b8 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -1869,6 +1869,74 @@ let adapt_dictionary_method ?through ?(give_back_args = false) span
+             List.nth args index)
+   in
+   let state_bindings = ref [] in
++  let group_regions gid =
++    T.RegionId.Set.of_list
++      (List.find (fun (g : T.region_var_group) -> g.id = gid) regions_hierarchy)
++        .regions
++  in
++  (* The state of an input which a caller observes right after the call: a
++     consumed input (e.g. a closure capturing [&'1 mut Sink<'2>]) holds, in
++     each mutable borrow given back at the forward return, the value given
++     back, which is authoritative for its whole payload, including the current
++     contents of the borrows nested in it (see
++     [SymbolicToPureValues.recombine_projection_exprs]). The input of a
++     backward function at a level [l > 0] is projected from it: a caller which
++     ends a region right after the call without updating the values it gets
++     back passes these payloads, not the values before the call (which would
++     undo the writes of the call through the nested borrows). A mutable
++     reference input is its payload given back at the forward return, and an
++     input with a final state output is that state (see [base_state]). *)
++  let observed_states = Hashtbl.create 1 in
++  let observed_state index =
++    match (returned_state, List.nth sg.inputs index) with
++    | Some _, _ | None, T.TRef _ -> base_state index
++    | None, _ when List.mem_assoc index state_vars -> base_state index
++    | None, ty -> (
++        match Hashtbl.find_opt observed_states index with
++        | Some state -> state
++        | None ->
++            let base = base_state index in
++            let updates =
++              List.filter_map
++                (fun ((gid, (back : back_sg_info)), var) ->
++                  let regions = group_regions gid in
++                  match var with
++                  | Some var
++                    when back.inputs = [] && back.early = []
++                         && TypesUtils.ty_has_mut_borrow_for_region_in_set
++                              ~frozen_under_shared:true ctx.type_ctx.type_infos
++                              regions ty ->
++                      let value =
++                        select_output gid index (mk_texpr_from_fvar var)
++                      in
++                      Some
++                        ( ty,
++                          regions,
++                          expand_back span ctx get_group gid ty base value )
++                  | _ -> None)
++                groups
++            in
++            let state =
++              if updates = [] then base
++              else
++                let owned =
++                  List.fold_left
++                    (fun owned (_, regions, _) ->
++                      T.RegionId.Set.union owned regions)
++                    T.RegionId.Set.empty updates
++                in
++                let value =
++                  SymbolicToPureValues.recombine_projection_exprs span ctx owned
++                    ty base updates
++                in
++                let var = fresh (Some "observed_state") value.ty in
++                state_bindings :=
++                  (mk_tpat_from_fvar None var, value) :: !state_bindings;
++                mk_texpr_from_fvar var
++            in
++            Hashtbl.add observed_states index state;
++            state)
++  in
+   let states =
+     List.map
+       (fun index ->
+@@ -1877,13 +1945,7 @@ let adapt_dictionary_method ?through ?(give_back_args = false) span
+         let updates =
+           List.filter_map
+             (fun ((gid, (back : back_sg_info)), var) ->
+-              let regions =
+-                T.RegionId.Set.of_list
+-                  (List.find
+-                     (fun (g : T.region_var_group) -> g.id = gid)
+-                     regions_hierarchy)
+-                    .regions
+-              in
++              let regions = group_regions gid in
+               (* The frozen mutable borrows of the state below shared borrows
+                  give nothing back (see
+                  [SymbolicToPureTypes.back_input_is_frozen]) *)
+@@ -1928,7 +1990,7 @@ let adapt_dictionary_method ?through ?(give_back_args = false) span
+                   else
+                     level_input level (fun i ty level _ ->
+                         project_back ~nested span ctx get_group gid level ty
+-                          (base_state i))
++                          (observed_state i))
+                 in
+                 let back_fun, late_input =
+                   match back.early with
+@@ -1942,8 +2004,9 @@ let adapt_dictionary_method ?through ?(give_back_args = false) span
+                          input, the value given back at level [l + 1] for this
+                          input by the latest stage before it which gives back
+                          one (the unchanged value of a borrow the caller gets
+-                         back), and otherwise the state of the input: the first
+-                         stage receives the state of the inputs. With two
++                         back), and otherwise the state of the input observed
++                         after the call (see [observed_state]): the first stage
++                         receives the observed state of the inputs. With two
+                          stages, the second stage receives at level [l] the
+                          values given back by the first stage at level [l + 1].
+                          The last stage receives the returned state at level
+@@ -1976,7 +2039,7 @@ let adapt_dictionary_method ?through ?(give_back_args = false) span
+                                            !given_back
+                                        with
+                                        | Some (v : fvar) -> mk_texpr_from_fvar v
+-                                       | None -> base_state i
++                                       | None -> observed_state i
+                                      in
+                                      [%cassert] span (value.ty = target)
+                                        "Dictionary state recovery: unsupported \
+diff --git a/tests/lean/ClosureMutContext/ClosureMutContext.lean b/tests/lean/ClosureMutContext/ClosureMutContext.lean
+index 096537c..cafb420 100644
+--- a/tests/lean/ClosureMutContext/ClosureMutContext.lean
++++ b/tests/lean/ClosureMutContext/ClosureMutContext.lean
+@@ -184,7 +184,8 @@ def LowerCtx.lower_all.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32 :
+         _root_.closure_mut_context.LowerCtx.lower_all.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output,
+         _root_.closure_mut_context.LowerCtx.mk capture_state1.runtime
+         capture_state1.native capture_state.depth)
+@@ -375,7 +376,8 @@ def LowerCtx.lower_pair.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
+         _root_.closure_mut_context.LowerCtx.lower_pair.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output,
+         _root_.closure_mut_context.LowerCtx.mk capture_state1.runtime
+         capture_state1.native capture_state.depth)
+diff --git a/tests/lean/NestedBorrowsClosureOnceState.lean b/tests/lean/NestedBorrowsClosureOnceState.lean
+new file mode 100644
+index 0000000..31aa578
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureOnceState.lean
+@@ -0,0 +1 @@
++import NestedBorrowsClosureOnceState.Checks
+diff --git a/tests/lean/NestedBorrowsClosureOnceState/Checks.lean b/tests/lean/NestedBorrowsClosureOnceState/Checks.lean
+new file mode 100644
+index 0000000..9a07daf
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureOnceState/Checks.lean
+@@ -0,0 +1,39 @@
++import NestedBorrowsClosureOnceState.NestedBorrowsClosureOnceState
++
++/-! Evaluate the model of `tests/src/nested-borrows-closure-once-state.rs` on
++    the inputs of its `native` test module and compare with the native results
++    (the writes of the closure through the nested borrows of its captures). -/
++
++namespace nested_borrows_closure_once_state.checks
++open Aeneas Aeneas.Std Result
++open nested_borrows_closure_once_state
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++/-- `(result, depth, raised)` -/
++def runDrive (raised : Nat) (o : Option Nat) : Option (Option Nat × Nat × Nat) :=
++  match drive (u raised) (o.map u) with
++  | ok (r, d, rs) => some (r.map (·.val), d.val, rs.val)
++  | _ => none
++
++def runMap2 (n : Nat) (o : Option Nat) : Option (Option Nat × Nat) :=
++  match via_map2 (u n) (o.map u) with
++  | ok (r, c) => some (r.map (·.val), c.val)
++  | _ => none
++
++def runMap3 (n : Nat) (o : Option Nat) : Option (Option Nat × Nat) :=
++  match via_map3 (u n) (o.map u) with
++  | ok (r, c) => some (r.map (·.val), c.val)
++  | _ => none
++
++-- drive_native
++#guard runDrive 10 (some 5) == some (some 9, 4, 15)
++#guard runDrive 10 none == some (none, 3, 10)
++
++-- via_map_native
++#guard runMap2 10 (some 5) == some (some 11, 15)
++#guard runMap2 10 none == some (none, 10)
++#guard runMap3 10 (some 5) == some (some 14, 15)
++#guard runMap3 10 none == some (none, 10)
++
++end nested_borrows_closure_once_state.checks
+diff --git a/tests/lean/NestedBorrowsClosureOnceState/NestedBorrowsClosureOnceState.lean b/tests/lean/NestedBorrowsClosureOnceState/NestedBorrowsClosureOnceState.lean
+new file mode 100644
+index 0000000..4669af8
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureOnceState/NestedBorrowsClosureOnceState.lean
+@@ -0,0 +1,640 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_closure_once_state]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_closure_once_state
++
++/-- [nested_borrows_closure_once_state::via_map2::closure]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 51:16-54:5 -/
++@[reducible]
++def via_map2.closure := _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_once_state::via_map3::closure]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 62:16-65:5 -/
++@[reducible]
++def via_map3.closure := _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_once_state::via_map3::closure#1]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 66:16-66:45 -/
++@[reducible]
++def via_map3.closure_1 :=
++  _root_.nested_borrows_closure_once_state.via_map3.closure
++
++/-- [nested_borrows_closure_once_state::via_map2::closure#1]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 55:18-55:42 -/
++@[reducible]
++def via_map2.closure_1 :=
++  _root_.nested_borrows_closure_once_state.via_map2.closure
++
++/-- [nested_borrows_closure_once_state::via_map3::closure#2]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 67:18-67:42 -/
++@[reducible]
++def via_map3.closure_2 :=
++  _root_.nested_borrows_closure_once_state.via_map3.closure_1
++
++/-- [nested_borrows_closure_once_state::Runtime]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 14:0-16:1
++    Visibility: public -/
++structure Runtime where
++  raised : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_once_state::LowerCtx]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 18:0-21:1
++    Visibility: public -/
++structure LowerCtx where
++  runtime : _root_.nested_borrows_closure_once_state.Runtime
++  depth : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_once_state::{nested_borrows_closure_once_state::LowerCtx<'p>}::step_opt::closure]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 32:14-32:30 -/
++@[reducible]
++def LowerCtx.step_opt.closure :=
++  _root_.nested_borrows_closure_once_state.LowerCtx
++
++/-- [core::option::{core::option::Option<T>}::map::<T0, T1, nested_borrows_closure_once_state::via_map2::closure#1<0, 1>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1160:4-1162:53
++    Name pattern: [core::option::{core::option::Option<@T>}::map<@T0, @T1, nested_borrows_closure_once_state::via_map2::closure#1<'0, '1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::map<@T0, @T1, nested_borrows_closure_once_state::via_map2::closure#1<'0, '1>>"]
++def
++  core.option.Option.mapT0T1closure_1_specialized_352ccf774c3a58a771aab711da8c3704
++  {T0 : Type} {T1 : Type} (opsfunctionFnOnceclosure_1TupleT0T1Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_once_state.via_map2.closure_1 T0 T1)
++  (self : _root_.Option T0)
++  (f : _root_.nested_borrows_closure_once_state.via_map2.closure_1) :
++  _root_.Aeneas.Std.Result ((_root_.Option T1) ×
++    _root_.nested_borrows_closure_once_state.via_map2.closure_1 ×
++    (_root_.nested_borrows_closure_once_state.via_map2.closure_1 →
++    _root_.nested_borrows_closure_once_state.via_map2.closure_1))
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok (none, f, fun f1 => f1)
++  | some x =>
++    let (model_state, model_state1) ←
++      opsfunctionFnOnceclosure_1TupleT0T1Inst.call_once f x
++    let back :=
++      (fun f1 => f1 :
++        _root_.nested_borrows_closure_once_state.via_map2.closure_1 →
++        _root_.nested_borrows_closure_once_state.via_map2.closure_1)
++    _root_.Aeneas.Std.Result.ok (some model_state, model_state1, back)
++
++/-- [core::option::{core::option::Option<T>}::map::<T0, T1, nested_borrows_closure_once_state::via_map3::closure#2<0, 1, 2>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1160:4-1162:53
++    Name pattern: [core::option::{core::option::Option<@T>}::map<@T0, @T1, nested_borrows_closure_once_state::via_map3::closure#2<'0, '1, '2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::map<@T0, @T1, nested_borrows_closure_once_state::via_map3::closure#2<'0, '1, '2>>"]
++def
++  core.option.Option.mapT0T1closure_2_specialized_c6cbc8390bce5034ed5a68aa2acfa7a5
++  {T0 : Type} {T1 : Type} (opsfunctionFnOnceclosure_2TupleT0T1Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_once_state.via_map3.closure_2 T0 T1)
++  (self : _root_.Option T0)
++  (f : _root_.nested_borrows_closure_once_state.via_map3.closure_2) :
++  _root_.Aeneas.Std.Result ((_root_.Option T1) ×
++    _root_.nested_borrows_closure_once_state.via_map3.closure_2 ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++    _root_.nested_borrows_closure_once_state.via_map3.closure_2) ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_2 ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++    _root_.nested_borrows_closure_once_state.via_map3.closure_2))))
++  := do
++  match self with
++  | none =>
++    let back :=
++      (fun f1 => (f1, fun f2 => f2) :
++        _root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++        (_root_.nested_borrows_closure_once_state.via_map3.closure_2 ×
++        (_root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++        _root_.nested_borrows_closure_once_state.via_map3.closure_2)))
++    _root_.Aeneas.Std.Result.ok (none, f, fun f1 => f1, back)
++  | some x =>
++    let (model_state, model_state1) ←
++      opsfunctionFnOnceclosure_2TupleT0T1Inst.call_once f x
++    let call_once_back :=
++      (fun state_back => (state_back, fun state_back1 => state_back1) :
++        _root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++        (_root_.nested_borrows_closure_once_state.via_map3.closure_2 ×
++        (_root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++        _root_.nested_borrows_closure_once_state.via_map3.closure_2)))
++    let back :=
++      (fun f1 => f1 :
++        _root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++        _root_.nested_borrows_closure_once_state.via_map3.closure_2)
++    let back1 :=
++      (fun f1 =>
++         let (c, _) := call_once_back f1
++         (c,
++           fun f2 => let c1 := f1
++                     let (_, back2) := call_once_back c1
++                     back2 f2) :
++        _root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++        (_root_.nested_borrows_closure_once_state.via_map3.closure_2 ×
++        (_root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++        _root_.nested_borrows_closure_once_state.via_map3.closure_2)))
++    _root_.Aeneas.Std.Result.ok (some model_state, model_state1, back, back1)
++
++/-- [core::option::{core::option::Option<T>}::map::<T0, T1, nested_borrows_closure_once_state::{nested_borrows_closure_once_state::LowerCtx<'p>}::step_opt::closure<0, 1, 2>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1160:4-1162:53
++    Name pattern: [core::option::{core::option::Option<@T>}::map<@T0, @T1, nested_borrows_closure_once_state::{nested_borrows_closure_once_state::LowerCtx<'p>}::step_opt::closure<'0, '1, '2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::map<@T0, @T1, nested_borrows_closure_once_state::{nested_borrows_closure_once_state::LowerCtx<'p>}::step_opt::closure<'0, '1, '2>>"]
++def
++  core.option.Option.mapT0T1closure_specialized_6df82afe03034724ac1ad551859b42d3
++  {T0 : Type} {T1 : Type} (opsfunctionFnOnceclosureTupleT0T1Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure T0 T1)
++  (self : _root_.Option T0)
++  (f : _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure) :
++  _root_.Aeneas.Std.Result ((_root_.Option T1) ×
++    _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure ×
++    (_root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure →
++    _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure))
++  := do
++  match self with
++  | none =>
++    let back :=
++      (fun f1 => let ⟨ r, _ ⟩ := f1
++                 { f with runtime := r } :
++        _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure →
++        _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure)
++    _root_.Aeneas.Std.Result.ok (none, f, back)
++  | some x =>
++    let (model_state, model_state1) ←
++      opsfunctionFnOnceclosureTupleT0T1Inst.call_once f x
++    let back :=
++      (fun f1 =>
++         let ⟨ r, _ ⟩ := { model_state1 with runtime := f1.runtime }
++         { f with runtime := r } :
++        _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure →
++        _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure)
++    _root_.Aeneas.Std.Result.ok (some model_state, model_state1, back)
++
++/-- [nested_borrows_closure_once_state::{nested_borrows_closure_once_state::LowerCtx<'p>}::step]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 24:4-28:5 -/
++def LowerCtx.step
++  (self : _root_.nested_borrows_closure_once_state.LowerCtx)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_once_state.LowerCtx ×
++    (_root_.nested_borrows_closure_once_state.LowerCtx →
++    _root_.nested_borrows_closure_once_state.LowerCtx))
++  := do
++  let i ←
++    lift (_root_.Aeneas.Std.core.num.U32.wrapping_add self.runtime.raised x)
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add self.depth 1#u32)
++  let i2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add x i1)
++  let back'p :=
++    (fun self1 => { self with runtime := self1.runtime } :
++      _root_.nested_borrows_closure_once_state.LowerCtx →
++      _root_.nested_borrows_closure_once_state.LowerCtx)
++  _root_.Aeneas.Std.Result.ok (i2, { runtime := { raised := i }, depth := i1 },
++    back'p)
++
++/-- [nested_borrows_closure_once_state::{nested_borrows_closure_once_state::LowerCtx<'p>}::step_opt::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::{nested_borrows_closure_once_state::LowerCtx<'p>}::step_opt::closure<'p, 1, 2>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 32:14-32:30 -/
++def LowerCtx.step_opt.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure ×
++    (_root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure →
++    _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure))
++  := do
++  let (i, lc, step_back) ←
++    _root_.nested_borrows_closure_once_state.LowerCtx.step c tupled_args
++  let back :=
++    (fun c1 =>
++       let lc1 := step_back { lc with runtime := c1.runtime }
++       { c with runtime := lc1.runtime } :
++      _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure →
++      _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure)
++  _root_.Aeneas.Std.Result.ok (i, lc, back)
++
++/-- Trait implementation: [nested_borrows_closure_once_state::{nested_borrows_closure_once_state::LowerCtx<'p>}::step_opt::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::{nested_borrows_closure_once_state::LowerCtx<'p>}::step_opt::closure<'p, 1, 2>}]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 32:14-32:30 -/
++@[reducible]
++def LowerCtx.step_opt.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_closure_once_state.LowerCtx.mk
++        capture_state1.runtime capture_state.depth)
++}
++
++/-- [nested_borrows_closure_once_state::{nested_borrows_closure_once_state::LowerCtx<'p>}::step_opt]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 31:4-33:5
++    Visibility: public -/
++def LowerCtx.step_opt
++  (self : _root_.nested_borrows_closure_once_state.LowerCtx)
++  (o : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_closure_once_state.LowerCtx ×
++    (_root_.nested_borrows_closure_once_state.LowerCtx →
++    _root_.nested_borrows_closure_once_state.LowerCtx))
++  := do
++  let (o1, c, map_back) ←
++    _root_.nested_borrows_closure_once_state.core.option.Option.mapT0T1closure_specialized_6df82afe03034724ac1ad551859b42d3
++      _root_.nested_borrows_closure_once_state.LowerCtx.step_opt.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++      o self
++  let back'p :=
++    (fun self1 =>
++       let c1 := map_back { c with runtime := self1.runtime }
++       let ⟨ r, _ ⟩ := c1
++       { self with runtime := r } :
++      _root_.nested_borrows_closure_once_state.LowerCtx →
++      _root_.nested_borrows_closure_once_state.LowerCtx)
++  _root_.Aeneas.Std.Result.ok (o1, c, back'p)
++
++/-- [nested_borrows_closure_once_state::drive]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 37:0-45:1
++    Visibility: public -/
++def drive
++  (raised : _root_.Aeneas.Std.U32) (o : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, cx, step_opt_back) ←
++    _root_.nested_borrows_closure_once_state.LowerCtx.step_opt
++      { runtime := { raised }, depth := 3#u32 } o
++  let lc := step_opt_back cx
++  _root_.Aeneas.Std.Result.ok (r, cx.depth, lc.runtime.raised)
++
++/-- [nested_borrows_closure_once_state::via_map2::{core::ops::function::FnMut<(u32), u32> for nested_borrows_closure_once_state::via_map2::closure<0>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 51:16-54:5 -/
++def via_map2.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++  (c : _root_.nested_borrows_closure_once_state.via_map2.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_once_state.via_map2.closure ×
++    (_root_.nested_borrows_closure_once_state.via_map2.closure →
++    _root_.nested_borrows_closure_once_state.via_map2.closure))
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add c tupled_args)
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul tupled_args 2#u32)
++  let back :=
++    (fun c1 => c1 : _root_.nested_borrows_closure_once_state.via_map2.closure →
++      _root_.nested_borrows_closure_once_state.via_map2.closure)
++  _root_.Aeneas.Std.Result.ok (i1, i, back)
++
++/-- [nested_borrows_closure_once_state::via_map2::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::via_map2::closure#1<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 55:18-55:42 -/
++def via_map2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.nested_borrows_closure_once_state.via_map2.closure_1)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_once_state.via_map2.closure_1 ×
++    (_root_.nested_borrows_closure_once_state.via_map2.closure_1 →
++    _root_.nested_borrows_closure_once_state.via_map2.closure_1))
++  := do
++  let (i, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_once_state.via_map2.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c tupled_args
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add i 1#u32)
++  let back :=
++    (fun c2 => let c3 := call_mut_back c2
++               c3 : _root_.nested_borrows_closure_once_state.via_map2.closure_1
++      → _root_.nested_borrows_closure_once_state.via_map2.closure_1)
++  _root_.Aeneas.Std.Result.ok (i1, c1, back)
++
++/-- Trait implementation: [nested_borrows_closure_once_state::via_map2::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::via_map2::closure#1<0, 1>}]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 55:18-55:42 -/
++@[reducible]
++def via_map2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_once_state.via_map2.closure_1
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_once_state.via_map2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output, capture_state1)
++}
++
++/-- [nested_borrows_closure_once_state::via_map2]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 49:0-57:1
++    Visibility: public -/
++def via_map2
++  (n : _root_.Aeneas.Std.U32) (o : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, map_back) ←
++    _root_.nested_borrows_closure_once_state.core.option.Option.mapT0T1closure_1_specialized_352ccf774c3a58a771aab711da8c3704
++      _root_.nested_borrows_closure_once_state.via_map2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32
++      o n
++  let c1 := map_back c
++  let calls := c1
++  _root_.Aeneas.Std.Result.ok (r, calls)
++
++/-- [nested_borrows_closure_once_state::via_map2::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::via_map2::closure<0>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 51:16-54:5 -/
++def via_map2.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.nested_borrows_closure_once_state.via_map2.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_once_state.via_map2.closure)
++  := do
++  let (i1, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_once_state.via_map2.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i1, c2)
++
++/-- Trait implementation: [nested_borrows_closure_once_state::via_map2::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::via_map2::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 51:16-54:5 -/
++@[reducible]
++def via_map2.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_once_state.via_map2.closure
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_once_state.via_map2.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [nested_borrows_closure_once_state::via_map2::{core::ops::function::FnMut<(u32), u32> for nested_borrows_closure_once_state::via_map2::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 51:16-54:5 -/
++@[reducible]
++def via_map2.closure.Insts.CoreOpsFunctionFnMutTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_once_state.via_map2.closure
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_once_state.via_map2.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_once_state.via_map2.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [nested_borrows_closure_once_state::via_map3::{core::ops::function::FnMut<(u32), u32> for nested_borrows_closure_once_state::via_map3::closure<0>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 62:16-65:5 -/
++def via_map3.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++  (c : _root_.nested_borrows_closure_once_state.via_map3.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_once_state.via_map3.closure ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure →
++    _root_.nested_borrows_closure_once_state.via_map3.closure))
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add c tupled_args)
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul tupled_args 2#u32)
++  let back :=
++    (fun c1 => c1 : _root_.nested_borrows_closure_once_state.via_map3.closure →
++      _root_.nested_borrows_closure_once_state.via_map3.closure)
++  _root_.Aeneas.Std.Result.ok (i1, i, back)
++
++/-- [nested_borrows_closure_once_state::via_map3::{core::ops::function::FnMut<(u32), u32> for nested_borrows_closure_once_state::via_map3::closure#1<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 66:16-66:45 -/
++def via_map3.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++  (c : _root_.nested_borrows_closure_once_state.via_map3.closure_1)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_once_state.via_map3.closure_1 ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_1 →
++    _root_.nested_borrows_closure_once_state.via_map3.closure_1) ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_1 →
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_1 ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_1 →
++    _root_.nested_borrows_closure_once_state.via_map3.closure_1))))
++  := do
++  let (i, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_once_state.via_map3.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c tupled_args
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add i 1#u32)
++  let back :=
++    (fun c2 => c2 : _root_.nested_borrows_closure_once_state.via_map3.closure_1
++      → _root_.nested_borrows_closure_once_state.via_map3.closure_1)
++  let back1 :=
++    (fun c2 => (c2, fun c3 => let c4 := call_mut_back c3
++                              c4) :
++      _root_.nested_borrows_closure_once_state.via_map3.closure_1 →
++      (_root_.nested_borrows_closure_once_state.via_map3.closure_1 ×
++      (_root_.nested_borrows_closure_once_state.via_map3.closure_1 →
++      _root_.nested_borrows_closure_once_state.via_map3.closure_1)))
++  _root_.Aeneas.Std.Result.ok (i1, c1, back, back1)
++
++/-- [nested_borrows_closure_once_state::via_map3::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::via_map3::closure#2<0, 1, 2>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 67:18-67:42 -/
++def via_map3.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.nested_borrows_closure_once_state.via_map3.closure_2)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_once_state.via_map3.closure_2 ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++    _root_.nested_borrows_closure_once_state.via_map3.closure_2) ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_2 ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++    _root_.nested_borrows_closure_once_state.via_map3.closure_2))))
++  := do
++  let (i, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_closure_once_state.via_map3.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c tupled_args
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add i 3#u32)
++  let back :=
++    (fun c2 => let c3 := call_mut_back c2
++               c3 : _root_.nested_borrows_closure_once_state.via_map3.closure_2
++      → _root_.nested_borrows_closure_once_state.via_map3.closure_2)
++  let back1 :=
++    (fun c2 =>
++       let c3 := c2
++       let (c4, _) := call_mut_back1 c3
++       (c4,
++         fun c5 =>
++           let c6 := c2
++           let (_, back2) := call_mut_back1 c6
++           let c7 := back2 c5
++           c7) : _root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++      (_root_.nested_borrows_closure_once_state.via_map3.closure_2 ×
++      (_root_.nested_borrows_closure_once_state.via_map3.closure_2 →
++      _root_.nested_borrows_closure_once_state.via_map3.closure_2)))
++  _root_.Aeneas.Std.Result.ok (i1, c1, back, back1)
++
++/-- Trait implementation: [nested_borrows_closure_once_state::via_map3::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::via_map3::closure#2<0, 1, 2>}]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 67:18-67:42 -/
++@[reducible]
++def via_map3.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_once_state.via_map3.closure_2
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_once_state.via_map3.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      let (c, back) := captured2 observed_state
++      let capture_state2 := back c
++      _root_.Aeneas.Std.Result.ok (output, capture_state2)
++}
++
++/-- [nested_borrows_closure_once_state::via_map3]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 60:0-69:1
++    Visibility: public -/
++def via_map3
++  (n : _root_.Aeneas.Std.U32) (o : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, map_back, map_back1) ←
++    _root_.nested_borrows_closure_once_state.core.option.Option.mapT0T1closure_2_specialized_c6cbc8390bce5034ed5a68aa2acfa7a5
++      _root_.nested_borrows_closure_once_state.via_map3.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32U32
++      o n
++  let c1 := map_back c
++  let (c2, back) := map_back1 c1
++  let c3 := back c2
++  let calls := c3
++  _root_.Aeneas.Std.Result.ok (r, calls)
++
++/-- [nested_borrows_closure_once_state::via_map3::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::via_map3::closure<0>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 62:16-65:5 -/
++def via_map3.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.nested_borrows_closure_once_state.via_map3.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_once_state.via_map3.closure)
++  := do
++  let (i1, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_once_state.via_map3.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i1, c2)
++
++/-- Trait implementation: [nested_borrows_closure_once_state::via_map3::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::via_map3::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 62:16-65:5 -/
++@[reducible]
++def via_map3.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_once_state.via_map3.closure
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_once_state.via_map3.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [nested_borrows_closure_once_state::via_map3::{core::ops::function::FnMut<(u32), u32> for nested_borrows_closure_once_state::via_map3::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 62:16-65:5 -/
++@[reducible]
++def via_map3.closure.Insts.CoreOpsFunctionFnMutTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_once_state.via_map3.closure
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_once_state.via_map3.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_once_state.via_map3.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [nested_borrows_closure_once_state::via_map3::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::via_map3::closure#1<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 66:16-66:45 -/
++def via_map3.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.nested_borrows_closure_once_state.via_map3.closure_1)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_once_state.via_map3.closure_1 ×
++    (_root_.nested_borrows_closure_once_state.via_map3.closure_1 →
++    _root_.nested_borrows_closure_once_state.via_map3.closure_1))
++  := do
++  let (i1, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_closure_once_state.via_map3.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 => let (c4, back1) := call_mut_back1 c3
++               back1 c4 :
++      _root_.nested_borrows_closure_once_state.via_map3.closure_1 →
++      _root_.nested_borrows_closure_once_state.via_map3.closure_1)
++  _root_.Aeneas.Std.Result.ok (i1, c2, back)
++
++/-- Trait implementation: [nested_borrows_closure_once_state::via_map3::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_once_state::via_map3::closure#1<0, 1>}]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 66:16-66:45 -/
++@[reducible]
++def via_map3.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_once_state.via_map3.closure_1
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_once_state.via_map3.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output, capture_state1)
++}
++
++/-- Trait implementation: [nested_borrows_closure_once_state::via_map3::{core::ops::function::FnMut<(u32), u32> for nested_borrows_closure_once_state::via_map3::closure#1<0, 1>}]
++    Source: 'tests/src/nested-borrows-closure-once-state.rs', lines 66:16-66:45 -/
++@[reducible]
++def via_map3.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_once_state.via_map3.closure_1
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_once_state.via_map3.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_once_state.via_map3.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output, capture_state1)
++}
++
++end nested_borrows_closure_once_state
+diff --git a/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean b/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
+index 3d64b95..9c70604 100644
+--- a/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
++++ b/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
+@@ -873,7 +873,8 @@ def
+         _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnOnceTupleU32ResultOptionU32T0_specialized_b29195c2ad3b86f03465d26a9532614f.call_once_specialized_04eb4b56c7eba3c39e81489965d603f8
+           coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
+         capture_state.#1, capture_state.#2))
+ }
+@@ -1532,7 +1533,8 @@ def
+         _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnOnceTupleU32U32_specialized_b26278894283a6d5bf68a3ec99fcf67d.call_once_specialized_4ee993a5fb04228bab75714e9ef64be7
+           coreopsfunctionFnMutclosurePairU32BoolU32Inst arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
+         capture_state.#1))
+ }
+diff --git a/tests/lean/NestedBorrowsClosureSharedClosure/NestedBorrowsClosureSharedClosure.lean b/tests/lean/NestedBorrowsClosureSharedClosure/NestedBorrowsClosureSharedClosure.lean
+index 27ed16c..7f6499d 100644
+--- a/tests/lean/NestedBorrowsClosureSharedClosure/NestedBorrowsClosureSharedClosure.lean
++++ b/tests/lean/NestedBorrowsClosureSharedClosure/NestedBorrowsClosureSharedClosure.lean
+@@ -2165,9 +2165,10 @@ def
+           arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
+-      let capture_state4 := captured4 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
++      let capture_state4 := captured4 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state1.#1).#0, (capture_state2.#1).#1,
+         (capture_state1.#1).#2, (capture_state3.#1).#3,
+diff --git a/tests/lean/NestedBorrowsClosureSharedClosureArms/NestedBorrowsClosureSharedClosureArms.lean b/tests/lean/NestedBorrowsClosureSharedClosureArms/NestedBorrowsClosureSharedClosureArms.lean
+index db804d9..e17c121 100644
+--- a/tests/lean/NestedBorrowsClosureSharedClosureArms/NestedBorrowsClosureSharedClosureArms.lean
++++ b/tests/lean/NestedBorrowsClosureSharedClosureArms/NestedBorrowsClosureSharedClosureArms.lean
+@@ -1530,9 +1530,10 @@ def
+           arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
+-      let capture_state4 := captured4 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
++      let capture_state4 := captured4 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state1.#1).#0, (capture_state2.#1).#1,
+         (capture_state1.#1).#2, (capture_state3.#1).#3,
+diff --git a/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean b/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean
+index b4f223d..8454fad 100644
+--- a/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean
++++ b/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean
+@@ -1129,7 +1129,8 @@ def
+         _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_1c703a6aff3393e57803c92f0a35fe4a.call_once_specialized_99d25d3e0cfb546f83d245698cb0db4b
+           coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
+         capture_state.#1))
+ }
+@@ -1373,7 +1374,8 @@ def
+           coreopsfunctionFnMutT1PairU32U8U32Inst
+           coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, capture_state1)
+ }
+ 
+@@ -1702,8 +1704,9 @@ def
+           coreopsfunctionFnMutT1PairU32U8U32Inst
+           coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
+-      let capture_state2 := captured2 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      let capture_state2 := captured2 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
+         capture_state2.#1))
+ }
+diff --git a/tests/lean/NestedBorrowsClosureVisitor/NestedBorrowsClosureVisitor.lean b/tests/lean/NestedBorrowsClosureVisitor/NestedBorrowsClosureVisitor.lean
+index 1240234..094b274 100644
+--- a/tests/lean/NestedBorrowsClosureVisitor/NestedBorrowsClosureVisitor.lean
++++ b/tests/lean/NestedBorrowsClosureVisitor/NestedBorrowsClosureVisitor.lean
+@@ -406,8 +406,9 @@ def visit_join.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple :
+           arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state2.#1).#0, (capture_state3.#1).#1)))
+ }
+diff --git a/tests/lean/NestedBorrowsClosureVisitorCalls/NestedBorrowsClosureVisitorCalls.lean b/tests/lean/NestedBorrowsClosureVisitorCalls/NestedBorrowsClosureVisitorCalls.lean
+index 7dd079d..941bfc2 100644
+--- a/tests/lean/NestedBorrowsClosureVisitorCalls/NestedBorrowsClosureVisitorCalls.lean
++++ b/tests/lean/NestedBorrowsClosureVisitorCalls/NestedBorrowsClosureVisitorCalls.lean
+@@ -1360,8 +1360,9 @@ def
+           coreopsfunctionFnMutclosureTupleShared0ExprResultTupleT0Inst arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state1.#1).#0, (capture_state2.#1).#1,
+         (capture_state3.#1).#2)))
+diff --git a/tests/lean/NestedBorrowsClosureVisitorFn/NestedBorrowsClosureVisitorFn.lean b/tests/lean/NestedBorrowsClosureVisitorFn/NestedBorrowsClosureVisitorFn.lean
+index 632d99a..e49d1f7 100644
+--- a/tests/lean/NestedBorrowsClosureVisitorFn/NestedBorrowsClosureVisitorFn.lean
++++ b/tests/lean/NestedBorrowsClosureVisitorFn/NestedBorrowsClosureVisitorFn.lean
+@@ -1501,8 +1501,9 @@ def visit_meta.closure_1.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple :
+           arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state2.#1).#0, (capture_state3.#1).#1)))
+ }
+@@ -1795,8 +1796,9 @@ def visit_meta_two.closure_1.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple :
+           arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state2.#1).#0, (capture_state3.#1).#1)))
+ }
+@@ -2094,8 +2096,9 @@ def visit_meta_cross.closure_1.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple
+           arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state2.#1).#0, (capture_state3.#1).#1)))
+ }
+@@ -2399,8 +2402,9 @@ def
+           arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state2.#1).#0, (capture_state3.#1).#1)))
+ }
+diff --git a/tests/lean/NestedBorrowsClosureVisitorLoop/NestedBorrowsClosureVisitorLoop.lean b/tests/lean/NestedBorrowsClosureVisitorLoop/NestedBorrowsClosureVisitorLoop.lean
+index 44f66d4..25d9de8 100644
+--- a/tests/lean/NestedBorrowsClosureVisitorLoop/NestedBorrowsClosureVisitorLoop.lean
++++ b/tests/lean/NestedBorrowsClosureVisitorLoop/NestedBorrowsClosureVisitorLoop.lean
+@@ -505,8 +505,9 @@ def visit_loop.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple :
+           arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state2.#1).#0, (capture_state3.#1).#1)))
+ }
+@@ -980,8 +981,9 @@ def visit_loop_index.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple
+           arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state2.#1).#0, (capture_state3.#1).#1)))
+ }
+@@ -1439,8 +1441,9 @@ def visit_loop_until.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple
+           arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state2.#1).#0, (capture_state3.#1).#1)))
+ }
+diff --git a/tests/lean/NestedBorrowsDepth2SelfFed/NestedBorrowsDepth2SelfFed.lean b/tests/lean/NestedBorrowsDepth2SelfFed/NestedBorrowsDepth2SelfFed.lean
+index 348ce27..1698935 100644
+--- a/tests/lean/NestedBorrowsDepth2SelfFed/NestedBorrowsDepth2SelfFed.lean
++++ b/tests/lean/NestedBorrowsDepth2SelfFed/NestedBorrowsDepth2SelfFed.lean
+@@ -1785,8 +1785,9 @@ def
+           arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (((capture_state2.#0).#0,
+         (capture_state3.#0).#1), capture_state1.#1))
+ }
+@@ -2409,7 +2410,8 @@ def
+         _root_.nested_borrows_depth2_self_fed.walk_first.closure0closure_specialized_e765ca0fb8197ec71879ebb57568ba90.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple_specialized_55e9e1dddc3fa0e54c0d8874c1da9c71.call_once_specialized_7c1f79e748f56349f07f54d40187d6e7
+           coreopsfunctionFnMutclosureTupleShared0ExprTupleInst arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, capture_state1)
+ }
+ 
+@@ -3007,7 +3009,8 @@ def
+           arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state2.#0,
+         capture_state1.#1))
+ }
+diff --git a/tests/lean/NestedBorrowsModelState/NestedBorrowsModelState.lean b/tests/lean/NestedBorrowsModelState/NestedBorrowsModelState.lean
+index b14a70a..c993494 100644
+--- a/tests/lean/NestedBorrowsModelState/NestedBorrowsModelState.lean
++++ b/tests/lean/NestedBorrowsModelState/NestedBorrowsModelState.lean
+@@ -210,7 +210,8 @@ def via_generic.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
+         _root_.nested_borrows_model_state.via_generic.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, capture_state1)
+ }
+ 
+@@ -477,7 +478,8 @@ def use_apply2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
+         _root_.nested_borrows_model_state.use_apply2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, capture_state1)
+ }
+ 
+@@ -834,8 +836,9 @@ def via_owned.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
+         _root_.nested_borrows_model_state.via_owned.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
+-      let (c, back) := captured2 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      let (c, back) := captured2 observed_state
+       let capture_state2 := back c
+       _root_.Aeneas.Std.Result.ok (output, capture_state2)
+ }
+@@ -966,7 +969,8 @@ def via_owned.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
+         _root_.nested_borrows_model_state.via_owned.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, capture_state1)
+ }
+ 
+@@ -1210,7 +1214,8 @@ def once.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
+         _root_.nested_borrows_model_state.once.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, capture_state1)
+ }
+ 
+@@ -1287,8 +1292,9 @@ def once.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
+         _root_.nested_borrows_model_state.once.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
+-      let (c, back) := captured2 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      let (c, back) := captured2 observed_state
+       let capture_state2 := back c
+       _root_.Aeneas.Std.Result.ok (output, capture_state2)
+ }
+@@ -1473,8 +1479,9 @@ def map_chain.closure_2.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32 :
+         _root_.nested_borrows_model_state.map_chain.closure_2.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
+-      let (c, back) := captured2 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      let (c, back) := captured2 observed_state
+       let capture_state2 := back c
+       _root_.Aeneas.Std.Result.ok (output, capture_state2)
+ }
+@@ -1680,7 +1687,8 @@ def map_chain.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
+         _root_.nested_borrows_model_state.map_chain.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, capture_state1)
+ }
+ 
+diff --git a/tests/lean/NestedBorrowsUntouchedJoin/NestedBorrowsUntouchedJoin.lean b/tests/lean/NestedBorrowsUntouchedJoin/NestedBorrowsUntouchedJoin.lean
+index 2286779..039af81 100644
+--- a/tests/lean/NestedBorrowsUntouchedJoin/NestedBorrowsUntouchedJoin.lean
++++ b/tests/lean/NestedBorrowsUntouchedJoin/NestedBorrowsUntouchedJoin.lean
+@@ -658,7 +658,8 @@ def
+           coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst arg
+           arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         capture_state1.#1))
+ }
+@@ -1130,7 +1131,8 @@ def
+           coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst arg
+           arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
+         capture_state.#1, capture_state.#2, capture_state.#3))
+ }
+diff --git a/tests/lean/RecursiveVisitorClosures/RecursiveVisitorClosures.lean b/tests/lean/RecursiveVisitorClosures/RecursiveVisitorClosures.lean
+index b637f5a..67040e8 100644
+--- a/tests/lean/RecursiveVisitorClosures/RecursiveVisitorClosures.lean
++++ b/tests/lean/RecursiveVisitorClosures/RecursiveVisitorClosures.lean
+@@ -2752,9 +2752,10 @@ def
+           coreopsfunctionFnMutclosureTupleShared0ExprResultTupleT0Inst arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
+-      let capture_state4 := captured4 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
++      let capture_state4 := captured4 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state2.#1).#0, (capture_state1.#1).#1,
+         (capture_state3.#1).#2, (capture_state1.#1).#3,
+@@ -3117,8 +3118,9 @@ def
+           coreopsfunctionFnMutclosureTupleShared0ExprResultTupleT0Inst arg arg1
+       let capture_state := captured
+       let capture_state1 := captured1
+-      let capture_state2 := captured2 arg
+-      let capture_state3 := captured3 arg
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      let capture_state3 := captured3 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
+         ((capture_state1.#1).#0, (capture_state2.#1).#1,
+         (capture_state3.#1).#2)))
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 12bd888..cabf35c 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -72,6 +72,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsOutputSharedLevels
+ @[default_target] lean_lib NestedBorrowsDepth2SelfFed
+ @[default_target] lean_lib ClosureGenericReturnInputRef
++@[default_target] lean_lib NestedBorrowsClosureOnceState
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib BtreeEntry
+diff --git a/tests/src/nested-borrows-closure-once-state.rs b/tests/src/nested-borrows-closure-once-state.rs
+new file mode 100644
+index 0000000..41d566d
+--- /dev/null
++++ b/tests/src/nested-borrows-closure-once-state.rs
+@@ -0,0 +1,88 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsClosureOnceState
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option} --include core::ops::deref::{core::ops::deref::Deref} --include core::ops::deref::{core::ops::deref::DerefMut}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A closure consumed by `Option::map` (its `FnOnce` dictionary) which writes
++//! through the nested borrows of its captures (production: a context
++//! `&mut LowerCtx<'p>` holding `&'p mut` state, `o.map(|x| self.step(x))`).
++//! The `FnOnce` instance recovers the closure state from the backward functions
++//! of `call_once` (`ModelStateABI.adapt_dictionary_method`): the inputs at the
++//! levels > 0 of the backward function of the inner region are the payloads
++//! given back at the forward return, not the captures before the call (which
++//! would undo the writes of the closure through the inner borrows).
++
++pub struct Runtime {
++    pub raised: u32,
++}
++
++pub struct LowerCtx<'p> {
++    pub runtime: &'p mut Runtime,
++    pub depth: u32,
++}
++
++impl<'p> LowerCtx<'p> {
++    fn step(&mut self, x: u32) -> u32 {
++        self.runtime.raised = self.runtime.raised.wrapping_add(x);
++        self.depth = self.depth.wrapping_add(1);
++        x.wrapping_add(self.depth)
++    }
++
++    /// The closure captures `&mut LowerCtx<'p>` (two levels).
++    pub fn step_opt(&mut self, o: Option<u32>) -> Option<u32> {
++        o.map(|x| self.step(x))
++    }
++}
++
++/// `(result, depth, raised)`; the caller reads the context after the call
++pub fn drive(raised: u32, o: Option<u32>) -> (Option<u32>, u32, u32) {
++    let mut rt = Runtime { raised };
++    let (r, d) = {
++        let mut cx = LowerCtx { runtime: &mut rt, depth: 3 };
++        let r = cx.step_opt(o);
++        (r, cx.depth)
++    };
++    (r, d, rt.raised)
++}
++
++/// The closure consumed by `map` captures `&mut c`, which captures
++/// `&mut calls` (two levels).
++pub fn via_map2(n: u32, o: Option<u32>) -> (Option<u32>, u32) {
++    let mut calls = n;
++    let mut c = |x: u32| {
++        calls = calls.wrapping_add(x);
++        x.wrapping_mul(2)
++    };
++    let r = o.map(|x| c(x).wrapping_add(1));
++    (r, calls)
++}
++
++/// Three levels: the backward function of the innermost region is staged.
++pub fn via_map3(n: u32, o: Option<u32>) -> (Option<u32>, u32) {
++    let mut calls = n;
++    let mut c = |x: u32| {
++        calls = calls.wrapping_add(x);
++        x.wrapping_mul(2)
++    };
++    let mut w = |x: u32| c(x).wrapping_add(1);
++    let r = o.map(|x| w(x).wrapping_add(3));
++    (r, calls)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drive_native() {
++        assert_eq!(drive(10, Some(5)), (Some(9), 4, 15));
++        assert_eq!(drive(10, None), (None, 3, 10));
++    }
++
++    #[test]
++    fn via_map_native() {
++        assert_eq!(via_map2(10, Some(5)), (Some(11), 15));
++        assert_eq!(via_map2(10, None), (None, 10));
++        assert_eq!(via_map3(10, Some(5)), (Some(14), 15));
++        assert_eq!(via_map3(10, None), (None, 10));
++    }
++}

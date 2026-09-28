@@ -1,0 +1,4222 @@
+# aeneas integration step 159 after cba11f3beb: commit 55ba2f0f338b989360c2abb864d8a9ef1e8a95d8
+# first parent b5f3c968f1b11cefa92bffa967babe7404bc654d, merged 7545d029695b3082ddff2d1f132c31b616dd70a9
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (TRIAGE class I: joins of shared loans whose payload type holds borrows the payload does not; mr10 staged continuations; Markers class A: release single-branch shared-projection abstractions; join pairing by all dual elements)
+
+diff --git a/src/interp/InterpMatchCtxs.ml b/src/interp/InterpMatchCtxs.ml
+index b74c69d..3e9ab14 100644
+--- a/src/interp/InterpMatchCtxs.ml
++++ b/src/interp/InterpMatchCtxs.ml
+@@ -1764,7 +1764,9 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+       let nbid = ctx0.fresh_borrow_id () in
+ 
+       let kind = RShared in
+-      let bv_ty = ty in
++      (* The payload holds no borrows (checked above), but its type may (e.g.
++         [[View<'_>; 1]]): see {!match_shared_loan_with_other}. *)
++      let bv_ty = unowned_rty_of_ety span ctx0 ty in
+       let borrow_ty = mk_ref_ty (RVar (Free rid)) bv_ty kind in
+ 
+       let borrow_av =
+@@ -1779,7 +1781,7 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+         let ty = borrow_ty in
+         (* Note that we allow the shared value to contain loans!
+            For this reason we introduce fresh symbolic values. *)
+-        let sv' = add_fresh_symbolic_value ctx0 sv.ty sv sv in
++        let sv' = add_fresh_symbolic_value ctx0 bv_ty sv sv in
+         let value =
+           ALoan (ASharedLoan (pm, lid, sv', mk_aignored span bv_ty None))
+         in
+@@ -2158,7 +2160,12 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+     in
+ 
+     let kind = RShared in
+-    let bv_ty = ty in
++    (* The payload holds no borrows (checked above), but its type may: e.g. an
++       empty array [[View<'_>; 0]] behind a promoted [&[]]. Only the outer
++       reference belongs to [rid]: reify the erased regions of the payload
++       type with distinct, unowned witnesses, as {!match_shared_borrows} does
++       for the retained payload. *)
++    let bv_ty = unowned_rty_of_ety span ctx0 ty in
+     let borrow_ty = mk_ref_ty (RVar (Free rid)) bv_ty kind in
+ 
+     let borrow_av =
+diff --git a/src/interp/InterpReduceCollapse.ml b/src/interp/InterpReduceCollapse.ml
+index d8563db..8febc71 100644
+--- a/src/interp/InterpReduceCollapse.ml
++++ b/src/interp/InterpReduceCollapse.ml
+@@ -1574,6 +1574,47 @@ let collapse_ctx_collapse (span : Meta.span)
+     | PRight -> PLeft
+   in
+ 
++  (* The number of marked elements of [aid0] whose dual (same element, other
++     marker) [aid1] holds, over every kind of element: shared borrows with
++     their shared borrow ids, borrows, loans, borrow and loan projections. *)
++  let complementarity (info : abs_borrows_loans_maps) (aid0 : abs_id)
++      (aid1 : abs_id) : int =
++    let find m empty aid = Option.value ~default:empty (AbsId.Map.find_opt aid m) in
++    let unique =
++      let s1 = find info.abs_to_borrows MarkedUniqueBorrowId.Set.empty aid1 in
++      MarkedUniqueBorrowId.Set.cardinal
++        (MarkedUniqueBorrowId.Set.filter
++           (fun (pm, bid, sid) ->
++             pm <> PNone
++             && MarkedUniqueBorrowId.Set.mem (invert_proj_marker pm, bid, sid) s1)
++           (find info.abs_to_borrows MarkedUniqueBorrowId.Set.empty aid0))
++    in
++    let ids m =
++      let s1 = find m MarkedBorrowId.Set.empty aid1 in
++      MarkedBorrowId.Set.cardinal
++        (MarkedBorrowId.Set.filter
++           (fun (pm, id) ->
++             pm <> PNone && MarkedBorrowId.Set.mem (invert_proj_marker pm, id) s1)
++           (find m MarkedBorrowId.Set.empty aid0))
++    in
++    let projs m =
++      let s1 = find m MarkedNormSymbProj.Set.empty aid1 in
++      MarkedNormSymbProj.Set.cardinal
++        (MarkedNormSymbProj.Set.filter
++           (fun (p : marked_norm_symb_proj) ->
++             p.pm <> PNone
++             && MarkedNormSymbProj.Set.mem
++                  { p with pm = invert_proj_marker p.pm }
++                  s1)
++           (find m MarkedNormSymbProj.Set.empty aid0))
++    in
++    unique
++    + ids info.abs_to_non_unique_borrows
++    + ids info.abs_to_loans
++    + projs info.abs_to_borrow_projs
++    + projs info.abs_to_loan_projs
++  in
++
+   let fixed_aids = ctx_get_frozen_abs_set ctx in
+ 
+   (* Merge all the mergeable abs where the same element is present in both abs,
+@@ -1689,23 +1730,14 @@ let collapse_ctx_collapse (span : Meta.span)
+                    regions. Pair with the most complementary one (the largest
+                    number of elements of [abs_id0] whose dual it holds): taking
+                    any other one coalesces owners which both branches keep
+-                   apart, and the joined context then no longer matches them. *)
+-                let marked aid m =
+-                  Set.filter
+-                    (fun x -> Marked.get_marker x <> PNone)
+-                    (Option.value ~default:Set.empty (AbsId.Map.find_opt aid m))
+-                in
+-                let duals m aid =
+-                  let elements1 = marked aid m in
+-                  Set.cardinal
+-                    (Set.filter
+-                       (fun x -> Set.mem (Marked.invert_proj_marker x) elements1)
+-                       (marked abs_id0 m))
+-                in
+-                let score aid =
+-                  duals (Marked.get_to_borrows ctx.info) aid
+-                  + duals (Marked.get_to_loans ctx.info) aid
+-                in
++                   apart, and the joined context then no longer matches them.
++                   Count every kind of element, not only the kind of the
++                   element which triggered the merge: e.g., two abstractions of
++                   a branch holding distinct shared borrows [SB l (^4)] and
++                   [SB l (^6)] of one loan, which are two distinct borrows
++                   (and, for one of them, a loan projector) that the other
++                   branch keeps apart as well. *)
++                let score aid = complementarity ctx.info abs_id0 aid in
+                 let best, _ =
+                   List.fold_left
+                     (fun (best, best_score) aid ->
+@@ -1912,7 +1944,12 @@ let end_closed_shared_components config (span : Meta.span) (ctx : eval_ctx) :
+ 
+         method! visit_ABorrow () =
+           function
+-          | ASharedBorrow (pm, _, _) -> self#visit_proj_marker () pm
++          (* Shared reborrows of the borrows inside a value (e.g., of the
++             elements [&'a T] of a [Vec<&'a T>] behind the shared borrow given
++             to [Option::as_ref]) are shared borrows: releasing them gives
++             nothing back and leaves their lenders untouched. *)
++          | ASharedBorrow (pm, _, _) | AProjSharedBorrow (pm, _) ->
++              self#visit_proj_marker () pm
+           | AEndedSharedBorrow -> ()
+           | _ -> raise Found
+ 
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index 27399d1..2f7c2cc 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -1819,8 +1819,12 @@ let register_inputs ?(whole_ignored_loans : bool = false) (ctx : bs_ctx)
+      loan of a region it does not own. When that outer loan is one whole input
+      (see [whole_ignored_loans] below), the value given back to such an inner
+      loan is the field of that input at its position: the input is the value
+-     of the loans of the borrowed value. Loans under an enumeration or a
+-     projector are left unbound. *)
++     of the loans of the borrowed value. The same holds for a loan projector
++     at such a position (e.g., the whole borrowed value [⌊s <: Vec<&'a mut
++     T>⌋] under the loan of a [&'b mut Vec<&'a mut T>] held by a loop
++     abstraction of ['a]): the value given back to its loans is the value of
++     that position. Loans under an enumeration or a projector are left
++     unbound. *)
+   let rec register_inner_loans (e : texpr) (av : V.tavalue) : unit =
+     match av.value with
+     | V.ALoan (V.AMutLoan (_, lid, _)) ->
+@@ -1842,6 +1846,12 @@ let register_inputs ?(whole_ignored_loans : bool = false) (ctx : bs_ctx)
+                   field)
+               fields
+         | _ -> ())
++    | V.ASymbolic (_, V.AProjLoans { proj = { sv_id; proj_ty }; _ })
++      when TypesUtils.ty_has_mut_borrow_for_region_in_pred type_infos
++             keep_region proj_ty ->
++        let norm_proj_ty = InterpBorrowsCore.normalize_proj_ty rids proj_ty in
++        if not (NormSymbProjMap.mem { sv_id; norm_proj_ty } !symbolic) then
++          symbolic := NormSymbProjMap.add { sv_id; norm_proj_ty } e !symbolic
+     | _ -> ()
+   in
+   let rec register (av : V.tavalue) : unit =
+@@ -2412,20 +2422,26 @@ let staged_cont_early_stages (ctx : bs_ctx) (ectx : C.eval_ctx)
+            the other way, from the first call: the borrow given to a call is
+            the one given back by the call before it (see
+            [SymbolicToPureTypes.back_sig_stage_map]), whose first stage gives
+-           the value at level 1 of the borrow given back to it *)
+-        List.rev_map
+-          (fun aid ->
+-            match V.AbsId.Map.find_opt aid ctx.fun_call_stages with
+-            | Some { signature; early_outputs = []; _ }
+-              when List.length signature.early = 1 ->
+-                (aid, 1)
+-            | _ ->
+-                [%craise] span
+-                  "Nested borrows: the continuation of a join or loop \
+-                   abstraction with pending loans calls a function whose \
+-                   backward function is not staged in two stages, or whose \
+-                   first stage was applied")
+-          calls
++           the value at level 1 of the borrow given back to it. A call without
++           staged backward function (its signature has no nested borrows, e.g.
++           [iter_mut] on the slice a loop iterates over) holds no value at
++           level 1, so it takes no part in this routing: the last stage applies
++           it, as for [StageLevel] *)
++        List.rev
++          (List.filter_map
++             (fun aid ->
++               match V.AbsId.Map.find_opt aid ctx.fun_call_stages with
++               | None | Some { signature = { early = []; _ }; _ } -> None
++               | Some { signature; early_outputs = []; _ }
++                 when List.length signature.early = 1 ->
++                   Some (aid, 1)
++               | _ ->
++                   [%craise] span
++                     "Nested borrows: the continuation of a join or loop \
++                      abstraction with pending loans calls a function whose \
++                      backward function is staged in more than two stages, or \
++                      whose first stage was applied")
++             calls)
+     | StageLevel _ ->
+         (* The calls without staged backward function (or all of whose inputs
+            the continuation gives) are applied by the last stage *)
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index f93ece2..15eabd3 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -3619,6 +3619,15 @@ and translate_end_abstraction_with_cont (ectx : C.eval_ctx) (abs : V.abs)
+   if abs_level > 0 then
+     translate_end_cont_abs_nested_level ectx abs abs_level e ctx
+   else
++    match V.AbsId.Map.find_opt abs.abs_id ctx.staged_conts with
++    | Some ({ stages_applied = 0; _ } as staged) ->
++        (* The instance of a loop abstraction with a staged continuation in
++           the context which applies the loop (its continuation applies the
++           loop's), whose level 1 did not apply the first stage (it promised
++           its outputs, see [staged_cont.promised_first_outputs]): level 0
++           applies both stages, as for the loop abstraction itself *)
++        translate_end_staged_cont ectx abs staged abs_level e ctx
++    | _ ->
+     (* Translate the continuation *)
+     let ctx, can_fail, output, abs_e =
+       translate_ended_abs_to_texpr ctx ectx abs abs_level
+diff --git a/tests/lean/JoinSharedBorrowsOneLoan.lean b/tests/lean/JoinSharedBorrowsOneLoan.lean
+new file mode 100644
+index 0000000..dcb95b1
+--- /dev/null
++++ b/tests/lean/JoinSharedBorrowsOneLoan.lean
+@@ -0,0 +1,2 @@
++import JoinSharedBorrowsOneLoan.Checks
++import JoinSharedBorrowsOneLoan.JoinSharedBorrowsOneLoan
+diff --git a/tests/lean/JoinSharedBorrowsOneLoan/Checks.lean b/tests/lean/JoinSharedBorrowsOneLoan/Checks.lean
+new file mode 100644
+index 0000000..a6f67cc
+--- /dev/null
++++ b/tests/lean/JoinSharedBorrowsOneLoan/Checks.lean
+@@ -0,0 +1,96 @@
++import JoinSharedBorrowsOneLoan.JoinSharedBorrowsOneLoan
++
++/-! Evaluate the model of `tests/src/join-shared-borrows-one-loan.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (for `lit_counted`: the result, then the number and the sum of the
++    diagnostics given back through the sink, after the caller pushed onto
++    it). -/
++
++namespace join_shared_borrows_one_loan.checks
++open Aeneas Aeneas.Std Result
++
++def val (r : Result U32) : Option Nat :=
++  match r with
++  | ok n => some n.val
++  | _ => none
++
++def val3 (r : Result (U32 × Usize × U32)) : Option (Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c) => some (a.val, b.val, c.val)
++  | _ => none
++
++-- native::drives
++#guard val (drive_lit 0#u32 0#u32) == some 11
++#guard val3 (drive_lit_counted 0#u32 0#u32) == some (1, 2, 8)
++#guard val (drive_lit 0#u32 1#u32) == some 2
++#guard val3 (drive_lit_counted 0#u32 1#u32) == some (0, 3, 10)
++#guard val (drive_lit 0#u32 2#u32) == some 2
++#guard val3 (drive_lit_counted 0#u32 2#u32) == some (0, 3, 10)
++#guard val (drive_lit 0#u32 3#u32) == some 2
++#guard val3 (drive_lit_counted 0#u32 3#u32) == some (0, 3, 10)
++#guard val (drive_lit 0#u32 4#u32) == some 2
++#guard val3 (drive_lit_counted 0#u32 4#u32) == some (0, 3, 10)
++#guard val (drive_lit 0#u32 5#u32) == some 12
++#guard val3 (drive_lit_counted 0#u32 5#u32) == some (2, 2, 8)
++#guard val (drive_lit 1#u32 0#u32) == some 11
++#guard val3 (drive_lit_counted 1#u32 0#u32) == some (1, 2, 8)
++#guard val (drive_lit 1#u32 1#u32) == some 11
++#guard val3 (drive_lit_counted 1#u32 1#u32) == some (1, 2, 8)
++#guard val (drive_lit 1#u32 2#u32) == some 3
++#guard val3 (drive_lit_counted 1#u32 2#u32) == some (0, 3, 11)
++#guard val (drive_lit 1#u32 3#u32) == some 3
++#guard val3 (drive_lit_counted 1#u32 3#u32) == some (0, 3, 11)
++#guard val (drive_lit 1#u32 4#u32) == some 11
++#guard val3 (drive_lit_counted 1#u32 4#u32) == some (1, 2, 8)
++#guard val (drive_lit 1#u32 5#u32) == some 12
++#guard val3 (drive_lit_counted 1#u32 5#u32) == some (2, 2, 8)
++#guard val (drive_lit 2#u32 0#u32) == some 11
++#guard val3 (drive_lit_counted 2#u32 0#u32) == some (1, 2, 8)
++#guard val (drive_lit 2#u32 1#u32) == some 11
++#guard val3 (drive_lit_counted 2#u32 1#u32) == some (1, 2, 8)
++#guard val (drive_lit 2#u32 2#u32) == some 11
++#guard val3 (drive_lit_counted 2#u32 2#u32) == some (1, 2, 8)
++#guard val (drive_lit 2#u32 3#u32) == some 3
++#guard val3 (drive_lit_counted 2#u32 3#u32) == some (0, 3, 11)
++#guard val (drive_lit 2#u32 4#u32) == some 11
++#guard val3 (drive_lit_counted 2#u32 4#u32) == some (1, 2, 8)
++#guard val (drive_lit 2#u32 5#u32) == some 12
++#guard val3 (drive_lit_counted 2#u32 5#u32) == some (2, 2, 8)
++#guard val (drive_lit 3#u32 0#u32) == some 11
++#guard val3 (drive_lit_counted 3#u32 0#u32) == some (1, 2, 8)
++#guard val (drive_lit 3#u32 1#u32) == some 11
++#guard val3 (drive_lit_counted 3#u32 1#u32) == some (1, 2, 8)
++#guard val (drive_lit 3#u32 2#u32) == some 11
++#guard val3 (drive_lit_counted 3#u32 2#u32) == some (1, 2, 8)
++#guard val (drive_lit 3#u32 3#u32) == some 11
++#guard val3 (drive_lit_counted 3#u32 3#u32) == some (1, 2, 8)
++#guard val (drive_lit 3#u32 4#u32) == some 11
++#guard val3 (drive_lit_counted 3#u32 4#u32) == some (1, 2, 8)
++#guard val (drive_lit 3#u32 5#u32) == some 12
++#guard val3 (drive_lit_counted 3#u32 5#u32) == some (2, 2, 8)
++#guard val (drive_lit 5#u32 0#u32) == some 1
++#guard val3 (drive_lit_counted 5#u32 0#u32) == some (1, 3, 109)
++#guard val (drive_lit 5#u32 1#u32) == some 1
++#guard val3 (drive_lit_counted 5#u32 1#u32) == some (1, 3, 109)
++#guard val (drive_lit 5#u32 2#u32) == some 1
++#guard val3 (drive_lit_counted 5#u32 2#u32) == some (1, 3, 109)
++#guard val (drive_lit 5#u32 3#u32) == some 1
++#guard val3 (drive_lit_counted 5#u32 3#u32) == some (1, 3, 109)
++#guard val (drive_lit 5#u32 4#u32) == some 1
++#guard val3 (drive_lit_counted 5#u32 4#u32) == some (1, 3, 109)
++#guard val (drive_lit 5#u32 5#u32) == some 2
++#guard val3 (drive_lit_counted 5#u32 5#u32) == some (2, 3, 110)
++#guard val (drive_lit 6#u32 0#u32) == some 1
++#guard val3 (drive_lit_counted 6#u32 0#u32) == some (1, 2, 8)
++#guard val (drive_lit 6#u32 1#u32) == some 1
++#guard val3 (drive_lit_counted 6#u32 1#u32) == some (1, 2, 8)
++#guard val (drive_lit 6#u32 2#u32) == some 1
++#guard val3 (drive_lit_counted 6#u32 2#u32) == some (1, 2, 8)
++#guard val (drive_lit 6#u32 3#u32) == some 1
++#guard val3 (drive_lit_counted 6#u32 3#u32) == some (1, 2, 8)
++#guard val (drive_lit 6#u32 4#u32) == some 1
++#guard val3 (drive_lit_counted 6#u32 4#u32) == some (1, 2, 8)
++#guard val (drive_lit 6#u32 5#u32) == some 2
++#guard val3 (drive_lit_counted 6#u32 5#u32) == some (2, 2, 8)
++
++end join_shared_borrows_one_loan.checks
+diff --git a/tests/lean/JoinSharedBorrowsOneLoan/JoinSharedBorrowsOneLoan.lean b/tests/lean/JoinSharedBorrowsOneLoan/JoinSharedBorrowsOneLoan.lean
+new file mode 100644
+index 0000000..79cf9c4
+--- /dev/null
++++ b/tests/lean/JoinSharedBorrowsOneLoan/JoinSharedBorrowsOneLoan.lean
+@@ -0,0 +1,964 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [join_shared_borrows_one_loan]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace join_shared_borrows_one_loan
++
++/-- [join_shared_borrows_one_loan::Atom]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 15:0-18:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Atom where
++| Int : _root_.Aeneas.Std.I64 → Atom
++| Sym : _root_.String → Atom
++
++/-- [join_shared_borrows_one_loan::Expr]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 20:0-23:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Expr where
++| Atom :
++  _root_.join_shared_borrows_one_loan.Atom →
++  _root_.Aeneas.Std.U32 →
++  Expr
++| Node : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.NestedVec Expr → Expr
++
++/-- [join_shared_borrows_one_loan::Meta]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 25:0-27:1
++    Visibility: public -/
++structure Meta where
++  ty : _root_.Option _root_.join_shared_borrows_one_loan.Expr
++
++/-- [join_shared_borrows_one_loan::List]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 29:0-32:1
++    Visibility: public -/
++structure List where
++  «meta» : _root_.Option _root_.join_shared_borrows_one_loan.Meta
++  kids : _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.join_shared_borrows_one_loan.Expr
++
++/-- [join_shared_borrows_one_loan::as_ref]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 34:0-39:1 -/
++def as_ref
++  {T : Type} (o : _root_.Option T) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some _ => _root_.Aeneas.Std.Result.ok o
++
++/-- [join_shared_borrows_one_loan::and_then]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 41:0-46:1 -/
++def and_then
++  {T : Type} {U : Type} {F : Type} (coreopsfunctionFnOnceFTupleTOptionInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F T (_root_.Option U))
++  (o : _root_.Option T) (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Option U)
++  := do
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some x =>
++    let (model_state, _) ← coreopsfunctionFnOnceFTupleTOptionInst.call_once f x
++    _root_.Aeneas.Std.Result.ok model_state
++
++/-- [join_shared_borrows_one_loan::first]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 48:0-50:1 -/
++def first
++  {T : Type} (xs : _root_.Aeneas.Std.Slice T) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  let b ← _root_.Aeneas.Std.core.slice.Slice.is_empty xs
++  if b
++  then _root_.Aeneas.Std.Result.ok none
++  else
++    let t ← _root_.Aeneas.Std.Slice.index_usize xs 0#usize
++    _root_.Aeneas.Std.Result.ok (some t)
++
++/-- [join_shared_borrows_one_loan::get_meta]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 52:0-54:1 -/
++def get_meta
++  (l : _root_.join_shared_borrows_one_loan.List) :
++  _root_.Aeneas.Std.Result (_root_.Option
++    _root_.join_shared_borrows_one_loan.Meta)
++  := do
++  _root_.join_shared_borrows_one_loan.as_ref l.«meta»
++
++/-- [join_shared_borrows_one_loan::children]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 56:0-58:1 -/
++def children
++  (l : _root_.join_shared_borrows_one_loan.List) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Slice
++    _root_.join_shared_borrows_one_loan.Expr)
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.deref l.kids)
++
++/-- [join_shared_borrows_one_loan::parts]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 60:0-65:1 -/
++def parts
++  (e : _root_.join_shared_borrows_one_loan.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.Slice _root_.join_shared_borrows_one_loan.Expr)))
++  := do
++  match e with
++  | _root_.join_shared_borrows_one_loan.Expr.Atom _ _ =>
++    _root_.Aeneas.Std.Result.ok none
++  | _root_.join_shared_borrows_one_loan.Expr.Node t k =>
++    let k1 := _root_.Aeneas.Std.NestedVec.toVec k
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref k1
++    _root_.Aeneas.Std.Result.ok (some (t, s))
++
++/-- [join_shared_borrows_one_loan::symbol_name]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 67:0-72:1 -/
++def symbol_name
++  (e : _root_.join_shared_borrows_one_loan.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Str)
++  := do
++  match e with
++  | _root_.join_shared_borrows_one_loan.Expr.Atom a _ =>
++    match a with
++    | _root_.join_shared_borrows_one_loan.Atom.Int _ =>
++      _root_.Aeneas.Std.Result.ok none
++    | _root_.join_shared_borrows_one_loan.Atom.Sym s =>
++      let s1 ← _root_.Aeneas.Std.alloc.string.DerefString.deref s
++      _root_.Aeneas.Std.Result.ok (some s1)
++  | _root_.join_shared_borrows_one_loan.Expr.Node _ _ =>
++    _root_.Aeneas.Std.Result.ok none
++
++/-- [join_shared_borrows_one_loan::lit::closure#1]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 80:69-83:5 -/
++@[reducible]
++def lit.closure_1 := _root_.Unit
++
++/-- [join_shared_borrows_one_loan::lit::{core::ops::function::FnOnce<(&'_ (join_shared_borrows_one_loan::Expr)), core::option::Option<&'_ (str)>> for join_shared_borrows_one_loan::lit::closure#1}::call_once]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 80:69-83:5 -/
++def
++  lit.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprOptionSharedStr.call_once
++  (c : _root_.join_shared_borrows_one_loan.lit.closure_1)
++  (tupled_args : _root_.join_shared_borrows_one_loan.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Str)
++  := do
++  let o ← _root_.join_shared_borrows_one_loan.parts tupled_args
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some p =>
++    let (i, prim_kids) := p
++    match i with
++    | 3#uscalar =>
++      let o1 ← _root_.join_shared_borrows_one_loan.first prim_kids
++      _root_.join_shared_borrows_one_loan.and_then
++        (_root_.Aeneas.Std.BuiltinFnOnce
++        _root_.join_shared_borrows_one_loan.Expr (_root_.Option
++        _root_.Aeneas.Std.Str)) o1
++        (_root_.join_shared_borrows_one_loan.symbol_name)
++    | _ => _root_.Aeneas.Std.Result.ok none
++
++/-- Trait implementation: [join_shared_borrows_one_loan::lit::{core::ops::function::FnOnce<(&'_ (join_shared_borrows_one_loan::Expr)), core::option::Option<&'_ (str)>> for join_shared_borrows_one_loan::lit::closure#1}]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 80:69-83:5 -/
++@[reducible]
++def lit.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprOptionSharedStr :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.join_shared_borrows_one_loan.lit.closure_1
++  _root_.join_shared_borrows_one_loan.Expr (_root_.Option
++  _root_.Aeneas.Std.Str) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.join_shared_borrows_one_loan.lit.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprOptionSharedStr.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [join_shared_borrows_one_loan::lit::closure]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 80:49-80:66 -/
++@[reducible]
++def lit.closure := _root_.Unit
++
++/-- [join_shared_borrows_one_loan::lit::{core::ops::function::FnOnce<(&'_ (join_shared_borrows_one_loan::Meta)), core::option::Option<&'_ (join_shared_borrows_one_loan::Expr)>> for join_shared_borrows_one_loan::lit::closure}::call_once]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 80:49-80:66 -/
++def
++  lit.closure.Insts.CoreOpsFunctionFnOnceTupleSharedMetaOptionSharedExpr.call_once
++  (c : _root_.join_shared_borrows_one_loan.lit.closure)
++  (tupled_args : _root_.join_shared_borrows_one_loan.Meta) :
++  _root_.Aeneas.Std.Result (_root_.Option
++    _root_.join_shared_borrows_one_loan.Expr)
++  := do
++  _root_.join_shared_borrows_one_loan.as_ref tupled_args.ty
++
++/-- Trait implementation: [join_shared_borrows_one_loan::lit::{core::ops::function::FnOnce<(&'_ (join_shared_borrows_one_loan::Meta)), core::option::Option<&'_ (join_shared_borrows_one_loan::Expr)>> for join_shared_borrows_one_loan::lit::closure}]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 80:49-80:66 -/
++@[reducible]
++def lit.closure.Insts.CoreOpsFunctionFnOnceTupleSharedMetaOptionSharedExpr :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.join_shared_borrows_one_loan.lit.closure
++  _root_.join_shared_borrows_one_loan.Meta (_root_.Option
++  _root_.join_shared_borrows_one_loan.Expr) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.join_shared_borrows_one_loan.lit.closure.Insts.CoreOpsFunctionFnOnceTupleSharedMetaOptionSharedExpr.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [join_shared_borrows_one_loan::lit]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 76:0-109:1
++    Visibility: public -/
++def lit
++  (list : _root_.join_shared_borrows_one_loan.List) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let meta1 ← _root_.join_shared_borrows_one_loan.get_meta list
++  let kids ← _root_.join_shared_borrows_one_loan.children list
++  let value_atom ← _root_.join_shared_borrows_one_loan.first kids
++  let o ←
++    _root_.join_shared_borrows_one_loan.and_then
++      _root_.join_shared_borrows_one_loan.lit.closure.Insts.CoreOpsFunctionFnOnceTupleSharedMetaOptionSharedExpr
++      meta1 ()
++  let meta_prim_name ←
++    _root_.join_shared_borrows_one_loan.and_then
++      _root_.join_shared_borrows_one_loan.lit.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprOptionSharedStr
++      o ()
++  let joined ←
++    match meta_prim_name with
++    | none =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (meta1, value_atom) :
++        _root_.Sum ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++        (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++        _root_.Aeneas.Std.U32)
++    | some prim_name =>
++      do
++      let joined1 ←
++        match value_atom with
++        | none =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (meta1, none) :
++            _root_.Sum ((_root_.Option
++            _root_.join_shared_borrows_one_loan.Meta) × (_root_.Option
++            _root_.join_shared_borrows_one_loan.Expr)) (_root_.Sum
++            ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++            (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++            _root_.Aeneas.Std.U32))
++        | some e =>
++          do
++          let joined2 ←
++            match e with
++            | _root_.join_shared_borrows_one_loan.Expr.Atom a i =>
++              do
++              let joined3 ←
++                match a with
++                | _root_.join_shared_borrows_one_loan.Atom.Int n =>
++                  do
++                  let b ←
++                    _root_.Aeneas.Std.core.str.traits.PartialEqStr.eq prim_name
++                      (_root_.Aeneas.Std.toStr "i8")
++                  let (meta2, range_check) ←
++                    if b
++                    then
++                      _root_.Aeneas.Std.Result.ok (meta1, some
++                        (_root_.Aeneas.Std.toStr "i8", (-128)#i64, 127#i64))
++                    else
++                      do
++                      let b1 ←
++                        _root_.Aeneas.Std.core.str.traits.PartialEqStr.eq
++                          prim_name (_root_.Aeneas.Std.toStr "i16")
++                      let o1 ←
++                        if b1
++                        then
++                          _root_.Aeneas.Std.Result.ok (some
++                            (_root_.Aeneas.Std.toStr "i16", (-32768)#i64,
++                            32767#i64))
++                        else
++                          do
++                          let b2 ←
++                            _root_.Aeneas.Std.core.str.traits.PartialEqStr.eq
++                              prim_name (_root_.Aeneas.Std.toStr "i32")
++                          if b2
++                          then
++                            _root_.Aeneas.Std.Result.ok (some
++                              (_root_.Aeneas.Std.toStr "i32",
++                              (-2147483648)#i64, 2147483647#i64))
++                          else _root_.Aeneas.Std.Result.ok none
++                      _root_.Aeneas.Std.Result.ok (meta1, o1)
++                  let joined4 ←
++                    match range_check with
++                    | none =>
++                      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () :
++                        _root_.Sum _root_.Unit (_root_.Sum ((_root_.Option
++                        _root_.join_shared_borrows_one_loan.Meta) ×
++                        _root_.join_shared_borrows_one_loan.Atom) (_root_.Sum
++                        ((_root_.Option
++                        _root_.join_shared_borrows_one_loan.Meta) ×
++                        _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                        ((_root_.Option
++                        _root_.join_shared_borrows_one_loan.Meta) ×
++                        (_root_.Option
++                        _root_.join_shared_borrows_one_loan.Expr)) (_root_.Sum
++                        ((_root_.Option
++                        _root_.join_shared_borrows_one_loan.Meta) ×
++                        (_root_.Option
++                        _root_.join_shared_borrows_one_loan.Expr))
++                        _root_.Aeneas.Std.U32)))))
++                    | some t =>
++                      let (dtype, lo, hi) := t
++                      if n < lo
++                      then
++                        do
++                        let i1 ← _root_.Aeneas.Std.core.str.Str.len dtype
++                        let atom ←
++                          lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++                        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++                          (_root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr
++                          (_root_.Sum.inr atom)))) : _root_.Sum _root_.Unit
++                          (_root_.Sum ((_root_.Option
++                          _root_.join_shared_borrows_one_loan.Meta) ×
++                          _root_.join_shared_borrows_one_loan.Atom) (_root_.Sum
++                          ((_root_.Option
++                          _root_.join_shared_borrows_one_loan.Meta) ×
++                          _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                          ((_root_.Option
++                          _root_.join_shared_borrows_one_loan.Meta) ×
++                          (_root_.Option
++                          _root_.join_shared_borrows_one_loan.Expr))
++                          (_root_.Sum ((_root_.Option
++                          _root_.join_shared_borrows_one_loan.Meta) ×
++                          (_root_.Option
++                          _root_.join_shared_borrows_one_loan.Expr))
++                          _root_.Aeneas.Std.U32)))))
++                      else
++                        if n > hi
++                        then
++                          do
++                          let i1 ← _root_.Aeneas.Std.core.str.Str.len dtype
++                          let atom ←
++                            lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++                          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++                            (_root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr
++                            (_root_.Sum.inr atom)))) : _root_.Sum _root_.Unit
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            _root_.join_shared_borrows_one_loan.Atom)
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            _root_.join_shared_borrows_one_loan.Expr)
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            (_root_.Option
++                            _root_.join_shared_borrows_one_loan.Expr))
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            (_root_.Option
++                            _root_.join_shared_borrows_one_loan.Expr))
++                            _root_.Aeneas.Std.U32)))))
++                        else
++                          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () :
++                            _root_.Sum _root_.Unit (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            _root_.join_shared_borrows_one_loan.Atom)
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            _root_.join_shared_borrows_one_loan.Expr)
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            (_root_.Option
++                            _root_.join_shared_borrows_one_loan.Expr))
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            (_root_.Option
++                            _root_.join_shared_borrows_one_loan.Expr))
++                            _root_.Aeneas.Std.U32)))))
++                  match joined4 with
++                  | _root_.Sum.inl () =>
++                    _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (meta2, a) :
++                      _root_.Sum ((_root_.Option
++                      _root_.join_shared_borrows_one_loan.Meta) ×
++                      _root_.join_shared_borrows_one_loan.Atom) (_root_.Sum
++                      ((_root_.Option _root_.join_shared_borrows_one_loan.Meta)
++                      × _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                      ((_root_.Option _root_.join_shared_borrows_one_loan.Meta)
++                      × (_root_.Option
++                      _root_.join_shared_borrows_one_loan.Expr)) (_root_.Sum
++                      ((_root_.Option _root_.join_shared_borrows_one_loan.Meta)
++                      × (_root_.Option
++                      _root_.join_shared_borrows_one_loan.Expr))
++                      _root_.Aeneas.Std.U32))))
++                  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++                | _root_.join_shared_borrows_one_loan.Atom.Sym _ =>
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (meta1, a) :
++                    _root_.Sum ((_root_.Option
++                    _root_.join_shared_borrows_one_loan.Meta) ×
++                    _root_.join_shared_borrows_one_loan.Atom) (_root_.Sum
++                    ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++                    _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                    ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++                    (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++                    (_root_.Sum ((_root_.Option
++                    _root_.join_shared_borrows_one_loan.Meta) × (_root_.Option
++                    _root_.join_shared_borrows_one_loan.Expr))
++                    _root_.Aeneas.Std.U32))))
++              match joined3 with
++              | _root_.Sum.inl (o1, a1) =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (o1,
++                  _root_.join_shared_borrows_one_loan.Expr.Atom a1 i) :
++                  _root_.Sum ((_root_.Option
++                  _root_.join_shared_borrows_one_loan.Meta) ×
++                  _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                  ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++                  (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++                  (_root_.Sum ((_root_.Option
++                  _root_.join_shared_borrows_one_loan.Meta) × (_root_.Option
++                  _root_.join_shared_borrows_one_loan.Expr))
++                  _root_.Aeneas.Std.U32)))
++              | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++            | _root_.join_shared_borrows_one_loan.Expr.Node _ _ =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (meta1, e) :
++                _root_.Sum ((_root_.Option
++                _root_.join_shared_borrows_one_loan.Meta) ×
++                _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++                (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++                (_root_.Sum ((_root_.Option
++                _root_.join_shared_borrows_one_loan.Meta) × (_root_.Option
++                _root_.join_shared_borrows_one_loan.Expr))
++                _root_.Aeneas.Std.U32)))
++          match joined2 with
++          | _root_.Sum.inl (o1, e1) =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (o1, some e1) :
++              _root_.Sum ((_root_.Option
++              _root_.join_shared_borrows_one_loan.Meta) × (_root_.Option
++              _root_.join_shared_borrows_one_loan.Expr)) (_root_.Sum
++              ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++              (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++              _root_.Aeneas.Std.U32))
++          | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      match joined1 with
++      | _root_.Sum.inl (o1, o2) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (o1, o2) : _root_.Sum
++          ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++          (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++          _root_.Aeneas.Std.U32)
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  match joined with
++  | _root_.Sum.inl (meta2, value_atom1) =>
++    let has_ty ←
++      match meta2 with
++      | none => _root_.Aeneas.Std.Result.ok false
++      | some m =>
++        do
++        let o1 ← _root_.join_shared_borrows_one_loan.as_ref m.ty
++        _root_.Aeneas.Std.Result.ok
++          (_root_.Aeneas.Std.core.option.Option.is_some o1)
++    let atom ←
++      match value_atom1 with
++      | none => _root_.Aeneas.Std.Result.ok 3#u32
++      | some e =>
++        match e with
++        | _root_.join_shared_borrows_one_loan.Expr.Atom a _ =>
++          match a with
++          | _root_.join_shared_borrows_one_loan.Atom.Int _ =>
++            _root_.Aeneas.Std.Result.ok 1#u32
++          | _root_.join_shared_borrows_one_loan.Atom.Sym _ =>
++            _root_.Aeneas.Std.Result.ok 2#u32
++        | _root_.join_shared_borrows_one_loan.Expr.Node _ _ =>
++          _root_.Aeneas.Std.Result.ok 2#u32
++    if has_ty
++    then atom + 10#u32
++    else _root_.Aeneas.Std.Result.ok atom
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [join_shared_borrows_one_loan::lit_counted::closure#1]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 116:69-119:5 -/
++@[reducible]
++def lit_counted.closure_1 := _root_.Unit
++
++/-- [join_shared_borrows_one_loan::lit_counted::{core::ops::function::FnOnce<(&'_ (join_shared_borrows_one_loan::Expr)), core::option::Option<&'_ (str)>> for join_shared_borrows_one_loan::lit_counted::closure#1}::call_once]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 116:69-119:5 -/
++def
++  lit_counted.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprOptionSharedStr.call_once
++  (c : _root_.join_shared_borrows_one_loan.lit_counted.closure_1)
++  (tupled_args : _root_.join_shared_borrows_one_loan.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Str)
++  := do
++  let o ← _root_.join_shared_borrows_one_loan.parts tupled_args
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some p =>
++    let (i, prim_kids) := p
++    match i with
++    | 3#uscalar =>
++      let o1 ← _root_.join_shared_borrows_one_loan.first prim_kids
++      _root_.join_shared_borrows_one_loan.and_then
++        (_root_.Aeneas.Std.BuiltinFnOnce
++        _root_.join_shared_borrows_one_loan.Expr (_root_.Option
++        _root_.Aeneas.Std.Str)) o1
++        (_root_.join_shared_borrows_one_loan.symbol_name)
++    | _ => _root_.Aeneas.Std.Result.ok none
++
++/-- Trait implementation: [join_shared_borrows_one_loan::lit_counted::{core::ops::function::FnOnce<(&'_ (join_shared_borrows_one_loan::Expr)), core::option::Option<&'_ (str)>> for join_shared_borrows_one_loan::lit_counted::closure#1}]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 116:69-119:5 -/
++@[reducible]
++def
++  lit_counted.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprOptionSharedStr
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.join_shared_borrows_one_loan.lit_counted.closure_1
++  _root_.join_shared_borrows_one_loan.Expr (_root_.Option
++  _root_.Aeneas.Std.Str) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.join_shared_borrows_one_loan.lit_counted.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprOptionSharedStr.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [join_shared_borrows_one_loan::lit_counted::closure]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 116:49-116:66 -/
++@[reducible]
++def lit_counted.closure := _root_.Unit
++
++/-- [join_shared_borrows_one_loan::lit_counted::{core::ops::function::FnOnce<(&'_ (join_shared_borrows_one_loan::Meta)), core::option::Option<&'_ (join_shared_borrows_one_loan::Expr)>> for join_shared_borrows_one_loan::lit_counted::closure}::call_once]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 116:49-116:66 -/
++def
++  lit_counted.closure.Insts.CoreOpsFunctionFnOnceTupleSharedMetaOptionSharedExpr.call_once
++  (c : _root_.join_shared_borrows_one_loan.lit_counted.closure)
++  (tupled_args : _root_.join_shared_borrows_one_loan.Meta) :
++  _root_.Aeneas.Std.Result (_root_.Option
++    _root_.join_shared_borrows_one_loan.Expr)
++  := do
++  _root_.join_shared_borrows_one_loan.as_ref tupled_args.ty
++
++/-- Trait implementation: [join_shared_borrows_one_loan::lit_counted::{core::ops::function::FnOnce<(&'_ (join_shared_borrows_one_loan::Meta)), core::option::Option<&'_ (join_shared_borrows_one_loan::Expr)>> for join_shared_borrows_one_loan::lit_counted::closure}]
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 116:49-116:66 -/
++@[reducible]
++def
++  lit_counted.closure.Insts.CoreOpsFunctionFnOnceTupleSharedMetaOptionSharedExpr
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.join_shared_borrows_one_loan.lit_counted.closure
++  _root_.join_shared_borrows_one_loan.Meta (_root_.Option
++  _root_.join_shared_borrows_one_loan.Expr) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.join_shared_borrows_one_loan.lit_counted.closure.Insts.CoreOpsFunctionFnOnceTupleSharedMetaOptionSharedExpr.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [join_shared_borrows_one_loan::lit_counted]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 112:0-147:1
++    Visibility: public -/
++def lit_counted
++  (list : _root_.join_shared_borrows_one_loan.List)
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let meta1 ← _root_.join_shared_borrows_one_loan.get_meta list
++  let kids ← _root_.join_shared_borrows_one_loan.children list
++  let value_atom ← _root_.join_shared_borrows_one_loan.first kids
++  let o ←
++    _root_.join_shared_borrows_one_loan.and_then
++      _root_.join_shared_borrows_one_loan.lit_counted.closure.Insts.CoreOpsFunctionFnOnceTupleSharedMetaOptionSharedExpr
++      meta1 ()
++  let meta_prim_name ←
++    _root_.join_shared_borrows_one_loan.and_then
++      _root_.join_shared_borrows_one_loan.lit_counted.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprOptionSharedStr
++      o ()
++  let joined ←
++    match meta_prim_name with
++    | none =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (meta1, value_atom) :
++        _root_.Sum ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++        (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++        (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.Aeneas.Std.U32)))
++    | some prim_name =>
++      do
++      let joined1 ←
++        match value_atom with
++        | none =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (meta1, none) :
++            _root_.Sum ((_root_.Option
++            _root_.join_shared_borrows_one_loan.Meta) × (_root_.Option
++            _root_.join_shared_borrows_one_loan.Expr)) (_root_.Sum
++            ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++            (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++            (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32))))
++        | some e =>
++          do
++          let joined2 ←
++            match e with
++            | _root_.join_shared_borrows_one_loan.Expr.Atom a i =>
++              do
++              let joined3 ←
++                match a with
++                | _root_.join_shared_borrows_one_loan.Atom.Int n =>
++                  do
++                  let b ←
++                    _root_.Aeneas.Std.core.str.traits.PartialEqStr.eq prim_name
++                      (_root_.Aeneas.Std.toStr "i8")
++                  let (meta2, range_check) ←
++                    if b
++                    then
++                      _root_.Aeneas.Std.Result.ok (meta1, some
++                        (_root_.Aeneas.Std.toStr "i8", (-128)#i64, 127#i64))
++                    else
++                      do
++                      let b1 ←
++                        _root_.Aeneas.Std.core.str.traits.PartialEqStr.eq
++                          prim_name (_root_.Aeneas.Std.toStr "i16")
++                      let o1 ←
++                        if b1
++                        then
++                          _root_.Aeneas.Std.Result.ok (some
++                            (_root_.Aeneas.Std.toStr "i16", (-32768)#i64,
++                            32767#i64))
++                        else
++                          do
++                          let b2 ←
++                            _root_.Aeneas.Std.core.str.traits.PartialEqStr.eq
++                              prim_name (_root_.Aeneas.Std.toStr "i32")
++                          if b2
++                          then
++                            _root_.Aeneas.Std.Result.ok (some
++                              (_root_.Aeneas.Std.toStr "i32",
++                              (-2147483648)#i64, 2147483647#i64))
++                          else _root_.Aeneas.Std.Result.ok none
++                      _root_.Aeneas.Std.Result.ok (meta1, o1)
++                  let joined4 ←
++                    match range_check with
++                    | none =>
++                      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () :
++                        _root_.Sum _root_.Unit (_root_.Sum ((_root_.Option
++                        _root_.join_shared_borrows_one_loan.Meta) ×
++                        _root_.join_shared_borrows_one_loan.Atom) (_root_.Sum
++                        ((_root_.Option
++                        _root_.join_shared_borrows_one_loan.Meta) ×
++                        _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                        ((_root_.Option
++                        _root_.join_shared_borrows_one_loan.Meta) ×
++                        (_root_.Option
++                        _root_.join_shared_borrows_one_loan.Expr)) (_root_.Sum
++                        ((_root_.Option
++                        _root_.join_shared_borrows_one_loan.Meta) ×
++                        (_root_.Option
++                        _root_.join_shared_borrows_one_loan.Expr))
++                        (_root_.Aeneas.Std.U32 ×
++                        (_root_.Aeneas.Std.alloc.vec.Vec
++                        _root_.Aeneas.Std.U32)))))))
++                    | some t =>
++                      let (dtype, lo, hi) := t
++                      if n < lo
++                      then
++                        do
++                        let i1 ← _root_.Aeneas.Std.core.str.Str.len dtype
++                        let i2 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++                        let errors1 ←
++                          _root_.Aeneas.Std.alloc.vec.Vec.push errors i2
++                        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++                          (_root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr
++                          (_root_.Sum.inr (0#u32, errors1))))) : _root_.Sum
++                          _root_.Unit (_root_.Sum ((_root_.Option
++                          _root_.join_shared_borrows_one_loan.Meta) ×
++                          _root_.join_shared_borrows_one_loan.Atom) (_root_.Sum
++                          ((_root_.Option
++                          _root_.join_shared_borrows_one_loan.Meta) ×
++                          _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                          ((_root_.Option
++                          _root_.join_shared_borrows_one_loan.Meta) ×
++                          (_root_.Option
++                          _root_.join_shared_borrows_one_loan.Expr))
++                          (_root_.Sum ((_root_.Option
++                          _root_.join_shared_borrows_one_loan.Meta) ×
++                          (_root_.Option
++                          _root_.join_shared_borrows_one_loan.Expr))
++                          (_root_.Aeneas.Std.U32 ×
++                          (_root_.Aeneas.Std.alloc.vec.Vec
++                          _root_.Aeneas.Std.U32)))))))
++                      else
++                        if n > hi
++                        then
++                          do
++                          let i1 ← _root_.Aeneas.Std.core.str.Str.len dtype
++                          let i2 ←
++                            lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++                          let errors1 ←
++                            _root_.Aeneas.Std.alloc.vec.Vec.push errors i2
++                          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++                            (_root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr
++                            (_root_.Sum.inr (0#u32, errors1))))) : _root_.Sum
++                            _root_.Unit (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            _root_.join_shared_borrows_one_loan.Atom)
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            _root_.join_shared_borrows_one_loan.Expr)
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            (_root_.Option
++                            _root_.join_shared_borrows_one_loan.Expr))
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            (_root_.Option
++                            _root_.join_shared_borrows_one_loan.Expr))
++                            (_root_.Aeneas.Std.U32 ×
++                            (_root_.Aeneas.Std.alloc.vec.Vec
++                            _root_.Aeneas.Std.U32)))))))
++                        else
++                          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () :
++                            _root_.Sum _root_.Unit (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            _root_.join_shared_borrows_one_loan.Atom)
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            _root_.join_shared_borrows_one_loan.Expr)
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            (_root_.Option
++                            _root_.join_shared_borrows_one_loan.Expr))
++                            (_root_.Sum ((_root_.Option
++                            _root_.join_shared_borrows_one_loan.Meta) ×
++                            (_root_.Option
++                            _root_.join_shared_borrows_one_loan.Expr))
++                            (_root_.Aeneas.Std.U32 ×
++                            (_root_.Aeneas.Std.alloc.vec.Vec
++                            _root_.Aeneas.Std.U32)))))))
++                  match joined4 with
++                  | _root_.Sum.inl () =>
++                    _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (meta2, a) :
++                      _root_.Sum ((_root_.Option
++                      _root_.join_shared_borrows_one_loan.Meta) ×
++                      _root_.join_shared_borrows_one_loan.Atom) (_root_.Sum
++                      ((_root_.Option _root_.join_shared_borrows_one_loan.Meta)
++                      × _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                      ((_root_.Option _root_.join_shared_borrows_one_loan.Meta)
++                      × (_root_.Option
++                      _root_.join_shared_borrows_one_loan.Expr)) (_root_.Sum
++                      ((_root_.Option _root_.join_shared_borrows_one_loan.Meta)
++                      × (_root_.Option
++                      _root_.join_shared_borrows_one_loan.Expr))
++                      (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++                      _root_.Aeneas.Std.U32))))))
++                  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++                | _root_.join_shared_borrows_one_loan.Atom.Sym _ =>
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (meta1, a) :
++                    _root_.Sum ((_root_.Option
++                    _root_.join_shared_borrows_one_loan.Meta) ×
++                    _root_.join_shared_borrows_one_loan.Atom) (_root_.Sum
++                    ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++                    _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                    ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++                    (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++                    (_root_.Sum ((_root_.Option
++                    _root_.join_shared_borrows_one_loan.Meta) × (_root_.Option
++                    _root_.join_shared_borrows_one_loan.Expr))
++                    (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++                    _root_.Aeneas.Std.U32))))))
++              match joined3 with
++              | _root_.Sum.inl (o1, a1) =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (o1,
++                  _root_.join_shared_borrows_one_loan.Expr.Atom a1 i) :
++                  _root_.Sum ((_root_.Option
++                  _root_.join_shared_borrows_one_loan.Meta) ×
++                  _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                  ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++                  (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++                  (_root_.Sum ((_root_.Option
++                  _root_.join_shared_borrows_one_loan.Meta) × (_root_.Option
++                  _root_.join_shared_borrows_one_loan.Expr))
++                  (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32)))))
++              | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++            | _root_.join_shared_borrows_one_loan.Expr.Node _ _ =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (meta1, e) :
++                _root_.Sum ((_root_.Option
++                _root_.join_shared_borrows_one_loan.Meta) ×
++                _root_.join_shared_borrows_one_loan.Expr) (_root_.Sum
++                ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++                (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++                (_root_.Sum ((_root_.Option
++                _root_.join_shared_borrows_one_loan.Meta) × (_root_.Option
++                _root_.join_shared_borrows_one_loan.Expr))
++                (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32)))))
++          match joined2 with
++          | _root_.Sum.inl (o1, e1) =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (o1, some e1) :
++              _root_.Sum ((_root_.Option
++              _root_.join_shared_borrows_one_loan.Meta) × (_root_.Option
++              _root_.join_shared_borrows_one_loan.Expr)) (_root_.Sum
++              ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++              (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++              (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32))))
++          | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      match joined1 with
++      | _root_.Sum.inl (o1, o2) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (o1, o2) : _root_.Sum
++          ((_root_.Option _root_.join_shared_borrows_one_loan.Meta) ×
++          (_root_.Option _root_.join_shared_borrows_one_loan.Expr))
++          (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32)))
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  match joined with
++  | _root_.Sum.inl (meta2, value_atom1) =>
++    let atom ←
++      match value_atom1 with
++      | none => _root_.Aeneas.Std.Result.ok 3#u32
++      | some e =>
++        match e with
++        | _root_.join_shared_borrows_one_loan.Expr.Atom a _ =>
++          match a with
++          | _root_.join_shared_borrows_one_loan.Atom.Int _ =>
++            _root_.Aeneas.Std.Result.ok 1#u32
++          | _root_.join_shared_borrows_one_loan.Atom.Sym _ =>
++            _root_.Aeneas.Std.Result.ok 2#u32
++        | _root_.join_shared_borrows_one_loan.Expr.Node _ _ =>
++          _root_.Aeneas.Std.Result.ok 2#u32
++    match meta2 with
++    | none => _root_.Aeneas.Std.Result.ok (atom, errors)
++    | some m =>
++      let o1 ← _root_.join_shared_borrows_one_loan.as_ref m.ty
++      let b := _root_.Aeneas.Std.core.option.Option.is_none o1
++      if b
++      then
++        let i ← 100#u32 + atom
++        let errors1 ← _root_.Aeneas.Std.alloc.vec.Vec.push errors i
++        _root_.Aeneas.Std.Result.ok (atom, errors1)
++      else _root_.Aeneas.Std.Result.ok (atom, errors)
++  | _root_.Sum.inr (exit, exit1) => _root_.Aeneas.Std.Result.ok (exit, exit1)
++
++/-- [join_shared_borrows_one_loan::list_of]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 151:0-176:1 -/
++def list_of
++  (prim : _root_.Aeneas.Std.U32) (code : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.join_shared_borrows_one_loan.List
++  := do
++  let name1 ←
++    match prim with
++    | 0#uscalar => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "i8")
++    | 1#uscalar => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "i16")
++    | 2#uscalar => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "i32")
++    | _ => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "f32")
++  let s ← _root_.Aeneas.Std.alloc.string.FromStrString.from_ name1
++  let prim_kids ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.join_shared_borrows_one_loan.Expr)
++      (_root_.join_shared_borrows_one_loan.Expr.Atom
++      (_root_.join_shared_borrows_one_loan.Atom.Sym s) 0#u32)
++  let ty ←
++    if prim = 5#u32
++    then _root_.Aeneas.Std.Result.ok none
++    else
++      _root_.Aeneas.Std.Result.ok (some
++        (_root_.join_shared_borrows_one_loan.Expr.Node 3#u32
++        (_root_.Aeneas.Std.alloc.vec.Vec.toNested prim_kids)))
++  let value ←
++    match code with
++    | 0#uscalar => _root_.Aeneas.Std.Result.ok (some 5#i64)
++    | 1#uscalar => _root_.Aeneas.Std.Result.ok (some 200#i64)
++    | 2#uscalar => _root_.Aeneas.Std.Result.ok (some 40000#i64)
++    | 3#uscalar => _root_.Aeneas.Std.Result.ok (some 3000000000#i64)
++    | 4#uscalar => _root_.Aeneas.Std.Result.ok (some (-200)#i64)
++    | _ => _root_.Aeneas.Std.Result.ok none
++  let kids ←
++    match value with
++    | none =>
++      do
++      let s1 ←
++        _root_.Aeneas.Std.alloc.string.FromStrString.from_
++          (_root_.Aeneas.Std.toStr "x")
++      _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++        _root_.join_shared_borrows_one_loan.Expr)
++        (_root_.join_shared_borrows_one_loan.Expr.Atom
++        (_root_.join_shared_borrows_one_loan.Atom.Sym s1) 1#u32)
++    | some v =>
++      _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++        _root_.join_shared_borrows_one_loan.Expr)
++        (_root_.join_shared_borrows_one_loan.Expr.Atom
++        (_root_.join_shared_borrows_one_loan.Atom.Int v) 1#u32)
++  if prim = 6#u32
++  then _root_.Aeneas.Std.Result.ok { «meta» := none, kids }
++  else _root_.Aeneas.Std.Result.ok { «meta» := (some { ty }), kids }
++
++/-- [join_shared_borrows_one_loan::drive_lit]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 178:0-180:1
++    Visibility: public -/
++def drive_lit
++  (prim : _root_.Aeneas.Std.U32) (code : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let l ← _root_.join_shared_borrows_one_loan.list_of prim code
++  _root_.join_shared_borrows_one_loan.lit l
++
++/-- [join_shared_borrows_one_loan::drive_lit_counted]: loop body 0:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 192:4-195:5
++    Visibility: public -/
++@[rust_loop_body]
++def drive_lit_counted_loop.body
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (sum : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len errors
++  if i < i1
++  then
++    let i2 ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) errors i
++    let sum1 ← sum + i2
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (sum1, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done sum)
++
++/-- [join_shared_borrows_one_loan::drive_lit_counted]: loop 0:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 192:4-195:5
++    Visibility: public -/
++@[rust_loop]
++def drive_lit_counted_loop
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (sum : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (sum1, i1) =>
++       _root_.join_shared_borrows_one_loan.drive_lit_counted_loop.body errors
++       sum1 i1 : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32))
++    (sum, i)
++
++/-- [join_shared_borrows_one_loan::drive_lit_counted]:
++    Source: 'tests/src/join-shared-borrows-one-loan.rs', lines 184:0-197:1
++    Visibility: public -/
++def drive_lit_counted
++  (prim : _root_.Aeneas.Std.U32) (code : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let list ← _root_.join_shared_borrows_one_loan.list_of prim code
++  let errors ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 7#u32
++  let (r, errors1) ←
++    _root_.join_shared_borrows_one_loan.lit_counted list errors
++  let errors2 ← _root_.Aeneas.Std.alloc.vec.Vec.push errors1 1#u32
++  let sum ←
++    _root_.join_shared_borrows_one_loan.drive_lit_counted_loop errors2 0#u32
++      0#usize
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len errors2
++  _root_.Aeneas.Std.Result.ok (r, i, sum)
++
++end join_shared_borrows_one_loan
+diff --git a/tests/lean/JoinSharedLoanErasedRegions.lean b/tests/lean/JoinSharedLoanErasedRegions.lean
+new file mode 100644
+index 0000000..8ac006d
+--- /dev/null
++++ b/tests/lean/JoinSharedLoanErasedRegions.lean
+@@ -0,0 +1,2 @@
++import JoinSharedLoanErasedRegions.Checks
++import JoinSharedLoanErasedRegions.JoinSharedLoanErasedRegions
+diff --git a/tests/lean/JoinSharedLoanErasedRegions/Checks.lean b/tests/lean/JoinSharedLoanErasedRegions/Checks.lean
+new file mode 100644
+index 0000000..f1550c2
+--- /dev/null
++++ b/tests/lean/JoinSharedLoanErasedRegions/Checks.lean
+@@ -0,0 +1,53 @@
++import JoinSharedLoanErasedRegions.JoinSharedLoanErasedRegions
++
++/-! Evaluate the model of `tests/src/join-shared-loan-erased-regions.rs` on
++    the inputs of its `native` test module and compare with the native results
++    (for `walk_mut`: the count, then the length and weight of the stack given
++    back to the caller, after the caller pushed onto it). -/
++
++namespace join_shared_loan_erased_regions.checks
++open Aeneas Aeneas.Std Result
++
++def val (r : Result Usize) : Option Nat :=
++  match r with
++  | ok n => some n.val
++  | _ => none
++
++def val3 (r : Result (Usize × Usize × Usize)) : Option (Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c) => some (a.val, b.val, c.val)
++  | _ => none
++
++def valR (r : Result (core.result.Result Usize Usize)) : Option (Bool × Nat) :=
++  match r with
++  | ok (.Ok n) => some (true, n.val)
++  | ok (.Err e) => some (false, e.val)
++  | _ => none
++
++-- native::drives
++#guard val (drive_walk (toStr "abc") 3#u32 4#u32) == some 10
++#guard val3 (drive_walk_mut (toStr "abc") 3#u32 4#u32 0#usize) == some (0, 4, 110)
++#guard val3 (drive_walk_mut (toStr "abc") 3#u32 4#u32 2#usize) == some (7, 2, 103)
++#guard val3 (drive_walk_mut (toStr "abc") 3#u32 4#u32 9#usize) == some (10, 1, 100)
++#guard valR (drive_walk_checked (toStr "abc") 3#u32 4#u32 1#usize) == some (false, 3)
++#guard valR (drive_walk_checked (toStr "abc") 3#u32 4#u32 5#usize) == some (true, 10)
++#guard val (drive_walk (toStr "") 25#u32 11#u32) == some 14
++#guard val3 (drive_walk_mut (toStr "") 25#u32 11#u32 0#usize) == some (0, 4, 136)
++#guard val3 (drive_walk_mut (toStr "") 25#u32 11#u32 2#usize) == some (9, 3, 125)
++#guard val3 (drive_walk_mut (toStr "") 25#u32 11#u32 9#usize) == some (24, 1, 100)
++#guard valR (drive_walk_checked (toStr "") 25#u32 11#u32 1#usize) == some (true, 36)
++#guard valR (drive_walk_checked (toStr "") 25#u32 11#u32 5#usize) == some (true, 36)
++#guard val (drive_walk (toStr "xy") 0#u32 40#u32) == some 14
++#guard val3 (drive_walk_mut (toStr "xy") 0#u32 40#u32 0#usize) == some (0, 4, 142)
++#guard val3 (drive_walk_mut (toStr "xy") 0#u32 40#u32 2#usize) == some (11, 4, 112)
++#guard val3 (drive_walk_mut (toStr "xy") 0#u32 40#u32 9#usize) == some (23, 1, 100)
++#guard valR (drive_walk_checked (toStr "xy") 0#u32 40#u32 1#usize) == some (false, 2)
++#guard valR (drive_walk_checked (toStr "xy") 0#u32 40#u32 5#usize) == some (true, 42)
++#guard val (pick true 5#u32) == some 3
++#guard val (both true 5#u32) == some 5
++#guard val (pick false 5#u32) == some 8
++#guard val (both false 5#u32) == some 6
++#guard val (pick false 0#u32) == some 3
++#guard val (both false 0#u32) == some 1
++
++end join_shared_loan_erased_regions.checks
+diff --git a/tests/lean/JoinSharedLoanErasedRegions/JoinSharedLoanErasedRegions.lean b/tests/lean/JoinSharedLoanErasedRegions/JoinSharedLoanErasedRegions.lean
+new file mode 100644
+index 0000000..b56249a
+--- /dev/null
++++ b/tests/lean/JoinSharedLoanErasedRegions/JoinSharedLoanErasedRegions.lean
+@@ -0,0 +1,572 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [join_shared_loan_erased_regions]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace join_shared_loan_erased_regions
++
++/-- [join_shared_loan_erased_regions::View]
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 14:0-17:1
++    Visibility: public -/
++@[discriminant isize]
++inductive View where
++| Name : _root_.Aeneas.Std.Str → View
++| Num : _root_.Aeneas.Std.U32 → View
++
++/-- [join_shared_loan_erased_regions::{core::clone::Clone for join_shared_loan_erased_regions::View<'a>}::clone]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 13:9-13:14
++    Visibility: public -/
++def View.Insts.CoreCloneClone.clone
++  (self : _root_.join_shared_loan_erased_regions.View) :
++  _root_.Aeneas.Std.Result _root_.join_shared_loan_erased_regions.View
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [join_shared_loan_erased_regions::{core::clone::Clone for join_shared_loan_erased_regions::View<'a>}]
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 13:9-13:14 -/
++@[reducible]
++def View.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.join_shared_loan_erased_regions.View := {
++  clone :=
++    _root_.join_shared_loan_erased_regions.View.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [join_shared_loan_erased_regions::{core::marker::Copy for join_shared_loan_erased_regions::View<'a>}]
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 13:16-13:20 -/
++@[reducible]
++def View.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.join_shared_loan_erased_regions.View := {
++  cloneInst := _root_.join_shared_loan_erased_regions.View.Insts.CoreCloneClone
++}
++
++/-- [join_shared_loan_erased_regions::weight]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 19:0-24:1 -/
++def weight
++  (v : _root_.join_shared_loan_erased_regions.View) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  match v with
++  | _root_.join_shared_loan_erased_regions.View.Name s =>
++    _root_.Aeneas.Std.core.str.Str.len s
++  | _root_.join_shared_loan_erased_regions.View.Num k =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.UScalar.cast .Usize k)
++
++/-- [join_shared_loan_erased_regions::weigh]: loop body 0:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 29:4-32:5 -/
++@[rust_loop_body]
++def weigh_loop.body
++  (entries : _root_.Aeneas.Std.Slice
++  _root_.join_shared_loan_erased_regions.View)
++  (total : _root_.Aeneas.Std.Usize) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++    _root_.Aeneas.Std.Usize)
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len entries
++  if i < i1
++  then
++    let v ← _root_.Aeneas.Std.Slice.index_usize entries i
++    let i2 ← _root_.join_shared_loan_erased_regions.weight v
++    let total1 ← total + i2
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (total1,
++      i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done total)
++
++/-- [join_shared_loan_erased_regions::weigh]: loop 0:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 29:4-32:5 -/
++@[rust_loop]
++def weigh_loop
++  (entries : _root_.Aeneas.Std.Slice
++  _root_.join_shared_loan_erased_regions.View)
++  (total : _root_.Aeneas.Std.Usize) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  loop
++    (fun (total1, i1) => _root_.join_shared_loan_erased_regions.weigh_loop.body
++       entries total1 i1 : (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++      → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++      _root_.Aeneas.Std.Usize))
++    (total, i)
++
++/-- [join_shared_loan_erased_regions::weigh]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 26:0-34:1 -/
++@[reducible]
++def weigh
++  (entries : _root_.Aeneas.Std.Slice
++  _root_.join_shared_loan_erased_regions.View)
++  (extra : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  _root_.join_shared_loan_erased_regions.weigh_loop entries extra 0#usize
++
++/-- [join_shared_loan_erased_regions::check]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 36:0-39:1 -/
++def check
++  (entries : _root_.Aeneas.Std.Slice
++  _root_.join_shared_loan_erased_regions.View)
++  (extra : _root_.Aeneas.Std.Usize) (limit : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize)
++  := do
++  let w ← _root_.join_shared_loan_erased_regions.weigh entries extra
++  if w > limit
++  then _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err w)
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok w)
++
++/-- [join_shared_loan_erased_regions::walk]: loop body 0:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 0:0-53:5
++    Visibility: public -/
++@[rust_loop_body]
++def walk_loop.body
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.join_shared_loan_erased_regions.View) (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize)
++    _root_.Aeneas.Std.Usize)
++  := do
++  let (o, stack1) ← _root_.Aeneas.Std.alloc.vec.Vec.pop stack
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done n)
++  | some v =>
++    let (stack2, n1) ←
++      match v with
++      | _root_.join_shared_loan_erased_regions.View.Name s =>
++        do
++        let s1 ←
++          lift (_root_.Aeneas.Std.Array.to_slice
++            (_root_.Aeneas.Std.Array.empty
++              _root_.join_shared_loan_erased_regions.View))
++        let i ← _root_.Aeneas.Std.core.str.Str.len s
++        let i1 ← _root_.join_shared_loan_erased_regions.weigh s1 i
++        let n2 ← n + i1
++        _root_.Aeneas.Std.Result.ok (stack1, n2)
++      | _root_.join_shared_loan_erased_regions.View.Num k =>
++        if k > 10#u32
++        then
++          do
++          let s ←
++            lift (_root_.Aeneas.Std.Array.to_slice
++              (_root_.Aeneas.Std.Array.empty
++                _root_.join_shared_loan_erased_regions.View))
++          let i ← _root_.join_shared_loan_erased_regions.weigh s 1#usize
++          let n2 ← n + i
++          let i1 ← k / 2#u32
++          let stack3 ←
++            _root_.Aeneas.Std.alloc.vec.Vec.push stack1
++              (_root_.join_shared_loan_erased_regions.View.Num i1)
++          _root_.Aeneas.Std.Result.ok (stack3, n2)
++        else
++          do
++          let i ← lift (_root_.Aeneas.Std.UScalar.cast .Usize k)
++          let n2 ← n + i
++          _root_.Aeneas.Std.Result.ok (stack1, n2)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (stack2,
++      n1))
++
++/-- [join_shared_loan_erased_regions::walk]: loop 0:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 0:0-53:5
++    Visibility: public -/
++@[rust_loop]
++def walk_loop
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.join_shared_loan_erased_regions.View) (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  loop
++    (fun (stack1, n1) => _root_.join_shared_loan_erased_regions.walk_loop.body
++       stack1 n1 : ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize)
++      _root_.Aeneas.Std.Usize))
++    (stack, n)
++
++/-- [join_shared_loan_erased_regions::walk]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 42:0-55:1
++    Visibility: public -/
++@[reducible]
++def walk
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.join_shared_loan_erased_regions.View) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  _root_.join_shared_loan_erased_regions.walk_loop stack 0#usize
++
++/-- [join_shared_loan_erased_regions::walk_mut]: loop body 0:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 0:0-73:5
++    Visibility: public -/
++@[rust_loop_body]
++def walk_mut_loop.body
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.join_shared_loan_erased_regions.View)
++  (budget : _root_.Aeneas.Std.Usize) (n : _root_.Aeneas.Std.Usize)
++  (steps : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize
++    × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.join_shared_loan_erased_regions.View)))
++  := do
++  let joined ←
++    if steps < budget
++    then
++      do
++      let (o, stack1) ← _root_.Aeneas.Std.alloc.vec.Vec.pop stack
++      match o with
++      | none =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl stack1 : _root_.Sum
++          (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.join_shared_loan_erased_regions.View) (_root_.Sum
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.join_shared_loan_erased_regions.View) ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.join_shared_loan_erased_regions.View) ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.Usize)))
++      | some v =>
++        let steps1 ← steps + 1#usize
++        let (stack2, n1) ←
++          match v with
++          | _root_.join_shared_loan_erased_regions.View.Name s =>
++            do
++            let s1 ←
++              lift (_root_.Aeneas.Std.Array.to_slice
++                (_root_.Aeneas.Std.Array.empty
++                  _root_.join_shared_loan_erased_regions.View))
++            let i ← _root_.Aeneas.Std.core.str.Str.len s
++            let i1 ← _root_.join_shared_loan_erased_regions.weigh s1 i
++            let n2 ← n + i1
++            _root_.Aeneas.Std.Result.ok (stack1, n2)
++          | _root_.join_shared_loan_erased_regions.View.Num k =>
++            if k > 10#u32
++            then
++              do
++              let i ← k % 7#u32
++              let s ←
++                lift (_root_.Aeneas.Std.Array.to_slice
++                  (_root_.Aeneas.Std.Array.make 1#usize [
++                    _root_.join_shared_loan_erased_regions.View.Num i
++                    ]))
++              let i1 ← _root_.join_shared_loan_erased_regions.weigh s 0#usize
++              let n2 ← n + i1
++              let i2 ← k / 2#u32
++              let stack3 ←
++                _root_.Aeneas.Std.alloc.vec.Vec.push stack1
++                  (_root_.join_shared_loan_erased_regions.View.Num i2)
++              _root_.Aeneas.Std.Result.ok (stack3, n2)
++            else
++              do
++              let i ← lift (_root_.Aeneas.Std.UScalar.cast .Usize k)
++              let n2 ← n + i
++              _root_.Aeneas.Std.Result.ok (stack1, n2)
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (stack2,
++          budget, n1, steps1)) : _root_.Sum (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.join_shared_loan_erased_regions.View) (_root_.Sum
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.join_shared_loan_erased_regions.View) ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.join_shared_loan_erased_regions.View) ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.Usize)))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl stack : _root_.Sum
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.join_shared_loan_erased_regions.View) (_root_.Sum
++        ((_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize
++        × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++        ((_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize
++        × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)))
++  match joined with
++  | _root_.Sum.inl v =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (n, v))
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2, exit3))
++  | _root_.Sum.inr (_root_.Sum.inr (exit, _, exit1, _)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit1,
++      exit))
++
++/-- [join_shared_loan_erased_regions::walk_mut]: loop 0:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 0:0-73:5
++    Visibility: public -/
++@[rust_loop]
++def walk_mut_loop
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.join_shared_loan_erased_regions.View)
++  (budget : _root_.Aeneas.Std.Usize) (n : _root_.Aeneas.Std.Usize)
++  (steps : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.join_shared_loan_erased_regions.View))
++  := do
++  loop
++    (fun (stack1, budget1, n1, steps1) =>
++       _root_.join_shared_loan_erased_regions.walk_mut_loop.body stack1 budget1
++       n1 steps1 : ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.Usize × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.join_shared_loan_erased_regions.View))))
++    (stack, budget, n, steps)
++
++/-- [join_shared_loan_erased_regions::walk_mut]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 59:0-75:1
++    Visibility: public -/
++@[reducible]
++def walk_mut
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.join_shared_loan_erased_regions.View)
++  (budget : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.join_shared_loan_erased_regions.View))
++  := do
++  _root_.join_shared_loan_erased_regions.walk_mut_loop stack budget 0#usize
++    0#usize
++
++/-- [join_shared_loan_erased_regions::walk_checked]: loop body 0:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 0:0-87:1
++    Visibility: public -/
++@[rust_loop_body]
++def walk_checked_loop.body
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.join_shared_loan_erased_regions.View)
++  (limit : _root_.Aeneas.Std.Usize) (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize))
++  := do
++  let (o, stack1) ← _root_.Aeneas.Std.alloc.vec.Vec.pop stack
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok n))
++  | some v =>
++    let joined ←
++      match v with
++      | _root_.join_shared_loan_erased_regions.View.Name s =>
++        do
++        let s1 ←
++          lift (_root_.Aeneas.Std.Array.to_slice
++            (_root_.Aeneas.Std.Array.empty
++              _root_.join_shared_loan_erased_regions.View))
++        let i ← _root_.Aeneas.Std.core.str.Str.len s
++        let r ← _root_.join_shared_loan_erased_regions.check s1 i limit
++        let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++        match cf with
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++          let n1 ← n + val
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (stack1, n1) : _root_.Sum
++            ((_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.join_shared_loan_erased_regions.View) ×
++            _root_.Aeneas.Std.Usize) (_root_.Sum
++            ((_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.join_shared_loan_erased_regions.View) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.Usize
++            _root_.Aeneas.Std.Usize) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.join_shared_loan_erased_regions.View) ×
++            _root_.Aeneas.Std.Usize × _root_.Unit)))
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++          let r1 ←
++            _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++              _root_.Aeneas.Std.Usize (_root_.Aeneas.Std.core.convert.FromSame
++              _root_.Aeneas.Std.Usize) residual
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (r1,
++            stack1, limit, ())) : _root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.join_shared_loan_erased_regions.View) ×
++            _root_.Aeneas.Std.Usize) (_root_.Sum
++            ((_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.join_shared_loan_erased_regions.View) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.Usize
++            _root_.Aeneas.Std.Usize) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.join_shared_loan_erased_regions.View) ×
++            _root_.Aeneas.Std.Usize × _root_.Unit)))
++      | _root_.join_shared_loan_erased_regions.View.Num k =>
++        do
++        let i ← lift (_root_.Aeneas.Std.UScalar.cast .Usize k)
++        let n1 ← n + i
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (stack1, n1) : _root_.Sum
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.join_shared_loan_erased_regions.View) ×
++          _root_.Aeneas.Std.Usize) (_root_.Sum
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.join_shared_loan_erased_regions.View) ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.Usize
++          _root_.Aeneas.Std.Usize) × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.join_shared_loan_erased_regions.View) ×
++          _root_.Aeneas.Std.Usize × _root_.Unit)))
++    match joined with
++    | _root_.Sum.inl (stack2, n1) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (stack2,
++        limit, n1))
++    | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2)) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++        exit1, exit2))
++    | _root_.Sum.inr (_root_.Sum.inr (exit, _, _, ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done exit)
++
++/-- [join_shared_loan_erased_regions::walk_checked]: loop 0:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 0:0-87:1
++    Visibility: public -/
++@[rust_loop]
++def walk_checked_loop
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.join_shared_loan_erased_regions.View)
++  (limit : _root_.Aeneas.Std.Usize) (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize)
++  := do
++  loop
++    (fun (stack1, limit1, n1) =>
++       _root_.join_shared_loan_erased_regions.walk_checked_loop.body stack1
++       limit1 n1 : ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.join_shared_loan_erased_regions.View) × _root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.core.result.Result
++      _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize)))
++    (stack, limit, n)
++
++/-- [join_shared_loan_erased_regions::walk_checked]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 78:0-87:1
++    Visibility: public -/
++@[reducible]
++def walk_checked
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.join_shared_loan_erased_regions.View)
++  (limit : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize)
++  := do
++  _root_.join_shared_loan_erased_regions.walk_checked_loop stack limit 0#usize
++
++/-- [join_shared_loan_erased_regions::pick]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 90:0-93:1
++    Visibility: public -/
++def pick
++  (b : _root_.Bool) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let e ←
++    if b
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.Array.to_slice
++        (_root_.Aeneas.Std.Array.empty
++          _root_.join_shared_loan_erased_regions.View))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.Array.to_slice
++        (_root_.Aeneas.Std.Array.make 1#usize [
++          _root_.join_shared_loan_erased_regions.View.Num k
++          ]))
++  _root_.join_shared_loan_erased_regions.weigh e 3#usize
++
++/-- [join_shared_loan_erased_regions::both]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 96:0-107:1
++    Visibility: public -/
++def both
++  (b : _root_.Bool) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let e ←
++    if b
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.Array.to_slice
++        (_root_.Aeneas.Std.Array.make 1#usize [
++          _root_.join_shared_loan_erased_regions.View.Num k
++          ]))
++    else
++      do
++      let i ← k + 1#u32
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.Array.to_slice
++        (_root_.Aeneas.Std.Array.make 1#usize [
++          _root_.join_shared_loan_erased_regions.View.Num i
++          ]))
++  _root_.join_shared_loan_erased_regions.weigh e 0#usize
++
++/-- [join_shared_loan_erased_regions::stack_of]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 109:0-115:1 -/
++def stack_of
++  (name1 : _root_.Aeneas.Std.Str) (a : _root_.Aeneas.Std.U32)
++  (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.join_shared_loan_erased_regions.View)
++  := do
++  let stack ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.join_shared_loan_erased_regions.View)
++      (_root_.join_shared_loan_erased_regions.View.Num a)
++  let stack1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push stack
++      (_root_.join_shared_loan_erased_regions.View.Name name1)
++  _root_.Aeneas.Std.alloc.vec.Vec.push stack1
++    (_root_.join_shared_loan_erased_regions.View.Num b)
++
++/-- [join_shared_loan_erased_regions::drive_walk]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 117:0-119:1
++    Visibility: public -/
++def drive_walk
++  (name1 : _root_.Aeneas.Std.Str) (a : _root_.Aeneas.Std.U32)
++  (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let v ← _root_.join_shared_loan_erased_regions.stack_of name1 a b
++  _root_.join_shared_loan_erased_regions.walk v
++
++/-- [join_shared_loan_erased_regions::drive_walk_mut]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 123:0-128:1
++    Visibility: public -/
++def drive_walk_mut
++  (name1 : _root_.Aeneas.Std.Str) (a : _root_.Aeneas.Std.U32)
++  (b : _root_.Aeneas.Std.U32) (budget : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.Usize)
++  := do
++  let stack ← _root_.join_shared_loan_erased_regions.stack_of name1 a b
++  let (n, stack1) ←
++    _root_.join_shared_loan_erased_regions.walk_mut stack budget
++  let stack2 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push stack1
++      (_root_.join_shared_loan_erased_regions.View.Num 100#u32)
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len stack2
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref stack2
++  let i1 ← _root_.join_shared_loan_erased_regions.weigh s 0#usize
++  _root_.Aeneas.Std.Result.ok (n, i, i1)
++
++/-- [join_shared_loan_erased_regions::drive_walk_checked]:
++    Source: 'tests/src/join-shared-loan-erased-regions.rs', lines 130:0-132:1
++    Visibility: public -/
++def drive_walk_checked
++  (name1 : _root_.Aeneas.Std.Str) (a : _root_.Aeneas.Std.U32)
++  (b : _root_.Aeneas.Std.U32) (limit : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize)
++  := do
++  let v ← _root_.join_shared_loan_erased_regions.stack_of name1 a b
++  _root_.join_shared_loan_erased_regions.walk_checked v limit
++
++end join_shared_loan_erased_regions
+diff --git a/tests/lean/LoopNestedMutElementsSink.lean b/tests/lean/LoopNestedMutElementsSink.lean
+new file mode 100644
+index 0000000..b888084
+--- /dev/null
++++ b/tests/lean/LoopNestedMutElementsSink.lean
+@@ -0,0 +1,2 @@
++import LoopNestedMutElementsSink.Checks
++import LoopNestedMutElementsSink.LoopNestedMutElementsSink
+diff --git a/tests/lean/LoopNestedMutElementsSink/Checks.lean b/tests/lean/LoopNestedMutElementsSink/Checks.lean
+new file mode 100644
+index 0000000..0c0f575
+--- /dev/null
++++ b/tests/lean/LoopNestedMutElementsSink/Checks.lean
+@@ -0,0 +1,26 @@
++import LoopNestedMutElementsSink.LoopNestedMutElementsSink
++
++/-! Evaluate the model of `tests/src/loop-nested-mut-elements-sink.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (the slice given back after the caller wrote through the element borrow
++    stored by the loop, and the counter of the slot). -/
++
++namespace loop_nested_mut_elements_sink.checks
++open Aeneas Aeneas.Std Result
++
++def val4 (r : Result (U32 × U32 × U32 × U32)) : Option (Nat × Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c, d) => some (a.val, b.val, c.val, d.val)
++  | _ => none
++
++-- native::drives
++#guard val4 (drive 1#u32 2#u32 3#u32 10#u32) == some (1, 2, 26, 3)
++#guard val4 (drive_even 1#u32 2#u32 3#u32 10#u32) == some (2, 24, 4, 11)
++#guard val4 (drive 4#u32 6#u32 8#u32 0#u32) == some (4, 6, 16, 3)
++#guard val4 (drive_even 4#u32 6#u32 8#u32 0#u32) == some (4, 6, 16, 13)
++#guard val4 (drive 5#u32 7#u32 9#u32 3#u32) == some (5, 7, 24, 3)
++#guard val4 (drive_even 5#u32 7#u32 9#u32 3#u32) == some (6, 8, 10, 10)
++#guard val4 (drive 2#u32 3#u32 5#u32 1#u32) == some (2, 3, 12, 3)
++#guard val4 (drive_even 2#u32 3#u32 5#u32 1#u32) == some (6, 4, 6, 11)
++
++end loop_nested_mut_elements_sink.checks
+diff --git a/tests/lean/LoopNestedMutElementsSink/LoopNestedMutElementsSink.lean b/tests/lean/LoopNestedMutElementsSink/LoopNestedMutElementsSink.lean
+new file mode 100644
+index 0000000..d748bc4
+--- /dev/null
++++ b/tests/lean/LoopNestedMutElementsSink/LoopNestedMutElementsSink.lean
+@@ -0,0 +1,517 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_nested_mut_elements_sink]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_nested_mut_elements_sink
++
++/-- [loop_nested_mut_elements_sink::Slot]
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 14:0-17:1
++    Visibility: public -/
++structure Slot where
++  last : _root_.Option _root_.Aeneas.Std.U32
++  count : _root_.Aeneas.Std.U32
++
++/-- [loop_nested_mut_elements_sink::Sink]
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 19:0-21:1
++    Visibility: public -/
++structure Sink where
++  slot : _root_.loop_nested_mut_elements_sink.Slot
++
++/-- [loop_nested_mut_elements_sink::push]:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 23:0-26:1
++    Visibility: public -/
++def push
++  (s : _root_.loop_nested_mut_elements_sink.Sink) (e : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.loop_nested_mut_elements_sink.Sink ×
++    (_root_.loop_nested_mut_elements_sink.Sink →
++    _root_.loop_nested_mut_elements_sink.Sink) ×
++    (_root_.loop_nested_mut_elements_sink.Sink →
++    (_root_.loop_nested_mut_elements_sink.Sink ×
++    (_root_.loop_nested_mut_elements_sink.Sink →
++    (_root_.loop_nested_mut_elements_sink.Sink × _root_.Aeneas.Std.U32)))))
++  := do
++  let i ← s.slot.count + 1#u32
++  let back'a :=
++    (fun s1 => (s1,
++       fun s2 =>
++         let e1 := match s2.slot.last with
++                   | some e2 => e2
++                   | _ => i
++         (s, e1)) : _root_.loop_nested_mut_elements_sink.Sink →
++      (_root_.loop_nested_mut_elements_sink.Sink ×
++      (_root_.loop_nested_mut_elements_sink.Sink →
++      (_root_.loop_nested_mut_elements_sink.Sink × _root_.Aeneas.Std.U32))))
++  _root_.Aeneas.Std.Result.ok ({ slot := { last := (some e), count := i } },
++    fun s1 => s1, back'a)
++
++/-- [loop_nested_mut_elements_sink::visit]: loop body 0:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 29:4-31:5
++    Visibility: public -/
++@[rust_loop_body]
++def visit_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.loop_nested_mut_elements_sink.Slot →
++  _root_.loop_nested_mut_elements_sink.Slot)
++  (back1 : _root_.loop_nested_mut_elements_sink.Slot →
++  (_root_.loop_nested_mut_elements_sink.Slot ×
++  (_root_.loop_nested_mut_elements_sink.Slot →
++  _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++  _root_.Aeneas.Std.U32))))) (s : _root_.loop_nested_mut_elements_sink.Slot) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.loop_nested_mut_elements_sink.Slot) ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    (_root_.loop_nested_mut_elements_sink.Slot ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32))))) × _root_.loop_nested_mut_elements_sink.Slot)
++    ((_root_.Option _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.loop_nested_mut_elements_sink.Slot) ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    (_root_.loop_nested_mut_elements_sink.Slot ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32)))))))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (
++      s.last, s.count, iter1, back,
++      fun s1 =>
++        let (back2, back3) := back1 s1
++        (back2, fun s2 im => let im1 := next_back im none
++                             back3 s2 im1)))
++  | some e =>
++    let (s1, push_back, push_back1) ←
++      _root_.loop_nested_mut_elements_sink.push { slot := s } e
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun s2 => back (push_back { slot := s2 }).slot,
++      fun s2 =>
++        let (back2, back3) := back1 s2
++        let (s3, back4) := push_back1 { slot := back2 }
++        (s3.slot,
++          fun s4 im =>
++            let ⟨ o1, _ ⟩ := s4
++            let (⟨ ⟨ o2, _ ⟩ ⟩, i) :=
++              back4 { slot := { s1.slot with last := o1 } }
++            let im1 := next_back im (some i)
++            back3 { s with last := o2 } im1), s1.slot))
++
++/-- [loop_nested_mut_elements_sink::visit]: loop 0:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 29:4-31:5
++    Visibility: public -/
++@[rust_loop]
++def visit_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.loop_nested_mut_elements_sink.Slot →
++  _root_.loop_nested_mut_elements_sink.Slot)
++  (back1 : _root_.loop_nested_mut_elements_sink.Slot →
++  (_root_.loop_nested_mut_elements_sink.Slot ×
++  (_root_.loop_nested_mut_elements_sink.Slot →
++  _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++  _root_.Aeneas.Std.U32))))) (s : _root_.loop_nested_mut_elements_sink.Slot) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.Aeneas.Std.U32) × (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.loop_nested_mut_elements_sink.Slot) ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    (_root_.loop_nested_mut_elements_sink.Slot ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32))))))
++  := do
++  loop
++    (fun (iter1, back2, back3, s1) =>
++       _root_.loop_nested_mut_elements_sink.visit_loop.body iter1 back2 back3
++       s1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++      × (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.loop_nested_mut_elements_sink.Slot) ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      (_root_.loop_nested_mut_elements_sink.Slot ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32))))) × _root_.loop_nested_mut_elements_sink.Slot) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.loop_nested_mut_elements_sink.Slot) ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      (_root_.loop_nested_mut_elements_sink.Slot ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32))))) × _root_.loop_nested_mut_elements_sink.Slot)
++      ((_root_.Option _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.loop_nested_mut_elements_sink.Slot) ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      (_root_.loop_nested_mut_elements_sink.Slot ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32))))))))
++    (iter, back, back1, s)
++
++/-- [loop_nested_mut_elements_sink::visit]:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 28:0-32:1
++    Visibility: public -/
++def visit
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (s : _root_.loop_nested_mut_elements_sink.Sink) :
++  _root_.Aeneas.Std.Result (_root_.loop_nested_mut_elements_sink.Sink ×
++    (_root_.loop_nested_mut_elements_sink.Sink →
++    _root_.loop_nested_mut_elements_sink.Sink) ×
++    (_root_.loop_nested_mut_elements_sink.Sink →
++    (_root_.loop_nested_mut_elements_sink.Sink ×
++    (_root_.loop_nested_mut_elements_sink.Sink → ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.loop_nested_mut_elements_sink.Sink)))))
++  := do
++  let (iter, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut xs
++  let (o, i, im, back, back1) ←
++    _root_.loop_nested_mut_elements_sink.visit_loop iter (fun s1 => s1)
++      (fun s1 => (s1,
++        fun s2 im1 => let ⟨ o1, _ ⟩ := s2
++                      let s3 := iter_mut_back im1
++                      (s3, o1))) s.slot
++  let back2 :=
++    (fun s1 => let s2 := back s1.slot
++               { slot := s2 } : _root_.loop_nested_mut_elements_sink.Sink →
++      _root_.loop_nested_mut_elements_sink.Sink)
++  let back'a :=
++    (fun s1 =>
++       let (s2, back3) := back1 s1.slot
++       ({ slot := s2 },
++         fun s3 =>
++           let (xs1, o1) := back3 { s3.slot with count := i } im
++           (xs1, { slot := { s.slot with last := o1 } })) :
++      _root_.loop_nested_mut_elements_sink.Sink →
++      (_root_.loop_nested_mut_elements_sink.Sink ×
++      (_root_.loop_nested_mut_elements_sink.Sink → ((_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × _root_.loop_nested_mut_elements_sink.Sink))))
++  _root_.Aeneas.Std.Result.ok ({ slot := { last := o, count := i } }, back2,
++    back'a)
++
++/-- [loop_nested_mut_elements_sink::visit_even]: loop body 0:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 36:4-42:5
++    Visibility: public -/
++@[rust_loop_body]
++def visit_even_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.loop_nested_mut_elements_sink.Slot →
++  _root_.loop_nested_mut_elements_sink.Slot)
++  (back1 : _root_.loop_nested_mut_elements_sink.Slot →
++  (_root_.loop_nested_mut_elements_sink.Slot ×
++  (_root_.loop_nested_mut_elements_sink.Slot →
++  _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++  _root_.Aeneas.Std.U32))))) (s : _root_.loop_nested_mut_elements_sink.Slot) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.loop_nested_mut_elements_sink.Slot) ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    (_root_.loop_nested_mut_elements_sink.Slot ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32))))) × _root_.loop_nested_mut_elements_sink.Slot)
++    ((_root_.Option _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.loop_nested_mut_elements_sink.Slot) ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    (_root_.loop_nested_mut_elements_sink.Slot ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32)))))))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (
++      s.last, s.count, iter1, back,
++      fun s1 =>
++        let (back2, back3) := back1 s1
++        (back2, fun s2 im => let im1 := next_back im none
++                             back3 s2 im1)))
++  | some e =>
++    let i ← e % 2#u32
++    let (s1, back2, back3) ←
++      if i = 0#u32
++      then
++        do
++        let (s2, push_back, push_back1) ←
++          _root_.loop_nested_mut_elements_sink.push { slot := s } e
++        _root_.Aeneas.Std.Result.ok (s2.slot,
++          (fun s3 =>
++             let (back4, back5) := back1 s3
++             let (s4, back6) := push_back1 { slot := back4 }
++             (s4.slot,
++               fun s5 im =>
++                 let ⟨ o1, _ ⟩ := s5
++                 let (⟨ ⟨ o2, _ ⟩ ⟩, i1) :=
++                   back6 { slot := { s2.slot with last := o1 } }
++                 let im1 := next_back im (some i1)
++                 back5 { s with last := o2 } im1) :
++          _root_.loop_nested_mut_elements_sink.Slot →
++          (_root_.loop_nested_mut_elements_sink.Slot ×
++          (_root_.loop_nested_mut_elements_sink.Slot →
++          _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++          ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.Aeneas.Std.U32))))),
++          (fun s3 => back (push_back { slot := s3 }).slot :
++          _root_.loop_nested_mut_elements_sink.Slot →
++          _root_.loop_nested_mut_elements_sink.Slot))
++      else
++        do
++        let e1 ← e + 1#u32
++        _root_.Aeneas.Std.Result.ok (s,
++          (fun s2 =>
++             let (back4, back5) := back1 s2
++             (back4,
++               fun s3 im =>
++                 let ⟨ o1, _ ⟩ := s3
++                 let im1 := next_back im (some e1)
++                 back5 { s with last := o1 } im1) :
++          _root_.loop_nested_mut_elements_sink.Slot →
++          (_root_.loop_nested_mut_elements_sink.Slot ×
++          (_root_.loop_nested_mut_elements_sink.Slot →
++          _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++          ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.Aeneas.Std.U32))))), back)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      back3, fun s2 => back2 s2, s1))
++
++/-- [loop_nested_mut_elements_sink::visit_even]: loop 0:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 36:4-42:5
++    Visibility: public -/
++@[rust_loop]
++def visit_even_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.loop_nested_mut_elements_sink.Slot →
++  _root_.loop_nested_mut_elements_sink.Slot)
++  (back1 : _root_.loop_nested_mut_elements_sink.Slot →
++  (_root_.loop_nested_mut_elements_sink.Slot ×
++  (_root_.loop_nested_mut_elements_sink.Slot →
++  _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++  _root_.Aeneas.Std.U32))))) (s : _root_.loop_nested_mut_elements_sink.Slot) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.Aeneas.Std.U32) × (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.loop_nested_mut_elements_sink.Slot) ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    (_root_.loop_nested_mut_elements_sink.Slot ×
++    (_root_.loop_nested_mut_elements_sink.Slot →
++    _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32))))))
++  := do
++  loop
++    (fun (iter1, back2, back3, s1) =>
++       _root_.loop_nested_mut_elements_sink.visit_even_loop.body iter1 back2
++       back3 s1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32) × (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.loop_nested_mut_elements_sink.Slot) ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      (_root_.loop_nested_mut_elements_sink.Slot ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32))))) × _root_.loop_nested_mut_elements_sink.Slot) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.loop_nested_mut_elements_sink.Slot) ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      (_root_.loop_nested_mut_elements_sink.Slot ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32))))) × _root_.loop_nested_mut_elements_sink.Slot)
++      ((_root_.Option _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.loop_nested_mut_elements_sink.Slot) ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      (_root_.loop_nested_mut_elements_sink.Slot ×
++      (_root_.loop_nested_mut_elements_sink.Slot →
++      _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32))))))))
++    (iter, back, back1, s)
++
++/-- [loop_nested_mut_elements_sink::visit_even]:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 35:0-43:1
++    Visibility: public -/
++def visit_even
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (s : _root_.loop_nested_mut_elements_sink.Sink) :
++  _root_.Aeneas.Std.Result (_root_.loop_nested_mut_elements_sink.Sink ×
++    (_root_.loop_nested_mut_elements_sink.Sink →
++    _root_.loop_nested_mut_elements_sink.Sink) ×
++    (_root_.loop_nested_mut_elements_sink.Sink →
++    (_root_.loop_nested_mut_elements_sink.Sink ×
++    (_root_.loop_nested_mut_elements_sink.Sink → ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.loop_nested_mut_elements_sink.Sink)))))
++  := do
++  let (iter, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut xs
++  let (o, i, im, back, back1) ←
++    _root_.loop_nested_mut_elements_sink.visit_even_loop iter (fun s1 => s1)
++      (fun s1 => (s1,
++        fun s2 im1 => let ⟨ o1, _ ⟩ := s2
++                      let s3 := iter_mut_back im1
++                      (s3, o1))) s.slot
++  let back2 :=
++    (fun s1 => let s2 := back s1.slot
++               { slot := s2 } : _root_.loop_nested_mut_elements_sink.Sink →
++      _root_.loop_nested_mut_elements_sink.Sink)
++  let back'a :=
++    (fun s1 =>
++       let (s2, back3) := back1 s1.slot
++       ({ slot := s2 },
++         fun s3 =>
++           let (xs1, o1) := back3 { s3.slot with count := i } im
++           (xs1, { slot := { s.slot with last := o1 } })) :
++      _root_.loop_nested_mut_elements_sink.Sink →
++      (_root_.loop_nested_mut_elements_sink.Sink ×
++      (_root_.loop_nested_mut_elements_sink.Sink → ((_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × _root_.loop_nested_mut_elements_sink.Sink))))
++  _root_.Aeneas.Std.Result.ok ({ slot := { last := o, count := i } }, back2,
++    back'a)
++
++/-- [loop_nested_mut_elements_sink::bump]:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 45:0-49:1
++    Visibility: public -/
++def bump
++  (s : _root_.loop_nested_mut_elements_sink.Sink) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.loop_nested_mut_elements_sink.Sink ×
++    (_root_.loop_nested_mut_elements_sink.Sink →
++    _root_.loop_nested_mut_elements_sink.Sink) ×
++    (_root_.loop_nested_mut_elements_sink.Sink →
++    (_root_.loop_nested_mut_elements_sink.Sink ×
++    (_root_.loop_nested_mut_elements_sink.Sink →
++    _root_.loop_nested_mut_elements_sink.Sink))))
++  := do
++  match s.slot.last with
++  | none =>
++    let back :=
++      (fun s1 => (s1, fun s2 => { slot := s.slot }) :
++        _root_.loop_nested_mut_elements_sink.Sink →
++        (_root_.loop_nested_mut_elements_sink.Sink ×
++        (_root_.loop_nested_mut_elements_sink.Sink →
++        _root_.loop_nested_mut_elements_sink.Sink)))
++    _root_.Aeneas.Std.Result.ok ({ slot := s.slot }, fun s1 => s1, back)
++  | some last =>
++    let last1 ← last + k
++    let back :=
++      (fun s1 => (s1,
++         fun s2 =>
++           let i := match s2.slot.last with
++                    | some i1 => i1
++                    | _ => last1
++           { slot := { s.slot with last := (some i) } }) :
++        _root_.loop_nested_mut_elements_sink.Sink →
++        (_root_.loop_nested_mut_elements_sink.Sink ×
++        (_root_.loop_nested_mut_elements_sink.Sink →
++        _root_.loop_nested_mut_elements_sink.Sink)))
++    _root_.Aeneas.Std.Result.ok
++      ({ slot := { s.slot with last := (some last1) } }, fun s1 => s1, back)
++
++/-- [loop_nested_mut_elements_sink::double]:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 51:0-55:1
++    Visibility: public -/
++def double
++  (slot : _root_.loop_nested_mut_elements_sink.Slot) :
++  _root_.Aeneas.Std.Result _root_.loop_nested_mut_elements_sink.Slot
++  := do
++  match slot.last with
++  | none => _root_.Aeneas.Std.Result.ok slot
++  | some last =>
++    let last1 ← last * 2#u32
++    _root_.Aeneas.Std.Result.ok { slot with last := (some last1) }
++
++/-- [loop_nested_mut_elements_sink::drive]:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 59:0-68:1
++    Visibility: public -/
++def drive
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (s, to_slice_mut_back) ←
++    lift (_root_.Aeneas.Std.Array.to_slice_mut
++      (_root_.Aeneas.Std.Array.make 3#usize [ a, b, c ]))
++  let (s1, visit_back, visit_back1) ←
++    _root_.loop_nested_mut_elements_sink.visit s
++      { slot := { last := none, count := 0#u32 } }
++  let (s2, bump_back, bump_back1) ←
++    _root_.loop_nested_mut_elements_sink.bump s1 k
++  let s3 := bump_back s2
++  let s4 := visit_back s3
++  let s5 ← _root_.loop_nested_mut_elements_sink.double s4.slot
++  let (s6, back) := visit_back1 { slot := { s5 with count := 0#u32 } }
++  let (s7, back1) :=
++    bump_back1 { slot := { s3.slot with last := s6.slot.last } }
++  let s8 := back1 { slot := { s2.slot with last := s7.slot.last } }
++  let (s9, _) := back { slot := { s1.slot with last := s8.slot.last } }
++  let xs := to_slice_mut_back s9
++  let i ← _root_.Aeneas.Std.Array.index_usize xs 0#usize
++  let i1 ← _root_.Aeneas.Std.Array.index_usize xs 1#usize
++  let i2 ← _root_.Aeneas.Std.Array.index_usize xs 2#usize
++  _root_.Aeneas.Std.Result.ok (i, i1, i2, s4.slot.count)
++
++/-- [loop_nested_mut_elements_sink::drive_even]:
++    Source: 'tests/src/loop-nested-mut-elements-sink.rs', lines 70:0-79:1
++    Visibility: public -/
++def drive_even
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (s, to_slice_mut_back) ←
++    lift (_root_.Aeneas.Std.Array.to_slice_mut
++      (_root_.Aeneas.Std.Array.make 3#usize [ a, b, c ]))
++  let (s1, visit_even_back, visit_even_back1) ←
++    _root_.loop_nested_mut_elements_sink.visit_even s
++      { slot := { last := none, count := 10#u32 } }
++  let (s2, bump_back, bump_back1) ←
++    _root_.loop_nested_mut_elements_sink.bump s1 k
++  let s3 := bump_back s2
++  let s4 := visit_even_back s3
++  let s5 ← _root_.loop_nested_mut_elements_sink.double s4.slot
++  let (s6, back) := visit_even_back1 { slot := { s5 with count := 10#u32 } }
++  let (s7, back1) :=
++    bump_back1 { slot := { s3.slot with last := s6.slot.last } }
++  let s8 := back1 { slot := { s2.slot with last := s7.slot.last } }
++  let (s9, _) := back { slot := { s1.slot with last := s8.slot.last } }
++  let xs := to_slice_mut_back s9
++  let i ← _root_.Aeneas.Std.Array.index_usize xs 0#usize
++  let i1 ← _root_.Aeneas.Std.Array.index_usize xs 1#usize
++  let i2 ← _root_.Aeneas.Std.Array.index_usize xs 2#usize
++  _root_.Aeneas.Std.Result.ok (i, i1, i2, s4.slot.count)
++
++end loop_nested_mut_elements_sink
+diff --git a/tests/lean/LoopSharedProjectionRelease.lean b/tests/lean/LoopSharedProjectionRelease.lean
+new file mode 100644
+index 0000000..ea2f543
+--- /dev/null
++++ b/tests/lean/LoopSharedProjectionRelease.lean
+@@ -0,0 +1,2 @@
++import LoopSharedProjectionRelease.Checks
++import LoopSharedProjectionRelease.LoopSharedProjectionRelease
+diff --git a/tests/lean/LoopSharedProjectionRelease/Checks.lean b/tests/lean/LoopSharedProjectionRelease/Checks.lean
+new file mode 100644
+index 0000000..bfcface
+--- /dev/null
++++ b/tests/lean/LoopSharedProjectionRelease/Checks.lean
+@@ -0,0 +1,59 @@
++import LoopSharedProjectionRelease.LoopSharedProjectionRelease
++
++/-! Evaluate the model of `tests/src/loop-shared-projection-release.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (for `conv`: the result, then the depth and the first exhausted depth given
++    back to the caller through the budget). -/
++
++namespace loop_shared_projection_release.checks
++open Aeneas Aeneas.Std Result
++
++def val (r : Result U32) : Option Nat :=
++  match r with
++  | ok n => some n.val
++  | _ => none
++
++def valR (r : Result (core.result.Result U32 U32)) : Option (Bool × Nat) :=
++  match r with
++  | ok (.Ok n) => some (true, n.val)
++  | ok (.Err e) => some (false, e.val)
++  | _ => none
++
++/-- `Err e` as `(0, e, 0)`, `Ok None` as `(1, 0, 0)`, `Ok (Some (n, sum))` as
++    `(2, n, sum)`; then the depth and the first exhausted depth. -/
++def valC (r : Result ((core.result.Result (Option (Usize × I64)) U32) × U32 × Option U32)) :
++    Option ((Nat × Nat × Int) × Nat × Option Nat) :=
++  match r with
++  | ok (res, depth, first) =>
++    let res := match res with
++      | .Err e => (0, e.val, 0)
++      | .Ok none => (1, 0, 0)
++      | .Ok (some (n, sum)) => (2, n.val, sum.val)
++    some (res, depth.val, first.map (·.val))
++  | _ => none
++
++-- native::drives
++#guard val (drive_sum_counted 1#u32 2#u32 3#u32 true) == some 9
++#guard val (drive_sum_counted 1#u32 2#u32 3#u32 false) == some 0
++#guard valR (drive_weigh_checked 1#u32 2#u32 3#u32 2#usize) == some (false, 1)
++#guard valR (drive_weigh_checked 1#u32 2#u32 3#u32 3#usize) == some (true, 13)
++#guard val (drive_sum_counted 0#u32 5#u32 3#u32 true) == some 11
++#guard val (drive_sum_counted 0#u32 5#u32 3#u32 false) == some 0
++#guard valR (drive_weigh_checked 0#u32 5#u32 3#u32 2#usize) == some (false, 1)
++#guard valR (drive_weigh_checked 0#u32 5#u32 3#u32 3#usize) == some (true, 15)
++#guard val (drive_sum_counted 4#u32 4#u32 4#u32 true) == some 15
++#guard val (drive_sum_counted 4#u32 4#u32 4#u32 false) == some 0
++#guard valR (drive_weigh_checked 4#u32 4#u32 4#u32 2#usize) == some (false, 1)
++#guard valR (drive_weigh_checked 4#u32 4#u32 4#u32 3#usize) == some (true, 12)
++#guard valC (drive_conv (1#u32, 2#u32, 3#u32) (4#u32, 5#u32, 6#u32) 3#usize)
++  == some ((2, 3, 39), 9, none)
++#guard valC (drive_conv (1#u32, 0#u32, 3#u32) (4#u32, 5#u32, 6#u32) 3#usize)
++  == some ((1, 0, 0), 9, some 4)
++#guard valC (drive_conv (1#u32, 2#u32, 3#u32) (4#u32, 7#u32, 0#u32) 3#usize)
++  == some ((1, 0, 0), 7, some 6)
++#guard valC (drive_conv (1#u32, 200#u32, 3#u32) (4#u32, 5#u32, 6#u32) 3#usize)
++  == some ((0, 11, 0), 6, none)
++#guard valC (drive_conv (1#u32, 2#u32, 3#u32) (4#u32, 5#u32, 6#u32) 2#usize)
++  == some ((0, 1, 0), 0, none)
++
++end loop_shared_projection_release.checks
+diff --git a/tests/lean/LoopSharedProjectionRelease/LoopSharedProjectionRelease.lean b/tests/lean/LoopSharedProjectionRelease/LoopSharedProjectionRelease.lean
+new file mode 100644
+index 0000000..2265778
+--- /dev/null
++++ b/tests/lean/LoopSharedProjectionRelease/LoopSharedProjectionRelease.lean
+@@ -0,0 +1,892 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_shared_projection_release]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_shared_projection_release
++
++/-- [loop_shared_projection_release::Native]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 16:0-18:1
++    Visibility: public -/
++structure Native where
++  depth : _root_.Aeneas.Std.U32
++
++/-- [loop_shared_projection_release::Record]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 20:0-22:1
++    Visibility: public -/
++structure Record where
++  first : _root_.Option _root_.Aeneas.Std.U32
++
++/-- [loop_shared_projection_release::Budget]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 25:0-28:1
++    Visibility: public -/
++structure Budget where
++  native : _root_.loop_shared_projection_release.Native
++  record : _root_.loop_shared_projection_release.Record
++
++/-- [loop_shared_projection_release::extract]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 30:0-40:1 -/
++def extract
++  (e : _root_.Aeneas.Std.U32)
++  (budget : _root_.loop_shared_projection_release.Budget) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.I64) ×
++    _root_.loop_shared_projection_release.Budget ×
++    (_root_.loop_shared_projection_release.Budget →
++    _root_.loop_shared_projection_release.Budget))
++  := do
++  let i ← budget.native.depth + 1#u32
++  if e = 0#u32
++  then
++    let b := _root_.Aeneas.Std.core.option.Option.is_none budget.record.first
++    if b
++    then
++      _root_.Aeneas.Std.Result.ok (none,
++        { native := { depth := i }, record := { first := (some i) } },
++        fun budget1 => budget1)
++    else
++      _root_.Aeneas.Std.Result.ok (none,
++        { budget with native := { depth := i } }, fun budget1 => budget1)
++  else
++    let i1 ← lift (_root_.Aeneas.Std.UScalar.hcast .I64 e)
++    _root_.Aeneas.Std.Result.ok (some i1,
++      { budget with native := { depth := i } }, fun budget1 => budget1)
++
++/-- [loop_shared_projection_release::as_ref]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 42:0-47:1 -/
++def as_ref
++  {T : Type} (o : _root_.Option T) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some _ => _root_.Aeneas.Std.Result.ok o
++
++/-- [loop_shared_projection_release::is_some_and]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 49:0-54:1 -/
++def is_some_and
++  {T : Type} {F : Type} (coreopsfunctionFnOnceFTupleTBoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F T _root_.Bool)
++  (o : _root_.Option T) (f : F) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok false
++  | some x =>
++    let (model_state, _) ← coreopsfunctionFnOnceFTupleTBoolInst.call_once f x
++    _root_.Aeneas.Std.Result.ok model_state
++
++/-- [loop_shared_projection_release::and_then]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 56:0-61:1 -/
++def and_then
++  {T : Type} {U : Type} {F : Type} (coreopsfunctionFnOnceFTupleTOptionInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F T (_root_.Option U))
++  (o : _root_.Option T) (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Option U)
++  := do
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some x =>
++    let (model_state, _) ← coreopsfunctionFnOnceFTupleTOptionInst.call_once f x
++    _root_.Aeneas.Std.Result.ok model_state
++
++/-- [loop_shared_projection_release::elements]: loop body 0:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 69:8-72:9 -/
++@[rust_loop_body]
++def elements_loop.body
++  (e : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len e
++  if i < i1
++  then
++    let i2 ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) e i
++    let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out i2
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (out1, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++
++/-- [loop_shared_projection_release::elements]: loop 0:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 69:8-72:9 -/
++@[rust_loop]
++def elements_loop
++  (e : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (out1, i1) => _root_.loop_shared_projection_release.elements_loop.body
++       e out1 i1 : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (out, i)
++
++/-- [loop_shared_projection_release::elements]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 63:0-75:1 -/
++def elements
++  (e : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let b := _root_.Aeneas.Std.alloc.vec.Vec.is_empty e
++  if b
++  then _root_.Aeneas.Std.Result.ok none
++  else
++    let out ←
++      _root_.loop_shared_projection_release.elements_loop e
++        (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) 0#usize
++    _root_.Aeneas.Std.Result.ok (some out)
++
++/-- [loop_shared_projection_release::count]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 77:0-82:1 -/
++def count
++  (o : _root_.Option (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok 0#usize
++  | some xs =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.len xs)
++
++/-- [loop_shared_projection_release::sum_counted]: loop body 0:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 92:4-94:5
++    Visibility: public -/
++@[rust_loop_body]
++def sum_counted_loop.body
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done total)
++  | some stride =>
++    let total1 ← total + stride
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, total1))
++
++/-- [loop_shared_projection_release::sum_counted]: loop 0:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 92:4-94:5
++    Visibility: public -/
++@[rust_loop]
++def sum_counted_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, total1) =>
++       _root_.loop_shared_projection_release.sum_counted_loop.body iter1 total1
++      : ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, total)
++
++/-- [loop_shared_projection_release::sum_counted]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 86:0-96:1
++    Visibility: public -/
++def sum_counted
++  (strides : _root_.Option (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let o ← _root_.loop_shared_projection_release.as_ref strides
++  let n ← _root_.loop_shared_projection_release.count o
++  match strides with
++  | none => _root_.Aeneas.Std.Result.ok 0#u32
++  | some strides1 =>
++    let total ← lift (_root_.Aeneas.Std.UScalar.cast .U32 n)
++    let (model_state, _) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter strides1
++    _root_.loop_shared_projection_release.sum_counted_loop model_state total
++
++/-- [loop_shared_projection_release::weigh_checked::closure]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 100:37-100:58 -/
++@[reducible]
++def weigh_checked.closure := _root_.Aeneas.Std.Usize
++
++/-- [loop_shared_projection_release::weigh_checked::{core::ops::function::FnOnce<(&'_ (alloc::vec::Vec<&'_ (u32)>)), bool> for loop_shared_projection_release::weigh_checked::closure<0>}::call_once]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 100:37-100:58 -/
++def
++  weigh_checked.closure.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool.call_once
++  (c : _root_.loop_shared_projection_release.weigh_checked.closure)
++  (tupled_args : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len tupled_args
++  _root_.Aeneas.Std.Result.ok (i != c)
++
++/-- Trait implementation: [loop_shared_projection_release::weigh_checked::{core::ops::function::FnOnce<(&'_ (alloc::vec::Vec<&'_ (u32)>)), bool> for loop_shared_projection_release::weigh_checked::closure<0>}]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 100:37-100:58 -/
++@[reducible]
++def
++  weigh_checked.closure.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_shared_projection_release.weigh_checked.closure
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_shared_projection_release.weigh_checked.closure.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [loop_shared_projection_release::weigh_checked]: loop body 0:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 107:4-113:5
++    Visibility: public -/
++@[rust_loop_body]
++def weigh_checked_loop.body
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done total)
++  | some stride =>
++    let total1 ← if stride = 3#u32
++                 then total + 10#u32
++                 else total + stride
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, total1))
++
++/-- [loop_shared_projection_release::weigh_checked]: loop 0:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 107:4-113:5
++    Visibility: public -/
++@[rust_loop]
++def weigh_checked_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, total1) =>
++       _root_.loop_shared_projection_release.weigh_checked_loop.body iter1
++       total1 : ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, total)
++
++/-- [loop_shared_projection_release::weigh_checked]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 99:0-115:1
++    Visibility: public -/
++def weigh_checked
++  (strides : _root_.Option (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) (rank : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let o ← _root_.loop_shared_projection_release.as_ref strides
++  let b ←
++    _root_.loop_shared_projection_release.is_some_and
++      _root_.loop_shared_projection_release.weigh_checked.closure.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool
++      o rank
++  if b
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      1#u32)
++  else
++    match strides with
++    | none =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        0#u32)
++    | some strides1 =>
++      let (model_state, _) ←
++        _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter strides1
++      let total ←
++        _root_.loop_shared_projection_release.weigh_checked_loop model_state
++          0#u32
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        total)
++
++/-- [loop_shared_projection_release::conv::closure#3]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 147:31-147:42 -/
++@[reducible]
++def conv.closure_3 := _root_.Unit
++
++/-- [loop_shared_projection_release::conv::{core::ops::function::FnOnce<(i64), bool> for loop_shared_projection_release::conv::closure#3}::call_once]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 147:31-147:42 -/
++def conv.closure_3.Insts.CoreOpsFunctionFnOnceTupleI64Bool.call_once
++  (c : _root_.loop_shared_projection_release.conv.closure_3)
++  (tupled_args : _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.Result.ok (tupled_args > 100#i64)
++
++/-- Trait implementation: [loop_shared_projection_release::conv::{core::ops::function::FnOnce<(i64), bool> for loop_shared_projection_release::conv::closure#3}]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 147:31-147:42 -/
++@[reducible]
++def conv.closure_3.Insts.CoreOpsFunctionFnOnceTupleI64Bool :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_shared_projection_release.conv.closure_3 _root_.Aeneas.Std.I64
++  _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_shared_projection_release.conv.closure_3.Insts.CoreOpsFunctionFnOnceTupleI64Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [loop_shared_projection_release::conv::closure#2]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 144:52-144:67 -/
++@[reducible]
++def conv.closure_2 := _root_.Unit
++
++/-- [loop_shared_projection_release::conv::{core::ops::function::FnOnce<(i64), core::option::Option<i64>> for loop_shared_projection_release::conv::closure#2}::call_once]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 144:52-144:67 -/
++def conv.closure_2.Insts.CoreOpsFunctionFnOnceTupleI64OptionI64.call_once
++  (c : _root_.loop_shared_projection_release.conv.closure_2)
++  (tupled_args : _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.I64)
++  := do
++  let i ← tupled_args + 1#i64
++  _root_.Aeneas.Std.Result.ok (some i)
++
++/-- Trait implementation: [loop_shared_projection_release::conv::{core::ops::function::FnOnce<(i64), core::option::Option<i64>> for loop_shared_projection_release::conv::closure#2}]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 144:52-144:67 -/
++@[reducible]
++def conv.closure_2.Insts.CoreOpsFunctionFnOnceTupleI64OptionI64 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_shared_projection_release.conv.closure_2 _root_.Aeneas.Std.I64
++  (_root_.Option _root_.Aeneas.Std.I64) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_shared_projection_release.conv.closure_2.Insts.CoreOpsFunctionFnOnceTupleI64OptionI64.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [loop_shared_projection_release::conv::closure#1]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 127:41-127:62 -/
++@[reducible]
++def conv.closure_1 := _root_.Aeneas.Std.Usize
++
++/-- [loop_shared_projection_release::conv::{core::ops::function::FnOnce<(&'_ (alloc::vec::Vec<&'_ (u32)>)), bool> for loop_shared_projection_release::conv::closure#1<0>}::call_once]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 127:41-127:62 -/
++def
++  conv.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool.call_once
++  (c : _root_.loop_shared_projection_release.conv.closure_1)
++  (tupled_args : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len tupled_args
++  _root_.Aeneas.Std.Result.ok (i != c)
++
++/-- Trait implementation: [loop_shared_projection_release::conv::{core::ops::function::FnOnce<(&'_ (alloc::vec::Vec<&'_ (u32)>)), bool> for loop_shared_projection_release::conv::closure#1<0>}]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 127:41-127:62 -/
++@[reducible]
++def conv.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_shared_projection_release.conv.closure_1
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_shared_projection_release.conv.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [loop_shared_projection_release::conv::closure]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 126:37-126:58 -/
++@[reducible]
++def conv.closure := _root_.Aeneas.Std.Usize
++
++/-- [loop_shared_projection_release::conv::{core::ops::function::FnOnce<(&'_ (alloc::vec::Vec<&'_ (u32)>)), bool> for loop_shared_projection_release::conv::closure<0>}::call_once]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 126:37-126:58 -/
++def
++  conv.closure.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool.call_once
++  (c : _root_.loop_shared_projection_release.conv.closure)
++  (tupled_args : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len tupled_args
++  _root_.Aeneas.Std.Result.ok (i != c)
++
++/-- Trait implementation: [loop_shared_projection_release::conv::{core::ops::function::FnOnce<(&'_ (alloc::vec::Vec<&'_ (u32)>)), bool> for loop_shared_projection_release::conv::closure<0>}]
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 126:37-126:58 -/
++@[reducible]
++def conv.closure.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_shared_projection_release.conv.closure
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_shared_projection_release.conv.closure.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [loop_shared_projection_release::conv]: loop body 0:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 136:4-157:1
++    Visibility: public -/
++@[rust_loop_body]
++def conv_loop.body
++  (iter : _root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++  (_root_.Aeneas.Std.core.iter.adapters.zip.Zip
++  (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++  (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)))
++  (back : _root_.loop_shared_projection_release.Native →
++  _root_.loop_shared_projection_release.Record →
++  (_root_.loop_shared_projection_release.Native ×
++  _root_.loop_shared_projection_release.Record))
++  (n : _root_.loop_shared_projection_release.Native)
++  (r : _root_.loop_shared_projection_release.Record)
++  (result : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) (concrete : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++    (_root_.Aeneas.Std.core.iter.adapters.zip.Zip
++    (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++    (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32))) ×
++    (_root_.loop_shared_projection_release.Native →
++    _root_.loop_shared_projection_release.Record →
++    (_root_.loop_shared_projection_release.Native ×
++    _root_.loop_shared_projection_release.Record)) ×
++    _root_.loop_shared_projection_release.Native ×
++    _root_.loop_shared_projection_release.Record ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++    _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) × _root_.Bool)
++    ((_root_.Aeneas.Std.core.result.Result (_root_.Option
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++    _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))) _root_.Aeneas.Std.U32) ×
++    _root_.loop_shared_projection_release.Native ×
++    _root_.loop_shared_projection_release.Record ×
++    (_root_.loop_shared_projection_release.Native →
++    _root_.loop_shared_projection_release.Record →
++    (_root_.loop_shared_projection_release.Native ×
++    _root_.loop_shared_projection_release.Record))))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.adapters.enumerate.IteratorEnumerate.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.U32)) iter
++  match model_state with
++  | none =>
++    let (model_state2, _) ←
++      lift (_root_.Aeneas.Std.core.bool.then_some concrete result)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok model_state2, n, r, back))
++  | some p =>
++    let (axis, p1) := p
++    let (stride, pad) := p1
++    let pair ←
++      if pad = 7#u32
++      then _root_.Aeneas.Std.Result.ok none
++      else _root_.Aeneas.Std.Result.ok (some pad)
++    let (stride1, budget, extract_back) ←
++      _root_.loop_shared_projection_release.extract stride
++        { native := n, record := r }
++    let (budget1, low, back1) ←
++      match pair with
++      | none =>
++        _root_.Aeneas.Std.Result.ok (budget, none,
++          (fun b => back (extract_back b).native (extract_back b).record :
++          _root_.loop_shared_projection_release.Budget →
++          (_root_.loop_shared_projection_release.Native ×
++          _root_.loop_shared_projection_release.Record)))
++      | some p2 =>
++        do
++        let (low1, budget2, extract_back1) ←
++          _root_.loop_shared_projection_release.extract p2 budget
++        _root_.Aeneas.Std.Result.ok (budget2, low1,
++          (fun b => back (extract_back (extract_back1 b)).native
++             (extract_back (extract_back1 b)).record :
++          _root_.loop_shared_projection_release.Budget →
++          (_root_.loop_shared_projection_release.Native ×
++          _root_.loop_shared_projection_release.Record)))
++    let (budget2, high, back2) ←
++      match pair with
++      | none =>
++        _root_.Aeneas.Std.Result.ok (budget1, none,
++          (fun b =>
++             let n1 := b.native
++             let r1 := b.record
++             back1 { native := n1, record := r1 } :
++          _root_.loop_shared_projection_release.Budget →
++          (_root_.loop_shared_projection_release.Native ×
++          _root_.loop_shared_projection_release.Record)))
++      | some p2 =>
++        do
++        let (o, budget3, extract_back1) ←
++          _root_.loop_shared_projection_release.extract p2 budget1
++        let high1 ←
++          _root_.loop_shared_projection_release.and_then
++            _root_.loop_shared_projection_release.conv.closure_2.Insts.CoreOpsFunctionFnOnceTupleI64OptionI64
++            o ()
++        _root_.Aeneas.Std.Result.ok (budget3, high1,
++          (fun b => back1 (extract_back1 b) :
++          _root_.loop_shared_projection_release.Budget →
++          (_root_.loop_shared_projection_release.Native ×
++          _root_.loop_shared_projection_release.Record)))
++    let b ←
++      _root_.loop_shared_projection_release.is_some_and
++        _root_.loop_shared_projection_release.conv.closure_3.Insts.CoreOpsFunctionFnOnceTupleI64Bool
++        stride1 ()
++    if b
++    then
++      let i ← lift (_root_.Aeneas.Std.UScalar.cast .U32 axis)
++      let i1 ← 10#u32 + i
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err i1, budget2.native,
++        budget2.record, fun n1 r1 => back2 { native := n1, record := r1 }))
++    else
++      let (result1, concrete1) ←
++        match stride1 with
++        | none => _root_.Aeneas.Std.Result.ok (result, false)
++        | some stride2 =>
++          match low with
++          | none => _root_.Aeneas.Std.Result.ok (result, false)
++          | some low1 =>
++            match high with
++            | none => _root_.Aeneas.Std.Result.ok (result, false)
++            | some high1 =>
++              do
++              let result2 ←
++                _root_.Aeneas.Std.alloc.vec.Vec.push result (stride2, low1,
++                  high1)
++              _root_.Aeneas.Std.Result.ok (result2, concrete)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, fun n1 r1 => back2 { native := n1, record := r1 },
++        budget2.native, budget2.record, result1, concrete1))
++
++/-- [loop_shared_projection_release::conv]: loop 0:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 136:4-157:1
++    Visibility: public -/
++@[rust_loop]
++def conv_loop
++  (iter : _root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++  (_root_.Aeneas.Std.core.iter.adapters.zip.Zip
++  (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++  (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)))
++  (back : _root_.loop_shared_projection_release.Native →
++  _root_.loop_shared_projection_release.Record →
++  (_root_.loop_shared_projection_release.Native ×
++  _root_.loop_shared_projection_release.Record))
++  (n : _root_.loop_shared_projection_release.Native)
++  (r : _root_.loop_shared_projection_release.Record)
++  (result : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) (concrete : _root_.Bool) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++    _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))) _root_.Aeneas.Std.U32) ×
++    _root_.loop_shared_projection_release.Native ×
++    _root_.loop_shared_projection_release.Record ×
++    (_root_.loop_shared_projection_release.Native →
++    _root_.loop_shared_projection_release.Record →
++    (_root_.loop_shared_projection_release.Native ×
++    _root_.loop_shared_projection_release.Record)))
++  := do
++  loop
++    (fun (iter1, back1, n1, r1, result1, concrete1) =>
++       _root_.loop_shared_projection_release.conv_loop.body iter1 back1 n1 r1
++       result1 concrete1 :
++      ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++      (_root_.Aeneas.Std.core.iter.adapters.zip.Zip
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)))
++      × (_root_.loop_shared_projection_release.Native →
++      _root_.loop_shared_projection_release.Record →
++      (_root_.loop_shared_projection_release.Native ×
++      _root_.loop_shared_projection_release.Record)) ×
++      _root_.loop_shared_projection_release.Native ×
++      _root_.loop_shared_projection_release.Record ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++      _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) × _root_.Bool) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++      (_root_.Aeneas.Std.core.iter.adapters.zip.Zip
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)))
++      × (_root_.loop_shared_projection_release.Native →
++      _root_.loop_shared_projection_release.Record →
++      (_root_.loop_shared_projection_release.Native ×
++      _root_.loop_shared_projection_release.Record)) ×
++      _root_.loop_shared_projection_release.Native ×
++      _root_.loop_shared_projection_release.Record ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++      _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) × _root_.Bool)
++      ((_root_.Aeneas.Std.core.result.Result (_root_.Option
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++      _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))) _root_.Aeneas.Std.U32) ×
++      _root_.loop_shared_projection_release.Native ×
++      _root_.loop_shared_projection_release.Record ×
++      (_root_.loop_shared_projection_release.Native →
++      _root_.loop_shared_projection_release.Record →
++      (_root_.loop_shared_projection_release.Native ×
++      _root_.loop_shared_projection_release.Record)))))
++    (iter, back, n, r, result, concrete)
++
++/-- [loop_shared_projection_release::conv]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 118:0-157:1
++    Visibility: public -/
++def conv
++  (strides : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (padding : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (rank : _root_.Aeneas.Std.Usize)
++  (budget : _root_.loop_shared_projection_release.Budget) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++    _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))) _root_.Aeneas.Std.U32) ×
++    _root_.loop_shared_projection_release.Budget ×
++    (_root_.loop_shared_projection_release.Budget →
++    _root_.loop_shared_projection_release.Budget))
++  := do
++  let strides1 ← _root_.loop_shared_projection_release.elements strides
++  let padding1 ← _root_.loop_shared_projection_release.elements padding
++  let o ← _root_.loop_shared_projection_release.as_ref strides1
++  let b ←
++    _root_.loop_shared_projection_release.is_some_and
++      _root_.loop_shared_projection_release.conv.closure.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool
++      o rank
++  if b
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      1#u32, budget, fun budget1 => budget1)
++  else
++    let o1 ← _root_.loop_shared_projection_release.as_ref padding1
++    let b1 ←
++      _root_.loop_shared_projection_release.is_some_and
++        _root_.loop_shared_projection_release.conv.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedVecSharedU32Bool
++        o1 rank
++    if b1
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++        1#u32, budget, fun budget1 => budget1)
++    else
++      match strides1 with
++      | none =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          none, budget, fun budget1 => budget1)
++      | some strides2 =>
++        match padding1 with
++        | none =>
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++            none, budget, fun budget1 => budget1)
++        | some padding2 =>
++          let result :=
++            _root_.Aeneas.Std.alloc.vec.Vec.with_capacity
++              (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 ×
++              _root_.Aeneas.Std.I64) rank
++          let (model_state, _) ←
++            _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter strides2
++          let (model_state1, _, _) ←
++            _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++              (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++              _root_.Aeneas.Std.U32)
++              (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++              _root_.Aeneas.Std.U32) model_state padding2
++          let model_state2 ←
++            (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++              (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++              _root_.Aeneas.Std.U32)
++              (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++              _root_.Aeneas.Std.U32)).enumerate model_state1
++          let (r, n, r1, back) ←
++            _root_.loop_shared_projection_release.conv_loop model_state2
++              (fun n1 r2 => (n1, r2)) budget.native budget.record result true
++          let back1 :=
++            (fun budget1 =>
++               let (n1, r2) := back budget1.native budget1.record
++               { native := n1, record := r2 } :
++              _root_.loop_shared_projection_release.Budget →
++              _root_.loop_shared_projection_release.Budget)
++          _root_.Aeneas.Std.Result.ok (r, { native := n, record := r1 }, back1)
++
++/-- [loop_shared_projection_release::vec3]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 159:0-165:1 -/
++def vec3
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let v ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) a
++  let v1 ← _root_.Aeneas.Std.alloc.vec.Vec.push v b
++  _root_.Aeneas.Std.alloc.vec.Vec.push v1 c
++
++/-- [loop_shared_projection_release::drive_sum_counted]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 167:0-171:1
++    Visibility: public -/
++def drive_sum_counted
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (some1 : _root_.Bool) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let v ← _root_.loop_shared_projection_release.vec3 a b c
++  let xs ←
++    if some1
++    then _root_.loop_shared_projection_release.elements v
++    else _root_.Aeneas.Std.Result.ok none
++  _root_.loop_shared_projection_release.sum_counted xs
++
++/-- [loop_shared_projection_release::drive_weigh_checked]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 173:0-176:1
++    Visibility: public -/
++def drive_weigh_checked
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (rank : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let v ← _root_.loop_shared_projection_release.vec3 a b c
++  let o ← _root_.loop_shared_projection_release.elements v
++  _root_.loop_shared_projection_release.weigh_checked o rank
++
++/-- [loop_shared_projection_release::drive_conv]: loop body 0:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 198:12-201:13
++    Visibility: public -/
++@[rust_loop_body]
++def drive_conv_loop.body
++  (budget : _root_.loop_shared_projection_release.Budget)
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))
++  (back : _root_.loop_shared_projection_release.Budget →
++  (_root_.loop_shared_projection_release.Native ×
++  _root_.loop_shared_projection_release.Record)) (sum : _root_.Aeneas.Std.I64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.loop_shared_projection_release.Budget →
++    (_root_.loop_shared_projection_release.Native ×
++    _root_.loop_shared_projection_release.Record)) × _root_.Aeneas.Std.I64 ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.I64 ×
++    (_root_.loop_shared_projection_release.Native ×
++    _root_.loop_shared_projection_release.Record)))
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len xs
++  if i < i1
++  then
++    let (i2, i3, i4) ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 ×
++        _root_.Aeneas.Std.I64)) xs i
++    let i5 ← i2 + i3
++    let i6 ← i5 + i4
++    let sum1 ← sum + i6
++    let i7 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun b =>
++         let n := b.native
++         let r := b.record
++         back { native := n, record := r }, sum1, i7))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (sum, back
++      budget))
++
++/-- [loop_shared_projection_release::drive_conv]: loop 0:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 198:12-201:13
++    Visibility: public -/
++@[rust_loop]
++def drive_conv_loop
++  (back : _root_.loop_shared_projection_release.Budget →
++  (_root_.loop_shared_projection_release.Native ×
++  _root_.loop_shared_projection_release.Record))
++  (budget : _root_.loop_shared_projection_release.Budget)
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) (sum : _root_.Aeneas.Std.I64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.I64 ×
++    (_root_.loop_shared_projection_release.Native ×
++    _root_.loop_shared_projection_release.Record))
++  := do
++  loop
++    (fun (back1, sum1, i1) =>
++       _root_.loop_shared_projection_release.drive_conv_loop.body budget xs
++       back1 sum1 i1 : ((_root_.loop_shared_projection_release.Budget →
++      (_root_.loop_shared_projection_release.Native ×
++      _root_.loop_shared_projection_release.Record)) × _root_.Aeneas.Std.I64 ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.loop_shared_projection_release.Budget →
++      (_root_.loop_shared_projection_release.Native ×
++      _root_.loop_shared_projection_release.Record)) × _root_.Aeneas.Std.I64 ×
++      _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.I64 ×
++      (_root_.loop_shared_projection_release.Native ×
++      _root_.loop_shared_projection_release.Record))))
++    (back, sum, i)
++
++/-- [loop_shared_projection_release::drive_conv]:
++    Source: 'tests/src/loop-shared-projection-release.rs', lines 180:0-208:1
++    Visibility: public -/
++def drive_conv
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  (rank : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.I64))
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U32))
++  := do
++  let (i, i1, i2) := s
++  let strides ← _root_.loop_shared_projection_release.vec3 i i1 i2
++  let (i3, i4, i5) := p
++  let padding ← _root_.loop_shared_projection_release.vec3 i3 i4 i5
++  let (r, budget, conv_back) ←
++    _root_.loop_shared_projection_release.conv strides padding rank
++      { native := { depth := 0#u32 }, record := { first := none } }
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok o =>
++    match o with
++    | none =>
++      let b := conv_back budget
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        none, b.native.depth, b.record.first)
++    | some xs =>
++      let (sum, back) ←
++        _root_.loop_shared_projection_release.drive_conv_loop
++          (fun b => ((conv_back b).native, (conv_back b).record)) budget xs
++          0#i64 0#usize
++      let i6 := _root_.Aeneas.Std.alloc.vec.Vec.len xs
++      let (native, record1) := back
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        (some (i6, sum)), native.depth, record1.first)
++  | _root_.Aeneas.Std.core.result.Result.Err e =>
++    let b := conv_back budget
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err e,
++      b.native.depth, b.record.first)
++
++end loop_shared_projection_release
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index cabf35c..5e397c5 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -245,3 +245,7 @@ package «tests» {}
+ @[default_target] lean_lib LoopNestedSharedElements
+ @[default_target] lean_lib LoopSharedNestedView
+ @[default_target] lean_lib LoopVisitorNestedSink
++@[default_target] lean_lib JoinSharedLoanErasedRegions
++@[default_target] lean_lib LoopNestedMutElementsSink
++@[default_target] lean_lib LoopSharedProjectionRelease
++@[default_target] lean_lib JoinSharedBorrowsOneLoan
+diff --git a/tests/src/join-shared-borrows-one-loan.rs b/tests/src/join-shared-borrows-one-loan.rs
+new file mode 100644
+index 0000000..80b2bd9
+--- /dev/null
++++ b/tests/src/join-shared-borrows-one-loan.rs
+@@ -0,0 +1,212 @@
++//@ [!lean] skip
++//@ [lean] subdir=JoinSharedBorrowsOneLoan
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Joins of two contexts in which two region abstractions hold distinct shared
++//! borrows of the same loan: the results of `get_meta(list)` and
++//! `children(list)`, both borrowed from `list`, live across a `match` on a
++//! string (the shape of `chelis_types::infer::expr::infer_lit`). The collapse
++//! of the join pairs each abstraction of one branch with the abstraction of
++//! the other branch which holds the same elements; pairing by the loan alone
++//! merged the two owners, and the joined context did not match.
++//! `Option` combinators are local copies of the ones of `core` (same
++//! signatures), which the Lean library does not model.
++
++pub enum Atom {
++    Int(i64),
++    Sym(String),
++}
++
++pub enum Expr {
++    Atom(Atom, u32),
++    Node(u32, Vec<Expr>),
++}
++
++pub struct Meta {
++    pub ty: Option<Expr>,
++}
++
++pub struct List {
++    pub meta: Option<Meta>,
++    pub kids: Vec<Expr>,
++}
++
++fn as_ref<T>(o: &Option<T>) -> Option<&T> {
++    match o {
++        Some(x) => Some(x),
++        None => None,
++    }
++}
++
++fn and_then<T, U, F: FnOnce(T) -> Option<U>>(o: Option<T>, f: F) -> Option<U> {
++    match o {
++        Some(x) => f(x),
++        None => None,
++    }
++}
++
++fn first<T>(xs: &[T]) -> Option<&T> {
++    if xs.is_empty() { None } else { Some(&xs[0]) }
++}
++
++fn get_meta(l: &List) -> Option<&Meta> {
++    as_ref(&l.meta)
++}
++
++fn children(l: &List) -> &[Expr] {
++    &l.kids
++}
++
++fn parts(e: &Expr) -> Option<(u32, &[Expr])> {
++    match e {
++        Expr::Node(t, k) => Some((*t, k)),
++        Expr::Atom(..) => None,
++    }
++}
++
++fn symbol_name(e: &Expr) -> Option<&str> {
++    match e {
++        Expr::Atom(Atom::Sym(s), _) => Some(s),
++        _ => None,
++    }
++}
++
++/// The width of the type of an out-of-range literal, or a code for the
++/// literal and its annotation.
++pub fn lit(list: &List) -> u32 {
++    let meta = get_meta(list);
++    let kids = children(list);
++    let value_atom = first(kids);
++    let meta_prim_name = and_then(and_then(meta, |m| as_ref(&m.ty)), |ty| match parts(ty) {
++        Some((3, prim_kids)) => and_then(first(prim_kids), symbol_name),
++        _ => None,
++    });
++    if let Some(prim_name) = meta_prim_name {
++        if let Some(Expr::Atom(Atom::Int(n), _)) = value_atom {
++            let range_check = match prim_name {
++                "i8" => Some(("i8", -128i64, 127i64)),
++                "i16" => Some(("i16", -32768, 32767)),
++                "i32" => Some(("i32", -2147483648, 2147483647)),
++                _ => None,
++            };
++            if let Some((dtype, lo, hi)) = range_check {
++                if *n < lo || *n > hi {
++                    return dtype.len() as u32;
++                }
++            }
++        }
++    }
++    let has_ty = match meta {
++        Some(m) => as_ref(&m.ty).is_some(),
++        None => false,
++    };
++    let atom = match value_atom {
++        Some(Expr::Atom(Atom::Int(_), _)) => 1,
++        Some(_) => 2,
++        None => 3,
++    };
++    if has_ty { atom + 10 } else { atom }
++}
++
++/// The same, counting the diagnostics in a sink given back to the caller.
++pub fn lit_counted(list: &List, errors: &mut Vec<u32>) -> u32 {
++    let meta = get_meta(list);
++    let kids = children(list);
++    let value_atom = first(kids);
++    let meta_prim_name = and_then(and_then(meta, |m| as_ref(&m.ty)), |ty| match parts(ty) {
++        Some((3, prim_kids)) => and_then(first(prim_kids), symbol_name),
++        _ => None,
++    });
++    if let Some(prim_name) = meta_prim_name {
++        if let Some(Expr::Atom(Atom::Int(n), _)) = value_atom {
++            let range_check = match prim_name {
++                "i8" => Some(("i8", -128i64, 127i64)),
++                "i16" => Some(("i16", -32768, 32767)),
++                "i32" => Some(("i32", -2147483648, 2147483647)),
++                _ => None,
++            };
++            if let Some((dtype, lo, hi)) = range_check {
++                if *n < lo || *n > hi {
++                    errors.push(dtype.len() as u32);
++                    return 0;
++                }
++            }
++        }
++    }
++    let atom = match value_atom {
++        Some(Expr::Atom(Atom::Int(_), _)) => 1,
++        Some(_) => 2,
++        None => 3,
++    };
++    if let Some(m) = meta {
++        if as_ref(&m.ty).is_none() {
++            errors.push(100 + atom);
++        }
++    }
++    atom
++}
++
++/// The literal of code [code]: an integer (5, 200, 40000, 3000000000 or
++/// -200), or a symbol for the other codes.
++fn list_of(prim: u32, code: u32) -> List {
++    let name = match prim {
++        0 => "i8",
++        1 => "i16",
++        2 => "i32",
++        _ => "f32",
++    };
++    let mut prim_kids = Vec::new();
++    prim_kids.push(Expr::Atom(Atom::Sym(String::from(name)), 0));
++    let ty = if prim == 5 { None } else { Some(Expr::Node(3, prim_kids)) };
++    let value = match code {
++        0 => Some(5i64),
++        1 => Some(200),
++        2 => Some(40000),
++        3 => Some(3000000000),
++        4 => Some(-200),
++        _ => None,
++    };
++    let mut kids = Vec::new();
++    match value {
++        Some(v) => kids.push(Expr::Atom(Atom::Int(v), 1)),
++        None => kids.push(Expr::Atom(Atom::Sym(String::from("x")), 1)),
++    }
++    let meta = if prim == 6 { None } else { Some(Meta { ty }) };
++    List { meta, kids }
++}
++
++pub fn drive_lit(prim: u32, code: u32) -> u32 {
++    lit(&list_of(prim, code))
++}
++
++/// The result, then the diagnostics given back through the sink after the
++/// caller pushed onto it: their number and sum.
++pub fn drive_lit_counted(prim: u32, code: u32) -> (u32, usize, u32) {
++    let list = list_of(prim, code);
++    let mut errors = Vec::new();
++    errors.push(7);
++    let r = lit_counted(&list, &mut errors);
++    errors.push(1);
++    let mut sum = 0;
++    let mut i = 0;
++    while i < errors.len() {
++        sum += errors[i];
++        i += 1;
++    }
++    (r, errors.len(), sum)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for prim in [0u32, 1, 2, 3, 5, 6] {
++            for code in [0u32, 1, 2, 3, 4, 5] {
++                println!("lit {} {} {}", prim, code, drive_lit(prim, code));
++                println!("lit_counted {} {} {:?}", prim, code, drive_lit_counted(prim, code));
++            }
++        }
++    }
++}
+diff --git a/tests/src/join-shared-loan-erased-regions.rs b/tests/src/join-shared-loan-erased-regions.rs
+new file mode 100644
+index 0000000..0f85cad
+--- /dev/null
++++ b/tests/src/join-shared-loan-erased-regions.rs
+@@ -0,0 +1,154 @@
++//@ [!lean] skip
++//@ [lean] subdir=JoinSharedLoanErasedRegions
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Joins of a shared loan whose payload holds no borrows while its type does:
++//! the promoted `&[]` of type `&[View<'a>; 0]` borrowed in one branch of a
++//! loop body (the shape of `chelis_deep::metadata::walk`, which calls
++//! `check_entries(&meta, None, &[], Some(context))?` in some branches), and a
++//! local `[View<'a>; 1]` holding only a number, borrowed in one or both
++//! branches of an `if`. The fresh abstraction of the join borrows a value of
++//! type `[View<'_>; N]`, whose erased regions need witnesses.
++
++#[derive(Clone, Copy)]
++pub enum View<'a> {
++    Name(&'a str),
++    Num(u32),
++}
++
++fn weight(v: View<'_>) -> usize {
++    match v {
++        View::Name(s) => s.len(),
++        View::Num(k) => k as usize,
++    }
++}
++
++fn weigh(entries: &[View<'_>], extra: usize) -> usize {
++    let mut total = extra;
++    let mut i = 0;
++    while i < entries.len() {
++        total += weight(entries[i]);
++        i += 1;
++    }
++    total
++}
++
++fn check(entries: &[View<'_>], extra: usize, limit: usize) -> Result<usize, usize> {
++    let w = weigh(entries, extra);
++    if w > limit { Err(w) } else { Ok(w) }
++}
++
++/// An owned stack: `&[]` in two branches, one of which pushes.
++pub fn walk(mut stack: Vec<View<'_>>) -> usize {
++    let mut n = 0;
++    while let Some(v) = stack.pop() {
++        match v {
++            View::Name(s) => n += weigh(&[], s.len()),
++            View::Num(k) if k > 10 => {
++                n += weigh(&[], 1);
++                stack.push(View::Num(k / 2));
++            }
++            View::Num(k) => n += k as usize,
++        }
++    }
++    n
++}
++
++/// A borrowed stack, given back to the caller: `&[]` in one branch, a local
++/// array holding a number in another.
++pub fn walk_mut(stack: &mut Vec<View<'_>>, budget: usize) -> usize {
++    let mut n = 0;
++    let mut steps = 0;
++    while steps < budget {
++        let Some(v) = stack.pop() else { break };
++        steps += 1;
++        match v {
++            View::Name(s) => n += weigh(&[], s.len()),
++            View::Num(k) if k > 10 => {
++                n += weigh(&[View::Num(k % 7)], 0);
++                stack.push(View::Num(k / 2));
++            }
++            View::Num(k) => n += k as usize,
++        }
++    }
++    n
++}
++
++/// The `?` of `check_entries(.., &[], ..)?` in `walk`.
++pub fn walk_checked(mut stack: Vec<View<'_>>, limit: usize) -> Result<usize, usize> {
++    let mut n = 0;
++    while let Some(v) = stack.pop() {
++        match v {
++            View::Name(s) => n += check(&[], s.len(), limit)?,
++            View::Num(k) => n += k as usize,
++        }
++    }
++    Ok(n)
++}
++
++/// Not a loop: the promoted `&[]` joined with a borrowed local array.
++pub fn pick<'a>(b: bool, k: u32) -> usize {
++    let e: &[View<'a>] = if b { &[] } else { &[View::Num(k)] };
++    weigh(e, 3)
++}
++
++/// Not a loop: two distinct loans of the same local array.
++pub fn both<'a>(b: bool, k: u32) -> usize {
++    let a: [View<'a>; 1];
++    let e: &[View<'a>];
++    if b {
++        a = [View::Num(k)];
++        e = &a;
++    } else {
++        a = [View::Num(k + 1)];
++        e = &a;
++    }
++    weigh(e, 0)
++}
++
++fn stack_of<'a>(name: &'a str, a: u32, b: u32) -> Vec<View<'a>> {
++    let mut stack = Vec::new();
++    stack.push(View::Num(a));
++    stack.push(View::Name(name));
++    stack.push(View::Num(b));
++    stack
++}
++
++pub fn drive_walk(name: &str, a: u32, b: u32) -> usize {
++    walk(stack_of(name, a, b))
++}
++
++/// The count, then the stack given back by `walk_mut` after the caller pushed
++/// onto it: its length and weight.
++pub fn drive_walk_mut(name: &str, a: u32, b: u32, budget: usize) -> (usize, usize, usize) {
++    let mut stack = stack_of(name, a, b);
++    let n = walk_mut(&mut stack, budget);
++    stack.push(View::Num(100));
++    (n, stack.len(), weigh(&stack, 0))
++}
++
++pub fn drive_walk_checked(name: &str, a: u32, b: u32, limit: usize) -> Result<usize, usize> {
++    walk_checked(stack_of(name, a, b), limit)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for (name, a, b) in [("abc", 3u32, 4u32), ("", 25, 11), ("xy", 0, 40)] {
++            println!("walk {:?} {} {} {}", name, a, b, drive_walk(name, a, b));
++            for budget in [0usize, 2, 9] {
++                println!("walk_mut {:?} {} {} {} {:?}", name, a, b, budget, drive_walk_mut(name, a, b, budget));
++            }
++            for limit in [1usize, 5] {
++                println!("walk_checked {:?} {} {} {} {:?}", name, a, b, limit, drive_walk_checked(name, a, b, limit));
++            }
++        }
++        for (b, k) in [(true, 5u32), (false, 5), (false, 0)] {
++            println!("pick {} {} {}", b, k, pick(b, k));
++            println!("both {} {} {}", b, k, both(b, k));
++        }
++    }
++}
+diff --git a/tests/src/loop-nested-mut-elements-sink.rs b/tests/src/loop-nested-mut-elements-sink.rs
+new file mode 100644
+index 0000000..9d1eaed
+--- /dev/null
++++ b/tests/src/loop-nested-mut-elements-sink.rs
+@@ -0,0 +1,92 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopNestedMutElementsSink
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A loop over `xs.iter_mut()` storing the element borrows `&'a mut u32` into
++//! a slot behind `&mut Sink<'_, 'a>` (a mutable borrow of a struct holding a
++//! mutable borrow of a struct holding borrows of region `'a`): the loop
++//! abstraction of `'a` has pending loans, and its continuation applies the
++//! call to `iter_mut` before the loop, whose backward function is not staged
++//! (the shape of `chelis_deep`'s `Metadata::visit_syntax` instantiated in
++//! `chelis_types`, annotations_transform.rs:284). The caller writes through
++//! the stored borrow after the call, then through the slot it owns.
++
++pub struct Slot<'a> {
++    pub last: Option<&'a mut u32>,
++    pub count: u32,
++}
++
++pub struct Sink<'b, 'a> {
++    pub slot: &'b mut Slot<'a>,
++}
++
++pub fn push<'b, 'a>(s: &mut Sink<'b, 'a>, e: &'a mut u32) {
++    s.slot.last = Some(e);
++    s.slot.count += 1;
++}
++
++pub fn visit<'a>(xs: &'a mut [u32], s: &mut Sink<'_, 'a>) {
++    for e in xs.iter_mut() {
++        push(s, e);
++    }
++}
++
++/// Only the even elements, after adding 1 to the others.
++pub fn visit_even<'a>(xs: &'a mut [u32], s: &mut Sink<'_, 'a>) {
++    for e in xs.iter_mut() {
++        if *e % 2 == 0 {
++            push(s, e);
++        } else {
++            *e += 1;
++        }
++    }
++}
++
++pub fn bump(s: &mut Sink<'_, '_>, k: u32) {
++    if let Some(last) = &mut s.slot.last {
++        **last += k;
++    }
++}
++
++pub fn double(slot: Slot<'_>) {
++    if let Some(last) = slot.last {
++        *last *= 2;
++    }
++}
++
++/// The slice given back after the caller wrote through the stored borrow,
++/// first through the sink, then through the slot.
++pub fn drive(a: u32, b: u32, c: u32, k: u32) -> (u32, u32, u32, u32) {
++    let mut xs = [a, b, c];
++    let mut slot = Slot { last: None, count: 0 };
++    let mut s = Sink { slot: &mut slot };
++    visit(&mut xs, &mut s);
++    bump(&mut s, k);
++    let n = slot.count;
++    double(slot);
++    (xs[0], xs[1], xs[2], n)
++}
++
++pub fn drive_even(a: u32, b: u32, c: u32, k: u32) -> (u32, u32, u32, u32) {
++    let mut xs = [a, b, c];
++    let mut slot = Slot { last: None, count: 10 };
++    let mut s = Sink { slot: &mut slot };
++    visit_even(&mut xs, &mut s);
++    bump(&mut s, k);
++    let n = slot.count;
++    double(slot);
++    (xs[0], xs[1], xs[2], n)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for (a, b, c, k) in [(1u32, 2u32, 3u32, 10u32), (4, 6, 8, 0), (5, 7, 9, 3), (2, 3, 5, 1)] {
++            println!("drive {} {} {} {} {:?}", a, b, c, k, drive(a, b, c, k));
++            println!("drive_even {} {} {} {} {:?}", a, b, c, k, drive_even(a, b, c, k));
++        }
++    }
++}
+diff --git a/tests/src/loop-shared-projection-release.rs b/tests/src/loop-shared-projection-release.rs
+new file mode 100644
+index 0000000..f8b7982
+--- /dev/null
++++ b/tests/src/loop-shared-projection-release.rs
+@@ -0,0 +1,234 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopSharedProjectionRelease
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Loops after a call which reborrows, through a shared borrow of a local
++//! `Option<Vec<&'a T>>`, the borrows `&'a T` inside it (`Option::as_ref`, whose
++//! result is consumed by a closure or a function), before the vector itself is
++//! moved into the iterator of the loop (the shape of
++//! `chelis_types::infer::app_tensor::conv_parameters`). Merging the region
++//! abstractions of the two calls leaves an abstraction holding only shared
++//! reborrows of the elements, whose lender is merged into the abstraction of
++//! the iterator: the loop fixed point and the match of the loop entry with it
++//! must release it. The `Option` combinators are local copies of the ones of
++//! `core` (same signatures), which the Lean library does not model.
++
++pub struct Native {
++    pub depth: u32,
++}
++
++pub struct Record {
++    pub first: Option<u32>,
++}
++
++/// Borrowed budget over two pieces of caller state (`StackBudget`).
++pub struct Budget<'a> {
++    native: &'a mut Native,
++    record: &'a mut Record,
++}
++
++fn extract(e: &u32, budget: &mut Budget<'_>) -> Option<i64> {
++    budget.native.depth += 1;
++    if *e == 0 {
++        if budget.record.first.is_none() {
++            budget.record.first = Some(budget.native.depth);
++        }
++        None
++    } else {
++        Some(*e as i64)
++    }
++}
++
++fn as_ref<T>(o: &Option<T>) -> Option<&T> {
++    match o {
++        Some(x) => Some(x),
++        None => None,
++    }
++}
++
++fn is_some_and<T, F: FnOnce(T) -> bool>(o: Option<T>, f: F) -> bool {
++    match o {
++        Some(x) => f(x),
++        None => false,
++    }
++}
++
++fn and_then<T, U, F: FnOnce(T) -> Option<U>>(o: Option<T>, f: F) -> Option<U> {
++    match o {
++        Some(x) => f(x),
++        None => None,
++    }
++}
++
++fn elements(e: &Vec<u32>) -> Option<Vec<&u32>> {
++    if e.is_empty() {
++        None
++    } else {
++        let mut out = Vec::new();
++        let mut i = 0;
++        while i < e.len() {
++            out.push(&e[i]);
++            i += 1;
++        }
++        Some(out)
++    }
++}
++
++fn count(o: Option<&Vec<&u32>>) -> usize {
++    match o {
++        Some(xs) => xs.len(),
++        None => 0,
++    }
++}
++
++/// The vector is consumed by the loop; its length was read through
++/// `as_ref` and a function.
++pub fn sum_counted(strides: Option<Vec<&u32>>) -> u32 {
++    let n = count(as_ref(&strides));
++    let Some(strides) = strides else {
++        return 0;
++    };
++    let mut total = n as u32;
++    for stride in strides.into_iter() {
++        total += *stride;
++    }
++    total
++}
++
++/// `as_ref` consumed by `is_some_and`, and a join in the loop body.
++pub fn weigh_checked(strides: Option<Vec<&u32>>, rank: usize) -> Result<u32, u32> {
++    if is_some_and(as_ref(&strides), |xs| xs.len() != rank) {
++        return Err(1);
++    }
++    let Some(strides) = strides else {
++        return Ok(0);
++    };
++    let mut total = 0;
++    for stride in strides.into_iter() {
++        if *stride == 3 {
++            total += 10;
++        } else {
++            total += *stride;
++        }
++    }
++    Ok(total)
++}
++
++/// `conv_parameters`: the budget is given back to the caller.
++pub fn conv(
++    strides: &Vec<u32>,
++    padding: &Vec<u32>,
++    rank: usize,
++    budget: &mut Budget<'_>,
++) -> Result<Option<Vec<(i64, i64, i64)>>, u32> {
++    let strides = elements(strides);
++    let padding = elements(padding);
++    if is_some_and(as_ref(&strides), |xs| xs.len() != rank)
++        || is_some_and(as_ref(&padding), |xs| xs.len() != rank)
++    {
++        return Err(1);
++    }
++    let (Some(strides), Some(padding)) = (strides, padding) else {
++        return Ok(None);
++    };
++    let mut result = Vec::with_capacity(rank);
++    let mut concrete = true;
++    for (axis, (stride, pad)) in strides.into_iter().zip(padding).enumerate() {
++        let pair = if *pad == 7 { None } else { Some(pad) };
++        let stride = extract(stride, budget);
++        let low = match pair {
++            Some(p) => extract(p, budget),
++            None => None,
++        };
++        let high = match pair {
++            Some(p) => and_then(extract(p, budget), |v| Some(v + 1)),
++            None => None,
++        };
++        if is_some_and(stride, |s| s > 100) {
++            return Err(10 + axis as u32);
++        }
++        if let (Some(stride), Some(low), Some(high)) = (stride, low, high) {
++            result.push((stride, low, high));
++        } else {
++            concrete = false;
++        }
++    }
++    Ok(concrete.then_some(result))
++}
++
++fn vec3(a: u32, b: u32, c: u32) -> Vec<u32> {
++    let mut v = Vec::new();
++    v.push(a);
++    v.push(b);
++    v.push(c);
++    v
++}
++
++pub fn drive_sum_counted(a: u32, b: u32, c: u32, some: bool) -> u32 {
++    let v = vec3(a, b, c);
++    let xs = if some { elements(&v) } else { None };
++    sum_counted(xs)
++}
++
++pub fn drive_weigh_checked(a: u32, b: u32, c: u32, rank: usize) -> Result<u32, u32> {
++    let v = vec3(a, b, c);
++    weigh_checked(elements(&v), rank)
++}
++
++/// The result (its length and the sum of its components, or `None`, or the
++/// error), then the state given back through the budget.
++pub fn drive_conv(
++    s: (u32, u32, u32),
++    p: (u32, u32, u32),
++    rank: usize,
++) -> (Result<Option<(usize, i64)>, u32>, u32, Option<u32>) {
++    let strides = vec3(s.0, s.1, s.2);
++    let padding = vec3(p.0, p.1, p.2);
++    let mut native = Native { depth: 0 };
++    let mut record = Record { first: None };
++    let mut budget = Budget {
++        native: &mut native,
++        record: &mut record,
++    };
++    let r = conv(&strides, &padding, rank, &mut budget);
++    let r = match r {
++        Ok(Some(xs)) => {
++            let mut sum = 0;
++            let mut i = 0;
++            while i < xs.len() {
++                sum += xs[i].0 + xs[i].1 + xs[i].2;
++                i += 1;
++            }
++            Ok(Some((xs.len(), sum)))
++        }
++        Ok(None) => Ok(None),
++        Err(e) => Err(e),
++    };
++    (r, native.depth, record.first)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for (a, b, c) in [(1u32, 2u32, 3u32), (0, 5, 3), (4, 4, 4)] {
++            for some in [true, false] {
++                println!("sum_counted {} {} {} {} {}", a, b, c, some, drive_sum_counted(a, b, c, some));
++            }
++            for rank in [2usize, 3] {
++                println!("weigh_checked {} {} {} {} {:?}", a, b, c, rank, drive_weigh_checked(a, b, c, rank));
++            }
++        }
++        for (s, p, rank) in [
++            ((1u32, 2u32, 3u32), (4u32, 5u32, 6u32), 3usize),
++            ((1, 0, 3), (4, 5, 6), 3),
++            ((1, 2, 3), (4, 7, 0), 3),
++            ((1, 200, 3), (4, 5, 6), 3),
++            ((1, 2, 3), (4, 5, 6), 2),
++        ] {
++            println!("conv {:?} {:?} {} {:?}", s, p, rank, drive_conv(s, p, rank));
++        }
++    }
++}

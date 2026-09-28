@@ -1,0 +1,1675 @@
+# aeneas integration step 151 after cba11f3beb: commit 786f970596001ec939b193b0bcf5f84118b38e6b
+# first parent 081989c9a1d3bb61fc6411ddff8817b337d28e70, merged 4bfd9da0d42431cd7a6b3eac361099bb9d3215c0
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (array patterns move elements out of an owned array through shared indexings; shared levels of other region groups' return abstractions)
+
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 67f55c4..37548db 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -3364,6 +3364,176 @@ let read_raw_pointer_metadata (_crate : crate) (f : fun_decl) : fun_decl =
+       { f with body = StructuredBody { body with body = b } }
+   | _ -> f
+ 
++(** Move array elements out through shared indexings.
++
++    Rust moves an element out of an owned array only by a constant index (array
++    patterns: [let [a, b] = arr]). Charon lowers the move to
++    [b = &mut arr; r = @ArrayIndexMut(move b, k); x = move ( *r).path]: a move
++    behind a mutable borrow, which the interpreter cannot evaluate (ending the
++    borrow would give back an array holding a moved element). The borrow
++    checker forbids any later read of the moved element: the array is only
++    accessed at its other constant indices, dropped or reassigned as a whole.
++    So the move may leave the element in the array: it reads the element
++    through a shared indexing [b = &arr; r = @ArrayIndexShared(move b, k)],
++    which [share_repeated_shared_indexing] then identifies with the shared
++    indexings of the same element that tested its variants (refutable
++    patterns), and the interpreter evaluates [move ( *r).path] as a read of a
++    value without borrows (see
++    [InterpExpressions.place_moves_through_shared_borrow]).
++
++    Applies to adjacent statements when [b] and [r] have no other use. *)
++let shared_indexing_for_array_moves (_crate : crate) (f : fun_decl) : fun_decl =
++  match f.body with
++  | StructuredBody body ->
++      let counts = ref LocalId.Map.empty in
++      let occurrences =
++        object
++          inherit [_] iter_statement as super
++
++          method! visit_place () p =
++            match p.kind with
++            | PlaceLocal id ->
++                counts :=
++                  LocalId.Map.update id
++                    (fun n -> Some (1 + Option.value n ~default:0))
++                    !counts
++            | _ -> super#visit_place () p
++        end
++      in
++      occurrences#visit_block () body.body;
++      let used_twice id = LocalId.Map.find_opt id !counts = Some 2 in
++      let rec moved_through_deref id (p : place) =
++        match p.kind with
++        | PlaceProjection ({ kind = PlaceLocal root; _ }, Deref) -> root = id
++        | PlaceProjection (p, _) -> moved_through_deref id p
++        | _ -> false
++      in
++      (* Skip the storage markers between the statements *)
++      let rec split lives = function
++        | ({ kind = StorageLive _; _ } as st) :: rest -> split (st :: lives) rest
++        | st :: rest -> Some (List.rev lives, st, rest)
++        | [] -> None
++      in
++      let converted = ref LocalId.Set.empty in
++      let rec rewrite (sts : statement list) : statement list =
++        match sts with
++        | ({ kind = Assign (({ kind = PlaceLocal b; _ } as bp), RvRef (arr, (BMut | BTwoPhaseMut), meta)); _ } as st0)
++          :: rest -> (
++            match split [] rest with
++            | Some
++                ( lives0,
++                  ({
++                     kind =
++                       Call
++                         ({
++                            func =
++                              FnOpRegular
++                                ({
++                                   kind =
++                                     FunId
++                                       (FBuiltin
++                                          (Index
++                                             {
++                                               is_array = true;
++                                               mutability = RMut;
++                                               is_range = false;
++                                             }));
++                                   _;
++                                 } as fn_ptr);
++                            args = [ Move { kind = PlaceLocal b'; _ }; idx ];
++                            dest = { kind = PlaceLocal r; _ } as rp;
++                          });
++                     _;
++                   } as st1),
++                  rest' )
++              when b = b' && used_twice b && used_twice r -> (
++                match split [] rest' with
++                | Some
++                    ( lives1,
++                      ({ kind = Assign (_, Use (Move p)); _ } as st2),
++                      rest'' )
++                  when moved_through_deref r p ->
++                    converted := LocalId.Set.add b (LocalId.Set.add r !converted);
++                    let st0 = { st0 with kind = Assign (bp, RvRef (arr, BShared, meta)) } in
++                    let fn_ptr =
++                      {
++                        fn_ptr with
++                        kind =
++                          FunId
++                            (FBuiltin
++                               (Index
++                                  {
++                                    is_array = true;
++                                    mutability = RShared;
++                                    is_range = false;
++                                  }));
++                      }
++                    in
++                    let st1 =
++                      {
++                        st1 with
++                        kind =
++                          Call
++                            {
++                              func = FnOpRegular fn_ptr;
++                              args = [ Move bp; idx ];
++                              dest = rp;
++                            };
++                      }
++                    in
++                    (st0 :: lives0) @ (st1 :: lives1) @ (st2 :: rewrite rest'')
++                | _ -> st0 :: rewrite rest)
++            | _ -> st0 :: rewrite rest)
++        | st :: rest -> st :: rewrite rest
++        | [] -> []
++      in
++      let rewrite_blocks =
++        object
++          inherit [_] map_statement as super
++
++          method! visit_block env b =
++            let b = super#visit_block env b in
++            { b with statements = rewrite b.statements }
++        end
++      in
++      let body_body = rewrite_blocks#visit_block () body.body in
++      if LocalId.Set.is_empty !converted then f
++      else
++        (* The borrow and the result become shared references *)
++        let shared (ty : ty) : ty =
++          match ty with
++          | TRef (r, ty, RMut) -> TRef (r, ty, RShared)
++          | _ -> ty
++        in
++        let retype =
++          object
++            inherit [_] map_statement as super
++
++            method! visit_place env p =
++              match p.kind with
++              | PlaceLocal id when LocalId.Set.mem id !converted ->
++                  { p with ty = shared p.ty }
++              | _ -> super#visit_place env p
++          end
++        in
++        let locals =
++          List.map
++            (fun (local : local) ->
++              if LocalId.Set.mem local.index !converted then
++                { local with local_ty = shared local.local_ty }
++              else local)
++            body.locals.locals
++        in
++        let body =
++          {
++            body with
++            body = retype#visit_block () body_body;
++            locals = { body.locals with locals };
++          }
++        in
++        { f with body = StructuredBody body }
++  | _ -> f
++
+ (** Share repeated shared indexings of an unchanged place.
+ 
+     A slice pattern such as [[A(B(x)), C(y), rest @ ..]] tests the variant of
+@@ -4303,6 +4473,7 @@ let apply_passes (crate : crate) : crate =
+       ("expand_char_switches", expand_char_switches);
+       ("update_loop", update_loops);
+       ("read_raw_pointer_metadata", read_raw_pointer_metadata);
++      ("shared_indexing_for_array_moves", shared_indexing_for_array_moves);
+       ("share_repeated_shared_indexing", share_repeated_shared_indexing);
+       ("remove_useless_joins", remove_useless_joins);
+       ("recover_last_use_moves", recover_last_use_moves);
+diff --git a/src/interp/InterpExpressions.ml b/src/interp/InterpExpressions.ml
+index 54d7f77..ba24c59 100644
+--- a/src/interp/InterpExpressions.ml
++++ b/src/interp/InterpExpressions.ml
+@@ -365,6 +365,26 @@ let rec copy_value (span : Meta.span) (allow_adt_copy : bool) (config : config)
+           cf )
+       end
+ 
++(** Rust rejects moving out of a place behind a reference. The pre-pass
++    [PrePasses.shared_indexing_for_array_moves] produces such a move for one
++    construct: moving an element out of an owned array by a constant index
++    (array patterns: [let [a, b] = arr]), as [move ( *@ArrayIndexShared(&arr,
++    k)).path]. The borrow checker forbids any later read of the moved element
++    (the array is only accessed at its other constant indices, dropped or
++    reassigned as a whole), so the move reads the element and leaves it in
++    place. This duplicates the value: it must hold neither borrows nor loans. *)
++let place_moves_through_shared_borrow (p : place) : bool =
++  let rec aux (p : place) =
++    match p.kind with
++    | PlaceLocal _ | PlaceGlobal _ -> false
++    | PlaceProjection (p', Deref) -> (
++        match p'.ty with
++        | TRef (_, _, RShared) -> true
++        | _ -> aux p')
++    | PlaceProjection (p', _) -> aux p'
++  in
++  aux p
++
+ (** Reorganize the environment in preparation for the evaluation of an operand.
+ 
+     Evaluating an operand requires reorganizing the environment to get access to
+@@ -421,6 +441,13 @@ let prepare_eval_operand_reorganize (config : config) (span : Meta.span)
+       (* Expand the symbolic values, if necessary *)
+       let greedy_expand = true in
+       access_rplace_reorganize config span greedy_expand access p ctx
++  | Move p when place_moves_through_shared_borrow p ->
++      [%cassert] span
++        (not (ty_has_borrows (Some span) ctx.type_ctx.type_infos p.ty))
++        ("Moving an element out of an array by a constant index is supported \
++          only for elements whose type contains no borrows: "
++        ^ ty_to_string ctx p.ty);
++      access_rplace_reorganize config span false Read p ctx
+   | Move p ->
+       (* Access the value *)
+       let access = Move in
+@@ -640,6 +667,14 @@ let eval_operand_no_reorganize (config : config) (span : Meta.span)
+       let ctx = write_place span access p updated_value ctx in
+       (* *)
+       (copied_value, ctx, cc)
++  | Move p when place_moves_through_shared_borrow p ->
++      (* See [place_moves_through_shared_borrow] *)
++      let _, v = read_place_check span Read p ctx in
++      [%cassert] span
++        (not (concrete_loans_in_value v))
++        "Moving an element out of an array by a constant index: the element \
++         is borrowed";
++      (v, ctx, fun e -> e)
+   | Move p ->
+       (* Access the value *)
+       let access = Move in
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 8a2cf33..f93ece2 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -3269,15 +3269,28 @@ and translate_end_abstraction_synth_ret (ectx : C.eval_ctx) (abs : V.abs)
+     (e : S.expr) (ctx : bs_ctx) (rg_id : T.RegionGroupId.id)
+     (abs_level : abs_level) : texpr =
+   [%ltrace "Translating ended synthesis abstraction: " ^ abs_to_string ctx abs];
+-  if abs_level > 0 then (
+-    (* Nested borrows in the output: at the odd levels, the abstraction gives
+-       back outputs of the backward function, at the even levels it receives
+-       inputs, like the input abstractions (with the opposite parity) *)
+-    [%cassert] ctx.span
+-      (ctx.bid = Some rg_id)
+-      "Nested borrows: ending a sub-abstraction of the return abstraction of \
+-       another region group is not supported";
+-    translate_end_abstraction_synth_input ectx abs e ctx rg_id abs_level)
++  if abs_level > 0 then
++    if ctx.bid = Some rg_id then
++      (* Nested borrows in the output: at the odd levels, the abstraction gives
++         back outputs of the backward function, at the even levels it receives
++         inputs, like the input abstractions (with the opposite parity) *)
++      translate_end_abstraction_synth_input ectx abs e ctx rg_id abs_level
++    else begin
++      (* A sub-abstraction of the return abstraction of another region group
++         (the backward function of a region group ends the return abstractions
++         of the other groups too, e.g. [&'a View<'b>] in the output: the
++         levels of ['a] and ['b] belong to different groups). We only support
++         the sub-abstractions which neither consume nor give back values: their
++         borrows are shared *)
++      let inputs = abs_to_consumed ctx ectx abs abs_level in
++      let ctx, outputs = abs_to_given_back ~ectx None abs abs_level ctx in
++      [%cassert] ctx.span
++        (inputs = [] && outputs = [])
++        "Nested borrows: ending a sub-abstraction of the return abstraction of \
++         another region group which consumes or gives back values is not \
++         supported";
++      translate_expr e ctx
++    end
+   else begin
+   (* Nested borrows: the levels of the return abstraction of which no
+      sub-abstraction exists give back its unchanged values (see
+diff --git a/tests/lean/ArrayPatternMove.lean b/tests/lean/ArrayPatternMove.lean
+new file mode 100644
+index 0000000..71be284
+--- /dev/null
++++ b/tests/lean/ArrayPatternMove.lean
+@@ -0,0 +1 @@
++import ArrayPatternMove.Checks
+diff --git a/tests/lean/ArrayPatternMove/ArrayPatternMove.lean b/tests/lean/ArrayPatternMove/ArrayPatternMove.lean
+new file mode 100644
+index 0000000..6361652
+--- /dev/null
++++ b/tests/lean/ArrayPatternMove/ArrayPatternMove.lean
+@@ -0,0 +1,564 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [array_pattern_move]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace array_pattern_move
++
++/-- [array_pattern_move::Atom]
++    Source: 'tests/src/array-pattern-move.rs', lines 15:0-18:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Atom where
++| Name : _root_.String → Atom
++| Num : _root_.Aeneas.Std.U32 → Atom
++
++/-- [array_pattern_move::Expr]
++    Source: 'tests/src/array-pattern-move.rs', lines 20:0-23:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Expr where
++| Atom : _root_.array_pattern_move.Atom → _root_.Aeneas.Std.U32 → Expr
++| List : _root_.Aeneas.Std.NestedVec Expr → Expr
++
++/-- [array_pattern_move::one_name]:
++    Source: 'tests/src/array-pattern-move.rs', lines 27:0-36:1
++    Visibility: public -/
++def one_name
++  (children : _root_.Aeneas.Std.alloc.vec.Vec _root_.array_pattern_move.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result (_root_.String
++    × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let r ← _root_.Aeneas.Std.alloc.vec.TryFromArrayVec.try_from 1#usize children
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok arr =>
++    let e ← _root_.Aeneas.Std.Array.index_usize arr 0#usize
++    match e with
++    | _root_.array_pattern_move.Expr.Atom a span =>
++      match a with
++      | _root_.array_pattern_move.Atom.Name name1 =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          (name1, span))
++      | _root_.array_pattern_move.Atom.Num _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++          2#u32)
++    | _root_.array_pattern_move.Expr.List _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++        2#u32)
++  | _root_.Aeneas.Std.core.result.Result.Err _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      1#u32)
++
++/-- [array_pattern_move::pair]:
++    Source: 'tests/src/array-pattern-move.rs', lines 40:0-54:1
++    Visibility: public -/
++def pair
++  (items : _root_.Aeneas.Std.alloc.vec.Vec _root_.array_pattern_move.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.array_pattern_move.Expr)) _root_.Aeneas.Std.U32)
++  := do
++  let r ← _root_.Aeneas.Std.alloc.vec.TryFromArrayVec.try_from 2#usize items
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok arr =>
++    let e ← _root_.Aeneas.Std.Array.index_usize arr 1#usize
++    match e with
++    | _root_.array_pattern_move.Expr.Atom _ _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++        4#u32)
++    | _root_.array_pattern_move.Expr.List m =>
++      let m1 := _root_.Aeneas.Std.NestedVec.toVec m
++      let n ← _root_.Aeneas.Std.Array.index_usize arr 0#usize
++      match n with
++      | _root_.array_pattern_move.Expr.Atom a s =>
++        match a with
++        | _root_.array_pattern_move.Atom.Name _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++            (s, m1))
++        | _root_.array_pattern_move.Atom.Num k =>
++          let n1 ← k + s
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++            (n1, m1))
++      | _root_.array_pattern_move.Expr.List v =>
++        let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++        let i := _root_.Aeneas.Std.alloc.vec.Vec.len v1
++        let n1 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          (n1, m1))
++  | _root_.Aeneas.Std.core.result.Result.Err _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      3#u32)
++
++/-- [array_pattern_move::Holder]
++    Source: 'tests/src/array-pattern-move.rs', lines 56:0-59:1
++    Visibility: public -/
++structure Holder where
++  arr : _root_.Aeneas.Std.Array (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) 2#usize
++  tag : _root_.Aeneas.Std.U32
++
++/-- [array_pattern_move::split]:
++    Source: 'tests/src/array-pattern-move.rs', lines 63:0-68:1
++    Visibility: public -/
++def split
++  (h : _root_.array_pattern_move.Holder) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let a ← _root_.Aeneas.Std.Array.index_usize h.arr 0#usize
++  let b ← _root_.Aeneas.Std.Array.index_usize h.arr 1#usize
++  let a1 ← _root_.Aeneas.Std.alloc.vec.Vec.push a h.tag
++  let i ← h.tag + 1#u32
++  _root_.Aeneas.Std.Result.ok (a1, b, i)
++
++/-- [array_pattern_move::push_lens]:
++    Source: 'tests/src/array-pattern-move.rs', lines 72:0-78:1
++    Visibility: public -/
++def push_lens
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (arr : _root_.Aeneas.Std.Array (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32) 3#usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let a ← _root_.Aeneas.Std.Array.index_usize arr 0#usize
++  let b ← _root_.Aeneas.Std.Array.index_usize arr 1#usize
++  let c ← _root_.Aeneas.Std.Array.index_usize arr 2#usize
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len a
++  let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i)
++  let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out i1
++  let i2 := _root_.Aeneas.Std.alloc.vec.Vec.len c
++  let i3 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i2)
++  let out2 ← _root_.Aeneas.Std.alloc.vec.Vec.push out1 i3
++  let b1 ← _root_.Aeneas.Std.alloc.vec.Vec.push b 7#u32
++  _root_.Aeneas.Std.Result.ok (b1, out2)
++
++/-- [array_pattern_move::singles]: loop body 0:
++    Source: 'tests/src/array-pattern-move.rs', lines 83:4-92:1
++    Visibility: public -/
++@[rust_loop_body]
++def singles_loop.body
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++  (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))) (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))) × _root_.Aeneas.Std.U32)
++    (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok total))
++  | some g =>
++    let r ← _root_.Aeneas.Std.alloc.vec.TryFromArrayVec.try_from 1#usize g
++    match r with
++    | _root_.Aeneas.Std.core.result.Result.Ok arr =>
++      let x ← _root_.Aeneas.Std.Array.index_usize arr 0#usize
++      let x1 ← _root_.Aeneas.Std.alloc.vec.Vec.push x 1#u32
++      let i := _root_.Aeneas.Std.alloc.vec.Vec.len x1
++      let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i)
++      let total1 ← total + i1
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, total1))
++    | _root_.Aeneas.Std.core.result.Result.Err _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err 9#u32))
++
++/-- [array_pattern_move::singles]: loop 0:
++    Source: 'tests/src/array-pattern-move.rs', lines 83:4-92:1
++    Visibility: public -/
++@[rust_loop]
++def singles_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++  (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))) (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, total1) => _root_.array_pattern_move.singles_loop.body iter1
++       total1 : ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32))) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32))) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32)))
++    (iter, total)
++
++/-- [array_pattern_move::singles]:
++    Source: 'tests/src/array-pattern-move.rs', lines 81:0-92:1
++    Visibility: public -/
++def singles
++  (groups : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter groups
++  _root_.array_pattern_move.singles_loop model_state 0#u32
++
++/-- [array_pattern_move::mk_atom]:
++    Source: 'tests/src/array-pattern-move.rs', lines 94:0-96:1
++    Visibility: public -/
++def mk_atom
++  (name1 : _root_.Bool) (s : _root_.String) (k : _root_.Aeneas.Std.U32)
++  (span : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.array_pattern_move.Expr
++  := do
++  if name1
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.array_pattern_move.Expr.Atom
++      (_root_.array_pattern_move.Atom.Name s) span)
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.array_pattern_move.Expr.Atom
++      (_root_.array_pattern_move.Atom.Num k) span)
++
++/-- [array_pattern_move::run_one_name]: loop body 0:
++    Source: 'tests/src/array-pattern-move.rs', lines 101:4-104:5
++    Visibility: public -/
++@[rust_loop_body]
++def run_one_name_loop.body
++  (n : _root_.Aeneas.Std.U32) (name1 : _root_.Bool)
++  (span : _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.array_pattern_move.Expr)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.array_pattern_move.Expr) ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.array_pattern_move.Expr))
++  := do
++  if i < n
++  then
++    let s ←
++      _root_.Aeneas.Std.alloc.string.FromStrString.from_
++        (_root_.Aeneas.Std.toStr "x")
++    let i1 ← span + i
++    let e ← _root_.array_pattern_move.mk_atom name1 s i i1
++    let v1 ← _root_.Aeneas.Std.alloc.vec.Vec.push v e
++    let i2 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (v1, i2))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done v)
++
++/-- [array_pattern_move::run_one_name]: loop 0:
++    Source: 'tests/src/array-pattern-move.rs', lines 101:4-104:5
++    Visibility: public -/
++@[rust_loop]
++def run_one_name_loop
++  (n : _root_.Aeneas.Std.U32) (name1 : _root_.Bool)
++  (span : _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.array_pattern_move.Expr)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.array_pattern_move.Expr)
++  := do
++  loop
++    (fun (v1, i1) => _root_.array_pattern_move.run_one_name_loop.body n name1
++       span v1 i1 : ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.array_pattern_move.Expr) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.array_pattern_move.Expr) ×
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.array_pattern_move.Expr)))
++    (v, i)
++
++/-- [array_pattern_move::run_one_name]:
++    Source: 'tests/src/array-pattern-move.rs', lines 98:0-106:1
++    Visibility: public -/
++def run_one_name
++  (n : _root_.Aeneas.Std.U32) (name1 : _root_.Bool)
++  (span : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result (_root_.String
++    × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let v ←
++    _root_.array_pattern_move.run_one_name_loop n name1 span
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.array_pattern_move.Expr)
++      0#u32
++  _root_.array_pattern_move.one_name v
++
++/-- [array_pattern_move::run_pair]:
++    Source: 'tests/src/array-pattern-move.rs', lines 108:0-126:1
++    Visibility: public -/
++def run_pair
++  (first_name : _root_.Bool) (list : _root_.Bool) (extra : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  let s ←
++    _root_.Aeneas.Std.alloc.string.FromStrString.from_ (_root_.Aeneas.Std.toStr
++      "n")
++  let e ← _root_.array_pattern_move.mk_atom first_name s 5#u32 10#u32
++  let v ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.array_pattern_move.Expr) e
++  let v1 ←
++    if list
++    then
++      do
++      let s1 ←
++        _root_.Aeneas.Std.alloc.string.FromStrString.from_
++          (_root_.Aeneas.Std.toStr "a")
++      let e1 ← _root_.array_pattern_move.mk_atom true s1 0#u32 1#u32
++      let inner ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push
++          (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.array_pattern_move.Expr)
++          e1
++      let s2 ←
++        _root_.Aeneas.Std.alloc.string.FromStrString.from_
++          (_root_.Aeneas.Std.toStr "b")
++      let e2 ← _root_.array_pattern_move.mk_atom false s2 2#u32 3#u32
++      let inner1 ← _root_.Aeneas.Std.alloc.vec.Vec.push inner e2
++      _root_.Aeneas.Std.alloc.vec.Vec.push v
++        (_root_.array_pattern_move.Expr.List
++        (_root_.Aeneas.Std.alloc.vec.Vec.toNested inner1))
++    else
++      do
++      let s1 ←
++        _root_.Aeneas.Std.alloc.string.FromStrString.from_
++          (_root_.Aeneas.Std.toStr "m")
++      let e1 ← _root_.array_pattern_move.mk_atom false s1 1#u32 2#u32
++      _root_.Aeneas.Std.alloc.vec.Vec.push v e1
++  let v2 ←
++    if extra
++    then
++      do
++      let s1 ←
++        _root_.Aeneas.Std.alloc.string.FromStrString.from_
++          (_root_.Aeneas.Std.toStr "e")
++      let e1 ← _root_.array_pattern_move.mk_atom false s1 0#u32 0#u32
++      _root_.Aeneas.Std.alloc.vec.Vec.push v1 e1
++    else _root_.Aeneas.Std.Result.ok v1
++  let r ← _root_.array_pattern_move.pair v2
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok p =>
++    let (n, m) := p
++    let i := _root_.Aeneas.Std.alloc.vec.Vec.len m
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (n,
++      i))
++  | _root_.Aeneas.Std.core.result.Result.Err e1 =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err e1)
++
++/-- [array_pattern_move::run_split]:
++    Source: 'tests/src/array-pattern-move.rs', lines 128:0-135:1
++    Visibility: public -/
++def run_split
++  (x : _root_.Aeneas.Std.U32) (y : _root_.Aeneas.Std.U32)
++  (tag : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let v0 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) x
++  let v1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) y
++  let i ← y + 1#u32
++  let v11 ← _root_.Aeneas.Std.alloc.vec.Vec.push v1 i
++  _root_.array_pattern_move.split
++    { arr := (_root_.Aeneas.Std.Array.make 2#usize [ v0, v11 ]), tag }
++
++/-- [array_pattern_move::run_push_lens]: loop body 0:
++    Source: 'tests/src/array-pattern-move.rs', lines 148:4-151:5
++    Visibility: public -/
++@[rust_loop_body]
++def run_push_lens_loop.body
++  (k : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  if i < k
++  then
++    let c1 ← _root_.Aeneas.Std.alloc.vec.Vec.push c i
++    let i1 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (c1, i1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done c)
++
++/-- [array_pattern_move::run_push_lens]: loop 0:
++    Source: 'tests/src/array-pattern-move.rs', lines 148:4-151:5
++    Visibility: public -/
++@[rust_loop]
++def run_push_lens_loop
++  (k : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (c1, i1) => _root_.array_pattern_move.run_push_lens_loop.body k c1 i1
++      : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (c, i)
++
++/-- [array_pattern_move::run_push_lens]:
++    Source: 'tests/src/array-pattern-move.rs', lines 138:0-159:1
++    Visibility: public -/
++def run_push_lens
++  (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let out ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 100#u32
++  let a ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 1#u32
++  let b ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 2#u32
++  let b1 ← _root_.Aeneas.Std.alloc.vec.Vec.push b 3#u32
++  let c ←
++    _root_.array_pattern_move.run_push_lens_loop k
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) 0#u32
++  let (r, o) ←
++    _root_.array_pattern_move.push_lens out
++      (_root_.Aeneas.Std.Array.make 3#usize [ a, b1, c ])
++  let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push o 200#u32
++  _root_.Aeneas.Std.Result.ok (out1, r)
++
++/-- [array_pattern_move::run_singles]: loop body 1:
++    Source: 'tests/src/array-pattern-move.rs', lines 167:8-170:9
++    Visibility: public -/
++@[rust_loop_body]
++def run_singles_loop0_loop0.body
++  (i : _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (j : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  if j < i
++  then
++    let v1 ← _root_.Aeneas.Std.alloc.vec.Vec.push v j
++    let j1 ← j + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (v1, j1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done v)
++
++/-- [array_pattern_move::run_singles]: loop 1:
++    Source: 'tests/src/array-pattern-move.rs', lines 167:8-170:9
++    Visibility: public -/
++@[rust_loop]
++def run_singles_loop0_loop0
++  (i : _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (j : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (v1, j1) => _root_.array_pattern_move.run_singles_loop0_loop0.body i
++       v1 j1 : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (v, j)
++
++/-- [array_pattern_move::run_singles]: loop body 0:
++    Source: 'tests/src/array-pattern-move.rs', lines 164:4-175:5
++    Visibility: public -/
++@[rust_loop_body]
++def run_singles_loop0.body
++  (n : _root_.Aeneas.Std.U32)
++  (groups : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))) ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))))
++  := do
++  if i < n
++  then
++    let v ←
++      _root_.array_pattern_move.run_singles_loop0_loop0 i
++        (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) 0#u32
++    let g ←
++      _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++        (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) v
++    let groups1 ← _root_.Aeneas.Std.alloc.vec.Vec.push groups g
++    let i1 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (groups1,
++      i1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done groups)
++
++/-- [array_pattern_move::run_singles]: loop 0:
++    Source: 'tests/src/array-pattern-move.rs', lines 164:4-175:5
++    Visibility: public -/
++@[rust_loop]
++def run_singles_loop0
++  (n : _root_.Aeneas.Std.U32)
++  (groups : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)))
++  := do
++  loop
++    (fun (groups1, i1) => _root_.array_pattern_move.run_singles_loop0.body n
++       groups1 i1 : ((_root_.Aeneas.Std.alloc.vec.Vec
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32))) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))) ×
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.Vec
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)))))
++    (groups, i)
++
++/-- [array_pattern_move::run_singles]:
++    Source: 'tests/src/array-pattern-move.rs', lines 161:0-180:1
++    Visibility: public -/
++def run_singles
++  (n : _root_.Aeneas.Std.U32) (bad : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let groups ←
++    _root_.array_pattern_move.run_singles_loop0 n
++      (_root_.Aeneas.Std.alloc.vec.Vec.new (_root_.Aeneas.Std.alloc.vec.Vec
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))) 0#u32
++  let groups1 ←
++    if bad
++    then
++      _root_.Aeneas.Std.alloc.vec.Vec.push groups
++        (_root_.Aeneas.Std.alloc.vec.Vec.new (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.Aeneas.Std.U32))
++    else _root_.Aeneas.Std.Result.ok groups
++  _root_.array_pattern_move.singles groups1
++
++end array_pattern_move
+diff --git a/tests/lean/ArrayPatternMove/Checks.lean b/tests/lean/ArrayPatternMove/Checks.lean
+new file mode 100644
+index 0000000..c64747d
+--- /dev/null
++++ b/tests/lean/ArrayPatternMove/Checks.lean
+@@ -0,0 +1,70 @@
++import ArrayPatternMove.ArrayPatternMove
++
++/-! Evaluate the model of `tests/src/array-pattern-move.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace array_pattern_move.checks
++open Aeneas Aeneas.Std Result
++open array_pattern_move
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++
++def oneName (n : Nat) (isName : Bool) (span : Nat) : Option (Except Nat (String × Nat)) :=
++  match run_one_name (u n) isName (u span) with
++  | ok (core.result.Result.Ok (s, k)) => some (.ok (s, k.val))
++  | ok (core.result.Result.Err e) => some (.error e.val)
++  | _ => none
++
++def pair (firstName list extra : Bool) : Option (Except Nat (Nat × Nat)) :=
++  match run_pair firstName list extra with
++  | ok (core.result.Result.Ok (n, m)) => some (.ok (n.val, m.val))
++  | ok (core.result.Result.Err e) => some (.error e.val)
++  | _ => none
++
++def split (x y tag : Nat) : Option (List Nat × List Nat × Nat) :=
++  match run_split (u x) (u y) (u tag) with
++  | ok (a, b, t) => some (nats a, nats b, t.val)
++  | _ => none
++
++/-- `(out, b)`: `out` observes the caller's write through the reference after
++    the call -/
++def pushLens (k : Nat) : Option (List Nat × List Nat) :=
++  match run_push_lens (u k) with
++  | ok (out, b) => some (nats out, nats b)
++  | _ => none
++
++def singles (n : Nat) (bad : Bool) : Option (Except Nat Nat) :=
++  match run_singles (u n) bad with
++  | ok (core.result.Result.Ok t) => some (.ok t.val)
++  | ok (core.result.Result.Err e) => some (.error e.val)
++  | _ => none
++
++-- one_name_native
++#guard oneName 1 true 4 == some (.ok ("x", 4))
++#guard oneName 1 false 4 == some (.error 2)
++#guard oneName 0 true 4 == some (.error 1)
++#guard oneName 2 true 4 == some (.error 1)
++
++-- pair_native
++#guard pair false true false == some (.ok (15, 2))
++#guard pair true true false == some (.ok (10, 2))
++#guard pair false false false == some (.error 4)
++#guard pair false true true == some (.error 3)
++
++-- split_native
++#guard split 1 2 9 == some ([1, 9], [2, 3], 10)
++#guard split 0 0 0 == some ([0, 0], [0, 1], 1)
++
++-- push_lens_native
++#guard pushLens 3 == some ([100, 1, 3, 200], [2, 3, 7])
++#guard pushLens 0 == some ([100, 1, 0, 200], [2, 3, 7])
++
++-- singles_native
++#guard singles 3 false == some (.ok 6)
++#guard singles 4 false == some (.ok 10)
++#guard singles 0 false == some (.ok 0)
++#guard singles 2 true == some (.error 9)
++
++end array_pattern_move.checks
+diff --git a/tests/lean/NestedBorrowsOutputSharedLevels.lean b/tests/lean/NestedBorrowsOutputSharedLevels.lean
+new file mode 100644
+index 0000000..1167075
+--- /dev/null
++++ b/tests/lean/NestedBorrowsOutputSharedLevels.lean
+@@ -0,0 +1 @@
++import NestedBorrowsOutputSharedLevels.Checks
+diff --git a/tests/lean/NestedBorrowsOutputSharedLevels/Checks.lean b/tests/lean/NestedBorrowsOutputSharedLevels/Checks.lean
+new file mode 100644
+index 0000000..bc96da2
+--- /dev/null
++++ b/tests/lean/NestedBorrowsOutputSharedLevels/Checks.lean
+@@ -0,0 +1,46 @@
++import NestedBorrowsOutputSharedLevels.NestedBorrowsOutputSharedLevels
++
++/-! Evaluate the model of `tests/src/nested-borrows-output-shared-levels.rs`
++    on the inputs of its `native` test module and compare with the native
++    results. -/
++
++namespace nested_borrows_output_shared_levels.checks
++open Aeneas Aeneas.Std Result
++open nested_borrows_output_shared_levels
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def runFirst (k n : Nat) : Option Nat :=
++  match run_first (u k) (u n) with
++  | ok r => some r.val
++  | _ => none
++
++/-- `(value, count)`: the count observes the caller's write through the
++    reference after the call -/
++def runFirstCounted (tag n set : Nat) : Option (Nat × Nat) :=
++  match run_first_counted (u tag) (u n) (u set) with
++  | ok (v, c) => some (v.val, c.val)
++  | _ => none
++
++def runSecondChild (k : Nat) (isSome : Bool) (n : Nat) : Option Nat :=
++  match run_second_child (u k) isSome (u n) with
++  | ok r => some r.val
++  | _ => none
++
++-- first_native
++#guard runFirst 9 1 == some 9
++#guard runFirst 9 0 == some 0
++#guard runFirst 3 3 == some 3
++
++-- first_counted_native
++#guard runFirstCounted 2 2 10 == some (102, 17)
++#guard runFirstCounted 0 1 0 == some (0, 5)
++#guard runFirstCounted 4 3 1 == some (102, 10)
++
++-- second_child_native
++#guard runSecondChild 9 true 2 == some 104
++#guard runSecondChild 9 true 1 == some 0
++#guard runSecondChild 9 false 3 == some 0
++#guard runSecondChild 9 true 3 == some 104
++
++end nested_borrows_output_shared_levels.checks
+diff --git a/tests/lean/NestedBorrowsOutputSharedLevels/NestedBorrowsOutputSharedLevels.lean b/tests/lean/NestedBorrowsOutputSharedLevels/NestedBorrowsOutputSharedLevels.lean
+new file mode 100644
+index 0000000..99d7dc1
+--- /dev/null
++++ b/tests/lean/NestedBorrowsOutputSharedLevels/NestedBorrowsOutputSharedLevels.lean
+@@ -0,0 +1,290 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_output_shared_levels]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_output_shared_levels
++
++/-- [core::option::{core::option::Option<T>}::as_ref]:
++    Source: '/rustc/library/core/src/option.rs', lines 744:4-744:44
++    Name pattern: [core::option::{core::option::Option<@T>}::as_ref]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<@T>}::as_ref"]
++def core.option.Option.as_ref
++  {T : Type} (self : _root_.Option T) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some _ => _root_.Aeneas.Std.Result.ok self
++
++/-- [core::option::{core::option::Option<T>}::and_then]:
++    Source: '/rustc/library/core/src/option.rs', lines 1541:4-1543:61
++    Name pattern: [core::option::{core::option::Option<@T>}::and_then]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<@T>}::and_then"]
++def core.option.Option.and_then
++  {T : Type} {U : Type} {F : Type} (opsfunctionFnOnceFTupleTOptionInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F T (_root_.Option U))
++  (self : _root_.Option T) (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Option U)
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some x =>
++    let (model_state, _) ← opsfunctionFnOnceFTupleTOptionInst.call_once f x
++    _root_.Aeneas.Std.Result.ok model_state
++
++/-- [core::option::{core::option::Option<&0 (T)>}::copied]:
++    Source: '/rustc/library/core/src/option.rs', lines 2119:4-2121:16
++    Name pattern: [core::option::{core::option::Option<&'0 @T>}::copied]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<&'0 @T>}::copied"]
++def core.option.OptionShared0T.copied
++  {T : Type} (markerCopyInst : _root_.Aeneas.Std.core.marker.Copy T)
++  (self : _root_.Option T) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some _ => _root_.Aeneas.Std.Result.ok self
++
++/-- [nested_borrows_output_shared_levels::View]
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 15:0-19:1
++    Visibility: public -/
++@[discriminant isize]
++inductive View where
++| Num : _root_.Aeneas.Std.U32 → View
++| Name : _root_.Aeneas.Std.Str → View
++| Empty : View
++
++/-- [nested_borrows_output_shared_levels::{core::clone::Clone for nested_borrows_output_shared_levels::View<'a>}::clone]:
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 14:9-14:14
++    Visibility: public -/
++def View.Insts.CoreCloneClone.clone
++  (self : _root_.nested_borrows_output_shared_levels.View) :
++  _root_.Aeneas.Std.Result _root_.nested_borrows_output_shared_levels.View
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [nested_borrows_output_shared_levels::{core::clone::Clone for nested_borrows_output_shared_levels::View<'a>}]
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 14:9-14:14 -/
++@[reducible]
++def View.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_borrows_output_shared_levels.View := {
++  clone :=
++    _root_.nested_borrows_output_shared_levels.View.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [nested_borrows_output_shared_levels::{core::marker::Copy for nested_borrows_output_shared_levels::View<'a>}]
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 14:16-14:20 -/
++@[reducible]
++def View.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.nested_borrows_output_shared_levels.View := {
++  cloneInst :=
++    _root_.nested_borrows_output_shared_levels.View.Insts.CoreCloneClone
++}
++
++/-- [nested_borrows_output_shared_levels::Parts]
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 21:0-24:1
++    Visibility: public -/
++structure Parts where
++  tag : _root_.Aeneas.Std.U32
++  children : _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_borrows_output_shared_levels.View
++
++/-- [nested_borrows_output_shared_levels::first]:
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 26:0-33:1
++    Visibility: public -/
++def first
++  (p : _root_.nested_borrows_output_shared_levels.Parts) :
++  _root_.Aeneas.Std.Result (_root_.Option
++    _root_.nested_borrows_output_shared_levels.View)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref p.children
++  _root_.Aeneas.Std.core.slice.Slice.first s
++
++/-- [nested_borrows_output_shared_levels::first_counted]:
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 37:0-45:1
++    Visibility: public -/
++def first_counted
++  (p : _root_.nested_borrows_output_shared_levels.Parts)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_output_shared_levels.View) × _root_.Aeneas.Std.U32)
++  := do
++  let n1 ← n + p.tag
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref p.children
++  let o ←
++    _root_.Aeneas.Std.core.slice.Slice.get
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.nested_borrows_output_shared_levels.View) s 1#usize
++  _root_.Aeneas.Std.Result.ok (o, n1)
++
++/-- [nested_borrows_output_shared_levels::second_child::closure]
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 49:28-49:49 -/
++@[reducible]
++def second_child.closure := _root_.Unit
++
++/-- [nested_borrows_output_shared_levels::second_child::{core::ops::function::FnOnce<(&'_ (nested_borrows_output_shared_levels::Parts<'_>)), core::option::Option<&'_ (nested_borrows_output_shared_levels::View<'_>)>> for nested_borrows_output_shared_levels::second_child::closure}::call_once]:
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 49:28-49:49 -/
++def
++  second_child.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPartsOptionSharedView.call_once
++  (c : _root_.nested_borrows_output_shared_levels.second_child.closure)
++  (tupled_args : _root_.nested_borrows_output_shared_levels.Parts) :
++  _root_.Aeneas.Std.Result (_root_.Option
++    _root_.nested_borrows_output_shared_levels.View)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref tupled_args.children
++  _root_.Aeneas.Std.core.slice.Slice.get
++    (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++    _root_.nested_borrows_output_shared_levels.View) s 1#usize
++
++/-- Trait implementation: [nested_borrows_output_shared_levels::second_child::{core::ops::function::FnOnce<(&'_ (nested_borrows_output_shared_levels::Parts<'_>)), core::option::Option<&'_ (nested_borrows_output_shared_levels::View<'_>)>> for nested_borrows_output_shared_levels::second_child::closure}]
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 49:28-49:49 -/
++@[reducible]
++def
++  second_child.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPartsOptionSharedView
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_output_shared_levels.second_child.closure
++  _root_.nested_borrows_output_shared_levels.Parts (_root_.Option
++  _root_.nested_borrows_output_shared_levels.View) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.nested_borrows_output_shared_levels.second_child.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPartsOptionSharedView.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [nested_borrows_output_shared_levels::second_child]:
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 48:0-50:1
++    Visibility: public -/
++def second_child
++  (parts : _root_.Option _root_.nested_borrows_output_shared_levels.Parts) :
++  _root_.Aeneas.Std.Result (_root_.Option
++    _root_.nested_borrows_output_shared_levels.View)
++  := do
++  let o ←
++    _root_.nested_borrows_output_shared_levels.core.option.Option.as_ref parts
++  let o1 ←
++    _root_.nested_borrows_output_shared_levels.core.option.Option.and_then
++      _root_.nested_borrows_output_shared_levels.second_child.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPartsOptionSharedView
++      o ()
++  _root_.nested_borrows_output_shared_levels.core.option.OptionShared0T.copied
++    _root_.nested_borrows_output_shared_levels.View.Insts.CoreMarkerCopy o1
++
++/-- [nested_borrows_output_shared_levels::value]:
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 52:0-59:1
++    Visibility: public -/
++def value
++  (v : _root_.Option _root_.nested_borrows_output_shared_levels.View) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match v with
++  | none => _root_.Aeneas.Std.Result.ok 0#u32
++  | some v1 =>
++    match v1 with
++    | _root_.nested_borrows_output_shared_levels.View.Num n =>
++      _root_.Aeneas.Std.Result.ok n
++    | _root_.nested_borrows_output_shared_levels.View.Name s =>
++      let i ← _root_.Aeneas.Std.core.str.Str.len s
++      let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i)
++      i1 + 100#u32
++    | _root_.nested_borrows_output_shared_levels.View.Empty =>
++      _root_.Aeneas.Std.Result.ok 1000#u32
++
++/-- [nested_borrows_output_shared_levels::mk]:
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 61:0-73:1
++    Visibility: public -/
++def mk
++  (tag : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32)
++  (name1 : _root_.Aeneas.Std.Str) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.nested_borrows_output_shared_levels.Parts
++  := do
++  let children ←
++    if n > 0#u32
++    then
++      _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++        _root_.nested_borrows_output_shared_levels.View)
++        (_root_.nested_borrows_output_shared_levels.View.Num k)
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.new
++        _root_.nested_borrows_output_shared_levels.View)
++  let children1 ←
++    if n > 1#u32
++    then
++      _root_.Aeneas.Std.alloc.vec.Vec.push children
++        (_root_.nested_borrows_output_shared_levels.View.Name name1)
++    else _root_.Aeneas.Std.Result.ok children
++  if n > 2#u32
++  then
++    let children2 ←
++      _root_.Aeneas.Std.alloc.vec.Vec.push children1
++        _root_.nested_borrows_output_shared_levels.View.Empty
++    _root_.Aeneas.Std.Result.ok { tag, children := children2 }
++  else _root_.Aeneas.Std.Result.ok { tag, children := children1 }
++
++/-- [nested_borrows_output_shared_levels::run_first]:
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 75:0-78:1
++    Visibility: public -/
++def run_first
++  (k : _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let p ←
++    _root_.nested_borrows_output_shared_levels.mk 1#u32 k
++      (_root_.Aeneas.Std.toStr "abc") n
++  let o ← _root_.nested_borrows_output_shared_levels.first p
++  let o1 ←
++    _root_.nested_borrows_output_shared_levels.core.option.OptionShared0T.copied
++      _root_.nested_borrows_output_shared_levels.View.Insts.CoreMarkerCopy o
++  _root_.nested_borrows_output_shared_levels.value o1
++
++/-- [nested_borrows_output_shared_levels::run_first_counted]:
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 81:0-92:1
++    Visibility: public -/
++def run_first_counted
++  (tag : _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.U32)
++  (set : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let p ←
++    _root_.nested_borrows_output_shared_levels.mk tag 7#u32
++      (_root_.Aeneas.Std.toStr "ab") n
++  let (o, c) ← _root_.nested_borrows_output_shared_levels.first_counted p 5#u32
++  let v ←
++    _root_.nested_borrows_output_shared_levels.core.option.OptionShared0T.copied
++      _root_.nested_borrows_output_shared_levels.View.Insts.CoreMarkerCopy o
++  let c1 ← c + set
++  let i ← _root_.nested_borrows_output_shared_levels.value v
++  _root_.Aeneas.Std.Result.ok (i, c1)
++
++/-- [nested_borrows_output_shared_levels::run_second_child]:
++    Source: 'tests/src/nested-borrows-output-shared-levels.rs', lines 94:0-97:1
++    Visibility: public -/
++def run_second_child
++  (k : _root_.Aeneas.Std.U32) (some1 : _root_.Bool) (n : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let parts ←
++    if some1
++    then
++      do
++      let p ←
++        _root_.nested_borrows_output_shared_levels.mk 0#u32 k
++          (_root_.Aeneas.Std.toStr "abcd") n
++      _root_.Aeneas.Std.Result.ok (some p)
++    else _root_.Aeneas.Std.Result.ok none
++  let o ← _root_.nested_borrows_output_shared_levels.second_child parts
++  _root_.nested_borrows_output_shared_levels.value o
++
++end nested_borrows_output_shared_levels
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 3c786e1..ede4cb5 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -68,6 +68,8 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsClosureVisitorCalls
+ @[default_target] lean_lib NestedBorrowsCallThenLoop
+ @[default_target] lean_lib NestedBorrowsFrozenPayloadLoans
++@[default_target] lean_lib ArrayPatternMove
++@[default_target] lean_lib NestedBorrowsOutputSharedLevels
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib BtreeEntry
+diff --git a/tests/src/array-pattern-move.rs b/tests/src/array-pattern-move.rs
+new file mode 100644
+index 0000000..7011bd7
+--- /dev/null
++++ b/tests/src/array-pattern-move.rs
+@@ -0,0 +1,221 @@
++//@ [!lean] skip
++//@ [lean] subdir=ArrayPatternMove
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option} --include core::ops::deref::{core::ops::deref::Deref} --include core::ops::deref::{core::ops::deref::DerefMut}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Moving elements out of an owned array by constant indices (array
++//! patterns: `let [a, b] = arr`). Charon lowers each move to
++//! `move *(ArrayIndexMut(&mut arr, i))`, a move behind a mutable borrow, which
++//! the interpreter rejected ('Could not read a borrow'). The borrow checker
++//! forbids any later read of a moved element, so the move reads the element
++//! and leaves it in the array (production: chelis_deep annotations_codec
++//! `variable`/`binder`/`effects`/`decode_value` and the `try_from_expression`
++//! functions of annotations_transform, which destructure `Vec::try_into`
++//! results).
++
++pub enum Atom {
++    Name(String),
++    Num(u32),
++}
++
++pub enum Expr {
++    Atom(Atom, u32),
++    List(Vec<Expr>),
++}
++
++/// The production shape of `VariableRef::try_from_expression`: a refutable
++/// pattern that moves fields out of the single element
++pub fn one_name(children: Vec<Expr>) -> Result<(String, u32), u32> {
++    let arr: [Expr; 1] = match children.try_into() {
++        Ok(arr) => arr,
++        Err(_) => return Err(1),
++    };
++    let [Expr::Atom(Atom::Name(name), span)] = arr else {
++        return Err(2);
++    };
++    Ok((name, span))
++}
++
++/// Two elements: the second is moved after the array was given back by the
++/// first move's `index_mut`
++pub fn pair(items: Vec<Expr>) -> Result<(u32, Vec<Expr>), u32> {
++    let arr: [Expr; 2] = match items.try_into() {
++        Ok(arr) => arr,
++        Err(_) => return Err(3),
++    };
++    let [n, Expr::List(m)] = arr else {
++        return Err(4);
++    };
++    let n = match n {
++        Expr::Atom(Atom::Num(k), s) => k + s,
++        Expr::Atom(Atom::Name(_), s) => s,
++        Expr::List(v) => v.len() as u32,
++    };
++    Ok((n, m))
++}
++
++pub struct Holder {
++    pub arr: [Vec<u32>; 2],
++    pub tag: u32,
++}
++
++/// A partial move out of a field: the other field is read and written after
++/// the moves; the moved vectors are mutated
++pub fn split(mut h: Holder) -> (Vec<u32>, Vec<u32>, u32) {
++    let [mut a, b] = h.arr;
++    a.push(h.tag);
++    h.tag += 1;
++    (a, b, h.tag)
++}
++
++/// The moves happen while a mutable borrow of the caller is live; the caller
++/// writes through it after the call
++pub fn push_lens(out: &mut Vec<u32>, arr: [Vec<u32>; 3]) -> Vec<u32> {
++    let [a, mut b, c] = arr;
++    out.push(a.len() as u32);
++    out.push(c.len() as u32);
++    b.push(7);
++    b
++}
++
++/// In a loop (production: `effects` destructures inside `for child in children`)
++pub fn singles(groups: Vec<Vec<Vec<u32>>>) -> Result<u32, u32> {
++    let mut total = 0;
++    for g in groups {
++        let [mut x]: [Vec<u32>; 1] = match g.try_into() {
++            Ok(arr) => arr,
++            Err(_) => return Err(9),
++        };
++        x.push(1);
++        total += x.len() as u32;
++    }
++    Ok(total)
++}
++
++pub fn mk_atom(name: bool, s: String, k: u32, span: u32) -> Expr {
++    if name { Expr::Atom(Atom::Name(s), span) } else { Expr::Atom(Atom::Num(k), span) }
++}
++
++pub fn run_one_name(n: u32, name: bool, span: u32) -> Result<(String, u32), u32> {
++    let mut v = Vec::new();
++    let mut i = 0;
++    while i < n {
++        v.push(mk_atom(name, String::from("x"), i, span + i));
++        i += 1;
++    }
++    one_name(v)
++}
++
++pub fn run_pair(first_name: bool, list: bool, extra: bool) -> Result<(u32, usize), u32> {
++    let mut v = Vec::new();
++    v.push(mk_atom(first_name, String::from("n"), 5, 10));
++    if list {
++        let mut inner = Vec::new();
++        inner.push(mk_atom(true, String::from("a"), 0, 1));
++        inner.push(mk_atom(false, String::from("b"), 2, 3));
++        v.push(Expr::List(inner));
++    } else {
++        v.push(mk_atom(false, String::from("m"), 1, 2));
++    }
++    if extra {
++        v.push(mk_atom(false, String::from("e"), 0, 0));
++    }
++    match pair(v) {
++        Ok((n, m)) => Ok((n, m.len())),
++        Err(e) => Err(e),
++    }
++}
++
++pub fn run_split(x: u32, y: u32, tag: u32) -> (Vec<u32>, Vec<u32>, u32) {
++    let mut v0 = Vec::new();
++    v0.push(x);
++    let mut v1 = Vec::new();
++    v1.push(y);
++    v1.push(y + 1);
++    split(Holder { arr: [v0, v1], tag })
++}
++
++/// Caller: calls `push_lens` through a reborrow, then writes through `out`
++pub fn run_push_lens(k: u32) -> (Vec<u32>, Vec<u32>) {
++    let mut out = Vec::new();
++    out.push(100);
++    let mut a = Vec::new();
++    a.push(1);
++    let mut b = Vec::new();
++    b.push(2);
++    b.push(3);
++    let mut c = Vec::new();
++    let mut i = 0;
++    while i < k {
++        c.push(i);
++        i += 1;
++    }
++    let r = {
++        let o = &mut out;
++        let r = push_lens(&mut *o, [a, b, c]);
++        o.push(200);
++        r
++    };
++    (out, r)
++}
++
++pub fn run_singles(n: u32, bad: bool) -> Result<u32, u32> {
++    let mut groups = Vec::new();
++    let mut i = 0;
++    while i < n {
++        let mut v = Vec::new();
++        let mut j = 0;
++        while j < i {
++            v.push(j);
++            j += 1;
++        }
++        let mut g = Vec::new();
++        g.push(v);
++        groups.push(g);
++        i += 1;
++    }
++    if bad {
++        groups.push(Vec::new());
++    }
++    singles(groups)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn one_name_native() {
++        assert_eq!(run_one_name(1, true, 4), Ok((String::from("x"), 4)));
++        assert_eq!(run_one_name(1, false, 4), Err(2));
++        assert_eq!(run_one_name(0, true, 4), Err(1));
++        assert_eq!(run_one_name(2, true, 4), Err(1));
++    }
++
++    #[test]
++    fn pair_native() {
++        assert_eq!(run_pair(false, true, false), Ok((15, 2)));
++        assert_eq!(run_pair(true, true, false), Ok((10, 2)));
++        assert_eq!(run_pair(false, false, false), Err(4));
++        assert_eq!(run_pair(false, true, true), Err(3));
++    }
++
++    #[test]
++    fn split_native() {
++        assert_eq!(run_split(1, 2, 9), (vec![1, 9], vec![2, 3], 10));
++        assert_eq!(run_split(0, 0, 0), (vec![0, 0], vec![0, 1], 1));
++    }
++
++    #[test]
++    fn push_lens_native() {
++        assert_eq!(run_push_lens(3), (vec![100, 1, 3, 200], vec![2, 3, 7]));
++        assert_eq!(run_push_lens(0), (vec![100, 1, 0, 200], vec![2, 3, 7]));
++    }
++
++    #[test]
++    fn singles_native() {
++        assert_eq!(run_singles(3, false), Ok(6));
++        assert_eq!(run_singles(4, false), Ok(10));
++        assert_eq!(run_singles(0, false), Ok(0));
++        assert_eq!(run_singles(2, true), Err(9));
++    }
++}
+diff --git a/tests/src/nested-borrows-output-shared-levels.rs b/tests/src/nested-borrows-output-shared-levels.rs
+new file mode 100644
+index 0000000..a64fe68
+--- /dev/null
++++ b/tests/src/nested-borrows-output-shared-levels.rs
+@@ -0,0 +1,124 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsOutputSharedLevels
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option} --include core::ops::deref::{core::ops::deref::Deref} --include core::ops::deref::{core::ops::deref::DerefMut}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A function whose output `&'c View<'d>` has its levels in different region
++//! groups (the regions of a closure signature are all distinct: `|p|
++//! p.children.first()` on `&'a Parts<'b>`). The backward function of a region
++//! group ends the return abstractions of the other groups too, including their
++//! sub-abstractions: the level of `'d` was rejected ('ending a sub-abstraction
++//! of the return abstraction of another region group'). Its borrows are shared:
++//! it consumes and gives back nothing (production: chelis_deep metadata
++//! `check_entries`, `body.as_ref().and_then(|p| p.children.first())`).
++
++#[derive(Clone, Copy)]
++pub enum View<'a> {
++    Num(&'a u32),
++    Name(&'a str),
++    Empty,
++}
++
++pub struct Parts<'a> {
++    pub tag: u32,
++    pub children: Vec<View<'a>>,
++}
++
++pub fn first<'a, 'b, 'c, 'd>(p: &'a Parts<'b>) -> Option<&'c View<'d>>
++where
++    'a: 'c,
++    'b: 'd,
++    'b: 'a,
++{
++    p.children.first()
++}
++
++/// With a mutable borrow: the backward function of its region ends the
++/// return abstractions of the other groups
++pub fn first_counted<'a, 'b, 'c, 'd>(p: &'a Parts<'b>, n: &mut u32) -> Option<&'c View<'d>>
++where
++    'a: 'c,
++    'b: 'd,
++    'b: 'a,
++{
++    *n += p.tag;
++    p.children.get(1)
++}
++
++/// The production shape: a closure passed to `Option::and_then`
++pub fn second_child<'a>(parts: Option<Parts<'a>>) -> Option<View<'a>> {
++    parts.as_ref().and_then(|p| p.children.get(1)).copied()
++}
++
++pub fn value(v: Option<View<'_>>) -> u32 {
++    match v {
++        Some(View::Num(n)) => *n,
++        Some(View::Name(s)) => s.len() as u32 + 100,
++        Some(View::Empty) => 1000,
++        None => 0,
++    }
++}
++
++pub fn mk<'a>(tag: u32, k: &'a u32, name: &'a str, n: u32) -> Parts<'a> {
++    let mut children = Vec::new();
++    if n > 0 {
++        children.push(View::Num(k));
++    }
++    if n > 1 {
++        children.push(View::Name(name));
++    }
++    if n > 2 {
++        children.push(View::Empty);
++    }
++    Parts { tag, children }
++}
++
++pub fn run_first(k: u32, n: u32) -> u32 {
++    let p = mk(1, &k, "abc", n);
++    value(first(&p).copied())
++}
++
++/// The caller writes through the counter after the call, then reads it
++pub fn run_first_counted(tag: u32, n: u32, set: u32) -> (u32, u32) {
++    let k = 7;
++    let p = mk(tag, &k, "ab", n);
++    let mut count = 5;
++    let v = {
++        let c = &mut count;
++        let v = first_counted(&p, &mut *c).copied();
++        *c += set;
++        v
++    };
++    (value(v), count)
++}
++
++pub fn run_second_child(k: u32, some: bool, n: u32) -> u32 {
++    let parts = if some { Some(mk(0, &k, "abcd", n)) } else { None };
++    value(second_child(parts))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn first_native() {
++        assert_eq!(run_first(9, 1), 9);
++        assert_eq!(run_first(9, 0), 0);
++        assert_eq!(run_first(3, 3), 3);
++    }
++
++    #[test]
++    fn first_counted_native() {
++        assert_eq!(run_first_counted(2, 2, 10), (102, 17));
++        assert_eq!(run_first_counted(0, 1, 0), (0, 5));
++        assert_eq!(run_first_counted(4, 3, 1), (102, 10));
++    }
++
++    #[test]
++    fn second_child_native() {
++        assert_eq!(run_second_child(9, true, 2), 104);
++        assert_eq!(run_second_child(9, true, 1), 0);
++        assert_eq!(run_second_child(9, false, 3), 0);
++        assert_eq!(run_second_child(9, true, 3), 104);
++    }
++}

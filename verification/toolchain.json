@@ -9,7 +9,7 @@
     "integration": {
       "repository": ".work/toolchain/aeneas-src",
       "base": "cba11f3bebc2bac2bdc6ce1298f6277f6d4d04de",
-      "commit": "809c8c21f6034025fc99749f5965d1741a94594d"
+      "commit": "5cd0e4a0b17206f3f7a42019e936c96ff55d0eab"
     },
     "series": [
       {

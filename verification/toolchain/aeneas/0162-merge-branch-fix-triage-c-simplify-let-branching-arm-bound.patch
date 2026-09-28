@@ -1,0 +1,3695 @@
+# aeneas integration step 162 after cba11f3beb: commit b10cbcd9916d6f6526da0bf51ef2637a8528a5f9
+# first parent 919c70e0a93b671e701b134a39bdaad217f77862, merged b1d727e28532500862a990ebedc15797ef436c49
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/triage' (C simplify_let_branching arm-bound vars; B identity dyn upcast; D share_repeated_shared_indexing non-fall-through branches; F separate compilation trait copies with method subsets; E untranslated trait decls/impls not exported; G u8<->char casts; A &mut slice length + SliceSubSliceMut)
+#
+# PrePasses.ml: both sides added a pass after read_raw_pointer_metadata:
+# read_lengths_before_reborrows (fix/triage) and shared_indexing_for_array_moves
+# (main). Both are kept and run in that order, before
+# share_repeated_shared_indexing: the first rewrites slice reborrows, the
+# second array moves, so they touch disjoint statements.
+
+diff --git a/backends/lean/Aeneas/Std/Scalar/Casts.lean b/backends/lean/Aeneas/Std/Scalar/Casts.lean
+index c03ef15..f1c995c 100644
+--- a/backends/lean/Aeneas/Std/Scalar/Casts.lean
++++ b/backends/lean/Aeneas/Std/Scalar/Casts.lean
+@@ -100,6 +100,34 @@ def UScalar.cast_fromBool (ty : UScalarTy) (x : Bool) : UScalar ty :=
+ def IScalar.cast_fromBool (ty : IScalarTy) (x : Bool) : IScalar ty :=
+   if x then ⟨ 1#ty.numBits ⟩ else ⟨ 0#ty.numBits ⟩
+ 
++/-- `x as char` for a `u8` `x`, the only integer type which Rust casts to `char`: every `u8` value
++    is a Unicode scalar value, so `Char.ofNat` never falls back to `'\0'`. -/
++def UScalar.cast_toChar (x : U8) : Char := Char.ofNat x.val
++
++/-- `c as uN` for a `char` `c`: its code point (at most `0x10FFFF`), truncated to the target type -/
++def UScalar.cast_fromChar (ty : UScalarTy) (c : Char) : UScalar ty :=
++  ⟨ BitVec.ofNat ty.numBits c.toNat ⟩
++
++/-- `c as iN` for a `char` `c`: its code point, truncated to the target type -/
++def IScalar.cast_fromChar (ty : IScalarTy) (c : Char) : IScalar ty :=
++  ⟨ BitVec.ofNat ty.numBits c.toNat ⟩
++
++section
++  /-! The char casts on examples at the truncation boundaries. -/
++  local macro:max x:term:max noWs "i8" : term => `(I8.ofInt $x (by decide))
++  local macro:max x:term:max noWs "u8" : term => `(U8.ofNat $x (by decide))
++  local macro:max x:term:max noWs "u16" : term => `(U16.ofNat $x (by decide))
++  local macro:max x:term:max noWs "u32" : term => `(U32.ofNat $x (by decide))
++
++  #assert UScalar.cast_toChar 97u8 = 'a'                   -- assert_eq!(97u8 as char, 'a');
++  #assert UScalar.cast_toChar 255u8 = 'ÿ'                  -- assert_eq!(255u8 as char, 'ÿ');
++  #assert UScalar.cast_fromChar .U32 'é' = 233u32          -- assert_eq!('é' as u32, 233);
++  #assert UScalar.cast_fromChar .U32 (Char.ofNat 0x10FFFF) = 0x10FFFFu32 -- char::MAX as u32
++  #assert UScalar.cast_fromChar .U8 'Ā' = 0u8              -- assert_eq!('Ā' as u8, 0);
++  #assert UScalar.cast_fromChar .U16 '😀' = 0xF600u16      -- assert_eq!('😀' as u16, 0xF600);
++  #assert IScalar.cast_fromChar .I8 'ÿ' = (-1)i8           -- assert_eq!('ÿ' as i8, -1);
++end
++
+ /-!
+ # Casts: Theorems
+ -/
+diff --git a/backends/lean/Aeneas/Std/Slice.lean b/backends/lean/Aeneas/Std/Slice.lean
+index 8fc4df1..cef76b6 100644
+--- a/backends/lean/Aeneas/Std/Slice.lean
++++ b/backends/lean/Aeneas/Std/Slice.lean
+@@ -290,6 +290,25 @@ theorem Slice.subslice_shared_spec {α : Type u} (s : Slice α) (start end_ : Us
+   subslice_shared s start end_ ⦃ ns => ns.val = s.val.slice start.val end_.val ⦄ := by
+   simp_all only [subslice_shared, length, and_self, ite_true, spec_ok]
+ 
++/-- The mutable subslice `s[start..end_]` (builtin `@SliceSubSliceMut`, e.g. the
++    rest `rest @ ..` of a slice pattern on a mutable slice), and the backward
++    function which writes the given-back subslice back into `s` from `start`
++    on. In Rust the given-back subslice has the length of the subslice;
++    `setSlice!` keeps the length of `s` for any given-back value. -/
++def Slice.subslice_mut {α : Type u} (s : Slice α) (start end_ : Usize) :
++  Result (Slice α × (Slice α → Slice α)) := do
++  let ns ← Slice.subslice_shared s start end_
++  ok (ns, fun ns' => ⟨ s.val.setSlice! start.val ns'.val, by scalar_tac ⟩)
++
++@[step]
++theorem Slice.subslice_mut_spec {α : Type u} (s : Slice α) (start end_ : Usize)
++  (h0 : start.val ≤ end_.val) (h1 : end_.val ≤ s.val.length) :
++  subslice_mut s start end_ ⦃ p =>
++    p.1.val = s.val.slice start.val end_.val ∧
++    ∀ ns', (p.2 ns').val = s.val.setSlice! start.val ns'.val ⦄ := by
++  simp_all only [subslice_mut, subslice_shared, length, and_self, ite_true, bind_tc_ok,
++    spec_ok, implies_true]
++
+ def Slice.update_subslice {α : Type u} (s : Slice α) (r : Range Usize) (ss : Slice α) : Result (Slice α) :=
+   -- TODO: not completely sure here
+   if h: r.start.val < r.end.val ∧ r.end.val ≤ s.length ∧ ss.val.length = r.end.val - r.start.val then
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 807755f..155af32 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -3290,18 +3290,64 @@ let resolve_default_only_dispatch (crate : crate) : crate =
+ (** Read the length of a matched slice directly.
+ 
+     The length check of a slice pattern on a place which is not a local (e.g.
+-    [match c { A(x, [y]) => ... }]) creates a raw pointer to the matched slice
+-    only to read its metadata:
++    [match c { A(x, [y]) => ... }], or on a mutable slice) creates a raw pointer
++    to the matched slice only to read its metadata:
+     {[
+       r := &raw const ( *p) with_metadata(m);
+       n := copy r.metadata;
+     ]}
+     The metadata of this pointer is [m]. When the raw pointer has no other use,
+-    read [m] directly ([n := m]) and drop the raw pointer. *)
++    read [m] directly ([n := m]) and drop the raw pointer. The code of a match
++    arm may be duplicated by the control-flow reconstruction: the raw pointer
++    then has one such definition and read per copy, and no other use. *)
+ let read_raw_pointer_metadata (_crate : crate) (f : fun_decl) : fun_decl =
+   match f.body with
+   | StructuredBody body ->
++      (* The metadata read which follows the definition of the raw pointer [r]
++         (after storage markers of other locals): the markers, the read, its
++         destination and the statements after it *)
++      let metadata_read r (rest : statement list) =
++        let rec split lives = function
++          | ({ kind = StorageLive id; _ } as live) :: rest when id <> r ->
++              split (live :: lives) rest
++          | next :: rest -> Some (List.rev lives, next, rest)
++          | [] -> None
++        in
++        match split [] rest with
++        | Some
++            ( lives,
++              ({
++                 kind =
++                   Assign
++                     ( dest,
++                       Use
++                         ( Copy
++                             {
++                               kind =
++                                 PlaceProjection
++                                   ({ kind = PlaceLocal r'; _ }, PtrMetadata);
++                               _;
++                             }
++                         | Move
++                             {
++                               kind =
++                                 PlaceProjection
++                                   ({ kind = PlaceLocal r'; _ }, PtrMetadata);
++                               _;
++                             } ) );
++                 _;
++               } as next),
++              rest' )
++          when r = r' -> Some (lives, next, dest, rest')
++        | _ -> None
++      in
++      let incr id map =
++        LocalId.Map.add id
++          (1 + Option.value (LocalId.Map.find_opt id map) ~default:0)
++          map
++      in
+       let counts = ref LocalId.Map.empty in
++      let pairs = ref LocalId.Map.empty in
+       let occurrences =
+         object
+           inherit [_] iter_statement as super
+@@ -3309,19 +3355,34 @@ let read_raw_pointer_metadata (_crate : crate) (f : fun_decl) : fun_decl =
+           (* Occurrences in places (not in storage markers) *)
+           method! visit_place env p =
+             match p.kind with
+-            | PlaceLocal id ->
+-                counts :=
+-                  LocalId.Map.add id
+-                    (1
+-                    + Option.value (LocalId.Map.find_opt id !counts) ~default:0
+-                    )
+-                    !counts
++            | PlaceLocal id -> counts := incr id !counts
+             | _ -> super#visit_place env p
++
++          (* Definitions immediately followed by their metadata read *)
++          method! visit_block env b =
++            let rec go = function
++              | {
++                  kind = Assign ({ kind = PlaceLocal r; _ }, RawPtr (_, _, _));
++                  _;
++                }
++                :: rest ->
++                  if Option.is_some (metadata_read r rest) then
++                    pairs := incr r !pairs;
++                  go rest
++              | _ :: rest -> go rest
++              | [] -> ()
++            in
++            go b.statements;
++            super#visit_block env b
+         end
+       in
+       occurrences#visit_block () body.body;
+-      (* Only the definition and the metadata read *)
+-      let single_use id = LocalId.Map.find_opt id !counts = Some 2 in
++      (* Every occurrence is the definition or the metadata read of a pair *)
++      let single_use id =
++        match LocalId.Map.find_opt id !pairs with
++        | Some n -> LocalId.Map.find_opt id !counts = Some (2 * n)
++        | None -> false
++      in
+       let visitor =
+         object
+           inherit [_] map_statement as super
+@@ -3336,40 +3397,8 @@ let read_raw_pointer_metadata (_crate : crate) (f : fun_decl) : fun_decl =
+                  } as st)
+                 :: rest
+                 when single_use r -> (
+-                  let rec split lives = function
+-                    | ({ kind = StorageLive id; _ } as live) :: rest
+-                      when id <> r -> split (live :: lives) rest
+-                    | next :: rest -> Some (List.rev lives, next, rest)
+-                    | [] -> None
+-                  in
+-                  match split [] rest with
+-                  | Some
+-                      ( lives,
+-                        ({
+-                           kind =
+-                             Assign
+-                               ( dest,
+-                                 Use
+-                                   ( Copy
+-                                       {
+-                                         kind =
+-                                           PlaceProjection
+-                                             ( { kind = PlaceLocal r'; _ },
+-                                               PtrMetadata );
+-                                         _;
+-                                       }
+-                                   | Move
+-                                       {
+-                                         kind =
+-                                           PlaceProjection
+-                                             ( { kind = PlaceLocal r'; _ },
+-                                               PtrMetadata );
+-                                         _;
+-                                       } ) );
+-                           _;
+-                         } as next),
+-                        rest' )
+-                    when r = r' ->
++                  match metadata_read r rest with
++                  | Some (lives, next, dest, rest') ->
+                       lives
+                       @ {
+                           next with
+@@ -3378,7 +3407,7 @@ let read_raw_pointer_metadata (_crate : crate) (f : fun_decl) : fun_decl =
+                             st.comments_before @ next.comments_before;
+                         }
+                         :: go rest'
+-                  | _ -> st :: go rest)
++                  | None -> st :: go rest)
+               | st :: rest -> st :: go rest
+               | [] -> []
+             in
+@@ -3389,6 +3418,91 @@ let read_raw_pointer_metadata (_crate : crate) (f : fun_decl) : fun_decl =
+       { f with body = StructuredBody { body with body = b } }
+   | _ -> f
+ 
++(** Read the length of a mutable slice before the reborrow which follows it.
++
++    The rest [rest @ ..] of a slice pattern on a mutable slice reborrows the
++    slice, then reads its length for the end of the subslice:
++    {[
++      r := &mut ( *p) with_metadata(..);
++      n := len( *p);    // or: n := copy p.metadata
++      rest := @SliceSubSliceMut(move r, from, n - k);
++    ]}
++    The length is the metadata of the reference [p], which the reborrow does
++    not change; the interpreter, however, reads it from the slice, which is
++    then lent to [r]: the read would end [r]. Read the length before the
++    reborrow (with the storage markers in between, which may be [n]'s). *)
++let read_lengths_before_reborrows (_crate : crate) (f : fun_decl) : fun_decl =
++  match f.body with
++  | StructuredBody body ->
++      let reborrow (st : statement) =
++        match st.kind with
++        | Assign
++            ( { kind = PlaceLocal r; _ },
++              RvRef
++                ( {
++                    kind = PlaceProjection ({ kind = PlaceLocal p; _ }, Deref);
++                    _;
++                  },
++                  (BMut | BTwoPhaseMut),
++                  _ ) ) -> Some (r, p)
++        | _ -> None
++      in
++      let length_read p (st : statement) =
++        match st.kind with
++        | Assign
++            ( { kind = PlaceLocal n; _ },
++              ( Len
++                  ( {
++                      kind =
++                        PlaceProjection ({ kind = PlaceLocal p'; _ }, Deref);
++                      _;
++                    },
++                    _,
++                    None )
++              | Use
++                  (Copy
++                     {
++                       kind =
++                         PlaceProjection ({ kind = PlaceLocal p'; _ }, PtrMetadata);
++                       _;
++                     }) ) )
++          when p' = p -> Some n
++        | _ -> None
++      in
++      let visitor =
++        object
++          inherit [_] map_statement as super
++
++          method! visit_block env b =
++            let b = super#visit_block env b in
++            let rec go (sts : statement list) =
++              match sts with
++              | st :: rest -> (
++                  match reborrow st with
++                  | None -> st :: go rest
++                  | Some (r, p) -> (
++                      let rec split lives = function
++                        | ({ kind = StorageLive id; _ } as live) :: rest
++                          when id <> r && id <> p -> split (live :: lives) rest
++                        | next :: rest -> Some (List.rev lives, next, rest)
++                        | [] -> None
++                      in
++                      match split [] rest with
++                      | Some (lives, next, rest') -> (
++                          match length_read p next with
++                          | Some n when n <> r && n <> p ->
++                              lives @ (next :: go (st :: rest'))
++                          | _ -> st :: go rest)
++                      | None -> st :: go rest))
++              | [] -> []
++            in
++            { b with statements = go b.statements }
++        end
++      in
++      let b = visitor#visit_block () body.body in
++      { f with body = StructuredBody { body with body = b } }
++  | _ -> f
++
+ (** Move array elements out through shared indexings.
+ 
+     Rust moves an element out of an owned array only by a constant index (array
+@@ -3663,6 +3777,25 @@ let share_repeated_shared_indexing (_crate : crate) (f : fun_decl) : fun_decl =
+         } -> Some (builtin, generics, borrow, idx, result, ty)
+     | _ -> None
+   in
++  (* Whether control may continue after a block with the statement which
++     follows it *)
++  let rec falls_through (b : block) : bool =
++    match List.rev b.statements with
++    | { kind = Return | Abort _ | Break _ | Continue _; _ } :: _ -> false
++    | { kind = Switch switch; _ } :: _ -> (
++        match switch with
++        | If (_, b0, b1) -> falls_through b0 || falls_through b1
++        | SwitchInt (_, _, branches, otherwise) ->
++            List.exists (fun (_, b) -> falls_through b) branches
++            || falls_through otherwise
++        | Match (_, branches, otherwise) -> (
++            List.exists (fun (_, b) -> falls_through b) branches
++            ||
++            match otherwise with
++            | Some b -> falls_through b
++            | None -> false))
++    | _ -> true
++  in
+   match f.body with
+   | StructuredBody body ->
+       let rec block avail (b : block) : block =
+@@ -3723,7 +3856,35 @@ let share_repeated_shared_indexing (_crate : crate) (f : fun_decl) : fun_decl =
+           | st :: rest -> statement avail st rest
+           | [] -> []
+         and statement avail st rest =
+-          let written = written st in
++          (* The statements after a switch follow only its branches which may
++             complete normally: the writes of a branch ending with a return, an
++             abort, a break or a continue (e.g. the storage markers before the
++             early return of a slice pattern's fallback arm in a loop body) do
++             not reach them *)
++          let written =
++            match st.kind with
++            | Switch switch ->
++                let keep (b : block) =
++                  if falls_through b then b else { b with statements = [] }
++                in
++                let switch =
++                  match switch with
++                  | If (op, b0, b1) -> If (op, keep b0, keep b1)
++                  | SwitchInt (op, ty, branches, otherwise) ->
++                      SwitchInt
++                        ( op,
++                          ty,
++                          List.map (fun (v, b) -> (v, keep b)) branches,
++                          keep otherwise )
++                  | Match (p, branches, otherwise) ->
++                      Match
++                        ( p,
++                          List.map (fun (v, b) -> (v, keep b)) branches,
++                          Option.map keep otherwise )
++                in
++                written { st with kind = Switch switch }
++            | _ -> written st
++          in
+           let st =
+             match st.kind with
+             | Switch switch ->
+@@ -4498,6 +4659,7 @@ let apply_passes (crate : crate) : crate =
+       ("expand_char_switches", expand_char_switches);
+       ("update_loop", update_loops);
+       ("read_raw_pointer_metadata", read_raw_pointer_metadata);
++      ("read_lengths_before_reborrows", read_lengths_before_reborrows);
+       ("shared_indexing_for_array_moves", shared_indexing_for_array_moves);
+       ("share_repeated_shared_indexing", share_repeated_shared_indexing);
+       ("remove_useless_joins", remove_useless_joins);
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 65b2d16..dba4b48 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -757,7 +757,12 @@ let sc_global_fingerprint (ctx : gen_ctx) (d : Pure.global_decl) : string =
+       string_of_bool d.can_fail;
+     ]
+ 
+-let sc_trait_decl_fingerprint (ctx : gen_ctx) (d : Pure.trait_decl) : string =
++(** The interface of a trait declaration without its methods, and the
++    signatures of its methods. The partially monomorphized copies of a foreign
++    trait keep the methods which their chunk uses: another chunk may see only
++    some of the methods of the owner's copy (see [sc_check_external_views]). *)
++let sc_trait_decl_parts (ctx : gen_ctx) (d : Pure.trait_decl) :
++    string * string list =
+   let env = sc_env ctx d.generics in
+   let method_sig (name, (m : Pure.fun_decl_ref Pure.binder)) =
+     name ^ " : "
+@@ -766,34 +771,45 @@ let sc_trait_decl_fingerprint (ctx : gen_ctx) (d : Pure.trait_decl) : string =
+     | Some trans -> sc_fun_sig_fingerprint ctx trans.f.signature
+     | None -> "<untranslated>"
+   in
+-  String.concat "\n"
+-    ([
+-       PrintPure.generic_params_to_string env d.generics;
+-       PrintPure.predicates_to_string env d.preds;
+-       Pure.show_explicit_info d.explicit_info;
+-     ]
+-    @ List.map (PrintPure.trait_clause_to_string env) d.parent_clauses
+-    @ List.map
+-        (fun (name, ty) -> name ^ " : " ^ PrintPure.ty_to_string env false ty)
+-        d.consts
+-    @ d.types
+-    @ List.map method_sig d.methods)
++  ( String.concat "\n"
++      ([
++         PrintPure.generic_params_to_string env d.generics;
++         PrintPure.predicates_to_string env d.preds;
++         Pure.show_explicit_info d.explicit_info;
++       ]
++      @ List.map (PrintPure.trait_clause_to_string env) d.parent_clauses
++      @ List.map
++          (fun (name, ty) -> name ^ " : " ^ PrintPure.ty_to_string env false ty)
++          d.consts
++      @ d.types),
++    List.map method_sig d.methods )
+ 
+-let sc_trait_impl_fingerprint (ctx : gen_ctx) (d : Pure.trait_impl) : string =
++let sc_trait_decl_fingerprint (ctx : gen_ctx) (d : Pure.trait_decl) : string =
++  let header, methods = sc_trait_decl_parts ctx d in
++  String.concat "\n" (header :: methods)
++
++(** The interface of a trait implementation without its methods (which are
++    functions with their own interfaces), and the names of its methods *)
++let sc_trait_impl_parts (ctx : gen_ctx) (d : Pure.trait_impl) :
++    string * string list =
+   let env = sc_env ctx d.generics in
+-  String.concat "\n"
+-    ([
+-       PrintPure.trait_decl_ref_to_string env false d.impl_trait;
+-       PrintPure.generic_params_to_string env d.generics;
+-       PrintPure.predicates_to_string env d.preds;
+-       Pure.show_explicit_info d.explicit_info;
+-     ]
+-    @ List.map (PrintPure.trait_ref_to_string env false) d.parent_trait_refs
+-    @ List.map fst d.consts
+-    @ List.map
+-        (fun (name, ty) -> name ^ " = " ^ PrintPure.ty_to_string env false ty)
+-        d.types
+-    @ List.map fst d.methods)
++  ( String.concat "\n"
++      ([
++         PrintPure.trait_decl_ref_to_string env false d.impl_trait;
++         PrintPure.generic_params_to_string env d.generics;
++         PrintPure.predicates_to_string env d.preds;
++         Pure.show_explicit_info d.explicit_info;
++       ]
++      @ List.map (PrintPure.trait_ref_to_string env false) d.parent_trait_refs
++      @ List.map fst d.consts
++      @ List.map
++          (fun (name, ty) -> name ^ " = " ^ PrintPure.ty_to_string env false ty)
++          d.types),
++    List.map fst d.methods )
++
++let sc_trait_impl_fingerprint (ctx : gen_ctx) (d : Pure.trait_impl) : string =
++  let header, methods = sc_trait_impl_parts ctx d in
++  String.concat "\n" (header :: methods)
+ 
+ let sc_digest (s : string) : string = Digest.to_hex (Digest.string s)
+ 
+@@ -825,50 +841,73 @@ let sc_fun_facts (ctx : gen_ctx) (id : FunDeclId.id) : SC.fun_facts =
+       [%craise] decl.item_meta.span
+         "Separate compilation: missing function analysis"
+ 
+-(** The Lean name, fingerprint, function facts and trait fields of the
+-    translation of an item, if it was translated. *)
+-let sc_item_interface (ctx : gen_ctx) (id : item_id) :
+-    (string list * string * SC.fun_facts option * string list option) option =
++(** The interface of the translation of an item, as seen by the other chunks *)
++type sc_interface = {
++  lean_names : string list;
++  fingerprint : string;  (** Before its digest *)
++  facts : SC.fun_facts option;
++  methods : string list option;
++      (** Trait declarations: the fields of the structure; implementations:
++          the methods they define *)
++  members : (string * string list option) option;
++      (** Trait declarations and implementations: the interface without the
++          methods, and the signatures of the [methods] of a declaration (none
++          for an implementation, whose methods are functions with their own
++          interfaces) *)
++}
++
++(** The interface of the translation of an item, if it was translated *)
++let sc_item_interface (ctx : gen_ctx) (id : item_id) : sc_interface option =
++  let simple lean_names fingerprint facts =
++    { lean_names; fingerprint; facts; methods = None; members = None }
++  in
+   match id with
+   | IdType tid ->
+       Option.map
+         (fun d ->
+-          ( [ ExtractBase.ctx_get None (TypeId (TAdtId tid)) ctx ],
+-            sc_type_fingerprint ctx d,
+-            None,
+-            None ))
++          simple
++            [ ExtractBase.ctx_get None (TypeId (TAdtId tid)) ctx ]
++            (sc_type_fingerprint ctx d) None)
+         (Pure.TypeDeclId.Map.find_opt tid ctx.trans_types)
+   | IdFun fid ->
+       Option.map
+         (fun (trans : pure_fun_translation) ->
+-          ( sc_fun_lean_names ctx trans,
+-            sc_fun_sig_fingerprint ctx trans.f.signature,
+-            Some (sc_fun_facts ctx fid),
+-            None ))
++          simple
++            (sc_fun_lean_names ctx trans)
++            (sc_fun_sig_fingerprint ctx trans.f.signature)
++            (Some (sc_fun_facts ctx fid)))
+         (FunDeclId.Map.find_opt fid ctx.trans_funs)
+   | IdGlobal gid ->
+       Option.map
+         (fun (d : Pure.global_decl) ->
+-          ( [ ExtractBase.ctx_get None (GlobalId gid) ctx ],
+-            sc_global_fingerprint ctx d,
+-            Some (sc_fun_facts ctx d.body_id),
+-            None ))
++          simple
++            [ ExtractBase.ctx_get None (GlobalId gid) ctx ]
++            (sc_global_fingerprint ctx d)
++            (Some (sc_fun_facts ctx d.body_id)))
+         (GlobalDeclId.Map.find_opt gid ctx.trans_globals)
+   | IdTraitDecl tid ->
+       Option.map
+         (fun (d : Pure.trait_decl) ->
+-          ( [ ExtractBase.ctx_get None (TraitDeclId tid) ctx ],
+-            sc_trait_decl_fingerprint ctx d,
+-            None,
+-            Some (List.map fst d.methods) ))
++          let header, sigs = sc_trait_decl_parts ctx d in
++          {
++            lean_names = [ ExtractBase.ctx_get None (TraitDeclId tid) ctx ];
++            fingerprint = sc_trait_decl_fingerprint ctx d;
++            facts = None;
++            methods = Some (List.map fst d.methods);
++            members = Some (header, Some sigs);
++          })
+         (TraitDeclId.Map.find_opt tid ctx.trans_trait_decls)
+   | IdTraitImpl tid ->
+       Option.map
+         (fun (d : Pure.trait_impl) ->
+-          ( [ ExtractBase.ctx_get None (TraitImplId tid) ctx ],
+-            sc_trait_impl_fingerprint ctx d,
+-            None,
+-            None ))
++          let header, methods = sc_trait_impl_parts ctx d in
++          {
++            lean_names = [ ExtractBase.ctx_get None (TraitImplId tid) ctx ];
++            fingerprint = sc_trait_impl_fingerprint ctx d;
++            facts = None;
++            methods = Some methods;
++            members = Some (header, None);
++          })
+         (TraitImplId.Map.find_opt tid ctx.trans_trait_impls)
+ 
+ (** Record a declaration emitted in the current module *)
+@@ -877,23 +916,63 @@ let sc_record (ctx : gen_ctx) (id : item_id) : unit =
+     match
+       (SC.item_key ctx.crate id, !SC.current_module, sc_item_interface ctx id)
+     with
+-    | Some key, Some lean_module, Some (lean_names, fingerprint, facts, methods)
+-      ->
++    | Some key, Some lean_module, Some i ->
+         SC.record
+           {
+             key;
+             lean_module;
+-            lean_names;
+-            fingerprint = sc_digest fingerprint;
+-            facts;
+-            methods;
++            lean_names = i.lean_names;
++            fingerprint = sc_digest i.fingerprint;
++            facts = i.facts;
++            methods = i.methods;
++            members =
++              Option.map
++                (fun (header, sigs) : SC.members ->
++                  {
++                    header = sc_digest header;
++                    method_fingerprints =
++                      List.map sc_digest (Option.value sigs ~default:[]);
++                  })
++                i.members;
+           }
+     | _ ->
+         [%craise_opt_span] None
+           "Separate compilation: cannot record a declaration"
+ 
++(** Whether the view of a trait declaration or implementation in this chunk
++    keeps a subset of the methods of the owner's, with the same interface
++    otherwise: the partially monomorphized copy of a foreign trait (e.g.
++    [Iterator::<IterMut<'a, T>, &'a mut T>]) keeps the methods which its
++    chunk uses, and the view of an external declaration keeps at most the
++    owner's fields ([PureMicroPasses.apply_external_trait_fields]). The chunk
++    does not emit the declaration: it refers to the owner's structure (and
++    instance) by its Lean name, and projects only fields of its view, each of
++    which the owner emits with the same signature (equal digests); the rest of
++    the interface (parameters, predicates, parent clauses, constants and types)
++    has the same digest. Lean checks these references when the chunks are
++    compiled together. *)
++let sc_members_subset (i : sc_interface) (e : SC.entry) : bool =
++  match (i.methods, i.members, e.methods, e.members) with
++  | Some methods, Some (header, sigs), Some methods', Some members' -> (
++      sc_digest header = members'.header
++      && List.for_all (fun m -> List.mem m methods') methods
++      &&
++      match sigs with
++      | None -> true
++      | Some sigs ->
++          List.length members'.method_fingerprints = List.length methods'
++          &&
++          let owner_sig =
++            List.combine methods' members'.method_fingerprints
++          in
++          List.for_all2
++            (fun m s -> List.assoc_opt m owner_sig = Some (sc_digest s))
++            methods sigs)
++  | _ -> false
++
+ (** The external items used by this chunk must be seen exactly as their owner
+-    emitted them: same Lean names, same interface. *)
++    emitted them: same Lean names, same interface (up to the methods which a
++    copy of a foreign trait does not use, see [sc_members_subset]). *)
+ let sc_check_external_views (ctx : gen_ctx) : unit =
+   let check_view (id : item_id) =
+     match SC.external_entry id with
+@@ -901,21 +980,23 @@ let sc_check_external_views (ctx : gen_ctx) : unit =
+     | Some e -> (
+         match sc_item_interface ctx id with
+         | None -> ()
+-        | Some (lean_names, fingerprint, _, methods) -> (
+-            let main = List.hd lean_names in
++        | Some i -> (
++            let main = List.hd i.lean_names in
+             if main <> List.hd e.lean_names then
+               SC.fail
+                 ("Separate compilation: the Lean name of [" ^ e.key ^ "] is "
+                ^ main ^ " in this chunk but " ^ List.hd e.lean_names
+                ^ " in its owner module " ^ e.lean_module);
+-            if sc_digest fingerprint <> e.fingerprint then
++            let subset = lazy (sc_members_subset i e) in
++            if sc_digest i.fingerprint <> e.fingerprint && not (Lazy.force subset)
++            then
+               SC.fail
+                 ("Separate compilation: the interface of [" ^ e.key
+                ^ "] in this chunk differs from the one emitted by its owner \
+                   module " ^ e.lean_module ^ ". Interface in this chunk:\n"
+-               ^ fingerprint);
+-            match (methods, e.methods) with
+-            | Some l, Some l' when l <> l' ->
++               ^ i.fingerprint);
++            match (i.methods, e.methods) with
++            | Some l, Some l' when l <> l' && not (Lazy.force subset) ->
+                 SC.fail
+                   ("Separate compilation: the fields of [" ^ e.key
+                  ^ "] differ from the ones of its owner module " ^ e.lean_module
+@@ -1338,58 +1419,62 @@ let export_functions_group (fmt : Format.formatter) (config : gen_config)
+       (fun trans -> Extract.extract_unit_test_if_marked ctx fmt trans.f)
+       pure_ls
+ 
++(* A trait declaration or implementation whose translation failed has no entry
++   in the translated context: its error was reported when its translation
++   failed, and it is not exported (as a function whose translation failed). *)
+ let trait_decl_is_builtin (ctx : gen_ctx) (id : Pure.trait_decl_id) : bool =
+-  let trait_decl =
+-    [%silent_unwrap_opt_span] None
+-      (TraitDeclId.Map.find_opt id ctx.trans_trait_decls)
+-  in
+-  Option.is_some trait_decl.builtin_info
++  match TraitDeclId.Map.find_opt id ctx.trans_trait_decls with
++  | Some trait_decl -> Option.is_some trait_decl.builtin_info
++  | None -> false
+ 
+ let trait_impl_is_builtin (ctx : gen_ctx) (id : Pure.trait_impl_id) : bool =
+-  let trait_impl =
+-    [%silent_unwrap_opt_span] None
+-      (TraitImplId.Map.find_opt id ctx.trans_trait_impls)
+-  in
+-  Option.is_some trait_impl.builtin_info
++  match TraitImplId.Map.find_opt id ctx.trans_trait_impls with
++  | Some trait_impl -> Option.is_some trait_impl.builtin_info
++  | None -> false
+ 
+ (** Export a trait declaration. *)
+ let export_trait_decl (fmt : Format.formatter) (_config : gen_config)
+     (ctx : gen_ctx) (trait_decl_id : Pure.trait_decl_id) (extract_decl : bool)
+     (extract_extra_info : bool) : unit =
+-  let trait_decl =
+-    [%silent_unwrap_opt_span] None
+-      (TraitDeclId.Map.find_opt trait_decl_id ctx.trans_trait_decls)
+-  in
+-  (* Check if the trait declaration is builtin, in which case we ignore it *)
+-  if not (trait_decl_is_builtin ctx trait_decl_id) then (
+-    let ctx = { ctx with trait_decl_id = Some trait_decl.def_id } in
+-    if extract_decl then (
+-      Extract.extract_trait_decl ctx fmt trait_decl;
+-      sc_record ctx (IdTraitDecl trait_decl_id));
+-    if extract_extra_info then
+-      Extract.extract_trait_decl_extra_info ctx fmt trait_decl)
+-  else ()
++  match TraitDeclId.Map.find_opt trait_decl_id ctx.trans_trait_decls with
++  | None -> ()
++  | Some trait_decl ->
++      (* A declaration one of whose methods could not be translated (its error
++         was reported) is not exported either: its structure would lack the
++         method's field *)
++      let methods_translated =
++        List.for_all
++          (fun (_, (m : Pure.fun_decl_ref Pure.binder)) ->
++            FunDeclId.Map.mem m.binder_value.fun_id ctx.trans_funs)
++          trait_decl.methods
++      in
++      (* Check if the trait declaration is builtin, in which case we ignore it *)
++      if Option.is_none trait_decl.builtin_info && methods_translated then (
++        let ctx = { ctx with trait_decl_id = Some trait_decl.def_id } in
++        if extract_decl then (
++          Extract.extract_trait_decl ctx fmt trait_decl;
++          sc_record ctx (IdTraitDecl trait_decl_id));
++        if extract_extra_info then
++          Extract.extract_trait_decl_extra_info ctx fmt trait_decl)
+ 
+ (** Export a trait implementation. *)
+ let export_trait_impl (fmt : Format.formatter) (_config : gen_config)
+     (ctx : gen_ctx) ~(is_rec : bool) (trait_impl_id : Pure.trait_impl_id) : unit
+     =
+-  (* Lookup the definition *)
+-  let trait_impl =
+-    [%silent_unwrap_opt_span] None
+-      (TraitImplId.Map.find_opt trait_impl_id ctx.trans_trait_impls)
+-  in
+-  if not (trait_impl_is_builtin ctx trait_impl_id) then (
+-    let ctx =
+-      if is_rec then
+-        {
+-          ctx with
+-          local_trait_impl_refs = TraitImplId.Set.singleton trait_impl_id;
+-        }
+-      else ctx
+-    in
+-    Extract.extract_trait_impl ctx fmt ~is_rec trait_impl;
+-    sc_record ctx (IdTraitImpl trait_impl_id))
++  match TraitImplId.Map.find_opt trait_impl_id ctx.trans_trait_impls with
++  | None -> ()
++  | Some trait_impl ->
++      if Option.is_none trait_impl.builtin_info then (
++        let ctx =
++          if is_rec then
++            {
++              ctx with
++              local_trait_impl_refs = TraitImplId.Set.singleton trait_impl_id;
++            }
++          else ctx
++        in
++        Extract.extract_trait_impl ctx fmt ~is_rec trait_impl;
++        sc_record ctx (IdTraitImpl trait_impl_id))
+ 
+ (** A generic utility to generate the extracted definitions: as we may want to
+     split the definitions between different files (or not), we can control what
+@@ -1549,11 +1634,11 @@ let extract_definitions ?(on_group_done : unit -> unit = fun () -> ())
+         let inline_trait_impls =
+           List.fold_left
+             (fun impls -> function
+-              | IdTraitImpl id ->
+-                  let impl = TraitImplId.Map.find id ctx.trans_trait_impls in
+-                  if Option.is_none impl.builtin_info then
+-                    TraitImplId.Map.add id impl impls
+-                  else impls
++              | IdTraitImpl id -> (
++                  match TraitImplId.Map.find_opt id ctx.trans_trait_impls with
++                  | Some impl when Option.is_none impl.builtin_info ->
++                      TraitImplId.Map.add id impl impls
++                  | _ -> impls)
+               | _ -> impls)
+             TraitImplId.Map.empty ids
+         in
+diff --git a/src/extract/Extract.ml b/src/extract/Extract.ml
+index 0b14727..58040f1 100644
+--- a/src/extract/Extract.ml
++++ b/src/extract/Extract.ml
+@@ -502,6 +502,17 @@ let extract_cast_kind_gen (span : Meta.span)
+              in
+              let tgt = integer_type_to_string tgt in
+              (cast_str, None, Some tgt)
++         | TUInt U8, TChar when backend () = Lean ->
++             (* Rust casts only [u8] to [char] *)
++             ("_root_.Aeneas.Std.UScalar.cast_toChar", None, None)
++         | TChar, (TInt _ | TUInt _) when backend () = Lean ->
++             let tgt = literal_as_integer tgt in
++             let cast_str =
++               if Scalars.integer_type_is_signed tgt then
++                 "_root_.Aeneas.Std.IScalar.cast_fromChar"
++               else "_root_.Aeneas.Std.UScalar.cast_fromChar"
++             in
++             (cast_str, None, Some (integer_type_to_string tgt))
+          | TInt _, TBool | TUInt _, TBool ->
+              (* This is not allowed by rustc: the way of doing it in Rust is: [x != 0] *)
+              [%craise] span "Unexpected cast: integer to bool"
+@@ -511,7 +522,13 @@ let extract_cast_kind_gen (span : Meta.span)
+                 boolean), it gets compiled to [b] (i.e., no cast
+                 is introduced). *)
+              [%craise] span "Unexpected cast: bool to bool"
+-         | _ -> [%craise] span "Unreachable"
++         | _ ->
++             (* E.g. [char] casts in the other backends: no model *)
++             [%craise] span
++               ("Unsupported cast from "
++               ^ PrintPure.literal_type_to_string src
++               ^ " to "
++               ^ PrintPure.literal_type_to_string tgt)
+        in
+        (* Print the name of the function *)
+        F.pp_print_string fmt cast_str;
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index a98060e..03144d7 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -1085,10 +1085,20 @@ let ctx_get_reference (span : Meta.span option) (id : id) (ctx : extraction_ctx)
+   let name = ctx_get span id ctx in
+   if backend () <> Lean then name
+   else
++    (* A declaration which could not be translated has no entry (its
++       translation error was reported, and [ctx_get] reports a missing name):
++       a reference to it stays qualified from the root. *)
++    let generated_opt : type a. a option option -> bool = function
++      | Some (Some _) -> false
++      | Some None | None -> true
++    in
+     let generated =
+       match id with
+       | TypeId (TAdtId id) | StructId (TAdtId id) | VariantId (TAdtId id, _) ->
+-          (TypeDeclId.Map.find id ctx.trans_types).builtin_info = None
++          generated_opt
++            (Option.map
++               (fun (d : Pure.type_decl) -> d.builtin_info)
++               (TypeDeclId.Map.find_opt id ctx.trans_types))
+       | FunId (FromLlbc (FunId (FRegular id), loop_id))
+         when PureUtils.FunLoopIdSet.mem (id, loop_id) ctx.local_function_refs ->
+           false
+@@ -1099,15 +1109,24 @@ let ctx_get_reference (span : Meta.span option) (id : id) (ctx : extraction_ctx)
+           | Some f -> f.f.builtin_info = None
+           | None -> false)
+       | GlobalId id | GlobalPureValueId id ->
+-          (GlobalDeclId.Map.find id ctx.trans_globals).builtin_info = None
++          generated_opt
++            (Option.map
++               (fun (d : Pure.global_decl) -> d.builtin_info)
++               (GlobalDeclId.Map.find_opt id ctx.trans_globals))
+       | TerminationMeasureId _ | DecreasesProofId _ -> true
+       | TraitDeclId id | TraitDeclConstructorId id ->
+-          (TraitDeclId.Map.find id ctx.trans_trait_decls).builtin_info = None
++          generated_opt
++            (Option.map
++               (fun (d : Pure.trait_decl) -> d.builtin_info)
++               (TraitDeclId.Map.find_opt id ctx.trans_trait_decls))
+       | TraitImplId id when Pure.TraitImplId.Set.mem id ctx.local_trait_impl_refs
+         ->
+           false
+       | TraitImplId id ->
+-          (TraitImplId.Map.find id ctx.trans_trait_impls).builtin_info = None
++          generated_opt
++            (Option.map
++               (fun (d : Pure.trait_impl) -> d.builtin_info)
++               (TraitImplId.Map.find_opt id ctx.trans_trait_impls))
+       | _ -> false
+     in
+     if generated then
+@@ -1684,6 +1703,8 @@ let builtin_llbc_functions () : (A.builtin_fun_id * string) list =
+           "_root_.Aeneas.Std.Slice.index_mut_usize" );
+         ( Index { is_array = false; mutability = RShared; is_range = true },
+           "_root_.Aeneas.Std.Slice.subslice_shared" );
++        ( Index { is_array = false; mutability = RMut; is_range = true },
++          "_root_.Aeneas.Std.Slice.subslice_mut" );
+       ]
+ 
+ let builtin_pure_functions () : (pure_builtin_fun_id * string) list =
+diff --git a/src/interp/InterpExpressions.ml b/src/interp/InterpExpressions.ml
+index ba24c59..79ffc45 100644
+--- a/src/interp/InterpExpressions.ml
++++ b/src/interp/InterpExpressions.ml
+@@ -643,9 +643,40 @@ let eval_operand_no_reorganize (config : config) (span : Meta.span)
+             synthesize_intro_symbolic ctx None sv (SymbolicAst.VaSliceLen v)
+           in
+           (mk_tvalue_from_symbolic_value sv, ctx, cc)
++      | TRef (_, TSlice _, RMut) ->
++          (* The length of a mutably borrowed slice (slice patterns on a
++             [&mut [T]] read it): the length of the current value of the
++             slice, which no write through the borrow can change. The
++             translation reads it from that value, which must therefore not be
++             (partly) lent through a mutable reborrow. *)
++          let has_mut_loans (v : tvalue) : bool =
++            let obj =
++              object
++                inherit [_] iter_tvalue
++                method! visit_ty _ _ = ()
++                method! visit_VMutLoan _ _ = raise Found
++              end
++            in
++            try
++              obj#visit_tvalue () v;
++              false
++            with Found -> true
++          in
++          [%cassert] span
++            (match v.value with
++            | VBorrow (VMutBorrow (_, inner)) -> not (has_mut_loans inner)
++            | VSymbolic _ -> true
++            | _ -> false)
++            "Reading the length of a mutably borrowed slice whose content is \
++             currently lent through a mutable reborrow is not supported";
++          let sv = mk_fresh_symbolic_value span ctx (TLiteral (TUInt Usize)) in
++          let cc =
++            synthesize_intro_symbolic ctx None sv (SymbolicAst.VaSliceLen v)
++          in
++          (mk_tvalue_from_symbolic_value sv, ctx, cc)
+       | _ ->
+           [%craise] span
+-            "Pointer metadata is only supported for shared slice references")
++            "Pointer metadata is only supported for slice references")
+   | Copy p ->
+       (* Access the value *)
+       let access = Read in
+@@ -1082,11 +1113,11 @@ let eval_unary_op_symbolic (config : config) (span : Meta.span) (unop : unop)
+         "Unsized cast between dynamic traits: unimplemented case";
+       [%cassert] span (ty1 = ty0)
+         "Unsized cast between dynamic traits: unimplemented case";
+-      [%cassert] span
+-        (not (tvalue_has_borrows (Some span) ctx v))
+-        "Unsized cast between dynamic traits: unimplemented case";
+-
+-      (* Nothing to do: the cast is the identity *)
++      (* Nothing to do: the cast is the identity. The types are equal up to
++         their (erased) regions, e.g. [&'a (dyn Error + 'b)] to
++         [&'a (dyn Error + 'c)] in the [Error::source] of [thiserror]: the value,
++         including its borrows, is unchanged, as with a [Use] of the
++         operand. *)
+       (Ok v, ctx, cc)
+   | Cast (CastUnsize (ty0, ty1, _))
+     when ty_has_borrows (Some span) ctx.type_ctx.type_infos v.ty ->
+@@ -1697,10 +1728,10 @@ let eval_rvalue_not_global (config : config) (span : Meta.span)
+       (* Arrays: the length is a constant *)
+       wrap_in_result (eval_operand config span (Constant len) ctx)
+   | Len ({ kind = PlaceProjection (r, Deref); _ }, _, None) -> (
+-      (* Slice patterns read the length of the matched slice. Behind a shared
++      (* Slice patterns read the length of the matched slice. Behind a
+          reference, this is the metadata of the reference. *)
+       match r.ty with
+-      | TRef (_, (TSlice _ as ty), RShared) ->
++      | TRef (_, (TSlice _ as ty), (RShared | RMut)) ->
+           let metadata : place =
+             { kind = PlaceProjection (r, PtrMetadata); ty = TPtrMetadata ty }
+           in
+diff --git a/src/llbc/Builtin.ml b/src/llbc/Builtin.ml
+index 5cd0e08..ccf6502 100644
+--- a/src/llbc/Builtin.ml
++++ b/src/llbc/Builtin.ml
+@@ -163,16 +163,15 @@ module Sig = struct
+ 
+   let array_index_sig (is_mut : bool) = mk_array_slice_index_sig true is_mut
+ 
+-  (** [fn<'a, T>(&'a [T], usize, usize) -> &'a [T]]: the subslice [from..to] (a
+-      range projection, e.g. the rest of a slice pattern). *)
+-  let slice_subslice_shared_sig : bound_fun_sig =
++  (** [fn<'a, T>(&'a [T], usize, usize) -> &'a [T]] (shared) or
++      [fn<'a, T>(&'a mut [T], usize, usize) -> &'a mut [T]] (mutable): the
++      subslice [from..to] (a range projection, e.g. the rest [rest @ ..] of a
++      slice pattern). *)
++  let slice_subslice_sig (is_mut : bool) : bound_fun_sig =
+     let generics =
+       mk_generic_params [ region_param_0 ] [ type_param_0 ] [] (* <'a, T> *)
+     in
+-    let slice =
+-      mk_ref_ty rvar_0 (mk_slice_ty tvar_0) false
+-      (* &'a [T] *)
+-    in
++    let slice = mk_ref_ty rvar_0 (mk_slice_ty tvar_0) is_mut in
+     mk_sig generics [ slice; usize_ty; usize_ty ] slice
+ 
+   let slice_index_sig (is_mut : bool) = mk_array_slice_index_sig false is_mut
+@@ -272,7 +271,11 @@ let raw_builtin_fun_infos : raw_builtin_fun_info list =
+       true,
+       None );
+     ( Index { is_array = false; mutability = RShared; is_range = true },
+-      Sig.slice_subslice_shared_sig,
++      Sig.slice_subslice_sig false,
++      true,
++      None );
++    ( Index { is_array = false; mutability = RMut; is_range = true },
++      Sig.slice_subslice_sig true,
+       true,
+       None );
+   ]
+diff --git a/src/llbc/SeparateCompilation.ml b/src/llbc/SeparateCompilation.ml
+index 9a90fad..31f1acc 100644
+--- a/src/llbc/SeparateCompilation.ml
++++ b/src/llbc/SeparateCompilation.ml
+@@ -66,8 +66,24 @@ type entry = {
+   facts : fun_facts option;
+       (** Functions and globals (facts of the initializer) *)
+   methods : string list option;
+-      (** Trait declarations: the methods which are fields of the Lean structure
+-      *)
++      (** Trait declarations: the methods which are fields of the Lean
++          structure; trait implementations: the methods which they define *)
++  members : members option;
++      (** Trait declarations and implementations (absent from the manifests
++          which predate them) *)
++}
++
++(** The interface of a trait declaration or implementation, member by member:
++    the partially monomorphized copies of a foreign trait keep the methods
++    which their chunk uses, so that another chunk may see a copy with only some
++    of the methods of the owner's (see [Translate.sc_check_external_views]). *)
++and members = {
++  header : string;
++      (** Digest of the interface without the methods *)
++  method_fingerprints : string list;
++      (** Trait declarations: the digests of the signatures of the [methods],
++          in the same order (implementations: empty, their methods are
++          functions with their own entries) *)
+ }
+ 
+ let manifest_version = 1
+@@ -229,10 +245,21 @@ let entry_to_json (e : entry) : Yojson.Basic.t =
+     @ (match e.facts with
+       | None -> []
+       | Some f -> [ ("facts", facts_to_json f) ])
++    @ (match e.methods with
++      | None -> []
++      | Some l -> [ ("methods", strings l) ])
+     @
+-    match e.methods with
++    match e.members with
+     | None -> []
+-    | Some l -> [ ("methods", strings l) ])
++    | Some m ->
++        [
++          ( "members",
++            `Assoc
++              [
++                ("header", `String m.header);
++                ("method_fingerprints", strings m.method_fingerprints);
++              ] );
++        ])
+ 
+ exception Malformed of string
+ 
+@@ -280,6 +307,15 @@ let entry_of_json (js : Yojson.Basic.t) : entry =
+       (match member "methods" js with
+       | `Null -> None
+       | l -> Some (strings l));
++    members =
++      (match member "members" js with
++      | `Null -> None
++      | m ->
++          Some
++            {
++              header = to_string (member "header" m);
++              method_fingerprints = strings (member "method_fingerprints" m);
++            });
+   }
+ 
+ let namespace_to_json () : Yojson.Basic.t =
+diff --git a/src/pure/PureMicroPassesGeneral.ml b/src/pure/PureMicroPassesGeneral.ml
+index 965b7a9..3d15550 100644
+--- a/src/pure/PureMicroPassesGeneral.ml
++++ b/src/pure/PureMicroPassesGeneral.ml
+@@ -1321,16 +1321,24 @@ let simplify_let_branching (ctx : ctx) (def : fun_decl) =
+   let simplify_aux (monadic : bool) (pats : tpat list) (bound : texpr)
+       (next : texpr) : tpat * texpr * texpr =
+     let num_outs = List.length pats in
+-    (* We will accumulate the outputs we find in this array *)
++    (* Compute the set of variables which are bound inside the bound expression
++       (we will ignored those, as they were not introduced before) *)
++    let bound_fvars = texpr_get_bound_fvars bound in
++
++    (* We will accumulate the outputs we find in this array. A value which
++       refers to a variable bound inside the bound expression (e.g. by the
++       pattern of the only match arm which does not fail) is not a possible
++       output: it is not in scope after the let-binding. *)
+     let outs = Array.init num_outs (fun _ -> []) in
+     let push_to_outs i el =
++      let el =
++        List.filter
++          (fun e -> FVarId.Set.disjoint (texpr_get_fvars e) bound_fvars)
++          el
++      in
+       Array.set outs i (TExprSet.of_list el :: Array.get outs i)
+     in
+ 
+-    (* Compute the set of variables which are bound inside the bound expression
+-       (we will ignored those, as they were not introduced before) *)
+-    let bound_fvars = texpr_get_bound_fvars bound in
+-
+     (* Small helper.
+ 
+        When exploring expressions, we keep track of the variables we branched
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 2dddae2..f0befd4 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -4298,9 +4298,12 @@ and translate_intro_symbolic (ectx : C.eval_ctx) (p : S.mplace option)
+         [%cassert] ctx.span
+           (Config.backend () = Config.Lean)
+           "Slice pointer metadata is only supported by the Lean backend";
++        (* A mutable borrow is translated to its current value: its length is
++           the length of the slice it gives access to *)
+         let elem_ty =
+           match v.ty with
+-          | T.TRef (_, T.TSlice ty, T.RShared) -> ctx_translate_fwd_ty ctx ty
++          | T.TRef (_, T.TSlice ty, (T.RShared | T.RMut)) ->
++              ctx_translate_fwd_ty ctx ty
+           | _ -> [%internal_error] ctx.span
+         in
+         let v = tvalue_to_texpr ctx ectx v in
+diff --git a/tests/lean/CharCasts.lean b/tests/lean/CharCasts.lean
+new file mode 100644
+index 0000000..7db4e9b
+--- /dev/null
++++ b/tests/lean/CharCasts.lean
+@@ -0,0 +1 @@
++import CharCasts.Checks
+diff --git a/tests/lean/CharCasts/CharCasts.lean b/tests/lean/CharCasts/CharCasts.lean
+new file mode 100644
+index 0000000..343cf60
+--- /dev/null
++++ b/tests/lean/CharCasts/CharCasts.lean
+@@ -0,0 +1,72 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [char_casts]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace char_casts
++
++/-- [char_casts::byte_char]:
++    Source: 'tests/src/char-casts.rs', lines 12:0-14:1
++    Visibility: public -/
++def byte_char
++  (b : _root_.Aeneas.Std.U8) : _root_.Aeneas.Std.Result _root_.Char := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.UScalar.cast_toChar b)
++
++/-- [char_casts::letter_a]:
++    Source: 'tests/src/char-casts.rs', lines 17:0-19:1
++    Visibility: public -/
++def letter_a : _root_.Aeneas.Std.Result _root_.Char := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.UScalar.cast_toChar 97#u8)
++
++/-- [char_casts::code_point]:
++    Source: 'tests/src/char-casts.rs', lines 22:0-24:1
++    Visibility: public -/
++def code_point
++  (c : _root_.Char) : _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32 := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.UScalar.cast_fromChar .U32 c)
++
++/-- [char_casts::truncated]:
++    Source: 'tests/src/char-casts.rs', lines 27:0-29:1
++    Visibility: public -/
++def truncated
++  (c : _root_.Char) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U8 × _root_.Aeneas.Std.I8 ×
++    _root_.Aeneas.Std.U16 × _root_.Aeneas.Std.I16)
++  := do
++  let i ← lift (_root_.Aeneas.Std.UScalar.cast_fromChar .U8 c)
++  let i1 ← lift (_root_.Aeneas.Std.IScalar.cast_fromChar .I8 c)
++  let i2 ← lift (_root_.Aeneas.Std.UScalar.cast_fromChar .U16 c)
++  let i3 ← lift (_root_.Aeneas.Std.IScalar.cast_fromChar .I16 c)
++  _root_.Aeneas.Std.Result.ok (i, i1, i2, i3)
++
++/-- [char_casts::letter_codes]:
++    Source: 'tests/src/char-casts.rs', lines 32:0-34:1
++    Visibility: public -/
++def letter_codes
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U8 × _root_.Aeneas.Std.U64)
++  := do
++  let i ← lift (_root_.Aeneas.Std.UScalar.cast_fromChar .U8 'z')
++  let i1 ← lift (_root_.Aeneas.Std.UScalar.cast_fromChar .U64 'z')
++  _root_.Aeneas.Std.Result.ok (i, i1)
++
++/-- [char_casts::describe_escape]:
++    Source: 'tests/src/char-casts.rs', lines 37:0-42:1
++    Visibility: public -/
++def describe_escape
++  (b : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Char)
++  := do
++  match b with
++  | 110#uscalar => _root_.Aeneas.Std.Result.ok none
++  | _ =>
++    let c ← lift (_root_.Aeneas.Std.UScalar.cast_toChar b)
++    _root_.Aeneas.Std.Result.ok (some c)
++
++end char_casts
+diff --git a/tests/lean/CharCasts/Checks.lean b/tests/lean/CharCasts/Checks.lean
+new file mode 100644
+index 0000000..168bb45
+--- /dev/null
++++ b/tests/lean/CharCasts/Checks.lean
+@@ -0,0 +1,37 @@
++import CharCasts.CharCasts
++
++/-! Evaluate the models of `tests/src/char-casts.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace char_casts.checks
++open Aeneas Aeneas.Std Result
++
++def u8 (n : Nat) : U8 := ⟨BitVec.ofNat _ n⟩
++
++def res {α : Type} (r : Result α) : Option α :=
++  match r with
++  | ok x => some x
++  | _ => none
++
++#guard res (byte_char (u8 97)) == some 'a'
++#guard res (byte_char (u8 0)) == some (Char.ofNat 0)
++#guard res (byte_char (u8 255)) == some 'ÿ'
++#guard res letter_a == some 'a'
++#guard res (describe_escape (u8 110)) == some none
++#guard res (describe_escape (u8 113)) == some (some 'q')
++
++#guard (res (code_point 'a')).map (·.val) == some 97
++#guard (res (code_point 'é')).map (·.val) == some 233
++#guard (res (code_point (Char.ofNat 0x10FFFF))).map (·.val) == some 0x10FFFF
++
++/-- The unsigned results as naturals, the signed ones as integers -/
++def truncatedR (c : Char) : Option (Nat × Int × Nat × Int) :=
++  (res (truncated c)).map fun (a, b, d, e) => (a.val, b.val, d.val, e.val)
++
++#guard truncatedR 'a' == some (97, 97, 97, 97)
++#guard truncatedR 'ÿ' == some (255, -1, 255, 255)
++#guard truncatedR 'Ā' == some (0, 0, 256, 256)
++#guard truncatedR '😀' == some (0, 0, 0xF600, -2560)
++#guard (res letter_codes).map (fun (a, b) => (a.val, b.val)) == some (122, 122)
++
++end char_casts.checks
+diff --git a/tests/lean/DynErrorSource.lean b/tests/lean/DynErrorSource.lean
+new file mode 100644
+index 0000000..f0e46dd
+--- /dev/null
++++ b/tests/lean/DynErrorSource.lean
+@@ -0,0 +1 @@
++import DynErrorSource.Checks
+diff --git a/tests/lean/DynErrorSource/Checks.lean b/tests/lean/DynErrorSource/Checks.lean
+new file mode 100644
+index 0000000..90773ee
+--- /dev/null
++++ b/tests/lean/DynErrorSource/Checks.lean
+@@ -0,0 +1,18 @@
++import DynErrorSource.DynErrorSource
++
++/-! Evaluate the model of `tests/src/dyn-error-source.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace dyn_error_source.checks
++open Aeneas Aeneas.Std Result
++
++/-- Whether `e.source()` is `Some`; `none` if the model fails -/
++def hasSource (e : Outer) : Option Bool :=
++  match Outer.Insts.CoreErrorError.source e with
++  | ok s => some s.isSome
++  | _ => none
++
++#guard hasSource (.Wrapped 3#u32) == some true
++#guard hasSource .Plain == some false
++
++end dyn_error_source.checks
+diff --git a/tests/lean/DynErrorSource/DynErrorSource.lean b/tests/lean/DynErrorSource/DynErrorSource.lean
+new file mode 100644
+index 0000000..de9c99c
+--- /dev/null
++++ b/tests/lean/DynErrorSource/DynErrorSource.lean
+@@ -0,0 +1,254 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [dyn_error_source]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace dyn_error_source
++
++/-- [dyn_error_source::Inner]
++    Source: 'tests/src/dyn-error-source.rs', lines 18:0-18:26
++    Visibility: public -/
++@[reducible]
++def Inner := _root_.Aeneas.Std.U32
++
++/-- [dyn_error_source::{core::fmt::Debug for dyn_error_source::Inner}::fmt]:
++    Source: 'tests/src/dyn-error-source.rs', lines 17:9-17:14
++    Visibility: public -/
++def Inner.Insts.CoreFmtDebug.fmt
++  (self : _root_.dyn_error_source.Inner)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let dyn :=
++    _root_.Aeneas.Std.Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.Aeneas.Std.core.fmt.DebugU32) self
++  _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++    (_root_.Aeneas.Std.toStr "Inner") dyn
++
++/-- Trait implementation: [dyn_error_source::{core::fmt::Debug for dyn_error_source::Inner}]
++    Source: 'tests/src/dyn-error-source.rs', lines 17:9-17:14 -/
++@[reducible]
++def Inner.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.dyn_error_source.Inner := {
++  fmt := _root_.dyn_error_source.Inner.Insts.CoreFmtDebug.fmt
++}
++
++/-- [dyn_error_source::{core::clone::Clone for dyn_error_source::Inner}::clone]:
++    Source: 'tests/src/dyn-error-source.rs', lines 17:16-17:21
++    Visibility: public -/
++def Inner.Insts.CoreCloneClone.clone
++  (self : _root_.dyn_error_source.Inner) :
++  _root_.Aeneas.Std.Result _root_.dyn_error_source.Inner
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.clone.impls.CloneU32.clone self)
++  _root_.Aeneas.Std.Result.ok i
++
++/-- Trait implementation: [dyn_error_source::{core::clone::Clone for dyn_error_source::Inner}]
++    Source: 'tests/src/dyn-error-source.rs', lines 17:16-17:21 -/
++@[reducible]
++def Inner.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.dyn_error_source.Inner := {
++  clone := _root_.dyn_error_source.Inner.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [dyn_error_source::{core::marker::StructuralPartialEq for dyn_error_source::Inner}]
++    Source: 'tests/src/dyn-error-source.rs', lines 17:23-17:32 -/
++@[reducible]
++def Inner.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.dyn_error_source.Inner := {
++}
++
++/-- [dyn_error_source::{core::cmp::PartialEq<dyn_error_source::Inner> for dyn_error_source::Inner}::eq]:
++    Source: 'tests/src/dyn-error-source.rs', lines 17:23-17:32
++    Visibility: public -/
++def Inner.Insts.CoreCmpPartialEqInner.eq
++  (self : _root_.dyn_error_source.Inner)
++  (other : _root_.dyn_error_source.Inner) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.Result.ok (self = other)
++
++/-- Trait implementation: [dyn_error_source::{core::cmp::PartialEq<dyn_error_source::Inner> for dyn_error_source::Inner}]
++    Source: 'tests/src/dyn-error-source.rs', lines 17:23-17:32 -/
++@[reducible]
++def Inner.Insts.CoreCmpPartialEqInner : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.dyn_error_source.Inner _root_.dyn_error_source.Inner := {
++  eq := _root_.dyn_error_source.Inner.Insts.CoreCmpPartialEqInner.eq
++}
++
++/-- [dyn_error_source::{core::cmp::Eq for dyn_error_source::Inner}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/dyn-error-source.rs', lines 17:34-17:36
++    Visibility: public -/
++def Inner.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.dyn_error_source.Inner) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [dyn_error_source::{core::cmp::Eq for dyn_error_source::Inner}]
++    Source: 'tests/src/dyn-error-source.rs', lines 17:34-17:36 -/
++@[reducible]
++def Inner.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.dyn_error_source.Inner := {
++  partialEqInst := _root_.dyn_error_source.Inner.Insts.CoreCmpPartialEqInner
++  assert_receiver_is_total_eq :=
++    _root_.dyn_error_source.Inner.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [dyn_error_source::{core::fmt::Display for dyn_error_source::Inner}::fmt]:
++    Source: 'tests/src/dyn-error-source.rs', lines 21:4-23:5
++    Visibility: public -/
++def Inner.Insts.CoreFmtDisplay.fmt
++  (self : _root_.dyn_error_source.Inner)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let a ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_display
++      _root_.Aeneas.Std.core.fmt.DisplayU32 self
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 9#usize [
++        6#u8, 105#u8, 110#u8, 110#u8, 101#u8, 114#u8, 32#u8, 192#u8, 0#u8
++        ]) (_root_.Aeneas.Std.Array.make 1#usize [ a ])
++  _root_.Aeneas.Std.core.fmt.Formatter.write_fmt f a1
++
++/-- Trait implementation: [dyn_error_source::{core::fmt::Display for dyn_error_source::Inner}]
++    Source: 'tests/src/dyn-error-source.rs', lines 20:0-24:1 -/
++@[reducible]
++def Inner.Insts.CoreFmtDisplay : _root_.Aeneas.Std.core.fmt.Display
++  _root_.dyn_error_source.Inner := {
++  fmt := _root_.dyn_error_source.Inner.Insts.CoreFmtDisplay.fmt
++}
++
++/-- Trait implementation: [dyn_error_source::{core::error::Error for dyn_error_source::Inner}]
++    Source: 'tests/src/dyn-error-source.rs', lines 26:0-26:23 -/
++@[reducible]
++def Inner.Insts.CoreErrorError : _root_.Aeneas.Std.core.error.Error
++  _root_.dyn_error_source.Inner := {
++  fmtDebugInst := _root_.dyn_error_source.Inner.Insts.CoreFmtDebug
++  fmtDisplayInst := _root_.dyn_error_source.Inner.Insts.CoreFmtDisplay
++}
++
++/-- Trait declaration: [dyn_error_source::AsDynError]
++    Source: 'tests/src/dyn-error-source.rs', lines 29:0-31:1
++    Visibility: public -/
++structure AsDynError (Self : Type) where
++  as_dyn_error : Self → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Dyn (fun
++    _dyn => _root_.Aeneas.Std.core.error.Error _dyn))
++
++/-- [dyn_error_source::{dyn_error_source::AsDynError<'a> for T}::as_dyn_error]:
++    Source: 'tests/src/dyn-error-source.rs', lines 34:4-36:5
++    Visibility: public -/
++def AsDynError.Blanket.as_dyn_error
++  {T : Type} (coreerrorErrorInst : _root_.Aeneas.Std.core.error.Error T)
++  (self : T) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Dyn (fun _dyn =>
++    _root_.Aeneas.Std.core.error.Error _dyn))
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.Dyn.mk _ coreerrorErrorInst
++    self)
++
++/-- Trait implementation: [dyn_error_source::{dyn_error_source::AsDynError<'a> for T}]
++    Source: 'tests/src/dyn-error-source.rs', lines 33:0-37:1 -/
++@[reducible]
++def AsDynError.Blanket {T : Type} (coreerrorErrorInst :
++  _root_.Aeneas.Std.core.error.Error T) : _root_.dyn_error_source.AsDynError T
++  := {
++  as_dyn_error := _root_.dyn_error_source.AsDynError.Blanket.as_dyn_error
++    coreerrorErrorInst
++}
++
++/-- [dyn_error_source::Outer]
++    Source: 'tests/src/dyn-error-source.rs', lines 40:0-43:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Outer where
++| Wrapped : _root_.dyn_error_source.Inner → Outer
++| Plain : Outer
++
++/-- [dyn_error_source::{core::fmt::Debug for dyn_error_source::Outer}::fmt]:
++    Source: 'tests/src/dyn-error-source.rs', lines 39:9-39:14
++    Visibility: public -/
++def Outer.Insts.CoreFmtDebug.fmt
++  (self : _root_.dyn_error_source.Outer)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.dyn_error_source.Outer.Wrapped __self_0 =>
++    let __self_01 :=
++      _root_.Aeneas.Std.Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.dyn_error_source.Inner.Insts.CoreFmtDebug) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Wrapped") __self_01
++  | _root_.dyn_error_source.Outer.Plain =>
++    _root_.Aeneas.Std.core.fmt.Formatter.write_str f (_root_.Aeneas.Std.toStr
++      "Plain")
++
++/-- Trait implementation: [dyn_error_source::{core::fmt::Debug for dyn_error_source::Outer}]
++    Source: 'tests/src/dyn-error-source.rs', lines 39:9-39:14 -/
++@[reducible]
++def Outer.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.dyn_error_source.Outer := {
++  fmt := _root_.dyn_error_source.Outer.Insts.CoreFmtDebug.fmt
++}
++
++/-- [dyn_error_source::{core::fmt::Display for dyn_error_source::Outer}::fmt]:
++    Source: 'tests/src/dyn-error-source.rs', lines 46:4-48:5
++    Visibility: public -/
++def Outer.Insts.CoreFmtDisplay.fmt
++  (self : _root_.dyn_error_source.Outer)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let a ←
++    _root_.Aeneas.Std.core.fmt.Arguments.from_str (_root_.Aeneas.Std.toStr
++      "outer")
++  _root_.Aeneas.Std.core.fmt.Formatter.write_fmt f a
++
++/-- Trait implementation: [dyn_error_source::{core::fmt::Display for dyn_error_source::Outer}]
++    Source: 'tests/src/dyn-error-source.rs', lines 45:0-49:1 -/
++@[reducible]
++def Outer.Insts.CoreFmtDisplay : _root_.Aeneas.Std.core.fmt.Display
++  _root_.dyn_error_source.Outer := {
++  fmt := _root_.dyn_error_source.Outer.Insts.CoreFmtDisplay.fmt
++}
++
++/-- [dyn_error_source::{core::error::Error for dyn_error_source::Outer}::source]:
++    Source: 'tests/src/dyn-error-source.rs', lines 53:4-58:5
++    Visibility: public -/
++def Outer.Insts.CoreErrorError.source
++  (self : _root_.dyn_error_source.Outer) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.Dyn (fun _dyn =>
++    _root_.Aeneas.Std.core.error.Error _dyn)))
++  := do
++  match self with
++  | _root_.dyn_error_source.Outer.Wrapped source =>
++    let dyn ←
++      _root_.dyn_error_source.AsDynError.Blanket.as_dyn_error
++        _root_.dyn_error_source.Inner.Insts.CoreErrorError source
++    _root_.Aeneas.Std.Result.ok (some dyn)
++  | _root_.dyn_error_source.Outer.Plain => _root_.Aeneas.Std.Result.ok none
++
++/-- Trait implementation: [dyn_error_source::{core::error::Error for dyn_error_source::Outer}]
++    Source: 'tests/src/dyn-error-source.rs', lines 52:0-59:1 -/
++@[reducible]
++def Outer.Insts.CoreErrorError : _root_.Aeneas.Std.core.error.Error
++  _root_.dyn_error_source.Outer := {
++  fmtDebugInst := _root_.dyn_error_source.Outer.Insts.CoreFmtDebug
++  fmtDisplayInst := _root_.dyn_error_source.Outer.Insts.CoreFmtDisplay
++}
++
++end dyn_error_source
+diff --git a/tests/lean/LetBranchingArmVars.lean b/tests/lean/LetBranchingArmVars.lean
+new file mode 100644
+index 0000000..dc315f8
+--- /dev/null
++++ b/tests/lean/LetBranchingArmVars.lean
+@@ -0,0 +1 @@
++import LetBranchingArmVars.Checks
+diff --git a/tests/lean/LetBranchingArmVars/Checks.lean b/tests/lean/LetBranchingArmVars/Checks.lean
+new file mode 100644
+index 0000000..983288d
+--- /dev/null
++++ b/tests/lean/LetBranchingArmVars/Checks.lean
+@@ -0,0 +1,32 @@
++import LetBranchingArmVars.LetBranchingArmVars
++
++/-! Evaluate the model of `tests/src/let-branching-arm-vars.rs` on the inputs of
++    its `native` test module and compare with the native results, including
++    the panicking input. -/
++
++namespace let_branching_arm_vars.checks
++open Aeneas Aeneas.Std Result
++
++def code : R → Nat
++  | .AF => 0 | .AI => 1 | .AN => 2 | .FV => 3 | .IV => 4 | .NV => 5 | .Other => 6
++
++/-- `some (some c)`: `Some(r)` with code `c`; `some none`: `None`; `none`: a panic -/
++def intersectR (a b : R) : Option (Option Nat) :=
++  match R.intersect a b with
++  | ok r => some (r.map code)
++  | _ => none
++
++#guard intersectR .AF .AN == some (some (code .AF))
++#guard intersectR .AN .AI == some (some (code .AI))
++#guard intersectR .IV .AI == some (some (code .AI))
++#guard intersectR .AF .AI == some none
++#guard intersectR .FV .IV == some none
++
++#guard intersectR .FV .NV == some (some (code .FV))
++#guard intersectR .NV .NV == some (some (code .NV))
++#guard intersectR .IV .NV == some (some (code .IV))
++
++-- `R::Other.intersect(R::AF)` panics (`unreachable!`)
++#guard intersectR .Other .AF == none
++
++end let_branching_arm_vars.checks
+diff --git a/tests/lean/LetBranchingArmVars/LetBranchingArmVars.lean b/tests/lean/LetBranchingArmVars/LetBranchingArmVars.lean
+new file mode 100644
+index 0000000..363e844
+--- /dev/null
++++ b/tests/lean/LetBranchingArmVars/LetBranchingArmVars.lean
+@@ -0,0 +1,542 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [let_branching_arm_vars]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace let_branching_arm_vars
++
++/-- [core::option::{core::ops::try_trait::Try<T, core::option::Option<core::convert::Infallible>> for core::option::Option<T>}::branch]:
++    Source: '/rustc/library/core/src/option.rs', lines 2765:4-2765:64
++    Name pattern: [core::option::{core::ops::try_trait::Try<core::option::Option<@T>, @T, core::option::Option<core::convert::Infallible>>}::branch]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::ops::try_trait::Try<core::option::Option<@T>, @T, core::option::Option<core::convert::Infallible>>}::branch"]
++def core.option.Option.Insts.CoreOpsTry_traitTryTOptionInfallible.branch
++  {T : Type} (self : _root_.Option T) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow
++    (_root_.Option _root_.Aeneas.Std.core.convert.Infallible) T)
++  := do
++  match self with
++  | none =>
++    _root_.Aeneas.Std.Result.ok
++      (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break none)
++  | some v =>
++    _root_.Aeneas.Std.Result.ok
++      (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue v)
++
++/-- [core::option::{core::ops::try_trait::FromResidual<core::option::Option<core::convert::Infallible>> for core::option::Option<T>}::from_residual]:
++    Source: '/rustc/library/core/src/option.rs', lines 2779:4-2779:67
++    Name pattern: [core::option::{core::ops::try_trait::FromResidual<core::option::Option<@T>, core::option::Option<core::convert::Infallible>>}::from_residual]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::ops::try_trait::FromResidual<core::option::Option<@T>, core::option::Option<core::convert::Infallible>>}::from_residual"]
++def
++  core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionInfallible.from_residual
++  (T : Type) (o : _root_.Option _root_.Aeneas.Std.core.convert.Infallible) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  _root_.Aeneas.Std.Result.ok none
++
++/-- [let_branching_arm_vars::R]
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 16:0-24:1
++    Visibility: public -/
++@[discriminant isize]
++inductive R where
++| AF : R
++| AI : R
++| AN : R
++| FV : R
++| IV : R
++| NV : R
++| Other : R
++
++/-- [let_branching_arm_vars::{core::clone::Clone for let_branching_arm_vars::R}::clone]:
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 15:9-15:14
++    Visibility: public -/
++def R.Insts.CoreCloneClone.clone
++  (self : _root_.let_branching_arm_vars.R) :
++  _root_.Aeneas.Std.Result _root_.let_branching_arm_vars.R
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [let_branching_arm_vars::{core::clone::Clone for let_branching_arm_vars::R}]
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 15:9-15:14 -/
++@[reducible]
++def R.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.let_branching_arm_vars.R := {
++  clone := _root_.let_branching_arm_vars.R.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [let_branching_arm_vars::{core::marker::Copy for let_branching_arm_vars::R}]
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 15:16-15:20 -/
++@[reducible]
++def R.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.let_branching_arm_vars.R := {
++  cloneInst := _root_.let_branching_arm_vars.R.Insts.CoreCloneClone
++}
++
++/-- Trait implementation: [let_branching_arm_vars::{core::marker::StructuralPartialEq for let_branching_arm_vars::R}]
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 15:22-15:31 -/
++@[reducible]
++def R.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.let_branching_arm_vars.R := {
++}
++
++/-- [let_branching_arm_vars::{core::cmp::PartialEq<let_branching_arm_vars::R> for let_branching_arm_vars::R}::eq]:
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 15:22-15:31
++    Visibility: public -/
++def R.Insts.CoreCmpPartialEqR.eq
++  (self : _root_.let_branching_arm_vars.R)
++  (other : _root_.let_branching_arm_vars.R) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  _root_.Aeneas.Std.Result.ok (self1 = other1)
++
++/-- Trait implementation: [let_branching_arm_vars::{core::cmp::PartialEq<let_branching_arm_vars::R> for let_branching_arm_vars::R}]
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 15:22-15:31 -/
++@[reducible]
++def R.Insts.CoreCmpPartialEqR : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R := {
++  eq := _root_.let_branching_arm_vars.R.Insts.CoreCmpPartialEqR.eq
++}
++
++/-- [let_branching_arm_vars::{core::cmp::Eq for let_branching_arm_vars::R}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 15:33-15:35
++    Visibility: public -/
++def R.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.let_branching_arm_vars.R) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [let_branching_arm_vars::{core::cmp::Eq for let_branching_arm_vars::R}]
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 15:33-15:35 -/
++@[reducible]
++def R.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.let_branching_arm_vars.R := {
++  partialEqInst := _root_.let_branching_arm_vars.R.Insts.CoreCmpPartialEqR
++  assert_receiver_is_total_eq :=
++    _root_.let_branching_arm_vars.R.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [let_branching_arm_vars::{core::fmt::Debug for let_branching_arm_vars::R}::fmt]:
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 15:37-15:42
++    Visibility: public -/
++def R.Insts.CoreFmtDebug.fmt
++  (self : _root_.let_branching_arm_vars.R)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let s ←
++    match self with
++    | _root_.let_branching_arm_vars.R.AF =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "AF")
++    | _root_.let_branching_arm_vars.R.AI =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "AI")
++    | _root_.let_branching_arm_vars.R.AN =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "AN")
++    | _root_.let_branching_arm_vars.R.FV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "FV")
++    | _root_.let_branching_arm_vars.R.IV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "IV")
++    | _root_.let_branching_arm_vars.R.NV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "NV")
++    | _root_.let_branching_arm_vars.R.Other =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "Other")
++  _root_.Aeneas.Std.core.fmt.Formatter.write_str f s
++
++/-- Trait implementation: [let_branching_arm_vars::{core::fmt::Debug for let_branching_arm_vars::R}]
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 15:37-15:42 -/
++@[reducible]
++def R.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.let_branching_arm_vars.R := {
++  fmt := _root_.let_branching_arm_vars.R.Insts.CoreFmtDebug.fmt
++}
++
++/-- [let_branching_arm_vars::{let_branching_arm_vars::R}::fam]:
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 27:4-34:5 -/
++def R.fam
++  (self : _root_.let_branching_arm_vars.R) :
++  _root_.Aeneas.Std.Result _root_.let_branching_arm_vars.R
++  := do
++  let joined ←
++    match self with
++    | _root_.let_branching_arm_vars.R.AF =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.AF : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.AI =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.AI : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.AN =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.AN : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.FV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        _root_.let_branching_arm_vars.R.AF : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.IV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        _root_.let_branching_arm_vars.R.AI : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.NV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        _root_.let_branching_arm_vars.R.AN : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.Other =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.Other : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++  match joined with
++  | _root_.Sum.inl x => _root_.Aeneas.Std.Result.ok x
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [let_branching_arm_vars::{let_branching_arm_vars::R}::is_value]:
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 36:4-38:5 -/
++def R.is_value
++  (self : _root_.let_branching_arm_vars.R) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let joined ←
++    match self with
++    | _root_.let_branching_arm_vars.R.AF =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++        _root_.let_branching_arm_vars.R.AF) : _root_.Sum
++        _root_.let_branching_arm_vars.R (_root_.Sum (_root_.Sum
++        _root_.let_branching_arm_vars.R _root_.Bool)
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.AI =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++        _root_.let_branching_arm_vars.R.AI) : _root_.Sum
++        _root_.let_branching_arm_vars.R (_root_.Sum (_root_.Sum
++        _root_.let_branching_arm_vars.R _root_.Bool)
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.AN =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++        _root_.let_branching_arm_vars.R.AN) : _root_.Sum
++        _root_.let_branching_arm_vars.R (_root_.Sum (_root_.Sum
++        _root_.let_branching_arm_vars.R _root_.Bool)
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.FV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.FV : _root_.Sum
++        _root_.let_branching_arm_vars.R (_root_.Sum (_root_.Sum
++        _root_.let_branching_arm_vars.R _root_.Bool)
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.IV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.IV : _root_.Sum
++        _root_.let_branching_arm_vars.R (_root_.Sum (_root_.Sum
++        _root_.let_branching_arm_vars.R _root_.Bool)
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.NV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.NV : _root_.Sum
++        _root_.let_branching_arm_vars.R (_root_.Sum (_root_.Sum
++        _root_.let_branching_arm_vars.R _root_.Bool)
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.Other =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++        _root_.let_branching_arm_vars.R.Other) : _root_.Sum
++        _root_.let_branching_arm_vars.R (_root_.Sum (_root_.Sum
++        _root_.let_branching_arm_vars.R _root_.Bool)
++        _root_.let_branching_arm_vars.R))
++  let joined1 ←
++    match joined with
++    | _root_.Sum.inl _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr true : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.Bool)
++    | _root_.Sum.inr (_root_.Sum.inl exit) => _root_.Aeneas.Std.Result.ok exit
++    | _root_.Sum.inr (_root_.Sum.inr exit) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl exit : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.Bool)
++  match joined1 with
++  | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok false
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [let_branching_arm_vars::{let_branching_arm_vars::R}::for_value]:
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 40:4-47:5 -/
++def R.for_value
++  (self : _root_.let_branching_arm_vars.R) :
++  _root_.Aeneas.Std.Result _root_.let_branching_arm_vars.R
++  := do
++  let r ← _root_.let_branching_arm_vars.R.fam self
++  let joined ←
++    match r with
++    | _root_.let_branching_arm_vars.R.AF =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        _root_.let_branching_arm_vars.R.FV : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.AI =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        _root_.let_branching_arm_vars.R.IV : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.AN =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        _root_.let_branching_arm_vars.R.NV : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.FV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.FV : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.IV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.IV : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.NV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.NV : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++    | _root_.let_branching_arm_vars.R.Other =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.Other : _root_.Sum
++        _root_.let_branching_arm_vars.R _root_.let_branching_arm_vars.R)
++  match joined with
++  | _root_.Sum.inl _ =>
++    _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [let_branching_arm_vars::{let_branching_arm_vars::R}::intersect]:
++    Source: 'tests/src/let-branching-arm-vars.rs', lines 50:4-66:5
++    Visibility: public -/
++def R.intersect
++  (self : _root_.let_branching_arm_vars.R)
++  (other : _root_.let_branching_arm_vars.R) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.let_branching_arm_vars.R)
++  := do
++  let r ← _root_.let_branching_arm_vars.R.fam self
++  let r1 ← _root_.let_branching_arm_vars.R.fam other
++  let joined ←
++    match r with
++    | _root_.let_branching_arm_vars.R.AF =>
++      do
++      let joined1 ←
++        match r1 with
++        | _root_.let_branching_arm_vars.R.AF =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (some
++            _root_.let_branching_arm_vars.R.AF,
++            _root_.let_branching_arm_vars.R.AF) : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.AI =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (none,
++            _root_.let_branching_arm_vars.R.AI) : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.AN =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (some
++            _root_.let_branching_arm_vars.R.AF,
++            _root_.let_branching_arm_vars.R.AN) : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.FV =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.FV : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.IV =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.IV : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.NV =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.NV : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.Other =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.Other : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++      let (o, r2) ←
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++        | _root_.Sum.inr (exit, exit1) =>
++          _root_.Aeneas.Std.Result.ok (exit, exit1)
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (o,
++        _root_.let_branching_arm_vars.R.AF, r2) : _root_.Sum
++        _root_.let_branching_arm_vars.R ((_root_.Option
++        _root_.let_branching_arm_vars.R) × _root_.let_branching_arm_vars.R ×
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.AI =>
++      do
++      let joined1 ←
++        match r1 with
++        | _root_.let_branching_arm_vars.R.AF =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (none,
++            _root_.let_branching_arm_vars.R.AF) : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.AI =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (some
++            _root_.let_branching_arm_vars.R.AI,
++            _root_.let_branching_arm_vars.R.AI) : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.AN =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (some
++            _root_.let_branching_arm_vars.R.AI,
++            _root_.let_branching_arm_vars.R.AN) : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.FV =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.FV : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.IV =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.IV : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.NV =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.NV : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.Other =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.Other : _root_.Sum
++            _root_.let_branching_arm_vars.R ((_root_.Option
++            _root_.let_branching_arm_vars.R) ×
++            _root_.let_branching_arm_vars.R))
++      let (o, r2) ←
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++        | _root_.Sum.inr (exit, exit1) =>
++          _root_.Aeneas.Std.Result.ok (exit, exit1)
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (o,
++        _root_.let_branching_arm_vars.R.AI, r2) : _root_.Sum
++        _root_.let_branching_arm_vars.R ((_root_.Option
++        _root_.let_branching_arm_vars.R) × _root_.let_branching_arm_vars.R ×
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.AN =>
++      do
++      let joined1 ←
++        match r1 with
++        | _root_.let_branching_arm_vars.R.AF =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++            (_root_.let_branching_arm_vars.R.AF,
++            _root_.let_branching_arm_vars.R.AF) : _root_.Sum
++            _root_.let_branching_arm_vars.R (_root_.let_branching_arm_vars.R ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.AI =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++            (_root_.let_branching_arm_vars.R.AI,
++            _root_.let_branching_arm_vars.R.AI) : _root_.Sum
++            _root_.let_branching_arm_vars.R (_root_.let_branching_arm_vars.R ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.AN =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++            (_root_.let_branching_arm_vars.R.AN,
++            _root_.let_branching_arm_vars.R.AN) : _root_.Sum
++            _root_.let_branching_arm_vars.R (_root_.let_branching_arm_vars.R ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.FV =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.FV : _root_.Sum
++            _root_.let_branching_arm_vars.R (_root_.let_branching_arm_vars.R ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.IV =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.IV : _root_.Sum
++            _root_.let_branching_arm_vars.R (_root_.let_branching_arm_vars.R ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.NV =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.NV : _root_.Sum
++            _root_.let_branching_arm_vars.R (_root_.let_branching_arm_vars.R ×
++            _root_.let_branching_arm_vars.R))
++        | _root_.let_branching_arm_vars.R.Other =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            _root_.let_branching_arm_vars.R.Other : _root_.Sum
++            _root_.let_branching_arm_vars.R (_root_.let_branching_arm_vars.R ×
++            _root_.let_branching_arm_vars.R))
++      let (r2, r3) ←
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++        | _root_.Sum.inr (exit, exit1) =>
++          _root_.Aeneas.Std.Result.ok (exit, exit1)
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (some r2,
++        _root_.let_branching_arm_vars.R.AN, r3) : _root_.Sum
++        _root_.let_branching_arm_vars.R ((_root_.Option
++        _root_.let_branching_arm_vars.R) × _root_.let_branching_arm_vars.R ×
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.FV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.FV : _root_.Sum
++        _root_.let_branching_arm_vars.R ((_root_.Option
++        _root_.let_branching_arm_vars.R) × _root_.let_branching_arm_vars.R ×
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.IV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.IV : _root_.Sum
++        _root_.let_branching_arm_vars.R ((_root_.Option
++        _root_.let_branching_arm_vars.R) × _root_.let_branching_arm_vars.R ×
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.NV =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.NV : _root_.Sum
++        _root_.let_branching_arm_vars.R ((_root_.Option
++        _root_.let_branching_arm_vars.R) × _root_.let_branching_arm_vars.R ×
++        _root_.let_branching_arm_vars.R))
++    | _root_.let_branching_arm_vars.R.Other =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.let_branching_arm_vars.R.Other : _root_.Sum
++        _root_.let_branching_arm_vars.R ((_root_.Option
++        _root_.let_branching_arm_vars.R) × _root_.let_branching_arm_vars.R ×
++        _root_.let_branching_arm_vars.R))
++  let o ←
++    match joined with
++    | _root_.Sum.inl _ =>
++      _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++    | _root_.Sum.inr (exit, _, _) => _root_.Aeneas.Std.Result.ok exit
++  let cf ←
++    _root_.let_branching_arm_vars.core.option.Option.Insts.CoreOpsTry_traitTryTOptionInfallible.branch
++      o
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let b ← _root_.let_branching_arm_vars.R.is_value self
++    if b
++    then
++      let b1 ← _root_.let_branching_arm_vars.R.is_value other
++      if b1
++      then
++        let val1 ← _root_.let_branching_arm_vars.R.for_value val
++        _root_.Aeneas.Std.Result.ok (some val1)
++      else _root_.Aeneas.Std.Result.ok (some val)
++    else _root_.Aeneas.Std.Result.ok (some val)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    _root_.let_branching_arm_vars.core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionInfallible.from_residual
++      _root_.let_branching_arm_vars.R residual
++
++end let_branching_arm_vars
+diff --git a/tests/lean/SlicePatternEnumLoop.lean b/tests/lean/SlicePatternEnumLoop.lean
+new file mode 100644
+index 0000000..b87dd48
+--- /dev/null
++++ b/tests/lean/SlicePatternEnumLoop.lean
+@@ -0,0 +1 @@
++import SlicePatternEnumLoop.Checks
+diff --git a/tests/lean/SlicePatternEnumLoop/Checks.lean b/tests/lean/SlicePatternEnumLoop/Checks.lean
+new file mode 100644
+index 0000000..bc26e0f
+--- /dev/null
++++ b/tests/lean/SlicePatternEnumLoop/Checks.lean
+@@ -0,0 +1,53 @@
++import SlicePatternEnumLoop.SlicePatternEnumLoop
++
++/-! Evaluate the models of `tests/src/slice-pattern-enum-loop.rs` on the inputs
++    of its `native` test module and compare with the native results. -/
++
++namespace slice_pattern_enum_loop.checks
++open Aeneas Aeneas.Std Result
++
++/-- `Rank(n)` as `.inl n`, `Lit(n)` as `.inr n` -/
++def enc : D → Nat ⊕ Nat
++  | .Rank n => .inl n.val
++  | .Lit n => .inr n.val
++
++def dec : Nat ⊕ Nat → D
++  | .inl n => .Rank ⟨BitVec.ofNat _ n⟩
++  | .inr n => .Lit ⟨BitVec.ofNat _ n⟩
++
++def vec (xs : List (Nat ⊕ Nat)) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    alloc.vec.Vec D :=
++  ⟨xs.map dec, by simpa using h⟩
++
++def resolveR (xs : List (Nat ⊕ Nat)) (n : Nat) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option Nat :=
++  match resolve (vec xs h) ⟨BitVec.ofNat _ n⟩ with
++  | ok r => some r.val
++  | _ => none
++
++#guard resolveR [.inl 4] 3 == some 4
++#guard resolveR [.inl 4] 0 == some 0
++#guard resolveR [.inr 1] 2 == some 7
++#guard resolveR [.inl 1, .inl 2] 1 == some 7
++#guard resolveR [] 1 == some 7
++
++def table (rows : List (List (Nat ⊕ Nat))) (h : rows.length ≤ Usize.max := by scalar_tac)
++    (hr : ∀ r ∈ rows, r.length ≤ Usize.max := by scalar_tac) : Slice (alloc.vec.Vec D) :=
++  ⟨rows.attach.map (fun ⟨r, hm⟩ => vec r (hr r hm)), by simpa using h⟩
++
++def resolveChainR (rows : List (List (Nat ⊕ Nat))) (start : Nat)
++    (h : rows.length ≤ Usize.max := by scalar_tac)
++    (hr : ∀ r ∈ rows, r.length ≤ Usize.max := by simp; scalar_tac) :
++    Option (List (Nat ⊕ Nat)) :=
++  match resolve_chain (table rows h hr) ⟨BitVec.ofNat _ start⟩ with
++  | ok v => some (v.val.map enc)
++  | _ => none
++
++#guard resolveChainR [[.inl 1], [.inl 2], [.inr 9]] 0 == some [.inr 9]
++#guard resolveChainR [[.inl 1], [.inl 2], [.inr 9]] 5 == some [.inl 5]
++
++#guard resolveChainR [[.inl 0], [.inl 0]] 1 == some [.inl 0]
++#guard resolveChainR [[.inl 1], [.inl 0]] 0 == some [.inl 1]
++#guard resolveChainR [[.inl 1], [.inl 3]] 0 == some [.inl 3]
++
++end slice_pattern_enum_loop.checks
+diff --git a/tests/lean/SlicePatternEnumLoop/SlicePatternEnumLoop.lean b/tests/lean/SlicePatternEnumLoop/SlicePatternEnumLoop.lean
+new file mode 100644
+index 0000000..4878600
+--- /dev/null
++++ b/tests/lean/SlicePatternEnumLoop/SlicePatternEnumLoop.lean
+@@ -0,0 +1,333 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [slice_pattern_enum_loop]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace slice_pattern_enum_loop
++
++/-- Trait implementation: [core::iter::range::{core::iter::range::Step for u32}]
++    Source: '/rustc/library/core/src/iter/range.rs', lines 265:12-265:37
++    Name pattern: [core::iter::range::Step<u32>] -/
++@[reducible, rust_trait_impl "core::iter::range::Step<u32>"]
++def U32.Insts.CoreIterRangeStep : _root_.Aeneas.Std.core.iter.range.Step
++  _root_.Aeneas.Std.U32 := {
++  cloneInst := _root_.Aeneas.Std.core.clone.CloneU32
++  partialOrdInst := _root_.Aeneas.Std.core.cmp.PartialOrdU32
++  steps_between := _root_.Aeneas.Std.core.iter.range.StepU32.steps_between
++  forward_checked := _root_.Aeneas.Std.core.iter.range.StepU32.forward_checked
++  backward_checked :=
++    _root_.Aeneas.Std.core.iter.range.StepU32.backward_checked
++}
++
++/-- [slice_pattern_enum_loop::D]
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 18:0-21:1
++    Visibility: public -/
++@[discriminant isize]
++inductive D where
++| Rank : _root_.Aeneas.Std.U32 → D
++| Lit : _root_.Aeneas.Std.U64 → D
++
++/-- [slice_pattern_enum_loop::{core::clone::Clone for slice_pattern_enum_loop::D}::clone]:
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 17:9-17:14
++    Visibility: public -/
++def D.Insts.CoreCloneClone.clone
++  (self : _root_.slice_pattern_enum_loop.D) :
++  _root_.Aeneas.Std.Result _root_.slice_pattern_enum_loop.D
++  := do
++  match self with
++  | _root_.slice_pattern_enum_loop.D.Rank __self_0 =>
++    let i ← lift (_root_.Aeneas.Std.core.clone.impls.CloneU32.clone __self_0)
++    _root_.Aeneas.Std.Result.ok (_root_.slice_pattern_enum_loop.D.Rank i)
++  | _root_.slice_pattern_enum_loop.D.Lit __self_0 =>
++    let i ← lift (_root_.Aeneas.Std.core.clone.impls.CloneU64.clone __self_0)
++    _root_.Aeneas.Std.Result.ok (_root_.slice_pattern_enum_loop.D.Lit i)
++
++/-- Trait implementation: [slice_pattern_enum_loop::{core::clone::Clone for slice_pattern_enum_loop::D}]
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 17:9-17:14 -/
++@[reducible]
++def D.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.slice_pattern_enum_loop.D := {
++  clone := _root_.slice_pattern_enum_loop.D.Insts.CoreCloneClone.clone
++}
++
++/-- [slice_pattern_enum_loop::{core::fmt::Debug for slice_pattern_enum_loop::D}::fmt]:
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 17:16-17:21
++    Visibility: public -/
++def D.Insts.CoreFmtDebug.fmt
++  (self : _root_.slice_pattern_enum_loop.D)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.slice_pattern_enum_loop.D.Rank __self_0 =>
++    let __self_01 :=
++      _root_.Aeneas.Std.Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU32) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Rank") __self_01
++  | _root_.slice_pattern_enum_loop.D.Lit __self_0 =>
++    let __self_01 :=
++      _root_.Aeneas.Std.Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU64) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Lit") __self_01
++
++/-- Trait implementation: [slice_pattern_enum_loop::{core::fmt::Debug for slice_pattern_enum_loop::D}]
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 17:16-17:21 -/
++@[reducible]
++def D.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.slice_pattern_enum_loop.D := {
++  fmt := _root_.slice_pattern_enum_loop.D.Insts.CoreFmtDebug.fmt
++}
++
++/-- Trait implementation: [slice_pattern_enum_loop::{core::marker::StructuralPartialEq for slice_pattern_enum_loop::D}]
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 17:23-17:32 -/
++@[reducible]
++def D.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.slice_pattern_enum_loop.D := {
++}
++
++/-- [slice_pattern_enum_loop::{core::cmp::PartialEq<slice_pattern_enum_loop::D> for slice_pattern_enum_loop::D}::eq]:
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 17:23-17:32
++    Visibility: public -/
++def D.Insts.CoreCmpPartialEqD.eq
++  (self : _root_.slice_pattern_enum_loop.D)
++  (other : _root_.slice_pattern_enum_loop.D) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    match self with
++    | _root_.slice_pattern_enum_loop.D.Rank __self_0 =>
++      match other with
++      | _root_.slice_pattern_enum_loop.D.Rank __arg1_0 =>
++        _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++          _root_.Aeneas.Std.core.cmp.PartialEqU32 __self_0 __arg1_0
++      | _root_.slice_pattern_enum_loop.D.Lit _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++    | _root_.slice_pattern_enum_loop.D.Lit __self_0 =>
++      match other with
++      | _root_.slice_pattern_enum_loop.D.Rank _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.slice_pattern_enum_loop.D.Lit __arg1_0 =>
++        _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++          _root_.Aeneas.Std.core.cmp.PartialEqU64 __self_0 __arg1_0
++  else _root_.Aeneas.Std.Result.ok false
++
++/-- Trait implementation: [slice_pattern_enum_loop::{core::cmp::PartialEq<slice_pattern_enum_loop::D> for slice_pattern_enum_loop::D}]
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 17:23-17:32 -/
++@[reducible]
++def D.Insts.CoreCmpPartialEqD : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.slice_pattern_enum_loop.D _root_.slice_pattern_enum_loop.D := {
++  eq := _root_.slice_pattern_enum_loop.D.Insts.CoreCmpPartialEqD.eq
++}
++
++/-- [slice_pattern_enum_loop::{core::cmp::Eq for slice_pattern_enum_loop::D}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 17:34-17:36
++    Visibility: public -/
++def D.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.slice_pattern_enum_loop.D) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [slice_pattern_enum_loop::{core::cmp::Eq for slice_pattern_enum_loop::D}]
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 17:34-17:36 -/
++@[reducible]
++def D.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.slice_pattern_enum_loop.D := {
++  partialEqInst := _root_.slice_pattern_enum_loop.D.Insts.CoreCmpPartialEqD
++  assert_receiver_is_total_eq :=
++    _root_.slice_pattern_enum_loop.D.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [slice_pattern_enum_loop::resolve]: loop body 0:
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 26:4-33:1
++    Visibility: public -/
++@[rust_loop_body]
++def resolve_loop.body
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.slice_pattern_enum_loop.D)
++  (iter : _root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.U32)
++  (current : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.range.IteratorRange.next
++      _root_.slice_pattern_enum_loop.U32.Insts.CoreIterRangeStep iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done current)
++  | some _ =>
++    let s ← _root_.Aeneas.Std.alloc.vec.Vec.as_slice v
++    let i := _root_.Aeneas.Std.Slice.len s
++    if i = 1#usize
++    then
++      let d ← _root_.Aeneas.Std.Slice.index_usize s 0#usize
++      match d with
++      | _root_.slice_pattern_enum_loop.D.Rank next =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          (model_state1, next))
++      | _root_.slice_pattern_enum_loop.D.Lit _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done 7#u32)
++    else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done 7#u32)
++
++/-- [slice_pattern_enum_loop::resolve]: loop 0:
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 26:4-33:1
++    Visibility: public -/
++@[rust_loop]
++def resolve_loop
++  (iter : _root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.slice_pattern_enum_loop.D)
++  (current : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, current1) => _root_.slice_pattern_enum_loop.resolve_loop.body
++       v iter1 current1 : ((_root_.Aeneas.Std.core.ops.range.Range
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, current)
++
++/-- [slice_pattern_enum_loop::resolve]:
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 24:0-33:1
++    Visibility: public -/
++@[reducible]
++def resolve
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.slice_pattern_enum_loop.D)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.slice_pattern_enum_loop.resolve_loop { start := 0#u32, «end» := n } v
++    0#u32
++
++/-- [slice_pattern_enum_loop::resolve_chain]: loop body 0:
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 1:0-50:32
++    Visibility: public -/
++@[rust_loop_body]
++def resolve_chain_loop.body
++  (table : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.slice_pattern_enum_loop.D))
++  (iter : _root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++  (current : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.slice_pattern_enum_loop.D))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.range.IteratorRange.next
++      _root_.Aeneas.Std.core.iter.range.StepUsize iter
++  match model_state with
++  | none =>
++    let i ← lift (_root_.Aeneas.Std.UScalar.cast .U32 current)
++    let s ←
++      lift (_root_.Aeneas.Std.Array.to_slice
++        (_root_.Aeneas.Std.Array.make 1#usize [
++           _root_.slice_pattern_enum_loop.D.Rank i
++           ] : _root_.Aeneas.Std.Array _root_.slice_pattern_enum_loop.D
++        1#usize))
++    let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done v)
++  | some _ =>
++    let o ←
++      _root_.Aeneas.Std.core.slice.Slice.get
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        (_root_.Aeneas.Std.alloc.vec.Vec _root_.slice_pattern_enum_loop.D))
++        table current
++    match o with
++    | none =>
++      let i ← lift (_root_.Aeneas.Std.UScalar.cast .U32 current)
++      let s ←
++        lift (_root_.Aeneas.Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 1#usize [
++             _root_.slice_pattern_enum_loop.D.Rank i
++             ] : _root_.Aeneas.Std.Array _root_.slice_pattern_enum_loop.D
++          1#usize))
++      let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done v)
++    | some bound =>
++      let s ← _root_.Aeneas.Std.alloc.vec.Vec.as_slice bound
++      let i := _root_.Aeneas.Std.Slice.len s
++      if i = 1#usize
++      then
++        let d ← _root_.Aeneas.Std.Slice.index_usize s 0#usize
++        match d with
++        | _root_.slice_pattern_enum_loop.D.Rank next =>
++          let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .Usize next)
++          if i1 != current
++          then
++            let current1 ← lift (_root_.Aeneas.Std.UScalar.cast .Usize next)
++            _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++              (model_state1, current1))
++          else
++            let i2 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 current)
++            let s1 ←
++              lift (_root_.Aeneas.Std.Array.to_slice
++                (_root_.Aeneas.Std.Array.make 1#usize [
++                   _root_.slice_pattern_enum_loop.D.Rank i2
++                   ] : _root_.Aeneas.Std.Array _root_.slice_pattern_enum_loop.D
++                1#usize))
++            let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++            _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done v)
++        | _root_.slice_pattern_enum_loop.D.Lit _ =>
++          let v ←
++            _root_.Aeneas.Std.alloc.vec.CloneVec.clone
++              _root_.slice_pattern_enum_loop.D.Insts.CoreCloneClone bound
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done v)
++      else
++        let v ←
++          _root_.Aeneas.Std.alloc.vec.CloneVec.clone
++            _root_.slice_pattern_enum_loop.D.Insts.CoreCloneClone bound
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done v)
++
++/-- [slice_pattern_enum_loop::resolve_chain]: loop 0:
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 1:0-50:32
++    Visibility: public -/
++@[rust_loop]
++def resolve_chain_loop
++  (iter : _root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++  (table : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.slice_pattern_enum_loop.D)) (current : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.slice_pattern_enum_loop.D)
++  := do
++  loop
++    (fun (iter1, current1) =>
++       _root_.slice_pattern_enum_loop.resolve_chain_loop.body table iter1
++       current1 : ((_root_.Aeneas.Std.core.ops.range.Range
++      _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++      _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.slice_pattern_enum_loop.D)))
++    (iter, current)
++
++/-- [slice_pattern_enum_loop::resolve_chain]:
++    Source: 'tests/src/slice-pattern-enum-loop.rs', lines 38:0-51:1
++    Visibility: public -/
++def resolve_chain
++  (table : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.slice_pattern_enum_loop.D)) (start : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.slice_pattern_enum_loop.D)
++  := do
++  let i := _root_.Aeneas.Std.Slice.len table
++  let i1 ← i + 1#usize
++  _root_.slice_pattern_enum_loop.resolve_chain_loop
++    { start := 0#usize, «end» := i1 } table start
++
++end slice_pattern_enum_loop
+diff --git a/tests/lean/SlicePatternMut.lean b/tests/lean/SlicePatternMut.lean
+new file mode 100644
+index 0000000..70fff9e
+--- /dev/null
++++ b/tests/lean/SlicePatternMut.lean
+@@ -0,0 +1 @@
++import SlicePatternMut.Checks
+diff --git a/tests/lean/SlicePatternMut/Checks.lean b/tests/lean/SlicePatternMut/Checks.lean
+new file mode 100644
+index 0000000..d0bb89a
+--- /dev/null
++++ b/tests/lean/SlicePatternMut/Checks.lean
+@@ -0,0 +1,55 @@
++import SlicePatternMut.SlicePatternMut
++
++/-! Evaluate the models of `tests/src/slice-pattern-mut.rs` on the inputs of its
++    `native` test module and compare with the native results, including the
++    slices after the writes. -/
++
++namespace slice_pattern_mut.checks
++open Aeneas Aeneas.Std Result
++
++def u32s (xs : List Nat) : List U32 := xs.map (fun x => ⟨BitVec.ofNat _ x⟩)
++
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨u32s xs, by simpa [u32s] using h⟩
++
++def vec (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec U32 :=
++  ⟨u32s xs, by simpa [u32s] using h⟩
++
++def nats (xs : List U32) : List Nat := xs.map (·.val)
++
++def bumpSecondR (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option (List Nat) :=
++  match bump_second (sl xs h) with
++  | ok s => some (nats s.val)
++  | _ => none
++
++#guard bumpSecondR [1, 2] == some [1, 3]
++#guard bumpSecondR [1, 2, 3] == some [1, 2, 3]
++#guard bumpSecondR [1] == some [1]
++
++def bumpGuardedR (xs : List Nat) (limit : Nat) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option (Nat × List Nat) :=
++  match bump_guarded (vec xs h) ⟨BitVec.ofNat _ limit⟩ with
++  | ok (r, v) => some (r.val, nats v.val)
++  | _ => none
++
++#guard bumpGuardedR [1, 2] 5 == some (3, [1, 3])
++#guard bumpGuardedR [1, 7] 5 == some (3, [3, 7])
++#guard bumpGuardedR [4, 5, 6] 5 == some (6, [6, 5, 6])
++#guard bumpGuardedR [] 5 == some (0, [])
++
++def withSlice (f : Slice U32 → Result (U32 × Slice U32)) (xs : List Nat)
++    (h : xs.length ≤ Usize.max := by scalar_tac) : Option (Nat × List Nat) :=
++  match f (sl xs h) with
++  | ok (r, s) => some (r.val, nats s.val)
++  | _ => none
++
++#guard withSlice bump_rest [1, 2, 3] == some (2, [1, 102, 3])
++#guard withSlice bump_rest [5] == some (0, [5])
++#guard withSlice bump_rest [] == some (0, [])
++
++#guard withSlice bump_middle [1, 2, 3, 4] == some (2, [1, 2, 103, 4])
++#guard withSlice bump_middle [1, 2] == some (0, [1, 2])
++#guard withSlice bump_middle [1] == some (0, [1])
++
++end slice_pattern_mut.checks
+diff --git a/tests/lean/SlicePatternMut/SlicePatternMut.lean b/tests/lean/SlicePatternMut/SlicePatternMut.lean
+new file mode 100644
+index 0000000..0d25e90
+--- /dev/null
++++ b/tests/lean/SlicePatternMut/SlicePatternMut.lean
+@@ -0,0 +1,177 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [slice_pattern_mut]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace slice_pattern_mut
++
++/-- [slice_pattern_mut::second_mut]:
++    Source: 'tests/src/slice-pattern-mut.rs', lines 20:0-25:1
++    Visibility: public -/
++def second_mut
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Option _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32))
++  := do
++  let s1 := _root_.Aeneas.Std.Slice.len s
++  if s1 = 2#usize
++  then
++    let (x, index_mut_back) ← _root_.Aeneas.Std.Slice.index_mut_usize s 1#usize
++    let back :=
++      (fun o => let i := match o with
++                         | some i1 => i1
++                         | _ => x
++                index_mut_back i : _root_.Option _root_.Aeneas.Std.U32 →
++        _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.Result.ok (some x, back)
++  else
++    let back :=
++      (fun o => s : _root_.Option _root_.Aeneas.Std.U32 →
++        _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.Result.ok (none, back)
++
++/-- [slice_pattern_mut::bump_second]:
++    Source: 'tests/src/slice-pattern-mut.rs', lines 28:0-32:1
++    Visibility: public -/
++def bump_second
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  := do
++  let (o, second_mut_back) ← _root_.slice_pattern_mut.second_mut s
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok (second_mut_back none)
++  | some x =>
++    let x1 ← x + 1#u32
++    _root_.Aeneas.Std.Result.ok (second_mut_back (some x1))
++
++/-- [slice_pattern_mut::bump_guarded]:
++    Source: 'tests/src/slice-pattern-mut.rs', lines 36:0-49:1
++    Visibility: public -/
++def bump_guarded
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (s, deref_mut_back) ← lift (_root_.Aeneas.Std.alloc.vec.Vec.deref_mut v)
++  let s1 := _root_.Aeneas.Std.Slice.len s
++  if s1 = 2#usize
++  then
++    let (x, index_mut_back) ← _root_.Aeneas.Std.Slice.index_mut_usize s 1#usize
++    if x < limit
++    then
++      let x1 ← x + 1#u32
++      let s2 := index_mut_back x1
++      let v1 := deref_mut_back s2
++      _root_.Aeneas.Std.Result.ok (x1, v1)
++    else
++      let s2 := index_mut_back x
++      let s3 := _root_.Aeneas.Std.Slice.len s2
++      if s3 >= 1#usize
++      then
++        let (x1, index_mut_back1) ←
++          _root_.Aeneas.Std.Slice.index_mut_usize s2 0#usize
++        let x2 ← x1 + 2#u32
++        let s4 := index_mut_back1 x2
++        let v1 := deref_mut_back s4
++        _root_.Aeneas.Std.Result.ok (x2, v1)
++      else
++        let s4 := _root_.Aeneas.Std.Slice.len s2
++        massert (s4 = 0#usize)
++        let v1 := deref_mut_back s2
++        _root_.Aeneas.Std.Result.ok (0#u32, v1)
++  else
++    let s2 := _root_.Aeneas.Std.Slice.len s
++    if s2 >= 1#usize
++    then
++      let (x, index_mut_back) ←
++        _root_.Aeneas.Std.Slice.index_mut_usize s 0#usize
++      let x1 ← x + 2#u32
++      let s3 := index_mut_back x1
++      let v1 := deref_mut_back s3
++      _root_.Aeneas.Std.Result.ok (x1, v1)
++    else
++      let s3 := _root_.Aeneas.Std.Slice.len s
++      massert (s3 = 0#usize)
++      let v1 := deref_mut_back s
++      _root_.Aeneas.Std.Result.ok (0#u32, v1)
++
++/-- [slice_pattern_mut::bump_rest]:
++    Source: 'tests/src/slice-pattern-mut.rs', lines 53:0-63:1
++    Visibility: public -/
++def bump_rest
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32))
++  := do
++  let s1 := _root_.Aeneas.Std.Slice.len s
++  if s1 >= 1#usize
++  then
++    let i := _root_.Aeneas.Std.Slice.len s
++    let i1 ← i - 0#usize
++    let _ ← i1 - 1#usize
++    let i2 := _root_.Aeneas.Std.Slice.len s
++    let i3 ← i2 - 0#usize
++    let (rest, subslice_mut_back) ←
++      _root_.Aeneas.Std.Slice.subslice_mut s 1#usize i3
++    let rest1 := _root_.Aeneas.Std.Slice.len rest
++    let rest2 ←
++      if rest1 >= 1#usize
++      then
++        do
++        let (r, index_mut_back) ←
++          _root_.Aeneas.Std.Slice.index_mut_usize rest 0#usize
++        let r1 ← r + 100#u32
++        _root_.Aeneas.Std.Result.ok (index_mut_back r1)
++      else _root_.Aeneas.Std.Result.ok rest
++    let i4 := _root_.Aeneas.Std.Slice.len rest2
++    let i5 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i4)
++    let s2 := subslice_mut_back rest2
++    _root_.Aeneas.Std.Result.ok (i5, s2)
++  else
++    let s2 := _root_.Aeneas.Std.Slice.len s
++    massert (s2 = 0#usize)
++    _root_.Aeneas.Std.Result.ok (0#u32, s)
++
++/-- [slice_pattern_mut::bump_middle]:
++    Source: 'tests/src/slice-pattern-mut.rs', lines 66:0-77:1
++    Visibility: public -/
++def bump_middle
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32))
++  := do
++  let s1 := _root_.Aeneas.Std.Slice.len s
++  if s1 >= 2#usize
++  then
++    let i := _root_.Aeneas.Std.Slice.len s
++    let i1 ← i - 1#usize
++    let _ ← i1 - 1#usize
++    let i2 := _root_.Aeneas.Std.Slice.len s
++    let i3 ← i2 - 1#usize
++    let (mid, subslice_mut_back) ←
++      _root_.Aeneas.Std.Slice.subslice_mut s 1#usize i3
++    let i4 := _root_.Aeneas.Std.Slice.len mid
++    let n ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i4)
++    let mid1 := _root_.Aeneas.Std.Slice.len mid
++    if mid1 >= 1#usize
++    then
++      let i5 := _root_.Aeneas.Std.Slice.len mid
++      let i6 ← i5 - 1#usize
++      let (m, index_mut_back) ← _root_.Aeneas.Std.Slice.index_mut_usize mid i6
++      let m1 ← m + 100#u32
++      let s2 := index_mut_back m1
++      let s3 := subslice_mut_back s2
++      _root_.Aeneas.Std.Result.ok (n, s3)
++    else let s2 := subslice_mut_back mid
++         _root_.Aeneas.Std.Result.ok (n, s2)
++  else _root_.Aeneas.Std.Result.ok (0#u32, s)
++
++end slice_pattern_mut
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 6894d40..fb535e7 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -257,3 +257,8 @@ package «tests» {}
+ @[default_target] lean_lib SliceArrayEq
+ @[default_target] lean_lib VecAsMutSlice
+ @[default_target] lean_lib SerdeIgnoredAny
++@[default_target] lean_lib LetBranchingArmVars
++@[default_target] lean_lib DynErrorSource
++@[default_target] lean_lib SlicePatternEnumLoop
++@[default_target] lean_lib CharCasts
++@[default_target] lean_lib SlicePatternMut
+diff --git a/tests/separate-compilation/trait-method-subsets.sh b/tests/separate-compilation/trait-method-subsets.sh
+new file mode 100755
+index 0000000..412ead2
+--- /dev/null
++++ b/tests/separate-compilation/trait-method-subsets.sh
+@@ -0,0 +1,179 @@
++#!/usr/bin/env bash
++# Partially monomorphized copies of a foreign trait with different method
++# subsets across chunks (SeparateCompilation manifest `members`).
++#
++# Usage: trait-method-subsets.sh <charon> <aeneas> [<work directory>]
++#
++# Chunks of trait_method_subsets.rs, extracted like the chunks of a workspace
++# (-canonical-names, -split-files, one -subdir per chunk, -abort-on-error;
++# without -warnings-as-errors, which rejects the specialized adapter methods
++# that have no model, unknown externals unrelated to this test). Charon keeps,
++# in the copies `Iterator::<IterMut<'_, T0>, &'_ mut T1>` of the trait and of
++# its implementation for IterMut, the methods which the chunk uses:
++# - A (the owner) emits them with next, enumerate and take; its manifest
++#   records, for the trait declaration, the digest of its interface without the
++#   methods and the digest of each method's signature, and for the
++#   implementation the digest of its interface without the methods and the
++#   methods it defines.
++# - B (next and enumerate) with -external <manifest of A> is admitted: its
++#   copies keep a subset of A's methods, with the same interface otherwise and
++#   the same signatures; B does not emit the declaration and refers to A's
++#   instance (Lean checks these references when the chunks are compiled
++#   together).
++# - The other way round (B the owner), A is admitted as before: the view of an
++#   external declaration keeps the owner's fields (next and enumerate), and A
++#   calls take directly, not through the dictionary.
++# - B is rejected when A's manifest differs in the signature of a method B
++#   uses, in the interface without the methods (declaration or
++#   implementation), or has no member digests (a manifest written before
++#   them): only equal interfaces are admitted then.
++set -uo pipefail
++
++charon=$1
++aeneas=$2
++here=$(cd "$(dirname "$0")" && pwd)
++work=${3:-$(mktemp -d)}
++mkdir -p "$work"
++failures=0
++
++check() { # check <description> <command...>
++  local what=$1
++  shift
++  if "$@"; then
++    echo "ok: $what"
++  else
++    echo "FAILED: $what"
++    failures=$((failures + 1))
++  fi
++}
++absent() { # absent <grep arguments...>: the files exist and do not match
++  grep -q "$@"
++  [ $? -eq 1 ]
++}
++
++llbc() { # llbc <chunk> <charon options...>
++  local chunk=$1
++  shift
++  "$charon" rustc --preset=aeneas --mir=promoted --monomorphize-mut=except-types \
++    --remove-adt-clauses '--lift-associated-types=*' --error-on-warnings \
++    --include core::iter::adapters::enumerate::Enumerate \
++    --include core::iter::adapters::take::Take "$@" \
++    --dest-file "$work/$chunk.llbc" -- "$here/trait_method_subsets.rs" \
++    --crate-name=trait_method_subsets --crate-type=rlib --edition=2021 \
++    >"$work/$chunk.charon.log" 2>&1 ||
++    { echo "charon failed on chunk $chunk (see $work/$chunk.charon.log)"; exit 1; }
++}
++
++run() { # run <name> <chunk> <aeneas options...>; sets $status
++  local name=$1 chunk=$2
++  shift 2
++  rm -rf "${work:?}/$name" && mkdir -p "$work/$name"
++  "$aeneas" -backend lean -checks -abort-on-error -strict-joins \
++    -sequential -no-progress-bar -canonical-names -split-files -subdir "Chunk$chunk" \
++    -dest "$work/$name/lean" -emit-manifest "$work/$name/manifest.json" "$@" \
++    "$work/$chunk.llbc" >"$work/$name/log" 2>&1
++  status=$?
++}
++
++decl='trait_decl core::iter::traits::iterator::Iterator::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)>[]'
++impl='trait_impl core::slice::iter::{core::iter::traits::iterator::Iterator::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)><'"'"'a, T> for T}'
++
++# field <manifest> <key> <python expression on the entry e>: print it as JSON
++field() {
++  python3 -c '
++import json, sys
++entries = [e for e in json.load(open(sys.argv[1]))["entries"] if e["key"] == sys.argv[2]]
++e = entries[0] if entries else None
++print(json.dumps(eval(sys.argv[3])) if e else "missing")' "$1" "$2" "$3"
++}
++
++# tamper <in> <out> <key> <python statement on the entry e>
++tamper() {
++  python3 -c '
++import json, sys
++manifest = json.load(open(sys.argv[1]))
++for e in manifest["entries"]:
++    if e["key"] == sys.argv[3]:
++        exec(sys.argv[4])
++json.dump(manifest, open(sys.argv[2], "w"))' "$1" "$2" "$3" "$4"
++}
++
++llbc A --start-from trait_method_subsets::number_all \
++  --start-from trait_method_subsets::bump_first
++llbc B --opaque trait_method_subsets::number_all --opaque trait_method_subsets::bump_first \
++  --start-from trait_method_subsets::double_even
++llbc B0 --start-from trait_method_subsets::double_even
++llbc A1 --opaque trait_method_subsets::double_even \
++  --start-from trait_method_subsets::number_all --start-from trait_method_subsets::bump_first
++
++run a A
++check "A exits with status 0" test "$status" -eq 0
++check "A's copy of the trait has next, enumerate and take" \
++  test "$(field "$work/a/manifest.json" "$decl" 'e["methods"]')" = '["next", "enumerate", "take"]'
++check "A records a signature digest per method of the trait" \
++  test "$(field "$work/a/manifest.json" "$decl" 'len(e["members"]["method_fingerprints"])')" = 3
++check "A records the methods of the implementation" \
++  test "$(field "$work/a/manifest.json" "$impl" 'e["methods"]')" = '["next", "enumerate", "take"]'
++check "A records the interface of the implementation without its methods" \
++  test "$(field "$work/a/manifest.json" "$impl" 'len(e["members"]["header"])')" = 32
++
++run b B -external "$work/a/manifest.json"
++check "B (a subset of A's methods) exits with status 0" test "$status" -eq 0
++decl_name=$(field "$work/a/manifest.json" "$decl" 'e["names"][0]' | tr -d '"')
++impl_name=$(field "$work/a/manifest.json" "$impl" 'e["names"][0]' | tr -d '"')
++check "B does not emit A's copy of the trait" \
++  absent -rqxF "  $decl_name" "$work/b/lean/ChunkB"
++check "B refers to A's implementation" \
++  grep -qF "_root_.$impl_name" "$work/b/lean/ChunkB/Funs.lean"
++
++run b0 B0
++check "B0 (B as the owner) exits with status 0" test "$status" -eq 0
++run a1 A1 -external "$work/b0/manifest.json"
++check "A after B (B the owner) exits with status 0" test "$status" -eq 0
++check "A after B does not emit B's copy of the trait" \
++  absent -rqxF "  $(field "$work/b0/manifest.json" "$decl" 'e["names"][0]' | tr -d '"')" \
++  "$work/a1/lean/ChunkA1"
++
++tamper "$work/a/manifest.json" "$work/a-sig.json" "$decl" \
++  'e["members"]["method_fingerprints"][e["methods"].index("enumerate")] = "0" * 32'
++run b-sig B -external "$work/a-sig.json"
++check "B is rejected when the signature of enumerate differs" test "$status" -ne 0
++check "the rejection names the trait's interface" \
++  grep -qF "the interface of [$decl] in this chunk differs" "$work/b-sig/log"
++
++tamper "$work/a/manifest.json" "$work/a-take.json" "$decl" \
++  'e["members"]["method_fingerprints"][e["methods"].index("take")] = "0" * 32'
++run b-take B -external "$work/a-take.json"
++check "B is admitted when only the signature of take (not a field of B's view) differs" \
++  test "$status" -eq 0
++
++tamper "$work/a/manifest.json" "$work/a-header.json" "$decl" 'e["members"]["header"] = "0" * 32'
++run b-header B -external "$work/a-header.json"
++check "B is rejected when the trait's interface without the methods differs" \
++  test "$status" -ne 0
++check "the rejection names the trait's interface (header)" \
++  grep -qF "the interface of [$decl] in this chunk differs" "$work/b-header/log"
++
++tamper "$work/a/manifest.json" "$work/a-impl.json" "$impl" 'e["members"]["header"] = "0" * 32'
++run b-impl B -external "$work/a-impl.json"
++check "B is rejected when the implementation's interface without the methods differs" \
++  test "$status" -ne 0
++check "the rejection names the implementation's interface" \
++  grep -qF "the interface of [$impl] in this chunk differs" "$work/b-impl/log"
++
++python3 -c '
++import json, sys
++manifest = json.load(open(sys.argv[1]))
++for e in manifest["entries"]:
++    e.pop("members", None)
++json.dump(manifest, open(sys.argv[2], "w"))' "$work/a/manifest.json" "$work/a-old.json"
++run b-old B -external "$work/a-old.json"
++check "B is rejected with a manifest of A without member digests" test "$status" -ne 0
++check "the rejection names the trait's interface (no member digests)" \
++  grep -qF "the interface of [$decl] in this chunk differs" "$work/b-old/log"
++
++if [ "$failures" -ne 0 ]; then
++  echo "$failures check(s) failed; outputs in $work"
++  exit 1
++fi
++echo "all checks passed"
+diff --git a/tests/separate-compilation/trait_method_subsets.rs b/tests/separate-compilation/trait_method_subsets.rs
+new file mode 100644
+index 0000000..6cd825e
+--- /dev/null
++++ b/tests/separate-compilation/trait_method_subsets.rs
+@@ -0,0 +1,38 @@
++//! Chunks of trait-method-subsets.sh. With `--monomorphize-mut`, Charon makes a
++//! partially monomorphized copy of `Iterator` for the mutable slice iterator
++//! (`Iterator::<IterMut<'_, T0>, &'_ mut T1>`) and of its implementation, with
++//! only the methods which the chunk uses: `next`, `enumerate` and `take` in
++//! chunk A, `next` and `enumerate` in chunk B.
++
++// Chunk A
++
++/// Adds its position to every element (`enumerate`).
++pub fn number_all(v: &mut Vec<u32>) {
++    for (i, x) in v.iter_mut().enumerate() {
++        *x += i as u32;
++    }
++}
++
++/// Increments the first `n` elements (`take`) and returns how many there were.
++pub fn bump_first(v: &mut Vec<u32>, n: usize) -> u32 {
++    let mut k = 0;
++    for x in v.iter_mut().take(n) {
++        *x += 1;
++        k += 1;
++    }
++    k
++}
++
++// Chunk B: a subset of the methods of A (`enumerate`)
++
++/// Doubles the elements at even positions and returns their sum.
++pub fn double_even(v: &mut Vec<u32>) -> u32 {
++    let mut sum = 0;
++    for (i, x) in v.iter_mut().enumerate() {
++        if i % 2 == 0 {
++            *x *= 2;
++            sum += *x;
++        }
++    }
++    sum
++}
+diff --git a/tests/src/char-casts.rs b/tests/src/char-casts.rs
+new file mode 100644
+index 0000000..d0dfae5
+--- /dev/null
++++ b/tests/src/char-casts.rs
+@@ -0,0 +1,69 @@
++//@ [!lean] skip
++//@ [lean] subdir=CharCasts
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Casts from `u8` to `char` (the byte of an escape in a lexer's error, the
++//! shape of `chelis_deep::lexer::lex_string`) and from `char` to the integer
++//! types (the code point, truncated to the target type). The extraction had no
++//! case for them. `CharCasts/Checks.lean` evaluates the models on the inputs of
++//! the `native` test module below.
++
++/// The character of a byte.
++pub fn byte_char(b: u8) -> char {
++    b as char
++}
++
++/// A constant byte as a character (a cast of a constant operand).
++pub fn letter_a() -> char {
++    97u8 as char
++}
++
++/// The code point of a character.
++pub fn code_point(c: char) -> u32 {
++    c as u32
++}
++
++/// The code point truncated to the unsigned and signed 8-bit and 16-bit types.
++pub fn truncated(c: char) -> (u8, i8, u16, i16) {
++    (c as u8, c as i8, c as u16, c as i16)
++}
++
++/// A constant character as a byte and as a code point.
++pub fn letter_codes() -> (u8, u64) {
++    ('z' as u8, 'z' as u64)
++}
++
++/// The escape of an invalid byte, as a lexer reports it.
++pub fn describe_escape(b: u8) -> Option<char> {
++    match b {
++        b'n' => None,
++        other => Some(other as char),
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn byte_to_char() {
++        assert_eq!(byte_char(97), 'a');
++        assert_eq!(byte_char(0), '\0');
++        assert_eq!(byte_char(255), 'ÿ');
++        assert_eq!(letter_a(), 'a');
++        assert_eq!(describe_escape(b'n'), None);
++        assert_eq!(describe_escape(b'q'), Some('q'));
++    }
++
++    #[test]
++    fn char_to_integers() {
++        assert_eq!(code_point('a'), 97);
++        assert_eq!(code_point('é'), 233);
++        assert_eq!(code_point(char::MAX), 0x10FFFF);
++        assert_eq!(truncated('a'), (97, 97, 97, 97));
++        assert_eq!(truncated('ÿ'), (255, -1, 255, 255));
++        assert_eq!(truncated('Ā'), (0, 0, 256, 256));
++        assert_eq!(truncated('😀'), (0, 0, 0xF600, -2560));
++        assert_eq!(letter_codes(), (122, 122));
++    }
++}
+diff --git a/tests/src/diagnostic-recovery-instance.lean.out b/tests/src/diagnostic-recovery-instance.lean.out
+index 688bf92..8ea312b 100644
+--- a/tests/src/diagnostic-recovery-instance.lean.out
++++ b/tests/src/diagnostic-recovery-instance.lean.out
+@@ -63,9 +63,5 @@ Name pattern: '(could not compute the name pattern: uncaught exception Assert_fa
+ Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
+ Compiler source: Translate.ml, line 600
+-[[91mError[39m] Internal error: please file an issue
+-Compiler source: Translate.ml, line 1378
+-[[91mError[39m] Internal error: please file an issue
+-Compiler source: Translate.ml, line 1378
+-[[92mInfo[39m ] Generated the partial file (because of 18 errors, including 6 unique errors): tests/lean/DiagnosticRecoveryInstance/DiagnosticRecoveryInstance.lean
+-[[92mInfo[39m ] Total execution time: 0.305453 seconds
++[[92mInfo[39m ] Generated the partial file (because of 16 errors, including 5 unique errors): tests/lean/DiagnosticRecoveryInstance/DiagnosticRecoveryInstance.lean
++[[92mInfo[39m ] Total execution time: 0.447075 seconds
+diff --git a/tests/src/dyn-error-source.rs b/tests/src/dyn-error-source.rs
+new file mode 100644
+index 0000000..07ae9a4
+--- /dev/null
++++ b/tests/src/dyn-error-source.rs
+@@ -0,0 +1,74 @@
++//@ [!lean] skip
++//@ [lean] subdir=DynErrorSource
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The `Error::source` which `thiserror` derives for a `#[from]` field:
++//! `AsDynError::as_dyn_error` returns `&(dyn Error + 'a)`, which `source`
++//! returns as `&(dyn Error + 'static)`. The unsized cast between the two trait
++//! objects changes only an (erased) region: it is the identity, including the
++//! borrow of the field, but the interpreter used to reject it because the value
++//! holds a borrow ("Unsized cast between dynamic traits: unimplemented case").
++//! `DynErrorSource/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below.
++
++use std::error::Error;
++use std::fmt;
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Inner(pub u32);
++
++impl fmt::Display for Inner {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "inner {}", self.0)
++    }
++}
++
++impl Error for Inner {}
++
++/// `thiserror`'s `AsDynError`.
++pub trait AsDynError<'a> {
++    fn as_dyn_error(&self) -> &(dyn Error + 'a);
++}
++
++impl<'a, T: Error + 'a> AsDynError<'a> for T {
++    fn as_dyn_error(&self) -> &(dyn Error + 'a) {
++        self
++    }
++}
++
++#[derive(Debug)]
++pub enum Outer {
++    Wrapped(Inner),
++    Plain,
++}
++
++impl fmt::Display for Outer {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "outer")
++    }
++}
++
++/// As derived by `thiserror` for `Wrapped(#[from] Inner)`.
++impl Error for Outer {
++    fn source(&self) -> Option<&(dyn Error + 'static)> {
++        match self {
++            Outer::Wrapped(source) => Some(source.as_dyn_error()),
++            Outer::Plain => None,
++        }
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn wrapped_has_a_source() {
++        assert!(Outer::Wrapped(Inner(3)).source().is_some());
++    }
++
++    #[test]
++    fn plain_has_no_source() {
++        assert!(Outer::Plain.source().is_none());
++    }
++}
+diff --git a/tests/src/let-branching-arm-vars.rs b/tests/src/let-branching-arm-vars.rs
+new file mode 100644
+index 0000000..ac78c44
+--- /dev/null
++++ b/tests/src/let-branching-arm-vars.rs
+@@ -0,0 +1,94 @@
++//@ [!lean] skip
++//@ [lean] subdir=LetBranchingArmVars
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::ops::try_trait::Try} --include core::option::{core::ops::try_trait::FromResidual}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A `?` on a match whose arms are all `Some(..)` or panics (the shape of
++//! `chelis_types::TypeVarRestriction::intersect`). The joined match binds the
++//! family in the pattern of its only non-failing arm; `simplify_let_branching`
++//! used to lift that arm's bound value out of the match, leaving dangling
++//! variables (the `-checks` sanity check of `PureUtils` stopped the
++//! translation). A value which refers to a variable bound inside the bound
++//! expression is not a possible output of the let-binding.
++//! `LetBranchingArmVars/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below, including the panicking ones.
++
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub enum R {
++    AF,
++    AI,
++    AN,
++    FV,
++    IV,
++    NV,
++    Other,
++}
++
++impl R {
++    fn fam(self) -> Self {
++        match self {
++            R::FV => R::AF,
++            R::IV => R::AI,
++            R::NV => R::AN,
++            x => x,
++        }
++    }
++
++    fn is_value(self) -> bool {
++        matches!(self, R::FV | R::IV | R::NV)
++    }
++
++    fn for_value(self) -> Self {
++        match self.fam() {
++            R::AF => R::FV,
++            R::AI => R::IV,
++            R::AN => R::NV,
++            _ => unreachable!("not a family"),
++        }
++    }
++
++    /// The restriction admitting the types admitted by both, if any.
++    pub fn intersect(self, other: R) -> Option<R> {
++        use R::{AF, AI, AN};
++        let family = match (self.fam(), other.fam()) {
++            (AF, AF) => Some(AF),
++            (AI, AI) => Some(AI),
++            (AN, AN) => Some(AN),
++            (AN, AF) | (AF, AN) => Some(AF),
++            (AN, AI) | (AI, AN) => Some(AI),
++            (AF, AI) | (AI, AF) => None,
++            _ => unreachable!("not a family"),
++        }?;
++        Some(if self.is_value() && other.is_value() {
++            family.for_value()
++        } else {
++            family
++        })
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn intersect_of_families() {
++        assert_eq!(R::AF.intersect(R::AN), Some(R::AF));
++        assert_eq!(R::AN.intersect(R::AI), Some(R::AI));
++        assert_eq!(R::IV.intersect(R::AI), Some(R::AI));
++        assert_eq!(R::AF.intersect(R::AI), None);
++        assert_eq!(R::FV.intersect(R::IV), None);
++    }
++
++    #[test]
++    fn intersect_of_values_is_a_value() {
++        assert_eq!(R::FV.intersect(R::NV), Some(R::FV));
++        assert_eq!(R::NV.intersect(R::NV), Some(R::NV));
++        assert_eq!(R::IV.intersect(R::NV), Some(R::IV));
++    }
++
++    #[test]
++    #[should_panic]
++    fn intersect_of_other_panics() {
++        let _ = R::Other.intersect(R::AF);
++    }
++}
+diff --git a/tests/src/slice-pattern-enum-loop.rs b/tests/src/slice-pattern-enum-loop.rs
+new file mode 100644
+index 0000000..a10ef1e
+--- /dev/null
++++ b/tests/src/slice-pattern-enum-loop.rs
+@@ -0,0 +1,82 @@
++//@ [!lean] skip
++//@ [lean] subdir=SlicePatternEnumLoop
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Slice patterns with enum element patterns in a loop body, with an early
++//! return in the fallback arm (the shapes of `chelis_types::Subst::resolve_rvar`
++//! and `chelis_deep::canonical_type_syntax`). The pattern tests the variant of
++//! the element through a first `@SliceIndexShared`, then binds its field through
++//! a second one; `share_repeated_shared_indexing` reuses the first result, but
++//! the storage markers before the fallback arm's `return` used to invalidate it
++//! after the match, and the interpreter could not expand the second element
++//! ("Not allowed to expand enumerations with several variants"). The writes of
++//! a branch which returns, aborts, breaks or continues do not reach the
++//! statements after the match. `SlicePatternEnumLoop/Checks.lean` evaluates the
++//! models on the inputs of the `native` test module below.
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum D {
++    Rank(u32),
++    Lit(u64),
++}
++
++/// Follows a single-rank table `n` times; 7 if it is not a single rank.
++pub fn resolve(v: &Vec<D>, n: u32) -> u32 {
++    let mut current = 0;
++    for _ in 0..n {
++        match v.as_slice() {
++            [D::Rank(next)] => current = *next,
++            _ => return 7,
++        }
++    }
++    current
++}
++
++/// Follows the chain of single ranks from `start` (at most `table.len() + 1`
++/// steps): a missing entry or a fixed point is the rank itself, any other entry
++/// is the result.
++pub fn resolve_chain(table: &[Vec<D>], start: usize) -> Vec<D> {
++    let mut current = start;
++    for _ in 0..table.len() + 1 {
++        match table.get(current) {
++            None => return vec![D::Rank(current as u32)],
++            Some(bound) => match bound.as_slice() {
++                [D::Rank(next)] if *next as usize != current => current = *next as usize,
++                [D::Rank(_)] => return vec![D::Rank(current as u32)],
++                _ => return bound.clone(),
++            },
++        }
++    }
++    vec![D::Rank(current as u32)]
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn resolve_follows_a_single_rank() {
++        assert_eq!(resolve(&vec![D::Rank(4)], 3), 4);
++        assert_eq!(resolve(&vec![D::Rank(4)], 0), 0);
++        assert_eq!(resolve(&vec![D::Lit(1)], 2), 7);
++        assert_eq!(resolve(&vec![D::Rank(1), D::Rank(2)], 1), 7);
++        assert_eq!(resolve(&vec![], 1), 7);
++    }
++
++    #[test]
++    fn resolve_chain_stops_at_a_non_rank() {
++        let table = vec![vec![D::Rank(1)], vec![D::Rank(2)], vec![D::Lit(9)]];
++        assert_eq!(resolve_chain(&table, 0), vec![D::Lit(9)]);
++        assert_eq!(resolve_chain(&table, 5), vec![D::Rank(5)]);
++    }
++
++    #[test]
++    fn resolve_chain_stops_at_a_fixed_point_or_a_cycle() {
++        let table = vec![vec![D::Rank(0)], vec![D::Rank(0)]];
++        assert_eq!(resolve_chain(&table, 1), vec![D::Rank(0)]);
++        let table = vec![vec![D::Rank(1)], vec![D::Rank(0)]];
++        assert_eq!(resolve_chain(&table, 0), vec![D::Rank(1)]);
++        let table = vec![vec![D::Rank(1)], vec![D::Rank(3)]];
++        assert_eq!(resolve_chain(&table, 0), vec![D::Rank(3)]);
++    }
++}
+diff --git a/tests/src/slice-pattern-mut.rs b/tests/src/slice-pattern-mut.rs
+new file mode 100644
+index 0000000..55d8c1e
+--- /dev/null
++++ b/tests/src/slice-pattern-mut.rs
+@@ -0,0 +1,136 @@
++//@ [!lean] skip
++//@ [lean] subdir=SlicePatternMut
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Slice patterns on mutable slices (the shapes of
++//! `chelis_deep::identity::try_inherit_extensions` and
++//! `annotations_transform`). The length check reads the metadata of the
++//! mutable slice reference (`PtrMetadata`, or a raw pointer `&raw const *p`
++//! whose metadata is read, once per copy of the match arm made by the
++//! control-flow reconstruction): the length of the current value of the slice.
++//! The rest `rest @ ..` of a pattern on a mutable slice is the builtin
++//! `@SliceSubSliceMut`, whose backward function writes the given-back
++//! subslice back into the slice. (Patterns with several mutable bindings, or
++//! with enum element patterns, on a mutable slice are not supported yet: each
++//! binding borrows the whole slice.) `SlicePatternMut/Checks.lean` evaluates the
++//! models on the inputs of the `native` test module below, including the
++//! slices after the writes.
++
++/// The second of exactly two elements.
++pub fn second_mut(s: &mut [u32]) -> Option<&mut u32> {
++    match s {
++        [_, x] => Some(x),
++        _ => None,
++    }
++}
++
++/// Increments the second of exactly two elements.
++pub fn bump_second(s: &mut [u32]) {
++    if let Some(x) = second_mut(s) {
++        *x += 1;
++    }
++}
++
++/// A slice pattern with a guard on the slice of a vector: the control-flow
++/// reconstruction duplicates the length reads of the fallback arms.
++pub fn bump_guarded(v: &mut Vec<u32>, limit: u32) -> u32 {
++    let s: &mut [u32] = v;
++    match s {
++        [_, x] if *x < limit => {
++            *x += 1;
++            *x
++        }
++        [x, ..] => {
++            *x += 2;
++            *x
++        }
++        [] => 0,
++    }
++}
++
++/// Adds 100 to the first element of the rest after the first element, and
++/// returns the length of the rest.
++pub fn bump_rest(s: &mut [u32]) -> u32 {
++    match s {
++        [_, rest @ ..] => {
++            if let [r, ..] = rest {
++                *r += 100;
++            }
++            rest.len() as u32
++        }
++        [] => 0,
++    }
++}
++
++/// Writes through the middle of `[_, mid @ .., _]`; returns its length.
++pub fn bump_middle(s: &mut [u32]) -> u32 {
++    match s {
++        [_, mid @ .., _] => {
++            let n = mid.len() as u32;
++            if let [.., m] = mid {
++                *m += 100;
++            }
++            n
++        }
++        _ => 0,
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn bump_second_of_two() {
++        let mut v = [1, 2];
++        bump_second(&mut v);
++        assert_eq!(v, [1, 3]);
++        let mut v = [1, 2, 3];
++        bump_second(&mut v);
++        assert_eq!(v, [1, 2, 3]);
++        let mut v = [1];
++        bump_second(&mut v);
++        assert_eq!(v, [1]);
++    }
++
++    #[test]
++    fn bump_guarded_follows_the_guard() {
++        let mut v = vec![1, 2];
++        assert_eq!(bump_guarded(&mut v, 5), 3);
++        assert_eq!(v, vec![1, 3]);
++        let mut v = vec![1, 7];
++        assert_eq!(bump_guarded(&mut v, 5), 3);
++        assert_eq!(v, vec![3, 7]);
++        let mut v = vec![4, 5, 6];
++        assert_eq!(bump_guarded(&mut v, 5), 6);
++        assert_eq!(v, vec![6, 5, 6]);
++        let mut v: Vec<u32> = vec![];
++        assert_eq!(bump_guarded(&mut v, 5), 0);
++        assert_eq!(v, vec![]);
++    }
++
++    #[test]
++    fn bump_rest_writes_through_the_rest() {
++        let mut v = [1, 2, 3];
++        assert_eq!(bump_rest(&mut v), 2);
++        assert_eq!(v, [1, 102, 3]);
++        let mut v = [5];
++        assert_eq!(bump_rest(&mut v), 0);
++        assert_eq!(v, [5]);
++        let mut v: [u32; 0] = [];
++        assert_eq!(bump_rest(&mut v), 0);
++    }
++
++    #[test]
++    fn bump_middle_writes_through_the_middle() {
++        let mut v = [1, 2, 3, 4];
++        assert_eq!(bump_middle(&mut v), 2);
++        assert_eq!(v, [1, 2, 103, 4]);
++        let mut v = [1, 2];
++        assert_eq!(bump_middle(&mut v), 0);
++        assert_eq!(v, [1, 2]);
++        let mut v = [1];
++        assert_eq!(bump_middle(&mut v), 0);
++        assert_eq!(v, [1]);
++    }
++}
+diff --git a/tests/src/untranslated-trait-impl.lean.out b/tests/src/untranslated-trait-impl.lean.out
+new file mode 100644
+index 0000000..441e8f0
+--- /dev/null
++++ b/tests/src/untranslated-trait-impl.lean.out
+@@ -0,0 +1,69 @@
++[[92mInfo[39m ] Imported: tests/llbc/untranslated_trait_impl.llbc
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
++[[91mError[39m] Could not translate the function signature of 'untranslated_trait_impl::Shape::apply because of previous error
++Name pattern: 'untranslated_trait_impl::Shape::apply'
++Definition span: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
++Source: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
++Compiler source: Translate.ml, line 430
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
++[[91mError[39m] Could not translate the function signature of 'untranslated_trait_impl::{untranslated_trait_impl::Shape for untranslated_trait_impl::S}::apply because of previous error
++Name pattern: 'untranslated_trait_impl::{untranslated_trait_impl::Shape<untranslated_trait_impl::S>}::apply'
++Definition span: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
++Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
++Compiler source: Translate.ml, line 430
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
++[[91mError[39m] Could not translate the function 'untranslated_trait_impl::Shape::apply because of previous error.
++Name pattern: 'untranslated_trait_impl::Shape::apply'
++Definition span: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
++Source: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
++Compiler source: Translate.ml, line 334
++[[91mError[39m] Function pointers are not supported yet
++Source: 'tests/src/untranslated-trait-impl.rs', lines 30:8-30:17
++Compiler source: interp/InterpStatements.ml, line 1624
++[[91mError[39m] Could not translate the body of function 'untranslated_trait_impl::{untranslated_trait_impl::Shape for untranslated_trait_impl::S}::apply because of previous error
++Name pattern: 'untranslated_trait_impl::{untranslated_trait_impl::Shape<untranslated_trait_impl::S>}::apply'
++Definition span: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
++Source: 'tests/src/untranslated-trait-impl.rs', lines 30:8-30:17
++Compiler source: interp/Interp.ml, line 627
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
++[[91mError[39m] Could not translate the function 'untranslated_trait_impl::{untranslated_trait_impl::Shape for untranslated_trait_impl::S}::apply because of previous error.
++Name pattern: 'untranslated_trait_impl::{untranslated_trait_impl::Shape<untranslated_trait_impl::S>}::apply'
++Definition span: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
++Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
++Compiler source: Translate.ml, line 334
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
++[[91mError[39m] Could not translate the trait instance 'untranslated_trait_impl::{untranslated_trait_impl::Shape for untranslated_trait_impl::S} because of previous error
++Name pattern: 'untranslated_trait_impl::{untranslated_trait_impl::Shape<untranslated_trait_impl::S>}'
++Definition span: 'tests/src/untranslated-trait-impl.rs', lines 25:0-32:1
++Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
++Compiler source: Translate.ml, line 600
++[[91mError[39m] Unexpected error: could not find the declaration for method 'apply' for trait declaration 'untranslated_trait_impl::Shape'
++Source: 'tests/src/untranslated-trait-impl.rs', lines 18:0-21:1
++Compiler source: extract/Extract.ml, line 2942
++[[91mError[39m] Could not generate names for the trait declaration 'untranslated_trait_impl::Shape because of previous error
++Name pattern: 'untranslated_trait_impl::Shape'
++Definition span: 'tests/src/untranslated-trait-impl.rs', lines 18:0-21:1
++Source: 'tests/src/untranslated-trait-impl.rs', lines 18:0-21:1
++Compiler source: Translate.ml, line 2214
++[[92mInfo[39m ] Creating missing directory: tests/lean/UntranslatedTraitImpl
++[[91mError[39m] Could not find: trait_decl_id: 0
++Source: 'tests/src/untranslated-trait-impl.rs', lines 34:0-36:1
++Compiler source: extract/ExtractBase.ml, line 741
++[[91mError[39m] Could not find: trait_decl: untranslated_trait_impl::Shape (id: 0), method name: get
++Source: 'tests/src/untranslated-trait-impl.rs', lines 34:0-36:1
++Compiler source: extract/ExtractBase.ml, line 730
++[[91mError[39m] Could not find: trait_impl_id: 0
++Source: 'tests/src/untranslated-trait-impl.rs', lines 38:0-40:1
++Compiler source: extract/ExtractBase.ml, line 741
++[[92mInfo[39m ] Generated the partial file (because of 17 errors, including 10 unique errors): tests/lean/UntranslatedTraitImpl/UntranslatedTraitImpl.lean
++[[92mInfo[39m ] Total execution time: 0.669151 seconds
+diff --git a/tests/src/untranslated-trait-impl.rs b/tests/src/untranslated-trait-impl.rs
+new file mode 100644
+index 0000000..aa4706b
+--- /dev/null
++++ b/tests/src/untranslated-trait-impl.rs
+@@ -0,0 +1,44 @@
++//@ [!lean] skip
++//@ [lean] recover-errors
++//@ [lean] subdir=UntranslatedTraitImpl
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! References to a trait declaration and an implementation whose translation
++//! failed (a method signature with a function pointer type, which is not
++//! supported): the run reports the errors of the declaration and of the
++//! implementation, then one "Could not find" error per reference (in `generic`
++//! and `via_dict`), still emits `incr`, and exits with status 1. The
++//! declaration and the implementation are not exported: before, their export
++//! raised internal errors (the declaration's structure with a placeholder for
++//! the method's field, Extract.ml; the implementation, Translate.ml) and the
++//! reference to the implementation an uncaught `Not_found`
++//! (ExtractBase.ctx_get_reference). The partial output, which refers to the
++//! missing declarations, is not committed.
++
++pub trait Shape {
++    fn get(&self) -> u32;
++    fn apply(&self, f: fn(u32) -> u32) -> u32;
++}
++
++pub struct S(pub u32);
++
++impl Shape for S {
++    fn get(&self) -> u32 {
++        self.0
++    }
++    fn apply(&self, f: fn(u32) -> u32) -> u32 {
++        f(self.0)
++    }
++}
++
++pub fn generic<T: Shape>(t: &T) -> u32 {
++    t.get()
++}
++
++pub fn via_dict(s: &S) -> u32 {
++    generic(s)
++}
++
++pub fn incr(x: u32) -> u32 {
++    x.wrapping_add(1)
++}

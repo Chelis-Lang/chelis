@@ -1,0 +1,3725 @@
+# aeneas integration step 161 after cba11f3beb: commit 919c70e0a93b671e701b134a39bdaad217f77862
+# first parent 46249a64c633d25d3bf01addbe14378a91e10376, merged 2cab833e71b3caf4bae8f256c124e98c5fa6f0ba
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/std-14' (bool::then with canonical closure state; Option::get_or_insert; &[T]/Vec == arrays; Vec::as_mut_slice; serde IgnoredAny)
+
+diff --git a/backends/lean/Aeneas/Std/Array/ArraySlice.lean b/backends/lean/Aeneas/Std/Array/ArraySlice.lean
+index e3c7513..c0598ad 100644
+--- a/backends/lean/Aeneas/Std/Array/ArraySlice.lean
++++ b/backends/lean/Aeneas/Std/Array/ArraySlice.lean
+@@ -159,6 +159,21 @@ def core.array.equality.PartialEqSliceArray.ne
+     core.array.equality.PartialEqArray.ne partialEqInst ⟨s.val, h⟩ a
+   else .ok true
+ 
++/-- `impl PartialEq<[U; N]> for &[T]` (core/src/array/equality.rs): `**self == *other`, the
++    comparison of `[T]` with `[U; N]` above. -/
++@[rust_fun "core::array::equality::{core::cmp::PartialEq<&'0 [@T], [@U; @N]>}::eq"]
++def core.array.equality.PartialEqSharedSliceArray.eq
++  {T : Type} {U : Type} {N : Usize} (partialEqInst : core.cmp.PartialEq T U)
++  (s : Slice T) (a : Array U N) : Result Bool :=
++  core.array.equality.PartialEqSliceArray.eq partialEqInst s a
++
++/-- `impl PartialEq<[U; N]> for &[T]` (core/src/array/equality.rs): `**self != *other`. -/
++@[rust_fun "core::array::equality::{core::cmp::PartialEq<&'0 [@T], [@U; @N]>}::ne"]
++def core.array.equality.PartialEqSharedSliceArray.ne
++  {T : Type} {U : Type} {N : Usize} (partialEqInst : core.cmp.PartialEq T U)
++  (s : Slice T) (a : Array U N) : Result Bool :=
++  core.array.equality.PartialEqSliceArray.ne partialEqInst s a
++
+ @[rust_fun "core::array::{core::fmt::Debug<core::array::TryFromSliceError>}::fmt"]
+ def core.array.DebugTryFromSliceError.fmt
+   (_ : core.array.TryFromSliceError) (fmt : core.fmt.Formatter) :
+diff --git a/backends/lean/Aeneas/Std/Core/CoreOption.lean b/backends/lean/Aeneas/Std/Core/CoreOption.lean
+index 1c29516..0c0b4d9 100644
+--- a/backends/lean/Aeneas/Std/Core/CoreOption.lean
++++ b/backends/lean/Aeneas/Std/Core/CoreOption.lean
+@@ -48,6 +48,14 @@ def core.option.Option.ok_or {T E : Type} (x : Option T) (err : E) :
+   | some value => .ok (.Ok value)
+   | none => .ok (.Err err)
+ 
++/-- `Option::get_or_insert` (core/src/option.rs): `self.get_or_insert_with(|| value)`, which
++    stores `value` when the option is `None` (the value is dropped otherwise), then lends the
++    contained value. The option given back holds the value given back to that borrow. -/
++@[rust_fun "core::option::{core::option::Option<@T>}::get_or_insert"]
++def core.option.Option.get_or_insert {T : Type} (self : Option T) (value : T) :
++    Result (T × (T → Option T)) :=
++  .ok (self.getD value, some)
++
+ @[rust_fun
+   "core::option::{core::cmp::PartialEq<core::option::Option<@T>, core::option::Option<@T>>}::eq"]
+ def core.option.Option.Insts.CoreCmpPartialEqOption.eq
+diff --git a/backends/lean/Aeneas/Std/Core/Ops.lean b/backends/lean/Aeneas/Std/Core/Ops.lean
+index bb9406b..f556d62 100644
+--- a/backends/lean/Aeneas/Std/Core/Ops.lean
++++ b/backends/lean/Aeneas/Std/Core/Ops.lean
+@@ -248,14 +248,18 @@ structure core.ops.try_trait.Residual (Self O TryType: Type) where
+   TryInst : core.ops.try_trait.Try TryType O Self
+ 
+ /-- `bool::then` (core/src/bool.rs): `if self { Some(f()) } else { None }`. The closure
+-    is called once when the condition holds, else dropped without being called. -/
++    is called once when the condition holds, else dropped without being called. The model
++    returns the closure's final state (the canonical state ABI of its input 1,
++    `ModelStateABI.modeled_fun_abi`): its state after the call, or the closure unchanged when
++    it is not called. A partial-monomorphization instance of `then` at a closure capturing
++    mutable borrows gives back to them the values in this state. -/
+ @[rust_fun "core::bool::{bool}::then"]
+ def core.bool.Bool.then {T F : Type} (fnInst : core.ops.function.FnOnce F Unit T)
+-    (condition : Bool) (f : F) : Result (Option T) :=
++    (condition : Bool) (f : F) : Result (Option T × F) :=
+   if condition then do
+-    let (value, _) ← fnInst.call_once f ()
+-    ok (some value)
+-  else ok none
++    let (value, f) ← fnInst.call_once f ()
++    ok (some value, f)
++  else ok (none, f)
+ 
+ namespace Std
+ 
+diff --git a/backends/lean/Aeneas/Std/Serde/Impls.lean b/backends/lean/Aeneas/Std/Serde/Impls.lean
+index d64b2be..d4430ce 100644
+--- a/backends/lean/Aeneas/Std/Serde/Impls.lean
++++ b/backends/lean/Aeneas/Std/Serde/Impls.lean
+@@ -844,6 +844,96 @@ def DeserializeArray32 {T : Type} (i : serde_core.de.Deserialize T) :
+     serde_core.de.Deserialize (Array T 32#usize) :=
+   { deserialize := fun inst deserializer => DeserializeArray32.deserialize i inst deserializer }
+ 
++/-! ### `IgnoredAny` (de/ignored_any.rs)
++
++`IgnoredAny` is a unit struct (its Lean type is `Unit`). `impl Visitor for IgnoredAny` accepts every
++value and drops it: the scalars, `visit_none` and `visit_unit` are `Ok(IgnoredAny)`,
++`visit_some` and `visit_newtype_struct` are `IgnoredAny::deserialize(deserializer)`, `visit_seq`
++reads the elements as `IgnoredAny` until the end, `visit_map` the entries, `visit_enum` the variant
++then its content as a newtype variant, each stopping at the first error. `impl Deserialize for
++IgnoredAny` is `deserializer.deserialize_ignored_any(IgnoredAny)`. The visitor deserializes nested
++values with itself, so its dictionaries are built level by level of the knot (`DeAt`): the visitor
++at level `n + 1` reads nested values with the dictionaries at level `n`, as `Visitor.wrap` projects
++a visitor of `Ω` (`proj n`). -/
++
++/-- `while let Some(IgnoredAny) = tri!(seq.next_element()) {}` then `Ok(IgnoredAny)`. -/
++def ignoredElements {X : serde_core.de.Fam} {A Error : Type}
++    (seq : serde_core.de.SeqAccessF X A Error) (d : X.Deserialize Unit) (access : A) :
++    Result (core.result.Result Unit Error) := do
++  let (r, access) ← seq.next_element d access
++  match r with
++  | .Err e => ok (.Err e)
++  | .Ok none => ok (.Ok ())
++  | .Ok (some ()) => ignoredElements seq d access
++partial_fixpoint
++
++/-- `while let Some((IgnoredAny, IgnoredAny)) = tri!(map.next_entry()) {}` then `Ok(IgnoredAny)`. -/
++def ignoredEntries {X : serde_core.de.Fam} {A Error : Type}
++    (map : serde_core.de.MapAccessF X A Error) (d : X.Deserialize Unit) (access : A) :
++    Result (core.result.Result Unit Error) := do
++  let (r, access) ← map.next_entry d d access
++  match r with
++  | .Err e => ok (.Err e)
++  | .Ok none => ok (.Ok ())
++  | .Ok (some ((), ())) => ignoredEntries map d access
++partial_fixpoint
++
++/-- `impl Visitor for IgnoredAny` one level above the dictionaries `d` (its `Deserialize`) and
++    `v` (its `Visitor`) of the knot family `X`. -/
++def ignoredAnyVisitorStep {X : serde_core.de.Fam} (d : X.Deserialize Unit)
++    (v : X.Visitor Unit Unit) : serde_core.de.VisitorStep X Unit Unit :=
++  { expecting := fun _ f => f.append "anything at all"
++    visit_bool := fun _ _ _ => ok (.Ok ())
++    visit_i64 := fun _ _ _ => ok (.Ok ())
++    visit_i128 := fun _ _ _ => ok (.Ok ())
++    visit_u64 := fun _ _ _ => ok (.Ok ())
++    visit_u128 := fun _ _ _ => ok (.Ok ())
++    visit_f64 := fun _ _ _ => ok (.Ok ())
++    visit_str := fun _ _ _ => ok (.Ok ())
++    visit_none := fun _ _ => ok (.Ok ())
++    visit_some := fun inst _ deserializer => inst.deserialize_ignored_any v deserializer ()
++    visit_newtype_struct := fun inst _ deserializer =>
++      inst.deserialize_ignored_any v deserializer ()
++    visit_unit := fun _ _ => ok (.Ok ())
++    visit_seq := fun seq _ access => ignoredElements seq d access
++    visit_map := fun map _ access => ignoredEntries map d access
++    visit_bytes := fun _ _ _ => ok (.Ok ())
++    visit_enum := fun data _ access => do
++      match ← data.variant d access with
++      | .Err e => ok (.Err e)
++      | .Ok ((), variant) => data.VariantAccessInst.newtype_variant d variant }
++
++/-- The dictionaries of `IgnoredAny` at level `n` of the knot: `impl Deserialize` and
++    `impl Visitor`. -/
++def ignoredAnyAt : (n : Nat) →
++    (serde_core.de.DeAt n).Deserialize Unit × (serde_core.de.DeAt n).Visitor Unit Unit
++  | 0 => (PUnit.unit, PUnit.unit)
++  | n + 1 =>
++    let below := ignoredAnyAt n
++    (⟨fun inst deserializer => inst.deserialize_ignored_any below.2 deserializer ()⟩,
++      ignoredAnyVisitorStep below.1 below.2)
++
++/-- `IgnoredAny` as the visitor of the Rust traits (`Ω`). -/
++def IgnoredAnyVisitor : serde_core.de.VisitorΩ Unit Unit := ⟨fun n => (ignoredAnyAt n).2⟩
++
++/-- `impl<'de> Deserialize<'de> for IgnoredAny`: `deserializer.deserialize_ignored_any(IgnoredAny)`. -/
++@[rust_fun
++  "serde_core::de::ignored_any::{serde_core::de::Deserialize<'de, serde_core::de::ignored_any::IgnoredAny>}::deserialize"]
++def DeserializeIgnoredAny.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result Unit Error) :=
++  inst.deserialize_ignored_any IgnoredAnyVisitor deserializer ()
++
++@[reducible, rust_trait_impl
++  "serde_core::de::Deserialize<'de, serde_core::de::ignored_any::IgnoredAny>"]
++def DeserializeIgnoredAny : serde_core.de.Deserialize Unit :=
++  { deserialize := fun inst deserializer => DeserializeIgnoredAny.deserialize inst deserializer }
++
++/-- The knot is the level-wise construction: `Deserialize.wrap DeserializeIgnoredAny` is, at every
++    level, the level's `impl Deserialize for IgnoredAny`. -/
++theorem DeserializeIgnoredAny.wrap_level (n : Nat) :
++    (serde_core.de.Deserialize.wrap DeserializeIgnoredAny).level n = (ignoredAnyAt n).1 := by
++  cases n <;> rfl
++
+ end serde_core.de.impls
+ 
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/SliceCmp.lean b/backends/lean/Aeneas/Std/SliceCmp.lean
+index c584504..6e98160 100644
+--- a/backends/lean/Aeneas/Std/SliceCmp.lean
++++ b/backends/lean/Aeneas/Std/SliceCmp.lean
+@@ -1,5 +1,7 @@
+ import Aeneas.Std.Slice
+ import Aeneas.Std.Core.Cmp
++import Aeneas.Std.Array.ArraySlice
++import Aeneas.Std.Vec
+ 
+ /-!
+ # Comparison impls of `[T]` (`core/src/slice/cmp.rs`)
+@@ -150,4 +152,19 @@ def core.slice.cmp.OrdSliceInst {T : Type} (inst : core.cmp.Ord T) : core.cmp.Or
+   cmp := core.slice.cmp.OrdSlice.cmp inst
+ }
+ 
++/-- `impl PartialEq<[U; N]> for Vec<T, A>` (alloc/src/vec/partial_eq.rs, `__impl_slice_eq1`):
++    `self[..] == other[..]`, the slice comparison. -/
++@[rust_fun "alloc::vec::partial_eq::{core::cmp::PartialEq<alloc::vec::Vec<@T>, [@U; @N]>}::eq"
++  (keepParams := [true, true, false])]
++def alloc.vec.partial_eq.PartialEqVecArray.eq {T U : Type} {N : Usize}
++    (inst : core.cmp.PartialEq T U) (v : alloc.vec.Vec T) (a : Array U N) : Result Bool :=
++  core.slice.cmp.PartialEqSlice.eq inst (alloc.vec.Vec.deref v) a.to_slice
++
++/-- `impl PartialEq<[U; N]> for Vec<T, A>`: `self[..] != other[..]`. -/
++@[rust_fun "alloc::vec::partial_eq::{core::cmp::PartialEq<alloc::vec::Vec<@T>, [@U; @N]>}::ne"
++  (keepParams := [true, true, false])]
++def alloc.vec.partial_eq.PartialEqVecArray.ne {T U : Type} {N : Usize}
++    (inst : core.cmp.PartialEq T U) (v : alloc.vec.Vec T) (a : Array U N) : Result Bool :=
++  core.slice.cmp.PartialEqSlice.ne inst (alloc.vec.Vec.deref v) a.to_slice
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Vec.lean b/backends/lean/Aeneas/Std/Vec.lean
+index e8c3a24..51934b6 100644
+--- a/backends/lean/Aeneas/Std/Vec.lean
++++ b/backends/lean/Aeneas/Std/Vec.lean
+@@ -632,6 +632,14 @@ def core.ops.deref.DerefMutVec (T : Type) :
+   deref_mut v := ok (alloc.vec.Vec.deref_mut v)
+ }
+ 
++/-- `Vec::as_mut_slice` (alloc/src/vec/mod.rs): `slice::from_raw_parts_mut(self.as_mut_ptr(),
++    self.len)`, the whole vector as a mutable slice, as `deref_mut`: the vector given back holds
++    the slice given back (a mutable slice keeps its length). -/
++@[rust_fun "alloc::vec::{alloc::vec::Vec<@T>}::as_mut_slice" (keepParams := [true, false])]
++def alloc.vec.Vec.as_mut_slice {T : Type} (v : alloc.vec.Vec T) :
++    Result (Slice T × (Slice T → alloc.vec.Vec T)) :=
++  ok (alloc.vec.Vec.deref_mut v)
++
+ @[rust_fun "alloc::vec::{alloc::vec::Vec<@T>}::resize" (keepParams := [true,false])]
+ def alloc.vec.Vec.resize {T : Type} (cloneInst : core.clone.Clone T)
+   (v : alloc.vec.Vec T) (new_len : Usize) (value : T) : Result (alloc.vec.Vec T) := do
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 11c0538..3a3a575 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -278,7 +278,7 @@ let lean_builtin_funs = [
+   mk_fun "alloc::boxed::iter::{core::iter::traits::collect::IntoIterator<Box<[@I]>, @I, alloc::vec::into_iter::IntoIter<@I, @A>>}::into_iter" "_root_.Aeneas.Std.alloc.boxed.IntoIteratorBoxSlice.into_iter" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Core.lean", line: 126 *)
+   mk_fun "alloc::boxed::{core::clone::Clone<Box<@T>>}::clone" "_root_.Aeneas.Std.core.alloc.boxed.CloneBox.clone" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 745 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 753 *)
+   mk_fun "alloc::boxed::{core::clone::Clone<Box<[@T]>>}::clone" "_root_.Aeneas.Std.alloc.boxed.CloneBoxSlice.clone" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/String.lean", line: 214 *)
+   mk_fun "alloc::boxed::{core::clone::Clone<Box<str>>}::clone" "_root_.Aeneas.Std.alloc.boxed.CloneBoxStr.clone";
+@@ -654,12 +654,18 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::into_iter::{core::iter::traits::iterator::Iterator<alloc::vec::into_iter::IntoIter<@T, @A>, @T>}::take" "_root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.take" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/VecIter.lean", line: 86 *)
+   mk_fun "alloc::vec::into_iter::{core::iter::traits::iterator::Iterator<alloc::vec::into_iter::IntoIter<@T, @A>, @T>}::try_fold" "_root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.try_fold" ~keep_params:(Some [true; false; true; true; true; true]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 758 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 157 *)
++  mk_fun "alloc::vec::partial_eq::{core::cmp::PartialEq<alloc::vec::Vec<@T>, [@U; @N]>}::eq" "_root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVecArray.eq" ~keep_params:(Some [true; true; false]);
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 164 *)
++  mk_fun "alloc::vec::partial_eq::{core::cmp::PartialEq<alloc::vec::Vec<@T>, [@U; @N]>}::ne" "_root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVecArray.ne" ~keep_params:(Some [true; true; false]);
++  (* file: "Aeneas/Std/Vec.lean", line: 766 *)
+   mk_fun "alloc::vec::partial_eq::{core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>}::eq" "_root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVec.eq" ~keep_params:(Some [true; true; false; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 768 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 776 *)
+   mk_fun "alloc::vec::partial_eq::{core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>}::ne" "_root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVec.ne" ~keep_params:(Some [true; true; false; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 547 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::append" "_root_.Aeneas.Std.alloc.vec.Vec.append" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/Vec.lean", line: 638 *)
++  mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::as_mut_slice" "_root_.Aeneas.Std.alloc.vec.Vec.as_mut_slice" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 613 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::as_slice" "_root_.Aeneas.Std.alloc.vec.Vec.as_slice" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 52 *)
+@@ -688,7 +694,7 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::push" "_root_.Aeneas.Std.alloc.vec.Vec.push" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 56 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::remove" "_root_.Aeneas.Std.alloc.vec.Vec.remove" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 635 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 643 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::resize" "_root_.Aeneas.Std.alloc.vec.Vec.resize" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 603 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::retain" "_root_.Aeneas.Std.alloc.vec.Vec.retain" ~keep_params:(Some [true; false; true]);
+@@ -698,17 +704,17 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::split_off" "_root_.Aeneas.Std.alloc.vec.Vec.split_off" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 530 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::with_capacity" "_root_.Aeneas.Std.alloc.vec.Vec.with_capacity" ~can_fail:false ~lift:false;
+-  (* file: "Aeneas/Std/Vec.lean", line: 730 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 738 *)
+   mk_fun "alloc::vec::{core::clone::Clone<alloc::vec::Vec<@T>>}::clone" "_root_.Aeneas.Std.alloc.vec.CloneVec.clone" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 693 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 701 *)
+   mk_fun "alloc::vec::{core::convert::From<Box<[@T]>, alloc::vec::Vec<@T>>}::from" "_root_.Aeneas.Std.alloc.vec.FromBoxSliceVec.from" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 661 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 669 *)
+   mk_fun "alloc::vec::{core::convert::From<alloc::vec::Vec<@T>, [@T; @N]>}::from" "_root_.Aeneas.Std.alloc.vec.FromVecArray.from";
+-  (* file: "Aeneas/Std/Vec.lean", line: 677 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 685 *)
+   mk_fun "alloc::vec::{core::convert::TryFrom<[@T; @N], alloc::vec::Vec<@T>, alloc::vec::Vec<@T>>}::try_from" "_root_.Aeneas.Std.alloc.vec.TryFromArrayVec.try_from" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 67 *)
+   mk_fun "alloc::vec::{core::default::Default<alloc::vec::Vec<@T>>}::default" "_root_.Aeneas.Std.alloc.vec.DefaultVec.default";
+-  (* file: "Aeneas/Std/Vec.lean", line: 789 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 797 *)
+   mk_fun "alloc::vec::{core::fmt::Debug<alloc::vec::Vec<@T>>}::fmt" "_root_.Aeneas.Std.alloc.vec.DebugVec.fmt" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 110 *)
+   mk_fun "alloc::vec::{core::iter::traits::collect::Extend<alloc::vec::Vec<@T>, &'a @T>}::extend" "_root_.Aeneas.Std.alloc.vec.ExtendVecShared.extend" ~keep_params:(Some [true; false; true; true]) ~keep_trait_clauses:(Some [false; true]);
+@@ -786,6 +792,10 @@ let lean_builtin_funs = [
+   mk_fun "chelis_types::native::{chelis_types::native::NativeServices}::stack_exhausted" "_root_.Aeneas.Std.chelis_types.native.NativeServices.stack_exhausted";
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 109 *)
+   mk_fun "chelis_types::native::{chelis_types::native::NativeServices}::with_grown_stack" "_root_.Aeneas.Std.chelis_types.native.NativeServices.with_grown_stack";
++  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 164 *)
++  mk_fun "core::array::equality::{core::cmp::PartialEq<&'0 [@T], [@U; @N]>}::eq" "_root_.Aeneas.Std.core.array.equality.PartialEqSharedSliceArray.eq";
++  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 171 *)
++  mk_fun "core::array::equality::{core::cmp::PartialEq<&'0 [@T], [@U; @N]>}::ne" "_root_.Aeneas.Std.core.array.equality.PartialEqSharedSliceArray.ne";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 130 *)
+   mk_fun "core::array::equality::{core::cmp::PartialEq<[@T; @N], [@U; @N]>}::eq" "_root_.Aeneas.Std.core.array.equality.PartialEqArray.eq";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 138 *)
+@@ -810,27 +820,27 @@ let lean_builtin_funs = [
+   mk_fun "core::array::iter::{core::iter::traits::iterator::Iterator<core::array::iter::IntoIter<@T, @N>, @T>}::size_hint" "_root_.Aeneas.Std.core.array.iter.IteratorIntoIter.size_hint";
+   (* file: "Aeneas/Std/ArrayIter.lean", line: 56 *)
+   mk_fun "core::array::iter::{core::iter::traits::iterator::Iterator<core::array::iter::IntoIter<@T, @N>, @T>}::try_fold" "_root_.Aeneas.Std.core.array.iter.IteratorIntoIter.try_fold";
+-  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 230 *)
++  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 245 *)
+   mk_fun "core::array::{[@T; @N]}::as_mut_slice" "_root_.Aeneas.Std.core.array.Array.as_mut_slice";
+-  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 226 *)
++  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 241 *)
+   mk_fun "core::array::{[@T; @N]}::as_slice" "_root_.Aeneas.Std.core.array.Array.as_slice";
+   (* file: "Aeneas/Std/Array/Array.lean", line: 228 *)
+   mk_fun "core::array::{core::clone::Clone<[@T; @N]>}::clone" "_root_.Aeneas.Std.core.array.CloneArray.clone";
+   (* file: "Aeneas/Std/Array/Array.lean", line: 241 *)
+   mk_fun "core::array::{core::clone::Clone<[@T; @N]>}::clone_from" "_root_.Aeneas.Std.core.array.CloneArray.clone_from";
+-  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 188 *)
+-  mk_fun "core::array::{core::convert::TryFrom<&'a [@T; @N], &'a [@T], core::array::TryFromSliceError>}::try_from" "_root_.Aeneas.Std.core.array.TryFromSharedArraySlice.try_from";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 203 *)
++  mk_fun "core::array::{core::convert::TryFrom<&'a [@T; @N], &'a [@T], core::array::TryFromSliceError>}::try_from" "_root_.Aeneas.Std.core.array.TryFromSharedArraySlice.try_from";
++  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 218 *)
+   mk_fun "core::array::{core::convert::TryFrom<&'a mut [@T; @N], &'a mut [@T], core::array::TryFromSliceError>}::try_from" "_root_.Aeneas.Std.core.array.TryFromMutArraySlice.try_from";
+-  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 176 *)
++  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 191 *)
+   mk_fun "core::array::{core::convert::TryFrom<[@T; @N], &'0 [@T], core::array::TryFromSliceError>}::try_from" "_root_.Aeneas.Std.core.array.TryFromArrayCopySlice.try_from";
+   (* file: "Aeneas/Std/Array/Array.lean", line: 301 *)
+   mk_fun "core::array::{core::default::Default<[@T; 0]>}::default" "_root_.Aeneas.Std.core.default.DefaultArrayEmpty.default";
+   (* file: "Aeneas/Std/Array/Array.lean", line: 285 *)
+   mk_fun "core::array::{core::default::Default<[@T; @N]>}::default" "_root_.Aeneas.Std.core.default.DefaultArray.default";
+-  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 219 *)
++  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 234 *)
+   mk_fun "core::array::{core::fmt::Debug<[@T; @N]>}::fmt" "_root_.Aeneas.Std.core.array.DebugArray.fmt";
+-  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 162 *)
++  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 177 *)
+   mk_fun "core::array::{core::fmt::Debug<core::array::TryFromSliceError>}::fmt" "_root_.Aeneas.Std.core.array.DebugTryFromSliceError.fmt";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 399 *)
+   mk_fun "core::array::{core::iter::traits::collect::IntoIterator<&'a [@T; @N], &'a @T, core::slice::iter::Iter<'a, @T>>}::into_iter" "_root_.Aeneas.Std.core.array.IntoIteratorSharedArray.into_iter";
+@@ -838,7 +848,7 @@ let lean_builtin_funs = [
+   mk_fun "core::array::{core::ops::index::Index<[@T; @N], @I, @O>}::index" "_root_.Aeneas.Std.core.array.Array.index";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 92 *)
+   mk_fun "core::array::{core::ops::index::IndexMut<[@T; @N], @I, @O>}::index_mut" "_root_.Aeneas.Std.core.array.Array.index_mut";
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 252 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 256 *)
+   mk_fun "core::bool::{bool}::then" "_root_.Aeneas.Std.core.bool.Bool.then";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 95 *)
+   mk_fun "core::bool::{bool}::then_some" "_root_.Aeneas.Std.core.bool.then_some" ~can_fail:false;
+@@ -1146,7 +1156,7 @@ let lean_builtin_funs = [
+   mk_fun "core::fmt::{core::fmt::Debug<(@A, @B)>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugPair.fmt";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 183 *)
+   mk_fun "core::fmt::{core::fmt::Debug<(@V, @U, @T)>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugTriple.fmt";
+-  (* file: "Aeneas/Std/Vec.lean", line: 799 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 807 *)
+   mk_fun "core::fmt::{core::fmt::Debug<[@T]>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugSlice.fmt";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 324 *)
+   mk_fun "core::fmt::{core::fmt::Debug<bool>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugBool.fmt";
+@@ -1896,7 +1906,7 @@ let lean_builtin_funs = [
+   mk_fun "core::option::{core::clone::Clone<core::option::Option<@T>>}::clone_from" "_root_.Aeneas.Std.core.option.Option.Clone.clone_from";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 217 *)
+   mk_fun "core::option::{core::cmp::Eq<core::option::Option<@T>>}::assert_receiver_is_total_eq" "_root_.Aeneas.Std.core.option.EqOption.assert_receiver_is_total_eq";
+-  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 51 *)
++  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 59 *)
+   mk_fun "core::option::{core::cmp::PartialEq<core::option::Option<@T>, core::option::Option<@T>>}::eq" "_root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq";
+   (* file: "Aeneas/Std/Core/Default.lean", line: 13 *)
+   mk_fun "core::option::{core::default::Default<core::option::Option<@T>>}::default" "_root_.Aeneas.Std.core.option.DefaultOption.default";
+@@ -1920,6 +1930,8 @@ let lean_builtin_funs = [
+   mk_fun "core::option::{core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>}::size_hint" "_root_.Aeneas.Std.core.option.IteratorIter.size_hint";
+   (* file: "Aeneas/Std/Core/CoreOption.lean", line: 40 *)
+   mk_fun "core::option::{core::option::Option<@T>}::expect" "_root_.Aeneas.Std.core.option.Option.expect";
++  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 54 *)
++  mk_fun "core::option::{core::option::Option<@T>}::get_or_insert" "_root_.Aeneas.Std.core.option.Option.get_or_insert";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 208 *)
+   mk_fun "core::option::{core::option::Option<@T>}::is_none" "_root_.Aeneas.Std.core.option.Option.is_none" ~can_fail:false ~lift:false;
+   (* file: "Aeneas/Std/Core/Core.lean", line: 212 *)
+@@ -1954,29 +1966,29 @@ let lean_builtin_funs = [
+   mk_fun "core::result::{core::result::Result<@T, @E>}::expect" "_root_.Aeneas.Std.core.result.Result.expect";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 622 *)
+   mk_fun "core::result::{core::result::Result<@T, @E>}::unwrap" "_root_.Aeneas.Std.core.result.Result.unwrap";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 135 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 137 *)
+   mk_fun "core::slice::cmp::{core::cmp::Ord<[@T]>}::cmp" "_root_.Aeneas.Std.core.slice.cmp.OrdSlice.cmp";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 53 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 55 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialEq<[@T], [@U]>}::eq" "_root_.Aeneas.Std.core.slice.cmp.PartialEqSlice.eq";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 58 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 60 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialEq<[@T], [@U]>}::ne" "_root_.Aeneas.Std.core.slice.cmp.PartialEqSlice.ne";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 98 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 100 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialOrd<[@T], [@T]>}::__chaining_ge" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSlice.chaining_ge";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 94 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 96 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialOrd<[@T], [@T]>}::__chaining_gt" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSlice.chaining_gt";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 90 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 92 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialOrd<[@T], [@T]>}::__chaining_le" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSlice.chaining_le";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 86 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 88 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialOrd<[@T], [@T]>}::__chaining_lt" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSlice.chaining_lt";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 115 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 117 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialOrd<[@T], [@T]>}::ge" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSlice.ge";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 111 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 113 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialOrd<[@T], [@T]>}::gt" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSlice.gt";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 107 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 109 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialOrd<[@T], [@T]>}::le" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSlice.le";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 103 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 105 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialOrd<[@T], [@T]>}::lt" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSlice.lt";
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 75 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 77 *)
+   mk_fun "core::slice::cmp::{core::cmp::PartialOrd<[@T], [@T]>}::partial_cmp" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSlice.partial_cmp";
+   (* file: "Aeneas/Std/Slice.lean", line: 328 *)
+   mk_fun "core::slice::index::{core::ops::index::Index<[@T], @I, @O>}::index" "_root_.Aeneas.Std.core.slice.index.Slice.index";
+@@ -2472,6 +2484,8 @@ let lean_builtin_funs = [
+   mk_fun "num_bigint::biguint::{core::hash::Hash<num_bigint::biguint::BigUint>}::hash" "_root_.Aeneas.Std.num_bigint.BigUint.HashBigUint.hash";
+   (* file: "Aeneas/Std/Serde/Private.lean", line: 86 *)
+   mk_fun "serde::private::de::missing_field" "_root_.Aeneas.Std.serde.private.de.missing_field";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 920 *)
++  mk_fun "serde_core::de::ignored_any::{serde_core::de::Deserialize<'de, serde_core::de::ignored_any::IgnoredAny>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeIgnoredAny.deserialize";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 648 *)
+   mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, ()>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeUnit.deserialize";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 367 *)
+@@ -2820,7 +2834,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::borrow::Borrow<alloc::vec::Vec<@T>, [@T]>" "_root_.Aeneas.Std.core.borrow.BorrowVecSlice" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Core.lean", line: 131 *)
+   mk_trait_impl "core::clone::Clone<Box<@T>>" "_root_.Aeneas.Std.core.core.clone.CloneBox" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 751 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 759 *)
+   mk_trait_impl "core::clone::Clone<Box<[@T]>>" "_root_.Aeneas.Std.core.clone.CloneBoxSlice" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/String.lean", line: 217 *)
+   mk_trait_impl "core::clone::Clone<Box<str>>" "_root_.Aeneas.Std.core.clone.CloneBoxStr";
+@@ -2836,7 +2850,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::clone::Clone<alloc::string::String>" "_root_.Aeneas.Std.core.clone.CloneString";
+   (* file: "Aeneas/Std/Sync.lean", line: 46 *)
+   mk_trait_impl "core::clone::Clone<alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.core.clone.CloneArc" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 736 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 744 *)
+   mk_trait_impl "core::clone::Clone<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.clone.CloneallocvecVec" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Core.lean", line: 120 *)
+   mk_trait_impl "core::clone::Clone<bool>" "_root_.Aeneas.Std.core.clone.CloneBool";
+@@ -2884,7 +2898,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::Eq<(@U, @T)>" "_root_.Aeneas.Std.core.cmp.EqPair";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 328 *)
+   mk_trait_impl "core::cmp::Eq<Box<@T>>" "_root_.Aeneas.Std.core.cmp.EqBox" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 70 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 72 *)
+   mk_trait_impl "core::cmp::Eq<[@T]>" "_root_.Aeneas.Std.core.slice.cmp.EqSliceInst";
+   (* file: "Aeneas/Std/String.lean", line: 147 *)
+   mk_trait_impl "core::cmp::Eq<alloc::string::String>" "_root_.Aeneas.Std.core.cmp.EqString";
+@@ -2900,7 +2914,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::Ord<(@U, @T)>" "_root_.Aeneas.Std.core.cmp.OrdPair";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 375 *)
+   mk_trait_impl "core::cmp::Ord<Box<@T>>" "_root_.Aeneas.Std.core.cmp.OrdBox" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 146 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 148 *)
+   mk_trait_impl "core::cmp::Ord<[@T]>" "_root_.Aeneas.Std.core.slice.cmp.OrdSliceInst";
+   (* file: "Aeneas/Std/String.lean", line: 176 *)
+   mk_trait_impl "core::cmp::Ord<alloc::string::String>" "_root_.Aeneas.Std.core.cmp.OrdString";
+@@ -2922,7 +2936,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<(@U, @T), (@U, @T)>" "_root_.Aeneas.Std.core.cmp.PartialEqPair";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 321 *)
+   mk_trait_impl "core::cmp::PartialEq<Box<@T>, Box<@T>>" "_root_.Aeneas.Std.core.cmp.PartialEqBox" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 63 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 65 *)
+   mk_trait_impl "core::cmp::PartialEq<[@T], [@U]>" "_root_.Aeneas.Std.core.slice.cmp.PartialEqSliceInst";
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 311 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+@@ -2934,7 +2948,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<alloc::string::String, alloc::string::String>" "_root_.Aeneas.Std.core.cmp.PartialEqString";
+   (* file: "Aeneas/Std/String.lean", line: 83 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::string::String, str>" "_root_.Aeneas.Std.core.cmp.PartialEqStringStr";
+-  (* file: "Aeneas/Std/Vec.lean", line: 779 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 787 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>" "_root_.Aeneas.Std.core.cmp.PartialEqVec" ~keep_params:(Some [true; true; false; false]);
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 210 *)
+   mk_trait_impl "core::cmp::PartialEq<bool, bool>" "_root_.Aeneas.Std.core.cmp.PartialEqBool";
+@@ -2962,7 +2976,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialOrd<(@U, @T), (@U, @T)>" "_root_.Aeneas.Std.core.cmp.PartialOrdPair";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 360 *)
+   mk_trait_impl "core::cmp::PartialOrd<Box<@T>, Box<@T>>" "_root_.Aeneas.Std.core.cmp.PartialOrdBox" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/SliceCmp.lean", line: 120 *)
++  (* file: "Aeneas/Std/SliceCmp.lean", line: 122 *)
+   mk_trait_impl "core::cmp::PartialOrd<[@T], [@T]>" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSliceInst";
+   (* file: "Aeneas/Std/String.lean", line: 170 *)
+   mk_trait_impl "core::cmp::PartialOrd<alloc::string::String, alloc::string::String>" "_root_.Aeneas.Std.core.cmp.PartialOrdString";
+@@ -2988,7 +3002,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::From<@Self, @Self>" "_root_.Aeneas.Std.core.convert.FromSame";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 64 *)
+   mk_trait_impl "core::convert::From<Box<@T>, @T>" "_root_.Aeneas.Std.core.convert.FromBox";
+-  (* file: "Aeneas/Std/Vec.lean", line: 701 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 709 *)
+   mk_trait_impl "core::convert::From<Box<[@T]>, alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.convert.FromBoxSliceVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/String.lean", line: 617 *)
+   mk_trait_impl "core::convert::From<Box<str>, &'0 str>" "_root_.Aeneas.Std.core.convert.FromSharedStrBoxStr";
+@@ -3002,7 +3016,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::From<alloc::string::String, &'0 alloc::string::String>" "_root_.Aeneas.Std.core.convert.FromSharedStringString";
+   (* file: "Aeneas/Std/String.lean", line: 588 *)
+   mk_trait_impl "core::convert::From<alloc::string::String, &'a str>" "_root_.Aeneas.Std.core.convert.FromStrString";
+-  (* file: "Aeneas/Std/Vec.lean", line: 667 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 675 *)
+   mk_trait_impl "core::convert::From<alloc::vec::Vec<@T>, [@T; @N]>" "_root_.Aeneas.Std.core.convert.FromVecArray";
+   (* file: "Aeneas/Std/Float.lean", line: 601 *)
+   mk_trait_impl "core::convert::From<f64, f32>" "_root_.Aeneas.Std.core.convert.num.FromF64F32";
+@@ -3018,11 +3032,11 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::From<num_bigint::biguint::BigUint, usize>" "_root_.Aeneas.Std.num_bigint.FromBigUintUsize";
+   (* file: "Aeneas/Std/Core/Convert.lean", line: 25 *)
+   mk_trait_impl "core::convert::Into<@Self, @T>" "_root_.Aeneas.Std.core.convert.IntoFrom";
+-  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 195 *)
++  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 210 *)
+   mk_trait_impl "core::convert::TryFrom<&'a [@T; @N], &'a [@T], core::array::TryFromSliceError>" "_root_.Aeneas.Std.core.convert.TryFromSharedArraySliceTryFromSliceError";
+   (* file: "Aeneas/Std/Core/Convert.lean", line: 44 *)
+   mk_trait_impl "core::convert::TryFrom<@T, @U, core::convert::Infallible>" "_root_.Aeneas.Std.core.convert.TryFromTUInfallible.Blanket";
+-  (* file: "Aeneas/Std/Vec.lean", line: 684 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 692 *)
+   mk_trait_impl "core::convert::TryFrom<[@T; @N], alloc::vec::Vec<@T>, alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.convert.TryFromArrayVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 133 *)
+   mk_trait_impl "core::convert::TryFrom<i16, i64, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromI16I64";
+@@ -3080,7 +3094,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<(@A, @B)>" "_root_.Aeneas.Std.core.fmt.DebugPair";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 187 *)
+   mk_trait_impl "core::fmt::Debug<(@V, @U, @T)>" "_root_.Aeneas.Std.core.fmt.DebugTriple";
+-  (* file: "Aeneas/Std/Vec.lean", line: 805 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 813 *)
+   mk_trait_impl "core::fmt::Debug<[@T]>" "_root_.Aeneas.Std.core.fmt.DebugSlice";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 90 *)
+   mk_trait_impl "core::fmt::Debug<alloc::boxed::Box<@T>>" "_root_.Aeneas.Std.core.fmt.DebugBox" ~keep_params:(Some [true; false]);
+@@ -3090,13 +3104,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<alloc::string::String>" "_root_.Aeneas.Std.core.fmt.DebugString";
+   (* file: "Aeneas/Std/Sync.lean", line: 89 *)
+   mk_trait_impl "core::fmt::Debug<alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.core.fmt.DebugArc" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 812 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 820 *)
+   mk_trait_impl "core::fmt::Debug<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.fmt.DebugVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 328 *)
+   mk_trait_impl "core::fmt::Debug<bool>" "_root_.Aeneas.Std.core.fmt.DebugBool";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 52 *)
+   mk_trait_impl "core::fmt::Debug<char>" "_root_.Aeneas.Std.core.fmt.DebugChar";
+-  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 169 *)
++  (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 184 *)
+   mk_trait_impl "core::fmt::Debug<core::array::TryFromSliceError>" "_root_.Aeneas.Std.core.fmt.DebugTryFromSliceError";
+   (* file: "Aeneas/Std/Core/Discriminant.lean", line: 125 *)
+   mk_trait_impl "core::fmt::Debug<core::mem::Discriminant<@T>>" "_root_.Aeneas.Std.core.mem.DebugDiscriminant";
+@@ -3656,6 +3670,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "serde_core::de::Deserialize<'de, i64>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeI64";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 529 *)
+   mk_trait_impl "serde_core::de::Deserialize<'de, i8>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeI8";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 926 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, serde_core::de::ignored_any::IgnoredAny>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeIgnoredAny";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 414 *)
+   mk_trait_impl "serde_core::de::Deserialize<'de, u32>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeU32";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 579 *)
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index 431d4b8..c1a6dc7 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -385,6 +385,10 @@ let modeled_fun_abi (crate : A.crate) (decl : A.fun_decl)
+       Some (Canonical Constructor)
+   | "_root_.Aeneas.Std.core.bool.then_some" ->
+       Some (Canonical (ConstructorWithState [ 1 ]))
++  (* [bool::then] consumes its closure: the model returns the closure's final
++     state (after its call, or unchanged when it is not called), so its
++     instances at closures capturing mutable borrows give these back *)
++  | "_root_.Aeneas.Std.core.bool.Bool.then" -> Some (Canonical (State [ 1 ]))
+   | _ ->
+       let contract =
+         match decl.src with
+diff --git a/tests/lean/BoolThenClosureState.lean b/tests/lean/BoolThenClosureState.lean
+new file mode 100644
+index 0000000..7ed39c2
+--- /dev/null
++++ b/tests/lean/BoolThenClosureState.lean
+@@ -0,0 +1 @@
++import BoolThenClosureState.Checks
+diff --git a/tests/lean/BoolThenClosureState/BoolThenClosureState.lean b/tests/lean/BoolThenClosureState/BoolThenClosureState.lean
+new file mode 100644
+index 0000000..26a2b8e
+--- /dev/null
++++ b/tests/lean/BoolThenClosureState/BoolThenClosureState.lean
+@@ -0,0 +1,610 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [bool_then_closure_state]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace bool_then_closure_state
++
++/-- [bool_then_closure_state::check::closure]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 54:15-57:5 -/
++def check.closure :=
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++
++/-- [bool_then_closure_state::VarGen]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 13:0-15:1
++    Visibility: public -/
++structure VarGen where
++  next_tvar : _root_.Aeneas.Std.U32
++
++/-- [bool_then_closure_state::scoped::closure]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 62:24-66:5 -/
++def scoped.closure :=
++  _root_.bool_then_closure_state.VarGen × _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32
++
++/-- [bool_then_closure_state::scoped::closure#1]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 67:27-71:5 -/
++def scoped.closure_1 :=
++  _root_.bool_then_closure_state.VarGen × _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32
++
++/-- [bool_then_closure_state::overflow::closure]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 95:14-98:5 -/
++@[reducible]
++def overflow.closure := _root_.Aeneas.Std.U32
++
++/-- [bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::closure]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 45:22-45:40 -/
++@[reducible]
++def Resolver.resolve.closure := _root_.bool_then_closure_state.VarGen
++
++/-- [bool_then_closure_state::twice::closure]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 87:26-87:44 -/
++@[reducible]
++def twice.closure := _root_.bool_then_closure_state.VarGen
++
++/-- [bool_then_closure_state::twice::closure#1]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 88:27-88:45 -/
++@[reducible]
++def twice.closure_1 := _root_.bool_then_closure_state.VarGen
++
++/-- [bool_then_closure_state::twice::closure#2]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 89:26-89:49 -/
++@[reducible]
++def twice.closure_2 := _root_.bool_then_closure_state.VarGen
++
++/-- [bool_then_closure_state::Resolver]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 25:0-27:1
++    Visibility: public -/
++structure Resolver where
++  holes : _root_.Bool
++
++/-- [bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::closure#1]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 46:28-46:54 -/
++def Resolver.resolve.closure_1 :=
++  _root_.bool_then_closure_state.Resolver × _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32
++
++/-- [core::option::{core::option::Option<T>}::ok_or_else::<T0, T1, bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::closure#1<0, 1>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1363:4-1365:52
++    Name pattern: [core::option::{core::option::Option<@T>}::ok_or_else<@T0, @T1, bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::closure#1<'0, '1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::ok_or_else<@T0, @T1, bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::closure#1<'0, '1>>"]
++def
++  core.option.Option.ok_or_elseT0T1closure_1_specialized_b1a4117ca32a9dde5f4d5c928ffe99c2
++  {T0 : Type} {T1 : Type} (opsfunctionFnOnceclosure_1TupleT1Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.Resolver.resolve.closure_1 _root_.Unit T1)
++  (self : _root_.Option T0)
++  (err : _root_.bool_then_closure_state.Resolver.resolve.closure_1) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result T0 T1) ×
++    _root_.bool_then_closure_state.Resolver.resolve.closure_1)
++  := do
++  let (r, _) := err
++  match self with
++  | none =>
++    let (model_state, model_state1) ←
++      opsfunctionFnOnceclosure_1TupleT1Inst.call_once err ()
++    let (_, v) := model_state1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      model_state, (r, v))
++  | some v =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok v,
++      err)
++
++/-- [bool_then_closure_state::{bool_then_closure_state::VarGen}::fresh_tvar]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 18:4-22:5
++    Visibility: public -/
++def VarGen.fresh_tvar
++  (self : _root_.bool_then_closure_state.VarGen) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.bool_then_closure_state.VarGen)
++  := do
++  let i ← self.next_tvar + 1#u32
++  _root_.Aeneas.Std.Result.ok (self.next_tvar, { next_tvar := i })
++
++/-- [bool_then_closure_state::{bool_then_closure_state::Resolver}::allows_hole]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 30:4-32:5 -/
++def Resolver.allows_hole
++  (self : _root_.bool_then_closure_state.Resolver) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.Result.ok self.holes
++
++/-- [bool_then_closure_state::{bool_then_closure_state::Resolver}::unbound]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 34:4-37:5 -/
++def Resolver.unbound
++  (self : _root_.bool_then_closure_state.Resolver)
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (code : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let errors1 ← _root_.Aeneas.Std.alloc.vec.Vec.push errors code
++  _root_.Aeneas.Std.Result.ok (code, errors1)
++
++/-- [bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::closure#1<0, 1>}::call_once]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 46:28-46:54 -/
++def Resolver.resolve.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.bool_then_closure_state.Resolver.resolve.closure_1)
++  (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.bool_then_closure_state.Resolver.resolve.closure_1)
++  := do
++  let (r, v) := c
++  let (i, v1) ← _root_.bool_then_closure_state.Resolver.unbound r v 7#u32
++  _root_.Aeneas.Std.Result.ok (i, (r, v1))
++
++/-- Trait implementation: [bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::closure#1<0, 1>}]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 46:28-46:54 -/
++@[reducible]
++def Resolver.resolve.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.Resolver.resolve.closure_1 _root_.Unit
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.bool_then_closure_state.Resolver.resolve.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (arg.#0, capture_state.#1))
++}
++
++/-- [bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::closure<0>}::call_once]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 45:22-45:40 -/
++def Resolver.resolve.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.bool_then_closure_state.Resolver.resolve.closure)
++  (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.bool_then_closure_state.Resolver.resolve.closure)
++  := do
++  let (i, vg) ← _root_.bool_then_closure_state.VarGen.fresh_tvar c
++  _root_.Aeneas.Std.Result.ok (i, vg)
++
++/-- Trait implementation: [bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve::closure<0>}]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 45:22-45:40 -/
++@[reducible]
++def Resolver.resolve.closure.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.Resolver.resolve.closure _root_.Unit
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.bool_then_closure_state.Resolver.resolve.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [bool_then_closure_state::{bool_then_closure_state::Resolver}::resolve]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 41:4-49:5
++    Visibility: public -/
++def Resolver.resolve
++  (self : _root_.bool_then_closure_state.Resolver)
++  (vg : _root_.bool_then_closure_state.VarGen)
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (name1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.bool_then_closure_state.Resolver ×
++    _root_.bool_then_closure_state.VarGen × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  if name1 = 0#u32
++  then
++    let b ← _root_.bool_then_closure_state.Resolver.allows_hole self
++    let (model_state, model_state1) ←
++      _root_.Aeneas.Std.core.bool.Bool.then
++        _root_.bool_then_closure_state.Resolver.resolve.closure.Insts.CoreOpsFunctionFnOnceTupleU32
++        b vg
++    let (r, c) ←
++      _root_.bool_then_closure_state.core.option.Option.ok_or_elseT0T1closure_1_specialized_b1a4117ca32a9dde5f4d5c928ffe99c2
++        _root_.bool_then_closure_state.Resolver.resolve.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32
++        model_state (self, errors)
++    let (_, errors1) := c
++    _root_.Aeneas.Std.Result.ok (r, self, model_state1, errors1)
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok name1,
++      self, vg, errors)
++
++/-- [bool_then_closure_state::check::{core::ops::function::FnOnce<(), usize> for bool_then_closure_state::check::closure<0, 1>}::call_once]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 54:15-57:5 -/
++def check.closure.Insts.CoreOpsFunctionFnOnceTupleUsize.call_once
++  (c : _root_.bool_then_closure_state.check.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.bool_then_closure_state.check.closure)
++  := do
++  let (v, i) := c
++  let v1 ← _root_.Aeneas.Std.alloc.vec.Vec.push v i
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len v1
++  _root_.Aeneas.Std.Result.ok (i1, (v1, i))
++
++/-- Trait implementation: [bool_then_closure_state::check::{core::ops::function::FnOnce<(), usize> for bool_then_closure_state::check::closure<0, 1>}]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 54:15-57:5 -/
++@[reducible]
++def check.closure.Insts.CoreOpsFunctionFnOnceTupleUsize :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.check.closure _root_.Unit
++  _root_.Aeneas.Std.Usize := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.bool_then_closure_state.check.closure.Insts.CoreOpsFunctionFnOnceTupleUsize.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, arg.#1))
++}
++
++/-- [bool_then_closure_state::check]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 53:0-58:1
++    Visibility: public -/
++def check
++  (ok1 : _root_.Bool)
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (code : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.Usize) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.bool.Bool.then
++      _root_.bool_then_closure_state.check.closure.Insts.CoreOpsFunctionFnOnceTupleUsize
++      (¬ ok1) (errors, code)
++  let (errors1, _) := model_state1
++  _root_.Aeneas.Std.Result.ok (model_state, errors1)
++
++/-- [bool_then_closure_state::scoped::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::scoped::closure#1<0, 1>}::call_once]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 67:27-71:5 -/
++def scoped.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.bool_then_closure_state.scoped.closure_1) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.bool_then_closure_state.scoped.closure_1 ×
++    _root_.bool_then_closure_state.scoped.closure_1)
++  := do
++  let (vg, v) := c
++  let (v1, vg1) ← _root_.bool_then_closure_state.VarGen.fresh_tvar vg
++  let i ← v1 + 100#u32
++  let v2 ← _root_.Aeneas.Std.alloc.vec.Vec.push v i
++  _root_.Aeneas.Std.Result.ok (v1, (vg1, v), (vg, v2))
++
++/-- Trait implementation: [bool_then_closure_state::scoped::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::scoped::closure#1<0, 1>}]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 67:27-71:5 -/
++@[reducible]
++def scoped.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.scoped.closure_1 _root_.Unit
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.bool_then_closure_state.scoped.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- [bool_then_closure_state::scoped::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::scoped::closure<0, 1>}::call_once]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 62:24-66:5 -/
++def scoped.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.bool_then_closure_state.scoped.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.bool_then_closure_state.scoped.closure ×
++    _root_.bool_then_closure_state.scoped.closure)
++  := do
++  let (vg, v) := c
++  let (v1, vg1) ← _root_.bool_then_closure_state.VarGen.fresh_tvar vg
++  let v2 ← _root_.Aeneas.Std.alloc.vec.Vec.push v v1
++  _root_.Aeneas.Std.Result.ok (v1, (vg1, v), (vg, v2))
++
++/-- Trait implementation: [bool_then_closure_state::scoped::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::scoped::closure<0, 1>}]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 62:24-66:5 -/
++@[reducible]
++def scoped.closure.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.scoped.closure _root_.Unit
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.bool_then_closure_state.scoped.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- [bool_then_closure_state::scoped]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 61:0-73:1
++    Visibility: public -/
++def «scoped»
++  (cyclic : _root_.Bool) (vg : _root_.bool_then_closure_state.VarGen)
++  (log : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Option _root_.Aeneas.Std.U32)) ×
++    _root_.bool_then_closure_state.VarGen × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.bool.Bool.then
++      _root_.bool_then_closure_state.scoped.closure.Insts.CoreOpsFunctionFnOnceTupleU32
++      cyclic (vg, log)
++  let (vg1, _) := model_state1
++  let (_, log1) := model_state1
++  let (model_state2, model_state3) ←
++    _root_.Aeneas.Std.core.bool.Bool.then
++      _root_.bool_then_closure_state.scoped.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32
++      (¬ cyclic) (vg1, log1)
++  let (vg2, _) := model_state3
++  let (_, log2) := model_state3
++  _root_.Aeneas.Std.Result.ok ((model_state, model_state2), vg2, log2)
++
++/-- [bool_then_closure_state::plain::closure]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 77:14-77:22 -/
++@[reducible]
++def plain.closure := _root_.Aeneas.Std.U32
++
++/-- [bool_then_closure_state::plain::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::plain::closure<0>}::call_once]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 77:14-77:22 -/
++def plain.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.bool_then_closure_state.plain.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  c + 1#u32
++
++/-- Trait implementation: [bool_then_closure_state::plain::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::plain::closure<0>}]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 77:14-77:22 -/
++@[reducible]
++def plain.closure.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.plain.closure _root_.Unit
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.bool_then_closure_state.plain.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [bool_then_closure_state::plain]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 76:0-78:1
++    Visibility: public -/
++def plain
++  (cond : _root_.Bool) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.bool.Bool.then
++      _root_.bool_then_closure_state.plain.closure.Insts.CoreOpsFunctionFnOnceTupleU32
++      cond x
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- [bool_then_closure_state::generic]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 82:0-84:1
++    Visibility: public -/
++def generic
++  {F : Type} (coreopsfunctionFnOnceFTupleU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F _root_.Unit
++  _root_.Aeneas.Std.U32) (cond : _root_.Bool) (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.bool.Bool.then coreopsfunctionFnOnceFTupleU32Inst
++      cond f
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- [bool_then_closure_state::generic::<bool_then_closure_state::twice::closure<0>>]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 82:0-84:1
++    Visibility: public -/
++def genericclosure_specialized_e7eda8ea6062c0ccacc340a654c3be8c
++  (coreopsfunctionFnOnceclosureTupleU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.twice.closure _root_.Unit
++  _root_.Aeneas.Std.U32) (cond : _root_.Bool)
++  (f : _root_.bool_then_closure_state.twice.closure) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.bool_then_closure_state.twice.closure)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.bool.Bool.then
++      coreopsfunctionFnOnceclosureTupleU32Inst cond f
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1)
++
++/-- [bool_then_closure_state::generic::<bool_then_closure_state::twice::closure#1<0>>]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 82:0-84:1
++    Visibility: public -/
++def genericclosure_1_specialized_a078b9fde3892ab3e4c99d825a9447ff
++  (coreopsfunctionFnOnceclosure_1TupleU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.twice.closure_1 _root_.Unit
++  _root_.Aeneas.Std.U32) (cond : _root_.Bool)
++  (f : _root_.bool_then_closure_state.twice.closure_1) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.bool_then_closure_state.twice.closure_1)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.bool.Bool.then
++      coreopsfunctionFnOnceclosure_1TupleU32Inst cond f
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1)
++
++/-- [bool_then_closure_state::generic::<bool_then_closure_state::twice::closure#2<0>>]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 82:0-84:1
++    Visibility: public -/
++def genericclosure_2_specialized_88b6d348a5a2840fa7afc5ee5955c9ac
++  (coreopsfunctionFnOnceclosure_2TupleU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.twice.closure_2 _root_.Unit
++  _root_.Aeneas.Std.U32) (cond : _root_.Bool)
++  (f : _root_.bool_then_closure_state.twice.closure_2) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.bool_then_closure_state.twice.closure_2)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.bool.Bool.then
++      coreopsfunctionFnOnceclosure_2TupleU32Inst cond f
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1)
++
++/-- [bool_then_closure_state::twice::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::twice::closure#2<0>}::call_once]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 89:26-89:49 -/
++def twice.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.bool_then_closure_state.twice.closure_2) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.bool_then_closure_state.twice.closure_2)
++  := do
++  let (i, vg) ← _root_.bool_then_closure_state.VarGen.fresh_tvar c
++  let i1 ← i * 10#u32
++  _root_.Aeneas.Std.Result.ok (i1, vg)
++
++/-- Trait implementation: [bool_then_closure_state::twice::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::twice::closure#2<0>}]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 89:26-89:49 -/
++@[reducible]
++def twice.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.twice.closure_2 _root_.Unit
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.bool_then_closure_state.twice.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [bool_then_closure_state::twice::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::twice::closure#1<0>}::call_once]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 88:27-88:45 -/
++def twice.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.bool_then_closure_state.twice.closure_1) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.bool_then_closure_state.twice.closure_1)
++  := do
++  let (i, vg) ← _root_.bool_then_closure_state.VarGen.fresh_tvar c
++  _root_.Aeneas.Std.Result.ok (i, vg)
++
++/-- Trait implementation: [bool_then_closure_state::twice::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::twice::closure#1<0>}]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 88:27-88:45 -/
++@[reducible]
++def twice.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.twice.closure_1 _root_.Unit
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.bool_then_closure_state.twice.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [bool_then_closure_state::twice::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::twice::closure<0>}::call_once]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 87:26-87:44 -/
++def twice.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.bool_then_closure_state.twice.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.bool_then_closure_state.twice.closure)
++  := do
++  let (i, vg) ← _root_.bool_then_closure_state.VarGen.fresh_tvar c
++  _root_.Aeneas.Std.Result.ok (i, vg)
++
++/-- Trait implementation: [bool_then_closure_state::twice::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::twice::closure<0>}]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 87:26-87:44 -/
++@[reducible]
++def twice.closure.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.twice.closure _root_.Unit
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.bool_then_closure_state.twice.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [bool_then_closure_state::twice]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 86:0-91:1
++    Visibility: public -/
++def twice
++  (vg : _root_.bool_then_closure_state.VarGen) :
++  _root_.Aeneas.Std.Result (((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32)) × _root_.bool_then_closure_state.VarGen)
++  := do
++  let (a, c) ←
++    _root_.bool_then_closure_state.genericclosure_specialized_e7eda8ea6062c0ccacc340a654c3be8c
++      _root_.bool_then_closure_state.twice.closure.Insts.CoreOpsFunctionFnOnceTupleU32
++      true vg
++  let (b, c1) ←
++    _root_.bool_then_closure_state.genericclosure_1_specialized_a078b9fde3892ab3e4c99d825a9447ff
++      _root_.bool_then_closure_state.twice.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32
++      false c
++  let (c2, c3) ←
++    _root_.bool_then_closure_state.genericclosure_2_specialized_88b6d348a5a2840fa7afc5ee5955c9ac
++      _root_.bool_then_closure_state.twice.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32
++      true c1
++  _root_.Aeneas.Std.Result.ok ((a, b, c2), c3)
++
++/-- [bool_then_closure_state::overflow::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::overflow::closure<0>}::call_once]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 95:14-98:5 -/
++def overflow.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.bool_then_closure_state.overflow.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.bool_then_closure_state.overflow.closure)
++  := do
++  let i ← c + _root_.Aeneas.Std.core.num.U32.MAX
++  _root_.Aeneas.Std.Result.ok (i, i)
++
++/-- Trait implementation: [bool_then_closure_state::overflow::{core::ops::function::FnOnce<(), u32> for bool_then_closure_state::overflow::closure<0>}]
++    Source: 'tests/src/bool-then-closure-state.rs', lines 95:14-98:5 -/
++@[reducible]
++def overflow.closure.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.bool_then_closure_state.overflow.closure _root_.Unit
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.bool_then_closure_state.overflow.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [bool_then_closure_state::overflow]:
++    Source: 'tests/src/bool-then-closure-state.rs', lines 94:0-99:1
++    Visibility: public -/
++def overflow
++  (cond : _root_.Bool) (vg : _root_.bool_then_closure_state.VarGen) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.bool_then_closure_state.VarGen)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.bool.Bool.then
++      _root_.bool_then_closure_state.overflow.closure.Insts.CoreOpsFunctionFnOnceTupleU32
++      cond vg.next_tvar
++  _root_.Aeneas.Std.Result.ok (model_state, { next_tvar := model_state1 })
++
++end bool_then_closure_state
+diff --git a/tests/lean/BoolThenClosureState/Checks.lean b/tests/lean/BoolThenClosureState/Checks.lean
+new file mode 100644
+index 0000000..797474f
+--- /dev/null
++++ b/tests/lean/BoolThenClosureState/Checks.lean
+@@ -0,0 +1,72 @@
++import BoolThenClosureState.BoolThenClosureState
++
++/-! Evaluate the model of `tests/src/bool-then-closure-state.rs` on the inputs of its `native` test
++    module and compare with the native results, including the values given back to the borrows
++    the closures capture. -/
++namespace bool_then_closure_state.checks
++open Aeneas Aeneas.Std Result
++
++def u32 (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++def vec (xs : List Nat) : alloc.vec.Vec U32 :=
++  let xs := xs.map u32
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++def gen (n : Nat) : VarGen := { next_tvar := u32 n }
++/-- A `Result<u32, u32>` as the text of its `Debug` form. -/
++def res (r : core.result.Result U32 U32) : String :=
++  match r with | .Ok v => s!"Ok({v.val})" | .Err e => s!"Err({e.val})"
++
++/-- `resolve` on a resolver, a generator and the errors: the result, the generator's next variable
++    and the errors given back. -/
++def resolveOf (holes : Bool) (next : Nat) (errors : List Nat) (nm : Nat) :
++    Option (String × Nat × List Nat) :=
++  match Resolver.resolve { holes } (gen next) (vec errors) (u32 nm) with
++  | ok (r, _, vg, errors) => some (res r, vg.next_tvar.val, nats errors)
++  | _ => none
++
++#guard resolveOf true 5 [1] 0 == some ("Ok(5)", 6, [1])
++#guard resolveOf true 6 [1] 3 == some ("Ok(3)", 6, [1])
++#guard resolveOf false 6 [1] 0 == some ("Err(7)", 6, [1, 7])
++
++def checkOf (ok' : Bool) (errors : List Nat) (code : Nat) : Option (Option Nat × List Nat) :=
++  match check ok' (vec errors) (u32 code) with
++  | ok (r, errors) => some (r.map (·.val), nats errors)
++  | _ => none
++
++#guard checkOf true [4] 9 == some (none, [4])
++#guard checkOf false [4] 9 == some (some 2, [4, 9])
++
++def scopedOf (cyclic : Bool) (next : Nat) (log : List Nat) :
++    Option ((Option Nat × Option Nat) × Nat × List Nat) :=
++  match «scoped» cyclic (gen next) (vec log) with
++  | ok ((a, b), vg, log) => some ((a.map (·.val), b.map (·.val)), vg.next_tvar.val, nats log)
++  | _ => none
++
++#guard scopedOf true 2 [] == some ((some 2, none), 3, [2])
++#guard scopedOf false 3 [2] == some ((none, some 3), 4, [2, 103])
++
++def plainOf (cond : Bool) (x : Nat) : Option (Option Nat) :=
++  match plain cond (u32 x) with
++  | ok r => some (r.map (·.val))
++  | _ => none
++
++#guard plainOf true 1 == some (some 2)
++#guard plainOf false 1 == some none
++
++def twiceOf (next : Nat) : Option ((Option Nat × Option Nat × Option Nat) × Nat) :=
++  match twice (gen next) with
++  | ok ((a, b, c), vg) => some ((a.map (·.val), b.map (·.val), c.map (·.val)), vg.next_tvar.val)
++  | _ => none
++
++#guard twiceOf 1 == some ((some 1, none, some 20), 3)
++
++def overflowOf (cond : Bool) (next : Nat) : Option (Option Nat × Nat) :=
++  match overflow cond (gen next) with
++  | ok (r, vg) => some (r.map (·.val), vg.next_tvar.val)
++  | _ => none
++
++#guard overflowOf false 1 == some (none, 1)
++#guard overflowOf true 0 == some (some 4294967295, 4294967295)
++#guard overflowOf true 1 == none
++
++end bool_then_closure_state.checks
+diff --git a/tests/lean/OptionGetOrInsert.lean b/tests/lean/OptionGetOrInsert.lean
+new file mode 100644
+index 0000000..bba2328
+--- /dev/null
++++ b/tests/lean/OptionGetOrInsert.lean
+@@ -0,0 +1 @@
++import OptionGetOrInsert.Checks
+diff --git a/tests/lean/OptionGetOrInsert/Checks.lean b/tests/lean/OptionGetOrInsert/Checks.lean
+new file mode 100644
+index 0000000..739a70e
+--- /dev/null
++++ b/tests/lean/OptionGetOrInsert/Checks.lean
+@@ -0,0 +1,56 @@
++import OptionGetOrInsert.OptionGetOrInsert
++
++/-! Evaluate the model of `tests/src/option-get-or-insert.rs` on the inputs of its `native` test
++    module and compare with the native results, including the options given back. -/
++namespace option_get_or_insert.checks
++open Aeneas Aeneas.Std Result
++
++def slice {α : Type} (xs : List α) : Slice α :=
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++def u32 (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++def usize (n : Nat) : Usize := ⟨BitVec.ofNat _ n⟩
++def txt (x : Str) : Option String :=
++  match Str.toString x with | ok t => some t | _ => none
++
++/-- A reason as the text of its `Debug` form. -/
++def reasonR : Reason → String
++  | .Recursive => "Recursive"
++  | .HigherOrder => "HigherOrder"
++  | .Runtime n => s!"Runtime({n.val})"
++
++def visitOf (rs : List Reason) : Option (Option String × Nat) :=
++  match visit_all (slice rs) with
++  | ok (r, n) => some (r.map reasonR, n.val)
++  | _ => none
++
++#guard visitOf [] == some (none, 0)
++#guard visitOf [.HigherOrder, .Recursive, .Runtime (u32 3)] == some (some "HigherOrder", 3)
++#guard visitOf [.Runtime (u32 4), .Recursive] == some (some "Runtime(4)", 2)
++
++def fallbackOf (names : List Str) (want : Str) : Option (Option String) :=
++  match first_or_match (slice names) want with
++  | ok (some s) => (txt s).map some
++  | ok none => some none
++  | _ => none
++
++#guard fallbackOf [toStr "a", toStr "b", toStr "c"] (toStr "b") == some (some "b")
++#guard fallbackOf [toStr "a", toStr "b", toStr "c"] (toStr "z") == some (some "a")
++#guard fallbackOf [] (toStr "z") == some none
++
++def seedOf (parents : List (Option Nat)) (start : Nat) : Option (List (Option Nat)) :=
++  match seed (slice (parents.map fun p => ({ seed_parent := p.map usize } : Site))) (usize start) with
++  | ok sites => some (sites.val.map fun s => s.seed_parent.map (·.val))
++  | _ => none
++
++#guard seedOf [some 1, none, none] 7 == some [some 1, some 7, some 7]
++
++def bumpOf (slot : Option Nat) (value : Nat) : Option (Nat × Option Nat) :=
++  match bump (slot.map u32) (u32 value) with
++  | ok (r, slot) => some (r.val, slot.map (·.val))
++  | _ => none
++
++#guard bumpOf none 5 == some (6, some 6)
++#guard bumpOf (some 6) 50 == some (7, some 7)
++#guard bumpOf (some 4294967295) 0 == none
++
++end option_get_or_insert.checks
+diff --git a/tests/lean/OptionGetOrInsert/OptionGetOrInsert.lean b/tests/lean/OptionGetOrInsert/OptionGetOrInsert.lean
+new file mode 100644
+index 0000000..321c811
+--- /dev/null
++++ b/tests/lean/OptionGetOrInsert/OptionGetOrInsert.lean
+@@ -0,0 +1,390 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [option_get_or_insert]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace option_get_or_insert
++
++/-- [option_get_or_insert::Reason]
++    Source: 'tests/src/option-get-or-insert.rs', lines 14:0-18:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Reason where
++| Recursive : Reason
++| HigherOrder : Reason
++| Runtime : _root_.Aeneas.Std.U32 → Reason
++
++/-- [option_get_or_insert::{core::clone::Clone for option_get_or_insert::Reason}::clone]:
++    Source: 'tests/src/option-get-or-insert.rs', lines 13:9-13:14
++    Visibility: public -/
++def Reason.Insts.CoreCloneClone.clone
++  (self : _root_.option_get_or_insert.Reason) :
++  _root_.Aeneas.Std.Result _root_.option_get_or_insert.Reason
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [option_get_or_insert::{core::clone::Clone for option_get_or_insert::Reason}]
++    Source: 'tests/src/option-get-or-insert.rs', lines 13:9-13:14 -/
++@[reducible]
++def Reason.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.option_get_or_insert.Reason := {
++  clone := _root_.option_get_or_insert.Reason.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [option_get_or_insert::{core::marker::Copy for option_get_or_insert::Reason}]
++    Source: 'tests/src/option-get-or-insert.rs', lines 13:16-13:20 -/
++@[reducible]
++def Reason.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.option_get_or_insert.Reason := {
++  cloneInst := _root_.option_get_or_insert.Reason.Insts.CoreCloneClone
++}
++
++/-- Trait implementation: [option_get_or_insert::{core::marker::StructuralPartialEq for option_get_or_insert::Reason}]
++    Source: 'tests/src/option-get-or-insert.rs', lines 13:22-13:31 -/
++@[reducible]
++def Reason.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.option_get_or_insert.Reason := {
++}
++
++/-- [option_get_or_insert::{core::cmp::PartialEq<option_get_or_insert::Reason> for option_get_or_insert::Reason}::eq]:
++    Source: 'tests/src/option-get-or-insert.rs', lines 13:22-13:31
++    Visibility: public -/
++def Reason.Insts.CoreCmpPartialEqReason.eq
++  (self : _root_.option_get_or_insert.Reason)
++  (other : _root_.option_get_or_insert.Reason) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    let joined ←
++      match self with
++      | _root_.option_get_or_insert.Reason.Recursive =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          _root_.option_get_or_insert.Reason.Recursive : _root_.Sum
++          _root_.option_get_or_insert.Reason _root_.Bool)
++      | _root_.option_get_or_insert.Reason.HigherOrder =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          _root_.option_get_or_insert.Reason.HigherOrder : _root_.Sum
++          _root_.option_get_or_insert.Reason _root_.Bool)
++      | _root_.option_get_or_insert.Reason.Runtime __self_0 =>
++        do
++        let joined1 ←
++          match other with
++          | _root_.option_get_or_insert.Reason.Recursive =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++              _root_.option_get_or_insert.Reason.Recursive : _root_.Sum
++              _root_.option_get_or_insert.Reason (_root_.Sum
++              _root_.option_get_or_insert.Reason _root_.Bool))
++          | _root_.option_get_or_insert.Reason.HigherOrder =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++              _root_.option_get_or_insert.Reason.HigherOrder : _root_.Sum
++              _root_.option_get_or_insert.Reason (_root_.Sum
++              _root_.option_get_or_insert.Reason _root_.Bool))
++          | _root_.option_get_or_insert.Reason.Runtime __arg1_0 =>
++            do
++            let b ←
++              _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++                _root_.Aeneas.Std.core.cmp.PartialEqU32 __self_0 __arg1_0
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr b) :
++              _root_.Sum _root_.option_get_or_insert.Reason (_root_.Sum
++              _root_.option_get_or_insert.Reason _root_.Bool))
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr true : _root_.Sum
++            _root_.option_get_or_insert.Reason _root_.Bool)
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    match joined with
++    | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok true
++    | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  else _root_.Aeneas.Std.Result.ok false
++
++/-- Trait implementation: [option_get_or_insert::{core::cmp::PartialEq<option_get_or_insert::Reason> for option_get_or_insert::Reason}]
++    Source: 'tests/src/option-get-or-insert.rs', lines 13:22-13:31 -/
++@[reducible]
++def Reason.Insts.CoreCmpPartialEqReason : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.option_get_or_insert.Reason _root_.option_get_or_insert.Reason := {
++  eq := _root_.option_get_or_insert.Reason.Insts.CoreCmpPartialEqReason.eq
++}
++
++/-- [option_get_or_insert::{core::fmt::Debug for option_get_or_insert::Reason}::fmt]:
++    Source: 'tests/src/option-get-or-insert.rs', lines 13:33-13:38
++    Visibility: public -/
++def Reason.Insts.CoreFmtDebug.fmt
++  (self : _root_.option_get_or_insert.Reason)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.option_get_or_insert.Reason.Recursive =>
++    _root_.Aeneas.Std.core.fmt.Formatter.write_str f (_root_.Aeneas.Std.toStr
++      "Recursive")
++  | _root_.option_get_or_insert.Reason.HigherOrder =>
++    _root_.Aeneas.Std.core.fmt.Formatter.write_str f (_root_.Aeneas.Std.toStr
++      "HigherOrder")
++  | _root_.option_get_or_insert.Reason.Runtime __self_0 =>
++    let __self_01 :=
++      _root_.Aeneas.Std.Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU32) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Runtime") __self_01
++
++/-- Trait implementation: [option_get_or_insert::{core::fmt::Debug for option_get_or_insert::Reason}]
++    Source: 'tests/src/option-get-or-insert.rs', lines 13:33-13:38 -/
++@[reducible]
++def Reason.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.option_get_or_insert.Reason := {
++  fmt := _root_.option_get_or_insert.Reason.Insts.CoreFmtDebug.fmt
++}
++
++/-- [option_get_or_insert::Visitor]
++    Source: 'tests/src/option-get-or-insert.rs', lines 20:0-23:1
++    Visibility: public -/
++structure Visitor where
++  reason : _root_.Option _root_.option_get_or_insert.Reason
++  visits : _root_.Aeneas.Std.U32
++
++/-- [option_get_or_insert::{option_get_or_insert::Visitor}::note]:
++    Source: 'tests/src/option-get-or-insert.rs', lines 27:4-30:5
++    Visibility: public -/
++def Visitor.note
++  (self : _root_.option_get_or_insert.Visitor)
++  (reason : _root_.option_get_or_insert.Reason) :
++  _root_.Aeneas.Std.Result _root_.option_get_or_insert.Visitor
++  := do
++  let i ← self.visits + 1#u32
++  let (r, get_or_insert_back) ←
++    _root_.Aeneas.Std.core.option.Option.get_or_insert self.reason reason
++  let o := get_or_insert_back r
++  _root_.Aeneas.Std.Result.ok { reason := o, visits := i }
++
++/-- [option_get_or_insert::visit_all]: loop body 0:
++    Source: 'tests/src/option-get-or-insert.rs', lines 35:4-37:5
++    Visibility: public -/
++@[rust_loop_body]
++def visit_all_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.option_get_or_insert.Reason) (v : _root_.option_get_or_insert.Visitor)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.option_get_or_insert.Reason) × _root_.option_get_or_insert.Visitor)
++    _root_.option_get_or_insert.Visitor)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done v)
++  | some r =>
++    let v1 ← _root_.option_get_or_insert.Visitor.note v r
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, v1))
++
++/-- [option_get_or_insert::visit_all]: loop 0:
++    Source: 'tests/src/option-get-or-insert.rs', lines 35:4-37:5
++    Visibility: public -/
++@[rust_loop]
++def visit_all_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.option_get_or_insert.Reason) (v : _root_.option_get_or_insert.Visitor)
++  :
++  _root_.Aeneas.Std.Result _root_.option_get_or_insert.Visitor
++  := do
++  loop
++    (fun (iter1, v1) => _root_.option_get_or_insert.visit_all_loop.body iter1
++       v1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.option_get_or_insert.Reason) ×
++      _root_.option_get_or_insert.Visitor) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.option_get_or_insert.Reason) ×
++      _root_.option_get_or_insert.Visitor)
++      _root_.option_get_or_insert.Visitor))
++    (iter, v)
++
++/-- [option_get_or_insert::visit_all]:
++    Source: 'tests/src/option-get-or-insert.rs', lines 33:0-39:1
++    Visibility: public -/
++def visit_all
++  (reasons : _root_.Aeneas.Std.Slice _root_.option_get_or_insert.Reason) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.option_get_or_insert.Reason)
++    × _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter reasons
++  let v ←
++    _root_.option_get_or_insert.visit_all_loop model_state
++      { reason := none, visits := 0#u32 }
++  _root_.Aeneas.Std.Result.ok (v.reason, v.visits)
++
++/-- [option_get_or_insert::first_or_match]: loop body 0:
++    Source: 'tests/src/option-get-or-insert.rs', lines 44:4-51:1
++    Visibility: public -/
++@[rust_loop_body]
++def first_or_match_loop.body
++  (want : _root_.Aeneas.Std.Str)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.Str)
++  (fallback : _root_.Option _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.Str) ×
++    (_root_.Option _root_.Aeneas.Std.Str)) (_root_.Option
++    _root_.Aeneas.Std.Str))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done fallback)
++  | some name1 =>
++    let (s, get_or_insert_back) ←
++      _root_.Aeneas.Std.core.option.Option.get_or_insert fallback name1
++    let b ←
++      _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++        _root_.Aeneas.Std.core.cmp.PartialEqStr name1 want
++    if b
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        model_state)
++    else
++      let fallback1 := get_or_insert_back s
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, fallback1))
++
++/-- [option_get_or_insert::first_or_match]: loop 0:
++    Source: 'tests/src/option-get-or-insert.rs', lines 44:4-51:1
++    Visibility: public -/
++@[rust_loop]
++def first_or_match_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.Str)
++  (want : _root_.Aeneas.Std.Str)
++  (fallback : _root_.Option _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Str)
++  := do
++  loop
++    (fun (iter1, fallback1) =>
++       _root_.option_get_or_insert.first_or_match_loop.body want iter1
++       fallback1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.Str) × (_root_.Option _root_.Aeneas.Std.Str)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.Str) ×
++      (_root_.Option _root_.Aeneas.Std.Str)) (_root_.Option
++      _root_.Aeneas.Std.Str)))
++    (iter, fallback)
++
++/-- [option_get_or_insert::first_or_match]:
++    Source: 'tests/src/option-get-or-insert.rs', lines 42:0-51:1
++    Visibility: public -/
++def first_or_match
++  (names : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str)
++  (want : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Str)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter names
++  _root_.option_get_or_insert.first_or_match_loop model_state want none
++
++/-- [option_get_or_insert::Site]
++    Source: 'tests/src/option-get-or-insert.rs', lines 53:0-55:1
++    Visibility: public -/
++structure Site where
++  seed_parent : _root_.Option _root_.Aeneas.Std.Usize
++
++/-- [option_get_or_insert::seed]: loop body 0:
++    Source: 'tests/src/option-get-or-insert.rs', lines 59:4-61:5
++    Visibility: public -/
++@[rust_loop_body]
++def seed_loop.body
++  (start : _root_.Aeneas.Std.Usize)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.option_get_or_insert.Site)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.option_get_or_insert.Site → _root_.Aeneas.Std.Slice
++  _root_.option_get_or_insert.Site) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.option_get_or_insert.Site) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.option_get_or_insert.Site
++    → _root_.Aeneas.Std.Slice _root_.option_get_or_insert.Site))
++    (_root_.Aeneas.Std.Slice _root_.option_get_or_insert.Site))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (let im := next_back iter1 none
++       back im))
++  | some child =>
++    let (i, get_or_insert_back) ←
++      _root_.Aeneas.Std.core.option.Option.get_or_insert child.seed_parent
++        start
++    let o1 := get_or_insert_back i
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun im => let im1 := next_back im (some { seed_parent := o1 })
++                back im1))
++
++/-- [option_get_or_insert::seed]: loop 0:
++    Source: 'tests/src/option-get-or-insert.rs', lines 59:4-61:5
++    Visibility: public -/
++@[rust_loop]
++def seed_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.option_get_or_insert.Site)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.option_get_or_insert.Site → _root_.Aeneas.Std.Slice
++  _root_.option_get_or_insert.Site) (start : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Slice
++    _root_.option_get_or_insert.Site)
++  := do
++  loop
++    (fun (iter1, back1) => _root_.option_get_or_insert.seed_loop.body start
++       iter1 back1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.option_get_or_insert.Site) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.option_get_or_insert.Site → _root_.Aeneas.Std.Slice
++      _root_.option_get_or_insert.Site)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.option_get_or_insert.Site) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.option_get_or_insert.Site → _root_.Aeneas.Std.Slice
++      _root_.option_get_or_insert.Site)) (_root_.Aeneas.Std.Slice
++      _root_.option_get_or_insert.Site)))
++    (iter, back)
++
++/-- [option_get_or_insert::seed]:
++    Source: 'tests/src/option-get-or-insert.rs', lines 58:0-62:1
++    Visibility: public -/
++def seed
++  (sites : _root_.Aeneas.Std.Slice _root_.option_get_or_insert.Site)
++  (start : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Slice
++    _root_.option_get_or_insert.Site)
++  := do
++  let (iter, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut sites
++  _root_.option_get_or_insert.seed_loop iter iter_mut_back start
++
++/-- [option_get_or_insert::bump]:
++    Source: 'tests/src/option-get-or-insert.rs', lines 65:0-69:1
++    Visibility: public -/
++def bump
++  (slot : _root_.Option _root_.Aeneas.Std.U32) (value : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U32))
++  := do
++  let (r, get_or_insert_back) ←
++    _root_.Aeneas.Std.core.option.Option.get_or_insert slot value
++  let r1 ← r + 1#u32
++  let slot1 := get_or_insert_back r1
++  _root_.Aeneas.Std.Result.ok (r1, slot1)
++
++end option_get_or_insert
+diff --git a/tests/lean/SerdeIgnoredAny.lean b/tests/lean/SerdeIgnoredAny.lean
+new file mode 100644
+index 0000000..1efd1f6
+--- /dev/null
++++ b/tests/lean/SerdeIgnoredAny.lean
+@@ -0,0 +1 @@
++import SerdeIgnoredAny.Checks
+diff --git a/tests/lean/SerdeIgnoredAny/Checks.lean b/tests/lean/SerdeIgnoredAny/Checks.lean
+new file mode 100644
+index 0000000..6222259
+--- /dev/null
++++ b/tests/lean/SerdeIgnoredAny/Checks.lean
+@@ -0,0 +1,219 @@
++import SerdeIgnoredAny.SerdeIgnoredAny
++
++/-! Run the extracted data-side implementations of `tests/src/serde-ignored-any` (`Tagged`, whose
++    unknown fields are read as `IgnoredAny`, and `skip`) with the model of `IgnoredAny` against the
++    in-test format of its `native` test module (a value tree, with `ValueDe`/`SeqDe`/`MapDe`),
++    encoded as a `FormatProgram`, and compare with the native results. -/
++
++namespace serde_ignored_any.checks
++open Aeneas Aeneas.Std Result
++
++/-- `native::Value` -/
++inductive TValue where
++  | u32 (n : Nat)
++  | str (s : String)
++  | bool (b : Bool)
++  | unit
++  | opt (v : Option TValue)
++  | newtype (v : TValue)
++  | seq (xs : List TValue)
++  | map (kvs : List (TValue × TValue))
++  | struct_ (typeName : String) (fields : List (String × TValue))
++  | bad
++deriving Inhabited
++
++/-! ## `native::TestError(String)` -/
++
++/-- `impl Display for TestError`: `f.write_str(&self.0)`. -/
++def errDisplay : core.fmt.Display String := ⟨fun s f => f.append s⟩
++
++/-- `#[derive(Debug)]`: `TestError("..")`. -/
++def errDebug : core.fmt.Debug String :=
++  ⟨fun s f => f.debugTuple "TestError" [⟨String, core.fmt.DebugString, s⟩]⟩
++
++/-- `ToString::to_string` (a `Display` returning an error panics). -/
++def toString' {T : Type} (d : core.fmt.Display T) (x : T) : Result String := do
++  let (status, f) ← d.fmt x {}
++  match status with
++  | .Ok () => ok f.output
++  | .Err _ => fail .panic
++
++/-- `impl de::Error for TestError`: `TestError(msg.to_string())`. -/
++def deErr : serde_core.de.Error String :=
++  { coreerrorErrorInst := ⟨errDebug, errDisplay⟩, custom := fun d msg => toString' d msg }
++
++/-! ## `ValueDe`, `SeqDe`, `MapDe`, as a format program -/
++
++open serde_core.de in
++def deTypes : FormatTypes where
++  ιD := Unit
++  D := fun _ => TValue
++  DError := fun _ => String
++  ιS := Unit
++  S := fun _ => List TValue
++  SError := fun _ => String
++  ιM := Unit
++  M := fun _ => List (TValue × TValue) × Option TValue
++  MError := fun _ => String
++  ιE := Empty
++  E := fun _ => Unit
++  EError := fun _ => String
++  EVariant := fun _ => Unit
++  ιV := Empty
++  V := fun _ => Unit
++  VError := fun _ => String
++
++def u32OfNat (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++open serde_core.de in
++/-- `ValueDe::deserialize_any`. -/
++def deserializeAny {X : Fam} (sub : deTypes.Dicts X) {V Value : Type} (vis : VisitorStep X V Value)
++    (d : TValue) (v : V) : Result (core.result.Result Value String) :=
++  match d with
++  | .u32 n => vis.visit_u32 deErr v (u32OfNat n)
++  | .str s => do
++    let s ← Str.ofString s
++    vis.visit_str deErr v s
++  | .bool b => vis.visit_bool deErr v b
++  | .unit => vis.visit_unit deErr v
++  | .opt none => vis.visit_none deErr v
++  | .opt (some x) => vis.visit_some (sub.des ()) v x
++  | .newtype x => vis.visit_newtype_struct (sub.des ()) v x
++  | .seq xs => vis.visit_seq (sub.seqs ()) v xs
++  | .map kvs => vis.visit_map (sub.maps ()) v (kvs, none)
++  | .struct_ _ fields => vis.visit_map (sub.maps ()) v (fields.map fun (k, x) => (.str k, x), none)
++  | .bad => ok (.Err "bad value")
++
++open serde_core.de in
++def deStep (X : Fam) (sub : deTypes.Dicts X) : deTypes.Dicts (Step X) where
++  des := fun _ =>
++    let any := @deserializeAny X sub
++    { serde_coredeErrorInst := deErr
++      deserialize_any := any
++      deserialize_bool := any, deserialize_i8 := any, deserialize_i16 := any
++      deserialize_i32 := any, deserialize_i64 := any, deserialize_i128 := any
++      deserialize_u8 := any, deserialize_u16 := any, deserialize_u32 := any
++      deserialize_u64 := any, deserialize_u128 := any, deserialize_f32 := any
++      deserialize_f64 := any, deserialize_char := any, deserialize_str := any
++      deserialize_string := any, deserialize_bytes := any, deserialize_byte_buf := any
++      deserialize_option := any, deserialize_unit := any
++      deserialize_unit_struct := fun vis d _ v => any vis d v
++      deserialize_newtype_struct := fun vis d _ v => any vis d v
++      deserialize_seq := any
++      deserialize_tuple := fun vis d _ v => any vis d v
++      deserialize_tuple_struct := fun vis d _ _ v => any vis d v
++      deserialize_map := any
++      deserialize_struct := fun vis d _ _ v => any vis d v
++      deserialize_enum := fun vis d _ _ v => any vis d v
++      deserialize_identifier := any
++      deserialize_ignored_any := any }
++  seqs := fun _ =>
++    { serde_coredeErrorInst := deErr
++      next_element_seed := fun seed xs t =>
++        match xs with
++        | [] => ok (.Ok none, [])
++        | x :: rest =>
++          seed.deserialize (sub.des ()) t x >>= fun r =>
++          match r with
++          | .Ok v => ok (.Ok (some v), rest)
++          | .Err e => ok (.Err e, rest) }
++  maps := fun _ =>
++    { serde_coredeErrorInst := deErr
++      next_key_seed := fun seed st k =>
++        match st.1 with
++        | [] => ok (.Ok none, st)
++        | (key, value) :: rest =>
++          seed.deserialize (sub.des ()) k key >>= fun r =>
++          match r with
++          | .Ok v => ok (.Ok (some v), (rest, some value))
++          | .Err e => ok (.Err e, (rest, some value))
++      next_value_seed := fun seed st v =>
++        match st.2 with
++        | none => ok (.Err "value missing", st)
++        | some value => do
++          let r ← seed.deserialize (sub.des ()) v value
++          ok (r, (st.1, none)) }
++  enums := fun i => nomatch i
++  variants := fun i => nomatch i
++
++open serde_core.de in
++def deFormat : FormatProgram deTypes where
++  base := bottom (DeAt 0) deTypes
++  step := deStep
++
++/-- `ValueDe` with nesting bound `n`. -/
++def valueDe (n : Nat) := deFormat.encode n ()
++
++/-! ## The extracted implementations against the in-test format (the asserts of `native`) -/
++
++/-- A result of the native test helpers: `Ok`, `Err(TestError(..))`, or no result (a panic or
++    divergence of the model, or the nesting bound reached). -/
++inductive Out (α : Type) where
++  | ok (a : α)
++  | err (e : String)
++  | none
++deriving BEq, Repr
++
++def out {α : Type} : Result (core.result.Result α String) → Out α
++  | ok (.Ok a) => .ok a
++  | ok (.Err e) => .err e
++  | _ => .none
++
++def Out.map {α β : Type} (f : α → β) : Out α → Out β
++  | .ok a => .ok (f a)
++  | .err e => .err e
++  | .none => .none
++
++/-- The nesting bound of the encoded format (the tests need at most nine levels). -/
++def bound : Nat := 12
++
++/-- `de_skip`: `skip(ValueDe(v))`. -/
++def deSkip (v : TValue) : Out Nat := (out (skip (valueDe bound) v)).map (·.val)
++
++/-- `de_tagged`: `Tagged::deserialize(ValueDe(v)).map(|t| t.id)`. -/
++def deTagged (v : TValue) : Out Nat :=
++  (out (serde_ignored_any.Tagged.Insts.Serde_coreDeDeserialize.deserialize (valueDe bound) v)).map
++    (·.id.val)
++
++/-- `nested()` -/
++def nested : TValue :=
++  .map [(.u32 1, .seq [.u32 2, .str "b", .opt (some .unit)]),
++        (.str "k", .newtype (.seq [.seq [], .map []]))]
++
++/-! `skips_every_shape` -/
++#guard [TValue.u32 3, .str "x", .bool true, .unit, .opt none, .opt (some (.u32 4)),
++    .newtype (.str "y"), .seq [], .seq [.u32 1, .bool false], .map [], nested,
++    .struct_ "S" [("a", .u32 1), ("b", nested)]].map deSkip ==
++  List.replicate 12 (.ok 1)
++
++/-! `skip_errors` -/
++#guard deSkip .bad == .err "bad value"
++#guard deSkip (.seq [.u32 1, .bad, .u32 2]) == .err "bad value"
++#guard deSkip (.map [(.u32 1, .u32 2), (.str "k", .bad)]) == .err "bad value"
++#guard deSkip (.map [(.bad, .u32 2)]) == .err "bad value"
++#guard deSkip (.opt (some (.seq [.bad]))) == .err "bad value"
++#guard deSkip (.newtype .bad) == .err "bad value"
++
++/-! `unknown_fields_are_skipped` -/
++#guard deTagged (.struct_ "Tagged" [("id", .u32 3)]) == .ok 3
++#guard deTagged (.struct_ "Tagged" [("x", .str "a"), ("id", .u32 3), ("nested", nested),
++    ("flag", .bool true), ("none", .opt none)]) == .ok 3
++#guard deTagged (.map [(.u32 0, .u32 9), (.u32 5, .unit)]) == .ok 9
++#guard deTagged (.struct_ "Tagged" [("x", .u32 1)]) == .err "missing field `id`"
++#guard deTagged (.struct_ "Tagged" [("id", .u32 3), ("x", .seq [.bad])]) == .err "bad value"
++#guard deTagged (.struct_ "Tagged" [("id", .u32 3), ("id", .u32 4)]) == .err "duplicate field `id`"
++
++/-! The nesting bound is explicit: below the nesting depth of a value there is no result. -/
++#guard (out (skip (valueDe 6) nested)).map (·.val) == .none
++#guard (out (skip (valueDe 7) nested)).map (·.val) == .ok 1
++#guard (out (skip (valueDe 0) (.u32 1))).map (·.val) == .none
++#guard (out (skip (valueDe 1) (.u32 1))).map (·.val) == .ok 1
++
++/-! The knot of `IgnoredAny` is its level-wise construction (`rfl`); the standard axioms come from
++    the `partial_fixpoint` loops over the elements and entries. -/
++/-- info: 'Aeneas.Std.serde_core.de.impls.DeserializeIgnoredAny.wrap_level' depends on axioms: [propext,
++ Classical.choice,
++ Quot.sound] -/
++#guard_msgs in #print axioms serde_core.de.impls.DeserializeIgnoredAny.wrap_level
++
++end serde_ignored_any.checks
+diff --git a/tests/lean/SerdeIgnoredAny/SerdeIgnoredAny.lean b/tests/lean/SerdeIgnoredAny/SerdeIgnoredAny.lean
+new file mode 100644
+index 0000000..23640c1
+--- /dev/null
++++ b/tests/lean/SerdeIgnoredAny/SerdeIgnoredAny.lean
+@@ -0,0 +1,360 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [serde_ignored_any]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace serde_ignored_any
++
++/-- [serde_core::de::ignored_any::IgnoredAny]
++    Source: '/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_core-1.0.228/src/de/ignored_any.rs', lines 111:0-111:21
++    Name pattern: [serde_core::de::ignored_any::IgnoredAny]
++    Visibility: public -/
++@[reducible, rust_type "serde_core::de::ignored_any::IgnoredAny"]
++def serde_core.de.ignored_any.IgnoredAny := _root_.Unit
++
++/-- [serde_ignored_any::Tagged]
++    Source: 'src/lib.rs', lines 19:0-21:1
++    Visibility: public -/
++structure Tagged where
++  id : _root_.Aeneas.Std.U32
++
++/-- [serde_ignored_any::TAGGED_FIELDS]
++    Source: 'src/lib.rs', lines 23:0-23:39 -/
++@[global_simps, irreducible]
++def TAGGED_FIELDS : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str :=
++  _root_.Aeneas.Std.Array.to_slice
++    (_root_.Aeneas.Std.Array.make 1#usize [ _root_.Aeneas.Std.toStr "id" ])
++
++/-- [serde_ignored_any::TaggedField]
++    Source: 'src/lib.rs', lines 25:0-28:1 -/
++@[discriminant isize]
++inductive TaggedField where
++| Id : TaggedField
++| Ignore : TaggedField
++
++/-- [serde_ignored_any::TaggedFieldVisitor]
++    Source: 'src/lib.rs', lines 30:0-30:26 -/
++@[reducible]
++def TaggedFieldVisitor := _root_.Unit
++
++/-- [serde_ignored_any::{serde_core::de::Visitor<'de, serde_ignored_any::TaggedField> for serde_ignored_any::TaggedFieldVisitor}::visit_str]:
++    Source: 'src/lib.rs', lines 46:4-51:5
++    Visibility: public -/
++def TaggedFieldVisitor.Insts.Serde_coreDeVisitorDeTaggedField.visit_str
++  {E : Type} (serde_coredeErrorInst : _root_.Aeneas.Std.serde_core.de.Error E)
++  (self : _root_.serde_ignored_any.TaggedFieldVisitor)
++  (value : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_ignored_any.TaggedField E)
++  := do
++  let b ←
++    _root_.Aeneas.Std.core.str.traits.PartialEqStr.eq value
++      (_root_.Aeneas.Std.toStr "id")
++  if b
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      _root_.serde_ignored_any.TaggedField.Id)
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      _root_.serde_ignored_any.TaggedField.Ignore)
++
++/-- [serde_ignored_any::{serde_core::de::Visitor<'de, serde_ignored_any::TaggedField> for serde_ignored_any::TaggedFieldVisitor}::visit_u64]:
++    Source: 'src/lib.rs', lines 39:4-44:5
++    Visibility: public -/
++def TaggedFieldVisitor.Insts.Serde_coreDeVisitorDeTaggedField.visit_u64
++  {E : Type} (serde_coredeErrorInst : _root_.Aeneas.Std.serde_core.de.Error E)
++  (self : _root_.serde_ignored_any.TaggedFieldVisitor)
++  (value : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_ignored_any.TaggedField E)
++  := do
++  match value with
++  | 0#uscalar =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      _root_.serde_ignored_any.TaggedField.Id)
++  | _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      _root_.serde_ignored_any.TaggedField.Ignore)
++
++/-- [serde_ignored_any::{serde_core::de::Visitor<'de, serde_ignored_any::TaggedField> for serde_ignored_any::TaggedFieldVisitor}::expecting]:
++    Source: 'src/lib.rs', lines 35:4-37:5
++    Visibility: public -/
++def TaggedFieldVisitor.Insts.Serde_coreDeVisitorDeTaggedField.expecting
++  (self : _root_.serde_ignored_any.TaggedFieldVisitor)
++  (formatter : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  _root_.Aeneas.Std.core.fmt.Formatter.write_str formatter
++    (_root_.Aeneas.Std.toStr "field identifier")
++
++/-- Trait implementation: [serde_ignored_any::{serde_core::de::Visitor<'de, serde_ignored_any::TaggedField> for serde_ignored_any::TaggedFieldVisitor}]
++    Source: 'src/lib.rs', lines 32:0-52:1 -/
++@[reducible]
++def TaggedFieldVisitor.Insts.Serde_coreDeVisitorDeTaggedField :
++  _root_.Aeneas.Std.serde_core.de.Visitor
++  _root_.serde_ignored_any.TaggedFieldVisitor
++  _root_.serde_ignored_any.TaggedField := {
++  expecting :=
++    _root_.serde_ignored_any.TaggedFieldVisitor.Insts.Serde_coreDeVisitorDeTaggedField.expecting
++  visit_u64 := fun {E : Type} (serde_coredeErrorInst :
++    _root_.Aeneas.Std.serde_core.de.Error E) =>
++    _root_.serde_ignored_any.TaggedFieldVisitor.Insts.Serde_coreDeVisitorDeTaggedField.visit_u64
++    serde_coredeErrorInst
++  visit_str := fun {E : Type} (serde_coredeErrorInst :
++    _root_.Aeneas.Std.serde_core.de.Error E) =>
++    _root_.serde_ignored_any.TaggedFieldVisitor.Insts.Serde_coreDeVisitorDeTaggedField.visit_str
++    serde_coredeErrorInst
++}
++
++/-- [serde_ignored_any::{serde_core::de::Deserialize<'de> for serde_ignored_any::TaggedField}::deserialize]:
++    Source: 'src/lib.rs', lines 55:4-57:5
++    Visibility: public -/
++def TaggedField.Insts.Serde_coreDeDeserialize.deserialize
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_ignored_any.TaggedField Clause0_Error)
++  := do
++  serde_coredeDeserializerInst.deserialize_identifier
++    (_root_.Aeneas.Std.serde_core.de.Visitor.wrap
++    _root_.serde_ignored_any.TaggedFieldVisitor.Insts.Serde_coreDeVisitorDeTaggedField)
++    deserializer ()
++
++/-- Trait implementation: [serde_ignored_any::{serde_core::de::Deserialize<'de> for serde_ignored_any::TaggedField}]
++    Source: 'src/lib.rs', lines 54:0-58:1 -/
++@[reducible]
++def TaggedField.Insts.Serde_coreDeDeserialize :
++  _root_.Aeneas.Std.serde_core.de.Deserialize
++  _root_.serde_ignored_any.TaggedField := {
++  deserialize := fun {D : Type} {Clause0_Error : Type}
++    (serde_coredeDeserializerInst :
++    _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error) =>
++    _root_.serde_ignored_any.TaggedField.Insts.Serde_coreDeDeserialize.deserialize
++    serde_coredeDeserializerInst
++}
++
++/-- [serde_ignored_any::TaggedVisitor]
++    Source: 'src/lib.rs', lines 60:0-60:21 -/
++@[reducible]
++def TaggedVisitor := _root_.Unit
++
++/-- [serde_ignored_any::{serde_core::de::Visitor<'de, serde_ignored_any::Tagged> for serde_ignored_any::TaggedVisitor}::visit_map]: loop body 0:
++    Source: 'src/lib.rs', lines 1:0-89:5
++    Visibility: public -/
++@[rust_loop_body]
++def TaggedVisitor.Insts.Serde_coreDeVisitorDeTagged.visit_map_loop.body
++  {A : Type} {Clause0_Error : Type} (serde_coredeMapAccessInst :
++  _root_.Aeneas.Std.serde_core.de.MapAccess A Clause0_Error) (map : A)
++  (id : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (A × (_root_.Option
++    _root_.Aeneas.Std.U32)) (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_ignored_any.Tagged Clause0_Error))
++  := do
++  let (r, map1) ←
++    serde_coredeMapAccessInst.next_key
++      (_root_.Aeneas.Std.serde_core.de.Deserialize.wrap
++      _root_.serde_ignored_any.TaggedField.Insts.Serde_coreDeDeserialize) map
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    match val with
++    | none =>
++      let r1 ←
++        match id with
++        | none =>
++          do
++          let r2 ←
++            _root_.Aeneas.Std.serde.private.de.missing_field
++              _root_.Aeneas.Std.serde_core.de.impls.DeserializeU32
++              serde_coredeMapAccessInst.serde_coredeErrorInst
++              (_root_.Aeneas.Std.toStr "id")
++          let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r2
++          match cf1 with
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1
++            =>
++            _root_.Aeneas.Std.Result.ok
++              (_root_.Aeneas.Std.core.result.Result.Ok ({ id := val1 } :
++              _root_.serde_ignored_any.Tagged))
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual
++            =>
++            _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++              _root_.serde_ignored_any.Tagged
++              (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error) residual
++        | some id1 =>
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++            ({ id := id1 } : _root_.serde_ignored_any.Tagged))
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r1)
++    | some key =>
++      match key with
++      | _root_.serde_ignored_any.TaggedField.Id =>
++        let b := _root_.Aeneas.Std.core.option.Option.is_some id
++        if b
++        then
++          let t ←
++            serde_coredeMapAccessInst.serde_coredeErrorInst.duplicate_field
++              (_root_.Aeneas.Std.toStr "id")
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++            (_root_.Aeneas.Std.core.result.Result.Err t))
++        else
++          let (r1, map2) ←
++            serde_coredeMapAccessInst.next_value
++              (_root_.Aeneas.Std.serde_core.de.Deserialize.wrap
++              _root_.Aeneas.Std.serde_core.de.impls.DeserializeU32) map1
++          let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++          match cf1 with
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1
++            =>
++            _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++              (map2, some val1))
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual
++            =>
++            let r2 ←
++              _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                _root_.serde_ignored_any.Tagged
++                (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error)
++                residual
++            _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r2)
++      | _root_.serde_ignored_any.TaggedField.Ignore =>
++        let (r1, map2) ←
++          serde_coredeMapAccessInst.next_value
++            (_root_.Aeneas.Std.serde_core.de.Deserialize.wrap
++            _root_.Aeneas.Std.serde_core.de.impls.DeserializeIgnoredAny) map1
++        let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++        match cf1 with
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++            (map2, id))
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++          let r2 ←
++            _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++              _root_.serde_ignored_any.Tagged
++              (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error) residual
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r2)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r1 ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.serde_ignored_any.Tagged
++        (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error) residual
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r1)
++
++/-- [serde_ignored_any::{serde_core::de::Visitor<'de, serde_ignored_any::Tagged> for serde_ignored_any::TaggedVisitor}::visit_map]: loop 0:
++    Source: 'src/lib.rs', lines 1:0-89:5
++    Visibility: public -/
++@[rust_loop]
++def TaggedVisitor.Insts.Serde_coreDeVisitorDeTagged.visit_map_loop
++  {A : Type} {Clause0_Error : Type} (serde_coredeMapAccessInst :
++  _root_.Aeneas.Std.serde_core.de.MapAccess A Clause0_Error) (map : A)
++  (id : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_ignored_any.Tagged Clause0_Error)
++  := do
++  loop
++    (fun (map1, id1) =>
++       _root_.serde_ignored_any.TaggedVisitor.Insts.Serde_coreDeVisitorDeTagged.visit_map_loop.body
++       serde_coredeMapAccessInst map1 id1 : (A × (_root_.Option
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (A × (_root_.Option
++      _root_.Aeneas.Std.U32)) (_root_.Aeneas.Std.core.result.Result
++      _root_.serde_ignored_any.Tagged Clause0_Error)))
++    (map, id)
++
++/-- [serde_ignored_any::{serde_core::de::Visitor<'de, serde_ignored_any::Tagged> for serde_ignored_any::TaggedVisitor}::visit_map]:
++    Source: 'src/lib.rs', lines 69:4-89:5
++    Visibility: public -/
++@[reducible]
++def TaggedVisitor.Insts.Serde_coreDeVisitorDeTagged.visit_map
++  {A : Type} {Clause0_Error : Type} (serde_coredeMapAccessInst :
++  _root_.Aeneas.Std.serde_core.de.MapAccess A Clause0_Error)
++  (self : _root_.serde_ignored_any.TaggedVisitor) (map : A) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_ignored_any.Tagged Clause0_Error)
++  := do
++  _root_.serde_ignored_any.TaggedVisitor.Insts.Serde_coreDeVisitorDeTagged.visit_map_loop
++    serde_coredeMapAccessInst map none
++
++/-- [serde_ignored_any::{serde_core::de::Visitor<'de, serde_ignored_any::Tagged> for serde_ignored_any::TaggedVisitor}::expecting]:
++    Source: 'src/lib.rs', lines 65:4-67:5
++    Visibility: public -/
++def TaggedVisitor.Insts.Serde_coreDeVisitorDeTagged.expecting
++  (self : _root_.serde_ignored_any.TaggedVisitor)
++  (formatter : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  _root_.Aeneas.Std.core.fmt.Formatter.write_str formatter
++    (_root_.Aeneas.Std.toStr "struct Tagged")
++
++/-- Trait implementation: [serde_ignored_any::{serde_core::de::Visitor<'de, serde_ignored_any::Tagged> for serde_ignored_any::TaggedVisitor}]
++    Source: 'src/lib.rs', lines 62:0-90:1 -/
++@[reducible]
++def TaggedVisitor.Insts.Serde_coreDeVisitorDeTagged :
++  _root_.Aeneas.Std.serde_core.de.Visitor
++  _root_.serde_ignored_any.TaggedVisitor _root_.serde_ignored_any.Tagged := {
++  expecting :=
++    _root_.serde_ignored_any.TaggedVisitor.Insts.Serde_coreDeVisitorDeTagged.expecting
++  visit_map := fun {A : Type} {Clause0_Error : Type} (serde_coredeMapAccessInst
++    : _root_.Aeneas.Std.serde_core.de.MapAccess A Clause0_Error) =>
++    _root_.serde_ignored_any.TaggedVisitor.Insts.Serde_coreDeVisitorDeTagged.visit_map
++    serde_coredeMapAccessInst
++}
++
++/-- [serde_ignored_any::{serde_core::de::Deserialize<'de> for serde_ignored_any::Tagged}::deserialize]:
++    Source: 'src/lib.rs', lines 93:4-95:5
++    Visibility: public -/
++def Tagged.Insts.Serde_coreDeDeserialize.deserialize
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_ignored_any.Tagged Clause0_Error)
++  := do
++  serde_coredeDeserializerInst.deserialize_struct
++    (_root_.Aeneas.Std.serde_core.de.Visitor.wrap
++    _root_.serde_ignored_any.TaggedVisitor.Insts.Serde_coreDeVisitorDeTagged)
++    deserializer (_root_.Aeneas.Std.toStr "Tagged")
++    _root_.serde_ignored_any.TAGGED_FIELDS ()
++
++/-- Trait implementation: [serde_ignored_any::{serde_core::de::Deserialize<'de> for serde_ignored_any::Tagged}]
++    Source: 'src/lib.rs', lines 92:0-96:1 -/
++@[reducible]
++def Tagged.Insts.Serde_coreDeDeserialize :
++  _root_.Aeneas.Std.serde_core.de.Deserialize _root_.serde_ignored_any.Tagged
++  := {
++  deserialize := fun {D : Type} {Clause0_Error : Type}
++    (serde_coredeDeserializerInst :
++    _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error) =>
++    _root_.serde_ignored_any.Tagged.Insts.Serde_coreDeDeserialize.deserialize
++    serde_coredeDeserializerInst
++}
++
++/-- [serde_ignored_any::skip]:
++    Source: 'src/lib.rs', lines 99:0-102:1
++    Visibility: public -/
++def skip
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 Clause0_Error)
++  := do
++  let r ←
++    _root_.Aeneas.Std.serde_core.de.impls.DeserializeIgnoredAny.deserialize
++      serde_coredeDeserializerInst deserializer
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok 1#u32)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++      _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++      Clause0_Error) residual
++
++end serde_ignored_any
+diff --git a/tests/lean/SliceArrayEq.lean b/tests/lean/SliceArrayEq.lean
+new file mode 100644
+index 0000000..9c8577f
+--- /dev/null
++++ b/tests/lean/SliceArrayEq.lean
+@@ -0,0 +1 @@
++import SliceArrayEq.Checks
+diff --git a/tests/lean/SliceArrayEq/Checks.lean b/tests/lean/SliceArrayEq/Checks.lean
+new file mode 100644
+index 0000000..c19c695
+--- /dev/null
++++ b/tests/lean/SliceArrayEq/Checks.lean
+@@ -0,0 +1,50 @@
++import SliceArrayEq.SliceArrayEq
++
++/-! Evaluate the model of `tests/src/slice-array-eq.rs` on the inputs of its `native` test module
++    and compare with the native results. -/
++namespace slice_array_eq.checks
++open Aeneas Aeneas.Std Result
++
++def slice {α : Type} (xs : List α) : Slice α :=
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++def vec {α : Type} (xs : List α) : alloc.vec.Vec α :=
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++def u32s (xs : List Nat) : alloc.vec.Vec U32 := vec (xs.map fun n => (⟨BitVec.ofNat _ n⟩ : U32))
++def u32 (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++def text (n : Nat) : Domain := .Text ⟨BitVec.ofNat _ n⟩
++
++def bool (r : Result Bool) : Option Bool :=
++  match r with | ok b => some b | _ => none
++
++def numeric := [Domain.Numeric]
++def mixed := [Domain.Numeric, text 1]
++def other := [text 1, Domain.Numeric]
++
++-- `&[T] == [U; N]`
++#guard bool (is_numeric { domains := slice numeric }) == some true
++#guard bool (is_numeric { domains := slice mixed }) == some false
++#guard bool (is_numeric { domains := slice [] }) == some false
++#guard bool (is_numeric { domains := slice [Domain.Boolean] }) == some false
++#guard bool (is_mixed { domains := slice mixed }) == some true
++#guard bool (is_mixed { domains := slice other }) == some false
++#guard bool (is_mixed { domains := slice numeric }) == some false
++#guard bool (is_mixed { domains := slice [] }) == some false
++
++-- `&[T] != [U; N]` on a subslice (an index out of range panics)
++#guard bool (matrix_differs (u32s [9, 2, 3]) (u32 2) (u32 3)) == some false
++#guard bool (matrix_differs (u32s [9, 2, 3]) (u32 3) (u32 2)) == some true
++#guard bool (matrix_differs (u32s [4, 5]) (u32 4) (u32 5)) == some false
++#guard bool (matrix_differs (u32s [4, 5]) (u32 4) (u32 6)) == some true
++#guard bool (matrix_differs (u32s [1]) (u32 1) (u32 1)) == none
++
++-- `Vec<T> != [U; N]` and `Vec<T> == [U; N]`
++#guard bool (not_root (u32s [0])) == some false
++#guard bool (not_root (u32s [0, 1])) == some true
++#guard bool (not_root (u32s [])) == some true
++#guard bool (not_root (u32s [1])) == some true
++#guard bool (is_root (vec [Domain.Boolean])) == some true
++#guard bool (is_root (vec [text 0])) == some false
++#guard bool (is_root (vec [Domain.Boolean, Domain.Boolean])) == some false
++#guard bool (is_root (vec [])) == some false
++
++end slice_array_eq.checks
+diff --git a/tests/lean/SliceArrayEq/SliceArrayEq.lean b/tests/lean/SliceArrayEq/SliceArrayEq.lean
+new file mode 100644
+index 0000000..d6f6291
+--- /dev/null
++++ b/tests/lean/SliceArrayEq/SliceArrayEq.lean
+@@ -0,0 +1,224 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [slice_array_eq]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace slice_array_eq
++
++/-- [slice_array_eq::Domain]
++    Source: 'tests/src/slice-array-eq.rs', lines 14:0-18:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Domain where
++| Numeric : Domain
++| Boolean : Domain
++| Text : _root_.Aeneas.Std.U8 → Domain
++
++/-- [slice_array_eq::{core::clone::Clone for slice_array_eq::Domain}::clone]:
++    Source: 'tests/src/slice-array-eq.rs', lines 13:9-13:14
++    Visibility: public -/
++def Domain.Insts.CoreCloneClone.clone
++  (self : _root_.slice_array_eq.Domain) :
++  _root_.Aeneas.Std.Result _root_.slice_array_eq.Domain
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [slice_array_eq::{core::clone::Clone for slice_array_eq::Domain}]
++    Source: 'tests/src/slice-array-eq.rs', lines 13:9-13:14 -/
++@[reducible]
++def Domain.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.slice_array_eq.Domain := {
++  clone := _root_.slice_array_eq.Domain.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [slice_array_eq::{core::marker::Copy for slice_array_eq::Domain}]
++    Source: 'tests/src/slice-array-eq.rs', lines 13:16-13:20 -/
++@[reducible]
++def Domain.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.slice_array_eq.Domain := {
++  cloneInst := _root_.slice_array_eq.Domain.Insts.CoreCloneClone
++}
++
++/-- Trait implementation: [slice_array_eq::{core::marker::StructuralPartialEq for slice_array_eq::Domain}]
++    Source: 'tests/src/slice-array-eq.rs', lines 13:22-13:31 -/
++@[reducible]
++def Domain.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.slice_array_eq.Domain := {
++}
++
++/-- [slice_array_eq::{core::cmp::PartialEq<slice_array_eq::Domain> for slice_array_eq::Domain}::eq]:
++    Source: 'tests/src/slice-array-eq.rs', lines 13:22-13:31
++    Visibility: public -/
++def Domain.Insts.CoreCmpPartialEqDomain.eq
++  (self : _root_.slice_array_eq.Domain) (other : _root_.slice_array_eq.Domain)
++  :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    let joined ←
++      match self with
++      | _root_.slice_array_eq.Domain.Numeric =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          _root_.slice_array_eq.Domain.Numeric : _root_.Sum
++          _root_.slice_array_eq.Domain _root_.Bool)
++      | _root_.slice_array_eq.Domain.Boolean =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          _root_.slice_array_eq.Domain.Boolean : _root_.Sum
++          _root_.slice_array_eq.Domain _root_.Bool)
++      | _root_.slice_array_eq.Domain.Text __self_0 =>
++        do
++        let joined1 ←
++          match other with
++          | _root_.slice_array_eq.Domain.Numeric =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++              _root_.slice_array_eq.Domain.Numeric : _root_.Sum
++              _root_.slice_array_eq.Domain (_root_.Sum
++              _root_.slice_array_eq.Domain _root_.Bool))
++          | _root_.slice_array_eq.Domain.Boolean =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++              _root_.slice_array_eq.Domain.Boolean : _root_.Sum
++              _root_.slice_array_eq.Domain (_root_.Sum
++              _root_.slice_array_eq.Domain _root_.Bool))
++          | _root_.slice_array_eq.Domain.Text __arg1_0 =>
++            do
++            let b ←
++              _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++                _root_.Aeneas.Std.core.cmp.PartialEqU8 __self_0 __arg1_0
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr b) :
++              _root_.Sum _root_.slice_array_eq.Domain (_root_.Sum
++              _root_.slice_array_eq.Domain _root_.Bool))
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr true : _root_.Sum
++            _root_.slice_array_eq.Domain _root_.Bool)
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    match joined with
++    | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok true
++    | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  else _root_.Aeneas.Std.Result.ok false
++
++/-- Trait implementation: [slice_array_eq::{core::cmp::PartialEq<slice_array_eq::Domain> for slice_array_eq::Domain}]
++    Source: 'tests/src/slice-array-eq.rs', lines 13:22-13:31 -/
++@[reducible]
++def Domain.Insts.CoreCmpPartialEqDomain : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.slice_array_eq.Domain _root_.slice_array_eq.Domain := {
++  eq := _root_.slice_array_eq.Domain.Insts.CoreCmpPartialEqDomain.eq
++}
++
++/-- [slice_array_eq::{core::fmt::Debug for slice_array_eq::Domain}::fmt]:
++    Source: 'tests/src/slice-array-eq.rs', lines 13:33-13:38
++    Visibility: public -/
++def Domain.Insts.CoreFmtDebug.fmt
++  (self : _root_.slice_array_eq.Domain)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.slice_array_eq.Domain.Numeric =>
++    _root_.Aeneas.Std.core.fmt.Formatter.write_str f (_root_.Aeneas.Std.toStr
++      "Numeric")
++  | _root_.slice_array_eq.Domain.Boolean =>
++    _root_.Aeneas.Std.core.fmt.Formatter.write_str f (_root_.Aeneas.Std.toStr
++      "Boolean")
++  | _root_.slice_array_eq.Domain.Text __self_0 =>
++    let __self_01 :=
++      _root_.Aeneas.Std.Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU8) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Text") __self_01
++
++/-- Trait implementation: [slice_array_eq::{core::fmt::Debug for slice_array_eq::Domain}]
++    Source: 'tests/src/slice-array-eq.rs', lines 13:33-13:38 -/
++@[reducible]
++def Domain.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.slice_array_eq.Domain := {
++  fmt := _root_.slice_array_eq.Domain.Insts.CoreFmtDebug.fmt
++}
++
++/-- [slice_array_eq::Capability]
++    Source: 'tests/src/slice-array-eq.rs', lines 20:0-22:1
++    Visibility: public -/
++structure Capability where
++  domains : _root_.Aeneas.Std.Slice _root_.slice_array_eq.Domain
++
++/-- [slice_array_eq::is_numeric]:
++    Source: 'tests/src/slice-array-eq.rs', lines 25:0-27:1
++    Visibility: public -/
++def is_numeric
++  (c : _root_.slice_array_eq.Capability) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.core.array.equality.PartialEqSharedSliceArray.eq
++    _root_.slice_array_eq.Domain.Insts.CoreCmpPartialEqDomain c.domains
++    (_root_.Aeneas.Std.Array.make 1#usize [
++      _root_.slice_array_eq.Domain.Numeric
++      ])
++
++/-- [slice_array_eq::is_mixed]:
++    Source: 'tests/src/slice-array-eq.rs', lines 29:0-31:1
++    Visibility: public -/
++def is_mixed
++  (c : _root_.slice_array_eq.Capability) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.core.array.equality.PartialEqSharedSliceArray.eq
++    _root_.slice_array_eq.Domain.Insts.CoreCmpPartialEqDomain c.domains
++    (_root_.Aeneas.Std.Array.make 2#usize [
++      _root_.slice_array_eq.Domain.Numeric, _root_.slice_array_eq.Domain.Text
++      1#u8
++      ])
++
++/-- [slice_array_eq::matrix_differs]:
++    Source: 'tests/src/slice-array-eq.rs', lines 34:0-37:1
++    Visibility: public -/
++def matrix_differs
++  (dims : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (m : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len dims
++  let i1 ← i - 2#usize
++  let matrix ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice
++      _root_.Aeneas.Std.U32) dims { start := i1 }
++  _root_.Aeneas.Std.core.array.equality.PartialEqSharedSliceArray.ne
++    _root_.Aeneas.Std.core.cmp.PartialEqU32 matrix
++    (_root_.Aeneas.Std.Array.make 2#usize [ m, k ])
++
++/-- [slice_array_eq::not_root]:
++    Source: 'tests/src/slice-array-eq.rs', lines 40:0-42:1
++    Visibility: public -/
++def not_root
++  (scopes : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVecArray.ne
++    _root_.Aeneas.Std.core.cmp.PartialEqU32 scopes
++    (_root_.Aeneas.Std.Array.make 1#usize [ 0#u32 ])
++
++/-- [slice_array_eq::is_root]:
++    Source: 'tests/src/slice-array-eq.rs', lines 44:0-46:1
++    Visibility: public -/
++def is_root
++  (scopes : _root_.Aeneas.Std.alloc.vec.Vec _root_.slice_array_eq.Domain) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVecArray.eq
++    _root_.slice_array_eq.Domain.Insts.CoreCmpPartialEqDomain scopes
++    (_root_.Aeneas.Std.Array.make 1#usize [
++      _root_.slice_array_eq.Domain.Boolean
++      ])
++
++end slice_array_eq
+diff --git a/tests/lean/VecAsMutSlice.lean b/tests/lean/VecAsMutSlice.lean
+new file mode 100644
+index 0000000..1085211
+--- /dev/null
++++ b/tests/lean/VecAsMutSlice.lean
+@@ -0,0 +1 @@
++import VecAsMutSlice.Checks
+diff --git a/tests/lean/VecAsMutSlice/Checks.lean b/tests/lean/VecAsMutSlice/Checks.lean
+new file mode 100644
+index 0000000..d8c21ad
+--- /dev/null
++++ b/tests/lean/VecAsMutSlice/Checks.lean
+@@ -0,0 +1,40 @@
++import VecAsMutSlice.VecAsMutSlice
++
++/-! Evaluate the model of `tests/src/vec-as-mut-slice.rs` on the inputs of its `native` test module
++    and compare with the native results, including the vectors given back. -/
++namespace vec_as_mut_slice.checks
++open Aeneas Aeneas.Std Result
++
++def vec (xs : _root_.List Nat) : alloc.vec.Vec U32 :=
++  let xs := xs.map fun n => (⟨BitVec.ofNat _ n⟩ : U32)
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++def nats (v : alloc.vec.Vec U32) : _root_.List Nat := v.val.map (·.val)
++def u32 (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def stampOf (xs : _root_.List Nat) (value : Nat) : Option (Bool × _root_.List Nat) :=
++  match stamp_second { elements := vec xs } (u32 value) with
++  | ok (b, l) => some (b, nats l.elements)
++  | _ => none
++
++#guard stampOf [1, 2] 9 == some (true, [1, 9])
++#guard stampOf [1, 2, 3] 9 == some (false, [1, 2, 3])
++
++def bumpOf (xs : _root_.List Nat) : Option (Nat × _root_.List Nat) :=
++  match bump_all (vec xs) with
++  | ok (n, v) => some (n.val, nats v)
++  | _ => none
++
++#guard bumpOf [0, 5, 7] == some (3, [1, 6, 8])
++#guard bumpOf [] == some (0, [])
++#guard bumpOf [1, 4294967295] == none
++
++def swapOf (xs : _root_.List Nat) (x : Nat) : Option (_root_.List Nat) :=
++  match swap_then_push (vec xs) (u32 x) with
++  | ok v => some (nats v)
++  | _ => none
++
++#guard swapOf [1, 2, 3] 4 == some [3, 2, 1, 4]
++#guard swapOf [1] 4 == some [1, 4]
++#guard swapOf [] 4 == some [4]
++
++end vec_as_mut_slice.checks
+diff --git a/tests/lean/VecAsMutSlice/VecAsMutSlice.lean b/tests/lean/VecAsMutSlice/VecAsMutSlice.lean
+new file mode 100644
+index 0000000..6ad19fa
+--- /dev/null
++++ b/tests/lean/VecAsMutSlice/VecAsMutSlice.lean
+@@ -0,0 +1,141 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [vec_as_mut_slice]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace vec_as_mut_slice
++
++/-- [vec_as_mut_slice::List]
++    Source: 'tests/src/vec-as-mut-slice.rs', lines 10:0-12:1
++    Visibility: public -/
++structure List where
++  elements : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [vec_as_mut_slice::stamp_second]:
++    Source: 'tests/src/vec-as-mut-slice.rs', lines 15:0-23:1
++    Visibility: public -/
++def stamp_second
++  (list : _root_.vec_as_mut_slice.List) (value : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.vec_as_mut_slice.List)
++  := do
++  let (slice, as_mut_slice_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.as_mut_slice list.elements
++  let i := _root_.Aeneas.Std.Slice.len slice
++  if i = 2#usize
++  then
++    let s ← _root_.Aeneas.Std.Slice.update slice 1#usize value
++    let v := as_mut_slice_back s
++    _root_.Aeneas.Std.Result.ok (true, { elements := v })
++  else
++    let v := as_mut_slice_back slice
++    _root_.Aeneas.Std.Result.ok (false, { elements := v })
++
++/-- [vec_as_mut_slice::bump_all]: loop body 0:
++    Source: 'tests/src/vec-as-mut-slice.rs', lines 28:4-30:5
++    Visibility: public -/
++@[rust_loop_body]
++def bump_all_loop.body
++  (as_mut_slice_back : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (as_mut_slice_back, let im := next_back iter1 none
++                          back im))
++  | some x =>
++    let x1 ← x + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun im => let im1 := next_back im (some x1)
++                back im1))
++
++/-- [vec_as_mut_slice::bump_all]: loop 0:
++    Source: 'tests/src/vec-as-mut-slice.rs', lines 28:4-30:5
++    Visibility: public -/
++@[rust_loop]
++def bump_all_loop
++  (as_mut_slice_back : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1) => _root_.vec_as_mut_slice.bump_all_loop.body
++       as_mut_slice_back iter1 back1 :
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32))))
++    (iter, back)
++
++/-- [vec_as_mut_slice::bump_all]:
++    Source: 'tests/src/vec-as-mut-slice.rs', lines 26:0-32:1
++    Visibility: public -/
++def bump_all
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (slice, as_mut_slice_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.as_mut_slice v
++  let (iter, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut slice
++  let (back, back1) ←
++    _root_.vec_as_mut_slice.bump_all_loop as_mut_slice_back iter iter_mut_back
++  let i := _root_.Aeneas.Std.Slice.len back1
++  let v1 := back back1
++  _root_.Aeneas.Std.Result.ok (i, v1)
++
++/-- [vec_as_mut_slice::swap_ends]:
++    Source: 'tests/src/vec-as-mut-slice.rs', lines 35:0-40:1 -/
++def swap_ends
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  := do
++  let n := _root_.Aeneas.Std.Slice.len s
++  if n > 1#usize
++  then let i ← n - 1#usize
++       _root_.Aeneas.Std.core.slice.Slice.swap s 0#usize i
++  else _root_.Aeneas.Std.Result.ok s
++
++/-- [vec_as_mut_slice::swap_then_push]:
++    Source: 'tests/src/vec-as-mut-slice.rs', lines 42:0-46:1
++    Visibility: public -/
++def swap_then_push
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (s, as_mut_slice_back) ← _root_.Aeneas.Std.alloc.vec.Vec.as_mut_slice v
++  let s1 ← _root_.vec_as_mut_slice.swap_ends s
++  let v1 := as_mut_slice_back s1
++  _root_.Aeneas.Std.alloc.vec.Vec.push v1 x
++
++end vec_as_mut_slice
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 70429b3..6894d40 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -252,3 +252,8 @@ package «tests» {}
+ @[default_target] lean_lib LoopNestedMutElementsSink
+ @[default_target] lean_lib LoopSharedProjectionRelease
+ @[default_target] lean_lib JoinSharedBorrowsOneLoan
++@[default_target] lean_lib BoolThenClosureState
++@[default_target] lean_lib OptionGetOrInsert
++@[default_target] lean_lib SliceArrayEq
++@[default_target] lean_lib VecAsMutSlice
++@[default_target] lean_lib SerdeIgnoredAny
+diff --git a/tests/src/bool-then-closure-state.rs b/tests/src/bool-then-closure-state.rs
+new file mode 100644
+index 0000000..71d3d49
+--- /dev/null
++++ b/tests/src/bool-then-closure-state.rs
+@@ -0,0 +1,161 @@
++//@ [!lean] skip
++//@ [lean] subdir=BoolThenClosureState
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `bool::then` with closures which capture mutable borrows, as chelis-types uses it
++//! (`deep_type.rs` resolve_type_var/resolve_dim_var/resolve_rank_var, `app_hostio.rs`,
++//! `program.rs`): the partial-monomorphization instance of `then` at such a closure returns the
++//! closure's final state, so the model returns it too (the closure is called once when the
++//! condition holds, and dropped unchanged otherwise). BoolThenClosureState/Checks.lean compares
++//! the model with the native results asserted in the native test module, including the values
++//! given back to the captured borrows.
++
++pub struct VarGen {
++    pub next_tvar: u32,
++}
++
++impl VarGen {
++    pub fn fresh_tvar(&mut self) -> u32 {
++        let v = self.next_tvar;
++        self.next_tvar += 1;
++        v
++    }
++}
++
++pub struct Resolver {
++    pub holes: bool,
++}
++
++impl Resolver {
++    fn allows_hole(&self) -> bool {
++        self.holes
++    }
++
++    fn unbound(&self, errors: &mut Vec<u32>, code: u32) -> u32 {
++        errors.push(code);
++        code
++    }
++
++    /// chelis-types `deep_type.rs` resolve_type_var: a hole takes a fresh variable when holes are
++    /// allowed, and reports an unbound name otherwise.
++    pub fn resolve(&mut self, vg: &mut VarGen, errors: &mut Vec<u32>, name: u32) -> Result<u32, u32> {
++        if name == 0 {
++            return self
++                .allows_hole()
++                .then(|| vg.fresh_tvar())
++                .ok_or_else(|| self.unbound(errors, 7));
++        }
++        Ok(name)
++    }
++}
++
++/// chelis-types `app_hostio.rs`: a diagnostic pushed only when the check fails.
++pub fn check(ok: bool, errors: &mut Vec<u32>, code: u32) -> Option<usize> {
++    (!ok).then(|| {
++        errors.push(code);
++        errors.len()
++    })
++}
++
++/// Two closures, each capturing two mutable borrows; exactly one of them is called.
++pub fn scoped(cyclic: bool, vg: &mut VarGen, log: &mut Vec<u32>) -> (Option<u32>, Option<u32>) {
++    let a = cyclic.then(|| {
++        let v = vg.fresh_tvar();
++        log.push(v);
++        v
++    });
++    let b = (!cyclic).then(|| {
++        let v = vg.fresh_tvar();
++        log.push(v + 100);
++        v
++    });
++    (a, b)
++}
++
++/// A closure which captures nothing mutable.
++pub fn plain(cond: bool, x: u32) -> Option<u32> {
++    cond.then(|| x + 1)
++}
++
++/// A generic closure (the dictionary of its bound), and a caller passing a closure which captures
++/// a mutable borrow.
++pub fn generic<F: FnOnce() -> u32>(cond: bool, f: F) -> Option<u32> {
++    cond.then(f)
++}
++
++pub fn twice(vg: &mut VarGen) -> (Option<u32>, Option<u32>, Option<u32>) {
++    let a = generic(true, || vg.fresh_tvar());
++    let b = generic(false, || vg.fresh_tvar());
++    let c = generic(true, || vg.fresh_tvar() * 10);
++    (a, b, c)
++}
++
++/// The closure's call fails (arithmetic overflow): the failure propagates.
++pub fn overflow(cond: bool, vg: &mut VarGen) -> Option<u32> {
++    cond.then(|| {
++        vg.next_tvar += u32::MAX;
++        vg.next_tvar
++    })
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn resolve() {
++        let mut r = Resolver { holes: true };
++        let mut vg = VarGen { next_tvar: 5 };
++        let mut errors = vec![1];
++        assert_eq!(r.resolve(&mut vg, &mut errors, 0), Ok(5));
++        assert_eq!(vg.next_tvar, 6);
++        assert_eq!(errors, vec![1]);
++        assert_eq!(r.resolve(&mut vg, &mut errors, 3), Ok(3));
++        assert_eq!(vg.next_tvar, 6);
++        let mut r = Resolver { holes: false };
++        assert_eq!(r.resolve(&mut vg, &mut errors, 0), Err(7));
++        assert_eq!(vg.next_tvar, 6);
++        assert_eq!(errors, vec![1, 7]);
++    }
++
++    #[test]
++    fn check_pushes() {
++        let mut errors = vec![4];
++        assert_eq!(check(true, &mut errors, 9), None);
++        assert_eq!(errors, vec![4]);
++        assert_eq!(check(false, &mut errors, 9), Some(2));
++        assert_eq!(errors, vec![4, 9]);
++    }
++
++    #[test]
++    fn scoped_calls_one() {
++        let mut vg = VarGen { next_tvar: 2 };
++        let mut log = vec![];
++        assert_eq!(scoped(true, &mut vg, &mut log), (Some(2), None));
++        assert_eq!(vg.next_tvar, 3);
++        assert_eq!(log, vec![2]);
++        assert_eq!(scoped(false, &mut vg, &mut log), (None, Some(3)));
++        assert_eq!(vg.next_tvar, 4);
++        assert_eq!(log, vec![2, 103]);
++    }
++
++    #[test]
++    fn plain_and_generic() {
++        assert_eq!(plain(true, 1), Some(2));
++        assert_eq!(plain(false, 1), None);
++        let mut vg = VarGen { next_tvar: 1 };
++        assert_eq!(twice(&mut vg), (Some(1), None, Some(20)));
++        assert_eq!(vg.next_tvar, 3);
++    }
++
++    #[test]
++    fn overflow_fails() {
++        let mut vg = VarGen { next_tvar: 1 };
++        assert_eq!(overflow(false, &mut vg), None);
++        assert_eq!(vg.next_tvar, 1);
++        let mut vg = VarGen { next_tvar: 0 };
++        assert_eq!(overflow(true, &mut vg), Some(u32::MAX));
++        let mut vg = VarGen { next_tvar: 1 };
++        assert!(std::panic::catch_unwind(move || overflow(true, &mut vg)).is_err());
++    }
++}
+diff --git a/tests/src/model-constructor-opaque-adapter.lean.out b/tests/src/model-constructor-opaque-adapter.lean.out
+index 8145ca2..df179ea 100644
+--- a/tests/src/model-constructor-opaque-adapter.lean.out
++++ b/tests/src/model-constructor-opaque-adapter.lean.out
+@@ -1,5 +1,5 @@
+ [[92mInfo[39m ] Imported: tests/llbc/model_constructor_opaque_adapter.llbc
+ [[91mError[39m] Model constructor recovery requires one structurally identified source input: the input of type model_constructor_opaque_adapter::prefix_sums::closure<'5> is found at 0 positions of the output of type core::iter::adapters::map::Map<core::slice::iter::Iter<'4, u32>, model_constructor_opaque_adapter::prefix_sums::closure<'5>> (the fields of the opaque types core::iter::adapters::map::Map are unknown: extract their declarations with Charon's --include)
+ Source: 'tests/src/model-constructor-opaque-adapter.rs', lines 21:0-23:1
+-Compiler source: symbolic/ModelStateABI.ml, line 1088
++Compiler source: symbolic/ModelStateABI.ml, line 1092
+ 
+diff --git a/tests/src/option-get-or-insert.rs b/tests/src/option-get-or-insert.rs
+new file mode 100644
+index 0000000..a787f99
+--- /dev/null
++++ b/tests/src/option-get-or-insert.rs
+@@ -0,0 +1,109 @@
++//@ [!lean] skip
++//@ [lean] subdir=OptionGetOrInsert
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `Option::get_or_insert` as chelis-types (`infer/common.rs`, a fallback kept from the first
++//! candidate of a loop) and chelis-ir (`lower/static_controls.rs`, the first reason recorded in a
++//! field of `&mut self`; `ownership/verify.rs`, a field of each element of a mutable slice) use it:
++//! it stores the value when the option is `None` (the value is dropped otherwise) and lends the
++//! contained value, whose writes the option keeps. OptionGetOrInsert/Checks.lean compares the
++//! model with the native results asserted in the native test module, including the options
++//! given back.
++
++#[derive(Clone, Copy, PartialEq, Debug)]
++pub enum Reason {
++    Recursive,
++    HigherOrder,
++    Runtime(u32),
++}
++
++pub struct Visitor {
++    pub reason: Option<Reason>,
++    pub visits: u32,
++}
++
++impl Visitor {
++    /// static_controls.rs: only the first reason is kept.
++    pub fn note(&mut self, reason: Reason) {
++        self.visits += 1;
++        self.reason.get_or_insert(reason);
++    }
++}
++
++pub fn visit_all(reasons: &[Reason]) -> (Option<Reason>, u32) {
++    let mut v = Visitor { reason: None, visits: 0 };
++    for r in reasons {
++        v.note(*r);
++    }
++    (v.reason, v.visits)
++}
++
++/// common.rs: the first candidate is the fallback when no candidate matches.
++pub fn first_or_match<'a>(names: &[&'a str], want: &str) -> Option<&'a str> {
++    let mut fallback = None;
++    for name in names {
++        fallback.get_or_insert(*name);
++        if *name == want {
++            return Some(*name);
++        }
++    }
++    fallback
++}
++
++pub struct Site {
++    pub seed_parent: Option<usize>,
++}
++
++/// verify.rs: the parent is set on the sites which have none.
++pub fn seed(sites: &mut [Site], start: usize) {
++    for child in sites.iter_mut() {
++        child.seed_parent.get_or_insert(start);
++    }
++}
++
++/// A write through the returned reference, then a read of the option.
++pub fn bump(slot: &mut Option<u32>, value: u32) -> u32 {
++    let r = slot.get_or_insert(value);
++    *r += 1;
++    *r
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn keeps_first_reason() {
++        assert_eq!(visit_all(&[]), (None, 0));
++        assert_eq!(
++            visit_all(&[Reason::HigherOrder, Reason::Recursive, Reason::Runtime(3)]),
++            (Some(Reason::HigherOrder), 3)
++        );
++        assert_eq!(visit_all(&[Reason::Runtime(4), Reason::Recursive]), (Some(Reason::Runtime(4)), 2));
++    }
++
++    #[test]
++    fn fallback() {
++        assert_eq!(first_or_match(&["a", "b", "c"], "b"), Some("b"));
++        assert_eq!(first_or_match(&["a", "b", "c"], "z"), Some("a"));
++        assert_eq!(first_or_match(&[], "z"), None);
++    }
++
++    #[test]
++    fn seeds() {
++        let mut sites = [Site { seed_parent: Some(1) }, Site { seed_parent: None }, Site { seed_parent: None }];
++        seed(&mut sites, 7);
++        assert_eq!(sites.iter().map(|s| s.seed_parent).collect::<Vec<_>>(), vec![Some(1), Some(7), Some(7)]);
++    }
++
++    #[test]
++    fn bumps() {
++        let mut slot = None;
++        assert_eq!(bump(&mut slot, 5), 6);
++        assert_eq!(slot, Some(6));
++        assert_eq!(bump(&mut slot, 50), 7);
++        assert_eq!(slot, Some(7));
++        let mut full = Some(u32::MAX);
++        assert!(std::panic::catch_unwind(move || bump(&mut full, 0)).is_err());
++    }
++}
+diff --git a/tests/src/serde-ignored-any/Cargo.lock b/tests/src/serde-ignored-any/Cargo.lock
+new file mode 100644
+index 0000000..ddad770
+--- /dev/null
++++ b/tests/src/serde-ignored-any/Cargo.lock
+@@ -0,0 +1,74 @@
++# This file is automatically @generated by Cargo.
++# It is not intended for manual editing.
++version = 4
++
++[[package]]
++name = "proc-macro2"
++version = "1.0.107"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
++dependencies = [
++ "unicode-ident",
++]
++
++[[package]]
++name = "quote"
++version = "1.0.47"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
++dependencies = [
++ "proc-macro2",
++]
++
++[[package]]
++name = "serde"
++version = "1.0.228"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
++dependencies = [
++ "serde_core",
++]
++
++[[package]]
++name = "serde_core"
++version = "1.0.228"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
++dependencies = [
++ "serde_derive",
++]
++
++[[package]]
++name = "serde_derive"
++version = "1.0.228"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn",
++]
++
++[[package]]
++name = "serde_ignored_any"
++version = "0.1.0"
++dependencies = [
++ "serde",
++]
++
++[[package]]
++name = "syn"
++version = "2.0.119"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
++[[package]]
++name = "unicode-ident"
++version = "1.0.26"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+diff --git a/tests/src/serde-ignored-any/Cargo.toml b/tests/src/serde-ignored-any/Cargo.toml
+new file mode 100644
+index 0000000..047c7db
+--- /dev/null
++++ b/tests/src/serde-ignored-any/Cargo.toml
+@@ -0,0 +1,14 @@
++[package]
++name = "serde_ignored_any"
++version = "0.1.0"
++edition = "2021"
++
++[lib]
++name = "serde_ignored_any"
++path = "src/lib.rs"
++
++[dependencies]
++serde = "=1.0.228"
++
++# A standalone package (the Aeneas tree can live inside another cargo workspace).
++[workspace]
+diff --git a/tests/src/serde-ignored-any/aeneas-test-options b/tests/src/serde-ignored-any/aeneas-test-options
+new file mode 100644
+index 0000000..8943983
+--- /dev/null
++++ b/tests/src/serde-ignored-any/aeneas-test-options
+@@ -0,0 +1,4 @@
++charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++[!lean] skip
++[lean] subdir=SerdeIgnoredAny
++[lean] aeneas-args=-strict-joins -warnings-as-errors
+diff --git a/tests/src/serde-ignored-any/src/lib.rs b/tests/src/serde-ignored-any/src/lib.rs
+new file mode 100644
+index 0000000..40d0bb6
+--- /dev/null
++++ b/tests/src/serde-ignored-any/src/lib.rs
+@@ -0,0 +1,288 @@
++//! `serde::de::IgnoredAny` through the library model of `serde_core` (`Aeneas/Std/Serde`): the
++//! value `#[derive(Deserialize)]` without `deny_unknown_fields` reads the value of an unknown field
++//! as (chelis-deep's derived impls), and `IgnoredAny::deserialize` itself. `IgnoredAny` accepts any
++//! value: it deserializes the inner value of an option or a newtype, the elements of a sequence
++//! and the entries of a map again as `IgnoredAny`, until their end or the first error.
++//!
++//! `Tagged` has the hand-written form of `#[derive(Deserialize)]` (serde_derive 1.0.228, the
++//! `visit_map` arm): an unknown field name is `__Field::__ignore`, whose value goes through
++//! `MapAccess::next_value::<IgnoredAny>`.
++//!
++//! `SerdeIgnoredAny/Checks.lean` runs these implementations against the in-test format of the
++//! `native` test module (a value tree), encoded as a `FormatProgram`, and compares with the native
++//! results.
++
++use serde::de::{self, Deserialize, Deserializer, IgnoredAny, MapAccess, Visitor};
++use std::fmt;
++
++/// A struct with the hand-written form of `#[derive(Deserialize)]` (unknown fields are skipped).
++pub struct Tagged {
++    pub id: u32,
++}
++
++const TAGGED_FIELDS: &[&str] = &["id"];
++
++enum TaggedField {
++    Id,
++    Ignore,
++}
++
++struct TaggedFieldVisitor;
++
++impl<'de> Visitor<'de> for TaggedFieldVisitor {
++    type Value = TaggedField;
++
++    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("field identifier")
++    }
++
++    fn visit_u64<E: de::Error>(self, value: u64) -> Result<TaggedField, E> {
++        match value {
++            0 => Ok(TaggedField::Id),
++            _ => Ok(TaggedField::Ignore),
++        }
++    }
++
++    fn visit_str<E: de::Error>(self, value: &str) -> Result<TaggedField, E> {
++        match value {
++            "id" => Ok(TaggedField::Id),
++            _ => Ok(TaggedField::Ignore),
++        }
++    }
++}
++
++impl<'de> Deserialize<'de> for TaggedField {
++    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<TaggedField, D::Error> {
++        deserializer.deserialize_identifier(TaggedFieldVisitor)
++    }
++}
++
++struct TaggedVisitor;
++
++impl<'de> Visitor<'de> for TaggedVisitor {
++    type Value = Tagged;
++
++    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("struct Tagged")
++    }
++
++    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Tagged, A::Error> {
++        let mut id: Option<u32> = None;
++        while let Some(key) = map.next_key::<TaggedField>()? {
++            match key {
++                TaggedField::Id => {
++                    if id.is_some() {
++                        return Err(de::Error::duplicate_field("id"));
++                    }
++                    id = Some(map.next_value::<u32>()?);
++                }
++                TaggedField::Ignore => {
++                    let _ = map.next_value::<IgnoredAny>()?;
++                }
++            }
++        }
++        let id = match id {
++            Some(id) => id,
++            None => serde::__private228::de::missing_field("id")?,
++        };
++        Ok(Tagged { id })
++    }
++}
++
++impl<'de> Deserialize<'de> for Tagged {
++    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Tagged, D::Error> {
++        deserializer.deserialize_struct("Tagged", TAGGED_FIELDS, TaggedVisitor)
++    }
++}
++
++/// `IgnoredAny::deserialize`, then a constant: the value is consumed and dropped.
++pub fn skip<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
++    let IgnoredAny = IgnoredAny::deserialize(deserializer)?;
++    Ok(1)
++}
++
++#[cfg(test)]
++mod native {
++    //! The in-test format: an owned value tree, as serde's value deserializers.
++    use super::*;
++    use serde::de::{DeserializeSeed, SeqAccess};
++
++    #[derive(Clone, Debug, PartialEq)]
++    pub enum Value {
++        U32(u32),
++        Str(String),
++        Bool(bool),
++        Unit,
++        Opt(Option<Box<Value>>),
++        Newtype(Box<Value>),
++        Seq(Vec<Value>),
++        Map(Vec<(Value, Value)>),
++        Struct(&'static str, Vec<(&'static str, Value)>),
++        /// A value no visitor accepts: the format reports an error.
++        Bad,
++    }
++    use Value::*;
++
++    #[derive(Debug, PartialEq)]
++    pub struct TestError(pub String);
++
++    impl fmt::Display for TestError {
++        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++            f.write_str(&self.0)
++        }
++    }
++
++    impl std::error::Error for TestError {}
++
++    impl de::Error for TestError {
++        fn custom<T: fmt::Display>(msg: T) -> Self {
++            TestError(msg.to_string())
++        }
++    }
++
++    pub struct ValueDe(pub Value);
++    pub struct SeqDe(std::vec::IntoIter<Value>);
++    pub struct MapDe {
++        entries: std::vec::IntoIter<(Value, Value)>,
++        value: Option<Value>,
++    }
++
++    impl<'de> Deserializer<'de> for ValueDe {
++        type Error = TestError;
++
++        fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TestError> {
++            match self.0 {
++                U32(v) => visitor.visit_u32(v),
++                Str(s) => visitor.visit_str(&s),
++                Bool(b) => visitor.visit_bool(b),
++                Unit => visitor.visit_unit(),
++                Opt(None) => visitor.visit_none(),
++                Opt(Some(v)) => visitor.visit_some(ValueDe(*v)),
++                Newtype(v) => visitor.visit_newtype_struct(ValueDe(*v)),
++                Seq(items) => visitor.visit_seq(SeqDe(items.into_iter())),
++                Map(entries) => visitor.visit_map(MapDe { entries: entries.into_iter(), value: None }),
++                Struct(_, fields) => {
++                    let entries: Vec<(Value, Value)> =
++                        fields.into_iter().map(|(k, v)| (Str(k.to_string()), v)).collect();
++                    visitor.visit_map(MapDe { entries: entries.into_iter(), value: None })
++                }
++                Bad => Err(TestError("bad value".to_string())),
++            }
++        }
++
++        serde::forward_to_deserialize_any! {
++            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
++            bytes byte_buf option unit unit_struct newtype_struct seq tuple
++            tuple_struct map struct enum identifier ignored_any
++        }
++    }
++
++    impl<'de> SeqAccess<'de> for SeqDe {
++        type Error = TestError;
++        fn next_element_seed<T: DeserializeSeed<'de>>(
++            &mut self, seed: T,
++        ) -> Result<Option<T::Value>, TestError> {
++            match self.0.next() {
++                Some(v) => seed.deserialize(ValueDe(v)).map(Some),
++                None => Ok(None),
++            }
++        }
++    }
++
++    impl<'de> MapAccess<'de> for MapDe {
++        type Error = TestError;
++        fn next_key_seed<K: DeserializeSeed<'de>>(
++            &mut self, seed: K,
++        ) -> Result<Option<K::Value>, TestError> {
++            match self.entries.next() {
++                Some((k, v)) => {
++                    self.value = Some(v);
++                    seed.deserialize(ValueDe(k)).map(Some)
++                }
++                None => Ok(None),
++            }
++        }
++        fn next_value_seed<V: DeserializeSeed<'de>>(
++            &mut self, seed: V,
++        ) -> Result<V::Value, TestError> {
++            match self.value.take() {
++                Some(v) => seed.deserialize(ValueDe(v)),
++                None => Err(TestError("value missing".to_string())),
++            }
++        }
++    }
++
++    fn de_tagged(v: Value) -> Result<u32, TestError> {
++        Tagged::deserialize(ValueDe(v)).map(|t| t.id)
++    }
++
++    fn de_skip(v: Value) -> Result<u32, TestError> {
++        skip(ValueDe(v))
++    }
++
++    fn err(msg: &str) -> TestError {
++        TestError(msg.to_string())
++    }
++
++    fn nested() -> Value {
++        Map(vec![
++            (U32(1), Seq(vec![U32(2), Str("b".to_string()), Opt(Some(Box::new(Unit)))])),
++            (Str("k".to_string()), Newtype(Box::new(Seq(vec![Seq(vec![]), Map(vec![])])))),
++        ])
++    }
++
++    #[test]
++    fn skips_every_shape() {
++        for v in [
++            U32(3),
++            Str("x".to_string()),
++            Bool(true),
++            Unit,
++            Opt(None),
++            Opt(Some(Box::new(U32(4)))),
++            Newtype(Box::new(Str("y".to_string()))),
++            Seq(vec![]),
++            Seq(vec![U32(1), Bool(false)]),
++            Map(vec![]),
++            nested(),
++            Struct("S", vec![("a", U32(1)), ("b", nested())]),
++        ] {
++            assert_eq!(de_skip(v), Ok(1));
++        }
++    }
++
++    #[test]
++    fn skip_errors() {
++        assert_eq!(de_skip(Bad), Err(err("bad value")));
++        assert_eq!(de_skip(Seq(vec![U32(1), Bad, U32(2)])), Err(err("bad value")));
++        assert_eq!(de_skip(Map(vec![(U32(1), U32(2)), (Str("k".to_string()), Bad)])), Err(err("bad value")));
++        assert_eq!(de_skip(Map(vec![(Bad, U32(2))])), Err(err("bad value")));
++        assert_eq!(de_skip(Opt(Some(Box::new(Seq(vec![Bad]))))), Err(err("bad value")));
++        assert_eq!(de_skip(Newtype(Box::new(Bad))), Err(err("bad value")));
++    }
++
++    #[test]
++    fn unknown_fields_are_skipped() {
++        assert_eq!(de_tagged(Struct("Tagged", vec![("id", U32(3))])), Ok(3));
++        assert_eq!(
++            de_tagged(Struct("Tagged", vec![
++                ("x", Str("a".to_string())),
++                ("id", U32(3)),
++                ("nested", nested()),
++                ("flag", Bool(true)),
++                ("none", Opt(None)),
++            ])),
++            Ok(3)
++        );
++        assert_eq!(de_tagged(Map(vec![(U32(0), U32(9)), (U32(5), Unit)])), Ok(9));
++        assert_eq!(de_tagged(Struct("Tagged", vec![("x", U32(1))])), Err(err("missing field `id`")));
++        assert_eq!(
++            de_tagged(Struct("Tagged", vec![("id", U32(3)), ("x", Seq(vec![Bad]))])),
++            Err(err("bad value"))
++        );
++        assert_eq!(
++            de_tagged(Struct("Tagged", vec![("id", U32(3)), ("id", U32(4))])),
++            Err(err("duplicate field `id`"))
++        );
++    }
++}
+diff --git a/tests/src/slice-array-eq.rs b/tests/src/slice-array-eq.rs
+new file mode 100644
+index 0000000..ec3052b
+--- /dev/null
++++ b/tests/src/slice-array-eq.rs
+@@ -0,0 +1,92 @@
++//@ [!lean] skip
++//@ [lean] subdir=SliceArrayEq
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Comparisons of a shared slice (`&[T]`) and of a `Vec<T>` with an array, as chelis-types
++//! (`builtin_discovery.rs`: `self.capability.domains == [Domain::Numeric]` on a `&'static [_]`)
++//! and chelis-ir (`verify.rs`: `lhs_matrix != [m, k]` on a subslice; `evaluation.rs`:
++//! `scopes != [ScopeId(0)]` on a `Vec`) use them: `&[T] == [U; N]` is `**self == *other` (the
++//! `[T]`/`[U; N]` comparison), `Vec<T> == [U; N]` is `self[..] == other[..]` (the slice
++//! comparison), false (resp. true for `!=`) when the lengths differ. SliceArrayEq/Checks.lean
++//! compares the model with the native results asserted in the native test module.
++
++#[derive(Clone, Copy, PartialEq, Debug)]
++pub enum Domain {
++    Numeric,
++    Boolean,
++    Text(u8),
++}
++
++pub struct Capability<'a> {
++    pub domains: &'a [Domain],
++}
++
++/// builtin_discovery.rs
++pub fn is_numeric(c: &Capability<'_>) -> bool {
++    c.domains == [Domain::Numeric]
++}
++
++pub fn is_mixed(c: &Capability<'_>) -> bool {
++    c.domains == [Domain::Numeric, Domain::Text(1)]
++}
++
++/// verify.rs: the last two dimensions of a vector compared with a pair.
++pub fn matrix_differs(dims: &Vec<u32>, m: u32, k: u32) -> bool {
++    let matrix = &dims[dims.len() - 2..];
++    matrix != [m, k]
++}
++
++/// evaluation.rs: a stack of scopes compared with the root scope.
++pub fn not_root(scopes: &Vec<u32>) -> bool {
++    *scopes != [0]
++}
++
++pub fn is_root(scopes: Vec<Domain>) -> bool {
++    scopes == [Domain::Boolean]
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn slices() {
++        let numeric = [Domain::Numeric];
++        let mixed = [Domain::Numeric, Domain::Text(1)];
++        let other = [Domain::Text(1), Domain::Numeric];
++        assert!(is_numeric(&Capability { domains: &numeric }));
++        assert!(!is_numeric(&Capability { domains: &mixed }));
++        assert!(!is_numeric(&Capability { domains: &[] }));
++        assert!(!is_numeric(&Capability { domains: &[Domain::Boolean] }));
++        assert!(is_mixed(&Capability { domains: &mixed }));
++        assert!(!is_mixed(&Capability { domains: &other }));
++        assert!(!is_mixed(&Capability { domains: &numeric }));
++        assert!(!is_mixed(&Capability { domains: &[] }));
++    }
++
++    #[test]
++    fn matrices() {
++        assert!(!matrix_differs(&vec![9, 2, 3], 2, 3));
++        assert!(matrix_differs(&vec![9, 2, 3], 3, 2));
++        assert!(!matrix_differs(&vec![4, 5], 4, 5));
++        assert!(matrix_differs(&vec![4, 5], 4, 6));
++    }
++
++    #[test]
++    #[should_panic]
++    fn matrix_too_short() {
++        matrix_differs(&vec![1], 1, 1);
++    }
++
++    #[test]
++    fn vecs() {
++        assert!(!not_root(&vec![0]));
++        assert!(not_root(&vec![0, 1]));
++        assert!(not_root(&vec![]));
++        assert!(not_root(&vec![1]));
++        assert!(is_root(vec![Domain::Boolean]));
++        assert!(!is_root(vec![Domain::Text(0)]));
++        assert!(!is_root(vec![Domain::Boolean, Domain::Boolean]));
++        assert!(!is_root(vec![]));
++    }
++}
+diff --git a/tests/src/vec-as-mut-slice.rs b/tests/src/vec-as-mut-slice.rs
+new file mode 100644
+index 0000000..04b002d
+--- /dev/null
++++ b/tests/src/vec-as-mut-slice.rs
+@@ -0,0 +1,80 @@
++//@ [!lean] skip
++//@ [lean] subdir=VecAsMutSlice
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `Vec::as_mut_slice`, which chelis-deep (`identity.rs` assign, `annotations_transform.rs`
++//! try_inherit_extensions) matches the elements of a vector with: the whole vector as a mutable
++//! slice, whose writes the vector keeps. VecAsMutSlice/Checks.lean compares the model with the
++//! native results asserted in the native test module, including the vectors given back.
++
++pub struct List {
++    pub elements: Vec<u32>,
++}
++
++/// A write through an element of the slice (the second one, when there are exactly two).
++pub fn stamp_second(list: &mut List, value: u32) -> bool {
++    let slice = list.elements.as_mut_slice();
++    if slice.len() == 2 {
++        slice[1] = value;
++        true
++    } else {
++        false
++    }
++}
++
++/// A walk over every element of the slice.
++pub fn bump_all(v: &mut Vec<u32>) -> usize {
++    let slice = v.as_mut_slice();
++    for x in slice.iter_mut() {
++        *x += 1;
++    }
++    slice.len()
++}
++
++/// The slice given to a helper, then the vector used again.
++fn swap_ends(s: &mut [u32]) {
++    let n = s.len();
++    if n > 1 {
++        s.swap(0, n - 1);
++    }
++}
++
++pub fn swap_then_push(mut v: Vec<u32>, x: u32) -> Vec<u32> {
++    swap_ends(v.as_mut_slice());
++    v.push(x);
++    v
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn stamps() {
++        let mut list = List { elements: vec![1, 2] };
++        assert!(stamp_second(&mut list, 9));
++        assert_eq!(list.elements, vec![1, 9]);
++        let mut list = List { elements: vec![1, 2, 3] };
++        assert!(!stamp_second(&mut list, 9));
++        assert_eq!(list.elements, vec![1, 2, 3]);
++    }
++
++    #[test]
++    fn bumps() {
++        let mut v = vec![0, 5, 7];
++        assert_eq!(bump_all(&mut v), 3);
++        assert_eq!(v, vec![1, 6, 8]);
++        let mut e: Vec<u32> = vec![];
++        assert_eq!(bump_all(&mut e), 0);
++        assert_eq!(e, Vec::<u32>::new());
++        let mut o = vec![1, u32::MAX];
++        assert!(std::panic::catch_unwind(move || bump_all(&mut o)).is_err());
++    }
++
++    #[test]
++    fn swaps() {
++        assert_eq!(swap_then_push(vec![1, 2, 3], 4), vec![3, 2, 1, 4]);
++        assert_eq!(swap_then_push(vec![1], 4), vec![1, 4]);
++        assert_eq!(swap_then_push(vec![], 4), vec![4]);
++    }
++}

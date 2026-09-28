@@ -1,0 +1,47 @@
+# aeneas integration step 158 after cba11f3beb: commit b5f3c968f1b11cefa92bffa967babe7404bc654d
+# first parent 06c37fc3da5626be5d62ce616c6d89e83c6ceca6
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# tests: regenerate two outputs of the round-35 merges
+#
+# LoopVisitorNestedSink (from fix/nested-loops) was generated before the
+# call_once state recovery (b735eb7): its two call_once wrappers now feed the
+# higher levels the state given back at the forward return. Its Checks pass on
+# the regenerated output. loop-nested-closure-levels.lean.out only moves the
+# reported SymbolicToPureAbs.ml line from 2391 to 2423.
+
+diff --git a/tests/lean/LoopVisitorNestedSink/LoopVisitorNestedSink.lean b/tests/lean/LoopVisitorNestedSink/LoopVisitorNestedSink.lean
+index 0cb14c6..4c38745 100644
+--- a/tests/lean/LoopVisitorNestedSink/LoopVisitorNestedSink.lean
++++ b/tests/lean/LoopVisitorNestedSink/LoopVisitorNestedSink.lean
+@@ -400,7 +400,8 @@ def collect_chain.closure.Insts.CoreOpsFunctionFnOnceTupleOptionSharedU32Tuple
+         _root_.loop_visitor_nested_sink.collect_chain.closure.Insts.CoreOpsFunctionFnOnceTupleOptionSharedU32Tuple.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output,
+         _root_.loop_visitor_nested_sink.Sink.mk capture_state1.errors
+         capture_state.count)
+@@ -1008,7 +1009,8 @@ def validate.closure.Insts.CoreOpsFunctionFnOnceTupleUseTuple :
+         _root_.loop_visitor_nested_sink.validate.closure.Insts.CoreOpsFunctionFnOnceTupleUseTuple.call_once
+           arg arg1
+       let capture_state := captured
+-      let capture_state1 := captured1 arg
++      let observed_state := (arg.#0, captured.#1)
++      let capture_state1 := captured1 observed_state
+       _root_.Aeneas.Std.Result.ok (output, (arg.#0,
+         _root_.loop_visitor_nested_sink.Sink.mk (capture_state1.#1).errors
+         (capture_state.#1).count))
+diff --git a/tests/src/loop-nested-closure-levels.lean.out b/tests/src/loop-nested-closure-levels.lean.out
+index a2c698c..6938ed3 100644
+--- a/tests/src/loop-nested-closure-levels.lean.out
++++ b/tests/src/loop-nested-closure-levels.lean.out
+@@ -1,5 +1,5 @@
+ [[92mInfo[39m ] Imported: tests/llbc/loop_nested_closure_levels.llbc
+ [[91mError[39m] Nested borrows: the continuation of a join or loop abstraction with pending loans calls a function whose backward function is not staged in two stages, or whose first stage was applied
+ Source: 'tests/src/loop-nested-closure-levels.rs', lines 23:0-37:1
+-Compiler source: symbolic/SymbolicToPureAbs.ml, line 2391
++Compiler source: symbolic/SymbolicToPureAbs.ml, line 2423
+ 

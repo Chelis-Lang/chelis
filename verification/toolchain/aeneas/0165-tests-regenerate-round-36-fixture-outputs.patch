@@ -1,0 +1,274 @@
+# aeneas integration step 165 after cba11f3beb: commit 5cd0e4a0b17206f3f7a42019e936c96ff55d0eab
+# first parent ad9878fdfa6b0ff4a3315c6d3486c5fbac2aeb16
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# tests: regenerate round-36 fixture outputs
+
+diff --git a/tests/lean/LoopVisitorNestedSink/LoopVisitorNestedSink.lean b/tests/lean/LoopVisitorNestedSink/LoopVisitorNestedSink.lean
+index 4c38745..6542e74 100644
+--- a/tests/lean/LoopVisitorNestedSink/LoopVisitorNestedSink.lean
++++ b/tests/lean/LoopVisitorNestedSink/LoopVisitorNestedSink.lean
+@@ -181,9 +181,8 @@ def visit_chain01closure_specialized_961547505617278236c166b3ea774f09_loop.body
+           (fun s1 =>
+              let (back4, back5) := back1 s1
+              let (c, back6) := call_mut_back back4
+-             (c,
+-               fun s2 => let ⟨ v, _ ⟩ := back6 s2
+-                         back5 { s with errors := v }) :
++             (c, fun s2 => let carrier := back6 s2
++                           back5 carrier) :
+           _root_.loop_visitor_nested_sink.Sink →
+           (_root_.loop_visitor_nested_sink.Sink ×
+           (_root_.loop_visitor_nested_sink.Sink →
+@@ -199,9 +198,8 @@ def visit_chain01closure_specialized_961547505617278236c166b3ea774f09_loop.body
+           (fun s2 =>
+              let (back4, back5) := back1 s2
+              let (c, back6) := call_mut_back back4
+-             (c,
+-               fun s3 => let ⟨ v, _ ⟩ := back6 s3
+-                         back5 { s with errors := v }) :
++             (c, fun s3 => let carrier := back6 s3
++                           back5 carrier) :
+           _root_.loop_visitor_nested_sink.Sink →
+           (_root_.loop_visitor_nested_sink.Sink ×
+           (_root_.loop_visitor_nested_sink.Sink →
+@@ -688,11 +686,7 @@ def visit_uses01closure_specialized_2cbf773bb2dd88148e5be566ac9f50df_loop.body
+     match o1 with
+     | none =>
+       _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (stack1,
+-        back,
+-        fun s2 =>
+-          let (back2, back3) := back1 s2
+-          (back2, fun s3 => let ⟨ v1, _ ⟩ := s3
+-                            back3 { s1 with errors := v1 }), i2, s1))
++        back, fun s2 => back1 s2, i2, s1))
+     | some p1 =>
+       let (tag, children) := p1
+       let (i3, s2, stack2, back2, back3) ←
+@@ -730,8 +724,8 @@ def visit_uses01closure_specialized_2cbf773bb2dd88148e5be566ac9f50df_loop.body
+                        let (c, back10) := call_mut_back (i6, back8)
+                        (c.#1,
+                          fun s6 =>
+-                           let (_, ⟨ v3, _ ⟩) := back10 (i6, s6)
+-                           back9 { s1 with errors := v3 }) :
++                           let (_, carrier) := back10 (i6, s6)
++                           back9 carrier) :
+                     _root_.loop_visitor_nested_sink.Sink →
+                     (_root_.loop_visitor_nested_sink.Sink ×
+                     (_root_.loop_visitor_nested_sink.Sink →
+@@ -750,8 +744,8 @@ def visit_uses01closure_specialized_2cbf773bb2dd88148e5be566ac9f50df_loop.body
+                        let (c, back10) := call_mut_back (i6, back8)
+                        (c.#1,
+                          fun s7 =>
+-                           let (_, ⟨ v3, _ ⟩) := back10 (i6, s7)
+-                           back9 { s1 with errors := v3 }) :
++                           let (_, carrier) := back10 (i6, s7)
++                           back9 carrier) :
+                     _root_.loop_visitor_nested_sink.Sink →
+                     (_root_.loop_visitor_nested_sink.Sink ×
+                     (_root_.loop_visitor_nested_sink.Sink →
+@@ -766,14 +760,8 @@ def visit_uses01closure_specialized_2cbf773bb2dd88148e5be566ac9f50df_loop.body
+                 _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))),
+                 back7)
+             else
+-              _root_.Aeneas.Std.Result.ok (i2, s1, stack1,
+-                (fun s4 =>
+-                   let (back6, back7) := back1 s4
+-                   (back6,
+-                     fun s5 =>
+-                       let ⟨ v2, _ ⟩ := s5
+-                       back7 { s1 with errors := v2 }) :
+-                _root_.loop_visitor_nested_sink.Sink →
++              _root_.Aeneas.Std.Result.ok (i2, s1, stack1, (fun s4 => back1 s4
++                : _root_.loop_visitor_nested_sink.Sink →
+                 (_root_.loop_visitor_nested_sink.Sink ×
+                 (_root_.loop_visitor_nested_sink.Sink →
+                 _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))), back)
+@@ -783,12 +771,7 @@ def visit_uses01closure_specialized_2cbf773bb2dd88148e5be566ac9f50df_loop.body
+             (_root_.loop_visitor_nested_sink.Sink →
+             _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))), back5)
+         else
+-          _root_.Aeneas.Std.Result.ok (i2, s1, stack1,
+-            (fun s3 =>
+-               let (back4, back5) := back1 s3
+-               (back4,
+-                 fun s4 => let ⟨ v1, _ ⟩ := s4
+-                           back5 { s1 with errors := v1 }) :
++          _root_.Aeneas.Std.Result.ok (i2, s1, stack1, (fun s3 => back1 s3 :
+             _root_.loop_visitor_nested_sink.Sink →
+             (_root_.loop_visitor_nested_sink.Sink ×
+             (_root_.loop_visitor_nested_sink.Sink →
+diff --git a/tests/src/diagnostic-recovery-instance.lean.out b/tests/src/diagnostic-recovery-instance.lean.out
+index 8ea312b..d0d7dd9 100644
+--- a/tests/src/diagnostic-recovery-instance.lean.out
++++ b/tests/src/diagnostic-recovery-instance.lean.out
+@@ -6,7 +6,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
+ Name pattern: 'diagnostic_recovery_instance::use_tag'
+ Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+-Compiler source: Translate.ml, line 430
++Compiler source: Translate.ml, line 431
+ [[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
+ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+@@ -14,7 +14,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: 'diagnostic_recovery_instance::tag_slice'
+ Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
+-Compiler source: Translate.ml, line 430
++Compiler source: Translate.ml, line 431
+ [[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+ Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
+@@ -22,7 +22,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
+ Name pattern: 'diagnostic_recovery_instance::use_tag<'0, diagnostic_recovery_instance::Wrap<core::slice::iter::IterMut<'1, @T0>>>'
+ Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+-Compiler source: Translate.ml, line 430
++Compiler source: Translate.ml, line 431
+ [[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+ Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
+@@ -30,7 +30,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
+ Name pattern: 'diagnostic_recovery_instance::use_tag'
+ Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+-Compiler source: Translate.ml, line 334
++Compiler source: Translate.ml, line 335
+ [[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
+ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+@@ -38,7 +38,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: 'diagnostic_recovery_instance::tag_slice'
+ Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
+-Compiler source: Translate.ml, line 334
++Compiler source: Translate.ml, line 335
+ [[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+ Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
+@@ -46,7 +46,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
+ Name pattern: 'diagnostic_recovery_instance::use_tag<'0, diagnostic_recovery_instance::Wrap<core::slice::iter::IterMut<'1, @T0>>>'
+ Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
+-Compiler source: Translate.ml, line 334
++Compiler source: Translate.ml, line 335
+ [[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
+ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+@@ -54,7 +54,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: 'diagnostic_recovery_instance::{diagnostic_recovery_instance::Tag<diagnostic_recovery_instance::Wrap<@I>, fn (u32) -> u32>}'
+ Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
+-Compiler source: Translate.ml, line 600
++Compiler source: Translate.ml, line 601
+ [[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
+ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+@@ -62,6 +62,6 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: '(could not compute the name pattern: uncaught exception Assert_failure)'
+ Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
+ Source: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
+-Compiler source: Translate.ml, line 600
++Compiler source: Translate.ml, line 601
+ [[92mInfo[39m ] Generated the partial file (because of 16 errors, including 5 unique errors): tests/lean/DiagnosticRecoveryInstance/DiagnosticRecoveryInstance.lean
+-[[92mInfo[39m ] Total execution time: 0.447075 seconds
++[[92mInfo[39m ] Total execution time: 0.306346 seconds
+diff --git a/tests/src/diagnostic-recovery.lean.out b/tests/src/diagnostic-recovery.lean.out
+index f0efed3..fa9236c 100644
+--- a/tests/src/diagnostic-recovery.lean.out
++++ b/tests/src/diagnostic-recovery.lean.out
+@@ -13,7 +13,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: 'diagnostic_recovery::apply'
+ Definition span: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+ Source: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+-Compiler source: Translate.ml, line 430
++Compiler source: Translate.ml, line 431
+ [[91mError[39m] Function pointers are not supported yet
+ Source: 'tests/src/diagnostic-recovery.rs', lines 21:4-21:8
+ Compiler source: interp/InterpStatements.ml, line 1624
+@@ -29,6 +29,6 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: 'diagnostic_recovery::apply'
+ Definition span: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+ Source: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+-Compiler source: Translate.ml, line 334
++Compiler source: Translate.ml, line 335
+ [[92mInfo[39m ] Generated the partial file (because of 8 errors, including 7 unique errors): tests/lean/DiagnosticRecovery/DiagnosticRecovery.lean
+-[[92mInfo[39m ] Total execution time: 0.223421 seconds
++[[92mInfo[39m ] Total execution time: 0.228538 seconds
+diff --git a/tests/src/loop-nested-closure-levels.lean.out b/tests/src/loop-nested-closure-levels.lean.out
+index 6938ed3..dce8785 100644
+--- a/tests/src/loop-nested-closure-levels.lean.out
++++ b/tests/src/loop-nested-closure-levels.lean.out
+@@ -1,5 +1,5 @@
+ [[92mInfo[39m ] Imported: tests/llbc/loop_nested_closure_levels.llbc
+-[[91mError[39m] Nested borrows: the continuation of a join or loop abstraction with pending loans calls a function whose backward function is not staged in two stages, or whose first stage was applied
++[[91mError[39m] Nested borrows: the continuation of a join or loop abstraction with pending loans calls a function whose backward function is staged in more than two stages, or whose first stage was applied
+ Source: 'tests/src/loop-nested-closure-levels.rs', lines 23:0-37:1
+-Compiler source: symbolic/SymbolicToPureAbs.ml, line 2423
++Compiler source: symbolic/SymbolicToPureAbs.ml, line 2440
+ 
+diff --git a/tests/src/untranslated-trait-impl.lean.out b/tests/src/untranslated-trait-impl.lean.out
+index 441e8f0..f8bad2c 100644
+--- a/tests/src/untranslated-trait-impl.lean.out
++++ b/tests/src/untranslated-trait-impl.lean.out
+@@ -6,7 +6,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: 'untranslated_trait_impl::Shape::apply'
+ Definition span: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
+-Compiler source: Translate.ml, line 430
++Compiler source: Translate.ml, line 431
+ [[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
+ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+@@ -14,7 +14,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: 'untranslated_trait_impl::{untranslated_trait_impl::Shape<untranslated_trait_impl::S>}::apply'
+ Definition span: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
+-Compiler source: Translate.ml, line 430
++Compiler source: Translate.ml, line 431
+ [[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
+ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+@@ -22,7 +22,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: 'untranslated_trait_impl::Shape::apply'
+ Definition span: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 20:4-20:46
+-Compiler source: Translate.ml, line 334
++Compiler source: Translate.ml, line 335
+ [[91mError[39m] Function pointers are not supported yet
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 30:8-30:17
+ Compiler source: interp/InterpStatements.ml, line 1624
+@@ -38,7 +38,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: 'untranslated_trait_impl::{untranslated_trait_impl::Shape<untranslated_trait_impl::S>}::apply'
+ Definition span: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
+-Compiler source: Translate.ml, line 334
++Compiler source: Translate.ml, line 335
+ [[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
+ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+@@ -46,7 +46,7 @@ Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ Name pattern: 'untranslated_trait_impl::{untranslated_trait_impl::Shape<untranslated_trait_impl::S>}'
+ Definition span: 'tests/src/untranslated-trait-impl.rs', lines 25:0-32:1
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 29:4-31:5
+-Compiler source: Translate.ml, line 600
++Compiler source: Translate.ml, line 601
+ [[91mError[39m] Unexpected error: could not find the declaration for method 'apply' for trait declaration 'untranslated_trait_impl::Shape'
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 18:0-21:1
+ Compiler source: extract/Extract.ml, line 2942
+@@ -54,7 +54,7 @@ Compiler source: extract/Extract.ml, line 2942
+ Name pattern: 'untranslated_trait_impl::Shape'
+ Definition span: 'tests/src/untranslated-trait-impl.rs', lines 18:0-21:1
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 18:0-21:1
+-Compiler source: Translate.ml, line 2214
++Compiler source: Translate.ml, line 2215
+ [[92mInfo[39m ] Creating missing directory: tests/lean/UntranslatedTraitImpl
+ [[91mError[39m] Could not find: trait_decl_id: 0
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 34:0-36:1
+@@ -66,4 +66,4 @@ Compiler source: extract/ExtractBase.ml, line 730
+ Source: 'tests/src/untranslated-trait-impl.rs', lines 38:0-40:1
+ Compiler source: extract/ExtractBase.ml, line 741
+ [[92mInfo[39m ] Generated the partial file (because of 17 errors, including 10 unique errors): tests/lean/UntranslatedTraitImpl/UntranslatedTraitImpl.lean
+-[[92mInfo[39m ] Total execution time: 0.669151 seconds
++[[92mInfo[39m ] Total execution time: 0.263207 seconds

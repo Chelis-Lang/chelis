@@ -1,0 +1,1033 @@
+# aeneas integration step 153 after cba11f3beb: commit 06e74d5c3026ade3fd0220a60957ac42fa34e421
+# first parent 2710fa84e603529caa4e39767fa171b95ac6b110, merged 1f60ed5d8b32a28364c2617b5213f84539bb65a9
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/debug-struct' (core::fmt::builders::DebugStruct; opaque coverage counts only the lifetimes the declaration uses mutably: reviewed, see the commit's soundness argument)
+
+diff --git a/backends/lean/Aeneas/Std/Core/Fmt.lean b/backends/lean/Aeneas/Std/Core/Fmt.lean
+index bcef259..f36f67d 100644
+--- a/backends/lean/Aeneas/Std/Core/Fmt.lean
++++ b/backends/lean/Aeneas/Std/Core/Fmt.lean
+@@ -382,6 +382,66 @@ def Formatter.debug_tuple_field3_finish (fmt : Formatter) (name : Str)
+     (v0 v1 v2 : DebugValue) : Outcome := do
+   fmt.debugTuple (← decode name.val) [v0, v1, v2]
+ 
++/-- `core::fmt::builders::DebugStruct<'a, 'b> { fmt: &'a mut Formatter<'b>, result: fmt::Result,
++    has_fields: bool }` (core/src/fmt/builders.rs, rustc 1.95): the borrowed formatter is held by
++    value, and `Formatter::debug_struct`'s lens gives it back from the final builder. -/
++@[rust_type "core::fmt::builders::DebugStruct" (mutRegions := #[0]) (body := .opaque)]
++structure DebugStruct where
++  fmt : Formatter
++  result : core.result.Result Unit Error
++  has_fields : Bool
++
++/-- `Formatter::debug_struct` = `builders::debug_struct_new(self, name)`:
++    `let result = fmt.write_str(name); DebugStruct { fmt, result, has_fields: false }`. -/
++@[rust_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct"]
++def Formatter.debug_struct (fmt : Formatter) (name : Str) :
++    Result (DebugStruct × (DebugStruct → Formatter)) := do
++  let (result, fmt) ← fmt.write_str name
++  .ok ({ fmt, result, has_fields := false }, fun b => b.fmt)
++
++/-- `DebugStruct::field(name, value)` = `field_with(name, |f| value.fmt(f))`: unless the result is
++    already an error, `" { "` (the first field) or `", "`, the name, `": "` and the value; pretty
++    (`{:#?}`), `" {\n"` before the first field, then the name, `": "`, the value and `",\n"` through
++    a pad adapter (each line indented by four more spaces). The result is the first error; the
++    builder has fields from then on. The returned `&mut Self` is the builder itself: the value
++    given back to it is the value given back to `self` (`fun b => b`), and the staged backward
++    function of the lifetime `'a` (the formatter's borrow) passes the builder given back through
++    `self` (first stage) and the one given back through the returned reference (last stage) on as
++    the values of `self` for the caller of `self` and for the lender of `'a` (`fun s b => (s, b)`,
++    the whole builder being the state of `'a`). -/
++@[rust_fun "core::fmt::builders::{core::fmt::builders::DebugStruct<'a, 'b>}::field"]
++def DebugStruct.field (self : DebugStruct) (name : Str) (value : DebugValue) :
++    Result (DebugStruct × (DebugStruct → DebugStruct) ×
++      (DebugStruct → DebugStruct → DebugStruct × DebugStruct)) := do
++  let (result, fmt) ← match self.result with
++    | .Err e => .ok (.Err e, self.fmt)
++    | .Ok () =>
++      if self.fmt.options.bit 23 then
++        thenFormat (if self.has_fields then .ok (.Ok (), self.fmt) else self.fmt.append " {\n")
++          (fun f => f.indented (self.fmt.indent + 4) (fun f =>
++            thenFormat (f.write_str name) (fun f =>
++              thenFormat (f.append ": ") (fun f =>
++                thenFormat (debugValue value f) (fun f => f.append ",\n")))))
++      else
++        thenFormat (self.fmt.append (if self.has_fields then ", " else " { ")) (fun f =>
++          thenFormat (f.write_str name) (fun f =>
++            thenFormat (f.append ": ") (debugValue value)))
++  .ok ({ fmt, result, has_fields := true }, fun b => b, fun s b => (s, b))
++
++/-- `DebugStruct::finish`: with fields and no error, `"}"` (pretty) or `" }"`; the result, the
++    builder given back to `self`, and the backward function of `'a` (the builder is the state of
++    `'a`: what is given back through `'a` is given back unchanged). -/
++@[rust_fun "core::fmt::builders::{core::fmt::builders::DebugStruct<'a, 'b>}::finish"]
++def DebugStruct.finish (self : DebugStruct) :
++    Result (core.result.Result Unit Error × DebugStruct × (DebugStruct → DebugStruct)) := do
++  if self.has_fields then
++    match self.result with
++    | .Err e => .ok (.Err e, self, fun b => b)
++    | .Ok () =>
++      let (result, fmt) ← self.fmt.append (if self.fmt.options.bit 23 then "}" else " }")
++      .ok (result, { self with fmt, result }, fun b => b)
++  else .ok (self.result, self, fun b => b)
++
+ section Monotonicity
+ 
+ open Lean.Order
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 4383d9f..11c0538 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -72,6 +72,8 @@ let lean_builtin_types = [
+   mk_type "core::fmt::Error" "_root_.Aeneas.Std.core.fmt.Error";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 32 *)
+   mk_type "core::fmt::Formatter" "_root_.Aeneas.Std.core.fmt.Formatter" ~kind:(KStruct [("output", Some "output"); ("options", Some "options"); ("write", Some "write"); ("indent", Some "indent"); ("lineStart", Some "lineStart")]);
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 388 *)
++  mk_type "core::fmt::builders::DebugStruct" "_root_.Aeneas.Std.core.fmt.DebugStruct" ~mut_regions:([0]);
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 132 *)
+   mk_type "core::fmt::rt::Argument" "_root_.Aeneas.Std.core.fmt.rt.Argument" ~kind:(KEnum [("Placeholder", Some "placeholder"); ("Count", Some "count")]);
+   (* file: "Aeneas/Std/IteratorCombinators.lean", line: 22 *)
+@@ -1042,6 +1044,10 @@ let lean_builtin_funs = [
+   mk_fun "core::f64::{f64}::recip" "_root_.Aeneas.Std.F64.recip";
+   (* file: "Aeneas/Std/Float.lean", line: 461 *)
+   mk_fun "core::f64::{f64}::to_bits" "_root_.Aeneas.Std.F64.to_bits";
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 412 *)
++  mk_fun "core::fmt::builders::{core::fmt::builders::DebugStruct<'a, 'b>}::field" "_root_.Aeneas.Std.core.fmt.DebugStruct.field";
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 434 *)
++  mk_fun "core::fmt::builders::{core::fmt::builders::DebugStruct<'a, 'b>}::finish" "_root_.Aeneas.Std.core.fmt.DebugStruct.finish";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 159 *)
+   mk_fun "core::fmt::float::{core::fmt::Debug<f32>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugF32.fmt";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 168 *)
+@@ -1156,6 +1162,8 @@ let lean_builtin_funs = [
+   mk_fun "core::fmt::{core::fmt::Display<char>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayChar.fmt";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 68 *)
+   mk_fun "core::fmt::{core::fmt::Display<str>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayStr.fmt";
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 396 *)
++  mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 340 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field1_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field1_finish";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 345 *)
+@@ -1942,9 +1950,9 @@ let lean_builtin_funs = [
+   mk_fun "core::result::{core::ops::try_trait::Try<core::result::Result<@T, @E>, @T, core::result::Result<core::convert::Infallible, @E>>}::branch" "_root_.Aeneas.Std.core.result.TryResult.branch";
+   (* file: "Aeneas/Std/Core/Result.lean", line: 31 *)
+   mk_fun "core::result::{core::ops::try_trait::Try<core::result::Result<@T, @E>, @T, core::result::Result<core::convert::Infallible, @E>>}::from_output" "_root_.Aeneas.Std.core.result.TryResult.from_output";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 575 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 635 *)
+   mk_fun "core::result::{core::result::Result<@T, @E>}::expect" "_root_.Aeneas.Std.core.result.Result.expect";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 562 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 622 *)
+   mk_fun "core::result::{core::result::Result<@T, @E>}::unwrap" "_root_.Aeneas.Std.core.result.Result.unwrap";
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 135 *)
+   mk_fun "core::slice::cmp::{core::cmp::Ord<[@T]>}::cmp" "_root_.Aeneas.Std.core.slice.cmp.OrdSlice.cmp";
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index 299a93c..5e45bc9 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -115,19 +115,74 @@ let projection_selects_mutable (decls_ctx : C.decls_ctx)
+   TypesUtils.ty_has_mut_borrow_for_region_in_set decls_ctx.type_ctx.type_infos
+     regions ty
+ 
+-let projection_covers_regions (regions : T.RegionId.Set.t) (ty : T.ty) : bool =
+-  not
+-    (TypesUtils.ty_has_regions_in_pred
+-       (fun r -> not (region_selected regions r))
+-       ty)
++(** The type reference [tref] with, for an opaque type, only the region
++    arguments at the lifetime parameters which its declaration uses in mutable
++    borrows (for a builtin model, its declared [mut_regions]; see
++    [TypesAnalysis.initialize_type_decl_info]). The other lifetimes of an opaque
++    value are no positions of it: nothing is given back through them, and the
++    shared borrows under them are frozen while it is borrowed, so the value
++    given back through its mutable lifetimes is its whole value (e.g. ['b] of
++    [DebugStruct<'a, 'b>], which holds a [&'a mut Formatter<'b>]: the model of
++    [Formatter] uses its lifetime in no mutable borrow). *)
++let opaque_mut_positions (decls_ctx : C.decls_ctx) (tref : T.type_decl_ref) :
++    T.type_decl_ref =
++  match tref.id with
++  | T.TAdtId id -> (
++      let decl = T.TypeDeclId.Map.find id decls_ctx.type_ctx.type_decls in
++      match
++        (decl.kind, T.TypeDeclId.Map.find_opt id decls_ctx.type_ctx.type_infos)
++      with
++      | T.Opaque, Some info
++        when List.length decl.generics.regions
++             = List.length tref.generics.regions ->
++          let regions =
++            List.filter_map
++              (fun ((p : T.region_param), r) ->
++                if T.RegionId.Set.mem p.index info.mut_regions then Some r
++                else None)
++              (List.combine decl.generics.regions tref.generics.regions)
++          in
++          { tref with generics = { tref.generics with regions } }
++      | _ -> tref)
++  | _ -> tref
++
++exception Uncovered
++
++(** Whether every region position of [ty] (see [opaque_mut_positions]) is in
++    [regions]; as [TypesUtils.ty_has_regions_in_pred], function-item signatures,
++    trait witnesses and (by default) dyn traits store no region. *)
++let projection_covers_regions (decls_ctx : C.decls_ctx)
++    (regions : T.RegionId.Set.t) (ty : T.ty) : bool =
++  let visitor =
++    object
++      inherit [_] T.iter_ty as super
++
++      method! visit_region _ r =
++        if not (region_selected regions r) then raise Uncovered
++
++      method! visit_TFnDef _ _ = ()
++      method! visit_trait_ref _ _ = ()
++
++      method! visit_TDynTrait env tr =
++        if Config.type_analysis_ignore_dyn then ()
++        else super#visit_TDynTrait env tr
++
++      method! visit_TAdt env tref =
++        super#visit_TAdt env (opaque_mut_positions decls_ctx tref)
++    end
++  in
++  try
++    visitor#visit_ty () ty;
++    true
++  with Uncovered -> false
+ 
+ (** Region coverage alone does not make an enum's ordinary payload
+     authoritative. For transparent types, also check that every payload
+     position is under a selected mutable borrow (or has no fields). Opaque
+-    backward values are indivisible: their complete lifetime interface owns the
+-    private state returned by the model's backward operation. A mutable
+-    projection over [regions] of a value of type [ty] which is complete in this
+-    sense is authoritative on the whole value.
++    backward values are indivisible: their complete mutable lifetime interface
++    (see [opaque_mut_positions]) owns the private state returned by the model's
++    backward operation. A mutable projection over [regions] of a value of type
++    [ty] which is complete in this sense is authoritative on the whole value.
+ 
+     A recursive occurrence of a type being checked ([seen]) is covered: values
+     are finite, so every position of a value of a recursive type lies in a
+@@ -165,7 +220,7 @@ let rec projection_covers_value (decls_ctx : C.decls_ctx) (seen : T.ty list)
+             variants_complete 0 variants
+         | T.Opaque ->
+             projection_selects_mutable decls_ctx regions ty
+-            && projection_covers_regions regions ty
++            && projection_covers_regions decls_ctx regions ty
+         | _ -> false)
+     (* Every element of an array or a slice has the element type: the
+        projection covers the value iff it covers that type. *)
+@@ -258,11 +313,12 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+       [] updates
+   in
+   let selects_mutable = projection_selects_mutable decls_ctx in
+-  (* Every region position is selected or lies strictly under a selected
+-     mutable borrow. The value given back to a mutable borrow is authoritative
+-     for its whole payload, including the current contents of the borrows
+-     nested in it: an unselected lifetime there (e.g. ['1] in
+-     [Option<&'0 mut Frame<'1>>] owned by [{0}]) is not a separate position of
++  (* Every region position (see [opaque_mut_positions]) is selected or lies
++     strictly under a selected mutable borrow. The value given back to a mutable
++     borrow is authoritative for its whole payload, including the current
++     contents of the borrows nested in it: an unselected lifetime there (e.g.
++     ['1] in [Option<&'0 mut Frame<'1>>] owned by [{0}]) is not a separate
++     position of
+      this value, and the abstractions owning it give back the final values of
+      its inner borrows separately. *)
+   let covered regions ty =
+@@ -281,6 +337,9 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+         method! visit_TFnDef _ _ = ()
+         method! visit_trait_ref _ _ = ()
+ 
++        method! visit_TAdt env tref =
++          super#visit_TAdt env (opaque_mut_positions decls_ctx tref)
++
+         method! visit_TDynTrait env tr =
+           if Config.type_analysis_ignore_dyn then ()
+           else super#visit_TDynTrait env tr
+@@ -472,8 +531,10 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+              region position on both sides, not merely equality with the owned
+              subset: each position is selected or lies under a selected mutable
+              borrow (see [covered]). In particular, a projection of one
+-             lifetime of a two-region opaque value cannot overwrite the other
+-             lifetime's contents. Otherwise, an enum is recombined variant by
++             mutable lifetime of an opaque value with two cannot overwrite the
++             other lifetime's contents; its lifetimes which the declaration uses
++             in no mutable borrow are no positions (see
++             [opaque_mut_positions]). Otherwise, an enum is recombined variant by
+              variant (see [update_enum]).
+ 
+              Keep structs on the fieldwise path even with complete coverage:
+diff --git a/tests/lean/FmtDebugStruct.lean b/tests/lean/FmtDebugStruct.lean
+new file mode 100644
+index 0000000..9e9f153
+--- /dev/null
++++ b/tests/lean/FmtDebugStruct.lean
+@@ -0,0 +1 @@
++import FmtDebugStruct.Checks
+diff --git a/tests/lean/FmtDebugStruct/Checks.lean b/tests/lean/FmtDebugStruct/Checks.lean
+new file mode 100644
+index 0000000..a2e90b4
+--- /dev/null
++++ b/tests/lean/FmtDebugStruct/Checks.lean
+@@ -0,0 +1,48 @@
++import FmtDebugStruct.FmtDebugStruct
++
++/-! Evaluate the model of `tests/src/fmt-debug-struct.rs` on the inputs of its `native` test module
++    and compare with the native results, including the string given back by `try_render`. -/
++namespace fmt_debug_struct.checks
++open Aeneas Aeneas.Std Result
++
++def vec {α : Type} (xs : List α) : alloc.vec.Vec α :=
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++def u32 (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def text (r : Result String) : Option String :=
++  match r with | ok s => some s | _ => none
++
++def mkMeta (values : List Nat) (label : String) (slot content : Bool) : Option Metadata :=
++  match metadata (vec (values.map u32)) label slot content with | ok m => some m | _ => none
++
++def renderOf (m : Option Metadata) (pretty : Bool := false) : Option String :=
++  m.bind fun m => text (if pretty then render_pretty m else render m)
++
++#guard renderOf (mkMeta [1, 2] "x" true true) ==
++  some "Metadata { storage: Some(Storage { values: [1, 2], label: \"x\" }) }"
++#guard renderOf (mkMeta [] "" true false) == some "Metadata { storage: None }"
++#guard renderOf (mkMeta [] "" false true) == some "Metadata { storage: None }"
++#guard renderOf (mkMeta [1, 2] "x" true true) (pretty := true) ==
++  some "Metadata {\n    storage: Some(\n        Storage {\n            values: [\n                1,\n                2,\n            ],\n            label: \"x\",\n        },\n    ),\n}"
++
++def pairOf (pretty : Bool) : Option String :=
++  (mkMeta [3] "y" true true).bind fun right =>
++    text (render_pair { left := ⟨BitVec.ofInt _ (-7)⟩, right } pretty)
++
++#guard pairOf false ==
++  some "Pair { left: -7, right: Metadata { storage: Some(Storage { values: [3], label: \"y\" }) } }"
++#guard pairOf true ==
++  some "Pair {\n    left: -7,\n    right: Metadata {\n        storage: Some(\n            Storage {\n                values: [\n                    3,\n                ],\n                label: \"y\",\n            },\n        ),\n    },\n}"
++#guard text (render_empty false) == some "Empty"
++#guard text (render_empty true) == some "Empty"
++
++/-- The status of `write!` and the string given back. -/
++def tryRender (out : String) (first : Nat) (pretty : Bool) : Option (Bool × String) :=
++  match try_render out { first := ⟨BitVec.ofNat _ first⟩ } pretty with
++  | ok r => some r
++  | _ => none
++
++#guard tryRender "pre" 9 false == some (false, "pre<W { first: 9, bad: bad")
++#guard tryRender "" 0 true == some (false, "<W {\n    first: 0,\n    bad: bad")
++
++end fmt_debug_struct.checks
+diff --git a/tests/lean/FmtDebugStruct/FmtDebugStruct.lean b/tests/lean/FmtDebugStruct/FmtDebugStruct.lean
+new file mode 100644
+index 0000000..3b8c11c
+--- /dev/null
++++ b/tests/lean/FmtDebugStruct/FmtDebugStruct.lean
+@@ -0,0 +1,496 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [fmt_debug_struct]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace fmt_debug_struct
++
++/-- [core::option::{core::option::Option<T>}::as_ref]:
++    Source: '/rustc/library/core/src/option.rs', lines 744:4-744:44
++    Name pattern: [core::option::{core::option::Option<@T>}::as_ref]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<@T>}::as_ref"]
++def core.option.Option.as_ref
++  {T : Type} (self : _root_.Option T) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some _ => _root_.Aeneas.Std.Result.ok self
++
++/-- [core::option::{core::ops::try_trait::Try<T, core::option::Option<core::convert::Infallible>> for core::option::Option<T>}::branch]:
++    Source: '/rustc/library/core/src/option.rs', lines 2765:4-2765:64
++    Name pattern: [core::option::{core::ops::try_trait::Try<core::option::Option<@T>, @T, core::option::Option<core::convert::Infallible>>}::branch]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::ops::try_trait::Try<core::option::Option<@T>, @T, core::option::Option<core::convert::Infallible>>}::branch"]
++def core.option.Option.Insts.CoreOpsTry_traitTryTOptionInfallible.branch
++  {T : Type} (self : _root_.Option T) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow
++    (_root_.Option _root_.Aeneas.Std.core.convert.Infallible) T)
++  := do
++  match self with
++  | none =>
++    _root_.Aeneas.Std.Result.ok
++      (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break none)
++  | some v =>
++    _root_.Aeneas.Std.Result.ok
++      (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue v)
++
++/-- [core::option::{core::ops::try_trait::FromResidual<core::option::Option<core::convert::Infallible>> for core::option::Option<T>}::from_residual]:
++    Source: '/rustc/library/core/src/option.rs', lines 2779:4-2779:67
++    Name pattern: [core::option::{core::ops::try_trait::FromResidual<core::option::Option<@T>, core::option::Option<core::convert::Infallible>>}::from_residual]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::ops::try_trait::FromResidual<core::option::Option<@T>, core::option::Option<core::convert::Infallible>>}::from_residual"]
++def
++  core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionInfallible.from_residual
++  (T : Type) (o : _root_.Option _root_.Aeneas.Std.core.convert.Infallible) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  _root_.Aeneas.Std.Result.ok none
++
++/-- [core::result::{core::result::Result<T, E>}::is_ok]:
++    Source: '/rustc/library/core/src/result.rs', lines 593:4-593:37
++    Name pattern: [core::result::{core::result::Result<@T, @E>}::is_ok]
++    Visibility: public -/
++@[rust_fun "core::result::{core::result::Result<@T, @E>}::is_ok"]
++def core.result.Result.is_ok
++  {T : Type} {E : Type} (self : _root_.Aeneas.Std.core.result.Result T E) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  _root_.Aeneas.Std.Result.ok (self1 = 0#isize)
++
++/-- [fmt_debug_struct::Storage]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 15:0-18:1
++    Visibility: public -/
++structure Storage where
++  values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++  label : _root_.String
++
++/-- [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::Storage}::fmt]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 14:9-14:14
++    Visibility: public -/
++def Storage.Insts.CoreFmtDebug.fmt
++  (self : _root_.fmt_debug_struct.Storage)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let dyn :=
++    _root_.Aeneas.Std.Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugVec
++      _root_.Aeneas.Std.core.fmt.DebugU32) self.values
++  let dyn1 :=
++    _root_.Aeneas.Std.Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.Aeneas.Std.core.fmt.DebugString) self.label
++  _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish f
++    (_root_.Aeneas.Std.toStr "Storage") (_root_.Aeneas.Std.toStr "values") dyn
++    (_root_.Aeneas.Std.toStr "label") dyn1
++
++/-- Trait implementation: [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::Storage}]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 14:9-14:14 -/
++@[reducible]
++def Storage.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.fmt_debug_struct.Storage := {
++  fmt := _root_.fmt_debug_struct.Storage.Insts.CoreFmtDebug.fmt
++}
++
++/-- [fmt_debug_struct::Slot]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 20:0-22:1
++    Visibility: public -/
++structure Slot where
++  storage : _root_.Option _root_.fmt_debug_struct.Storage
++
++/-- [fmt_debug_struct::Metadata]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 24:0-26:1
++    Visibility: public -/
++structure Metadata where
++  storage : _root_.Option _root_.fmt_debug_struct.Slot
++
++/-- [fmt_debug_struct::{fmt_debug_struct::Metadata}::content]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 29:4-31:5 -/
++def Metadata.content
++  (self : _root_.fmt_debug_struct.Metadata) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.fmt_debug_struct.Storage)
++  := do
++  let o ← _root_.fmt_debug_struct.core.option.Option.as_ref self.storage
++  let cf ←
++    _root_.fmt_debug_struct.core.option.Option.Insts.CoreOpsTry_traitTryTOptionInfallible.branch
++      o
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    _root_.fmt_debug_struct.core.option.Option.as_ref val.storage
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    _root_.fmt_debug_struct.core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionInfallible.from_residual
++      _root_.fmt_debug_struct.Storage residual
++
++/-- [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::Metadata}::fmt]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 36:4-40:5
++    Visibility: public -/
++def Metadata.Insts.CoreFmtDebug.fmt
++  (self : _root_.fmt_debug_struct.Metadata)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let (ds, debug_struct_back) ←
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_struct f
++      (_root_.Aeneas.Std.toStr "Metadata")
++  let o ← _root_.fmt_debug_struct.Metadata.content self
++  let dyn :=
++    _root_.Aeneas.Std.Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugOption
++      (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.fmt_debug_struct.Storage.Insts.CoreFmtDebug)) o
++  let (ds1, field_back, field_back1) ←
++    _root_.Aeneas.Std.core.fmt.DebugStruct.field ds (_root_.Aeneas.Std.toStr
++      "storage") dyn
++  let (r, ds2, finish_back) ← _root_.Aeneas.Std.core.fmt.DebugStruct.finish ds1
++  let ds3 := field_back ds2
++  let back := field_back1 ds3
++  let ds4 := finish_back ds3
++  let (_, ds5) := back ds4
++  let f1 := debug_struct_back ds5
++  _root_.Aeneas.Std.Result.ok (r, f1)
++
++/-- Trait implementation: [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::Metadata}]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 35:0-41:1 -/
++@[reducible]
++def Metadata.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.fmt_debug_struct.Metadata := {
++  fmt := _root_.fmt_debug_struct.Metadata.Insts.CoreFmtDebug.fmt
++}
++
++/-- [fmt_debug_struct::Pair]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 44:0-47:1
++    Visibility: public -/
++structure Pair where
++  left : _root_.Aeneas.Std.I32
++  right : _root_.fmt_debug_struct.Metadata
++
++/-- [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::Pair}::fmt]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 50:4-52:5
++    Visibility: public -/
++def Pair.Insts.CoreFmtDebug.fmt
++  (self : _root_.fmt_debug_struct.Pair)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let (ds, debug_struct_back) ←
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_struct f
++      (_root_.Aeneas.Std.toStr "Pair")
++  let dyn :=
++    _root_.Aeneas.Std.Dyn.mk _ _root_.Aeneas.Std.core.fmt.DebugI32 self.left
++  let (ds1, field_back, field_back1) ←
++    _root_.Aeneas.Std.core.fmt.DebugStruct.field ds (_root_.Aeneas.Std.toStr
++      "left") dyn
++  let dyn1 :=
++    _root_.Aeneas.Std.Dyn.mk _
++      _root_.fmt_debug_struct.Metadata.Insts.CoreFmtDebug self.right
++  let (ds2, field_back2, field_back3) ←
++    _root_.Aeneas.Std.core.fmt.DebugStruct.field ds1 (_root_.Aeneas.Std.toStr
++      "right") dyn1
++  let (r, ds3, finish_back) ← _root_.Aeneas.Std.core.fmt.DebugStruct.finish ds2
++  let ds4 := field_back2 ds3
++  let ds5 := field_back ds4
++  let back := field_back1 ds5
++  let back1 := field_back3 ds5
++  let ds6 := finish_back ds5
++  let (_, ds7) := back1 ds6
++  let (_, ds8) := back ds7
++  let f1 := debug_struct_back ds8
++  _root_.Aeneas.Std.Result.ok (r, f1)
++
++/-- Trait implementation: [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::Pair}]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 49:0-53:1 -/
++@[reducible]
++def Pair.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.fmt_debug_struct.Pair := {
++  fmt := _root_.fmt_debug_struct.Pair.Insts.CoreFmtDebug.fmt
++}
++
++/-- [fmt_debug_struct::Empty]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 55:0-55:17
++    Visibility: public -/
++@[reducible]
++def Empty := _root_.Unit
++
++/-- [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::Empty}::fmt]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 58:4-60:5
++    Visibility: public -/
++def Empty.Insts.CoreFmtDebug.fmt
++  (self : _root_.fmt_debug_struct.Empty)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let (ds, debug_struct_back) ←
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_struct f
++      (_root_.Aeneas.Std.toStr "Empty")
++  let (r, ds1, finish_back) ← _root_.Aeneas.Std.core.fmt.DebugStruct.finish ds
++  let ds2 := finish_back ds1
++  let f1 := debug_struct_back ds2
++  _root_.Aeneas.Std.Result.ok (r, f1)
++
++/-- Trait implementation: [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::Empty}]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 57:0-61:1 -/
++@[reducible]
++def Empty.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.fmt_debug_struct.Empty := {
++  fmt := _root_.fmt_debug_struct.Empty.Insts.CoreFmtDebug.fmt
++}
++
++/-- [fmt_debug_struct::Failing]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 64:0-64:19
++    Visibility: public -/
++@[reducible]
++def Failing := _root_.Unit
++
++/-- [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::Failing}::fmt]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 67:4-70:5
++    Visibility: public -/
++def Failing.Insts.CoreFmtDebug.fmt
++  (self : _root_.fmt_debug_struct.Failing)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let (r, f1) ←
++    _root_.Aeneas.Std.core.fmt.Formatter.write_str f (_root_.Aeneas.Std.toStr
++      "bad")
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err (),
++      f1)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r1 ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.Unit (_root_.Aeneas.Std.core.convert.FromSame
++        _root_.Aeneas.Std.core.fmt.Error) residual
++    _root_.Aeneas.Std.Result.ok (r1, f1)
++
++/-- Trait implementation: [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::Failing}]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 66:0-71:1 -/
++@[reducible]
++def Failing.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.fmt_debug_struct.Failing := {
++  fmt := _root_.fmt_debug_struct.Failing.Insts.CoreFmtDebug.fmt
++}
++
++/-- [fmt_debug_struct::WithFailing]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 73:0-75:1
++    Visibility: public -/
++structure WithFailing where
++  first : _root_.Aeneas.Std.U8
++
++/-- [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::WithFailing}::fmt]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 78:4-84:5
++    Visibility: public -/
++def WithFailing.Insts.CoreFmtDebug.fmt
++  (self : _root_.fmt_debug_struct.WithFailing)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let (ds, debug_struct_back) ←
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_struct f
++      (_root_.Aeneas.Std.toStr "W")
++  let dyn :=
++    _root_.Aeneas.Std.Dyn.mk _ _root_.Aeneas.Std.core.fmt.DebugU8 self.first
++  let (ds1, field_back, field_back1) ←
++    _root_.Aeneas.Std.core.fmt.DebugStruct.field ds (_root_.Aeneas.Std.toStr
++      "first") dyn
++  let dyn1 :=
++    _root_.Aeneas.Std.Dyn.mk _
++      _root_.fmt_debug_struct.Failing.Insts.CoreFmtDebug ()
++  let (ds2, field_back2, field_back3) ←
++    _root_.Aeneas.Std.core.fmt.DebugStruct.field ds1 (_root_.Aeneas.Std.toStr
++      "bad") dyn1
++  let dyn2 :=
++    _root_.Aeneas.Std.Dyn.mk _ _root_.Aeneas.Std.core.fmt.DebugU8 3#u8
++  let (ds3, field_back4, field_back5) ←
++    _root_.Aeneas.Std.core.fmt.DebugStruct.field ds2 (_root_.Aeneas.Std.toStr
++      "last") dyn2
++  let (r, ds4, finish_back) ← _root_.Aeneas.Std.core.fmt.DebugStruct.finish ds3
++  let ds5 := field_back4 ds4
++  let ds6 := field_back2 ds5
++  let ds7 := field_back ds6
++  let back := field_back1 ds7
++  let back1 := field_back3 ds7
++  let back2 := field_back5 ds7
++  let ds8 := finish_back ds7
++  let (_, ds9) := back2 ds8
++  let (_, ds10) := back1 ds9
++  let (_, ds11) := back ds10
++  let f1 := debug_struct_back ds11
++  _root_.Aeneas.Std.Result.ok (r, f1)
++
++/-- Trait implementation: [fmt_debug_struct::{core::fmt::Debug for fmt_debug_struct::WithFailing}]
++    Source: 'tests/src/fmt-debug-struct.rs', lines 77:0-85:1 -/
++@[reducible]
++def WithFailing.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.fmt_debug_struct.WithFailing := {
++  fmt := _root_.fmt_debug_struct.WithFailing.Insts.CoreFmtDebug.fmt
++}
++
++/-- [fmt_debug_struct::metadata]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 87:0-97:1
++    Visibility: public -/
++def metadata
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (label : _root_.String) (slot : _root_.Bool) (content : _root_.Bool) :
++  _root_.Aeneas.Std.Result _root_.fmt_debug_struct.Metadata
++  := do
++  if slot
++  then
++    let o ←
++      if content
++      then
++        _root_.Aeneas.Std.Result.ok (some ({ values, label } :
++          _root_.fmt_debug_struct.Storage))
++      else _root_.Aeneas.Std.Result.ok none
++    _root_.Aeneas.Std.Result.ok { storage := (some { storage := o }) }
++  else _root_.Aeneas.Std.Result.ok { storage := none }
++
++/-- [fmt_debug_struct::render]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 99:0-101:1
++    Visibility: public -/
++def render
++  (m : _root_.fmt_debug_struct.Metadata) :
++  _root_.Aeneas.Std.Result _root_.String
++  := do
++  let a ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.fmt_debug_struct.Metadata.Insts.CoreFmtDebug) m
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 2#usize [ 192#u8, 0#u8 ])
++      (_root_.Aeneas.Std.Array.make 1#usize [ a ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a1
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [fmt_debug_struct::render_pretty]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 103:0-105:1
++    Visibility: public -/
++def render_pretty
++  (m : _root_.fmt_debug_struct.Metadata) :
++  _root_.Aeneas.Std.Result _root_.String
++  := do
++  let a ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.fmt_debug_struct.Metadata.Insts.CoreFmtDebug) m
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 6#usize [
++        193#u8, 32#u8, 0#u8, 128#u8, 96#u8, 0#u8
++        ]) (_root_.Aeneas.Std.Array.make 1#usize [ a ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a1
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [fmt_debug_struct::render_pair]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 107:0-109:1
++    Visibility: public -/
++def render_pair
++  (p : _root_.fmt_debug_struct.Pair) (pretty : _root_.Bool) :
++  _root_.Aeneas.Std.Result _root_.String
++  := do
++  if pretty
++  then
++    let a ←
++      _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++        (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.fmt_debug_struct.Pair.Insts.CoreFmtDebug) p
++    let a1 ←
++      _root_.Aeneas.Std.core.fmt.Arguments.new
++        (_root_.Aeneas.Std.Array.make 6#usize [
++          193#u8, 32#u8, 0#u8, 128#u8, 96#u8, 0#u8
++          ]) (_root_.Aeneas.Std.Array.make 1#usize [ a ])
++    let s ← _root_.Aeneas.Std.alloc.fmt.format a1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++  else
++    let a ←
++      _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++        (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.fmt_debug_struct.Pair.Insts.CoreFmtDebug) p
++    let a1 ←
++      _root_.Aeneas.Std.core.fmt.Arguments.new
++        (_root_.Aeneas.Std.Array.make 2#usize [ 192#u8, 0#u8 ])
++        (_root_.Aeneas.Std.Array.make 1#usize [ a ])
++    let s ← _root_.Aeneas.Std.alloc.fmt.format a1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [fmt_debug_struct::render_empty]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 111:0-113:1
++    Visibility: public -/
++def render_empty
++  (pretty : _root_.Bool) : _root_.Aeneas.Std.Result _root_.String := do
++  if pretty
++  then
++    let a ←
++      _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++        _root_.fmt_debug_struct.Empty.Insts.CoreFmtDebug ()
++    let a1 ←
++      _root_.Aeneas.Std.core.fmt.Arguments.new
++        (_root_.Aeneas.Std.Array.make 6#usize [
++          193#u8, 32#u8, 0#u8, 128#u8, 96#u8, 0#u8
++          ]) (_root_.Aeneas.Std.Array.make 1#usize [ a ])
++    let s ← _root_.Aeneas.Std.alloc.fmt.format a1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++  else
++    let a ←
++      _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++        _root_.fmt_debug_struct.Empty.Insts.CoreFmtDebug ()
++    let a1 ←
++      _root_.Aeneas.Std.core.fmt.Arguments.new
++        (_root_.Aeneas.Std.Array.make 2#usize [ 192#u8, 0#u8 ])
++        (_root_.Aeneas.Std.Array.make 1#usize [ a ])
++    let s ← _root_.Aeneas.Std.alloc.fmt.format a1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [fmt_debug_struct::try_render]:
++    Source: 'tests/src/fmt-debug-struct.rs', lines 116:0-118:1
++    Visibility: public -/
++def try_render
++  (out : _root_.String) (w : _root_.fmt_debug_struct.WithFailing)
++  (pretty : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.String)
++  := do
++  if pretty
++  then
++    let a ←
++      _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++        (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.fmt_debug_struct.WithFailing.Insts.CoreFmtDebug) w
++    let a1 ←
++      _root_.Aeneas.Std.core.fmt.Arguments.new
++        (_root_.Aeneas.Std.Array.make 10#usize [
++          1#u8, 60#u8, 193#u8, 32#u8, 0#u8, 128#u8, 96#u8, 1#u8, 62#u8, 0#u8
++          ]) (_root_.Aeneas.Std.Array.make 1#usize [ a ])
++    let (r, out1) ← _root_.Aeneas.Std.alloc.string.WriteString.write_fmt out a1
++    let b ← _root_.fmt_debug_struct.core.result.Result.is_ok r
++    _root_.Aeneas.Std.Result.ok (b, out1)
++  else
++    let a ←
++      _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++        (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.fmt_debug_struct.WithFailing.Insts.CoreFmtDebug) w
++    let a1 ←
++      _root_.Aeneas.Std.core.fmt.Arguments.new
++        (_root_.Aeneas.Std.Array.make 6#usize [
++          1#u8, 60#u8, 192#u8, 1#u8, 62#u8, 0#u8
++          ]) (_root_.Aeneas.Std.Array.make 1#usize [ a ])
++    let (r, out1) ← _root_.Aeneas.Std.alloc.string.WriteString.write_fmt out a1
++    let b ← _root_.fmt_debug_struct.core.result.Result.is_ok r
++    _root_.Aeneas.Std.Result.ok (b, out1)
++
++end fmt_debug_struct
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 4d043f2..0a48747 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -238,3 +238,4 @@ package «tests» {}
+ @[default_target] lean_lib FmtLowerExp
+ @[default_target] lean_lib SliceRposition
+ @[default_target] lean_lib LoopOptionTupleLoan
++@[default_target] lean_lib FmtDebugStruct
+diff --git a/tests/src/fmt-debug-struct-named.lean.out b/tests/src/fmt-debug-struct-named.lean.out
+new file mode 100644
+index 0000000..c8cc1ca
+--- /dev/null
++++ b/tests/src/fmt-debug-struct-named.lean.out
+@@ -0,0 +1,5 @@
++[[92mInfo[39m ] Imported: tests/llbc/fmt_debug_struct_named.llbc
++[[91mError[39m] Ambiguous current payloads for a nested reborrow
++Source: 'tests/src/fmt-debug-struct-named.rs', lines 16:4-21:5
++Compiler source: symbolic/SymbolicToPureValues.ml, line 831
++
+diff --git a/tests/src/fmt-debug-struct-named.rs b/tests/src/fmt-debug-struct-named.rs
+new file mode 100644
+index 0000000..6610d23
+--- /dev/null
++++ b/tests/src/fmt-debug-struct-named.rs
+@@ -0,0 +1,26 @@
++//@ [lean] known-failure
++//@ [!lean] skip
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The `DebugStruct` builder in a named local, its fields added by separate statements (the
++//! `&mut Self` which `field` returns is dropped each time). The production code chains the calls
++//! (`fmt-debug-struct.rs`); this form is rejected with a diagnostic instead of being extracted.
++use std::fmt;
++
++pub struct Named {
++    pub a: u8,
++    pub b: u8,
++}
++
++impl fmt::Debug for Named {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let mut builder = f.debug_struct("Named");
++        builder.field("a", &self.a);
++        builder.field("b", &self.b);
++        builder.finish()
++    }
++}
++
++pub fn render(n: &Named) -> String {
++    format!("{n:?}")
++}
+diff --git a/tests/src/fmt-debug-struct.rs b/tests/src/fmt-debug-struct.rs
+new file mode 100644
+index 0000000..e063d67
+--- /dev/null
++++ b/tests/src/fmt-debug-struct.rs
+@@ -0,0 +1,152 @@
++//@ [!lean] skip
++//@ [lean] subdir=FmtDebugStruct
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option} --include core::option::{core::ops::try_trait::Try} --include core::option::{core::ops::try_trait::FromResidual} --include core::result::{core::result::Result}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The `DebugStruct` builder (`Formatter::debug_struct`, `field`, `finish`) as chelis-deep
++//! `annotations.rs` uses it for `Metadata`: calls chained on the builder which `field` returns,
++//! compact and pretty (`{:#?}`, nested through the pad adapter), without fields, and with a field
++//! whose
++//! `Debug` fails (the failure is the result, the text written before it stays, the later fields
++//! and the closing brace are not written). FmtDebugStruct/Checks.lean compares the model with the
++//! native results asserted in the native test module.
++use std::fmt::{self, Write as _};
++
++#[derive(Debug)]
++pub struct Storage {
++    pub values: Vec<u32>,
++    pub label: String,
++}
++
++pub struct Slot {
++    pub storage: Option<Storage>,
++}
++
++pub struct Metadata {
++    pub storage: Option<Box<Slot>>,
++}
++
++impl Metadata {
++    fn content(&self) -> Option<&Storage> {
++        self.storage.as_ref()?.storage.as_ref()
++    }
++}
++
++/// chelis-deep `annotations.rs`: the annotation content only.
++impl fmt::Debug for Metadata {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("Metadata")
++            .field("storage", &self.content())
++            .finish()
++    }
++}
++
++/// Two chained fields, the second one a `Metadata` (nested builders).
++pub struct Pair {
++    pub left: i32,
++    pub right: Metadata,
++}
++
++impl fmt::Debug for Pair {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("Pair").field("left", &self.left).field("right", &self.right).finish()
++    }
++}
++
++pub struct Empty;
++
++impl fmt::Debug for Empty {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("Empty").finish()
++    }
++}
++
++/// A value whose `Debug` writes a prefix, then fails.
++pub struct Failing;
++
++impl fmt::Debug for Failing {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str("bad")?;
++        Err(fmt::Error)
++    }
++}
++
++pub struct WithFailing {
++    pub first: u8,
++}
++
++impl fmt::Debug for WithFailing {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("W")
++            .field("first", &self.first)
++            .field("bad", &Failing)
++            .field("last", &3u8)
++            .finish()
++    }
++}
++
++pub fn metadata(values: Vec<u32>, label: String, slot: bool, content: bool) -> Metadata {
++    Metadata {
++        storage: if slot {
++            Some(Box::new(Slot {
++                storage: if content { Some(Storage { values, label }) } else { None },
++            }))
++        } else {
++            None
++        },
++    }
++}
++
++pub fn render(m: &Metadata) -> String {
++    format!("{m:?}")
++}
++
++pub fn render_pretty(m: &Metadata) -> String {
++    format!("{m:#?}")
++}
++
++pub fn render_pair(p: &Pair, pretty: bool) -> String {
++    if pretty { format!("{p:#?}") } else { format!("{p:?}") }
++}
++
++pub fn render_empty(pretty: bool) -> String {
++    if pretty { format!("{:#?}", Empty) } else { format!("{:?}", Empty) }
++}
++
++/// The status of `write!` and the text written into a caller's string.
++pub fn try_render(out: &mut String, w: &WithFailing, pretty: bool) -> bool {
++    if pretty { write!(out, "<{w:#?}>").is_ok() } else { write!(out, "<{w:?}>").is_ok() }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn debug_struct() {
++        let full = metadata(vec![1, 2], "x".to_string(), true, true);
++        assert_eq!(render(&full), "Metadata { storage: Some(Storage { values: [1, 2], label: \"x\" }) }");
++        assert_eq!(render(&metadata(vec![], String::new(), true, false)), "Metadata { storage: None }");
++        assert_eq!(render(&metadata(vec![], String::new(), false, true)), "Metadata { storage: None }");
++        assert_eq!(
++            render_pretty(&full),
++            "Metadata {\n    storage: Some(\n        Storage {\n            values: [\n                1,\n                2,\n            ],\n            label: \"x\",\n        },\n    ),\n}"
++        );
++        let pair = Pair { left: -7, right: metadata(vec![3], "y".to_string(), true, true) };
++        assert_eq!(
++            render_pair(&pair, false),
++            "Pair { left: -7, right: Metadata { storage: Some(Storage { values: [3], label: \"y\" }) } }"
++        );
++        assert_eq!(
++            render_pair(&pair, true),
++            "Pair {\n    left: -7,\n    right: Metadata {\n        storage: Some(\n            Storage {\n                values: [\n                    3,\n                ],\n                label: \"y\",\n            },\n        ),\n    },\n}"
++        );
++        assert_eq!(render_empty(false), "Empty");
++        assert_eq!(render_empty(true), "Empty");
++        let mut out = String::from("pre");
++        assert!(!try_render(&mut out, &WithFailing { first: 9 }, false));
++        assert_eq!(out, "pre<W { first: 9, bad: bad");
++        let mut out = String::new();
++        assert!(!try_render(&mut out, &WithFailing { first: 0 }, true));
++        assert_eq!(out, "<W {\n    first: 0,\n    bad: bad");
++    }
++}

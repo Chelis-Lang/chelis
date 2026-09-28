@@ -1,0 +1,760 @@
+# aeneas integration step 150 after cba11f3beb: commit 081989c9a1d3bb61fc6411ddff8817b337d28e70
+# first parent 809c8c21f6034025fc99749f5965d1741a94594d, merged 6ca9ca5524f9c0374ab116c05a818c4563717df3
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/explicit-impl-params' (builtin trait impls bind explicitly the parameters Aeneas prints explicitly: DerefVec/DerefMutVec, IndexArray/IndexMutArray, FromBTreeMapArray, ExtendBTreeMap, IndexBTreeMap; checker script; the eval-root model elaborates)
+
+diff --git a/backends/lean/Aeneas/Std/Array/ArraySlice.lean b/backends/lean/Aeneas/Std/Array/ArraySlice.lean
+index e8aac6a..e3c7513 100644
+--- a/backends/lean/Aeneas/Std/Array/ArraySlice.lean
++++ b/backends/lean/Aeneas/Std/Array/ArraySlice.lean
+@@ -98,17 +98,17 @@ def core.array.Array.index_mut
+   ok (s, fun o => Array.from_slice a (back o))
+ 
+ @[rust_trait_impl "core::ops::index::Index<[@T; @N], @I, @O>"]
+-def core.ops.index.IndexArray {T I Output : Type} {N : Usize}
++def core.ops.index.IndexArray {T I Output : Type} (N : Usize)
+   (inst : core.ops.index.Index (Slice T) I Output) :
+   core.ops.index.Index (Array T N) I Output := {
+   index := core.array.Array.index inst
+ }
+ 
+ @[rust_trait_impl "core::ops::index::IndexMut<[@T; @N], @I, @O>"]
+-def core.ops.index.IndexMutArray {T I Output : Type} {N : Usize}
++def core.ops.index.IndexMutArray {T I Output : Type} (N : Usize)
+   (inst : core.ops.index.IndexMut (Slice T) I Output) :
+   core.ops.index.IndexMut (Array T N) I Output := {
+-  indexInst := core.ops.index.IndexArray inst.indexInst
++  indexInst := core.ops.index.IndexArray N inst.indexInst
+   index_mut := core.array.Array.index_mut inst
+ }
+ 
+diff --git a/backends/lean/Aeneas/Std/BTreeMap.lean b/backends/lean/Aeneas/Std/BTreeMap.lean
+index 235c2bd..7b636a9 100644
+--- a/backends/lean/Aeneas/Std/BTreeMap.lean
++++ b/backends/lean/Aeneas/Std/BTreeMap.lean
+@@ -737,7 +737,7 @@ def FromBTreeMapArray.from_ {K V : Type} {N : Usize} (ord : core.cmp.Ord K)
+ end alloc.collections.btree.map
+ 
+ @[reducible, rust_trait_impl "core::convert::From<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, [(@K, @V); @N]>"]
+-def core.convert.FromBTreeMapArray {K V : Type} {N : Usize} (ord : core.cmp.Ord K) :
++def core.convert.FromBTreeMapArray {K : Type} (V : Type) (N : Usize) (ord : core.cmp.Ord K) :
+     core.convert.From (BTreeMap K V) (Array (K × V) N) := {
+   from_ := alloc.collections.btree.map.FromBTreeMapArray.from_ ord
+ }
+@@ -766,7 +766,7 @@ def core.iter.traits.collect.FromIteratorBTreeMap {K : Type} (V : Type) (ord : c
+ 
+ @[reducible, rust_trait_impl "core::iter::traits::collect::Extend<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V)>"
+   (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
+-def core.iter.traits.collect.ExtendBTreeMap {K V : Type} (ord : core.cmp.Ord K) :
++def core.iter.traits.collect.ExtendBTreeMap {K : Type} (V : Type) (ord : core.cmp.Ord K) :
+     core.iter.traits.collect.Extend (alloc.collections.btree.map.BTreeMap K V) (K × V) := {
+   extend := alloc.collections.btree.map.ExtendBTreeMap.extend ord
+ }
+@@ -786,7 +786,7 @@ def alloc.collections.btree.map.IndexBTreeMap.index {K Q V : Type}
+ 
+ @[reducible, rust_trait_impl "core::ops::index::Index<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, &'0 @Q, @V>"
+   (keepParams := [true, true, true, false]) (keepTraitClauses := [false, true, true, true])]
+-def core.ops.index.IndexBTreeMap {K Q V : Type}
++def core.ops.index.IndexBTreeMap {K Q : Type} (V : Type)
+     (borrow : core.borrow.Borrow K Q) (keyOrd : core.cmp.Ord K) (ord : core.cmp.Ord Q) :
+     core.ops.index.Index (alloc.collections.btree.map.BTreeMap K V) Q V := {
+   index := alloc.collections.btree.map.IndexBTreeMap.index borrow keyOrd ord
+diff --git a/backends/lean/Aeneas/Std/Vec.lean b/backends/lean/Aeneas/Std/Vec.lean
+index d3f25d1..e8c3a24 100644
+--- a/backends/lean/Aeneas/Std/Vec.lean
++++ b/backends/lean/Aeneas/Std/Vec.lean
+@@ -615,7 +615,7 @@ def alloc.vec.Vec.as_slice {T : Type} (v : alloc.vec.Vec T) : Result (Slice T) :
+   ok (alloc.vec.Vec.deref v)
+ 
+ @[reducible, rust_trait_impl "core::ops::deref::Deref<alloc::vec::Vec<@T>, [@T]>" (keepParams := [true, false])]
+-def core.ops.deref.DerefVec {T : Type} : core.ops.deref.Deref (alloc.vec.Vec T) (Slice T) := {
++def core.ops.deref.DerefVec (T : Type) : core.ops.deref.Deref (alloc.vec.Vec T) (Slice T) := {
+   deref := fun v => ok (alloc.vec.Vec.deref v)
+ }
+ 
+@@ -626,9 +626,9 @@ def alloc.vec.Vec.deref_mut {T : Type} (v :  alloc.vec.Vec T) :
+    (⟨ v.val, v.property ⟩, λ s => ⟨ s.val, s.property ⟩)
+ 
+ @[reducible, rust_trait_impl "core::ops::deref::DerefMut<alloc::vec::Vec<@T>, [@T]>" (keepParams := [true, false])]
+-def core.ops.deref.DerefMutVec {T : Type} :
++def core.ops.deref.DerefMutVec (T : Type) :
+   core.ops.deref.DerefMut (alloc.vec.Vec T) (Slice T):= {
+-  derefInst := core.ops.deref.DerefVec
++  derefInst := core.ops.deref.DerefVec T
+   deref_mut v := ok (alloc.vec.Vec.deref_mut v)
+ }
+ 
+diff --git a/scripts/check-builtin-impl-params.py b/scripts/check-builtin-impl-params.py
+new file mode 100755
+index 0000000..2a42225
+--- /dev/null
++++ b/scripts/check-builtin-impl-params.py
+@@ -0,0 +1,94 @@
++#!/usr/bin/env python3
++"""Audit: does every `rust_trait_impl` definition of the Aeneas Lean library bind its type and const-generic
++parameters with the explicitness Aeneas prints them with?
++
++Aeneas prints a trait impl reference with the impl's kept type/const-generic arguments that no trait clause
++determines (PureUtils.compute_explicit_info: a parameter occurring in a trait clause is implicit), then the kept
++trait clauses. So a library definition must bind as explicit `( : Type)` / `( : Usize)` exactly the parameters
++that occur in none of its instance binders (the kept clauses), and as implicit `{ }` the others.
++
++usage: scripts/check-builtin-impl-params.py [backends/lean dir] (default: the one of this repository)
++Prints one line per mismatch (file:line name param lean=implicit|explicit aeneas=...), then the entries with
++keepTraitClauses (a parameter occurring only in a dropped clause is implicit for Aeneas although no binder of the
++definition determines it: listed for review), and a summary. Exit status 1 if any mismatch.
++"""
++import glob
++import os
++import re
++import sys
++
++OPEN = {"(": ")", "{": "}", "[": "]", "⦃": "⦄"}
++
++# Parameters of a pattern which are not parameters of the Rust impls it matches (so Aeneas never prints them):
++# `Default for [T; N]` is one impl per literal length (see the remark on core.default.DefaultArray).
++NOT_RUST_PARAMS = {("core.default.DefaultArray", "N")}
++
++
++def header_binders(text, start):
++    """The binders of the definition header starting at `start` (just after the name), up to the top-level ':'."""
++    i, binders = start, []
++    while i < len(text):
++        c = text[i]
++        if c in OPEN:
++            depth, j = 1, i + 1
++            while depth:
++                if text[j] == c:
++                    depth += 1
++                elif text[j] == OPEN[c]:
++                    depth -= 1
++                j += 1
++            binders.append((c, text[i + 1:j - 1]))
++            i = j
++        elif c == ":" or text.startswith(":=", i):
++            return binders
++        else:
++            i += 1
++    return binders
++
++
++def main():
++    root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backends", "lean")
++    mismatches, reviews, count = [], [], 0
++    for path in sorted(glob.glob(f"{root}/Aeneas/**/*.lean", recursive=True)):
++        text = open(path).read()
++        for m in re.finditer(r'rust_trait_impl\s+"([^"]*)"', text):
++            # the attributes may contain brackets (keepParams := [..]): they end at the next declaration
++            d = re.compile(r"^\s*(?:noncomputable\s+|private\s+|protected\s+)*(def|instance|abbrev)\s+(\S+)", re.M)
++            dm = d.search(text, m.end())
++            if dm is None:
++                continue
++            attrs = text[m.end():dm.start()]
++            name = dm.group(2)
++            line = text.count("\n", 0, dm.start()) + 1
++            count += 1
++            binders = header_binders(text, dm.end())
++            params, clauses = [], []
++            for kind, body in binders:
++                if ":" not in body:
++                    continue
++                names, ty = body.split(":", 1)
++                ty = ty.strip()
++                if kind in "({" and re.fullmatch(r"Type(\s+[a-z_0-9]+|\*)?|Usize", ty):
++                    params += [(n, kind) for n in names.split()]
++                else:
++                    clauses.append(ty)
++            for n, kind in params:
++                if (name, n) in NOT_RUST_PARAMS:
++                    continue
++                in_clause = any(re.search(r"(?<![\w.])" + re.escape(n) + r"(?![\w.])", t) for t in clauses)
++                lean = "explicit" if kind == "(" else "implicit"
++                aeneas = "implicit" if in_clause else "explicit"
++                if lean != aeneas:
++                    mismatches.append(f"{path}:{line}: {name} {n}: lean={lean} aeneas={aeneas} [{m.group(1)}]")
++            if "keepTraitClauses" in attrs:
++                reviews.append(f"{path}:{line}: {name} [{m.group(1)}] {' '.join(attrs.split())[:160]}")
++    for x in mismatches:
++        print("MISMATCH", x)
++    for x in reviews:
++        print("REVIEW", x)
++    print(f"{count} rust_trait_impl definitions, {len(mismatches)} mismatches, {len(reviews)} with keepTraitClauses")
++    return 1 if mismatches else 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/lean/ExplicitImplParams.lean b/tests/lean/ExplicitImplParams.lean
+new file mode 100644
+index 0000000..a09bb26
+--- /dev/null
++++ b/tests/lean/ExplicitImplParams.lean
+@@ -0,0 +1 @@
++import ExplicitImplParams.Checks
+diff --git a/tests/lean/ExplicitImplParams/Checks.lean b/tests/lean/ExplicitImplParams/Checks.lean
+new file mode 100644
+index 0000000..bf62721
+--- /dev/null
++++ b/tests/lean/ExplicitImplParams/Checks.lean
+@@ -0,0 +1,64 @@
++import ExplicitImplParams.ExplicitImplParams
++
++/-! Evaluate the model of `tests/src/explicit-impl-params.rs` on the inputs of
++    its `native` test module and compare with the native results. Each function
++    passes a builtin trait impl as the instance of a generic function, with the
++    explicit arguments Aeneas prints for it. -/
++
++namespace explicit_impl_params.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++
++def vec {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec α := ⟨xs, h⟩
++def vals (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++def pairs (v : alloc.vec.Vec (U32 × U32)) : List (Nat × Nat) := v.val.map fun (a, b) => (a.val, b.val)
++def pair (p : U32 × U32) : Nat × Nat := (p.1.val, p.2.val)
++
++def map (kv : List (Nat × Nat)) : alloc.collections.btree.map.BTreeMap U32 U32 :=
++  ⟨kv.map fun (k, v) => (u k, u v)⟩
++def set (xs : List Nat) : alloc.collections.btree.set.BTreeSet U32 :=
++  ⟨⟨xs.map fun x => (u x, ())⟩⟩
++
++def arr4 (a b c d : Nat) : Array U32 4#usize := ⟨[u a, u b, u c, u d], by simp⟩
++def arr3 (a b c : Nat) : Array U32 3#usize := ⟨[u a, u b, u c], by simp⟩
++def arrPairs (a b c : Nat × Nat) : Array (U32 × U32) 3#usize :=
++  ⟨[(u a.1, u a.2), (u b.1, u b.2), (u c.1, u c.2)], by simp⟩
++
++def ok? {α β} (f : α → β) : Result α → Option β
++  | ok x => some (f x)
++  | _ => none
++
++-- vec_deref
++#guard ok? (·.val) (deref_vec (vec [])) == some 0
++#guard ok? (·.val) (deref_vec (vec [u 5, u 1, u 2])) == some 8
++#guard ok? vals (deref_mut_vec (vec [])) == some []
++#guard ok? vals (deref_mut_vec (vec [u 5, u 1])) == some [15, 1]
++#guard ok? vals (deref_mut_vec (vec [u 4294967295])) == some [9]
++
++-- array_index
++#guard ok? (·.val) (index_array (arr4 4 5 6 7) (us 0)) == some 4
++#guard ok? (·.val) (index_array (arr4 4 5 6 7) (us 3)) == some 7
++#guard ok? (fun (a : Array U32 3#usize) => a.val.map (·.val)) (index_mut_array (arr3 1 2 3) (us 1))
++  == some [1, 6, 3]
++#guard ok? (fun (a : Array U32 3#usize) => a.val.map (·.val)) (index_mut_array (arr3 1 2 3) (us 2))
++  == some [1, 2, 9]
++
++-- btree_map
++#guard ok? pairs (from_array (arrPairs (3, 30) (1, 10) (3, 31))) == some [(1, 10), (3, 31)]
++#guard ok? (·.val) (index_map (map [(1, 10), (2, 20)]) (u 2)) == some 20
++#guard ok? (Option.map pair) (first_of_map (map [(1, 10), (2, 20)])) == some (some (1, 10))
++#guard ok? (Option.map pair) (first_of_map (map [])) == some none
++#guard ok? (Option.map pair) (next_of_map_iter (map [(4, 40), (5, 50)])) == some (some (4, 40))
++#guard ok? (Option.map (·.val)) (next_of_values (map [(4, 40), (5, 50)])) == some (some 40)
++#guard ok? (Option.map (·.val)) (next_of_values (map [])) == some none
++
++-- others
++#guard ok? (·.val) (clone_arc (u 7)) == some 7
++#guard ok? (·.val) (clone_rc (u 8)) == some 8
++#guard ok? (Option.map (·.val)) (first_of_set (set [1, 2, 3])) == some (some 1)
++#guard ok? (Option.map (·.val)) (first_of_set (set [])) == some none
++#guard ok? (Option.map (·.val)) (next_of_set_iter (set [4, 9])) == some (some 4)
++
++end explicit_impl_params.checks
+diff --git a/tests/lean/ExplicitImplParams/ExplicitImplParams.lean b/tests/lean/ExplicitImplParams/ExplicitImplParams.lean
+new file mode 100644
+index 0000000..ebf9055
+--- /dev/null
++++ b/tests/lean/ExplicitImplParams/ExplicitImplParams.lean
+@@ -0,0 +1,308 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [explicit_impl_params]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace explicit_impl_params
++
++/-- [explicit_impl_params::via_deref]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 23:0-26:1 -/
++def via_deref
++  {D : Type} (coreopsderefDerefDSliceU32Inst :
++  _root_.Aeneas.Std.core.ops.deref.Deref D (_root_.Aeneas.Std.Slice
++  _root_.Aeneas.Std.U32)) (d : D) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let s ← coreopsderefDerefDSliceU32Inst.deref d
++  let b ← _root_.Aeneas.Std.core.slice.Slice.is_empty s
++  if b
++  then _root_.Aeneas.Std.Result.ok 0#u32
++  else
++    let i ← _root_.Aeneas.Std.Slice.index_usize s 0#usize
++    let i1 := _root_.Aeneas.Std.Slice.len s
++    let i2 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++    i + i2
++
++/-- [explicit_impl_params::via_deref_mut]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 28:0-33:1 -/
++def via_deref_mut
++  {D : Type} (coreopsderefDerefMutDSliceU32Inst :
++  _root_.Aeneas.Std.core.ops.deref.DerefMut D (_root_.Aeneas.Std.Slice
++  _root_.Aeneas.Std.U32)) (d : D) :
++  _root_.Aeneas.Std.Result D
++  := do
++  let (s, deref_mut_back) ← coreopsderefDerefMutDSliceU32Inst.deref_mut d
++  let b ← _root_.Aeneas.Std.core.slice.Slice.is_empty s
++  if b
++  then _root_.Aeneas.Std.Result.ok (deref_mut_back s)
++  else
++    let i ← _root_.Aeneas.Std.Slice.index_usize s 0#usize
++    let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add i 10#u32)
++    let s1 ← _root_.Aeneas.Std.Slice.update s 0#usize i1
++    _root_.Aeneas.Std.Result.ok (deref_mut_back s1)
++
++/-- [explicit_impl_params::via_index]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 35:0-37:1 -/
++def via_index
++  {C : Type} (coreopsindexIndexCUsizeU32Inst :
++  _root_.Aeneas.Std.core.ops.index.Index C _root_.Aeneas.Std.Usize
++  _root_.Aeneas.Std.U32) (c : C) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  coreopsindexIndexCUsizeU32Inst.index c i
++
++/-- [explicit_impl_params::via_index_mut]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 39:0-41:1 -/
++def via_index_mut
++  {C : Type} (coreopsindexIndexMutCUsizeU32Inst :
++  _root_.Aeneas.Std.core.ops.index.IndexMut C _root_.Aeneas.Std.Usize
++  _root_.Aeneas.Std.U32) (c : C) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result C
++  := do
++  let i1 ← coreopsindexIndexMutCUsizeU32Inst.indexInst.index c i
++  let i2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul i1 3#u32)
++  let (_, index_mut_back) ← coreopsindexIndexMutCUsizeU32Inst.index_mut c i
++  _root_.Aeneas.Std.Result.ok (index_mut_back i2)
++
++/-- [explicit_impl_params::via_from]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 43:0-45:1 -/
++def via_from
++  {T : Type} {U : Type} (coreconvertFromInst :
++  _root_.Aeneas.Std.core.convert.From U T) (t : T) :
++  _root_.Aeneas.Std.Result U
++  := do
++  coreconvertFromInst.from_ t
++
++/-- [explicit_impl_params::via_index_key]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 47:0-49:1 -/
++def via_index_key
++  {C : Type} (coreopsindexIndexCSharedAU32U32Inst :
++  _root_.Aeneas.Std.core.ops.index.Index C _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (c : C) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  coreopsindexIndexCSharedAU32U32Inst.index c k
++
++/-- [explicit_impl_params::via_clone]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 51:0-53:1 -/
++def via_clone
++  {C : Type} (corecloneCloneInst : _root_.Aeneas.Std.core.clone.Clone C)
++  (c : C) :
++  _root_.Aeneas.Std.Result C
++  := do
++  corecloneCloneInst.clone c
++
++/-- [explicit_impl_params::via_next]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 55:0-57:1 -/
++def via_next
++  {I : Type} {Clause0_Item : Type} (coreitertraitsiteratorIteratorInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator I Clause0_Item) 
++  (it : I) :
++  _root_.Aeneas.Std.Result (_root_.Option Clause0_Item)
++  := do
++  let (model_state, _) ← coreitertraitsiteratorIteratorInst.next it
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- [explicit_impl_params::via_into_iter]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 59:0-61:1 -/
++def via_into_iter
++  {C : Type} {Clause0_Item : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator C Clause0_Item
++  Clause0_IntoIter) (c : C) :
++  _root_.Aeneas.Std.Result (_root_.Option Clause0_Item)
++  := do
++  let (model_state, _) ← coreitertraitscollectIntoIteratorInst.into_iter c
++  let (model_state1, _) ←
++    coreitertraitscollectIntoIteratorInst.iteratorInst.next model_state
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [explicit_impl_params::deref_vec]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 63:0-65:1
++    Visibility: public -/
++def deref_vec
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.explicit_impl_params.via_deref
++    (_root_.Aeneas.Std.core.ops.deref.DerefVec _root_.Aeneas.Std.U32) v
++
++/-- [explicit_impl_params::deref_mut_vec]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 67:0-70:1
++    Visibility: public -/
++def deref_mut_vec
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  _root_.explicit_impl_params.via_deref_mut
++    (_root_.Aeneas.Std.core.ops.deref.DerefMutVec _root_.Aeneas.Std.U32) v
++
++/-- [explicit_impl_params::index_array]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 72:0-74:1
++    Visibility: public -/
++def index_array
++  (a : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 4#usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.explicit_impl_params.via_index
++    (_root_.Aeneas.Std.core.ops.index.IndexArray 4#usize
++    (_root_.Aeneas.Std.core.ops.index.IndexSlice
++    (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++    _root_.Aeneas.Std.U32))) a i
++
++/-- [explicit_impl_params::index_mut_array]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 76:0-79:1
++    Visibility: public -/
++def index_mut_array
++  (a : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++    3#usize)
++  := do
++  _root_.explicit_impl_params.via_index_mut
++    (_root_.Aeneas.Std.core.ops.index.IndexMutArray 3#usize
++    (_root_.Aeneas.Std.core.ops.index.IndexMutSlice
++    (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++    _root_.Aeneas.Std.U32))) a i
++
++/-- [explicit_impl_params::from_array]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 81:0-84:1
++    Visibility: public -/
++def from_array
++  (a : _root_.Aeneas.Std.Array (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  3#usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  let m ←
++    _root_.explicit_impl_params.via_from
++      (_root_.Aeneas.Std.core.convert.FromBTreeMapArray _root_.Aeneas.Std.U32
++      3#usize _root_.Aeneas.Std.core.cmp.OrdU32) a
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorBTreeMap.into_iter
++      m
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeIntoIter
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) model_state
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [explicit_impl_params::index_map]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 86:0-88:1
++    Visibility: public -/
++def index_map
++  (m : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.explicit_impl_params.via_index_key
++    (_root_.Aeneas.Std.core.ops.index.IndexBTreeMap _root_.Aeneas.Std.U32
++    (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.core.cmp.OrdU32 _root_.Aeneas.Std.core.cmp.OrdU32) m k
++
++/-- [explicit_impl_params::clone_arc]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 90:0-93:1
++    Visibility: public -/
++def clone_arc
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let a ← lift (_root_.Aeneas.Std.alloc.sync.Arc.new x)
++  let a1 ←
++    _root_.explicit_impl_params.via_clone
++      (_root_.Aeneas.Std.core.clone.CloneArc _root_.Aeneas.Std.U32) a
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.sync.DerefArc.deref a1)
++
++/-- [explicit_impl_params::clone_rc]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 95:0-98:1
++    Visibility: public -/
++def clone_rc
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let a ← lift (_root_.Aeneas.Std.alloc.rc.Rc.new x)
++  let r ←
++    _root_.explicit_impl_params.via_clone (_root_.Aeneas.Std.core.clone.CloneRc
++      _root_.Aeneas.Std.U32) a
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.rc.DerefRc.deref r)
++
++/-- [explicit_impl_params::first_of_map]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 100:0-102:1
++    Visibility: public -/
++def first_of_map
++  (m : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32))
++  := do
++  _root_.explicit_impl_params.via_into_iter
++    (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) m
++
++/-- [explicit_impl_params::next_of_map_iter]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 104:0-106:1
++    Visibility: public -/
++def next_of_map_iter
++  (m : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorBTreeMap.into_iter
++      m
++  _root_.explicit_impl_params.via_next
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeIntoIter
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) model_state
++
++/-- [explicit_impl_params::next_of_values]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 108:0-110:1
++    Visibility: public -/
++def next_of_values
++  (m : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let iv ← _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.into_values m
++  _root_.explicit_impl_params.via_next
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeIntoValues
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) iv
++
++/-- [explicit_impl_params::first_of_set]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 112:0-114:1
++    Visibility: public -/
++def first_of_set
++  (s : _root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  _root_.explicit_impl_params.via_into_iter
++    (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeSet
++    _root_.Aeneas.Std.U32) s
++
++/-- [explicit_impl_params::next_of_set_iter]:
++    Source: 'tests/src/explicit-impl-params.rs', lines 116:0-118:1
++    Visibility: public -/
++def next_of_set_iter
++  (s : _root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.collections.btree.set.IntoIteratorBTreeSet.into_iter
++      s
++  _root_.explicit_impl_params.via_next
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeSetIntoIter
++    _root_.Aeneas.Std.U32) model_state
++
++end explicit_impl_params
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index da2a440..3c786e1 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -98,6 +98,7 @@ package «tests» {}
+ @[default_target] lean_lib DropBug
+ @[default_target] lean_lib Dyn
+ @[default_target] lean_lib DynamicSize
++@[default_target] lean_lib ExplicitImplParams
+ @[default_target] lean_lib FnOnceMutArgMutArg
+ @[default_target] lean_lib FromIterLoopState
+ @[default_target] lean_lib FromTo
+diff --git a/tests/src/explicit-impl-params.rs b/tests/src/explicit-impl-params.rs
+new file mode 100644
+index 0000000..78b40e4
+--- /dev/null
++++ b/tests/src/explicit-impl-params.rs
+@@ -0,0 +1,164 @@
++//@ [!lean] skip
++//@ [lean] subdir=ExplicitImplParams
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Builtin trait impls passed as trait instances. Aeneas prints the type and
++//! const-generic arguments of an impl which no trait clause of the impl
++//! determines explicitly (`PureUtils.compute_explicit_info`), so the Lean
++//! definitions of the models must bind exactly those explicitly: `T` of
++//! `Deref`/`DerefMut for Vec<T>`, `N` of `Index`/`IndexMut for [T; N]`, `V`
++//! and `N` of `From<[(K, V); N]> for BTreeMap<K, V>`, `V` of
++//! `Extend<(K, V)>`/`Index<&Q> for BTreeMap<K, V>` (the shape of
++//! `Option<Vec<NonZero<usize>>>::as_deref` in `chelis_ir::eval`). The other
++//! functions exercise impls whose explicit parameters appear only in clauses
++//! the model drops (`keepTraitClauses`). `Extend` instances cannot be
++//! exercised: a generic `Extend` dictionary is rejected by the collection
++//! contracts (E_UNSUPPORTED_COLLECTION).
++
++use std::collections::{BTreeMap, BTreeSet};
++use std::ops::{Deref, DerefMut, Index, IndexMut};
++use std::rc::Rc;
++use std::sync::Arc;
++
++fn via_deref<D: Deref<Target = [u32]>>(d: &D) -> u32 {
++    let s = d.deref();
++    if s.is_empty() { 0 } else { s[0] + s.len() as u32 }
++}
++
++fn via_deref_mut<D: DerefMut<Target = [u32]>>(d: &mut D) {
++    let s = d.deref_mut();
++    if !s.is_empty() {
++        s[0] = s[0].wrapping_add(10);
++    }
++}
++
++fn via_index<C: Index<usize, Output = u32>>(c: &C, i: usize) -> u32 {
++    c[i]
++}
++
++fn via_index_mut<C: IndexMut<usize, Output = u32>>(c: &mut C, i: usize) {
++    c[i] = c[i].wrapping_mul(3);
++}
++
++fn via_from<T, U: From<T>>(t: T) -> U {
++    U::from(t)
++}
++
++fn via_index_key<'a, C: Index<&'a u32, Output = u32>>(c: &C, k: &'a u32) -> u32 {
++    c[k]
++}
++
++fn via_clone<C: Clone>(c: &C) -> C {
++    c.clone()
++}
++
++fn via_next<I: Iterator>(mut it: I) -> Option<I::Item> {
++    it.next()
++}
++
++fn via_into_iter<C: IntoIterator>(c: C) -> Option<C::Item> {
++    c.into_iter().next()
++}
++
++pub fn deref_vec(v: Vec<u32>) -> u32 {
++    via_deref(&v)
++}
++
++pub fn deref_mut_vec(mut v: Vec<u32>) -> Vec<u32> {
++    via_deref_mut(&mut v);
++    v
++}
++
++pub fn index_array(a: [u32; 4], i: usize) -> u32 {
++    via_index(&a, i)
++}
++
++pub fn index_mut_array(mut a: [u32; 3], i: usize) -> [u32; 3] {
++    via_index_mut(&mut a, i);
++    a
++}
++
++pub fn from_array(a: [(u32, u32); 3]) -> Vec<(u32, u32)> {
++    let m: BTreeMap<u32, u32> = via_from(a);
++    m.into_iter().collect()
++}
++
++pub fn index_map(m: BTreeMap<u32, u32>, k: u32) -> u32 {
++    via_index_key(&m, &k)
++}
++
++pub fn clone_arc(x: u32) -> u32 {
++    let a = Arc::new(x);
++    *via_clone(&a)
++}
++
++pub fn clone_rc(x: u32) -> u32 {
++    let a = Rc::new(x);
++    *via_clone(&a)
++}
++
++pub fn first_of_map(m: BTreeMap<u32, u32>) -> Option<(u32, u32)> {
++    via_into_iter(m)
++}
++
++pub fn next_of_map_iter(m: BTreeMap<u32, u32>) -> Option<(u32, u32)> {
++    via_next(m.into_iter())
++}
++
++pub fn next_of_values(m: BTreeMap<u32, u32>) -> Option<u32> {
++    via_next(m.into_values())
++}
++
++pub fn first_of_set(s: BTreeSet<u32>) -> Option<u32> {
++    via_into_iter(s)
++}
++
++pub fn next_of_set_iter(s: BTreeSet<u32>) -> Option<u32> {
++    via_next(s.into_iter())
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn map(kv: &[(u32, u32)]) -> BTreeMap<u32, u32> {
++        kv.iter().copied().collect()
++    }
++
++    #[test]
++    fn vec_deref() {
++        assert_eq!(deref_vec(vec![]), 0);
++        assert_eq!(deref_vec(vec![5, 1, 2]), 8);
++        assert_eq!(deref_mut_vec(vec![]), Vec::<u32>::new());
++        assert_eq!(deref_mut_vec(vec![5, 1]), vec![15, 1]);
++        assert_eq!(deref_mut_vec(vec![u32::MAX]), vec![9]);
++    }
++
++    #[test]
++    fn array_index() {
++        assert_eq!(index_array([4, 5, 6, 7], 0), 4);
++        assert_eq!(index_array([4, 5, 6, 7], 3), 7);
++        assert_eq!(index_mut_array([1, 2, 3], 1), [1, 6, 3]);
++        assert_eq!(index_mut_array([1, 2, 3], 2), [1, 2, 9]);
++    }
++
++    #[test]
++    fn btree_map() {
++        assert_eq!(from_array([(3, 30), (1, 10), (3, 31)]), vec![(1, 10), (3, 31)]);
++        assert_eq!(index_map(map(&[(1, 10), (2, 20)]), 2), 20);
++        assert_eq!(first_of_map(map(&[(2, 20), (1, 10)])), Some((1, 10)));
++        assert_eq!(first_of_map(map(&[])), None);
++        assert_eq!(next_of_map_iter(map(&[(5, 50), (4, 40)])), Some((4, 40)));
++        assert_eq!(next_of_values(map(&[(5, 50), (4, 40)])), Some(40));
++        assert_eq!(next_of_values(map(&[])), None);
++    }
++
++    #[test]
++    fn others() {
++        assert_eq!(clone_arc(7), 7);
++        assert_eq!(clone_rc(8), 8);
++        assert_eq!(first_of_set([3, 1, 2].into_iter().collect()), Some(1));
++        assert_eq!(first_of_set(BTreeSet::new()), None);
++        assert_eq!(next_of_set_iter([9, 4].into_iter().collect()), Some(4));
++    }
++}
