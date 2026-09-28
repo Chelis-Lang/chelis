@@ -1698,8 +1698,8 @@ def cross_package_runtime(package: Path, destination: Path, replacement: Path) -
 
 
 def distribution_row(runner: EvidenceRun, context: dict[str, Any]) -> dict[str, Any]:
-    cli_package = nix_output(runner, context, ".#packages.chelis")
-    runtime_package = nix_output(runner, context, ".#packages.chelis-runtime")
+    cli_package = nix_output(runner, context, ".#chelis")
+    runtime_package = nix_output(runner, context, ".#chelis-runtime")
     package_cli = cli_package / "bin" / ("chelis.exe" if os.name == "nt" else "chelis")
     if package_cli.is_symlink():
         raise OracleFailure(f"Nix compiler package CLI is a symlink: {package_cli}")
