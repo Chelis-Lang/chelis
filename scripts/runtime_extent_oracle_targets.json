@@ -1360,6 +1360,63 @@
         "symbolic_tensor_capture_retains_its_axes",
         "tensor_capture_shape_disagreement_keeps_the_entry_guard"
       ]
+    },
+    {
+      "phase": "b",
+      "id": "grad_runtime_builders",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2419_range_tensor_ad.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "callbacks_with_observable_checks_require_ordered_execution",
+        "captured_cotangent_keeps_the_false_forward_range_claim",
+        "composed_generic_basis_has_the_exact_jacobian_row",
+        "empty_runtime_basis_has_an_empty_cotangent",
+        "independent_builder_invocations_keep_distinct_runtime_extents",
+        "literal_basis_remains_the_exact_gradient_control",
+        "range_map_basis_has_the_exact_isolated_gradient",
+        "represented_list_aliases_and_nested_maps_keep_their_source",
+        "runtime_builder_captures_receive_their_exact_cotangent",
+        "runtime_builder_handles_a_different_extent_and_nonzero_selected_index"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "runtime_iota",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/issue_570_runtime_iota.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "anonymous_batch_comparisons_keep_physical_input_authority",
+        "runtime_iota_inactive_scalar_arm_does_not_read_overflowing_endpoints",
+        "runtime_iota_keeps_exact_i64_values_and_independent_lengths",
+        "runtime_iota_rejects_a_false_result_extent_claim",
+        "runtime_iota_rejects_a_per_row_activation",
+        "runtime_iota_rejects_malformed_integer_sources",
+        "runtime_iota_rejects_missing_endpoints_and_wrong_result_dtype",
+        "runtime_iota_rejects_unrepresentable_length_before_allocation"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "runtime_iota_c",
+      "package": "chelis-backend-c",
+      "kind": "test",
+      "file": "crates/chelis-backend-c/tests/issue_570_runtime_iota.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "runtime_iota_native_exact_values_and_counts",
+        "runtime_iota_native_inactive_arm_does_not_read_overflowing_endpoints",
+        "runtime_iota_native_overflow_precedes_allocation"
+      ]
     }
   ]
 }

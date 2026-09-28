@@ -4120,6 +4120,49 @@ where
                     draw_keys(node, 2, &values)?,
                 )?
             }
+            RiscOp::Iota => {
+                let endpoint = |slot| {
+                    values[&node.inputs[slot]]
+                        .storage()
+                        .scalar_at(0)
+                        .as_i64_exact()
+                        .ok_or_else(|| "iota requires exact i64 scalar endpoints".to_string())
+                };
+                let start = endpoint(0)?;
+                let end = endpoint(1)?;
+                let count = if end <= start {
+                    0
+                } else {
+                    end.checked_sub(start).ok_or_else(|| {
+                        NumericTrap::Overflow {
+                            op: "range",
+                            prim: Prim::Int64,
+                        }
+                        .to_string()
+                    })?
+                };
+                let count = usize::try_from(count).map_err(|_| {
+                    NumericTrap::Overflow {
+                        op: "range",
+                        prim: Prim::Int64,
+                    }
+                    .to_string()
+                })?;
+                admit_result("range", &[count], Prim::Int64)?;
+                let mut elements = Vec::new();
+                elements
+                    .try_reserve_exact(count)
+                    .map_err(|_| "range allocation failed".to_string())?;
+                for index in 0..count {
+                    // count and the last element were bounded by the exact endpoints.
+                    elements.push(start + i64::try_from(index).expect("range index fits i64"));
+                }
+                TensorValue::from_storage(
+                    vec![count],
+                    finalize_tensor("range", Prim::Int64, RawTensor::Int(elements))
+                        .map_err(|e| e.to_string())?,
+                )
+            }
             RiscOp::UniformLike => {
                 check_draw_extents(&bound_dag, node, &values)?;
                 eval_uniform_like(
@@ -5286,6 +5329,30 @@ fn computed_axis_extent_value(
     resolved_stride_steps: Option<&[std::num::NonZeroUsize]>,
 ) -> Result<Option<usize>, String> {
     match computed {
+        crate::axis_sources::ComputedAxisExtent::RangeSpan => {
+            let start = values[&node.inputs[0]]
+                .storage()
+                .scalar_at(0)
+                .as_i64_exact()
+                .ok_or("range requires i64")?;
+            let end = values[&node.inputs[1]]
+                .storage()
+                .scalar_at(0)
+                .as_i64_exact()
+                .ok_or("range requires i64")?;
+            let count = if end <= start {
+                0
+            } else {
+                end.checked_sub(start).ok_or_else(|| {
+                    NumericTrap::Overflow {
+                        op: "range",
+                        prim: Prim::Int64,
+                    }
+                    .to_string()
+                })?
+            };
+            Ok(usize::try_from(count).ok())
+        }
         crate::axis_sources::ComputedAxisExtent::ShrinkSpan {
             start,
             end,

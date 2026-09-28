@@ -1263,7 +1263,8 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         ),
         RiscOp::Stride { strides } => bounds(ExtentSlot::StrideStep, &mut strides.iter()),
         RiscOp::SplitN { count } => bounds(ExtentSlot::SplitCount, &mut std::iter::once(count)),
-        RiscOp::Add
+        RiscOp::Iota
+        | RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul
         | RiscOp::Div
@@ -2105,6 +2106,40 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         // Check arity.
         let arity = node.inputs.len();
         match &node.op {
+            RiscOp::Iota => {
+                if node
+                    .owner
+                    .activation
+                    .and_then(|id| dag.get(id))
+                    .is_some_and(|active| !active.output_type.dims.is_empty())
+                {
+                    errors.push(format!(
+                        "iota at node {} requires scalar activation",
+                        node.id.0
+                    ));
+                }
+                if arity != 2 {
+                    errors.push(format!("iota at node {} requires two inputs", node.id.0));
+                }
+                for &input in &node.inputs {
+                    if let Some(input) = dag.get(input)
+                        && (input.output_type.precision != Prim::Int64
+                            || !input.output_type.dims.is_empty())
+                    {
+                        errors.push(format!(
+                            "iota at node {} requires rank-zero i64 endpoints",
+                            node.id.0
+                        ));
+                    }
+                }
+                if node.output_type.precision != Prim::Int64 || node.output_type.dims.len() != 1 {
+                    errors.push(format!(
+                        "iota at node {} requires rank-one i64 output",
+                        node.id.0
+                    ));
+                }
+            }
+
             RiscOp::Compare(kind) => {
                 if arity != 2 {
                     errors.push(format!(

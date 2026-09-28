@@ -559,6 +559,7 @@ fn reject_random_selection_parameters(
 /// exists.
 pub fn risc_op_name(op: &RiscOp) -> &'static str {
     match op {
+        RiscOp::Iota => "range",
         RiscOp::Add => "add",
         RiscOp::Sub => "sub",
         RiscOp::Mul => "mul",
@@ -755,6 +756,16 @@ fn grad_dag_result(
 
         let node = forward.get(node_id).unwrap().clone();
         let dag_size_before = dag.len();
+        // A broadcast's adjoint contracts an axis. Select inactive rows
+        // away while that axis still exists; the scalar/shared source may
+        // no longer carry the branch activation after the reduction.
+        let masks_before_reduction = matches!(node.op, RiscOp::Expand { .. });
+        let grad_out = if masks_before_reduction {
+            let input = forward.get(node.inputs[0]).expect("expand source exists");
+            mask_to_activation(&mut dag, &node, input, grad_out)?
+        } else {
+            grad_out
+        };
         let input_grads =
             compute_adjoints(&node, grad_out, forward, &mut dag).ok_or_else(|| {
                 format!(
@@ -766,9 +777,41 @@ fn grad_dag_result(
         let input_grads = input_grads
             .into_iter()
             .map(|(input_id, grad_node)| {
+                if masks_before_reduction {
+                    return Ok((input_id, grad_node));
+                }
                 let input = forward
                     .get(input_id)
                     .expect("adjoint input is a forward node");
+                let grad_node = if crate::axis_sources::is_same_shape_result_op(&node.op)
+                    && !input.output_type.dims.is_empty()
+                {
+                    // The forward operation checks operand agreement. Its
+                    // adjoint may be computed through a different operand's
+                    // axes; transport the result onto this primal's physical
+                    // axes before it reaches a select or accumulation. Keep
+                    // the forward check as an ordered dependency of the view.
+                    let view = dag.add_node(
+                        node.owner,
+                        RiscOp::Reshape {
+                            new_shape: (0..input.output_type.dims.len())
+                                .map(|axis| RtDim::InputAxis {
+                                    tensor: 1,
+                                    axis: RtAxis::Lit(
+                                        i32::try_from(axis).expect("tensor rank fits i32"),
+                                    ),
+                                })
+                                .collect(),
+                        },
+                        vec![grad_node, input_id],
+                        input.output_type.clone(),
+                        None,
+                    );
+                    dag.add_shape_dep(view, node.id);
+                    view
+                } else {
+                    grad_node
+                };
                 mask_to_activation(&mut dag, &node, input, grad_node)
                     .map(|masked| (input_id, masked))
             })
@@ -918,14 +961,7 @@ fn mask_to_activation(
             None,
         );
     }
-    let zero = dag.add_node(
-        owner,
-        RiscOp::synth_const(ty.precision, 0.0),
-        vec![],
-        ty.clone(),
-        None,
-    );
-    dag.add_shape_dep(zero, contribution);
+    let zero = zero_like(dag, owner, contribution, &ty);
     Ok(dag.add_node(
         owner,
         RiscOp::Where,
@@ -958,6 +994,41 @@ fn activation_implies(dag: &Dag, inner: Option<NodeId>, outer: NodeId) -> bool {
     false
 }
 
+/// Construct positive zero with the physical axes of a forward value. Anonymous
+/// dimensions are claims, not an allocation or equality witness; each Expand
+/// therefore reads its axis directly from that value.
+fn zero_like(dag: &mut Dag, owner: Owner, source: NodeId, ty: &TensorType) -> NodeId {
+    let mut value = dag.add_node(
+        owner,
+        RiscOp::synth_const(ty.precision, 0.0),
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: ty.precision,
+        },
+        None,
+    );
+    for axis in 0..ty.dims.len() {
+        value = dag.add_node(
+            owner,
+            RiscOp::Expand {
+                axis,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
+                },
+            },
+            vec![value, source],
+            TensorType {
+                dims: ty.dims[..=axis].to_vec(),
+                precision: ty.precision,
+            },
+            None,
+        );
+    }
+    value
+}
+
 /// Combine one forward value's incoming cotangent contributions in the exact
 /// spec/06 §2.4 order: an exact positive-zero base leaf followed by increasing
 /// forward consumer ordinal and input slot, reduced by adjacent pairs while an
@@ -971,14 +1042,7 @@ fn balanced_adjoint_sum(
     debug_assert!(!contributions.is_empty());
     let ty = forward_node.output_type.clone();
     let before_zero = dag.len();
-    let zero = dag.add_node(
-        forward_node.owner,
-        RiscOp::synth_const(ty.precision, 0.0),
-        vec![],
-        ty.clone(),
-        None,
-    );
-    dag.add_shape_dep(zero, forward_node.id);
+    let zero = zero_like(dag, forward_node.owner, forward_node.id, &ty);
     stamp_grad_marker(dag, before_zero, forward_node);
 
     let mut level = Vec::with_capacity(contributions.len() + 1);
@@ -1150,6 +1214,7 @@ fn compute_adjoints(
     dag: &mut Dag,
 ) -> Option<Vec<(NodeId, NodeId)>> {
     match &node.op {
+        RiscOp::Iota => Some(vec![]),
         // --- Binary elementwise ---
         RiscOp::Add => {
             let a = node.inputs[0];
@@ -1244,20 +1309,8 @@ fn compute_adjoints(
             let else_value = node.inputs[2];
             let condition_ty = forward.get(condition).unwrap().output_type.clone();
             let branch_ty = forward.get(then_value).unwrap().output_type.clone();
-            let zero_condition = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(condition_ty.precision, 0.0),
-                vec![],
-                condition_ty,
-                None,
-            );
-            let zero_branch = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(branch_ty.precision, 0.0),
-                vec![],
-                branch_ty.clone(),
-                None,
-            );
+            let zero_condition = zero_like(dag, node.owner, condition, &condition_ty);
+            let zero_branch = zero_like(dag, node.owner, then_value, &branch_ty);
             let then_grad = dag.add_node(
                 node.owner,
                 RiscOp::Where,
@@ -4519,6 +4572,93 @@ mod tests {
             })
         );
         assert!(grad_dag(&dag, out, &[x]).is_none());
+    }
+
+    #[test]
+    fn branch_broadcast_masks_rows_before_reducing_a_scalar_capture() {
+        use crate::eval::{TensorValue, eval_tensor};
+
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("test"));
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F64,
+        };
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            scalar_f64(),
+            None,
+        );
+        let rows = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "rows".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let zero = dag.add_node(
+            owner,
+            RiscOp::synth_const(Prim::F64, 0.0),
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let condition = dag.add_node(
+            owner,
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![zero, rows],
+            TensorType {
+                dims: ty.dims.clone(),
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        let expanded = dag.add_node(
+            Owner::new(owner.decl, Some(condition)),
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(3),
+            },
+            vec![x],
+            ty.clone(),
+            None,
+        );
+        let chosen = dag.add_node(
+            owner,
+            RiscOp::Where,
+            vec![condition, expanded, zero],
+            ty,
+            None,
+        );
+        let out = dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F64,
+            },
+            vec![chosen],
+            scalar_f64(),
+            None,
+        );
+        let result = grad_dag_checked(&dag, out, &[x]).unwrap();
+        for (rows, expected) in [(vec![1.0, -1.0, 1.0], 2.0), (vec![-1.0; 3], 0.0)] {
+            let values = eval_tensor(
+                &result.dag,
+                &UnordMap::from([
+                    ("x".to_string(), TensorValue::from_vec(vec![], vec![7.0])),
+                    ("rows".to_string(), TensorValue::from_vec(vec![3], rows)),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(
+                values[&result.grad_nodes[&x]].to_f64_lossy_vec(),
+                vec![expected]
+            );
+        }
     }
 
     // ================================================================

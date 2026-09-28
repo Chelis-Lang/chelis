@@ -2139,7 +2139,9 @@ pub struct WireRecordPatternField {
 ///   version-18 graph may hold that bridge operation, which has no
 ///   version-19 spelling, so it is rejected like every other earlier
 ///   version.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 19;
+/// - `20`: `Iota` represents the exact runtime i64 range source ([05-OP-54]).
+///   Its two scalar endpoints and rank-one result are validated before use.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 20;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2612,6 +2614,26 @@ impl WireDag {
                             node.id,
                             node.inputs.len()
                         )));
+                    }
+                }
+                WireRiscOp::Iota => {
+                    let valid = node
+                        .activation
+                        .and_then(|id| wire_node_by_id(&self.nodes, id))
+                        .is_none_or(|active| active.output_type.dims.is_empty())
+                        && node.inputs.len() == 2
+                        && node.inputs.iter().all(|id| {
+                            wire_node_by_id(&self.nodes, *id).is_some_and(|input| {
+                                input.output_type.precision == "int64"
+                                    && input.output_type.dims.is_empty()
+                            })
+                        })
+                        && node.output_type.precision == "int64"
+                        && node.output_type.dims.len() == 1;
+                    if !valid {
+                        return Err(WireDagContractError::new(
+                            "WireDag Iota requires two rank-zero i64 endpoints and a rank-one i64 output",
+                        ));
                     }
                 }
                 WireRiscOp::SplitN { count } => {
@@ -3422,7 +3444,8 @@ fn wire_axis_origin(
             fuel - 1,
             relevant_shape_sources,
         ),
-        WireRiscOp::Shrink { .. }
+        WireRiscOp::Iota
+        | WireRiscOp::Shrink { .. }
         | WireRiscOp::ReduceWindow { .. }
         | WireRiscOp::BlasMatmul { .. } => {
             Some(WireSemanticAxisOrigin::OpComputed { op: node.id, axis })
@@ -3853,6 +3876,7 @@ pub struct WireExtentClaim {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireRiscOp {
+    Iota,
     Add,
     Sub,
     Mul,

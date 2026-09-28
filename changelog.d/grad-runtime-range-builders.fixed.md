@@ -1,0 +1,1 @@
+Grad can differentiate scalar map-built tensors over runtime i64 ranges, preserving the source extent and captured scalar cotangents on Eval and C. Callbacks with observable checks reject explicitly pending ordered loop lowering.

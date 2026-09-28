@@ -6871,6 +6871,7 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
                 chelis_ir::dag::KeyBranch::Right => crate::schema::WireKeyBranch::Right,
             },
         },
+        RiscOp::Iota => WireRiscOp::Iota,
         RiscOp::FoldIn => WireRiscOp::FoldIn {},
         RiscOp::KeySelect => WireRiscOp::KeySelect {},
         RiscOp::SplitN { count } => WireRiscOp::SplitN {
@@ -7453,7 +7454,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 19);
+        assert_eq!(json["schema_version"], 20);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()
@@ -7529,6 +7530,60 @@ mod tests {
         let json = serde_json::to_value(&wire).unwrap();
         let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    fn runtime_iota_wire_fixture() -> Dag {
+        let mut dag = Dag::new();
+        let owner = dag.declare("runtime_iota");
+        let scalar = TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        };
+        let start = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "start".into(),
+            },
+            vec![],
+            scalar.clone(),
+            None,
+        );
+        let end = dag.add_node(
+            owner,
+            RiscOp::Load { name: "end".into() },
+            vec![],
+            scalar,
+            None,
+        );
+        let output = dag.add_node(
+            owner,
+            RiscOp::Iota,
+            vec![start, end],
+            TensorType {
+                dims: vec![DimInfo::Named("count".into(), None)],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        dag.add_root(output);
+        dag
+    }
+
+    #[test]
+    fn runtime_iota_wire_round_trip_and_malformed_endpoints() {
+        let dag = runtime_iota_wire_fixture();
+        let wire = wire_dag(&dag).unwrap();
+        let json = serde_json::to_string(&wire).unwrap();
+        let decoded = WireDag::from_validated_json(&json).unwrap();
+        assert!(matches!(decoded.nodes[2].op, WireRiscOp::Iota));
+        for path in [0, 1, 2] {
+            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            value["nodes"][path]["output_type"]["precision"] = serde_json::json!("f32");
+            assert!(WireDag::from_validated_json(&value.to_string()).is_err());
+        }
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["nodes"][2]["inputs"] = serde_json::json!([0]);
+        assert!(WireDag::from_validated_json(&value.to_string()).is_err());
     }
 
     #[test]

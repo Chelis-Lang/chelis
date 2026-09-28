@@ -357,6 +357,11 @@ prefix = "examples/grad_extent_claim.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+[[path_rule]]
+prefix = "examples/grad_runtime_basis.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 # chelis#2027: canonical release manifests and bundled locks are live inputs.
 [[standing_target]]
 package = "chelis-cli"

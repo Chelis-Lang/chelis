@@ -1540,6 +1540,7 @@ impl CEmitter {
             RiscOp::Split { branch } => self.emit_split_key(node, *branch, dag),
             RiscOp::FoldIn => self.emit_fold_in(node, dag),
             RiscOp::SplitN { count } => self.emit_split_keys(node, count),
+            RiscOp::Iota => self.emit_iota(node),
             RiscOp::KeySelect => self.emit_key_select(node, dag),
             RiscOp::Dropout => self.emit_keyed_dropout(node, dag),
             RiscOp::DropoutReplay => self.emit_keyed_dropout(node, dag),
@@ -5273,6 +5274,41 @@ impl CEmitter {
         ));
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// [05-OP-54]: exact i64 range, with its own realized count witness.
+    fn emit_iota(&mut self, node: &DagNode) {
+        let id = node.id.0;
+        let start = node.inputs[0].0;
+        let end = node.inputs[1].0;
+        let index = Self::prim_elem_type(Prim::Int64);
+        let trap = NumericTrap::Overflow {
+            op: "range",
+            prim: Prim::Int64,
+        }
+        .to_string();
+        self.line(&format!(
+            "{index} t{id}_start = ((const {index}*)t{start}_data)[0];"
+        ));
+        self.line(&format!(
+            "{index} t{id}_end = ((const {index}*)t{end}_data)[0];"
+        ));
+        if let Some(active) = node.owner.activation {
+            let active = active.0;
+            let byte = Self::prim_elem_type(Prim::Bool);
+            self.line(&format!(
+                "if (((const {byte}*)t{active}_data)[0] == 0) {{ t{id}_start = 0; t{id}_end = 0; }}"
+            ));
+        }
+        self.line(&format!("{index} t{id}_count = t{id}_end <= t{id}_start ? 0 : chelis_int_checked_sub(t{id}_end, t{id}_start, 64, {trap:?});"));
+        self.emit_runtime_dim_sites(id, &[(0, format!("t{id}_count"))]);
+        self.emit_declared_extent_guards("range", &node.output_type.dims, |_| {
+            format!("t{id}_count")
+        });
+        self.emit_slot_wrapper(id, &node.output_type);
+        self.line(&format!(
+            "for ({index} i = 0; i < t{id}_count; i++) (({index}*)t{id}_data)[i] = t{id}_start + i;"
+        ));
     }
 
     /// [05-OP-71]: row `j` of key `i` is `derive(derive(k[i], 2), j)`, the

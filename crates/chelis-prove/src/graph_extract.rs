@@ -210,7 +210,8 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
 
             // Operations without embedded numeric values. Keep this match
             // exhaustive so a new payload cannot bypass the proof boundary.
-            WireRiscOp::Add
+            WireRiscOp::Iota
+            | WireRiscOp::Add
             | WireRiscOp::Sub
             | WireRiscOp::Mul
             | WireRiscOp::Div
@@ -590,7 +591,8 @@ const _: () = {
     // `Expand` size is, so they join the same group.
     // Version 19 (chelis#2413) deletes the counter-stream bridge operation;
     // it adds no operation.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 19);
+    // Version 20 adds the discrete Iota source, with no embedded payload.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 20);
 };
 
 #[cfg(test)]

@@ -118,14 +118,16 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "split_n",
         // Version 19 (chelis#2413): the key join of a where-lowered branch.
         "key_select",
+        // Version 20: represented runtime integer range.
+        "iota",
     ];
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 19,
+        WIRE_DAG_SCHEMA_VERSION, 20,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 73);
+    assert_eq!(actual.len(), 74);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"

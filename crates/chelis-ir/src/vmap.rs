@@ -101,6 +101,11 @@ pub fn vectorize_axis0_with_node_map_and_captures(
             prepend_batch_type(&node.output_type, &batch_dim)
         };
         let op = match &node.op {
+            RiscOp::Iota => {
+                return Err(
+                    "runtime range inside vmap requires a shared cardinality representation".into(),
+                );
+            }
             RiscOp::Sum { axis, accumulator } => RiscOp::Sum {
                 axis: axis + 1,
                 accumulator: *accumulator,
@@ -329,15 +334,23 @@ pub fn vectorize_axis0_with_node_map_and_captures(
             continue;
         }
 
-        // A non-shared constant tensor has one authored payload, not one
+        // A non-shared constant has one authored payload, not one
         // payload per mapped lane. Preserve that payload at its original
         // type and make the old node's mapped identity an explicit batch
         // broadcast. Merely prepending the batch dimension while cloning the
         // flat storage creates a malformed constant whose cardinality no
         // longer matches its declared type (chelis#1932).
-        if !shared && matches!(node.op, RiscOp::ConstTensor { .. }) {
+        if !shared
+            && (matches!(node.op, RiscOp::ConstTensor { .. })
+                || (matches!(node.op, RiscOp::Const { .. }) && node.output_type.dims.is_empty()))
+        {
+            let raw_owner = if matches!(node.op, RiscOp::Const { .. }) {
+                crate::dag::Owner::new(owner.decl, None)
+            } else {
+                owner
+            };
             let raw = out.add_node(
-                owner,
+                raw_owner,
                 node.op.clone(),
                 Vec::new(),
                 node.output_type.clone(),
@@ -407,6 +420,16 @@ pub fn vectorize_axis0_with_node_map_and_captures(
             // returns the mapping. The remap below is therefore the
             // correctness step, not a no-op that happens to look like one.
             new_node.shape_deps = remapped_shape_deps;
+            // A scalar comparison has no axes to witness before batching.
+            // Its new anonymous batch axis belongs to its actual operand,
+            // just as the corresponding source-level tensor operation does.
+            if !shared
+                && matches!(new_node.op, RiscOp::Compare(_) | RiscOp::Logical(_))
+                && let Some(&source) = new_node.inputs.first()
+                && !new_node.shape_deps.contains(&source)
+            {
+                new_node.shape_deps.push(source);
+            }
             new_node.result_claim_deps = remapped_result_claims;
         }
         if let Some(reusable_input) = node.reusable_input {

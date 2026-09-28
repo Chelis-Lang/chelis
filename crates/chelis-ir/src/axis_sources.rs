@@ -417,6 +417,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
     let id = node.id;
     let rank = node.output_type.dims.len();
     match &node.op {
+        RiscOp::Iota => op_computed(id, rank),
         // --- Binary and unary elementwise: shape preserving ---
         RiscOp::Add
         | RiscOp::Sub
@@ -2822,6 +2823,8 @@ pub enum LocalGuardObservation {
 /// those are the owner's producers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputedAxisExtent {
+    /// [05-OP-54]: max(end - start, 0), reading exact i64 inputs 0 and 1.
+    RangeSpan,
     /// `shrink`'s half-open span on one axis: the extent is `end - start`
     /// (`spec/05-risc-primitives.md` section 2.4).
     ///
@@ -2974,6 +2977,7 @@ fn op_computed_axis_origin_bounded(
 /// the evaluator and the legacy movement failure on C.
 pub fn op_computed_axis_extent(op: &RiscOp, axis: usize) -> Option<ComputedAxisExtent> {
     match op {
+        RiscOp::Iota if axis == 0 => Some(ComputedAxisExtent::RangeSpan),
         RiscOp::Shrink { bounds } => {
             bounds
                 .get(axis)
@@ -3048,6 +3052,7 @@ pub fn static_op_computed_axis_extent(dag: &Dag, node: NodeId, axis: usize) -> O
         }
     };
     match op_computed_axis_extent(&owner.op, axis)? {
+        ComputedAxisExtent::RangeSpan => None,
         ComputedAxisExtent::ShrinkSpan {
             start,
             end,

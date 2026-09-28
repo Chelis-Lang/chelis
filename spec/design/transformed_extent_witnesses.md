@@ -112,3 +112,35 @@ capture and both direct gradient slots, and a statically wrong capture shape
 remains a checker error. This target is included in
 `runtime_extent_oracle_targets.json`. These capture receipts do not cover
 #2370's map-built basis inside a composed Jacobian helper.
+
+### Runtime scalar list builders
+
+`range(start, end)` uses an exact rank-zero i64 endpoint pair and an Iota
+source under [05-OP-54]. Its count is `max(end - start, 0)` in checked integer
+arithmetic; the source owns its realized output axis. Lists produced on this
+path travel as internal tensor-list values through bindings and captures,
+so consuming a list does not replay endpoint expressions. A map preserves
+that source axis; its scalar callback captures retain their own gradient
+paths while the integer source has zero cotangent.
+
+AD constructs zero leaves by expanding a scalar along the exact primal
+axes. A same-shape operation's input cotangent is an explicit reshape view
+whose extents read that input; the view retains the forward consumer so its
+operand and result checks precede cotangent use. This carries anonymous
+range axes through cotangent accumulation without inventing a dimension
+name or treating a matching element count as shape evidence. A branch-owned
+broadcast masks inactive cotangent rows before its adjoint reduces them,
+while the activation axes are still present.
+
+The bounded callback implementation vectorizes only a scalar DAG with no
+observable runtime checks, using the existing capture-aware vectorizer.
+[05-OP-55] requires an ordered loop for callbacks that can trap; those
+callbacks are rejected before execution until that carrier exists. HIP
+runtime sources and ranges nested inside vmap remain outside this slice.
+The numbered contracts remain unchanged.
+
+`issue_2419_range_tensor_ad` owns isolated and generic composed basis gradients,
+independent runtime widths, captured scalar cotangents and the ordered-callback
+rejection. `issue_570_runtime_iota` owns exact integer values, empty ranges,
+malformed sources, overflow and false extent claims. These are bounded receipts,
+not closure of every list callback or every #2515 leaf.

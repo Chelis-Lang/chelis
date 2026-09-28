@@ -727,6 +727,11 @@ pub struct ExtentClaim {
 /// A RISC primitive operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RiscOp {
+    /// [05-OP-54]: a tensor carrier for the half-open i64 `range(start, end)`.
+    /// Inputs are two exact rank-zero i64 values; output is rank-one i64.
+    /// The runtime length is max(end-start, 0), checked in mathematical
+    /// integers before allocation. Integer endpoints have no cotangent.
+    Iota,
     // --- Binary elementwise ---
     Add,
     /// Direct element-wise subtraction. Integer execution checks the exact
@@ -1620,7 +1625,8 @@ impl RiscOp {
             // preconditions under [04-NUM-9], not callable Table-A operations.
             // Its tagged requirements and shape-only dependency are checked
             // by the IR verifier and the runtime-extent oracle.
-            Self::ExtentWitness { .. }
+            Self::Iota
+            | Self::ExtentWitness { .. }
             | Self::CheckedReshapeExtent { .. }
             | Self::CheckedUnitAxis { .. }
             | Self::OneHot { .. }
@@ -1980,7 +1986,7 @@ impl RiscOp {
             // index; it is an internal lowering marker (dag.rs) consumed
             // before backend emission and is not part of the numeric
             // forward-bound surface.
-            RiscOp::OneHot { .. } => false,
+            RiscOp::OneHot { .. } | RiscOp::Iota => false,
 
             // `Shape` reads a runtime axis extent as a discrete integer
             // scalar derived from tensor metadata, not a bound over the
@@ -2253,6 +2259,7 @@ impl DagNode {
             }
         };
         match &self.op {
+            RiscOp::Iota => RuntimeCheck::OperandValues,
             RiscOp::Add | RiscOp::Sub | RiscOp::Mul | RiscOp::Neg | RiscOp::Abs => {
                 value_check(integer)
             }
@@ -3176,6 +3183,10 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
         name.is_empty() || name == "*"
     }
     match &node.op {
+        RiscOp::Iota => match node.output_type.dims.first() {
+            Some(DimInfo::Named(symbol, None)) if !is_anon(symbol) => vec![(symbol.clone(), 0)],
+            _ => Vec::new(),
+        },
         RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => node
             .output_type
             .dims
@@ -3242,6 +3253,7 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
 /// `axis_sources::check_rendered_dim_origins` refuses.
 pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
     match &node.op {
+        RiscOp::Iota => vec![0],
         RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => {
             (0..node.output_type.dims.len())
                 .filter(|axis| shape_source_for_axis(dag, node.id, *axis).is_none())
