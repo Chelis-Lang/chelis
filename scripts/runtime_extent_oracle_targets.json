@@ -1294,6 +1294,7 @@
         "eval_forwarded_insert_axis_keeps_result_ownership",
         "eval_insert_result_guard_owns_attribution_and_effect_order",
         "eval_result_axes_follow_declaration_order",
+        "host_constant_observations_keep_producer_order_in_both_lanes",
         "input_axis_claim_still_precedes_body_on_both_lanes",
         "mixed_named_entry_and_literal_result_keep_distinct_owners"
       ],

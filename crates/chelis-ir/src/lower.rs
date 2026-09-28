@@ -15510,21 +15510,18 @@ impl<'program> LowerCtx<'program> {
                 )
             }
 
-            // Fallback: unknown function.
-            _ => {
-                for arg in args {
-                    self.lower_expr(arg);
-                }
-                self.dag.add_node(
-                    self.owner(),
-                    RiscOp::Load {
-                        name: func_name.into(),
-                    },
-                    vec![],
-                    Self::default_type(),
-                    self.current_span_id.clone(),
-                )
-            }
+            // Exact argument values do not implement the operation. A fake
+            // input Load loses its arguments and effects, and DCE can erase
+            // it before the host helper's builtin-input check sees it. Decline
+            // the whole numeric attempt so the original host application keeps
+            // its value, evaluation order and effects ([05-HOST-1]).
+            _ => self.reject_lowering_at(
+                (Some(app_span), self.current_span_id.clone()),
+                format!(
+                    "application of `{func_name}` has no numeric IR lowering; \
+                     preserve its host execution (spec/05-risc-primitives.md [05-HOST-1])"
+                ),
+            ),
         }
     }
 
@@ -27408,6 +27405,55 @@ mod regression_tests {
         assert!(
             message.contains("chelis build --target c"),
             "diagnostic should name the build workaround: {message}"
+        );
+    }
+
+    /// [05-HOST-1], [05-OP-60]: knowing an argument's exact host value
+    /// cannot stand in for executing the operation that consumes it. In
+    /// particular an unused result cannot make an effect into a dead Load.
+    #[test]
+    fn unhandled_builtin_applications_never_become_tensor_inputs() {
+        for (operation, args) in [
+            ("print", "(lit {type: (t-prim {} string)} \"visible\")"),
+            ("print", "(lit {type: (t-prim {} f32)} 2.0)"),
+            (
+                "debug",
+                "(tuple {} (lit {type: (t-prim {} string)} \"visible\") (lit {type: (t-prim {} f32)} 2.0))",
+            ),
+            (
+                "write_file",
+                "(lit {type: (t-prim {} string)} \"unused-path\") (lit {type: (t-prim {} string)} \"contents\")",
+            ),
+            (
+                "test_assert",
+                "(lit {type: (t-prim {} bool)} false) (lit {type: (t-prim {} string)} \"must-fail\")",
+            ),
+        ] {
+            let source = format!("(app {{}} (var {{}} {operation}) {args})");
+            let exprs = chelis_deep::parser::parse_str(&source).expect("parse probe");
+            let error = try_lower_subexpr_program(
+                &exprs[0],
+                UnordMap::new(),
+                UnordMap::new(),
+                UnordMap::new(),
+            )
+            .expect_err("an operation without numeric lowering must retain its host execution");
+            assert!(error.to_string().contains(operation), "{error}");
+        }
+        // A free tensor input remains a Load, and an implemented operation
+        // still composes it; the prohibition is on fabricated call results.
+        let dag = parse_and_lower_unchecked(
+            "(app {} (var {} add) (var {} x) (lit {type: (t-prim {} f32)} 2.0))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "x"))
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Add))
         );
     }
 

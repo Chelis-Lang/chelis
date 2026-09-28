@@ -285,3 +285,6 @@ structurally rejects differentiation; accepting that graph needs a contract
 decision or an explicit `stop_gradient` boundary, beyond selector preservation.
 Numeric lowering rejects those string operations at their own identities with
 the [05-OP-58] authority, before a placeholder can cause a comparison error.
+An unmatched builtin application declines numeric lowering instead of becoming
+a synthetic input Load. Exact host arguments do not implement their consumer;
+the host path retains its effects and order, including discarded observations.
