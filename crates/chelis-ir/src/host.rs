@@ -9433,10 +9433,8 @@ pub(crate) fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
             None => true,
         };
     }
-    if matches!(
-        list.tag(),
-        DeepTag::TupleGet | DeepTag::Match | DeepTag::HandleEffect
-    ) {
+    // A tuple projection may select a tensor node without host execution.
+    if matches!(list.tag(), DeepTag::Match | DeepTag::HandleEffect) {
         return true;
     }
     if list.tag() != DeepTag::App {
