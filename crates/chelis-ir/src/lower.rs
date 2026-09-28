@@ -17124,11 +17124,11 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// chelis#513: syntactic recognizer for the input LANGUAGE of
-    /// [`Self::fold_shape_derived_static_size`], used by
-    /// [`Self::extract_reshape_dim_list`] to decide whether a reshape target
-    /// element the exactness gate REFUSED must fail loud instead of falling
-    /// back to the checker's wildcard dims.
+    /// chelis#513/#616: recognizer for checked integer dataflow over shape
+    /// reads. [`Self::extract_reshape_dim_list`] first offers this expression
+    /// to the exact static fold, then lowers any remaining expression as a
+    /// rank-zero integer node. A valid runtime operation must never fall back
+    /// to the checker's wildcard result dimension.
     ///
     /// Why loud matters: the wildcard fallback becomes an anonymous
     /// `Named(_, None)` dim, and under `grad` the eval lane's symbolic-dim
@@ -17141,10 +17141,14 @@ impl<'program> LowerCtx<'program> {
     /// Admitted runtime arithmetic is lowered before this legacy fallback;
     /// it retains the computed target and its independent result claims.
     ///
-    /// Returns true only when `expr` (cast-stripped) is an arithmetic app of
-    /// the fold's exact vocabulary (`neg`/`add`/`sub`/`mul`/`floor_div`/
-    /// `trunc_div`/`mod`, matching arity) and EVERY leaf is a recognized
-    /// static or shape-derived form. A leaf outside the language (e.g. a
+    /// Returns true only when `expr` (cast-stripped) is an integer app of
+    /// the supported runtime vocabulary (`neg`/`add`/`sub`/`mul`/
+    /// `floor_div`/`trunc_div`/`mod` or any [05-OP-47] bitwise kind, with
+    /// matching arity) and EVERY leaf is a recognized static or shape-derived
+    /// form. The bitwise family intentionally uses the runtime scalar node
+    /// even with static operands: its shift traps and signed-width behavior
+    /// are owned by the typed operation, not a second extent-only evaluator.
+    /// A leaf outside the language (e.g. a
     /// runtime scalar parameter) returns false and keeps the pre-existing
     /// wildcard fallback for forms this pass never claimed to understand.
     fn is_shape_derived_arith_dim(&self, expr: &Expr) -> bool {
@@ -17163,6 +17167,9 @@ impl<'program> LowerCtx<'program> {
                 let arity_ok = match op.as_str() {
                     "neg" => operands.len() == 1,
                     "add" | "sub" | "mul" | "floor_div" | "trunc_div" | "mod" => {
+                        operands.len() == 2
+                    }
+                    name if chelis_types::BitwiseKind::from_name(name).is_some() => {
                         operands.len() == 2
                     }
                     _ => false,

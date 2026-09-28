@@ -213,6 +213,57 @@ fn bitwise_transform_coefficients_execute_in_both_lanes() {
     }
 }
 
+/// A checked i64 bitwise result is an ordinary runtime extent. The reshape
+/// must consume that result instead of substituting its wildcard result dim.
+#[test]
+fn bitwise_results_supply_computed_reshape_extents_in_eval_and_c() {
+    if !c_toolchain_available() {
+        return;
+    }
+    for (op, source_count, rhs) in [
+        ("bitand", 2, 3),
+        ("bitor", 2, 0),
+        ("bitxor", 3, 1),
+        ("shl", 1, 1),
+        ("shr", 4, 1),
+    ] {
+        let source_values = std::iter::repeat_n("1.0f32", source_count)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let program = format!(
+            "def main() = {{\n source = to_tensor([{source_values}])\n x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n reshape(x, [{op}(shape(source, 0i32), {rhs}i64), 2i64])\n}}\n\
+             out = print(main())\n"
+        );
+        let evaluated = eval_first_line(&program).expect("computed extent must evaluate");
+        assert!(evaluated.contains("shape=[2, 2]"), "{op}: {evaluated}");
+        assert_eq!(
+            c_first_line(&program, &format!("bitwise_extent_{op}")),
+            evaluated
+        );
+    }
+}
+
+#[test]
+fn bitwise_computed_extent_traps_before_reshape_in_eval_and_c() {
+    if !c_toolchain_available() {
+        return;
+    }
+    let program = "def main() = {\n source = to_tensor([1.0f32])\n x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n reshape(x, [shl(shape(source, 0i32), -1i64), 4i64])\n}\nout = print(main())\n";
+    let error = eval_first_line(program).expect_err("negative shift extent must trap");
+    assert!(
+        error.contains("shift amount must be non-negative, got -1"),
+        "{error}"
+    );
+    let run = c_ubsan_run(program, "bitwise_extent_negative_shift");
+    assert!(!run.status.success());
+    let error = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        error.contains("shift amount must be non-negative, got -1"),
+        "{error}"
+    );
+    assert!(!error.contains("runtime error:"), "{error}");
+}
+
 #[test]
 fn bitwise_transformed_shifts_preserve_traps() {
     for transform in ["grad", "vmap"] {
