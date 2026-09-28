@@ -238,7 +238,17 @@ pub(crate) fn allocation_nodes(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
                 return None;
             }
             let allocates = match &node.op {
-                RiscOp::Load { .. } | RiscOp::Const { .. } => true,
+                RiscOp::Load { .. }
+                | RiscOp::Const { .. }
+                | RiscOp::ConstTensor { .. }
+                | RiscOp::Expand { .. } => true,
+                RiscOp::Cast { new_precision } => node
+                    .inputs
+                    .first()
+                    .and_then(|input| dag.get(*input))
+                    .is_some_and(|input| {
+                        input.output_type.precision.is_integer() && new_precision.is_float()
+                    }),
                 RiscOp::Neg
                 | RiscOp::Exp
                 | RiscOp::Log
@@ -291,6 +301,22 @@ pub(crate) fn emit_verified_dag(
     reject_f64(dag)?;
     dag.check_axis_sources(Stage::Codegen("metal"))?;
     reject_integer_abs(dag)?;
+    if let Some(node) = dag.nodes().iter().find(|node| {
+        matches!(node.op, RiscOp::Abs)
+            && node.output_type.precision.is_integer()
+            && dag.trap_seeds().is_activation_gated(node)
+    }) {
+        return Err(Unsupported::new(
+            UnsupportedKind::Op("Abs".into()),
+            format!("an activated integer abs at Metal DAG node {}", node.id.0),
+            Stage::Codegen("metal"),
+            chelis_types::unimplemented_rejection!(
+                2413,
+                "Metal has no operand activation gate for checked integer abs; use the C or HIP target"
+            ),
+        ));
+    }
+
     validate_count_nodes(dag)?;
     let mut e = Emitter::new(func_name, plan);
     e.emit(dag).map_err(metal_emission_unsupported)?;
@@ -521,19 +547,17 @@ fn metal_emission_unsupported(detail: String) -> Unsupported {
     )
 }
 
-/// The Metal unary template maps `Abs` to `fabs`; reject integer inputs at
-/// the public emission boundary until Phase 3 provides a typed, trapping
-/// backend kernel (chelis#699).
+/// Integer abs stays materialized in compiler fusion. Externally supplied
+/// fused integer abs needs per-step traps and is refused at this boundary.
 fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
-    if let Some(node) = dag.first_integer_abs_node() {
+    if let Some(node) = dag.first_fused_integer_abs_node() {
         return Err(Unsupported::new(
             UnsupportedKind::Op("Abs".to_string()),
             format!("an integer tensor at Metal DAG node {}", node.0),
             Stage::Codegen("metal"),
             chelis_types::unimplemented_rejection!(
                 729,
-                "integer abs code generation waits for the typed, trapping Phase 3 \
-                 kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane"
+                "fused integer abs requires per-step numeric traps; keep abs as a direct node"
             ),
         ));
     }
@@ -854,7 +878,9 @@ impl<'plan> Emitter<'plan> {
         match &node.op {
             RiscOp::Load { name } => self.emit_load(node, name.as_str(), inputs),
             RiscOp::Store { name } => self.emit_store(dag, node, name.as_str(), outputs),
-            RiscOp::Const { value } => self.emit_const(node, value.as_f64_lossy()),
+            RiscOp::Const { value } => self.emit_const(node, *value),
+            RiscOp::ConstTensor { data } => self.emit_const_tensor(node, data),
+            RiscOp::Expand { axis, .. } => self.emit_expand(node, *axis),
             RiscOp::Copy => Ok(()),
             RiscOp::Drop => {
                 let Some(action) = dag.action_for_node(node.id) else {
@@ -908,6 +934,18 @@ impl<'plan> Emitter<'plan> {
                 }
                 self.plans[id] = Some(source);
                 Ok(())
+            }
+
+            RiscOp::Cast { new_precision }
+                if node
+                    .inputs
+                    .first()
+                    .and_then(|input| dag.get(*input))
+                    .is_some_and(|input| {
+                        input.output_type.precision.is_integer() && new_precision.is_float()
+                    }) =>
+            {
+                self.emit_integer_float_cast(node)
             }
 
             // Unary elementwise (M2 first cut).
@@ -1065,11 +1103,6 @@ impl<'plan> Emitter<'plan> {
         ctx: &str,
     ) -> Result<(usize, Vec<usize>, Prim), String> {
         Self::require_metal_admissible(ty.precision, ctx)?;
-        if ty.dims.is_empty() {
-            return Err(format!(
-                "Metal emit ({ctx}): rank-0 not supported via this path; use scalar Const/reduce instead"
-            ));
-        }
         if ty.dims.len() > kernels::MOVEMENT_MAX_DIM {
             return Err(format!(
                 "Metal emit ({ctx}): rank {} exceeds device metadata limit {}",
@@ -1140,8 +1173,12 @@ impl<'plan> Emitter<'plan> {
         Ok(())
     }
 
-    fn emit_const(&mut self, node: &DagNode, value: f64) -> Result<(), String> {
-        let (n, prec) = self.require_static_rank1(&node.output_type, "Const")?;
+    fn emit_const(
+        &mut self,
+        node: &DagNode,
+        value: chelis_types::dtype_semantics::ScalarValue,
+    ) -> Result<(), String> {
+        let (n, shape, prec) = self.require_static_shape(&node.output_type, "Const")?;
         let buf = format!("buf_{}", node.id.0);
         let allocation = self.claim_allocation(node.id)?;
         // Both the byte-count and the fill body route through host-safe
@@ -1153,21 +1190,169 @@ impl<'plan> Emitter<'plan> {
         // `dtype::host_const_fill_body` for the per-dtype contract.
         let bytes = format!("{n}u * {}", dtype::host_sizeof_expr(prec));
         self.push_span_comments(node);
+        let display = value
+            .as_i64_exact()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| value.as_f64_lossy().to_string());
         self.body
-            .push(format!("// node {} = Const {value}", node.id.0));
+            .push(format!("// node {} = Const {display}", node.id.0));
         self.body.push(format!(
             "id<MTLBuffer> {buf} = chelis_metal_alloc({bytes});"
         ));
         // Fill via a small CPU loop; small enough for M2's static-extent
         // first cut. M4 will switch to a fused fill MSL kernel when scale
         // matters.
-        self.body
-            .push(dtype::host_const_fill_body(prec, value, &buf, n));
+        self.body.push(dtype::host_const_fill_body(value, &buf, n));
         self.plans[node.id.0] = Some(TensorPlan {
             buf,
             prec,
             n,
-            shape: vec![n],
+            shape,
+            allocation,
+        });
+        Ok(())
+    }
+
+    fn emit_const_tensor(
+        &mut self,
+        node: &DagNode,
+        data: &chelis_types::dtype_semantics::TensorStorage,
+    ) -> Result<(), String> {
+        let (n, shape, prec) = self.require_static_shape(&node.output_type, "ConstTensor")?;
+        if data.len() != n || data.prim() != prec {
+            return Err("constant payload must match its declared shape and dtype".to_string());
+        }
+        let buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
+        self.body.push(format!(
+            "id<MTLBuffer> {buf} = chelis_metal_alloc({n}u * {});",
+            dtype::host_sizeof_expr(prec)
+        ));
+        for index in 0..n {
+            self.body.push(
+                dtype::host_const_fill_body(data.scalar_at(index), &buf, 1)
+                    .replace("p[i]", &format!("p[{index}]")),
+            );
+        }
+        self.plans[node.id.0] = Some(TensorPlan {
+            buf,
+            prec,
+            n,
+            shape,
+            allocation,
+        });
+        Ok(())
+    }
+
+    /// Materialize an explicit axis expansion with exact stored elements.
+    fn emit_expand(&mut self, node: &DagNode, axis: usize) -> Result<(), String> {
+        let source = self
+            .plan_of(node.inputs[0])
+            .ok_or("expand input not materialized")?
+            .clone();
+        let (n, shape, prec) = self.require_static_shape(&node.output_type, "Expand")?;
+        if axis >= shape.len() || prec != source.prec {
+            return Err("invalid expand axis or dtype".to_string());
+        }
+        let mut source_shape = shape.clone();
+        source_shape.remove(axis);
+        if source_shape != source.shape {
+            return Err("expand must insert exactly its declared axis".to_string());
+        }
+        let inner = shape[axis + 1..].iter().product::<usize>();
+        let block = inner
+            .checked_mul(shape[axis])
+            .ok_or("expand index overflow")?;
+        let ty = dtype::msl_type(prec);
+        let body = if n == 0 {
+            "    return;".to_string()
+        } else {
+            format!("    out[tid] = a[(tid / {block}u) * {inner}u + tid % {inner}u];")
+        };
+        let name = format!("k_expand_{}", node.id.0);
+        let pso = format!("pso_{}", node.id.0);
+        let params = vec![
+            kernels::input_param(0, ty, "a"),
+            kernels::output_param(1, ty, "out"),
+        ];
+        let src = kernels::elementwise_kernel_for(&name, &params, &body, &[prec]);
+        self.kernels.push((
+            pso.clone(),
+            name.clone(),
+            Self::prepend_span_comments_to_kernel_source(node, src),
+        ));
+        let buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
+        self.body.push(format!(
+            "id<MTLBuffer> {buf} = chelis_metal_alloc({n}u * {});",
+            dtype::host_sizeof_expr(prec)
+        ));
+        self.body.push(format!(
+            "id<MTLComputePipelineState> {pso} = chelis_metal_get_pipeline({pso}_src, @\"{name}\");"
+        ));
+        self.body.push(format!("uint32_t n_{} = {n}u;", node.id.0));
+        self.body.push(format!("{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {buf} }}; chelis_metal_launch({pso}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 2, &n_{}, sizeof(uint32_t)); }}", source.buf, node.id.0));
+        self.plans[node.id.0] = Some(TensorPlan {
+            buf,
+            prec,
+            n,
+            shape,
+            allocation,
+        });
+        Ok(())
+    }
+
+    /// The explicit integer-to-float cast rounds the exact integer once to
+    /// the target width ([04-NUM-14]); no intermediate f32/f64 is allowed.
+    fn emit_integer_float_cast(&mut self, node: &DagNode) -> Result<(), String> {
+        let source = self
+            .plan_of(node.inputs[0])
+            .ok_or("cast input not materialized")?
+            .clone();
+        let (n, shape, precision) = self.require_static_shape(&node.output_type, "Cast")?;
+        if shape != source.shape {
+            return Err("integer-to-float cast must preserve shape".to_string());
+        }
+        let input_ty = source.msl_ty();
+        let output_ty = dtype::msl_type(precision);
+        let storage_ty = match precision {
+            Prim::F16 | Prim::Bf16 => "ushort",
+            Prim::F32 => "uint",
+            _ => unreachable!("Metal float admission precedes cast emission"),
+        };
+        let rounding = chelis_backend_c::integer_float::integer_to_float_bits("value", precision);
+        let body = format!(
+            "    typedef ulong chelis_cast_u64;\n    {input_ty} value = a[tid];\n{rounding}\n    out[tid] = as_type<{output_ty}>(({storage_ty})chelis_cast_bits);"
+        );
+        let name = format!("k_cast_{}", node.id.0);
+        let pso = format!("pso_{}", node.id.0);
+        let params = vec![
+            kernels::input_param(0, input_ty, "a"),
+            kernels::output_param(1, output_ty, "out"),
+        ];
+        let kernel = kernels::elementwise_kernel_for(&name, &params, &body, &[precision]);
+        self.kernels.push((
+            pso.clone(),
+            name.clone(),
+            Self::prepend_span_comments_to_kernel_source(node, kernel),
+        ));
+        let buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
+        self.push_span_comments(node);
+        self.body.push(format!(
+            "id<MTLBuffer> {buf} = chelis_metal_alloc({n}u * {});",
+            dtype::host_sizeof_expr(precision)
+        ));
+        self.body.push(format!(
+            "id<MTLComputePipelineState> {pso} = chelis_metal_get_pipeline({pso}_src, @\"{name}\");"
+        ));
+        self.body.push(format!("uint32_t n_{} = {n}u;", node.id.0));
+        self.body.push(format!("{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {buf} }}; chelis_metal_launch({pso}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 2, &n_{}, sizeof(uint32_t)); }}", source.buf, node.id.0));
+        self.plans[node.id.0] = Some(TensorPlan {
+            buf,
+            prec: precision,
+            n,
+            shape,
             allocation,
         });
         Ok(())
@@ -1187,9 +1372,9 @@ impl<'plan> Emitter<'plan> {
                 )
             })?
             .clone();
-        let (n, prec) = self.require_static_rank1(&node.output_type, "unary")?;
+        let (n, shape, prec) = self.require_static_shape(&node.output_type, "unary")?;
         let msl_ty = dtype::msl_type(prec);
-        if in_plan.n != n || in_plan.prec != prec {
+        if in_plan.shape != shape || in_plan.prec != prec {
             return Err(format!(
                 "Metal M2 emit unary node {}: input shape {:?}/{} != output shape [{}]/{} \
                  (no implicit broadcast/cast in M2 first cut)",
@@ -1226,13 +1411,15 @@ impl<'plan> Emitter<'plan> {
         let suffix = dtype::kernel_suffix(prec);
         let kernel_name = format!("k_unary{suffix}_{}", node.id.0);
         let pso_var = format!("pso_{}", node.id.0);
+        let checked_abs = matches!(node.op, RiscOp::Abs) && prec.is_integer();
         let body = match &node.op {
+            RiscOp::Abs if checked_abs => kernels::integer_abs_body(prec),
             RiscOp::Neg => "    out[tid] = -a[tid];".to_string(),
             RiscOp::Relu => {
                 format!("    out[tid] = a[tid] < ({msl_ty})0 ? ({msl_ty})0 : a[tid];")
             }
             other => {
-                let f = kernels::unary_func(other).ok_or_else(|| {
+                let f = kernels::unary_func(other, prec).ok_or_else(|| {
                     format!(
                         "Metal M2 emit unary node {}: op {:?} unsupported",
                         node.id.0, other
@@ -1241,10 +1428,13 @@ impl<'plan> Emitter<'plan> {
                 format!("    out[tid] = {f}(a[tid]);")
             }
         };
-        let params = vec![
+        let mut params = vec![
             kernels::input_param(0, msl_ty, "a"),
             kernels::output_param(1, msl_ty, "out"),
         ];
+        if checked_abs {
+            params.push(kernels::output_param(2, "atomic_uint", "numeric_status"));
+        }
         let src = kernels::elementwise_kernel_for(&kernel_name, &params, &body, &[prec]);
         let src = Self::prepend_span_comments_to_kernel_source(node, src);
         self.kernels
@@ -1264,16 +1454,38 @@ impl<'plan> Emitter<'plan> {
             "id<MTLComputePipelineState> {pso_var} = chelis_metal_get_pipeline({pso_var}_src, @\"{kernel_name}\");"
         ));
         self.body.push(format!("uint32_t n_{} = {n}u;", node.id.0));
-        self.body.push(format!(
-            "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; chelis_metal_launch({pso_var}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 2, &n_{}, sizeof(uint32_t)); }}",
-            in_plan.buf,
-            node.id.0
-        ));
+        if checked_abs {
+            let status = format!("numeric_status_{}", node.id.0);
+            self.body.push(format!(
+                "id<MTLBuffer> {status} = chelis_metal_alloc_status_word(sizeof(uint32_t));"
+            ));
+            self.extra_peak_device_bytes = self
+                .extra_peak_device_bytes
+                .checked_add(dtype::metal_elem_size(Prim::Int32))
+                .expect("numeric status-byte accounting overflow");
+            self.body.push(format!(
+                "{{ __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {out_buf}, {status} }}; chelis_metal_launch({pso_var}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 3, &n_{}, sizeof(uint32_t)); }}",
+                in_plan.buf, node.id.0
+            ));
+            let trap = NumericTrap::Overflow {
+                op: "abs",
+                prim: prec,
+            }
+            .to_string();
+            self.body.push(format!(
+                "if (*((uint32_t*)[{status} contents]) != 0) chelis_numeric_trap({trap:?});"
+            ));
+        } else {
+            self.body.push(format!(
+                "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; chelis_metal_launch({pso_var}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 2, &n_{}, sizeof(uint32_t)); }}",
+                in_plan.buf, node.id.0
+            ));
+        }
         self.plans[node.id.0] = Some(TensorPlan {
             buf: out_buf,
             prec,
             n,
-            shape: vec![n],
+            shape,
             allocation,
         });
         let _ = dag;

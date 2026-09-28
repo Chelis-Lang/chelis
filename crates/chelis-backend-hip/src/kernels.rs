@@ -1296,6 +1296,106 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
+/// [04-NUM-14] explicit integer-to-float conversion, with exact storage
+/// reads and one integer-space rounding to the target IEEE encoding.
+pub fn cast_integer_to_float(
+    rank: usize,
+    kernel_name: &str,
+    source: chelis_types::types::Prim,
+    target: chelis_types::types::Prim,
+    gate: Option<&OperandGate>,
+) -> String {
+    use chelis_types::types::Prim;
+    let input_ty = match source {
+        Prim::Int8 => "chelis_i8",
+        Prim::Int16 => "chelis_i16",
+        Prim::Int32 => "chelis_i32",
+        Prim::Int64 => "chelis_i64",
+        _ => panic!("integer-to-float kernel requires an integer source"),
+    };
+    let (output_ty, bits_ty) = match target {
+        Prim::F16 | Prim::Bf16 => ("chelis_u16", "chelis_u16"),
+        Prim::F32 => ("float", "chelis_u32"),
+        Prim::F64 => ("double", "chelis_u64"),
+        _ => panic!("integer-to-float kernel requires an active float target"),
+    };
+    let rounding = chelis_backend_c::integer_float::integer_to_float_bits("value", target);
+    format!("{DEVICE_HELPERS}{helper}\
+extern \"C\" __global__ void {kernel_name}(
+    const {input_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {output_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size{params}) {{
+{build_a_s}
+{build_out_sh}
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+{active}  chelis_device_metadata indices[{rank}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  {input_ty} value = {value};
+  typedef chelis_u64 chelis_cast_u64;
+{rounding}
+  union {{ {bits_ty} bits; {output_ty} value; }} result;
+  result.bits = ({bits_ty})chelis_cast_bits;
+  out[i] = result.value;
+}}
+",
+        helper = OperandGate::helper(gate), params = OperandGate::params(gate, rank),
+        active = OperandGate::prologue(gate, rank), value = OperandGate::read(gate, 0, "a[idx]", input_ty),
+        a_strides = stride_params(rank, "a"), out_shape = shape_params(rank, "out"),
+        build_a_s = build_array(rank, "a_s", "a", "s"),
+        build_out_sh = build_array(rank, "out_sh", "out", "sh"),
+    )
+}
+
+/// Exact signed abs ([05-OP-46]). Dtype selection is closed here: an
+/// integer operand cannot enter `ElemKind` or a libm template. MIN is tested
+/// before negation; the launch consumes the shared numeric failure record.
+pub fn unary_checked_abs_integer(
+    rank: usize,
+    kernel_name: &str,
+    precision: chelis_types::types::Prim,
+    gate: Option<&OperandGate>,
+) -> String {
+    use chelis_types::types::Prim;
+    let (ty, minimum) = match precision {
+        Prim::Int8 => ("chelis_i8", "(-127 - 1)"),
+        Prim::Int16 => ("chelis_i16", "(-32767 - 1)"),
+        Prim::Int32 => ("chelis_i32", "(-2147483647 - 1)"),
+        Prim::Int64 => ("chelis_i64", "(-9223372036854775807LL - 1LL)"),
+        _ => panic!("integer abs requires a signed integer dtype"),
+    };
+    format!(
+        "{DEVICE_HELPERS}{helper}\
+extern \"C\" __global__ void {kernel_name}(
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size{params}) {{
+{build_a_s}
+{build_out_sh}
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+{active}  chelis_device_metadata indices[{rank}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  {ty} value = {value};
+  if (value == ({ty}){minimum}) {{
+    chelis_record_numeric_failure((unsigned long long)i);
+    out[i] = ({ty})0;
+    return;
+  }}
+  out[i] = value < ({ty})0 ? ({ty})-value : value;
+}}
+",
+        helper = OperandGate::helper(gate),
+        params = OperandGate::params(gate, rank),
+        active = OperandGate::prologue(gate, rank),
+        value = OperandGate::read(gate, 0, "a[idx]", ty),
+        a_strides = stride_params(rank, "a"),
+        out_shape = shape_params(rank, "out"),
+        build_a_s = build_array(rank, "a_s", "a", "s"),
+        build_out_sh = build_array(rank, "out_sh", "out", "sh"),
+    )
+}
+
 /// Generate kernel source for a unary prefix op (neg: `-`).
 pub fn unary_prefix(rank: usize, kernel_name: &str, op: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
@@ -2268,7 +2368,10 @@ extern \"C\" __global__ void {kernel_name}(
 /// emitter does not need a per-precision launch shim beyond casting the
 /// literal.
 pub fn fill(_rank: usize, kernel_name: &str, kind: ElemKind) -> String {
-    let ty = kind.c_type();
+    fill_stored(kernel_name, kind.c_type())
+}
+
+pub fn fill_stored(kernel_name: &str, ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}({ty} *data, {ty} value, chelis_device_metadata size) {{

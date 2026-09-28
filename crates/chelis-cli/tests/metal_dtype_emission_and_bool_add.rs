@@ -160,35 +160,19 @@ fn metal_rank2_is_a_typed_error_without_an_artifact() {
     );
 }
 
-/// The #699 Metal symptom, REPLACED at chelis#730 Phase 1: the i64
-/// `abs` def used to arrive with a pre-planted `Const 0` node from
-/// `lower_transcendental` and Metal emitted a zero-filled buffer. Phase 2
-/// now preserves a typed integer `Abs` node. Metal's public DAG emitter
-/// rejects that node through the typed error channel without materializing
-/// an abort artifact. Replace this with a
-/// correctness row when the chelis#699 Phase 3 kernel lands.
+/// [05-OP-46]: integer abs reaches its checked integer kernel and never
+/// substitutes a zero or routes integer storage through fabs.
 #[test]
-fn metal_int64_abs_is_a_typed_error_not_pre_planted_zero() {
+fn metal_int64_abs_emits_exact_checked_kernel() {
     let (ok, stderr, emitted) = build_metal(
         "def f(a: tensor[4, i64]) -> tensor[4, i64] = abs(a)\n",
         "metal_i64_abs",
     );
-    assert!(!ok, "the Metal build must reject integer abs");
-    assert!(
-        !emitted.contains("node 0 = Const 0"),
-        "no pre-planted zero emission may be left behind"
-    );
-    assert!(
-        stderr.contains("unsupported:")
-            && stderr.contains(
-                "integer abs code generation waits for the typed, trapping Phase 3 kernel"
-            ),
-        "integer abs must return its branded typed reason; got:\n{stderr}"
-    );
-    assert!(
-        emitted.is_empty(),
-        "a rejected build wrote an artifact: {emitted}"
-    );
+    assert!(ok, "integer abs must build: {stderr}");
+    assert!(emitted.contains("numeric trap: overflow in abs at i64"));
+    assert!(emitted.contains("device const long* a"));
+    assert!(!emitted.contains("fabs("));
+    assert!(!emitted.contains("node 0 = Const 0"));
 }
 
 // ===========================================================================
