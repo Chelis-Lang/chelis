@@ -397,9 +397,24 @@ regions. Native suppression TLS now lives behind `lowering_runtime`, and lowerin
 rejection returns an explicit `LowerResult`; neither supplies the remaining native
 hook/unwind correspondence. The AD slice is not the full core.
 
-There is no Rust/Lean/LaCaDiLE correspondence theorem or full-core proof-acceptance
-claim. Unsupported runtime paths have not been replaced with opaque shims,
-no-ops, feature-gated substitutes, or axioms. Correspondence still requires
-checked proofs with the numerical and runtime relations stated. Strict
-external-definition checks and Lean compilation alone do not audit the backend
-library's axioms or abstractions; those are separate acceptance obligations.
+There is a checked **fragment** correspondence theorem, not a whole-core acceptance
+claim. On actual Aeneas-extracted `grad_dag_checked`, `lower_dag_ownership`, and
+`verify_ownership` results, `ChelisBridge.ExtractedOwnership.acceptLowered_sound`
+links independently decoded source, returned post-AD graph, and verified final
+ownership plan. For an accepted seven-operation scalar-loss graph it identifies the
+returned `output_node` among the actual final roots and proves its logical plan
+value equals the source loss for every real input, alongside the all-entry reference
+gradient and logical-ownership properties. The extracted scalar `x*x` graph passes
+the entire check; replacing its returned primal-node identity with its distinct
+scalar gradient root fails `Numeric.acceptPrimal` even with a newly searched witness.
+
+This theorem was compiled with the combined r35 `chelis_ir-3ndlar8c` model and
+matching patched Aeneas library. `ChelisBridge.Audit` accepted 590 theorems;
+`ClosureAudit` found 34,137 reachable declarations, only the foundational axioms
+`propext`, `Classical.choice`, `Quot.sound`, and no unjustified opaque/extern
+dependencies under `verification/trusted_base.json` (46 opaque and 114
+extern/implemented-by declarations inventoried). The model covers 25 selected
+roots, not a fresh eight-crate extraction or full acceptance. Native IEEE
+evaluation requires an independently justified exact, nontrapping execution
+relation; the theorem asserts real semantics of the decoded graph, not bitwise
+Rust execution. Runtime shell/unwind and whole-core correspondence remain open.

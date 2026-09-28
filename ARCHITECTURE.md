@@ -50,8 +50,8 @@ refer to the upstream snapshot; the product specification/generator tree is not 
 
 ## Reference correspondence map
 
-The pinned reference is `LaCaDiLE/lean/LaCaDiLECore`. The following are obligations, not
-completed proofs:
+The pinned reference is `LaCaDiLE/lean/LaCaDiLECore`. The following maps the
+overall obligations; the checked fragment results below do not complete them:
 
 | Production implementation | Reference contract |
 | --- | --- |
@@ -157,14 +157,32 @@ The bridge must establish these relations:
    excuse invalid ownership. Physical allocation, buffer reuse and cross-plan capacity
    identities are separate claims.
 
-For a proof-producing acceptance path, supply independently decoded `source`,
-`postAD` and `final` to `GraphCorrespondence.checkGradient`. Its concrete types are
-`Program ℚ Γ []`, `Circuit ℚ Γ Γ`, and `OwnedCode ℚ Γ Γ`. Both witnesses name actual
-final-context bindings; they cannot assert an arithmetic law or invent a missing port.
-An accepted check provides the reference real-derivative and logical-ownership theorem.
-Connecting that acceptance to the extracted Rust return value, the sparse-interface
-relation, generated Reshape, and exact numerical execution remain proof obligations.
-Compilation of a generated Lean file alone establishes none of those relations.
+The checked seven-operation fragment gate `ChelisBridge.ExtractedOwnership.acceptLowered`
+calls the extracted production `grad_dag_checked`, `lower_dag_ownership` on its returned
+post-AD DAG, and `verify_ownership` on the returned ownership program. It decodes the
+actual `source`, `postAD`, and `final` independently. `Validation.acceptPlan` checks
+the reference gradient, copy-normalized values and logical ownership of the original
+plan; `Numeric.acceptPrimal` additionally checks the root named by the actual
+`GradResult.output_node`. The witnesses only identify actual decoded bindings; they
+cannot assert an arithmetic law or invent a missing port.
+
+`ChelisBridge.ExtractedOwnership.acceptLowered_sound` states that acceptance yields
+those very extracted AD/lowering/verifier results, the independently decoded
+`Program ℚ Γ []`, `Circuit ℚ Γ Γ`, and final `OwnedCode ℚ Γ Ω`, and a root
+`w : Var Ω []` with `(artifactRootIds r)[w.offset]? = some r.output_node.val`. For every
+real input `ρ`, `w.get (final.eval ρ) = p.eval ρ`; the same theorem preserves the
+all-entry real-gradient and logical-ownership conclusions. The extracted r35 model
+has the production entry-point definitions, and its combined bridge build/audit
+checks this theorem. A scalar `x*x` graph passes the entire extracted acceptance;
+replacing only its returned primal-node identity with its distinct, same-shape
+gradient root fails the primal check.
+
+These are conditional rational/real graph theorems, not bitwise Rust execution
+equivalence. `Numeric.grad_observation` relates the flat *specification* of the
+post-AD loop under explicit `ExactRun` and input/shape/liveness conditions; it is
+not a proof about the actual extracted evaluator's returned buffers. Native
+numeric execution, runtime wrappers, and fresh eight-crate whole-core acceptance
+remain separate obligations. Generated Lean compilation alone proves none of them.
 
 Effectful extensions additionally relate the actual validated source spine, target
 checks, frame stack, cached keys and replay transitions. Require fixed control/rates/

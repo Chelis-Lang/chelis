@@ -201,20 +201,57 @@ def acceptsLowered (forward : Model.Dag) (output : Nat) (wrt : List Nat) : Bool 
       match lowered r.dag, decodeArtifact .f64 forward wrt p r,
           decodeArtifactRoots .f64 forward wrt p r with
       | some plan, some actual, some ⟨Ω, rc⟩ =>
-          match (Validation.planEntryIds forward wrt plan).bind
-              (fun ids => Ownership.decodeOwned .f64 ids Γ Ω plan) with
-          | some final =>
-              ExtractedOwnership.acceptLowered .f64 forward (usize output)
-                (slice (wrt.map usize)) supply
-                (witnessBetween p.compileGrad actual)
-                (witnessBetween rc.inlineCopies final.circuit.inlineCopies)
+          match (artifactRootIds r).idxOf? r.output_node.val with
+          | some k =>
+              match Var.decode Ω [] k with
+              | some primalRoot =>
+                  match (Validation.planEntryIds forward wrt plan).bind
+                      (fun ids => Ownership.decodeOwned .f64 ids Γ Ω plan) with
+                  | some final =>
+                      ExtractedOwnership.acceptLowered .f64 forward (usize output)
+                        (slice (wrt.map usize)) supply
+                        (witnessBetween p.compileGrad actual)
+                        (witnessBetween
+                          (Numeric.progCircuit p) (Numeric.selectRoot rc primalRoot))
+                        (witnessBetween rc.inlineCopies final.circuit.inlineCopies)
+                  | none => false
+              | none => false
           | none => false
       | _, _, _ => false
   | _, _ => false
 
+
 #guard acceptsLowered square 2 [0]
 #guard acceptsLowered withConst 4 [0]
 #guard acceptsLowered disconnected 3 [0, 1]
+
+/-- Scalar `x * x`: its returned primal and scalar gradient roots have the same shape but
+different meanings, so a witness for the gradient root must not admit the primal check. -/
+def scalarSquare : Model.Dag :=
+  mkDag [node 0 (load "x") [] [], node 1 .Mul [0, 0] []] [1]
+
+#guard acceptsLowered scalarSquare 1 [0]
+
+-- The actual artifact accepts the primal witness. Corrupt only its output-node field to
+-- name the returned scalar gradient root and search a fresh witness against that root:
+-- shape and root presence still agree, but the primal correspondence rejects x+x as x*x.
+#guard (do
+  let r ← extractedResult
+    (Model.gradDagChecked scalarSquare (usize 1) (slice [usize 0]))
+  let ⟨_, p⟩ ← decodeSource .f64 scalarSquare [0] 1
+  let ⟨Ω, rc⟩ ← decodeArtifactRoots .f64 scalarSquare [0] p r
+  let gradId ← (GradArtifact.grad r 0).join
+  let actualIndex ← (artifactRootIds r).idxOf? r.output_node.val
+  let actualRoot ← Var.decode Ω [] actualIndex
+  let bad : Model.GradResult := { r with output_node := usize gradId }
+  let badIndex ← (artifactRootIds bad).idxOf? bad.output_node.val
+  let badRoot ← Var.decode Ω [] badIndex
+  pure (gradId != r.output_node.val &&
+    Numeric.acceptPrimal .f64 scalarSquare [0] 1 r
+      (witnessBetween (Numeric.progCircuit p) (Numeric.selectRoot rc actualRoot)) &&
+    !Numeric.acceptPrimal .f64 scalarSquare [0] 1 bad
+      (witnessBetween (Numeric.progCircuit p) (Numeric.selectRoot rc badRoot)))
+) == some true
 
 -- `mul(x, x)`: both (equal) ports are borrowed by the product, which the root moves.
 #guard loweredDirectives (mkDag [node 0 (load "x") [] [2], node 1 .Mul [0, 0] [2]] [1]) ==

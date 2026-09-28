@@ -1,4 +1,4 @@
-import ChelisBridge.Validation
+import ChelisBridge.Numeric.Primal
 
 /-!
 # The extracted production ownership lowering, decoded
@@ -197,16 +197,15 @@ theorem verifyOwnership_lowered {dag : Model.Dag} {supply supply' : Model.Capaci
   · intro hv
     exact ⟨dag, plan, hp, hv, rfl⟩
 
-/-- Proof-producing acceptance of the actual production pipeline: run the extracted
+/- Proof-producing acceptance of the actual production pipeline: run the extracted
 `grad_dag_checked forward output wrt`, run the extracted `lower_dag_ownership` on the
-returned post-AD DAG (as production does), seal the returned program with the extracted public
-verifier `verify_ownership` (as production does before emission), then decode the source, the
-post-AD artifact and the sealed program's final plan independently and require
-`Validation.acceptPlan` (reference ownership check of the original plan, gradient
-correspondence, copy-normalized value correspondence of the final plan). -/
+returned post-AD DAG, seal that returned program with the extracted `verify_ownership`,
+and independently decode the source, post-AD artifact and final plan. Require the reference
+ownership/gradient/value checks and a primal check of the actual `output_node` root from the
+same returned AD artifact. -/
 def acceptLowered (dt : DType) (forward : Model.Dag) (output : Model.NodeId)
     (wrt : Slice Model.NodeId) (supply : Model.CapacityScopeSupply)
-    (adWitness normalizationWitness : List (Option Nat)) : Bool :=
+    (adWitness primalWitness normalizationWitness : List (Option Nat)) : Bool :=
   match extractedResult (Model.gradDagChecked forward output wrt) with
   | none => false
   | some r =>
@@ -215,32 +214,29 @@ def acceptLowered (dt : DType) (forward : Model.Dag) (output : Model.NodeId)
           match Model.verifyOwnership prog with
           | .ok (.Ok verified) =>
               match Model.dagProgramParts (Model.verifiedProgram verified) with
-              | some (d, plan) => Validation.acceptPlan dt forward (wrt.val.map (·.val)) output.val r
-                  (⟨d, plan⟩ : LoweredPlan) adWitness normalizationWitness
+              | some (d, plan) =>
+                  Validation.acceptPlan dt forward (wrt.val.map (·.val)) output.val r
+                    (⟨d, plan⟩ : LoweredPlan) adWitness normalizationWitness &&
+                    Numeric.acceptPrimal dt forward (wrt.val.map (·.val)) output.val r primalWitness
               | none => false
           | _ => false
       | _ => false
-
 /-- **Composed pipeline theorem for the actual returned artifacts.** If `acceptLowered`
 accepts, then the extracted AD returned `r`, the extracted ownership lowering of `r.dag`
-returned a program whose plan `pl` is over `r.dag` itself, the extracted `verify_ownership`
-sealed exactly that returned program (so the extracted DAG verifier accepted its plan against
-that DAG), and for the independently
-decoded source loss `p`, post-AD circuit `actual` and final plan `final` (over the artifact's own roots `Ω`): no owned
-root is transferred twice; `final` executes under the reference ownership machine from
-borrowed entries, returning its value semantics and terminating each local owner exactly
-once and no entry; the real derivative of the source loss is the artifact's value, which is
-the reference gradient; the final plan computes the artifact's own roots; and every final
-root that is the returned gradient of entry `u` equals the reference gradient at `u`.
+returned a program whose plan `pl` is over `r.dag` itself, and the extracted
+`verify_ownership` sealed exactly that returned program. For the independently decoded source
+loss `p`, post-AD circuit `actual` and final plan `final` over the actual artifact roots `Ω`,
+the theorem preserves the gradient and logical-ownership claims below and additionally gives
+the returned `output_node` root `w` in that same artifact, with `w.get (final.eval ρ) = p.eval ρ`.
 Logical ownership only (see the module header). -/
 theorem acceptLowered_sound {dt : DType} {forward : Model.Dag} {output : Model.NodeId}
     {wrt : Slice Model.NodeId} {supply : Model.CapacityScopeSupply}
-    {adWitness normalizationWitness : List (Option Nat)}
-    (h : acceptLowered dt forward output wrt supply adWitness normalizationWitness = true) :
+    {adWitness primalWitness normalizationWitness : List (Option Nat)}
+    (h : acceptLowered dt forward output wrt supply adWitness primalWitness normalizationWitness = true) :
     ∃ (r : Model.GradResult) (pl : LoweredPlan) (prog : Model.DagOwnershipProgram)
       (supply' : Model.CapacityScopeSupply)
       (Γ : Context) (p : Program ℚ Γ []) (actual : Circuit ℚ Γ Γ) (Ω : Context)
-      (rc : Circuit ℚ Γ Ω) (final : OwnedCode ℚ Γ Ω),
+      (rc : Circuit ℚ Γ Ω) (final : OwnedCode ℚ Γ Ω) (w : Var Ω []),
       Model.gradDagChecked forward output wrt = .ok (.Ok r) ∧
       Model.lowerDagOwnership r.dag supply = .ok (.Ok prog, supply') ∧
       pl.dag = r.dag ∧ Model.dagProgramParts prog = some (pl.dag, pl.plan) ∧
@@ -253,6 +249,7 @@ theorem acceptLowered_sound {dt : DType} {forward : Model.Dag} {output : Model.N
         decodeOwned dt ids Γ Ω pl = some final) ∧
       (((Model.planDirectives pl.plan).map Directive.ofModel).filterMap
         Directive.transfer?).Nodup ∧
+      (artifactRootIds r)[w.offset]? = some r.output_node.val ∧
       ∀ ρ : Values ℝ Γ,
         (∃ ended, final.run ρ (LaCaDiLECore.Ownership.initial Γ.length) =
             some (final.eval ρ, ended) ∧
@@ -266,7 +263,8 @@ theorem acceptLowered_sound {dt : DType} {forward : Model.Dag} {output : Model.N
           (wrt.val.map (·.val))[u.offset]? = some e →
           (GradArtifact.grad r e).join = some g →
           (artifactRootIds r)[w.offset]? = some g →
-          w.get (final.eval ρ) = u.get (p.grad ρ)) := by
+          w.get (final.eval ρ) = u.get (p.grad ρ)) ∧
+        w.get (final.eval ρ) = p.eval ρ := by
   unfold acceptLowered at h
   split at h
   · contradiction
@@ -291,10 +289,26 @@ theorem acceptLowered_sound {dt : DType} {forward : Model.Dag} {output : Model.N
           rw [hparts] at hlowp
           simp only [Option.some.injEq, Prod.mk.injEq] at hlowp
           obtain ⟨rfl, rfl⟩ := hlowp
-          obtain ⟨Γ, p, actual, Ω, rc, final, hs, ha, hroots, ⟨ids, hids, hf⟩, hall⟩ :=
-            Validation.checkGradient_bridge h
-          exact ⟨r, ⟨r.dag, _⟩, prog, supply', Γ, p, actual, Ω, rc, final, hgrad, hlow, rfl,
-            hparts, hver, hv, hs, ha, hroots, ⟨ids, hids, hf⟩, (decodeOwned_sound hf).2.1, hall⟩
+          simp only [Bool.and_eq_true] at h
+          obtain ⟨hplan, hprimal⟩ := h
+          obtain ⟨Γ', p', Ω', rc', w, hsrc', hroots', hroot, hprimalEval⟩ :=
+            Numeric.acceptPrimal_sound hprimal
+          obtain ⟨Γ, p, actual, Ω, rc, final, hs, ha, hroots,
+              ⟨ids, hids, hf⟩, hall⟩ := Validation.checkGradient_bridge hplan
+          have hsourceEq : (⟨Γ, p⟩ : Σ Γ : Context, Program ℚ Γ []) = ⟨Γ', p'⟩ :=
+            Option.some.inj (hs.symm.trans hsrc')
+          cases hsourceEq
+          have hrootsEq : (⟨Ω, rc⟩ : Σ Ω : Context, Circuit ℚ Γ' Ω) = ⟨Ω', rc'⟩ :=
+            Option.some.inj (hroots.symm.trans hroots')
+          cases hrootsEq
+          refine ⟨r, ⟨r.dag, _⟩, prog, supply', Γ', p', actual, Ω', rc', final, w, hgrad, hlow,
+            rfl, hparts, hver, hv, hs, ha, hroots, ⟨ids, hids, hf⟩,
+            (decodeOwned_sound hf).2.1, hroot, ?_⟩
+          intro ρ
+          obtain ⟨hrun, hderiv, hactual, hfinal, hgradroots⟩ := hall ρ
+          exact ⟨hrun, hderiv, hactual, hfinal, hgradroots, by
+            rw [hfinal]
+            exact hprimalEval ρ⟩
         · contradiction
       · contradiction
     · contradiction
