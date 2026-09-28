@@ -124,10 +124,24 @@ width or quoted keys, and resolves aliases before deciding whether a job
 calls that central workflow. Duplicate keys or malformed YAML fail closed.
 Nested step fields, comments, and run blocks cannot become job-level callers.
 For a legacy central CI profile, `chelis-tag` must equal `vX.Y.Z` and
-`chelis-version` must equal `X.Y.Z` for the exact `reef.toml` pin; extra or
-missing `v` prefixes do not count. To certify the CI pin guard and negative
-or blocked suites, the thin caller must also have explicit top-level `on`
-events covering both pull requests targeting `main` and pushes to `main`.
+`chelis-version` must equal `X.Y.Z` for the exact `reef.toml` compiler pin;
+extra or missing `v` prefixes do not count. The historical Coral CI guard
+also requires `package-version` to equal `[package].version` and
+`nautilus-tag` to equal `v` plus `[dependencies].nautilus.version` in that
+same `reef.toml`; missing or non-numeric versions cannot establish the guard.
+For each recognized historical Coral/Nautilus profile, the supplied Linux
+digest (and Darwin digest when that profile supplies one) must equal the
+matching platform value under the compiler version in the committed
+`.github/chelis-toolchains.json` lock. That lock must be a regular non-symlink
+file of at most 65536 bytes, with schema `chelis-toolchain-digests/v1`, 1–32
+numeric-version entries, and exactly valid `linux-x86_64` and `darwin-arm64`
+SHA-256 digests per entry, as checked by the historical workflow. Source
+drift or an unsafe/missing lock fails the workflow-pin row and cannot make
+the central caller certify a blocking guard, installer or suite. This
+comparison is for the accepted historical revision only, not newer `ci/main`.
+To certify the CI pin guard and negative or blocked suites, the thin caller
+must also have explicit top-level `on` events covering both pull requests
+targeting `main` and pushes to `main`.
 The offline audit accepts unfiltered events or literal `main` branch filters
 without negations or other restricting filters; manual-only, absent, or
 inert source markers do not establish a blocking change gate. This is only

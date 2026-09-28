@@ -23,7 +23,33 @@ const ARCHIVE_DIGEST: &str =
 fn stamp(dir: &Path, name: &str) -> PathBuf {
     let root = dir.join(name);
     scaffold::scaffold(&root, name, "Myshell", VER).expect("scaffold");
+    if matches!(name, "coral" | "nautilus") {
+        if name == "coral" {
+            let manifest = root.join("reef.toml");
+            let reef = std::fs::read_to_string(&manifest).unwrap();
+            std::fs::write(
+                manifest,
+                format!("{reef}\n[dependencies]\nnautilus = {{ version = \"4.5.6\" }}\n"),
+            )
+            .unwrap();
+        }
+        write_digest_lock(&root, ARCHIVE_DIGEST, ARCHIVE_DIGEST);
+    }
     root
+}
+
+fn write_digest_lock(root: &Path, linux: &str, darwin: &str) {
+    let lock = serde_json::json!({
+        "schema": "chelis-toolchain-digests/v1",
+        "versions": {
+            (VER): {"linux-x86_64": linux, "darwin-arm64": darwin}
+        }
+    });
+    std::fs::write(
+        root.join(".github/chelis-toolchains.json"),
+        lock.to_string(),
+    )
+    .unwrap();
 }
 
 fn verdict_of(report: &audit::AuditReport, key: &str) -> Verdict {
@@ -132,7 +158,7 @@ fn central_ci_wrapper(package: &str, version: &str) -> String {
     ];
     if package == "coral" {
         inputs.push("nautilus-tag: v4.5.6".to_string());
-        inputs.push("package-version: 7.8.9".to_string());
+        inputs.push("package-version: 0.1.0".to_string());
     }
     central_profile_wrapper(profile, &inputs).replace(
         "on: workflow_dispatch",
@@ -166,6 +192,178 @@ fn immutable_central_ci_wrappers_satisfy_executed_contract_rows() {
             );
         }
         assert!(report.ok(), "{package}: central wrapper must audit green");
+    }
+}
+
+#[test]
+fn central_coral_inputs_must_match_package_and_nautilus_dependency_pins() {
+    for (field, expected, replacement) in [
+        ("package-version", "0.1.0", "0.1.1"),
+        ("nautilus-tag", "v4.5.6", "v4.5.5"),
+        ("nautilus-tag", "v4.5.6", "\"\""),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "coral");
+        let wrapper = central_ci_wrapper("coral", VER).replace(
+            &format!("{field}: {expected}"),
+            &format!("{field}: {replacement}"),
+        );
+        std::fs::write(root.join(".github/workflows/ci.yml"), wrapper).unwrap();
+
+        let report = audit::audit(&root);
+        for row in ["workflow-env-pins", "pin-consistency-guard", "tests-neg"] {
+            assert_eq!(
+                verdict_of(&report, row),
+                Verdict::Fail,
+                "{field}: {replacement:?} incorrectly certified {row}"
+            );
+        }
+        assert!(
+            diagnostic_of(&report, "workflow-env-pins").contains(field),
+            "{field} mismatch must be diagnosed"
+        );
+    }
+}
+
+#[test]
+fn central_coral_guard_tracks_changed_reef_package_and_dependency_versions() {
+    for (before, after, field) in [
+        (
+            "version = \"0.1.0\"",
+            "version = \"0.1.1\"",
+            "package-version",
+        ),
+        ("version = \"4.5.6\"", "version = \"4.5.5\"", "nautilus-tag"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "coral");
+        std::fs::write(
+            root.join(".github/workflows/ci.yml"),
+            central_ci_wrapper("coral", VER),
+        )
+        .unwrap();
+        let reef = root.join("reef.toml");
+        let manifest = std::fs::read_to_string(&reef).unwrap();
+        std::fs::write(&reef, manifest.replace(before, after)).unwrap();
+
+        let report = audit::audit(&root);
+        assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Fail);
+        assert!(
+            diagnostic_of(&report, "workflow-env-pins").contains(field),
+            "changed reef source for {field} must be diagnosed"
+        );
+        assert_eq!(verdict_of(&report, "pin-consistency-guard"), Verdict::Fail);
+        assert_eq!(verdict_of(&report, "tests-neg"), Verdict::Fail);
+    }
+}
+
+#[test]
+fn central_ci_digests_must_match_the_committed_lock_for_both_platforms() {
+    let other_digest = format!("sha256:{}", "b".repeat(64));
+    for package in ["coral", "nautilus"] {
+        for platform in ["linux", "darwin"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = stamp(tmp.path(), package);
+            let old_input = format!("chelis-{platform}-sha256: {ARCHIVE_DIGEST}");
+            let new_input = format!("chelis-{platform}-sha256: {other_digest}");
+            let wrapper = central_ci_wrapper(package, VER).replace(&old_input, &new_input);
+            std::fs::write(root.join(".github/workflows/ci.yml"), &wrapper).unwrap();
+            if package == "nautilus" {
+                std::fs::create_dir_all(root.join("tests_blocked/example")).unwrap();
+                std::fs::write(root.join("tests_blocked/example/case.ch"), "1\n").unwrap();
+            }
+
+            let report = audit::audit(&root);
+            for row in ["workflow-env-pins", "pin-consistency-guard", "tests-neg"] {
+                assert_eq!(
+                    verdict_of(&report, row),
+                    Verdict::Fail,
+                    "{package} {platform} digest drift incorrectly certified {row}"
+                );
+            }
+            if package == "nautilus" {
+                assert_eq!(verdict_of(&report, "tests-blocked"), Verdict::Fail);
+            }
+            assert!(
+                diagnostic_of(&report, "workflow-env-pins").contains(platform),
+                "{package} {platform} digest drift must be diagnosed"
+            );
+
+            let (linux, darwin) = if platform == "linux" {
+                (other_digest.as_str(), ARCHIVE_DIGEST)
+            } else {
+                (ARCHIVE_DIGEST, other_digest.as_str())
+            };
+            write_digest_lock(&root, linux, darwin);
+            let matching = audit::audit(&root);
+            for row in ["workflow-env-pins", "pin-consistency-guard", "tests-neg"] {
+                assert_eq!(
+                    verdict_of(&matching, row),
+                    Verdict::Pass,
+                    "{package} matching {platform} lock should certify {row}"
+                );
+            }
+            assert!(
+                matching.ok(),
+                "{package} matching {platform} lock must audit green"
+            );
+        }
+    }
+}
+
+#[test]
+fn central_ci_requires_a_valid_committed_digest_lock() {
+    for package in ["coral", "nautilus"] {
+        for invalid in ["missing", "wrong schema", "invalid other entry", "symlink"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = stamp(tmp.path(), package);
+            std::fs::write(
+                root.join(".github/workflows/ci.yml"),
+                central_ci_wrapper(package, VER),
+            )
+            .unwrap();
+            let path = root.join(".github/chelis-toolchains.json");
+            match invalid {
+                "missing" => std::fs::remove_file(&path).unwrap(),
+                "wrong schema" => {
+                    let body = std::fs::read_to_string(&path).unwrap();
+                    std::fs::write(&path, body.replace("chelis-toolchain-digests/v1", "v2"))
+                        .unwrap();
+                }
+                "invalid other entry" => {
+                    std::fs::write(
+                        &path,
+                        serde_json::json!({
+                            "schema": "chelis-toolchain-digests/v1",
+                            "versions": {
+                                (VER): {
+                                    "linux-x86_64": ARCHIVE_DIGEST,
+                                    "darwin-arm64": ARCHIVE_DIGEST
+                                },
+                                "0.1.0": {"linux-x86_64": ARCHIVE_DIGEST}
+                            }
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
+                }
+                "symlink" => {
+                    let body = std::fs::read_to_string(&path).unwrap();
+                    std::fs::write(root.join(".github/digest-real.json"), body).unwrap();
+                    std::fs::remove_file(&path).unwrap();
+                    std::os::unix::fs::symlink("digest-real.json", &path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let report = audit::audit(&root);
+            assert_eq!(
+                verdict_of(&report, "workflow-env-pins"),
+                Verdict::Fail,
+                "{package}: {invalid} digest lock must fail the pin row"
+            );
+            assert_eq!(verdict_of(&report, "pin-consistency-guard"), Verdict::Fail);
+            assert_eq!(verdict_of(&report, "tests-neg"), Verdict::Fail);
+        }
     }
 }
 
@@ -318,6 +516,52 @@ fn central_nightly_and_release_profiles_are_real_install_contracts() {
             Verdict::Pass,
             "{profile} was not recognized as an installer"
         );
+    }
+}
+
+#[test]
+fn central_non_ci_profiles_require_the_committed_linux_digest() {
+    let other_digest = format!("sha256:{}", "b".repeat(64));
+    for (package, profile, inputs) in [
+        (
+            "coral",
+            "coral-release",
+            vec![format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+        ),
+        (
+            "nautilus",
+            "nautilus-release",
+            vec![format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+        ),
+        (
+            "nautilus",
+            "nautilus-nightly",
+            vec![
+                format!("chelis-tag: v{VER}"),
+                format!("chelis-version: {VER}"),
+                format!("chelis-linux-sha256: {ARCHIVE_DIGEST}"),
+            ],
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        std::fs::write(
+            root.join(".github/workflows/ci.yml"),
+            "name: inert\njobs:\n  no-install:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo no\n",
+        )
+        .unwrap();
+        std::fs::remove_file(root.join(".github/workflows/bump-pr.yml")).unwrap();
+        let wrapper =
+            central_profile_wrapper(profile, &inputs).replace(ARCHIVE_DIGEST, &other_digest);
+        std::fs::write(root.join(".github/workflows/central.yml"), wrapper).unwrap();
+
+        let report = audit::audit(&root);
+        assert_eq!(
+            verdict_of(&report, "workflow-env-pins"),
+            Verdict::Fail,
+            "{profile}: installer digest must match the committed lock"
+        );
+        assert_ne!(verdict_of(&report, "toolchain-installer"), Verdict::Pass);
     }
 }
 

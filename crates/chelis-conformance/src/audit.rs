@@ -13,6 +13,7 @@
 //! downgrades a row to `Na` when the shell's pin predates the row, so the HEAD
 //! canary does not fail a stale shell for a requirement that postdates its pin.
 
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -142,6 +143,9 @@ struct Ctx {
     /// when the manifest does not parse, which §8 must report rather than read
     /// as an empty declaration.
     conform: Option<Result<conform::ConformDecl, String>>,
+    /// Parsed once, only when a known legacy central caller needs its reef and
+    /// committed digest-lock sources checked.
+    central_sources: OnceCell<Result<CentralProfileSources, String>>,
 }
 
 impl Ctx {
@@ -164,6 +168,7 @@ impl Ctx {
             cargo_toml,
             workflows,
             conform,
+            central_sources: OnceCell::new(),
         }
     }
 
@@ -194,6 +199,13 @@ impl Ctx {
 
     fn exists(&self, rel: &str) -> bool {
         self.root.join(rel).exists()
+    }
+
+    fn central_sources(&self) -> Result<&CentralProfileSources, &str> {
+        self.central_sources
+            .get_or_init(|| load_central_sources(self))
+            .as_ref()
+            .map_err(String::as_str)
     }
 }
 
@@ -379,17 +391,8 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
         match central_workflow_evidence(ctx, body) {
             CentralWorkflowEvidence::Known(call) => {
                 checked += 1;
-                if let Some(version) = &call.chelis_version
-                    && version != bare
-                {
-                    mismatches.push(format!(
-                        "{name}: central chelis-version={version} != {bare}"
-                    ));
-                }
-                if let Some(tag) = &call.chelis_tag
-                    && tag.strip_prefix('v') != Some(bare)
-                {
-                    mismatches.push(format!("{name}: central chelis-tag={tag} != v{bare}"));
+                if let Err(why) = central_source_check(ctx, &call) {
+                    mismatches.push(format!("{name}: {why}"));
                 }
                 continue;
             }
@@ -426,10 +429,10 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
     if !mismatches.is_empty() {
         return fail(
             format!(
-                "workflow pin(s) disagree with reef.toml (={bare}): {}",
+                "workflow pin(s) disagree with reef.toml (={bare}) or the committed toolchain digest lock: {}",
                 mismatches.join("; ")
             ),
-            "update every workflow CHELIS_TAG/CHELIS_VERSION to match the reef pin, or run `chelis reef conform bump`",
+            "match local workflow pins to reef.toml (or run `chelis reef conform bump`); for legacy central callers also match profile inputs to reef.toml and .github/chelis-toolchains.json",
         );
     }
     if checked == 0 {
@@ -463,8 +466,8 @@ fn check_pin_consistency_guard(ctx: &Ctx) -> Check {
         pass()
     } else {
         fail(
-            "ci.yml lacks a blocking offline pin guard or known legacy central CI profile with exact reef inputs and PR/main-push triggers",
-            "run `chelis reef conform bump-check --base origin/main` / `conform audit`, or wire the known legacy central CI revision with exact pins and PR/main-push triggers (consumer approval is separate)",
+            "ci.yml lacks a blocking offline pin guard or known legacy central CI profile with matching reef/lock inputs and PR/main-push triggers",
+            "run `chelis reef conform bump-check --base origin/main` / `conform audit`, or wire the known legacy central CI revision with matching reef/lock inputs and PR/main-push triggers (consumer approval is separate)",
         )
     }
 }
@@ -1397,11 +1400,169 @@ const CENTRAL_WORKFLOW_PATH: &str = ".github/workflows/consumer.yml";
 const KNOWN_LEGACY_CENTRAL_WORKFLOW_SHA: &str = "4394706b569bdd7d557f6edc7b9818249decc330";
 const CENTRAL_SECRET_EXPRESSION: &str = "${{ secrets.CHELIS_RELEASE_TOKEN }}";
 
+/// Values checked by the exact historical 439 central profile before it
+/// installs a toolchain or claims to have run the shell's guards and suites.
+struct CentralProfileSources {
+    package_version: Option<String>,
+    nautilus_version: Option<String>,
+    linux_digest: String,
+    darwin_digest: String,
+}
+
 #[derive(Debug)]
 struct CentralWorkflowCall {
     profile: String,
     chelis_version: Option<String>,
     chelis_tag: Option<String>,
+    package_version: Option<String>,
+    nautilus_tag: Option<String>,
+    linux_digest: String,
+    darwin_digest: Option<String>,
+}
+
+fn numeric_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit()))
+    }) && parts.next().is_none()
+}
+
+fn load_central_sources(ctx: &Ctx) -> Result<CentralProfileSources, String> {
+    let reef = ctx
+        .reef_toml
+        .as_deref()
+        .ok_or("reef.toml is missing for central profile")?;
+    let manifest: toml::Value = toml::from_str(reef)
+        .map_err(|_| "reef.toml cannot be parsed for central profile".to_string())?;
+    let package_version = manifest
+        .get("package")
+        .and_then(|package| package.get("version"))
+        .and_then(toml::Value::as_str)
+        .filter(|version| numeric_version(version))
+        .map(str::to_string);
+    let nautilus_version = manifest
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("nautilus"))
+        .and_then(|nautilus| nautilus.get("version"))
+        .and_then(toml::Value::as_str)
+        .filter(|version| numeric_version(version))
+        .map(str::to_string);
+
+    let path = ctx.root.join(".github/chelis-toolchains.json");
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| ".github/chelis-toolchains.json is missing or unreadable".to_string())?;
+    if !metadata.file_type().is_file() || metadata.len() > 65_536 {
+        return Err(".github/chelis-toolchains.json must be a regular non-symlink file of at most 65536 bytes".to_string());
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| ".github/chelis-toolchains.json is unreadable".to_string())?;
+    let lock: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| ".github/chelis-toolchains.json is invalid JSON".to_string())?;
+    let object = lock
+        .as_object()
+        .filter(|object| {
+            object.len() == 2
+                && object.get("schema").and_then(serde_json::Value::as_str)
+                    == Some("chelis-toolchain-digests/v1")
+        })
+        .ok_or(".github/chelis-toolchains.json schema is invalid")?;
+    let versions = object
+        .get("versions")
+        .and_then(serde_json::Value::as_object)
+        .filter(|versions| (1..=32).contains(&versions.len()))
+        .ok_or(".github/chelis-toolchains.json versions are invalid")?;
+    for (version, entry) in versions {
+        let valid = entry.as_object().is_some_and(|record| {
+            record.len() == 2
+                && ["linux-x86_64", "darwin-arm64"].iter().all(|platform| {
+                    record
+                        .get(*platform)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(canonical_sha256)
+                })
+        });
+        if !numeric_version(version) || !valid {
+            return Err(format!(
+                ".github/chelis-toolchains.json entry {version} is invalid"
+            ));
+        }
+    }
+    let version = ctx
+        .reef_pin
+        .as_deref()
+        .and_then(|pin| pin.strip_prefix('='))
+        .ok_or("reef.toml has no exact compiler pin for central profile")?;
+    let selected = versions
+        .get(version)
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            format!(".github/chelis-toolchains.json has no compiler version {version}")
+        })?;
+    Ok(CentralProfileSources {
+        package_version,
+        nautilus_version,
+        linux_digest: selected["linux-x86_64"].as_str().unwrap().to_string(),
+        darwin_digest: selected["darwin-arm64"].as_str().unwrap().to_string(),
+    })
+}
+
+/// The same profile/source comparison decides both the pin row and whether a
+/// recognized central job may stand in for executed CI guards and suites.
+fn central_source_check(ctx: &Ctx, call: &CentralWorkflowCall) -> Result<(), String> {
+    let version = ctx
+        .reef_pin
+        .as_deref()
+        .and_then(|pin| pin.strip_prefix('='))
+        .ok_or("reef.toml has no exact compiler pin for central profile")?;
+    if let Some(actual) = &call.chelis_version
+        && actual != version
+    {
+        return Err(format!("central chelis-version={actual} != {version}"));
+    }
+    if let Some(actual) = &call.chelis_tag
+        && actual.strip_prefix('v') != Some(version)
+    {
+        return Err(format!("central chelis-tag={actual} != v{version}"));
+    }
+    let sources = ctx.central_sources().map_err(str::to_string)?;
+    if call.profile == "coral-ci" {
+        let package = sources
+            .package_version
+            .as_deref()
+            .ok_or("reef.toml [package].version is missing or not numeric")?;
+        if call.package_version.as_deref() != Some(package) {
+            return Err(format!(
+                "central package-version != reef.toml [package].version {package}"
+            ));
+        }
+        let nautilus = sources
+            .nautilus_version
+            .as_deref()
+            .ok_or("reef.toml [dependencies].nautilus.version is missing or not numeric")?;
+        if call
+            .nautilus_tag
+            .as_deref()
+            .and_then(|tag| tag.strip_prefix('v'))
+            != Some(nautilus)
+        {
+            return Err(format!(
+                "central nautilus-tag != v{nautilus} from reef.toml"
+            ));
+        }
+    }
+    if call.linux_digest != sources.linux_digest {
+        return Err("central chelis-linux-sha256 != committed Linux toolchain digest".to_string());
+    }
+    if let Some(actual) = &call.darwin_digest
+        && actual != &sources.darwin_digest
+    {
+        return Err(
+            "central chelis-darwin-sha256 != committed Darwin toolchain digest".to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1499,8 +1660,12 @@ fn central_workflow_evidence(ctx: &Ctx, body: &str) -> CentralWorkflowEvidence {
 /// and additional jobs cannot become audit authority.
 fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
     match central_workflow_evidence(ctx, body) {
-        CentralWorkflowEvidence::Known(call) => Some(call),
-        CentralWorkflowEvidence::Absent | CentralWorkflowEvidence::Unrecognized => None,
+        CentralWorkflowEvidence::Known(call) if central_source_check(ctx, &call).is_ok() => {
+            Some(call)
+        }
+        CentralWorkflowEvidence::Known(_)
+        | CentralWorkflowEvidence::Absent
+        | CentralWorkflowEvidence::Unrecognized => None,
     }
 }
 
@@ -1510,17 +1675,8 @@ fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
 /// central wrapper validator; this is the offline minimum for a running gate.
 fn central_ci_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
     let call = central_workflow_call(ctx, body)?;
-    if !matches!(call.profile.as_str(), "coral-ci" | "nautilus-ci") || !ci_runs_on_changes(body) {
-        return None;
-    }
-    let bare = ctx.reef_pin.as_deref()?.trim_start_matches('=');
-    (call.chelis_version.as_deref() == Some(bare)
-        && call
-            .chelis_tag
-            .as_deref()
-            .and_then(|tag| tag.strip_prefix('v'))
-            == Some(bare))
-    .then_some(call)
+    (matches!(call.profile.as_str(), "coral-ci" | "nautilus-ci") && ci_runs_on_changes(body))
+        .then_some(call)
 }
 
 /// Only explicit top-level event mappings can establish change coverage.
@@ -1727,6 +1883,19 @@ fn parse_central_workflow_call(workflow: &serde_json::Value) -> Option<CentralWo
             .map(str::to_string),
         chelis_tag: inputs
             .get("chelis-tag")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        package_version: inputs
+            .get("package-version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        nautilus_tag: inputs
+            .get("nautilus-tag")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        linux_digest: inputs.get("chelis-linux-sha256")?.as_str()?.to_string(),
+        darwin_digest: inputs
+            .get("chelis-darwin-sha256")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
     })
