@@ -20,6 +20,38 @@ use chelis_types::types::Prim;
 
 use crate::dag::{DimInfo, TensorType};
 
+/// A checked, unspecialized key operation carried as a host value. The
+/// operation identity belongs to the value's type until a checked call or a
+/// concrete callback formal selects one of its scalar/tensor signatures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyBuiltinCallable {
+    FromSeed,
+    Split,
+    SplitMany,
+    FoldIn,
+}
+
+impl KeyBuiltinCallable {
+    pub fn from_symbol(name: &str) -> Option<Self> {
+        match name {
+            "key_from_seed" => Some(Self::FromSeed),
+            "split_key" => Some(Self::Split),
+            "split_keys" => Some(Self::SplitMany),
+            "fold_in" => Some(Self::FoldIn),
+            _ => None,
+        }
+    }
+
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::FromSeed => "key_from_seed",
+            Self::Split => "split_key",
+            Self::SplitMany => "split_keys",
+            Self::FoldIn => "fold_in",
+        }
+    }
+}
+
 /// A host type before polymorphism and inference have been resolved.
 ///
 /// Unlike the legacy `HostType`, this vocabulary has no anonymous `Unknown`.
@@ -29,6 +61,7 @@ use crate::dag::{DimInfo, TensorType};
 pub enum HostTypeTerm {
     Scalar(HostPrecisionTerm),
     Fn(Vec<HostTypeTerm>, Box<HostTypeTerm>),
+    KeyBuiltinCallable(KeyBuiltinCallable),
     Adt(String, Vec<HostTypeTerm>),
     List(Box<HostTypeTerm>),
     Dict(Box<HostTypeTerm>, Box<HostTypeTerm>),
@@ -95,6 +128,7 @@ pub struct HostInferenceVar(pub u32);
 pub enum ConcreteHostType {
     Scalar(Prim),
     Function(Vec<ConcreteHostType>, Box<ConcreteHostType>),
+    KeyBuiltinCallable(KeyBuiltinCallable),
     Adt(String, Vec<ConcreteHostType>),
     List(Box<ConcreteHostType>),
     Dict(Box<ConcreteHostType>, Box<ConcreteHostType>),
@@ -212,6 +246,7 @@ impl HostTypeTerm {
             Self::List(inner) | Self::Option(inner) => inner.is_unresolved(),
             Self::Dict(key, value) => key.is_unresolved() || value.is_unresolved(),
             Self::Scalar(HostPrecisionTerm::Concrete(_))
+            | Self::KeyBuiltinCallable(_)
             | Self::Tensor(_)
             | Self::MappedFile
             | Self::Unit => false,
@@ -235,6 +270,7 @@ impl HostTypeTerm {
                     .collect::<Result<Vec<_>, _>>()?,
                 Box::new(ret.into_concrete()?),
             )),
+            Self::KeyBuiltinCallable(op) => Ok(ConcreteHostType::KeyBuiltinCallable(op)),
             Self::Adt(name, args) => Ok(ConcreteHostType::Adt(
                 name,
                 args.into_iter()

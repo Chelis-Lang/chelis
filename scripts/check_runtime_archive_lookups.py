@@ -235,6 +235,24 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "bindings/python/tests/python_wheel_smoke.py",
+        "runtime-variable",
+        lines=('RUNTIME_DIR_ENV = "CHELIS_RUNTIME_DIR"',),
+        disposition="not-lookup",
+        reason=(
+            "passes the variable name to a separate consumer to test staging rejection before artifact writes; it never selects an archive"
+        ),
+    ),
+    Row(
+        "bindings/python/tests/python_wheel_smoke.py",
+        "archive-name",
+        lines=('archive = artifact_dir / "libchelis_runtime.a"',),
+        disposition="not-lookup",
+        reason=(
+            "links the exact staged wheel archive after checking its SHA-256 against the receipt, without a directory/name search"
+        ),
+    ),
+    Row(
         "bindings/python/tests/manual_reef_context.py",
         "runtime-variable",
         lines=(
@@ -890,30 +908,13 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "crates/chelis-python/tests/manual_reef_context.rs",
-        "archive-name",
-        lines=(
-            "//! built `libchelis_runtime.a` discoverable via `CHELIS_RUNTIME_DIR`. No",
-            '#[ignore = "manual acceptance gate (#816): needs the 0.16.1 toolchain + reef registry, uv, and CHELIS_RUNTIME_DIR (libchelis_runtime.a); builds a temp reef project (tens of seconds)"]',
-        ),
-        disposition="lookup",
-        tracking="chelis#2694",
-        reason=(
-            "a manual gate's documentation and ignore reason still point the extension at a runtime directory holding the archive, which it now rejects"
-        ),
-    ),
-    Row(
-        "crates/chelis-python/tests/manual_reef_context.rs",
         "runtime-variable",
         lines=(
-            "//! built `libchelis_runtime.a` discoverable via `CHELIS_RUNTIME_DIR`. No",
-            "//! # bindings installed into py/.venv, runtime staticlib on CHELIS_RUNTIME_DIR",
-            '//! export CHELIS_RUNTIME_DIR="$PWD/target/agents/<name>/debug"',
-            '#[ignore = "manual acceptance gate (#816): needs the 0.16.1 toolchain + reef registry, uv, and CHELIS_RUNTIME_DIR (libchelis_runtime.a); builds a temp reef project (tens of seconds)"]',
+            "//! unset CHELIS_RUNTIME_DIR",
         ),
-        disposition="lookup",
-        tracking="chelis#2694",
+        disposition="not-lookup",
         reason=(
-            "a manual gate's prerequisites, command block and ignore reason still point the extension at a runtime directory, which it now rejects"
+            "the manual command clears an inherited override that the Python extension rejects"
         ),
     ),
     Row(

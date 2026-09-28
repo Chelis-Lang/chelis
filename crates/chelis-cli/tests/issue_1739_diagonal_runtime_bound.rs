@@ -1665,8 +1665,9 @@ fn the_census_reader_finds_the_guard_a_block_tail_moved() {
 
 /// THE CENSUS. Every executable Phase 0 example is offered to C. Recorded
 /// capability refusals are asserted; local and forwarded declared-result
-/// obligations are read back from the generated program. No shipped example
-/// currently adds one of these host-owned literal result checks.
+/// obligations are read back from the generated program. The keyed State
+/// wrapper retains four checked result axes through its tuple; the positive
+/// and per-axis negative Eval/C witnesses live in `key_pair_host_staging`.
 ///
 /// Entry guards have a different contract: compare their emitted conditions
 /// and labels with an independent parameter-axis traversal of checked source
@@ -1753,8 +1754,15 @@ fn no_shipped_example_gains_a_host_lane_guard() {
 
     assert_eq!(
         census,
-        Vec::<String>::new(),
-        "these shipped defs gained a host-lane result guard and each one needs a \
-         both-lane check before it lands"
+        vec![
+            "keyed_state_wrapper: main guards __let_19 axis 0 claiming 2",
+            "keyed_state_wrapper: main guards __let_19 axis 1 claiming 1",
+            "keyed_state_wrapper: main guards __let_19 axis 2 claiming 1",
+            "keyed_state_wrapper: main guards __let_19 axis 3 claiming 1",
+            "staged_adt_control: main guards __result axis 0 claiming 2",
+            "staged_adt_control: main guards __result axis 1 claiming 1",
+        ],
+        "these shipped defs changed their host-lane result guards; each change \
+         needs positive and negative both-lane checks before it lands"
     );
 }

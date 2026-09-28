@@ -484,6 +484,43 @@ enum ReefCommand {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
+    /// Check or apply registered Reef document schema upgrades
+    Upgrade {
+        /// Report required migration steps without file writes.
+        #[arg(long)]
+        check: bool,
+        /// Apply required migration steps through atomic file replacement.
+        #[arg(long)]
+        inplace: bool,
+        /// Package root. Defaults to the current directory.
+        #[arg(long, value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Stop after this supported manifest schema.
+        #[arg(long, value_name = "SCHEMA")]
+        manifest_to: Option<chelis_reef::ManifestSchemaVersion>,
+        /// Stop after this supported lock schema.
+        #[arg(long, value_name = "SCHEMA")]
+        lock_to: Option<chelis_reef::LockSchemaVersion>,
+    },
+    /// Refresh one package or the complete Reef dependency graph.
+    Update {
+        /// Optional package to refresh. Other locked packages stay fixed unless required.
+        package: Option<String>,
+        /// Disable remote providers. The command uses local candidates only.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Report current and available Reef package versions without final writes.
+    Outdated {
+        /// Optional package to inspect.
+        package: Option<String>,
+        /// Emit a stable JSON report.
+        #[arg(long)]
+        json: bool,
+        /// Disable remote providers. The command uses local candidates only.
+        #[arg(long)]
+        offline: bool,
+    },
     /// Build package artifacts (.chb + .tar.zst).
     ///
     /// By default, missing-from-registry dependencies are
@@ -4674,6 +4711,72 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                 "Initialized Reef package `{name}` at {}",
                 root.canonicalize().unwrap_or(root).display()
             );
+        }
+        ReefCommand::Upgrade {
+            check,
+            inplace,
+            path,
+            manifest_to,
+            lock_to,
+        } => {
+            let mode = match (check, inplace) {
+                (true, false) => chelis_reef::UpgradeMode::Check,
+                (false, true) => chelis_reef::UpgradeMode::InPlace,
+                _ => {
+                    return Err(
+                        "`chelis reef upgrade` requires exactly one of `--check` or `--inplace`"
+                            .into(),
+                    );
+                }
+            };
+            let root = path.unwrap_or_else(|| PathBuf::from("."));
+            let report = chelis_reef::upgrade_documents(&root, mode, manifest_to, lock_to)?;
+            if report.steps.is_empty() {
+                println!("Reef documents are current.");
+            } else {
+                for step in report.steps {
+                    println!("{step}");
+                }
+            }
+        }
+        ReefCommand::Update { package, offline } => {
+            let report = chelis_reef::update_project(Path::new("."), package.as_deref(), !offline)?;
+            if report.changes.is_empty() {
+                println!("All Reef packages are current.");
+            } else {
+                for change in report.changes {
+                    println!(
+                        "Updated {} {} -> {}",
+                        change.package,
+                        change.previous.as_deref().unwrap_or("<none>"),
+                        change.selected
+                    );
+                }
+            }
+        }
+        ReefCommand::Outdated {
+            package,
+            json,
+            offline,
+        } => {
+            let report =
+                chelis_reef::outdated_project(Path::new("."), package.as_deref(), !offline)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if report.packages.is_empty() {
+                println!("All Reef packages are current.");
+            } else {
+                for package in report.packages {
+                    println!(
+                        "{}: current={}, compatible={}, incompatible={}, blocked={}",
+                        package.package,
+                        package.current.as_deref().unwrap_or("<none>"),
+                        package.newest_compatible.as_deref().unwrap_or("<none>"),
+                        package.newest_incompatible.as_deref().unwrap_or("<none>"),
+                        package.blocked.as_deref().unwrap_or("<none>")
+                    );
+                }
+            }
         }
         ReefCommand::Build {
             path,

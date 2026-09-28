@@ -352,11 +352,15 @@ pub fn make_app(dir_name: &str) -> (TempDir, PathBuf, PathBuf) {
     let dir = tempdir().expect("tempdir");
     let app_pkg = dir.path().join(dir_name);
     fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+    // Reef package names are lowercase ASCII with internal hyphens.
+    let package_name = dir_name.to_ascii_lowercase().replace('_', "-");
     write_file(
         &app_pkg.join("reef.toml"),
         &format!(
-            r#"[package]
-name = "{dir_name}"
+            r#"schema = "1"
+
+[package]
+name = "{package_name}"
 version = "0.1.0"
 compiler = "={COMPILER_VERSION}"
 module_prefix = "Demo"

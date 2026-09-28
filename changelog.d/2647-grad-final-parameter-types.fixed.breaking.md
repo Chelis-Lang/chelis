@@ -15,3 +15,5 @@ first-order value annotations remain available to subsequent shape checks.
 Independent declared callable inputs and results remain available to ordinary
 generic instantiation, branch unification, and transforms without using a
 gradient result constraint to infer its selected parameters.
+Tensor concatenation retains computed extents when a transported callable's
+declared result has runtime dimensions.

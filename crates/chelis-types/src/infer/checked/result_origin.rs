@@ -203,8 +203,12 @@ impl InferenceProduct {
                     .map(|restriction| (*variable, restriction))
             })
             .collect();
+        let closed_key_variables = crate::env::closed_key_relation_variables(&scheme);
         for variable in &scheme.tvars {
-            subst.forbid_key_instantiation(*variable, crate::unify::GenericParameter::default());
+            if !closed_key_variables.contains(variable) {
+                subst
+                    .forbid_key_instantiation(*variable, crate::unify::GenericParameter::default());
+            }
         }
         scheme.result_origin = Some(origin);
         scheme

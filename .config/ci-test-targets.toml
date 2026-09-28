@@ -215,6 +215,25 @@ cadence = "pull_request and push"
 reason = "the managed-interpreter acceptance roster and unsafe-fallback guard execute in script-unit"
 tracking_issue = "chelis#1955"
 
+# The keyed corpus is manual; its receipt contract runs in script-unit.
+[[path_rule]]
+prefix = "scripts/keyed_randomness_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes selection, execution-receipt, timeout and retirement negative controls; full keyed acceptance is an explicit manual gate"
+tracking_issue = "chelis#2413"
+
+[[path_rule]]
+prefix = "scripts/test_keyed_randomness_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the keyed randomness acceptance runner contract tests without compiling its manual corpus"
+tracking_issue = "chelis#2413"
+
 # The completion runner consumes these exact runtime-extent corpus inputs.
 [[path_rule]]
 prefix = "scripts/runtime_extent_oracle.py"
@@ -926,8 +945,8 @@ tracking_issue = "chelis#1824"
 package = "chelis-python"
 name = "manual_reef_context"
 manual_gates = ["reef_context_manual_acceptance_oracle"]
-reason = "the reef-context acceptance oracle needs a populated local reef registry and Python environment that the Linux PR workers do not have"
-tracking_issue = "chelis#1824"
+reason = "the reef-context gate needs a populated local registry and the macOS Python library path unavailable to Linux PR workers"
+tracking_issue = "chelis#2694"
 
 # This target requires a real HIP workstation. Ubuntu change-owned and package
 # expansion workers must preserve the exact manual gate without attempting to
@@ -1071,6 +1090,17 @@ packages = ["chelis-types", "chelis-compiler-api"]
 # chelis-python's execution-wire facade tests import it.
 [[path_rule]]
 prefix = "bindings/python/chelis/"
+disposition = "packages"
+packages = ["chelis-python"]
+
+# These PEP 517 inputs choose the features used to build chelis-python wheels.
+[[path_rule]]
+prefix = "bindings/python/pyproject.toml"
+disposition = "packages"
+packages = ["chelis-python"]
+
+[[path_rule]]
+prefix = "bindings/python/build_backend/"
 disposition = "packages"
 packages = ["chelis-python"]
 
@@ -1236,7 +1266,25 @@ prefix = "examples/signed_seed.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
 
+# Forward staged ADT selection is checked through public Eval/C and parity.
+[[path_rule]]
+prefix = "examples/staged_adt_control.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# The keyed state wrapper is executed by chelis-cli::key_pair_host_staging and
+# chelis-cli::parity, and enters the executable and formatter corpora.
+[[path_rule]]
+prefix = "examples/keyed_state_wrapper.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 # CLI parity, executable-example checking, and formatter corpus coverage.
+[[path_rule]]
+prefix = "examples/key_builtin_aliases.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 [[path_rule]]
 prefix = "examples/tensor_key_operations.ch"
 disposition = "packages"
@@ -2998,6 +3046,24 @@ workflow = "ci.yml"
 job = "lint-rust"
 cadence = "pull_request and push"
 reason = "the Rust policy job's lint-and-unit gate stage runs the pipeline-core dependency guard against the workspace's resolved cargo graph"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/regenerate_chelis_std_bundle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust policy job's lint-and-unit gate stage runs the chelis-std bundle regeneration check twice against the committed outputs"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_regenerate_chelis_std_bundle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the bundle regeneration unit tests; the real fixed-point class stays on the nightly script lane"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]

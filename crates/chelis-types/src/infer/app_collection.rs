@@ -139,13 +139,22 @@ impl builtins::AggregateRule {
     }
 }
 
-/// A decided contract distinguishes a produced-value equality from an
-/// ordinary operation signature. The latter is used only after scalar/tensor
-/// key admission: it contains no callable input or result whose origin could
-/// be inferred backwards. It must settle before generic key-free marking.
+/// Stored-value equations retain their result origin. Scalar/tensor operation
+/// signatures contain no callable origin to infer backwards, and may settle
+/// directly. A computed result also retains its precise type separately from
+/// the declared signature's compatibility check.
 pub(crate) enum CollectionDecision {
     ResultOrigin(ResultConstraint),
-    RequiredEquality { actual: Type, expected: Type },
+    RequiredEquality {
+        actual: Type,
+        expected: Type,
+    },
+    /// A semantic rule computed this call's result. Its precise type remains
+    /// available even when the callable's declaration contains wildcards.
+    ProducedResult {
+        declared: Type,
+        produced: Type,
+    },
 }
 
 impl CollectionDecision {
@@ -156,6 +165,14 @@ impl CollectionDecision {
                 Ok(())
             }
             Self::RequiredEquality { actual, expected } => unify(&actual, &expected, subst),
+            Self::ProducedResult { declared, produced } => unify(&declared, &produced, subst),
+        }
+    }
+
+    pub(crate) fn produced_result(&self) -> Option<Type> {
+        match self {
+            Self::ProducedResult { produced, .. } => Some(produced.clone()),
+            Self::ResultOrigin(_) | Self::RequiredEquality { .. } => None,
         }
     }
 }
@@ -312,8 +329,14 @@ pub(crate) fn decide_collection_constraint(
                 let (raw_axis, list_info) = tensor_concat
                     .map(|evidence| (evidence.raw_axis, evidence.list_info.clone()))
                     .unwrap_or((None, ConcatListInfo::BindingLen(None)));
-                tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst)
-                    .map(|ty| joined(vec![ty]))
+                tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst).map(
+                    |produced| {
+                        Some(CollectionDecision::ProducedResult {
+                            declared: result.clone(),
+                            produced,
+                        })
+                    },
+                )
             }
             (lhs, rhs) => Err(format!(
                 "concat expects matching List inputs, got {lhs} and {rhs}"
@@ -322,17 +345,19 @@ pub(crate) fn decide_collection_constraint(
     }
 }
 
-/// Direct calls and transported contracts publish the same result equations.
-/// The decision validates compatibility on a private substitution; only the
-/// origin ledger may propagate its equality into inference.
+/// Direct calls and transported contracts publish the same decisions. Stored
+/// value equalities flow through the origin ledger; a computed scalar/tensor
+/// result retains its facts after checking the callable's declaration.
 pub(super) fn publish_collection_equation(
     constraint: &CollectionConstraint,
     node: &DeepNode,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<Type> {
+    let produced_result;
     match decide_collection_constraint(constraint, None, subst) {
         Ok(Some(decision)) => {
+            produced_result = decision.produced_result();
             if let Err(error) = decision.publish(subst) {
                 errors.push(error.into());
             }
@@ -349,7 +374,7 @@ pub(super) fn publish_collection_equation(
             ));
         }
     }
-    Some(constraint.result().clone())
+    Some(produced_result.unwrap_or_else(|| constraint.result().clone()))
 }
 
 fn key_operation_surface(operand: &Type, input: Prim) -> Result<Type, String> {

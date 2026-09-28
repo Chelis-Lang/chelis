@@ -959,6 +959,12 @@ identity into direct calls while respecting nested binders. Later shadowing cann
 retarget the call. Calls into staged definitions retain the shared plan instead of
 re-extracting a tensor-only helper. Host control boundaries are an explicit
 planner result, so a fallback cannot silently retry whole-function DAG lowering.
+A match whose scrutinee is an opaque host value, or whose selected pattern has
+a runtime guard, retains the complete match in host control before any arm is
+visited. The host evaluates the scrutinee once and executes only the selected
+arm under [04-PAT-2]; the staged attempt cannot hoist arm-local sources or
+reinterpret the host ADT as a static constructor. Static unguarded constructor
+selection continues to lower only its chosen arm.
 Random handlers retain host scope, each tensor segment consumes the live handled
 stream, and CSE preserves distinct activated draws.
 

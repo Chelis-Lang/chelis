@@ -97,7 +97,7 @@ fn concrete_static_rate_exported_library_call_survives_context_decode() {
     use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("src")).unwrap();
-    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"static_rate\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
+    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"static-rate\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
     std::fs::write(directory.path().join("src/draw.ch"), "module Probe.Draw\nexport (keep)\ndef keep(k: key, x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(k, x, rate)\n").unwrap();
     let context = compile_reef_context(directory.path(), directory.path()).unwrap();
     let decoded =
@@ -130,7 +130,7 @@ fn compiled_static_rate_exported_library_call_survives_context_decode() {
     // authority across the serialized context boundary.
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("src")).unwrap();
-    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"static_rate\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
+    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"static-rate\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
     std::fs::write(directory.path().join("src/draw.ch"), "module Probe.Draw\nexport (keep)\ndef keep(k: key, x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(k, x, rate)\n").unwrap();
     let context = compile_reef_context(directory.path(), directory.path()).unwrap();
     let decoded =
@@ -498,7 +498,7 @@ fn fixed_dropout_composes_with_host_produced_checked_reshape_targets() {
             );
             let directory = tempfile::tempdir().unwrap();
             std::fs::create_dir(directory.path().join("src")).unwrap();
-            std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"review_three_guard\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
+            std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"review-three-guard\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
             std::fs::write(
                 directory.path().join("src/draw.ch"),
                 format!("module Probe.Draw\nexport (loss)\n{definition}"),
@@ -629,7 +629,7 @@ fn host_only_random_source_does_not_cache_the_first_callers_key() {
     std::fs::write(
         directory.path().join("reef.toml"),
         format!(
-            "[package]\nname = \"round_four_seed\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
+            "[package]\nname = \"round-four-seed\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
         ),
     )
     .unwrap();
@@ -970,7 +970,7 @@ fn checked_extent_dropout_context_cache_keeps_claims_and_fresh_replay() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("src")).unwrap();
     std::fs::write(directory.path().join("reef.toml"), format!(
-        "[package]\nname = \"extent_dropout_probe\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
+        "[package]\nname = \"extent-dropout-probe\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
     )).unwrap();
     std::fs::write(directory.path().join("src/draw.ch"),
         "module Probe.Draw\nexport (draw, loss)\ndef checked[n](x: tensor[n, f32]) -> tensor[16, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef draw[n](k: key, x: tensor[n, f32]) -> tensor[16, 2, f32] = dropout(k, checked(x), 0.5f32)\ndef loss[n](k: key, x: tensor[n, f32]) -> tensor[f32] = sum(sum(draw(k, x), 0), 0)\n"
@@ -1215,7 +1215,7 @@ fn checked_library_context_and_prepared_context_preserve_raw_key_binding() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("src")).unwrap();
     std::fs::write(directory.path().join("reef.toml"), format!(
-        "[package]\nname = \"dropout_probe\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
+        "[package]\nname = \"dropout-probe\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
     )).unwrap();
     std::fs::write(directory.path().join("src/draw.ch"),
         "module Probe.Draw\nexport (draw)\ndef draw(k: key, x: tensor[32, f32]) -> tensor[32, f32] = dropout(k, x, 0.5f32)\n"
@@ -1300,7 +1300,7 @@ fn assert_explicit_drop_context_parity(
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("src")).unwrap();
     std::fs::write(directory.path().join("reef.toml"), format!(
-        "[package]\nname = \"dropout_drop_probe\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
+        "[package]\nname = \"dropout-drop-probe\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
     )).unwrap();
     std::fs::write(
         directory.path().join("src/draw.ch"),

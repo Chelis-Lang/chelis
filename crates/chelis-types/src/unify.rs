@@ -806,15 +806,20 @@ fn discharge_collection_constraint(
 ) -> CollectionDischarge {
     match crate::infer::decide_collection_constraint(constraint, tensor_concat, subst) {
         Ok(None) => CollectionDischarge::Unresolved,
-        Ok(Some(decision)) => match decision.publish(subst) {
-            Ok(()) => CollectionDischarge::Settled(Some(constraint.result().clone())),
-            Err(error) => {
-                subst.record_operand_gate_failure(OperandGateFailure::Decision {
-                    error: error.into(),
-                });
-                CollectionDischarge::Settled(None)
+        Ok(Some(decision)) => {
+            let produced = decision.produced_result();
+            match decision.publish(subst) {
+                Ok(()) => CollectionDischarge::Settled(Some(
+                    produced.unwrap_or_else(|| constraint.result().clone()),
+                )),
+                Err(error) => {
+                    subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                        error: error.into(),
+                    });
+                    CollectionDischarge::Settled(None)
+                }
             }
-        },
+        }
         Err(message) => {
             subst.record_operand_gate_failure(OperandGateFailure::Decision {
                 error: crate::errors::CheckError::new(
@@ -865,7 +870,7 @@ pub(crate) fn collection_contract_visible_in_type(
     contains(ty, &callable)
 }
 
-fn collection_contract_callable_type(constraint: &CollectionConstraint) -> Type {
+pub(crate) fn collection_contract_callable_type(constraint: &CollectionConstraint) -> Type {
     Type::Fn(
         constraint.operands().into_iter().cloned().collect(),
         Box::new(constraint.result().clone()),
@@ -1353,6 +1358,7 @@ impl Subst {
             .result_origin
             .as_ref()
             .map(|origin| crate::result_scope::ResultScope::new(&origin.equations));
+        let closed_key_variables = crate::env::closed_key_relation_variables(scheme);
         let mut marks = self
             .key_free_tvars
             .lock()
@@ -1369,6 +1375,12 @@ impl Subst {
             }
         }
         for tv in &variables {
+            // A closed checked key relation is not an authored unconstrained
+            // type parameter. Preserve any older generic mark, however: a
+            // relation cannot erase the restriction of an enclosing binder.
+            if closed_key_variables.contains(tv) && !marks.contains_key(tv) {
+                continue;
+            }
             let binder = binders
                 .iter()
                 .find(|(declared, _)| {
