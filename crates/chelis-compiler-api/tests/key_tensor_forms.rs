@@ -364,6 +364,8 @@ fn locally_aggregated_key_builtin_aliases_execute_in_eval_and_c() {
     for source in [
         "def main() = {\n  ops = (key_from_seed, split_key)\n  seed = ops.0\n  fork = ops.1\n  fork(seed(9i64))\n}\n",
         "def main() = {\n  ops = ((key_from_seed, split_key), fold_in)\n  pair = ops.0\n  seed = pair.0\n  fork = pair.1\n  fork(seed(9i64))\n}\n",
+        "def main() = {\n  seed = key_from_seed\n  fork = split_key\n  ops = (seed, fork)\n  make = ops.0\n  derive = ops.1\n  derive(make(9i64))\n}\n",
+        "def main() = {\n  seed = key_from_seed\n  another = seed\n  fork = split_key\n  ops = ((another, fork), 1i64)\n  pair = ops.0\n  make = pair.0\n  derive = pair.1\n  derive(make(9i64))\n}\n",
     ] {
         assert_alias_eval_c(source, &expected);
     }
@@ -373,20 +375,23 @@ fn locally_aggregated_key_builtin_aliases_execute_in_eval_and_c() {
 /// identity. It cannot turn `split_key` into a generic callable of any type.
 #[test]
 fn locally_aggregated_key_builtin_alias_rejects_wrong_operand() {
-    let source =
-        "def main() = {\n  ops = (key_from_seed, split_key)\n  fork = ops.1\n  fork(9i64)\n}\n";
-    let error = compile(CompileRequest {
-        source_kind: SourceKind::Surf,
-        source: source.to_string(),
-        target: CompileTarget::C,
-        entry_name: Some("key-aggregate-wrong-input".into()),
-    })
-    .expect_err("a projected split_key still requires a key operand");
-    assert_eq!(error.stage, "check", "{error:?}");
-    assert!(
-        format!("{error:?}").contains("key operation expects key or a tensor of key"),
-        "{error:?}"
-    );
+    for source in [
+        "def main() = {\n  ops = (key_from_seed, split_key)\n  fork = ops.1\n  fork(9i64)\n}\n",
+        "def main() = {\n  fork = split_key\n  ops = (fork, 1i64)\n  derive = ops.0\n  derive(9i64)\n}\n",
+    ] {
+        let error = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            target: CompileTarget::C,
+            entry_name: Some("key-aggregate-wrong-input".into()),
+        })
+        .expect_err("a projected split_key still requires a key operand");
+        assert_eq!(error.stage, "check", "{error:?}");
+        assert!(
+            format!("{error:?}").contains("key operation expects key or a tensor of key"),
+            "{source}\n{error:?}"
+        );
+    }
 }
 
 /// A public aggregate cannot export unspecialized builtin identity through

@@ -9106,6 +9106,26 @@ impl<'program> LowerCtx<'program> {
         Some(LoweredValue::Host { id, ty })
     }
 
+    /// A key builtin alias can enter a tuple after one or more lexical
+    /// bindings. Read an existing closed carrier through that binding;
+    /// only an unbound builtin producer creates a fresh carrier.
+    fn key_builtin_alias_value(&mut self, expr: &Expr, name: &str) -> Option<LoweredValue> {
+        let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
+            return None;
+        };
+        let referenced = kids.first().and_then(symbol_name)?;
+        if let Some(value) = self.bindings.get(referenced)
+            && let LoweredValue::Host {
+                ty: crate::host_type_state::HostTypeTerm::KeyBuiltinCallable(op),
+                ..
+            } = value
+            && op.symbol() == name
+        {
+            return Some(value.clone());
+        }
+        self.stage_key_builtin_tuple_item(expr, name)
+    }
+
     /// A declaration supplies obligations to its returned expression before
     /// lowering can fold the expression's independent extent source.
     ///
@@ -9978,7 +9998,14 @@ impl<'program> LowerCtx<'program> {
                         // as well as its native inlining identity. Host scalar
                         // expressions can then capture aliases through the
                         // same typed host carrier as other lexical values.
-                        if let Some(value) = self.stage_host_value(&bind_kids[i + 1], false) {
+                        let value = self.stage_host_value(&bind_kids[i + 1], false).or_else(|| {
+                            if let CallableExpr::KeyBuiltin(operation) = &callable {
+                                self.key_builtin_alias_value(&bind_kids[i + 1], operation)
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(value) = value {
                             self.bindings.insert(name.clone(), value);
                         }
                         self.local_callables.insert(name.clone(), callable);
@@ -20020,7 +20047,7 @@ impl<'program> LowerCtx<'program> {
             kids.iter()
                 .map(|expr| {
                     if let Some(CallableExpr::KeyBuiltin(name)) = self.resolve_callable_expr(expr)
-                        && let Some(staged) = self.stage_key_builtin_tuple_item(expr, &name)
+                        && let Some(staged) = self.key_builtin_alias_value(expr, &name)
                     {
                         staged
                     } else {
