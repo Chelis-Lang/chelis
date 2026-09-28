@@ -802,12 +802,13 @@ impl HostExecutionPlan {
     /// recover an ordinary host program while either is retained.
     #[cfg(feature = "lowering-trace")]
     pub fn discard_helper_traces(mut self) -> Self {
-        for product in self
-            .global
-            .iter_mut()
-            .chain(self.functions.iter_mut().flatten())
-        {
+        for product in self.global.iter_mut() {
             product.trace = None;
+        }
+        for products in self.functions.iter_mut() {
+            for product in products.iter_mut() {
+                product.trace = None;
+            }
         }
         self
     }
@@ -9196,7 +9197,11 @@ fn refine_function_params_from_body(params: &mut [HostParam], body: &HostExpr) {
     let HostExprKind::Call { args, arg_tys, .. } = &body.kind else {
         return;
     };
-    for (index, param) in params.iter_mut().enumerate() {
+    let mut next_index = 0;
+    while next_index < params.len() {
+        let index = next_index;
+        next_index += 1;
+        let param = &mut params[index];
         if !param.ty.is_unresolved() {
             continue;
         }
@@ -9293,7 +9298,8 @@ fn refine_host_function_signatures(
                 changed = true;
             }
 
-            for (index, param) in function.params.iter_mut().enumerate() {
+            for index in 0..function.params.len() {
+                let param = &mut function.params[index];
                 if !param.ty.is_unresolved() {
                     continue;
                 }
@@ -9394,7 +9400,12 @@ fn propagate_named_callback_signatures(
         let Some((param_tys, ret_ty)) = inferred.get(&function.name) else {
             continue;
         };
-        for (param, inferred_ty) in function.params.iter_mut().zip(param_tys.iter()) {
+        let mut next_index = 0;
+        while next_index < function.params.len().min(param_tys.len()) {
+            let index = next_index;
+            next_index += 1;
+            let param = &mut function.params[index];
+            let inferred_ty = &param_tys[index];
             if host_type_is_unresolved(&param.ty) && !host_type_is_unresolved(inferred_ty) {
                 param.ty = inferred_ty.clone();
                 changed = true;
@@ -9736,7 +9747,11 @@ fn refine_host_expr_types(
             let declared_sig = signatures.get(function).cloned();
             let sig = inferred_sig.or(declared_sig);
             if let Some((params, ret)) = sig {
-                for (index, arg_ty) in arg_tys.iter_mut().enumerate() {
+                let mut next_index = 0;
+                while next_index < arg_tys.len() {
+                    let index = next_index;
+                    next_index += 1;
+                    let arg_ty = &mut arg_tys[index];
                     if let Some(inferred) = params.get(index)
                         && !inferred.is_unresolved()
                         && *arg_ty != *inferred
@@ -10055,10 +10070,13 @@ fn specialize_host_callback_types(
     ret_ty: &HostTypeTerm,
 ) -> bool {
     let mut changed = false;
-    for (param, inferred) in callback_params_mut(callback)
-        .iter_mut()
-        .zip(param_tys.iter())
-    {
+    let params = callback_params_mut(callback);
+    let mut next_index = 0;
+    while next_index < params.len().min(param_tys.len()) {
+        let index = next_index;
+        next_index += 1;
+        let param = &mut params[index];
+        let inferred = &param_tys[index];
         if host_type_is_unresolved(&param.ty) && !host_type_is_unresolved(inferred) {
             param.ty = inferred.clone();
             changed = true;
@@ -13706,7 +13724,11 @@ fn lower_recursive_generic_call(
             .find(|spec| spec.def_name == canonical_name && spec.param_tys.len() == args.len())
             .cloned();
         if let Some(spec) = in_progress {
-            for (slot, param_ty) in param_tys.iter_mut().enumerate() {
+            let mut next_slot = 0;
+            while next_slot < param_tys.len() {
+                let slot = next_slot;
+                next_slot += 1;
+                let param_ty = &mut param_tys[slot];
                 if param_ty.is_unresolved() {
                     *param_ty = spec.param_tys[slot].clone();
                 }
@@ -13765,7 +13787,11 @@ fn lower_recursive_generic_call(
             solve_host_type_vars(&declared_ret_term, &ret_ty, &mut subst);
         }
         if !subst.is_empty() {
-            for (slot, param_ty) in param_tys.iter_mut().enumerate() {
+            let mut next_slot = 0;
+            while next_slot < param_tys.len() {
+                let slot = next_slot;
+                next_slot += 1;
+                let param_ty = &mut param_tys[slot];
                 if param_ty.is_unresolved()
                     && let Some(Some(declared_expr)) = declared.get(slot)
                 {
@@ -14809,7 +14835,11 @@ fn substitute_expr(
                         // only after its own value slot has been rewritten, so
                         // it applies to LATER values and to the body.
                         let mut pending: Option<(String, String)> = None;
-                        for (index, slot) in rebuilt_binds.iter_mut().enumerate().skip(2) {
+                        let mut next_index = 2;
+                        while next_index < rebuilt_binds.len() {
+                            let index = next_index;
+                            next_index += 1;
+                            let slot = &mut rebuilt_binds[index];
                             if index % 2 == 0 {
                                 let renamed = symbol_name(slot).and_then(|name| {
                                     renames.iter().find(|(from, _)| from == name).cloned()
@@ -15961,12 +15991,9 @@ fn remap_tensor_helper_dim_symbols(
         let declarable = crate::dag::op_declarable_axes(&remapped, root);
         let mut output = root.output_type.clone();
         let mut changed = false;
-        for (axis, (dim, actual_dim)) in output
-            .dims
-            .iter_mut()
-            .zip(actual_output.dims.iter())
-            .enumerate()
-        {
+        for axis in 0..output.dims.len().min(actual_output.dims.len()) {
+            let dim = &mut output.dims[axis];
+            let actual_dim = &actual_output.dims[axis];
             if declarable.contains(&axis) && is_anon(dim) && !is_anon(actual_dim) {
                 *dim = actual_dim.clone();
                 changed = true;

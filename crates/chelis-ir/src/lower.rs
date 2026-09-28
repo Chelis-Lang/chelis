@@ -1481,7 +1481,8 @@ fn lower_program_with_context_inner(
             .map_err(|message| raise_fatal_lowering_error(message, None, None, ctx.runtime))?;
         ctx.execution = Some(metadata);
         ctx.evaluation_entries = program.entries.clone();
-        for (owner, entry) in ctx.evaluation_entries.iter_mut().enumerate() {
+        for owner in 0..ctx.evaluation_entries.len() {
+            let entry = &mut ctx.evaluation_entries[owner];
             // Explicit source drops also belong to an entry's retention
             // list. Composition stripped these terminal markers above and
             // will regenerate ownership drops after combining the graphs.
@@ -9512,7 +9513,11 @@ impl<'program> LowerCtx<'program> {
                 }
             }
             LoweredValue::Tuple(items) => {
-                for (index, item) in items.iter_mut().enumerate() {
+                let mut next_index = 0;
+                while next_index < items.len() {
+                    let index = next_index;
+                    next_index += 1;
+                    let item = &mut items[index];
                     self.add_named_roots(&format!("{prefix}.{index}"), item)?;
                 }
             }
@@ -9523,7 +9528,11 @@ impl<'program> LowerCtx<'program> {
                 fields,
                 ..
             } => {
-                for (index, field) in fields.iter_mut().enumerate() {
+                let mut next_index = 0;
+                while next_index < fields.len() {
+                    let index = next_index;
+                    next_index += 1;
+                    let field = &mut fields[index];
                     let label = field_names
                         .as_ref()
                         .and_then(|names| names.get(index).cloned())

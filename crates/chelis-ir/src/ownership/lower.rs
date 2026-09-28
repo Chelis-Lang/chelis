@@ -683,7 +683,9 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         if self.blocks[index].terminator.is_some() {
             return Err(self.invariant(format!("block b{} terminated twice", self.current.0)));
         }
-        for edge in terminator.edges_mut() {
+        let mut edge_index = 0;
+        while let Some(edge) = terminator.edge_mut(edge_index) {
+            edge_index += 1;
             edge.id = EdgeId(self.next_edge);
             self.next_edge = self
                 .next_edge

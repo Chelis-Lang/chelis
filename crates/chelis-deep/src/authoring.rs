@@ -337,7 +337,8 @@ pub fn rename_function(
     let module = single_module_mut(&mut rewritten)?;
     let module_name = module_name(module).unwrap_or_default().to_string();
 
-    for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
+    for index in MODULE_DECLS_START..module.elements.len() {
+        let decl = &mut module.elements[index];
         if let Some(list) = tagged_list_mut(decl, DeepTag::Def) {
             if decl_name(list) == Some(old_name.as_str()) {
                 set_decl_name(list, new_name);
@@ -351,7 +352,8 @@ pub fn rename_function(
     }
 
     let mut renamed_references = 0;
-    for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
+    for index in MODULE_DECLS_START..module.elements.len() {
+        let decl = &mut module.elements[index];
         let Some(def) = tagged_list_mut(decl, DeepTag::Def) else {
             continue;
         };
@@ -496,7 +498,8 @@ pub fn change_signature(
     let mut replaced_defsig = false;
     let mut rewritten_calls = 0;
 
-    for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
+    for index in MODULE_DECLS_START..module.elements.len() {
+        let decl = &mut module.elements[index];
         if let Some(list) = tagged_list(decl, DeepTag::Defsig)
             && decl_name(list) == Some(target_name.as_str())
         {
@@ -524,7 +527,8 @@ pub fn change_signature(
         )));
     }
 
-    for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
+    for index in MODULE_DECLS_START..module.elements.len() {
+        let decl = &mut module.elements[index];
         let Some(def) = tagged_list_mut(decl, DeepTag::Def) else {
             continue;
         };
@@ -1760,10 +1764,18 @@ fn single_module_mut(exprs: &mut [Expr]) -> Result<&mut List, AuthoringError> {
     if count > 1 {
         return Err(AuthoringError::MultipleModules { count });
     }
-    exprs
-        .iter_mut()
-        .find_map(|expr| tagged_list_mut(expr, DeepTag::Module))
-        .ok_or(AuthoringError::NoModule)
+    let mut next_index = 0;
+    while next_index < exprs.len() {
+        let index = next_index;
+        next_index += 1;
+        // Test immutably, then borrow the one module mutably on the return
+        // path: returning a loop-conditional mutable borrow does not check.
+        if tagged_list(&exprs[index], DeepTag::Module).is_some() {
+            return tagged_list_mut(&mut exprs[index], DeepTag::Module)
+                .ok_or(AuthoringError::NoModule);
+        }
+    }
+    Err(AuthoringError::NoModule)
 }
 
 fn expr_tag(expr: &Expr) -> Option<DeepTag> {

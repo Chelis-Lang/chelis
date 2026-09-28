@@ -320,6 +320,35 @@ impl Terminator {
         }
     }
 
+    /// The `index`-th successor edge in `edges` order, or `None` past the
+    /// last one. Production code walks the edges mutably through this
+    /// accessor with a counter, not through a lending iterator.
+    pub(crate) fn edge_mut(&mut self, index: usize) -> Option<&mut Edge> {
+        match self {
+            Self::Return { .. } | Self::Exit => None,
+            Self::Jump(edge) => match index {
+                0 => Some(edge),
+                _ => None,
+            },
+            Self::Branch {
+                then_edge,
+                else_edge,
+                ..
+            }
+            | Self::Loop {
+                body_edge: then_edge,
+                exit_edge: else_edge,
+                ..
+            } => match index {
+                0 => Some(then_edge),
+                1 => Some(else_edge),
+                _ => None,
+            },
+            Self::Match { arms, .. } => arms.get_mut(index),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn edges_mut(&mut self) -> SuccessorEdges<&mut Edge, std::slice::IterMut<'_, Edge>> {
         match self {
             Self::Return { .. } | Self::Exit => SuccessorEdges::Fixed {
