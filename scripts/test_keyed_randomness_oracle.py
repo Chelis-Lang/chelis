@@ -242,6 +242,15 @@ class ReceiptTests(unittest.TestCase):
         self.assertIn("chelis-compiler-api::key_tensor_forms::tensor_key_forms_match_the_independent_scalar_reference_in_eval_and_c", identities)
         self.assertIn("chelis-types::jit_par_passthrough::par_is_rejected_with_the_typed_issue_fence", identities)
 
+    def test_catalog_includes_tensor_key_checker_contracts(self):
+        identities = oracle.expected_tests(oracle.SUITES)
+        self.assertEqual(len(identities), 91)
+        for name in (
+            "tensor_key_operations_preserve_shapes_and_affinity",
+            "tensor_key_contracts_survive_checker_context_serialization",
+        ):
+            self.assertIn(f"chelis-types::key_linearity::{name}", identities)
+
 
 if __name__ == "__main__":
     unittest.main()

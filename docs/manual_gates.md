@@ -104,7 +104,7 @@ assertion failures unless an explicit different success condition is given.
 
 | Gate | Command | Expected success | Owner |
 |---|---|---|---|
-| Keyed randomness corpus | `.venv/bin/python scripts/keyed_randomness_oracle.py` | `KEYED RANDOMNESS ORACLE: PASS` and a fresh exact-SHA receipt with all 89 selected identities passing, none failed/skipped/unrun, and the retired-dispatch tripwire passing. Requires a clean committed task worktree, its uv Python 3.11, Cargo/nextest and a native C toolchain. Manual: not dispatched by default CI. [Corpus and limits](keyed_randomness_oracle.md); `par` is a typed refusal, and shell release is separate. | chelis#2413 |
+| Keyed randomness corpus | `.venv/bin/python scripts/keyed_randomness_oracle.py` | `KEYED RANDOMNESS ORACLE: PASS` and a fresh exact-SHA receipt with all 91 selected identities passing, none failed/skipped/unrun, and the retired-dispatch tripwire passing. Requires a clean committed task worktree, its uv Python 3.11, Cargo/nextest and a native C toolchain. Manual: not dispatched by default CI. [Corpus and limits](keyed_randomness_oracle.md); `par` is a typed refusal, and shell release is separate. | chelis#2413 |
 
 ## Developer-environment acceptance gates
 

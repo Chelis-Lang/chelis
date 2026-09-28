@@ -49,6 +49,8 @@ SUITES = (
         "key_ref_worked_values_are_the_kernels_values",
     ), ("reference",)),
     Suite("chelis-types", "key_linearity", (
+        "tensor_key_operations_preserve_shapes_and_affinity",
+        "tensor_key_contracts_survive_checker_context_serialization",
         "deriving_keys_is_accepted_and_each_key_is_used_once",
         "reusing_a_key_after_a_key_operation_is_rejected",
         "reusing_a_key_after_a_draw_is_rejected",

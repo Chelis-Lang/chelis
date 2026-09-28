@@ -9,7 +9,7 @@ The compiler completion command for the finite chelis#2413 corpus is:
 Run from a clean, committed task worktree with its own uv-managed Python 3.11,
 Cargo/nextest, and the native C toolchain used by the integration tests. Check
 for orphan builds first. The runner builds the CLI and carried runtime, then
-executes 89 exact test identities across 18 integration targets. Its reviewed
+executes 91 exact test identities across 18 integration targets. Its reviewed
 catalog is `SUITES` in the runner; additions or replacements are reviewed
 changes to the acceptance corpus, not automatic discovery.
 
@@ -54,7 +54,7 @@ share another worktree's target or accept cached execution reports.
 | Runtime rates/bounds, empty inputs and [05-OP-8/37] adjoints | `key_operand_random_ir`, `key_operand_random_c`, `dropout_fixed_stream_api`, `dropout_fixed_stream_cli` |
 | Key rows, nested `vmap`, activation, branch joins and `grad` replay | `key_operations_ir`, `key_operations_c`, `key_operation_activations`, `key_operations_in_branch_arms`, `key_surface_lanes` |
 | [05-OP-69..72] tensor surface forms, runtime count/shape failures | `key_tensor_forms` |
-| [04-LIN-9/10] affinity, captures, generics and builtin policies | `key_linearity`, `key_builtin_cases` |
+| [04-LIN-9/10] affinity, tensor-key ranks and transported contracts, captures, generics and builtin policies | `key_linearity`, `key_builtin_cases` |
 | Symbolic derivations, one consumer and replay on the wire | `key_operations_ir`, `key_operand_random_ir`, `wire_random_domains` |
 | Stdlib initialization and the executable dropout example | `key_std_initialisers_cli`, `dropout_fixed_stream_cli` |
 | `par` disposition: typed #2503 refusal, before Eval/C execution | `jit_par_passthrough`, `jit_par_runtime_gap` |
