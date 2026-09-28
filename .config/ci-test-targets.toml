@@ -3418,6 +3418,11 @@ prefix = "examples/grad_disconnected.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+[[path_rule]]
+prefix = "examples/grad_bitwise.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 # chelis#2119: tree-sitter-chelis/build.rs compiles this grammar's parser and
 # external scanner into the crate, so its Rust/tree-sitter parity corpus is
 # what a scanner or grammar edit must re-run.

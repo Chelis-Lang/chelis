@@ -13,6 +13,57 @@ fn vector(precision: Prim) -> TensorType {
     }
 }
 
+#[test]
+fn hip_bitwise_kernels_have_exact_typed_rejections() {
+    for kind in [
+        chelis_types::BitwiseKind::And,
+        chelis_types::BitwiseKind::Or,
+        chelis_types::BitwiseKind::Xor,
+        chelis_types::BitwiseKind::ShiftLeft,
+        chelis_types::BitwiseKind::ShiftRight,
+    ] {
+        for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let lhs = dag.add_node(
+                decl,
+                RiscOp::Load { name: "lhs".into() },
+                vec![],
+                vector(prim),
+                None,
+            );
+            let rhs = dag.add_node(
+                decl,
+                RiscOp::Load { name: "rhs".into() },
+                vec![],
+                vector(prim),
+                None,
+            );
+            let out = dag.add_node(
+                decl,
+                RiscOp::Bitwise(kind),
+                vec![lhs, rhs],
+                vector(prim),
+                None,
+            );
+            dag.add_root(out);
+            let Err(error) = codegen_hip(&dag, "bitwise") else {
+                panic!("device kernel gap must reject")
+            };
+            assert_eq!(
+                error.stage,
+                chelis_types::unsupported::Stage::Codegen("hip")
+            );
+            assert_eq!(
+                error.authority.kind(),
+                chelis_types::unsupported::RejectionAuthorityKind::Unimplemented
+            );
+            assert_eq!(error.authority.issue().unwrap().number(), 2702);
+            assert!(error.to_string().contains(kind.name()));
+        }
+    }
+}
+
 fn binary_source(op: RiscOp, input: Prim, output: Prim, name: &str) -> String {
     let mut dag = Dag::new();
     let decl = dag.declare("test");

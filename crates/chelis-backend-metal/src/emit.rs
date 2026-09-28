@@ -296,6 +296,7 @@ pub(crate) fn emit_verified_dag(
     func_name: &str,
 ) -> Result<EmitResult, Unsupported> {
     let dag = plan.dag();
+    reject_bitwise(dag)?;
     reject_direct_nonnumeric(dag)?;
     reject_guarded_fail(dag)?;
     reject_f64(dag)?;
@@ -345,6 +346,23 @@ fn reject_direct_nonnumeric(dag: VerifiedDagView<'_>) -> Result<(), Unsupported>
             "the Metal exact comparison, Bool8 logical, and raw stored-bit where kernels are not implemented; use `--target c` or `--target hip`"
         ),
     ))
+}
+
+fn reject_bitwise(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+    for node in dag.nodes() {
+        if let RiscOp::Bitwise(kind) = node.op {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op(kind.name().to_string()),
+                format!("the Metal kernel set (node {})", node.id.0),
+                Stage::Codegen("metal"),
+                chelis_types::unimplemented_rejection!(
+                    2702,
+                    "exact signed-width bitwise tensor kernels have no Metal implementation; select the C target"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// chelis#1464 / [05-OP-68]: a guarded abort has no Metal kernel. A GPU

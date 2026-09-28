@@ -217,6 +217,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
             | WireRiscOp::Mod
+            | WireRiscOp::Bitwise { .. }
             | WireRiscOp::Compare { .. }
             | WireRiscOp::Logical { .. }
             | WireRiscOp::Where {}
@@ -590,7 +591,7 @@ const _: () = {
     // `Expand` size is, so they join the same group.
     // Version 19 (chelis#2413) deletes the counter-stream bridge operation;
     // it adds no operation.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 19);
+    assert!(WIRE_DAG_SCHEMA_VERSION == 20);
 };
 
 #[cfg(test)]

@@ -826,7 +826,7 @@ pub(super) fn integer_binop_result_type(
         // when both sides are.
         match (&lhs, &rhs) {
             (Type::Prim(lhs_prec), Type::Prim(rhs_prec))
-                if lhs_prec.is_integer() && rhs_prec.is_integer() =>
+                if lhs_prec.is_integer() && rhs_prec.is_integer() && lhs_prec == rhs_prec =>
             {
                 return Some(lhs);
             }
@@ -868,7 +868,7 @@ pub(super) fn integer_binop_result_type(
                         with_node_provenance(
                             node,
                             format!(
-                                "{} requires integer lhs and shift amount, got {} and {}",
+                                "{} requires matching integer lhs and shift amount, got {} and {}",
                                 fname, lhs, rhs
                             ),
                         ),

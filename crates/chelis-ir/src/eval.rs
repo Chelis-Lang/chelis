@@ -4077,6 +4077,19 @@ where
                 let rhs = &values[&node.inputs[1]];
                 binary_elementwise(ElementwiseBinOp::FloorDiv, lhs, rhs)?
             }
+            RiscOp::Bitwise(kind) => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                require_matching_comparison_shapes(lhs, rhs)?;
+                let storage = chelis_types::bitwise_tensor(*kind, lhs.storage(), rhs.storage())
+                    .map_err(|error| error.to_string())?;
+                TensorValue::from_storage(lhs.shape.clone(), storage)
+            }
+            RiscOp::Mod => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                binary_elementwise(ElementwiseBinOp::Mod, lhs, rhs)?
+            }
             // chelis#178: truncating (round-toward-zero) integer division.
             // `(a / b).trunc()` matches C/Rust integer `/` for the
             // integer-valued operands this op is restricted to.
@@ -4085,11 +4098,6 @@ where
             // float operands), so a zero divisor always traps with the shared
             // diagnostic — matching `host_ops::eval_trunc_div` and the C
             // backend guard.
-            RiscOp::Mod => {
-                let lhs = &values[&node.inputs[0]];
-                let rhs = &values[&node.inputs[1]];
-                binary_elementwise(ElementwiseBinOp::Mod, lhs, rhs)?
-            }
             RiscOp::TruncDiv => {
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
@@ -4779,6 +4787,7 @@ fn inactive_disagreeing_elementwise(
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
+            | RiscOp::Bitwise(_)
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::Compare(_)

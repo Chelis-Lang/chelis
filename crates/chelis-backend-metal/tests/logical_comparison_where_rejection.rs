@@ -38,6 +38,29 @@ fn direct_dag(op: RiscOp, input_prims: &[Prim], output: Prim) -> Dag {
 }
 
 #[test]
+fn metal_bitwise_kernels_have_exact_typed_rejections() {
+    for kind in [
+        chelis_types::BitwiseKind::And,
+        chelis_types::BitwiseKind::Or,
+        chelis_types::BitwiseKind::Xor,
+        chelis_types::BitwiseKind::ShiftLeft,
+        chelis_types::BitwiseKind::ShiftRight,
+    ] {
+        for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+            let dag = direct_dag(RiscOp::Bitwise(kind), &[prim, prim], prim);
+            let error = try_codegen_metal(&dag, "bitwise").expect_err("device kernel gap");
+            assert_eq!(error.stage, Stage::Codegen("metal"));
+            assert_eq!(
+                error.authority.kind(),
+                RejectionAuthorityKind::Unimplemented
+            );
+            assert_eq!(error.authority.issue().unwrap().number(), 2702);
+            assert!(error.to_string().contains(kind.name()));
+        }
+    }
+}
+
+#[test]
 fn metal_emitter_rejects_direct_nonnumeric_nodes_with_issue_2266_authority() {
     let cases = [
         direct_dag(

@@ -3315,6 +3315,8 @@ path even though bare `round` under `grad` remains a structural
 > interpretation differs from an unbounded arithmetic result.
 >
 > Adjoint: These discrete operations structurally reject differentiation.
+> A bitwise expression independent of the selected differentiated parameters
+> remains an executed forward coefficient; no adjoint is demanded of it.
 >
 > Accumulator: None.
 

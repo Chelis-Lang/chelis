@@ -13816,6 +13816,21 @@ impl<'program> LowerCtx<'program> {
                 );
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
+            name if args.len() == 2 && chelis_types::BitwiseKind::from_name(name).is_some() => {
+                let kind =
+                    chelis_types::BitwiseKind::from_name(name).expect("matched bitwise identity");
+                let a = self.lower_expr_node(&args[0], "bitwise lhs");
+                let b = self.lower_expr_node(&args[1], "bitwise rhs");
+                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
+                let node = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Bitwise(kind),
+                    vec![a, b],
+                    out_ty,
+                    self.current_span_id.clone(),
+                );
+                self.attach_reuse_hint(node, app_span, &[a, b])
+            }
             "mod" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "mod lhs");
                 let b = self.lower_expr_node(&args[1], "mod rhs");
@@ -17109,11 +17124,11 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// chelis#513: syntactic recognizer for the input LANGUAGE of
-    /// [`Self::fold_shape_derived_static_size`], used by
-    /// [`Self::extract_reshape_dim_list`] to decide whether a reshape target
-    /// element the exactness gate REFUSED must fail loud instead of falling
-    /// back to the checker's wildcard dims.
+    /// chelis#513/#616: recognizer for checked integer dataflow over shape
+    /// reads. [`Self::extract_reshape_dim_list`] first offers this expression
+    /// to the exact static fold, then lowers any remaining expression as a
+    /// rank-zero integer node. A valid runtime operation must never fall back
+    /// to the checker's wildcard result dimension.
     ///
     /// Why loud matters: the wildcard fallback becomes an anonymous
     /// `Named(_, None)` dim, and under `grad` the eval lane's symbolic-dim
@@ -17126,11 +17141,14 @@ impl<'program> LowerCtx<'program> {
     /// Admitted runtime arithmetic is lowered before this legacy fallback;
     /// it retains the computed target and its independent result claims.
     ///
-    /// Returns true only when `expr` (cast-stripped) is an arithmetic app of
-    /// the fold's exact vocabulary (`neg`/`add`/`sub`/`mul`/`floor_div`/
-    /// `trunc_div`/`mod`, matching arity) and EVERY leaf is a recognized
-    /// static or shape-derived form. A leaf outside the language (e.g. a
-    /// runtime scalar parameter) returns false and keeps the pre-existing
+    /// The legacy arithmetic vocabulary still checks its shape/static leaves.
+    /// A [05-OP-47] bitwise result instead admits its complete checked call:
+    /// operand spelling cannot decide whether an inline cast, helper call, or
+    /// tensor-to-scalar conversion produces a usable rank-zero integer. The
+    /// lowered result is checked at the target boundary. Even with static
+    /// operands, its shift traps and signed-width behavior belong to the
+    /// typed operation, not a second extent-only evaluator.
+    /// A leaf outside the language returns false and keeps the pre-existing
     /// wildcard fallback for forms this pass never claimed to understand.
     fn is_shape_derived_arith_dim(&self, expr: &Expr) -> bool {
         let Some((tag, _, kids)) = stamped_parts(expr) else {
@@ -17145,6 +17163,9 @@ impl<'program> LowerCtx<'program> {
                     return false;
                 };
                 let operands = &kids[1..];
+                if chelis_types::BitwiseKind::from_name(&op).is_some() {
+                    return operands.len() == 2;
+                }
                 let arity_ok = match op.as_str() {
                     "neg" => operands.len() == 1,
                     "add" | "sub" | "mul" | "floor_div" | "trunc_div" | "mod" => {
@@ -17163,11 +17184,13 @@ impl<'program> LowerCtx<'program> {
 
     /// Leaf recognizer for [`Self::is_shape_derived_arith_dim`]: a static
     /// int (literal / `(lit ...)` / cast-wrapped), a `shape(operand, axis)`
-    /// read (direct or a `shape_bindings` alias), a `let`-bound static var,
-    /// or a nested arithmetic app of the same language.
+    /// read (direct or a `shape_bindings` alias), a bound runtime rank-zero
+    /// integer node (parameter, helper result, or local computed alias),
+    /// a `let`-bound static var, or a nested app of the same language.
     fn is_shape_derived_arith_leaf(&self, expr: &Expr) -> bool {
         if extract_int_for_dim(expr).is_some()
             || self.shape_app_operand_axis_resolved(expr).is_some()
+            || self.is_runtime_scalar_var(expr)
         {
             return true;
         }
@@ -18672,6 +18695,14 @@ impl<'program> LowerCtx<'program> {
                 } else {
                     self.lower_expr_node(elem, "computed reshape target")
                 };
+                let actual_type = &self.dag.get(actual).expect("computed target").output_type;
+                if !actual_type.dims.is_empty() || !actual_type.precision.is_integer() {
+                    raise_lowering_error(
+                        "computed reshape target must lower to a rank-zero integer",
+                        Some(elem.span()),
+                        elem.span_id().map(ToOwned::to_owned),
+                    );
+                }
                 let slot = inputs.len();
                 inputs.push(actual);
                 computed_targets.push((axis, slot));

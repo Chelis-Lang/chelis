@@ -468,6 +468,22 @@ fn parity_grad_disconnected() {
 }
 
 #[test]
+fn parity_grad_bitwise() {
+    let path = examples_root().join("grad_bitwise.ch");
+    drive_parity(&path, true);
+    let output = String::from_utf8(run_eval(&path)).expect("UTF-8 eval");
+    assert!(output.contains("derivative = 4.0"), "{output}");
+    assert!(
+        output.contains("mapped = tensor(shape=[2], data=[4.0, 8.0])"),
+        "{output}"
+    );
+    assert!(
+        output.contains("exact = tensor(shape=[2], data=[9007199254740993, -2])"),
+        "{output}"
+    );
+}
+
+#[test]
 fn parity_grad_extent_claim() {
     let path = examples_root().join("grad_extent_claim.ch");
     drive_parity(&path, true);

@@ -241,11 +241,12 @@ fn grad_dag_checked_impl(
     // through a genuine data edge stays live through that edge and is checked.
     let reach = cotangent_reach(forward, output);
     let live = reach.iter().map(|&state| state != 0).collect::<Vec<_>>();
+    let selected_data = selected_data_reach(forward, wrt);
     reject_random_selection_parameters(forward, &live, wrt)?;
     for node in forward.nodes() {
         if live[node.id.0]
-            && let Some(rejection) = structural_rejection(node, forward)
-            && (!is_integer_arithmetic_rejection(&rejection)
+            && let Some(rejection) = structural_rejection(node, forward, selected_data[node.id.0])
+            && (!is_zero_exempt_integer_arithmetic(node, &rejection)
                 || reach[node.id.0] & ACTIVE_COTANGENT != 0)
         {
             return Err(rejection);
@@ -264,14 +265,66 @@ fn grad_dag_checked_impl(
 const ACTIVE_COTANGENT: u8 = 1;
 const ZERO_COTANGENT: u8 = 2;
 
-fn is_integer_arithmetic_rejection(rejection: &AdError) -> bool {
+fn is_zero_exempt_integer_arithmetic(node: &DagNode, rejection: &AdError) -> bool {
     matches!(
+        node.op,
+        RiscOp::Sub
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::MaxReduce { .. }
+            | RiscOp::MinReduce { .. }
+    ) && matches!(
         rejection,
         AdError::NotSupported {
             reason: AdRejectionReason::IntegerArithmeticOutput,
             ..
         }
     )
+}
+
+/// Track whether a forward value is derived from a selected parameter.
+/// A comparison or `where` condition still depends on its operands even
+/// though its cotangent is exact zero. Movement indices and random controls
+/// remain outside the selected data path, as in the AD operand contract.
+fn selected_data_reach(forward: &Dag, wrt: &[NodeId]) -> Vec<bool> {
+    let mut reached = vec![false; forward.len()];
+    for parameter in wrt {
+        if let Some(slot) = reached.get_mut(parameter.0) {
+            *slot = true;
+        }
+    }
+    for node in forward.nodes() {
+        if reached[node.id.0] {
+            continue;
+        }
+        reached[node.id.0] = node.inputs.iter().enumerate().any(|(slot, input)| {
+            let data_edge = match &node.op {
+                RiscOp::Shape { .. }
+                | RiscOp::ExtentWitness { .. }
+                | RiscOp::KeyFromSeed
+                | RiscOp::Split { .. }
+                | RiscOp::FoldIn
+                | RiscOp::SplitN { .. }
+                | RiscOp::KeySelect => false,
+                RiscOp::Shrink { .. }
+                | RiscOp::Stride { .. }
+                | RiscOp::Pad { .. }
+                | RiscOp::Reshape { .. }
+                | RiscOp::Gather { .. }
+                | RiscOp::Dropout
+                | RiscOp::DropoutReplay => slot == 0,
+                RiscOp::ScatterAdd { .. } => matches!(slot, 0 | 2),
+                RiscOp::UniformLike => matches!(slot, 1 | 2),
+                RiscOp::UniformBoundAdjoint { .. } | RiscOp::GuardedFail { .. } => slot == 1,
+                // The selected condition determines the forward value, even
+                // though it carries a zero cotangent.
+                RiscOp::Where | RiscOp::Compare(_) => true,
+                _ => true,
+            };
+            data_edge && reached[input.0]
+        });
+    }
+    reached
 }
 
 /// Reachability is carried with cotangent provenance. A comparison, shape
@@ -396,8 +449,14 @@ impl From<String> for BackwardFailure {
 /// piecewise-constant conversion reached through exact zero retains its
 /// named reason; signed-integer arithmetic reached only through exact zero
 /// has no requested adjoint and passes that zero to its producers.
-fn structural_rejection(node: &DagNode, forward: &Dag) -> Option<AdError> {
+fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> Option<AdError> {
     match &node.op {
+        RiscOp::Bitwise(kind) if selected_data => {
+            return Some(AdError::NotSupported {
+                op: kind.name(),
+                reason: AdRejectionReason::IntegerArithmeticOutput,
+            });
+        }
         RiscOp::Logical(kind) => {
             return Some(AdError::NotSupported {
                 op: kind.surf_name(),
@@ -620,6 +679,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::FloorDiv => "floor_div",
         RiscOp::TruncDiv => "trunc_div",
         RiscOp::Mod => "mod",
+        RiscOp::Bitwise(kind) => kind.name(),
         RiscOp::Compare(kind) => kind.surf_name(),
         RiscOp::Logical(kind) => kind.surf_name(),
         RiscOp::Where => "where",
@@ -726,9 +786,11 @@ fn stamp_grad_marker(dag: &mut Dag, dag_size_before: usize, forward_node: &DagNo
 
 /// Run reverse-mode AD on `forward`, differentiating `output` with respect to each node in `wrt`.
 ///
-/// Returns `None` if the forward DAG is empty or the output node doesn't exist.
+/// Returns `None` if the checked gradient is structurally unsupported or its
+/// backward DAG cannot be constructed. This compatibility entry point uses the
+/// same validation as [`grad_dag_checked`].
 pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradResult> {
-    grad_dag_result(forward, output, wrt).ok()
+    grad_dag_checked(forward, output, wrt).ok()
 }
 
 /// Like [`grad_dag`] but returns a structured failure string instead of
@@ -761,6 +823,7 @@ fn grad_dag_result(
     // clone span_id and merged_spans."
     let mut dag = forward.clone();
     let reach = cotangent_reach(forward, output);
+    let selected_data = selected_data_reach(forward, wrt);
     let mut adjoints: UnordMap<NodeId, NodeId> = UnordMap::new();
     // Contributions wait here until reverse traversal reaches their input.
     // Keeping the consumer ordinal and input slot makes the normative order
@@ -809,11 +872,11 @@ fn grad_dag_result(
         adjoints.insert(node_id, grad_out);
 
         let node = forward.get(node_id).unwrap().clone();
-        let rejection = structural_rejection(&node, forward);
+        let rejection = structural_rejection(&node, forward, selected_data[node_id.0]);
         let zero_only_integer_arithmetic = reach[node_id.0] == ZERO_COTANGENT
             && rejection
                 .as_ref()
-                .is_some_and(is_integer_arithmetic_rejection);
+                .is_some_and(|rejection| is_zero_exempt_integer_arithmetic(&node, rejection));
         if let Some(rejection) = rejection
             && !zero_only_integer_arithmetic
         {
@@ -1660,6 +1723,7 @@ fn compute_adjoints(
             );
             Some(vec![(x, zero)])
         }
+        RiscOp::Bitwise(_) => Some(vec![]),
         RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
             // chelis#178: floor / truncating integer division are
             // non-differentiable (piecewise constant) — grad_dag_checked
@@ -3187,6 +3251,306 @@ mod tests {
         TensorType {
             dims: vec![],
             precision: Prim::F64,
+        }
+    }
+
+    #[test]
+    fn bitwise_coefficient_index_dependencies_do_not_request_an_adjoint() {
+        let mut dag = Dag::new();
+        let owner = dag.declare("test");
+        let vector = |precision| TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision,
+        };
+        let mut add = |op, inputs, ty| dag.add_node(owner, op, inputs, ty, None);
+        let x = add(RiscOp::Load { name: "x".into() }, vec![], vector(Prim::F32));
+        let indices = add(
+            RiscOp::Cast {
+                new_precision: Prim::Int64,
+            },
+            vec![x],
+            vector(Prim::Int64),
+        );
+        let target = add(
+            RiscOp::synth_const_tensor(Prim::Int32, vec![2.0]),
+            vec![],
+            vector(Prim::Int32),
+        );
+        let updates = add(
+            RiscOp::synth_const_tensor(Prim::Int32, vec![3.0]),
+            vec![],
+            vector(Prim::Int32),
+        );
+        let scattered = add(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            vector(Prim::Int32),
+        );
+        let masked = add(
+            RiscOp::Bitwise(chelis_types::BitwiseKind::And),
+            vec![scattered, updates],
+            vector(Prim::Int32),
+        );
+        let coefficient = add(
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![masked],
+            vector(Prim::F32),
+        );
+        let weighted = add(RiscOp::Mul, vec![x, coefficient], vector(Prim::F32));
+        let output = add(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![weighted],
+            scalar_f32(),
+        );
+        let result = grad_dag_checked(&dag, output, &[x]).expect("indices carry no cotangent");
+        let inputs = UnordMap::from([("x".into(), TensorValue::from_vec(vec![1], vec![0.0]))]);
+        let actual = crate::eval::eval_tensor(&result.dag, &inputs).unwrap();
+        assert_eq!(actual[&result.grad_nodes[&x]].to_f64_lossy_vec(), vec![1.0]);
+    }
+
+    #[test]
+    fn bitwise_coefficients_are_forward_values_and_selected_bitwise_paths_reject() {
+        for kind in [
+            chelis_types::BitwiseKind::And,
+            chelis_types::BitwiseKind::Or,
+            chelis_types::BitwiseKind::Xor,
+            chelis_types::BitwiseKind::ShiftLeft,
+            chelis_types::BitwiseKind::ShiftRight,
+        ] {
+            let mut dag = Dag::new();
+            let owner = dag.declare("test");
+            let int_ty = TensorType {
+                dims: vec![],
+                precision: Prim::Int32,
+            };
+            let x = dag.add_node(
+                owner,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let n = dag.add_node(
+                owner,
+                RiscOp::Load { name: "n".into() },
+                vec![],
+                int_ty.clone(),
+                None,
+            );
+            let count = dag.add_node(
+                owner,
+                RiscOp::Const {
+                    value: chelis_types::scalar_from_i64("test", Prim::Int32, 2).unwrap(),
+                },
+                vec![],
+                int_ty.clone(),
+                None,
+            );
+            let discrete = dag.add_node(owner, RiscOp::Bitwise(kind), vec![n, count], int_ty, None);
+            let coefficient = dag.add_node(
+                owner,
+                RiscOp::Cast {
+                    new_precision: Prim::F32,
+                },
+                vec![discrete],
+                scalar_f32(),
+                None,
+            );
+            let output = dag.add_node(owner, RiscOp::Mul, vec![x, coefficient], scalar_f32(), None);
+            let result =
+                grad_dag_checked(&dag, output, &[x]).expect("unselected runtime coefficient");
+            assert!(grad_dag(&dag, output, &[x]).is_some());
+            let inputs = UnordMap::from_iter([("x".to_string(), 1.25), ("n".to_string(), 6.0)]);
+            let actual = eval_scalar(&result.dag, &inputs);
+            let expected = match kind {
+                chelis_types::BitwiseKind::And => 2.0,
+                chelis_types::BitwiseKind::Or => 6.0,
+                chelis_types::BitwiseKind::Xor => 4.0,
+                chelis_types::BitwiseKind::ShiftLeft => 24.0,
+                chelis_types::BitwiseKind::ShiftRight => 1.0,
+            };
+            assert_eq!(actual[&result.grad_nodes[&x]], expected);
+            assert!(
+                matches!(grad_dag_checked(&dag, output, &[n]), Err(AdError::NotSupported { op, reason: AdRejectionReason::IntegerArithmeticOutput }) if op == kind.name())
+            );
+        }
+    }
+
+    #[test]
+    fn bitwise_comparison_path_keeps_selected_value_origin() {
+        for kind in [
+            chelis_types::BitwiseKind::And,
+            chelis_types::BitwiseKind::Or,
+            chelis_types::BitwiseKind::Xor,
+            chelis_types::BitwiseKind::ShiftLeft,
+            chelis_types::BitwiseKind::ShiftRight,
+        ] {
+            let mut dag = Dag::new();
+            let owner = dag.declare("test");
+            let int_ty = TensorType {
+                dims: vec![],
+                precision: Prim::Int32,
+            };
+            let bool_ty = TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            };
+            let x = dag.add_node(
+                owner,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let one_float = dag.add_node(
+                owner,
+                RiscOp::synth_const(Prim::F32, 1.0),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let first_control = dag.add_node(
+                owner,
+                RiscOp::Compare(ComparisonKind::CmpLt),
+                vec![x, one_float],
+                bool_ty.clone(),
+                None,
+            );
+            let discrete = dag.add_node(
+                owner,
+                RiscOp::Cast {
+                    new_precision: Prim::Int32,
+                },
+                vec![first_control],
+                int_ty.clone(),
+                None,
+            );
+            let one_int = dag.add_node(
+                owner,
+                RiscOp::synth_const(Prim::Int32, 1.0),
+                vec![],
+                int_ty.clone(),
+                None,
+            );
+            let selected_bitwise = dag.add_node(
+                owner,
+                RiscOp::Bitwise(kind),
+                vec![discrete, one_int],
+                int_ty.clone(),
+                None,
+            );
+            let final_control = dag.add_node(
+                owner,
+                RiscOp::Compare(ComparisonKind::CmpLt),
+                vec![selected_bitwise, one_int],
+                bool_ty,
+                None,
+            );
+            let out = dag.add_node(
+                owner,
+                RiscOp::Where,
+                vec![final_control, x, x],
+                scalar_f32(),
+                None,
+            );
+            assert!(
+                matches!(
+                    grad_dag_checked(&dag, out, &[x]),
+                    Err(AdError::NotSupported {
+                        op,
+                        reason: AdRejectionReason::IntegerArithmeticOutput
+                    }) if op == kind.name()
+                ),
+                "{} must reject even through comparison zero-cotangent edges",
+                kind.name()
+            );
+            assert!(grad_dag(&dag, out, &[x]).is_none());
+        }
+    }
+
+    #[test]
+    fn unchecked_grad_uses_the_checked_structural_rejection_path() {
+        for kind in [
+            chelis_types::BitwiseKind::And,
+            chelis_types::BitwiseKind::Or,
+            chelis_types::BitwiseKind::Xor,
+            chelis_types::BitwiseKind::ShiftLeft,
+            chelis_types::BitwiseKind::ShiftRight,
+        ] {
+            let mut dag = Dag::new();
+            let owner = dag.declare("test");
+            let int_ty = TensorType {
+                dims: vec![],
+                precision: Prim::Int32,
+            };
+            let bool_ty = TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            };
+            let x = dag.add_node(
+                owner,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let n = dag.add_node(
+                owner,
+                RiscOp::Load { name: "n".into() },
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let discrete = dag.add_node(
+                owner,
+                RiscOp::Cast {
+                    new_precision: Prim::Int32,
+                },
+                vec![n],
+                int_ty.clone(),
+                None,
+            );
+            let one = dag.add_node(
+                owner,
+                RiscOp::synth_const(Prim::Int32, 1.0),
+                vec![],
+                int_ty.clone(),
+                None,
+            );
+            let bits = dag.add_node(
+                owner,
+                RiscOp::Bitwise(kind),
+                vec![discrete, one],
+                int_ty,
+                None,
+            );
+            let predicate = dag.add_node(
+                owner,
+                RiscOp::Compare(ComparisonKind::Eq),
+                vec![bits, one],
+                bool_ty,
+                None,
+            );
+            let output = dag.add_node(
+                owner,
+                RiscOp::Where,
+                vec![predicate, x, x],
+                scalar_f32(),
+                None,
+            );
+            assert!(matches!(
+                grad_dag_checked(&dag, output, &[x]),
+                Err(AdError::NotSupported {
+                    op: "cast",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                })
+            ));
+            assert!(grad_dag(&dag, output, &[x]).is_none(), "{}", kind.name());
         }
     }
 

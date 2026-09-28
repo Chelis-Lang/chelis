@@ -266,6 +266,7 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
+            | RiscOp::Bitwise(_)
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
@@ -425,6 +426,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
         | RiscOp::Mod
+        | RiscOp::Bitwise(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where
