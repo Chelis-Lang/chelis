@@ -326,16 +326,31 @@ fn grad_dag_checked_impl(
         }
     }
     for node in forward.nodes() {
-        let inputs: &[NodeId] = match &node.op {
-            RiscOp::Shape { .. } | RiscOp::Compare(_) => &[],
-            RiscOp::Shrink { .. }
-            | RiscOp::Stride { .. }
-            | RiscOp::Pad { .. }
-            | RiscOp::Reshape { .. }
-            | RiscOp::Gather { .. } => &node.inputs[..1],
-            _ => &node.inputs,
-        };
-        selected_path[node.id.0] |= inputs.iter().any(|input| selected_path[input.0]);
+        let reached = node.inputs.iter().enumerate().any(|(slot, input)| {
+            let carries_adjoint = match &node.op {
+                RiscOp::Shape { .. }
+                | RiscOp::Compare(_)
+                | RiscOp::KeyFromSeed
+                | RiscOp::Split { .. }
+                | RiscOp::FoldIn
+                | RiscOp::SplitN { .. }
+                | RiscOp::KeySelect => false,
+                RiscOp::Shrink { .. }
+                | RiscOp::Stride { .. }
+                | RiscOp::Pad { .. }
+                | RiscOp::Reshape { .. }
+                | RiscOp::Gather { .. }
+                | RiscOp::Dropout
+                | RiscOp::DropoutReplay => slot == 0,
+                RiscOp::ScatterAdd { .. } => matches!(slot, 0 | 2),
+                RiscOp::UniformLike => matches!(slot, 1 | 2),
+                RiscOp::UniformBoundAdjoint { .. } | RiscOp::GuardedFail { .. } => slot == 1,
+                RiscOp::Where => slot > 0,
+                _ => true,
+            };
+            carries_adjoint && selected_path[input.0]
+        });
+        selected_path[node.id.0] |= reached;
         if live[node.id.0]
             && selected_path[node.id.0]
             && let RiscOp::Bitwise(kind) = node.op
@@ -3149,6 +3164,65 @@ mod tests {
             dims: vec![],
             precision: Prim::F64,
         }
+    }
+
+    #[test]
+    fn bitwise_coefficient_index_dependencies_do_not_request_an_adjoint() {
+        let mut dag = Dag::new();
+        let owner = dag.declare("test");
+        let vector = |precision| TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision,
+        };
+        let mut add = |op, inputs, ty| dag.add_node(owner, op, inputs, ty, None);
+        let x = add(RiscOp::Load { name: "x".into() }, vec![], vector(Prim::F32));
+        let indices = add(
+            RiscOp::Cast {
+                new_precision: Prim::Int64,
+            },
+            vec![x],
+            vector(Prim::Int64),
+        );
+        let target = add(
+            RiscOp::synth_const_tensor(Prim::Int32, vec![2.0]),
+            vec![],
+            vector(Prim::Int32),
+        );
+        let updates = add(
+            RiscOp::synth_const_tensor(Prim::Int32, vec![3.0]),
+            vec![],
+            vector(Prim::Int32),
+        );
+        let scattered = add(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            vector(Prim::Int32),
+        );
+        let masked = add(
+            RiscOp::Bitwise(chelis_types::BitwiseKind::And),
+            vec![scattered, updates],
+            vector(Prim::Int32),
+        );
+        let coefficient = add(
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![masked],
+            vector(Prim::F32),
+        );
+        let weighted = add(RiscOp::Mul, vec![x, coefficient], vector(Prim::F32));
+        let output = add(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![weighted],
+            scalar_f32(),
+        );
+        let result = grad_dag_checked(&dag, output, &[x]).expect("indices carry no cotangent");
+        let inputs = UnordMap::from([("x".into(), TensorValue::from_vec(vec![1], vec![0.0]))]);
+        let actual = crate::eval::eval_tensor(&result.dag, &inputs).unwrap();
+        assert_eq!(actual[&result.grad_nodes[&x]].to_f64_lossy_vec(), vec![1.0]);
     }
 
     #[test]
