@@ -1163,13 +1163,6 @@ fn ensure_supported_execution_artifact_inner(
                  `tensor[1, f32]`), or select a tensor-in/tensor-out `def` with \
                  `entry_name=`."
             ),
-            Some(EntryLaneDecline::GradLike { entry }) => format!(
-                "{prefix}: entry `{entry}` uses a `grad`/`vmap` form, which only the \
-                 host-program lane can emit (multi-root gradient tuples); its result \
-                 is not a plain compiled tensor kernel and compile_and_load cannot \
-                 expose it as one. If you meant a different, tensor-in/tensor-out \
-                 `def`, select it with `entry_name=`."
-            ),
             Some(EntryLaneDecline::HasGlobals) => format!(
                 "{prefix}: the program has top-level (non-`def`) bindings, which only \
                  the host-program lane can emit; a standalone entry kernel would \
@@ -3583,41 +3576,20 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         );
     }
 
-    // Negative-parity sibling of the scalar case: a `grad` entry selected by
-    // name compiles WITHOUT error (host lane owns it, #309), and the job-path
-    // rejection reports the grad-specific reason, not the scalar one.
+    // A tensor projection from grad has a callable ABI with only the
+    // selected def's parameters and its single projected result.
     #[test]
-    fn compile_and_load_job_grad_entry_reports_grad_reason() {
-        let dir = tempdir().expect("tempdir");
-        let source_path = dir.path().join("model.ch");
-        fs::write(
-            &source_path,
-            "module Repro.GradEntry\n\
+    fn compile_and_load_job_grad_entry_executes_selected_tensor() {
+        let source = "module Repro.GradEntry\n\
              def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n  \
-  tensor_to_scalar(sum(mul(x, w), cast(0, i32)))\n\
-             def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0\n",
-        )
-        .expect("write source");
-        let result = run_compile_and_load_job(CompileAndLoadJob {
-            source_path,
-            source_kind: SourceKind::Surf,
-            target: CompileTarget::C,
-            entry_name: Some("dloss".to_string()),
-            artifact_dir: Some(PathBuf::from(dir.path())),
-            project_root: None,
-            force_bare: false,
-        });
-        let message = match result {
-            Ok(_) => panic!("grad entry has no callable tensor ABI and must be rejected"),
-            Err(CompileAndLoadError::Message(m)) => m,
-            Err(CompileAndLoadError::Compiler(e)) => {
-                panic!("grad entry must compile host-lane without a compiler error, got: {e:?}")
-            }
-        };
-        assert!(
-            message.contains("`dloss`") && message.contains("grad"),
-            "error must name the entry and the grad reason, got: {message}"
+              tensor_to_scalar(sum(mul(x, w), cast(0, i32)))\n\
+             def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0\n";
+        let values = run_job_and_call(
+            source,
+            Some("dloss"),
+            &[(vec![2.0, 3.0], vec![2]), (vec![5.0, 7.0], vec![2])],
         );
+        assert_eq!(values, vec![vec![5.0, 7.0]]);
     }
 
     // A genuinely host-only program (top-level bindings/globals, no
@@ -4195,43 +4167,25 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         );
     }
 
-    // Reviewer B1: a vmap entry declines the entry lane as GradLike but does
-    // NOT require the host backend, so it used to reach a debug_assert (a
-    // panic across the FFI boundary in debug builds; a silently merged
-    // manifest in release). The callable surface now rejects it loudly as an
-    // unsupported feature.
+    // A vmap entry is admitted by its checked, standalone tensor result.
     #[test]
-    fn compile_and_load_job_vmap_entry_is_loud_unsupported() {
-        let dir = tempdir().expect("tempdir");
-        let source_path = dir.path().join("model.ch");
-        fs::write(
-            &source_path,
-            "def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
+    fn compile_and_load_job_vmap_entry_executes_selected_tensor() {
+        let source = "def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
              def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = \
-             xs |> vmap(process)\n",
-        )
-        .expect("write source");
-        let result = run_compile_and_load_job(CompileAndLoadJob {
-            source_path,
-            source_kind: SourceKind::Surf,
-            target: CompileTarget::C,
-            entry_name: Some("batch_process".to_string()),
-            artifact_dir: Some(PathBuf::from(dir.path())),
-            project_root: None,
-            force_bare: false,
-        });
-        let message = match result {
-            Ok(_) => panic!("a vmap entry must not yield a whole-program callable model"),
-            Err(CompileAndLoadError::Message(m)) => m,
-            Err(CompileAndLoadError::Compiler(e)) => e
-                .errors
-                .first()
-                .map(|d| d.message.clone())
-                .unwrap_or_else(|| format!("{e:?}")),
-        };
-        assert!(
-            message.contains("batch_process") && message.contains("eval"),
-            "expected the strict transform-entry error naming the def and eval, got: {message}"
+             xs |> vmap(process)\n";
+        let input = vec![
+            -1.0, 2.0, -3.0, 4.0, 0.0, -5.0, 6.0, 7.0, 8.0, -9.0, 10.0, -11.0, 12.0, 13.0, -14.0,
+            15.0, 16.0, 17.0, -18.0, 19.0, 20.0, -21.0, 22.0, 23.0, 24.0, 25.0, -26.0, 27.0, 28.0,
+            -29.0, 30.0, 31.0,
+        ];
+        let values = run_job_and_call(
+            source,
+            Some("batch_process"),
+            &[(input.clone(), vec![8, 4])],
+        );
+        assert_eq!(
+            values,
+            vec![input.into_iter().map(|x| x.max(0.0)).collect::<Vec<_>>()]
         );
     }
 

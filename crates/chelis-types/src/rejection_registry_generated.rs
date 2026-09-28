@@ -209,7 +209,6 @@ pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
     951,
     1058,
     1059,
-    1138,
     1192,
     1277,
     1298,
