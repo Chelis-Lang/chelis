@@ -221,7 +221,7 @@ once Item 2 of the workstream lands (PR #26 — pipe lowering for
 grad/vmap-grad stages).
 
 **Recommendation to the orchestrator**: file a §5 entry in
-`docs/gap_synthesis.md` tracking `prefer-pipe-operator` autofix
+`docs/archive/reports/gap_synthesis.md` tracking `prefer-pipe-operator` autofix
 re-enablement as a follow-on workstream. The trait surface added in
 Item 5 will be reusable; the per-rule opt-in is just
 `fix_requires_typed_pipeline_check(&self) -> true` on the pipe rule.

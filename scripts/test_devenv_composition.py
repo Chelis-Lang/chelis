@@ -235,7 +235,7 @@ class DevenvCompositionTests(unittest.TestCase):
         )
 
     def test_contributor_docs_explain_the_devenv_surface(self) -> None:
-        text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        text = (REPO_ROOT / "docs/contributor_setup.md").read_text(encoding="utf-8")
         parse_contributor_docs(text)
 
     def test_missing_import_fails_at_the_parse_boundary(self) -> None:

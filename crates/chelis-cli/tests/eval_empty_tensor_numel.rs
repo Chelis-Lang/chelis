@@ -1,41 +1,6 @@
-//! Runtime coverage for `numel(to_tensor([]))` returning the wrong value
-//! (Runtime-EmptyTensorNumel-F1, pre-0.7.8 release blocker).
-//!
-//! ## Background
-//!
-//! `numel(to_tensor([]))` returns `1` instead of `0` via `chelis eval --file`,
-//! despite the shape being printed as `tensor(shape=[0], data=[])`. The bug
-//! is in two clamp sites that inflate a zero-element product back to 1:
-//!
-//! - `crates/chelis-compiler-api/src/runtime/eval.rs::eval_builtin "numel"` does
-//!   `tensor.value.shape.iter().product::<usize>().max(1)`. For shape `[0]`
-//!   the product is 0, then `.max(1)` clamps to 1.
-//! - `crates/chelis-runtime/src/lib.rs::chelis_alloc_tensor` and
-//!   `chelis_alloc_view` both run `if tensor.size == 0 { tensor.size = 1; }`
-//!   after multiplying shape components. `chelis_tensor_numel` then returns
-//!   the clamped size. The C backend exhibits the same wrong-value output.
-//!
-//! Both sites must drop the clamp for the empty rank-1 case. The scalar case
-//! (shape `[]`, ndim == 0) already produces 1 via the empty-product identity
-//! (`[].iter().product::<usize>() == 1`) and via the runtime initializer
-//! `size: 1` plus the skipped multiplication loop; neither path needs the
-//! clamp to handle scalars.
-//!
-//! ## Fixtures
-//!
-//! All four fixtures are pinned exact-equality. Positive controls cover the
-//! non-empty paths to catch regressions where a too-aggressive fix would
-//! break the scalar or single-element cases.
-//!
-//! * `eval_numel_empty_tensor`: shape `[0]`, expect `numel == 0`. Today
-//!   returns `1`; this is the primary bug.
-//! * `eval_rank_empty_tensor`: shape `[0]`, expect `rank == 1`. Pins that
-//!   the empty list literal infers as rank-1, not as a scalar.
-//! * `eval_numel_three_element_tensor`: positive control, expect `3`.
-//! * `eval_numel_single_element_tensor`: positive control, expect `1`. A
-//!   too-aggressive fix that returned shape.iter().product() without
-//!   special-casing the scalar would break this fixture if shape `[1]` got
-//!   confused with shape `[]`.
+//! Evaluator coverage for empty tensor shape and element count.
+//! A rank-one empty tensor has rank 1 and `numel == 0`; non-empty
+//! controls distinguish it from scalar and singleton cases.
 
 use assert_cmd::Command;
 use std::fs;

@@ -6,20 +6,25 @@ repo coherent.
 
 ## Documentation Hierarchy
 
-When updating docs, treat these as the owning sources:
+For project-level questions, use the authority order in
+[AGENTS.md](AGENTS.md#documentation-authority):
 
-1. `spec/design/chelis_canonical_reference.md`
-   Project-level decisions, naming, active backend strategy, CLI surface, and current
-   phase status.
-2. `spec/00-12*.md`
-   Language semantics and subsystem specifications.
-3. `spec/design/chelis_project_plan.md`
-   Phased execution plan and remaining design work.
-4. `spec/design/archive/`
-   Historical rationale only.
-   Archived docs must never be treated as current guidance.
+1. `spec/design/chelis_canonical_reference.md` controls cross-subject
+   architecture and project boundaries.
+2. A transferred chapter's named capability in the pinned `chelis-plans`
+   store controls that subject.
+3. An untransferred `spec/00-12*.md` chapter controls its subject.
+4. `spec/design/chelis_project_plan.md` controls project sequence that a
+   higher authority does not define.
+5. `spec/design/archive/` is historical reference only.
 
-If two active docs disagree, fix the disagreement instead of adding a third explanation.
+No numbered chapter has transferred. The numbered chapters decide language
+semantics, types, syntax, diagnostics, CLI behavior, and other user-visible
+contracts. `spec/design/*.md` explains implementation and sequence; it does
+not decide language rules. See
+[Numbered Specs Decide; Design Docs Implement](AGENTS.md#numbered-specs-decide-design-docs-implement).
+Correct the controlling document when active docs disagree instead of adding
+another explanation.
 
 ## Agent Guidance
 
@@ -29,8 +34,7 @@ use one canonical rule set.
 
 Project-local reusable agent skills live in `agent-skills/`.
 `.claude/skills` and `.codex/skills` should resolve to that same directory.
-`.claude/commands/` should resolve to the same canonical skill content rather than
-hand-maintained copies.
+`.claude/commands/` and `.codex/commands/` stay byte-identical.
 
 ## Doc Authoring Rules
 
@@ -115,8 +119,8 @@ Push before requesting the red-team round; the review runs against the
 pushed head while CI runs on it. The full workspace test suite is
 CI-owned: open a draft PR early and
 let CI (macOS Smoke is the authoritative workspace oracle) run it.
-See the README Prerequisites for the toolchain the gate needs (rustup,
-cargo-nextest, and the uv-managed Python venv).
+See [contributor setup](docs/contributor_setup.md) for the toolchain the gate
+needs (rustup, cargo-nextest, and the uv-managed Python 3.11 venv).
 
 ## Style Gate (every build, every PR)
 

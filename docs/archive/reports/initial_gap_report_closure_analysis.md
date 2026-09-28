@@ -1,9 +1,12 @@
 # Initial Gap Report — Closure Analysis
 
+> Historical closure analysis dated 2026-05-11. The status and remaining
+> work described below reflect that batch, not the current issue queue.
+
 **Filed:** 2026-05-11
-**Source report:** [`docs/identified_gaps.md`](identified_gaps.md) (originally filed 2026-05-08)
+**Source report:** [`identified_gaps.md`](identified_gaps.md) (originally filed 2026-05-08)
 **Latest closure batch:** PR #23 (`compiler cleanup: M1→W7 batch + W5/W7 red-team passes`), merged to `main` at `2ed588c`
-**Companion:** [`docs/gap_synthesis.md`](gap_synthesis.md) — §5 Remaining Work Register tracks each open item
+**Companion:** [`gap_synthesis.md`](gap_synthesis.md) — §5 Remaining Work Register tracked each open item
 
 ## Top-line verdict
 
@@ -36,7 +39,7 @@ correctness-bearing code paths.
 
 Two fresh-context red-team passes ran in worktree-isolated subagents
 against the same `compiler-cleanup` branch and are recorded in
-`docs/gap_synthesis.md` §5:
+`docs/archive/reports/gap_synthesis.md` §5:
 
 - **W5 (2026-05-11), against M1→M4 / Perf-F1 / Perf-F2:** 32 adversarial
   tests across `red_team_w5_*.rs` files. Surfaced one **P0 silent
@@ -64,7 +67,7 @@ correctness tests passing.
 ## What remains — backlog filed as §5 R1–R5
 
 After this batch, the residual work is tracked as standalone entries in
-`docs/gap_synthesis.md` §5. Each has an executable anchor or a defined
+`docs/archive/reports/gap_synthesis.md` §5. Each has an executable anchor or a defined
 closure path.
 
 | ID | Tracks | What closure requires |
@@ -106,10 +109,6 @@ the subject of M1→W7 closure:
 
 ## Cross-references
 
-- Per-gap detail with code citations: [`docs/identified_gaps.md`](identified_gaps.md)
-- Root-cause taxonomy + cost picture: [`docs/gap_synthesis.md`](gap_synthesis.md)
-- HIP environment runbook (used by `scripts/hip_test.py`): [`docs/local_hip_environment.md`](local_hip_environment.md)
-- Filed upstream bugs:
-  - [`spec/upstream-bugs/phase3h-gather-ad-incomplete.md`](../spec/upstream-bugs/phase3h-gather-ad-incomplete.md) (Gap 3)
-  - [`spec/upstream-bugs/matmul-rank2-rule-vs-einsum-shipped.md`](../spec/upstream-bugs/matmul-rank2-rule-vs-einsum-shipped.md) (Gap 4)
-  - [`spec/upstream-bugs/dead-mul-after-blas-specialization.md`](../spec/upstream-bugs/dead-mul-after-blas-specialization.md) (Gap 6)
+- Per-gap detail with code citations: [`identified_gaps.md`](identified_gaps.md)
+- Root-cause taxonomy + cost picture: [`gap_synthesis.md`](gap_synthesis.md)
+- HIP environment runbook (used by `scripts/hip_test.py`): [`docs/local_hip_environment.md`](../../local_hip_environment.md)

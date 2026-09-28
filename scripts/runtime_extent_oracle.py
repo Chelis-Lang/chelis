@@ -3405,8 +3405,12 @@ _LOCAL_ASCRIPTION_ATTACHMENT_REMOVED = """\
 _LOCAL_ASCRIPTION_EVAL_SOURCE = REPO_ROOT / "crates/chelis-ir/src/eval.rs"
 _LOCAL_ASCRIPTION_EVAL_OBSERVATION = """\
     if observed != claimed {
+        let canonical = match &claim.source {
+            None => format!("claimed = {claimed}"),
+            Some(source) => format!("{} axis {} = {claimed}", source.parameter, source.axis),
+        };
         return Err(format!(
-            "extent `{}`: claimed = {claimed}, {} axis {axis} = {observed}\\n\\
+            "extent `{}`: {canonical}, {} axis {axis} = {observed}\\n\\
              numeric trap: domain in {} at i64",
             claim.claim, claim.op, claim.op,
         ));

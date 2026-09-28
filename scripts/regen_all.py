@@ -71,7 +71,7 @@ What this script never writes
 * the `BASELINE` table in `crates/chelis-cli/tests/loud_unsupported_tripwire.rs`;
 * `scripts/runtime_extent_oracle_baseline.json` and
   `scripts/runtime_extent_oracle_baseline_phase_b.json`;
-* `docs/copy_drop_fixture_fitness_baseline.json`;
+* `crates/chelis-cli/tests/fixtures/copy_drop_fixture_fitness_baseline.json`;
 * `scripts/test_timing_baseline.json` (regenerated from CI telemetry only);
 * `spec/design/capacity_census_bindings.json` (stable reviewed authority rows,
   not execution-derived graph hashes);

@@ -1,19 +1,6 @@
-//! Wave 3 terminal red team for the 0.7.8 compiler-cleanup workstream.
-//!
-//! Adversarial fixtures for the CLI-level §5 closure HostEval-ScalarFn-F1
-//! (nested zero-arg fn calls, zero-arg in subexpr).
-//!
-//! Each fixture has a pinned expected outcome; either an exact stdout
-//! match or an exact exit-code / pattern.
-//!
-//! The Lint CLI path-walk / Lint-ExceptionPathRoot-F1 PR #93 closure
-//! invariant is covered by `lint_path_walk_consistency.rs`, which pins
-//! it with fast synthetic fixtures (a `lint .` vs `lint <subtree>` walk
-//! over a fixture containing a known violation, plus the workspace-
-//! rooted exception-matching cases). The earlier full-repo double-scan
-//! test here asserted only `count == count` and on the current repo
-//! that was `0 == 0` (no violations exist), so it cost ~90s to prove
-//! nothing the fixture-based lock does not prove precisely.
+//! CLI evaluator fixtures for nested zero-argument function calls
+//! and calls inside subexpressions. Each assertion checks exact
+//! output or a specific failure.
 
 use assert_cmd::Command;
 use std::fs;
@@ -36,13 +23,10 @@ fn eval_file(path: &Path) -> assert_cmd::assert::Assert {
 }
 
 // ============================================================
-// §3.1 HostEval-ScalarFn-F1 nested zero-arg fn-call adversarial
+// Nested zero-argument calls
 // ============================================================
 
-/// Two-level nested zero-arg: `outer()` calls `inner()`. The W3 fix
-/// at `lower_app`'s arity guard must let both calls through. The
-/// existing fixture in `host_eval_scalar_fn_call.rs` only exercises
-/// one-level zero-arg.
+/// Two-level nested zero-argument call: `outer()` calls `inner()`.
 #[test]
 fn host_eval_two_level_nested_zero_arg_i32() {
     let dir = tempdir().expect("tempdir");

@@ -10,15 +10,15 @@ the first; the second is covered further down.
 `chelisup` is Chelis's toolchain installer and version manager (the rustup
 analogue). It installs side-by-side `chelis` toolchains under `~/.chelis` and a
 small `chelis` **shim** that resolves the right one at every invocation. It
-also owns upgrades, the recorded default, and uninstall.
+also owns the recorded default and uninstall.
 
 ### 1. Bootstrap chelisup
 
-`Chelis-Lang/chelis` is private during the pre-launch era, so the public release
-URL does not serve asset bytes — a plain `curl` gets a `404`. The bootstrap needs
-an authenticated [`gh`](https://cli.github.com). One line fetches the published
-bootstrap script through `gh` and runs it (the script then uses `gh` again to pull
-the `chelisup` prebuilt for your platform), dropping it at `~/.chelis/bin/chelisup`:
+`Chelis-Lang/chelis` is private, so a public release URL does not serve its
+assets. You need repository access and an authenticated
+[`gh`](https://cli.github.com). This command fetches the bootstrap script
+from the latest GitHub release; the script uses `gh` to install the matching
+`chelisup` binary for your platform in `~/.chelis/bin`:
 
 ```sh
 gh auth login    # once, if you have not already
@@ -32,14 +32,8 @@ instead:
 sh crates/chelisup/bootstrap/chelisup.sh   # installs ~/.chelis/bin/chelisup
 ```
 
-Once chelis releases are public, the checkout-free form becomes the usual
-unauthenticated one-liner:
-
-```sh
-curl -fsSL https://github.com/Chelis-Lang/chelis/releases/latest/download/chelisup.sh | sh
-```
-
-Then put `~/.chelis/bin` on your PATH (the bootstrap prints the exact line):
+If the bootstrap reports that `~/.chelis/bin` is not on your PATH, add it
+(the bootstrap prints the exact line):
 
 ```sh
 export PATH="$HOME/.chelis/bin:$PATH"   # add to ~/.profile, ~/.bashrc, or ~/.zshrc
@@ -51,17 +45,21 @@ produces `target/debug/chelisup`.
 ### 2. Install a toolchain
 
 ```sh
-chelisup install 0.13.0        # into ~/.chelis/toolchains/0.13.0/
+release_tag="$(gh release view --repo Chelis-Lang/chelis --json tagName --jq .tagName)"
+version="${release_tag#v}"
+chelisup install "$version"
+chelis --version
 ```
 
-The first install also records `0.13.0` as the default and installs the
+The GitHub tag starts with `v`; `chelisup install` accepts only bare `X.Y.Z`.
+The first install also records that version as the default and installs the
 `chelis` shim, so `chelis --version` works from anywhere. Before placing a
 toolchain, chelisup checks that the runtime files it ships under `lib/` and
 `include/` are the ones its `chelis runtime export` reports, and refuses the
-release otherwise. Releases up to 0.18.11 predate that export; they install
-with a warning that their runtime files are unchecked. If chelisup refuses a
-release newer than itself, re-run the bootstrap to get the latest chelisup and
-try again.
+release otherwise. Older releases that predate that export install with a
+warning that their runtime files are unchecked. If chelisup refuses a newer
+release because it cannot read its format, re-run the bootstrap to update
+chelisup and try again.
 
 ### 3. Provision a project in one command
 
@@ -90,7 +88,7 @@ That is the whole "clone and build" story: bootstrap `chelisup` once, then
 The `chelis` shim resolves which installed toolchain answers each call, **first
 match wins**:
 
-1. a leading `+<ver>` argument: `chelis +0.13.0 build main.ch`;
+1. a leading `+<version>` argument, such as `chelis +X.Y.Z build main.ch`;
 2. the `CHELIS_TOOLCHAIN` environment variable (CI and scripting);
 3. a `chelis-toolchain` file found by walking up from the cwd (one bare version
    on its first non-comment line): a deliberate directory override that ranks
@@ -107,12 +105,13 @@ chelisup's management verbs:
 
 ```sh
 chelisup list-installed        # installed toolchains (marks the default)
-chelisup default 0.13.0        # set the default used outside a package
+chelisup default "$version"    # set the default used outside a package
 chelisup show                  # store layout + what resolves in the cwd
 chelisup which                 # print the toolchain binary chelis resolves to
-chelisup uninstall 0.11.0      # remove a toolchain
 chelisup self uninstall        # remove the shim + installer (keeps toolchains)
 ```
+
+Use `chelisup uninstall "$version"` to remove that installed toolchain.
 
 ### Cross-version commands
 
@@ -121,7 +120,7 @@ that lacks the verb you want, for example running a newer `reef src` from a
 project pinned to an older compiler:
 
 ```sh
-chelis +0.13.0 reef src sync
+chelis "+$version" reef src sync
 ```
 
 `+latest` is deliberately unsupported (it is ambiguous between newest-installed
@@ -178,70 +177,20 @@ Through the installed Nix wrapper, `chelisup self uninstall` removes all three r
 
 The `chelisup` release workflow owns release pins and side-by-side toolchains.
 
-## Rust Toolchain
+## Build the CLI from a checkout
 
-Chelis is built with stable Rust:
-
-```sh
-rustup default stable
-rustup component add rustfmt clippy
-```
-
-## C Toolchain
-
-The C backend expects a native compiler and a BLAS provider for matmul fast paths.
-
-Fedora / RHEL:
-
-```sh
-sudo dnf install gcc openblas-devel valgrind
-```
-
-Ubuntu / Debian:
-
-```sh
-sudo apt-get install gcc libopenblas-dev valgrind
-```
-
-macOS:
-
-```sh
-xcode-select --install
-```
-
-Supported macOS paths:
-
-- Default: Apple clang + Accelerate. This is the supported correctness path on Apple Silicon and does not require Homebrew OpenBLAS.
-- Optional: Homebrew GCC for OpenMP-enabled CPU loops.
-
-```sh
-brew install gcc
-```
-
-## Build and Test the Repo
-
-From a Chelis checkout:
-
-```sh
-cargo build --workspace --all-targets
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
-```
-
-During normal downstream work, you rarely need the whole gate above. Use it when you are
-checking a local compiler build or preparing a change to Chelis itself.
-
-## Build the CLI
+Set up Rust, the C toolchain, cargo-nextest, and a uv-managed Python 3.11
+environment using the [contributor setup guide](../../contributor_setup.md).
+Use focused tests and the [local gate](../../local_gate.md) when changing the
+compiler.
 
 ```sh
 cargo build -p chelis-cli
-export PATH="$PWD/target/debug:$PATH"
-chelis --help
+target/debug/chelis --help
 ```
 
-If you install a release build instead, make sure `chelis --help` works before starting
-the first program loop.
+This runs the checkout build; the release toolchain and `chelisup` store are
+separate.
 
 ## Build the Python distribution wheel
 

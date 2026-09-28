@@ -1,11 +1,15 @@
 # 0.7.8 Compiler Cleanup — Phase 0 Spec Lock
 
+> Historical workstream contract for 0.7.8. Current linearity semantics belong
+> to [`spec/04-type-system.md`](../../04-type-system.md); current implementation
+> design belongs to [`implicit_linearity.md`](../implicit_linearity.md).
+
 Status: Phase 0 deliverable. Pins three contracts so Wave 1 agents (W1, W2 PR 1,
 W3) work against stable targets. Not a canonical spec — this is a
 workstream-scoped design contract under `docs/design/`. The owning plan is
 `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`.
 
-Closes the diagnosis ambiguity for five `docs/gap_synthesis.md` §5 entries:
+Closes the diagnosis ambiguity for five `docs/archive/reports/gap_synthesis.md` §5 entries:
 
 - `Linearity-F1` (typed `ConsumeKind`)
 - `Linearity-F2` (tuple-destructure linearity false negative)
@@ -525,7 +529,7 @@ Recorded for awareness — not under Phase 0's authority:
 ## References
 
 - Plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`
-- `docs/gap_synthesis.md` §5 — Linearity-F1/F2/AliasedConsume-F1,
+- `docs/archive/reports/gap_synthesis.md` §5 — Linearity-F1/F2/AliasedConsume-F1,
   CRuntime-F32Coupling, HostEval-ScalarFn-F1
 - `crates/chelis-types/src/linearity.rs` — `BindingState`, `ConsumeSite`,
   `LinearScope`, string-prefix discrimination at L726, eight producers at

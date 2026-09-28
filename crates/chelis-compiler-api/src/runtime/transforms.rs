@@ -267,6 +267,12 @@ impl<'a> EvalContext<'a> {
                 arg_exprs.push(make_bool_literal_with_type(*value, span));
                 continue;
             }
+            if matches!(kind, TransformKind::Grad)
+                && let RuntimeValue::String(value) = value
+            {
+                arg_exprs.push(make_string_literal_with_type(value, span));
+                continue;
+            }
             // A grad body may use an integer scalar as a discrete selector
             // (for example list_index/take_list/skip_list). A synthetic Load
             // preserves its dtype but erases its exact runtime value before
@@ -1138,6 +1144,11 @@ fn stage_grad_list_value(
                 differentiable,
             ))
         }
+        RuntimeValue::String(value) => Ok((
+            make_string_literal_with_type(value, span),
+            GradListShape::Unit,
+            false,
+        )),
         RuntimeValue::Unit => Ok((make_unit_expr(span), GradListShape::Unit, false)),
         _ => Err(format!(
             "host runtime: `grad(...)` structured argument {argument_index}: recursive \
@@ -1248,6 +1259,7 @@ impl FrameCaptures<'_> {
                 make_integer_literal_with_type(payload.as_i64(), payload.dtype(), span)
             }
             RuntimeValue::Bool(flag) => make_bool_literal_with_type(*flag, span),
+            RuntimeValue::String(value) => make_string_literal_with_type(value, span),
             RuntimeValue::List(_) | RuntimeValue::Tuple(_) | RuntimeValue::Adt { .. } => {
                 let mut leaf_index = 0;
                 let argument_index = self.argument_count + self.fresh;
@@ -1662,6 +1674,25 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
         DeepTag::Var,
         meta,
         vec![Expr::Atom(Atom::Name(name.to_string()), span)],
+        span,
+    )
+}
+
+/// Preserve exact host data at a transform boundary without a tensor input.
+fn make_string_literal_with_type(value: &str, span: Span) -> Expr {
+    let mut meta = Metadata::default();
+    meta.replace(chelis_deep::annotations::MetadataValue::Type(
+        chelis_deep::annotations::TypeSyntax::try_new(empty_node(
+            DeepTag::TPrim,
+            vec![Expr::Atom(Atom::Name("string".into()), span)],
+            span,
+        ))
+        .expect("runtime string type"),
+    ));
+    Expr::node(
+        DeepTag::Lit,
+        meta,
+        vec![Expr::Atom(Atom::Str(value.into()), span)],
         span,
     )
 }

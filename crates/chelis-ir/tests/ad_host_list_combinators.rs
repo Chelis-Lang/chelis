@@ -37,7 +37,7 @@ fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
     Some((name, kids.get(1)?.clone()))
 }
 
-fn eval_out(src: &str) -> TensorValue {
+fn lower_out(src: &str) -> chelis_ir::dag::Dag {
     let checked = checked_surf(src);
     let mut defs = UnordMap::new();
     let mut out_expr = None;
@@ -55,7 +55,11 @@ fn eval_out(src: &str) -> TensorValue {
         .iter()
         .map(|(name, ty)| (name.clone(), ty.clone()))
         .collect();
-    let dag = lower_subexpr_program(&out_expr, UnordMap::new(), type_env, defs);
+    lower_subexpr_program(&out_expr, UnordMap::new(), type_env, defs)
+}
+
+fn eval_out(src: &str) -> TensorValue {
+    let dag = lower_out(src);
     let roots = dag.roots().to_vec();
     assert_eq!(roots.len(), 1, "out subexpression should have one root");
     let values = eval_tensor_roots_with_strict(&dag, &roots, |_| None).expect("subexpression eval");
@@ -313,4 +317,65 @@ out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
     );
     assert_eq!(out.shape, vec![3]);
     assert_close(&out.to_f64_lossy_vec(), &[0.5, 2.0, 6.0], 1e-5, "fold");
+}
+
+// [05-OP-55]: evaluated list values keep lexical captures, and even an
+// unused map invokes each callback and propagates its traps.
+#[test]
+fn staged_list_aliases_keep_values_and_unused_callback_traps() {
+    let out = eval_out(
+        "def loss(x: tensor[2, f32]) -> f32 = {
+  scale = 3.0f32
+  xs = to_list(copy(x))
+  ys = map(fn(v: f32) -> mul(v, scale), xs)
+  alias = ys
+  scale = 9.0f32
+  tensor_to_scalar(sum(to_tensor(alias), 0i32))
+}
+out = grad(loss)(to_tensor([1.0f32, 2.0f32]))
+",
+    );
+    assert_close(&out.to_f64_lossy_vec(), &[3.0, 3.0], 1e-6, "captured list");
+    for (input, traps) in [("1.0f32, 2.0f32", false), ("0.0f32, 2.0f32", true)] {
+        let source = format!(
+            "def loss(x: tensor[2, f32]) -> f32 = {{
+  ignored = map(fn(v: f32) -> trunc_div(1i64, cast(v, i64)), to_list(copy(x)))
+  tensor_to_scalar(sum(x, 0i32))
+}}
+out = grad(loss)(to_tensor([{input}]))
+"
+        );
+        let dag = lower_out(&source);
+        assert!(!dag.nodes().iter().any(|node| matches!(&node.op, chelis_ir::dag::RiscOp::Load { name } if ["map", "to_list", "ignored"].contains(&name.as_str()))));
+        let roots = dag.roots().to_vec();
+        let result = eval_tensor_roots_with_strict(&dag, &roots, |_| None);
+        if traps {
+            let error = result.expect_err("unused map callback must still divide by zero");
+            assert!(format!("{error:?}").contains("div"), "{error:?}");
+        } else {
+            assert_close(
+                &result.unwrap()[&roots[0]].to_f64_lossy_vec(),
+                &[1.0, 1.0],
+                1e-6,
+                "unused map",
+            );
+        }
+    }
+}
+
+#[test]
+fn staged_tensor_list_roundtrip_preserves_signed_zero_control() {
+    // [05-OP-57]: the bridge preserves stored bits, including the sign of zero.
+    for (input, expected) in [("-0.0f32", 1.0), ("0.0f32", 2.0)] {
+        let out = eval_out(&format!(
+            "def loss(x: tensor[2, f32], y: f32) -> f32 = {{
+  xs = to_list(copy(x))
+  restored = tensor_to_scalar(reshape(shrink(to_tensor(xs), [[0i64, 1i64]]), []))
+  if lt(div(1.0f32, restored), 0.0f32) then y else mul(2.0f32, y)
+}}
+out = grad(loss, wrt=y)(to_tensor([{input}, 1.0f32]), 3.0f32)
+"
+        ));
+        assert_close(&out.to_f64_lossy_vec(), &[expected], 1e-6, "zero sign");
+    }
 }

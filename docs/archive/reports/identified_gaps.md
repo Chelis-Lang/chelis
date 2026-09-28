@@ -1,5 +1,8 @@
 # Chelis Compiler Gaps — Empirical Findings
 
+> Historical report filed 2026-05-08. Current language behavior is governed
+> by the numbered specs; current open work is tracked in GitHub issues.
+
 **Status:** closed for the M1→W7 batch as of 2026-05-11. Gaps 2 and 6
 closed by M1; Surf-span adjacent finding closed by M2b; Gap 4 rank ≥ 2
 expressibility + symbolic/batched BLAS closed by M3/M3b; Gap 3 sparse
@@ -20,7 +23,7 @@ adversarial tests against W6, zero P0/P1, locked the W5 P0 → W6
 diagnosed-rejection cross-product invariant (all 8 non-F32 `Prim`
 values now produce a structured `BlasOutputPrecisionMismatch`
 diagnostic with zero silent fallthroughs). Standalone follow-ups
-filed as §5 R1–R5 in `docs/gap_synthesis.md`: softmax/layer_norm/
+filed as §5 R1–R5 in `docs/archive/reports/gap_synthesis.md`: softmax/layer_norm/
 attention recognizers, Path-B HIP host-program fallback codegen,
 DimExpr `Add` variant decision, DimExpr rational vs integer-floor
 semantics, HIP sparse gather Cast-wrapped indices.
@@ -537,9 +540,6 @@ only) while keeping the user-`def` specialization miss locked for Gap 5.
 amplify the cost dramatically when their matmuls miss specialization.
 Rank-2, symbolic, and batched BLAS-hit matmuls no longer pay the
 dead-`Mul` tax.
-
-**Tracked in:**
-`spec/upstream-bugs/dead-mul-after-blas-specialization.md`.
 
 ## Adjacent finding (not in the six) — closed by M2b
 

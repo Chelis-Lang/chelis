@@ -3,21 +3,20 @@
 
 Uses pygount for standard language counting with manual overrides for
 Chelis-specific file types (.ch, .dp, .pest, .scm) that pygount doesn't
-recognize. Outputs a markdown table to docs/loc_report.md.
+recognize. Prints a Markdown table by default.
 
 Requirements: pygount (pip install pygount)
 
 Usage:
-    python scripts/loc_report.py              # write to docs/loc_report.md
-    python scripts/loc_report.py --stdout     # print to stdout instead
-    python scripts/loc_report.py --json       # print raw data as JSON
+    cd py && uv run loc-report                # print Markdown to stdout
+    cd py && uv run loc-report --output path   # write Markdown to a file
+    cd py && uv run loc-report --json          # print raw data as JSON
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,8 +38,6 @@ class LangEntry:
     def total_lines(self) -> int:
         return self.code + self.comments + self.blanks
 
-
-DEFAULT_OUTPUT = "docs/loc_report.md"
 
 # Directories to always skip
 SKIP_DIRS = {"target", ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache"}
@@ -265,10 +262,12 @@ def render_markdown(entries: list[LangEntry]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate LOC report for Chelis")
-    parser.add_argument("--stdout", action="store_true", help="Print to stdout")
-    parser.add_argument("--json", action="store_true", help="Output raw JSON")
-    parser.add_argument("--output", default=None, help="Output file path")
+    parser = argparse.ArgumentParser(
+        description="Generate a Chelis LOC report (Markdown on stdout by default)"
+    )
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", help="Print raw JSON to stdout")
+    output.add_argument("--output", type=Path, help="Write Markdown to this file")
     args = parser.parse_args()
 
     repo_root = find_repo_root()
@@ -292,11 +291,11 @@ def main() -> None:
 
     md = render_markdown(entries)
 
-    if args.stdout:
+    if args.output is None:
         print(md)
         return
 
-    output_path = Path(args.output) if args.output else repo_root / DEFAULT_OUTPUT
+    output_path = args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(md, encoding="utf-8")
     print(f"Report written to {output_path}")

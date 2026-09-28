@@ -23,24 +23,9 @@
 //! the allowed set, so non-ASCII identifiers like `σ` are rejected.
 //! Empty strings are rejected.
 //!
-//! ## Why this kills the bug class
-//!
-//! The S4 re-red-team gate found that programmatic IR construction with
-//! `RiscOp::Load { name: "x\nINJECT".to_string() }` injects across all
-//! three backends (printf format strings, Metal node-comment lines, etc.)
-//! because the producer-supplied string flows into generated source
-//! without sanitization. By gating construction on parser-grammar
-//! validation, the only way a forbidden byte (newline, NUL, DEL, etc.)
-//! can reach codegen is for someone to construct the newtype in a way
-//! that bypasses `LoadStoreName::new` — which the private fields forbid in
-//! safe Rust outside this module.
-//!
-//! ## Deferred deeper work
-//!
-//! `spec/upstream-bugs/producer-string-sanitization.md` tracks the
-//! deferred per-emission-context sanitization (comment shared sanitizer,
-//! format-string sanitizer, full audit). This newtype is the bounded
-//! S4-close-out fix; it does not replace the deeper hardening.
+//! [`LoadStoreName::new`] rejects names outside this grammar. Serialized
+//! IR can bypass the constructor, so emission sites also sanitize names
+//! for their destination context.
 
 use std::borrow::Borrow;
 use std::fmt;
@@ -116,8 +101,7 @@ impl fmt::Display for LoadStoreNameError {
                     f,
                     "invalid character {character:?} (U+{code_point:04X}) at byte offset \
                      {byte_offset} in Load/Store name; allowed grammar is \
-                     [A-Za-z_][A-Za-z0-9_.-]* (see spec/03-deep-syntax.md §1.1.1 / \
-                     spec/upstream-bugs/producer-string-sanitization.md)"
+                     [A-Za-z_][A-Za-z0-9_.-]* (see spec/03-deep-syntax.md §1.1.1)"
                 )
             }
         }
@@ -678,10 +662,7 @@ mod tests {
 
     #[test]
     fn percent_format_specifier_is_rejected() {
-        // `%` is one of the format-string injection vectors flagged in
-        // spec/upstream-bugs/producer-string-sanitization.md. It is not
-        // a legal identifier byte in any emitted target language; the
-        // newtype rejects it at construction.
+        // `%` is not an identifier byte and is rejected at construction.
         let err = LoadStoreName::new("foo%s").unwrap_err();
         assert_eq!(
             err,

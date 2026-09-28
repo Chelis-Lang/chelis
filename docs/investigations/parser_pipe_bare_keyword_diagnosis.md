@@ -176,7 +176,7 @@ factor in:
    the LParen postfix path in `parse_primary_atom`).
 3. `cast(type)` as a one-arg pipe-stage form (per spec §3.6).
 
-The diagnosis note **recommends** a §5 entry to `docs/gap_synthesis.md`
+The diagnosis note **recommends** a §5 entry to `docs/archive/reports/gap_synthesis.md`
 covering this broader keyword-callable disambiguation. Filing is an
 orchestrator decision per the dispatch boilerplate.
 
