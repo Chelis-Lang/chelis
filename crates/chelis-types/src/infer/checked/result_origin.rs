@@ -70,9 +70,8 @@ impl InferenceProduct {
         self.import_result_constraints(subst);
         let body = resolved(ty, subst);
         let equations = self.result_equations_for(&body, subst);
-        let generalize = |ty: &Type| match owned_contracts {
-            Some(owned) => env.generalize_with_collection_contracts(ty, subst, owned),
-            None => env.generalize(ty, subst),
+        let generalize = |ty: &Type| {
+            env.generalize_with_result_constraints(ty, subst, owned_contracts, &equations)
         };
         if equations.is_empty() {
             return generalize(&body);

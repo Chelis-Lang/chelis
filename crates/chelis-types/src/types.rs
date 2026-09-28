@@ -919,6 +919,9 @@ impl ResultConstraint {
 
 /// The input type and result equations before result-only inference solved
 /// a helper's published signature. Each use instantiates these together.
+/// Quantifiers are closed over the scope components of these equations;
+/// unquantified variables retain identity with their inference producer even
+/// when the conventional solved signature no longer mentions them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultOrigin {
     pub body: Type,

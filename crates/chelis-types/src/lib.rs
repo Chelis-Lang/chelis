@@ -24,6 +24,7 @@ pub mod linearity;
 pub mod manifest;
 pub mod observation;
 pub(crate) mod opacity;
+mod result_scope;
 pub(crate) mod session;
 #[cfg(feature = "checkpoint-compile-probe")]
 #[doc(hidden)]

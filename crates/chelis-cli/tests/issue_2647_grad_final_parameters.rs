@@ -152,3 +152,29 @@ fn accumulator_aliases_check_at_their_required_result_types() {
         assert_eq!(payload["errors"], serde_json::json!([]));
     }
 }
+
+#[test]
+fn transported_gradient_results_are_checked_before_local_publication() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("transported_grad.ch");
+    for selection in [
+        "index([fold, fold], 0i64)",
+        "(Holder { value: fold }).value",
+        "if true then fold else fold",
+    ] {
+        for (parameter, accepted) in [("w", false), ("w: f32", true)] {
+            let source = format!(
+                "type Holder[a] = | Holder {{ value: a }}\ndef main() = {{\n  op = {selection}\n  r = op(fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), grad(fn ({parameter}) -> 1.0f32), [1i64])\n  g = r\n  g\n}}"
+            );
+            std::fs::write(&path, source).unwrap();
+            let output = Command::new(assert_cmd::cargo_bin!("chelis"))
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .args(["check", path.to_str().unwrap()])
+                .output()
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(output.status.success(), accepted, "{selection}: {output:?}");
+            assert_eq!(payload["errors"] == serde_json::json!([]), accepted);
+        }
+    }
+}

@@ -1070,18 +1070,37 @@ impl Env {
         let mut tvars = origin.map_or(&scheme.tvars, |origin| &origin.tvars).clone();
         let mut dvars = origin.map_or(&scheme.dvars, |origin| &origin.dvars).clone();
         let mut rvars = origin.map_or(&scheme.rvars, |origin| &origin.rvars).clone();
+        // The raw graph owns shared identity. A recursive group's solved
+        // signature may mention additional variables, but must not freshen a
+        // variable the origin deliberately kept shared with its producer.
+        let carried_origin = origin.map(|origin| {
+            Type::Tuple(
+                std::iter::once(origin.body.clone())
+                    .chain(
+                        origin
+                            .equations
+                            .iter()
+                            .flat_map(|equation| equation.types())
+                            .cloned(),
+                    )
+                    .collect(),
+            )
+        });
+        let shared_tvars = carried_origin.as_ref().map(free_tvars).unwrap_or_default();
+        let shared_dvars = carried_origin.as_ref().map(free_dvars).unwrap_or_default();
+        let shared_rvars = carried_origin.as_ref().map(free_rvars).unwrap_or_default();
         for var in &scheme.tvars {
-            if !tvars.contains(var) {
+            if !tvars.contains(var) && !shared_tvars.contains(var) {
                 tvars.push(*var);
             }
         }
         for var in &scheme.dvars {
-            if !dvars.contains(var) {
+            if !dvars.contains(var) && !shared_dvars.contains(var) {
                 dvars.push(*var);
             }
         }
         for var in &scheme.rvars {
-            if !rvars.contains(var) {
+            if !rvars.contains(var) && !shared_rvars.contains(var) {
                 rvars.push(*var);
             }
         }
@@ -1234,7 +1253,7 @@ impl Env {
 
     /// Generalize a type over variables not free in the environment.
     pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
-        self.generalize_owned(ty, subst, None)
+        self.generalize_owned(ty, subst, None, &[])
     }
 
     /// Generalize one deferred declaration using only the contract instances
@@ -1249,7 +1268,20 @@ impl Env {
         subst: &Subst,
         owned_contracts: &[crate::unify::CollectionContractId],
     ) -> Scheme {
-        self.generalize_owned(ty, subst, Some(owned_contracts))
+        self.generalize_owned(ty, subst, Some(owned_contracts), &[])
+    }
+
+    /// Generalize the raw type and its deferred equalities as one scoped
+    /// graph. An equality component containing a shared variable stays shared;
+    /// a fresh instantiation must never copy only part of that component.
+    pub(crate) fn generalize_with_result_constraints(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+        equations: &[ResultConstraint],
+    ) -> Scheme {
+        self.generalize_owned(ty, subst, owned_contracts, equations)
     }
 
     fn generalize_owned(
@@ -1257,8 +1289,10 @@ impl Env {
         ty: &Type,
         subst: &Subst,
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+        equations: &[ResultConstraint],
     ) -> Scheme {
-        let (level_scheme, ledger_removals) = self.generalize_by_levels(ty, subst, owned_contracts);
+        let (mut level_scheme, ledger_removals) =
+            self.generalize_by_levels(ty, subst, owned_contracts);
         #[cfg(feature = "generalize-sweep-oracle")]
         GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
             if enabled.get() {
@@ -1289,6 +1323,8 @@ impl Env {
                 );
             }
         });
+        crate::result_scope::ResultScope::new(equations)
+            .retain_closed_quantifiers(&mut level_scheme);
         // Transport contracts this scheme now owns have moved off the
         // inference-local contract ledger. Each later instantiation installs a
         // fresh renamed instance with its own application identity.

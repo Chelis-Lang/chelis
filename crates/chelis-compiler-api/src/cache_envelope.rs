@@ -92,7 +92,8 @@ impl CachePayload for crate::LibraryContext {
     // variant index shifted, and Deep lost the `random` handler kind.
     // V21: generalized checker schemes retain result-equation origins.
     // V22: checked fold/scan aliases retain accumulator/result equations.
-    const FORMAT_VERSION: u32 = 22;
+    // V23: result-origin quantifiers preserve complete scope components.
+    const FORMAT_VERSION: u32 = 23;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -135,7 +136,8 @@ impl CachePayload for crate::StdLibContext {
     // their bincode shape does not.
     // V36: generalized checker schemes retain result-equation origins.
     // V37: checked fold/scan aliases retain accumulator/result equations.
-    const FORMAT_VERSION: u32 = 37;
+    // V38: result-origin quantifiers preserve complete scope components.
+    const FORMAT_VERSION: u32 = 38;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

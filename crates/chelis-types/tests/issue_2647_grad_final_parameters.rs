@@ -1044,3 +1044,102 @@ fn accumulator_aliases_carry_grad_result_origin_before_helper_instantiation() {
         }
     }
 }
+
+fn check_transported_fold_local_result(selection: &str) {
+    let source = format!(
+        "type Holder[a] =\n  | Holder {{ value: a }}\ndef main() = {{\n  op = {selection}\n  r = op(fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), grad(fn (w) -> 1.0f32), [1i64])\n  g = r\n  g\n}}"
+    );
+    check(&source, false);
+    check(
+        &source.replace("grad(fn (w) ->", "grad(fn (w: f32) ->"),
+        true,
+    );
+    check(&source.replace("  g\n}", "  g(2.0f32)\n}"), true);
+    check(&source.replace("  g\n}", "  g(true)\n}"), false);
+}
+
+#[test]
+fn fold_list_escape_keeps_local_result_provenance() {
+    check_transported_fold_local_result("index([fold, fold], 0i64)");
+}
+
+#[test]
+fn fold_record_escape_keeps_local_result_provenance() {
+    check_transported_fold_local_result("(Holder { value: fold }).value");
+}
+
+#[test]
+fn fold_branch_escape_keeps_local_result_provenance() {
+    check_transported_fold_local_result("if true then fold else fold");
+}
+
+#[test]
+fn callable_result_components_survive_transport_alias_depth_and_cache() {
+    use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
+    let library = "type Holder[a] = | Holder { value: a }\ndef select(p) = if true then p else grad(fn (w: f32) -> 1.0f32)\ndef identity(f) = f";
+    let program = desugar_program(&parse_str(library).unwrap()).unwrap();
+    let context = build_type_env_from_library(&program).unwrap();
+    let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
+    for (selection, arguments, projection) in [
+        (
+            "index([fold, fold], 0i64)",
+            "fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), INPUT, [1i64]",
+            "r",
+        ),
+        (
+            "(Holder { value: fold }).value",
+            "fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), INPUT, [1i64]",
+            "r",
+        ),
+        (
+            "if true then fold else fold",
+            "fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), INPUT, [1i64]",
+            "r",
+        ),
+        (
+            "index([scan, scan], 0i64)",
+            "fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), INPUT, [1i64]",
+            "index(r, 0i64)",
+        ),
+        (
+            "(Holder { value: scan }).value",
+            "fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), INPUT, [1i64]",
+            "index(r, 0i64)",
+        ),
+        (
+            "if true then scan else scan",
+            "fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), INPUT, [1i64]",
+            "index(r, 0i64)",
+        ),
+        ("index([select, select], 0i64)", "INPUT", "r"),
+        ("(Holder { value: select }).value", "INPUT", "r"),
+        ("if true then select else select", "INPUT", "r"),
+        ("identity(index([select, select], 0i64))", "INPUT", "r"),
+    ] {
+        for depth in [1, 3] {
+            let mut aliases = format!("  g0 = {projection}\n");
+            for index in 1..depth {
+                aliases.push_str(&format!("  g{index} = g{}\n", index - 1));
+            }
+            for (parameter, application, accepted) in [
+                ("w", "", false),
+                ("w: f32", "", true),
+                ("w", "(2.0f32)", true),
+                ("w", "(true)", false),
+            ] {
+                let arguments =
+                    arguments.replace("INPUT", &format!("grad(fn ({parameter}) -> 1.0f32)"));
+                let source = format!(
+                    "def main() = {{\n  op = {selection}\n  r = op({arguments})\n{aliases}  g{}{application}\n}}",
+                    depth - 1
+                );
+                check(&format!("{library}\n{source}"), accepted);
+                let program = desugar_program(&parse_str(&source).unwrap()).unwrap();
+                for context in [&context, &restored] {
+                    let checked = check_ir_with_context(context, &program);
+                    assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
+                }
+            }
+        }
+    }
+}
