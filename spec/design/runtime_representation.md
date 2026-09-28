@@ -1124,7 +1124,9 @@ and write key or seed storage under [05-OP-69] through [05-OP-72]; they add no
 public carrier or operation identity. The checked call signature selects the
 scalar or tensor entry, and the compiled-C `key_tensor_forms` suite covers
 those entries, including invalid counts, shapes, shadowing, and local
-transport. The Phase 0 owner registration admits only this path, kind, and
+transport. Phase 1 inherits the same ownership-ledger command and freezes
+its positive and rejection test identities in its reviewed selection manifest.
+The Phase 0 owner registration admits only this path, kind, and
 owner; a new helper requires its own authority and execution control.
 
 HIP exact direct arithmetic adds four closed typed-lane final forms:

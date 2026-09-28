@@ -902,14 +902,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 self.moved.remove(&owner);
                 self.register(owner)?;
                 self.name_owner(owner, name)?;
-                // A resolved key-builtin value enters this lexical scope as
-                // a function pointer. Calls through its alias have the same
-                // affine argument modes as the checked builtin contract;
-                // treating it as an ordinary owner makes `alias(k)` look
-                // like an unknown direct callee before C projection.
-                if let ConcreteHostType::Function(params, _) = &self.info(owner)?.ty {
-                    let modes = vec![ParamMode::Owned; params.len()];
-                    self.callback_modes.insert(owner, modes);
+                // Only producers with recorded callback provenance enter
+                // callback scope. Ordinary returned function values retain
+                // their owner until the C ABI rejects them (chelis#879).
+                if self.callback_modes.contains_key(&owner) {
                     self.scope_mut()?
                         .names
                         .insert(name.to_string(), Place::Callback(owner));
@@ -1253,12 +1249,25 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         }
                     });
                 }
-                self.apply(
+                let value = self.apply(
                     ty,
                     format!("builtin:{name}"),
                     vec![use_; operands.len()],
                     operands,
-                )
+                )?;
+                // A closed key-builtin value has the checked operation's
+                // affine argument modes. Record them at its producer so an
+                // unrelated function value cannot acquire callback status
+                // merely by sharing its concrete function type.
+                if args.is_empty()
+                    && crate::host_type_state::KeyBuiltinCallable::from_symbol(name).is_some()
+                    && let ConcreteHostType::Function(params, _) = ty
+                    && let Value::Fresh(owner) = &value
+                {
+                    self.callback_modes
+                        .insert(*owner, vec![ParamMode::Owned; params.len()]);
+                }
+                Ok(value)
             }
             ConcreteHostExprKind::AdtFieldAccess {
                 base,
