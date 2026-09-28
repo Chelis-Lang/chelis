@@ -97,6 +97,23 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
   School exemplar: [`scripts/audit_workarounds.py`](https://github.com/Chelis-Lang/school/blob/main/scripts/audit_workarounds.py)
   `--pins-only`, wired as a `hard-rule-guard` step in
   [`ci.yml`](https://github.com/Chelis-Lang/school/blob/main/.github/workflows/ci.yml).
+
+For the historical Coral/Nautilus thin callers, the offline conformance audit
+recognizes only the exact legacy central implementation
+`Chelis-Lang/ci/.github/workflows/consumer.yml@4394706b569bdd7d557f6edc7b9818249decc330`
+and its closed, profile-specific inputs and secret. An audit `Pass` is a
+structural claim about those legacy profile jobs, **not** independent consumer
+acceptance of that SHA, private workflow access, or evidence of hosted
+execution. Coral and Nautilus must each review and accept their central
+revision independently and prove their own hosted suite before migration;
+Nautilus #32 remains a draft and does not authorize Coral. The newer
+`ci/main` capability selectors have different semantics and are not covered
+by this historical recognition rule. Audit of a new central SHA requires
+reviewing its job behavior and updating the auditor, not treating any
+40-character immutable reference as equivalent.
+An unknown central pointer in any workflow is a failed workflow-pin row,
+even if another workflow invokes the known legacy revision.
+
 - Toolchain installs go through an installer that reads the reef pin. The
   first-party path (shipped; WS-B/WS-C of
   [`chelis_packaging_and_install.md`](chelis_packaging_and_install.md)) is

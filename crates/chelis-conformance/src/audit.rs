@@ -392,6 +392,15 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
             }
             continue;
         }
+        // An unrelated valid workflow must not make row 3 pass while a second
+        // workflow names an unrecognized central implementation. Inert markers
+        // cannot supply authority either; fail closed rather than skipping them.
+        if body.contains(CENTRAL_WORKFLOW_PREFIX) {
+            mismatches.push(format!(
+                "{name}: unknown or malformed central workflow wrapper"
+            ));
+            continue;
+        }
         if !workflow_installs_toolchain(body) {
             continue;
         }
@@ -455,8 +464,8 @@ fn check_pin_consistency_guard(ctx: &Ctx) -> Check {
         pass()
     } else {
         fail(
-            "ci.yml does not run the offline pin/conformance guard or an approved central CI profile",
-            "run `chelis reef conform bump-check --base origin/main` / `conform audit`, or call the immutable approved central CI profile",
+            "ci.yml does not run the offline pin/conformance guard or a known legacy central CI profile",
+            "run `chelis reef conform bump-check --base origin/main` / `conform audit`, or call the known legacy central CI revision (consumer approval is separate)",
         )
     }
 }
@@ -1381,6 +1390,13 @@ fn read_workflows(root: &Path) -> Vec<(String, String)> {
 }
 
 const CENTRAL_WORKFLOW_PREFIX: &str = "Chelis-Lang/ci/.github/workflows/consumer.yml@";
+// This known historical revision has the closed Coral/Nautilus jobs audited
+// below; Nautilus #32 pins it, but that PR is not an approval of a consumer
+// migration. Neither an audit Pass nor this constant approves the revision for
+// Coral or Nautilus: each consumer separately reviews its accepted SHA and
+// verifies hosted execution. Do not infer these jobs from arbitrary SHAs or
+// from the newer ci/main capability-selector workflow.
+const KNOWN_LEGACY_CENTRAL_WORKFLOW_SHA: &str = "4394706b569bdd7d557f6edc7b9818249decc330";
 const CENTRAL_SECRET_EXPRESSION: &str = "${{ secrets.CHELIS_RELEASE_TOKEN }}";
 
 #[derive(Debug)]
@@ -1410,9 +1426,14 @@ fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
 
 fn parse_central_workflow_call(body: &str) -> Option<CentralWorkflowCall> {
     let lines: Vec<&str> = body.lines().collect();
-    let jobs_start = lines
+    let mut jobs_sections = lines
         .iter()
-        .position(|line| leading_spaces(line) == Some(0) && line.trim() == "jobs:")?;
+        .enumerate()
+        .filter(|(_, line)| leading_spaces(line) == Some(0) && line.trim() == "jobs:");
+    let (jobs_start, _) = jobs_sections.next()?;
+    if jobs_sections.next().is_some() {
+        return None;
+    }
     let jobs_end = lines
         .iter()
         .enumerate()
@@ -1499,12 +1520,7 @@ fn parse_central_workflow_call(body: &str) -> Option<CentralWorkflowCall> {
     }
     let uses = &keys.get("uses")?.0;
     let sha = uses.strip_prefix(CENTRAL_WORKFLOW_PREFIX)?;
-    if sha.len() != 40
-        || sha.bytes().all(|byte| byte == b'0')
-        || !sha
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if sha != KNOWN_LEGACY_CENTRAL_WORKFLOW_SHA {
         return None;
     }
 

@@ -257,6 +257,26 @@ nix-env --install --attr bashInteractive -f https://github.com/NixOS/nixpkgs/tar
 Do not run `devenv init` because this repository already contains the required
 Devenv files.
 
+#### Optional direnv activation
+
+For a human working repeatedly in one checkout, direnv can activate the
+tracked Devenv environment in place. Install this repository's pinned Devenv
+2.2.3 and direnv, enable the direnv hook in your own shell, and create a local
+`.envrc` in each worktree:
+
+```bash
+eval "$(devenv direnvrc)"
+use devenv
+```
+
+Review that local file, then opt in with `direnv allow`. For example,
+`direnv exec . chelis-gate --list` uses the activated local toolchain.
+`/.envrc` and `/.direnv/` are ignored; neither is a hosted CI dependency.
+If the installed Devenv CLI does not match the pinned version, fix the CLI
+installation before opting in. This is optional for interactive local
+development; the primary uv/rustup path remains preferable for agents, and
+downstream shell conformance never requires direnv.
+
 #### Use the shell
 
 1. From the repository root, run the environment smoke test:

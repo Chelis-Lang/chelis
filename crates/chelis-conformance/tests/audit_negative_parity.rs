@@ -15,7 +15,8 @@ use chelis_conformance::scaffold;
 // applies to blocks stamped at AUDITOR_VERSION, so a hardcoded scaffold
 // version silently skips the forged-block oracle after every release bump.
 const VER: &str = env!("CARGO_PKG_VERSION");
-const CENTRAL_SHA: &str = "1111111111111111111111111111111111111111";
+// Known historical legacy profile implementation, not a consumer rollout approval.
+const CENTRAL_SHA: &str = "4394706b569bdd7d557f6edc7b9818249decc330";
 const ARCHIVE_DIGEST: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -247,6 +248,64 @@ fn central_nautilus_profile_binds_blocked_suite() {
 
     let report = audit::audit(&root);
     assert_eq!(verdict_of(&report, "tests-blocked"), Verdict::Pass);
+}
+
+#[test]
+fn different_immutable_central_revision_cannot_supply_legacy_audit_authority() {
+    for package in ["coral", "nautilus"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        let wrapper = central_ci_wrapper(package, VER)
+            .replace(CENTRAL_SHA, "31ab77c35018d72bccdcae8d7330b25312a38114");
+        std::fs::write(root.join(".github/workflows/ci.yml"), wrapper).unwrap();
+        std::fs::remove_file(root.join(".github/workflows/bump-pr.yml")).unwrap();
+        let report = audit::audit(&root);
+        assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Fail);
+        assert_eq!(verdict_of(&report, "pin-consistency-guard"), Verdict::Fail);
+        assert_eq!(verdict_of(&report, "tests-neg"), Verdict::Fail);
+        assert_ne!(verdict_of(&report, "toolchain-installer"), Verdict::Pass);
+        assert!(
+            !report.ok(),
+            "{package}: unknown central SHA cannot audit green"
+        );
+    }
+}
+
+#[test]
+fn unrecognized_release_wrapper_cannot_hide_behind_known_ci_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "nautilus");
+    std::fs::write(
+        root.join(".github/workflows/ci.yml"),
+        central_ci_wrapper("nautilus", VER),
+    )
+    .unwrap();
+    let release = central_profile_wrapper(
+        "nautilus-release",
+        &[format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+    )
+    .replace(CENTRAL_SHA, "31ab77c35018d72bccdcae8d7330b25312a38114");
+    std::fs::write(root.join(".github/workflows/release.yml"), release).unwrap();
+    let report = audit::audit(&root);
+    assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Fail);
+    assert!(
+        !report.ok(),
+        "different central revision must not audit green"
+    );
+}
+
+#[test]
+fn duplicate_jobs_document_cannot_launder_an_inert_central_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "nautilus");
+    let wrapper = format!(
+        "{}jobs:\n  unexpected:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo no\n",
+        central_ci_wrapper("nautilus", VER)
+    );
+    std::fs::write(root.join(".github/workflows/ci.yml"), wrapper).unwrap();
+    let report = audit::audit(&root);
+    assert_eq!(verdict_of(&report, "pin-consistency-guard"), Verdict::Fail);
+    assert_eq!(verdict_of(&report, "tests-neg"), Verdict::Fail);
 }
 
 #[test]
