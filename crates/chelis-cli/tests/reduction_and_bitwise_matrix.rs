@@ -178,6 +178,227 @@ fn scalar_program(expr: &str, ret_ty: &str) -> String {
     format!("module M.Main\ndef run() -> {ret_ty} = {expr}\nout = print(run())\n")
 }
 
+/// [05-OP-47], #2631: discrete coefficients are executed in the forward
+/// graph; their builtin names are never transform parameters.
+#[test]
+fn bitwise_transform_coefficients_execute_in_both_lanes() {
+    for (op, lhs, rhs, expected) in [
+        ("bitand", 6, 3, 2),
+        ("bitor", 6, 3, 7),
+        ("bitxor", 6, 3, 5),
+        ("shl", 1, 2, 4),
+        ("shr", -16, 2, -4),
+    ] {
+        for ty in ["i8", "i16", "i32", "i64"] {
+            let definition = format!(
+                "def coefficient(a: {ty}, b: {ty}) -> {ty} = {op}(a, b)\n\
+                 def loss(x: tensor[f32]) -> tensor[f32] = mul(x, scalar_to_tensor(cast(coefficient({lhs}{ty}, {rhs}{ty}), f32)))\n"
+            );
+            for (transform, argument, expected) in [
+                ("grad", "scalar_to_tensor(1.0f32)", format!("{expected}.0")),
+                (
+                    "vmap",
+                    "to_tensor([1.0f32, 2.0f32])",
+                    format!("tensor(shape=[2], data=[{expected}.0, {}.0])", 2 * expected),
+                ),
+            ] {
+                let program = format!("{definition}out = print(({transform}(loss))({argument}))\n");
+                assert_eq!(eval_first_line(&program).expect("transform eval"), expected);
+                assert_eq!(
+                    c_first_line(&program, &format!("transform_{op}_{ty}_{transform}")),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn bitwise_transformed_shifts_preserve_traps() {
+    for transform in ["grad", "vmap"] {
+        for op in ["shl", "shr"] {
+            for discarded in [false, true] {
+                let body = if discarded {
+                    format!("{{ dead = {op}(1i32, -1i32)\n mul(x, scalar_to_tensor(2.0f32)) }}")
+                } else {
+                    format!("mul(x, scalar_to_tensor(cast({op}(1i32, -1i32), f32)))")
+                };
+                let argument = if transform == "grad" {
+                    "scalar_to_tensor(1.0f32)"
+                } else {
+                    "to_tensor([1.0f32, 2.0f32])"
+                };
+                let program = format!(
+                    "def loss(x: tensor[f32]) -> tensor[f32] = {body}\nout = print(({transform}(loss))({argument}))\n"
+                );
+                let error = eval_first_line(&program).expect_err("negative shift traps");
+                assert!(
+                    error.contains("shift amount must be non-negative, got -1"),
+                    "{error}"
+                );
+                let run = c_ubsan_run(&program, &format!("trap_{transform}_{op}_{discarded}"));
+                assert!(!run.status.success());
+                let error = String::from_utf8_lossy(&run.stderr);
+                assert!(
+                    error.contains("shift amount must be non-negative, got -1"),
+                    "{error}"
+                );
+                assert!(!error.contains("runtime error:"), "{error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn bitwise_vmap_runtime_operands_preserve_exact_i64_bits() {
+    let program = "def row(x: tensor[i64]) -> tensor[i64] = scalar_to_tensor(bitxor(tensor_to_scalar(x), 1i64))\n\
+                   out = print((vmap(row))(to_tensor([9007199254740992i64, -1i64])))\n";
+    let expected = "tensor(shape=[2], data=[9007199254740993, -2])";
+    assert_eq!(eval_first_line(program).expect("exact vmap"), expected);
+    assert_eq!(c_first_line(program, "bitwise_vmap_exact"), expected);
+}
+
+#[test]
+fn bitwise_grad_runtime_parameter_coefficients_execute() {
+    for (op, expected) in [
+        ("bitand", "2.0"),
+        ("bitor", "6.0"),
+        ("bitxor", "4.0"),
+        ("shl", "24.0"),
+        ("shr", "1.0"),
+    ] {
+        let source = format!(
+            "def loss(x: tensor[f32], n: i32) -> tensor[f32] = mul(x, scalar_to_tensor(cast({op}(n, 2i32), f32)))\nout = print((grad(loss, wrt=x))(scalar_to_tensor(1.25f32), 6i32))\n"
+        );
+        assert_eq!(
+            eval_first_line(&source).expect("runtime coefficient"),
+            expected
+        );
+        assert_eq!(
+            c_first_line(&source, &format!("runtime_coefficient_{op}")),
+            expected
+        );
+    }
+}
+
+#[test]
+fn bitwise_grad_rejects_a_selected_discrete_path() {
+    for op in ["bitand", "bitor", "bitxor", "shl", "shr"] {
+        let source = format!(
+            "def loss(x: tensor[f32]) -> tensor[f32] = scalar_to_tensor(cast({op}(cast(tensor_to_scalar(x), i32), 1i32), f32))\nout = print((grad(loss))(scalar_to_tensor(2.0f32)))\n"
+        );
+        let error = eval_first_line(&source).expect_err("selected discrete path must reject");
+        assert!(
+            error.contains("non-differentiable") && error.contains(op),
+            "{error}"
+        );
+        let (built, error, _) = c_build_outcome(&source, &format!("selected_discrete_{op}"));
+        assert!(
+            !built && error.contains("non-differentiable") && error.contains(op),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn bitwise_vmap_reports_first_negative_count() {
+    for op in ["shl", "shr"] {
+        let program = format!(
+            "def row(n: tensor[i32]) -> tensor[i32] = scalar_to_tensor({op}(1i32, tensor_to_scalar(n)))\nout = print((vmap(row))(to_tensor([-2i32, -1i32])))\n"
+        );
+        let expected = "shift amount must be non-negative, got -2";
+        assert!(eval_first_line(&program).unwrap_err().contains(expected));
+        let run = c_ubsan_run(&program, &format!("first_negative_{op}"));
+        assert!(!run.status.success());
+        let error = String::from_utf8_lossy(&run.stderr);
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("runtime error:"), "{error}");
+    }
+}
+
+#[test]
+fn bitwise_vmap_shift_boundaries_are_ubsan_clean() {
+    for (ty, width, minimum) in [
+        ("i8", 8, "-128"),
+        ("i16", 16, "-32768"),
+        ("i32", 32, "-2147483648"),
+        ("i64", 64, "-9223372036854775808"),
+    ] {
+        for (op, lhs, expected) in [
+            (
+                "shl",
+                "1",
+                format!("tensor(shape=[2], data=[{minimum}, 0])"),
+            ),
+            ("shr", "-1", "tensor(shape=[2], data=[-1, -1])".to_string()),
+        ] {
+            let program = format!(
+                "def row(n: tensor[{ty}]) -> tensor[{ty}] = scalar_to_tensor({op}({lhs}{ty}, tensor_to_scalar(n)))\nout = print((vmap(row))(to_tensor([{}{ty}, {width}{ty}])))\n",
+                width - 1
+            );
+            assert_eq!(
+                eval_first_line(&program).expect("width-bound eval"),
+                expected
+            );
+            let run = c_ubsan_run(&program, &format!("mapped_{op}_{ty}"));
+            assert!(
+                run.status.success(),
+                "{}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            assert!(!String::from_utf8_lossy(&run.stderr).contains("runtime error:"));
+            assert_eq!(
+                String::from_utf8_lossy(&run.stdout).lines().next().unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn bitwise_transform_operands_reject_noninteger_and_mixed_width_types() {
+    for op in ["bitand", "bitor", "bitxor", "shl", "shr"] {
+        for args in ["1.0f32, 2.0f32", "true, false", "1i32, 2i64"] {
+            let source = format!(
+                "def loss(x: tensor[f32]) -> tensor[f32] = mul(x, scalar_to_tensor(cast({op}({args}), f32)))\nout = (grad(loss))(scalar_to_tensor(1.0f32))\n"
+            );
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("negative.ch");
+            write_file(&path, &source);
+            let result = Command::cargo_bin("chelis")
+                .unwrap()
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .arg("check")
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                !result.status.success(),
+                "{op}({args}) unexpectedly checked"
+            );
+            let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            assert!(!report["errors"].as_array().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn bitwise_inactive_transformed_branch_does_not_trap() {
+    let source = "def loss(x: tensor[f32]) -> tensor[f32] = if gt(tensor_to_scalar(x), 0.0f32) then { dead = shl(1i32, -1i32)\n mul(x, scalar_to_tensor(2.0f32)) } else mul(x, scalar_to_tensor(3.0f32))\n\
+                  out = print((grad(loss))(scalar_to_tensor(-1.0f32)))\n";
+    assert_eq!(eval_first_line(source).expect("inactive eval"), "3.0");
+    let run = c_ubsan_run(source, "bitwise_inactive");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).lines().next().unwrap(),
+        "3.0"
+    );
+}
+
 // ===========================================================================
 // chelis#682 at every width - eval/C parity locks
 // ===========================================================================

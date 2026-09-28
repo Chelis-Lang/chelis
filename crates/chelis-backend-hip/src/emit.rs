@@ -1545,6 +1545,7 @@ impl HipEmitter {
                 Self::dtype_kernel_suffix(operand_prec())
             )),
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
+            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
             RiscOp::TruncDiv => Some(format!(
                 "kernel_trunc_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -1942,6 +1943,7 @@ impl HipEmitter {
             // operands only — native `/` is exactly the C truncating
             // quotient, so it reuses the typed binary template.
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
+            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
             RiscOp::TruncDiv => {
                 let prec = operand_prec();
                 debug_assert!(
@@ -2395,6 +2397,7 @@ impl HipEmitter {
             // chelis#178: floor / truncating integer division launch like
             // any other binary elementwise kernel.
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
+            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
             RiscOp::FloorDiv | RiscOp::TruncDiv => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -4997,11 +5000,18 @@ impl HipEmitter {
         )
     }
 
-    /// The [05-OP-6] rung has no guarded device kernel, so it never
-    /// reaches codegen: `reject_unsupported_hip_ops` gates it first.
-    /// These arms exist so a future HIP implementation has to remove
-    /// this rejection deliberately rather than inherit `cast`'s
-    /// unguarded conversion by accident.
+    fn bitwise_unsupported(node: &DagNode, kind: chelis_types::BitwiseKind) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op(kind.name().to_string()),
+            format!("the HIP kernel set (node {})", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                2702,
+                "exact signed-width bitwise tensor kernels have no HIP implementation; select the C target"
+            ),
+        )
+    }
+
     fn remainder_unsupported(node: &DagNode) -> Unsupported {
         Unsupported::new(
             UnsupportedKind::Op("mod".to_string()),
@@ -5014,6 +5024,11 @@ impl HipEmitter {
         )
     }
 
+    /// The [05-OP-6] rung has no guarded device kernel, so it never
+    /// reaches codegen: `reject_unsupported_hip_ops` gates it first.
+    /// These arms exist so a future HIP implementation has to remove
+    /// this rejection deliberately rather than inherit `cast`'s
+    /// unguarded conversion by accident.
     fn cast_trunc_unsupported(node: &DagNode) -> Unsupported {
         Unsupported::new(
             UnsupportedKind::Op("cast_trunc".to_string()),
@@ -5041,6 +5056,7 @@ impl HipEmitter {
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
+            | RiscOp::Bitwise(_)
             | RiscOp::Compare(_)
             | RiscOp::Logical(_)
             | RiscOp::Where

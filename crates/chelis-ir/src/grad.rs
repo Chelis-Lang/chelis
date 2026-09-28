@@ -317,6 +317,36 @@ fn grad_dag_checked_impl(
         }
     }
     reject_random_selection_parameters(forward, &live, wrt)?;
+    // Discrete coefficients execute in the forward graph. Only a value path
+    // from a selected parameter asks for their forbidden adjoint [05-OP-47].
+    let mut selected_path = vec![false; forward.len()];
+    for parameter in wrt {
+        if let Some(reached) = selected_path.get_mut(parameter.0) {
+            *reached = true;
+        }
+    }
+    for node in forward.nodes() {
+        let inputs: &[NodeId] = match &node.op {
+            RiscOp::Shape { .. } | RiscOp::Compare(_) => &[],
+            RiscOp::Shrink { .. }
+            | RiscOp::Stride { .. }
+            | RiscOp::Pad { .. }
+            | RiscOp::Reshape { .. }
+            | RiscOp::Gather { .. } => &node.inputs[..1],
+            _ => &node.inputs,
+        };
+        selected_path[node.id.0] |= inputs.iter().any(|input| selected_path[input.0]);
+        if live[node.id.0]
+            && selected_path[node.id.0]
+            && let RiscOp::Bitwise(kind) = node.op
+        {
+            return Err(AdError::NotSupported {
+                op: kind.name(),
+                reason: AdRejectionReason::IntegerArithmeticOutput,
+            });
+        }
+    }
+
     for node in forward.nodes() {
         if !live[node.id.0] {
             continue;
@@ -566,6 +596,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::FloorDiv => "floor_div",
         RiscOp::TruncDiv => "trunc_div",
         RiscOp::Mod => "mod",
+        RiscOp::Bitwise(kind) => kind.name(),
         RiscOp::Compare(kind) => kind.surf_name(),
         RiscOp::Logical(kind) => kind.surf_name(),
         RiscOp::Where => "where",
@@ -1575,6 +1606,7 @@ fn compute_adjoints(
             );
             Some(vec![(x, zero)])
         }
+        RiscOp::Bitwise(_) => Some(vec![]),
         RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
             // chelis#178: floor / truncating integer division are
             // non-differentiable (piecewise constant) — grad_dag_checked
@@ -3116,6 +3148,73 @@ mod tests {
         TensorType {
             dims: vec![],
             precision: Prim::F64,
+        }
+    }
+
+    #[test]
+    fn bitwise_coefficients_are_forward_values_and_selected_bitwise_paths_reject() {
+        for kind in [
+            chelis_types::BitwiseKind::And,
+            chelis_types::BitwiseKind::Or,
+            chelis_types::BitwiseKind::Xor,
+            chelis_types::BitwiseKind::ShiftLeft,
+            chelis_types::BitwiseKind::ShiftRight,
+        ] {
+            let mut dag = Dag::new();
+            let owner = dag.declare("test");
+            let int_ty = TensorType {
+                dims: vec![],
+                precision: Prim::Int32,
+            };
+            let x = dag.add_node(
+                owner,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let n = dag.add_node(
+                owner,
+                RiscOp::Load { name: "n".into() },
+                vec![],
+                int_ty.clone(),
+                None,
+            );
+            let count = dag.add_node(
+                owner,
+                RiscOp::Const {
+                    value: chelis_types::scalar_from_i64("test", Prim::Int32, 2).unwrap(),
+                },
+                vec![],
+                int_ty.clone(),
+                None,
+            );
+            let discrete = dag.add_node(owner, RiscOp::Bitwise(kind), vec![n, count], int_ty, None);
+            let coefficient = dag.add_node(
+                owner,
+                RiscOp::Cast {
+                    new_precision: Prim::F32,
+                },
+                vec![discrete],
+                scalar_f32(),
+                None,
+            );
+            let output = dag.add_node(owner, RiscOp::Mul, vec![x, coefficient], scalar_f32(), None);
+            let result =
+                grad_dag_checked(&dag, output, &[x]).expect("unselected runtime coefficient");
+            let inputs = UnordMap::from_iter([("x".to_string(), 1.25), ("n".to_string(), 6.0)]);
+            let actual = eval_scalar(&result.dag, &inputs);
+            let expected = match kind {
+                chelis_types::BitwiseKind::And => 2.0,
+                chelis_types::BitwiseKind::Or => 6.0,
+                chelis_types::BitwiseKind::Xor => 4.0,
+                chelis_types::BitwiseKind::ShiftLeft => 24.0,
+                chelis_types::BitwiseKind::ShiftRight => 1.0,
+            };
+            assert_eq!(actual[&result.grad_nodes[&x]], expected);
+            assert!(
+                matches!(grad_dag_checked(&dag, output, &[n]), Err(AdError::NotSupported { op, reason: AdRejectionReason::IntegerArithmeticOutput }) if op == kind.name())
+            );
         }
     }
 

@@ -44,6 +44,9 @@ A disconnected differentiable scalar or tensor receives exact zeros with its
 actual argument's dtype and ordered shape, including empty axes and rank zero. See
 [`grad_disconnected.ch`](../examples/grad_disconnected.ch).
 
+[`grad_bitwise.ch`](../examples/grad_bitwise.ch) demonstrates exact discrete
+coefficients retained in the forward graph under `grad` and `vmap`.
+
 Source-level `grad` returns gradients only, not `(value, grad)`.
 For a multi-parameter function, the gradient payload is flattened:
 

@@ -6802,6 +6802,7 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::FloorDiv => WireRiscOp::FloorDiv,
         RiscOp::TruncDiv => WireRiscOp::TruncDiv,
         RiscOp::Mod => WireRiscOp::Mod,
+        RiscOp::Bitwise(kind) => WireRiscOp::Bitwise { bitwise: *kind },
         RiscOp::Compare(kind) => WireRiscOp::Compare {
             comparison: match kind {
                 ComparisonKind::CmpLt => WireComparisonKind::CmpLt,

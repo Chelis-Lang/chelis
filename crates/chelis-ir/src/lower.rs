@@ -13819,6 +13819,21 @@ impl<'program> LowerCtx<'program> {
                 );
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
+            name if args.len() == 2 && chelis_types::BitwiseKind::from_name(name).is_some() => {
+                let kind =
+                    chelis_types::BitwiseKind::from_name(name).expect("matched bitwise identity");
+                let a = self.lower_expr_node(&args[0], "bitwise lhs");
+                let b = self.lower_expr_node(&args[1], "bitwise rhs");
+                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
+                let node = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Bitwise(kind),
+                    vec![a, b],
+                    out_ty,
+                    self.current_span_id.clone(),
+                );
+                self.attach_reuse_hint(node, app_span, &[a, b])
+            }
             "mod" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "mod lhs");
                 let b = self.lower_expr_node(&args[1], "mod rhs");

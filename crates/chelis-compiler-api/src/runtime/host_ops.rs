@@ -447,86 +447,19 @@ pub(super) fn eval_trunc_div(args: &[RuntimeValue]) -> Result<RuntimeValue, Stri
     numeric_binop(args, Some(IntBinOp::TruncDiv), None)
 }
 
-pub(super) fn bit_int_binop(
+pub(super) fn bitwise_binop(
     args: &[RuntimeValue],
-    op: impl Fn(i64, i64) -> i64,
+    op: chelis_types::BitwiseKind,
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
-            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
-        {
-            // Pre-WS-A0 stored every int as i64; preserve i64-precision
-            // arithmetic but pin the result dtype to the operand dtype
-            // when both sides agree, else widen to i64. Matches the
-            // §5.1 "no implicit precision promotion" rule for matched
-            // operands, and fails closed for mixed widths.
-            let (ldt, rdt) = (lp.dtype(), rp.dtype());
-            let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
-            RuntimeValue::scalar_like_int(result_dtype, op(lp.as_i64(), rp.as_i64()))
+        (Some(RuntimeValue::Scalar(lhs)), Some(RuntimeValue::Scalar(rhs))) => {
+            let value = chelis_types::bitwise_scalar(op, lhs.value(), rhs.value())
+                .map_err(|error| error.to_string())?;
+            Ok(RuntimeValue::from_scalar_value(value))
         }
-        other => Err(format!("integer op expects int args, got {other:?}")),
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum IntShiftOp {
-    Left,
-    Right,
-}
-
-pub(super) fn int_shift_binop(
-    args: &[RuntimeValue],
-    op: IntShiftOp,
-) -> Result<RuntimeValue, String> {
-    match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
-            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
-        {
-            let rhs = rp.as_i64();
-            if rhs < 0 {
-                return Err(format!("shift amount must be non-negative, got {rhs}"));
-            }
-            let width = match lp.dtype() {
-                Prim::Int8 => 8_u32,
-                Prim::Int16 => 16,
-                Prim::Int32 => 32,
-                Prim::Int64 => 64,
-                _ => unreachable!("integer guard above excludes non-integer shift operands"),
-            };
-            // [04-NUM-13]: shifts are width-bounded, not host-language
-            // shifts. A count at or above the declared width produces the
-            // fully shifted-out value (zero for left shift/nonnegative right
-            // shift, all ones for negative arithmetic right shift). Avoid
-            // invoking Rust's debug-panic shift path for those counts.
-            let lhs = lp.as_i64();
-            let raw = if rhs >= i64::from(width) {
-                match op {
-                    IntShiftOp::Left => 0,
-                    IntShiftOp::Right if lhs < 0 => -1,
-                    IntShiftOp::Right => 0,
-                }
-            } else {
-                match op {
-                    IntShiftOp::Left => lhs.wrapping_shl(rhs as u32),
-                    IntShiftOp::Right => lhs.wrapping_shr(rhs as u32),
-                }
-            };
-            // [04-NUM-13] discards bits at the declared width. Narrow before
-            // the trapping finalizer so an in-spec shift such as `1i8 << 7`
-            // stores -128 instead of being misclassified as arithmetic
-            // overflow.
-            let wrapped = match lp.dtype() {
-                Prim::Int8 => (raw as i8) as i64,
-                Prim::Int16 => (raw as i16) as i64,
-                Prim::Int32 => (raw as i32) as i64,
-                other => {
-                    debug_assert_eq!(other, Prim::Int64);
-                    raw
-                }
-            };
-            RuntimeValue::scalar_like_int(lp.dtype(), wrapped)
-        }
-        other => Err(format!("shift op expects int args, got {other:?}")),
+        other => Err(format!(
+            "bitwise op expects integer scalar args, got {other:?}"
+        )),
     }
 }
 

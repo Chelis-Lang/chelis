@@ -217,6 +217,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
             | WireRiscOp::Mod
+            | WireRiscOp::Bitwise { .. }
             | WireRiscOp::Compare { .. }
             | WireRiscOp::Logical { .. }
             | WireRiscOp::Where {}

@@ -2459,7 +2459,7 @@ impl WireDag {
                         )));
                     }
                 }
-                WireRiscOp::Mod => {
+                WireRiscOp::Mod | WireRiscOp::Bitwise { .. } => {
                     if node.inputs.len() != 2
                         || !Prim::parse_interchange_name(&node.output_type.precision)
                             .is_some_and(|prim| prim.is_integer())
@@ -2483,8 +2483,8 @@ impl WireDag {
                         })
                     {
                         return Err(WireDagContractError::new(format!(
-                            "WireDag Mod node {} requires two earlier inputs with its integer dtype and shape",
-                            node.id
+                            "WireDag {:?} node {} requires two earlier inputs with its integer dtype and shape",
+                            node.op, node.id
                         )));
                     }
                 }
@@ -3334,6 +3334,7 @@ fn wire_axis_origin(
         | WireRiscOp::FloorDiv
         | WireRiscOp::TruncDiv
         | WireRiscOp::Mod
+        | WireRiscOp::Bitwise { .. }
         | WireRiscOp::MaxElem
         | WireRiscOp::MinElem
         | WireRiscOp::ExtremaAdjoint { .. }
@@ -3860,6 +3861,9 @@ pub enum WireRiscOp {
     FloorDiv,
     TruncDiv,
     Mod,
+    Bitwise {
+        bitwise: chelis_types::BitwiseKind,
+    },
     Compare {
         comparison: WireComparisonKind,
     },
