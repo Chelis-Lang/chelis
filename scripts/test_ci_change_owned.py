@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+from dataclasses import replace
 import io
 import json
 import os
@@ -852,7 +853,7 @@ class SchemaTests(unittest.TestCase):
                     validate(hidden)
 
     def test_repository_manual_gate_rows_cite_live_wired_entries(self) -> None:
-        """The check behind script-unit's docs/manual_gates.md path rule."""
+        """Manual-gate config stays valid and direct changes retain routing."""
         root = Path(__file__).resolve().parents[1]
         config = owned.read_config(root / ".config/ci-test-targets.toml")
         self.assertTrue(config.manual_gate_targets)
@@ -860,6 +861,42 @@ class SchemaTests(unittest.TestCase):
             config.manual_gate_targets,
             (root / owned.MANUAL_GATES_PATH).read_text(),
         )
+
+        path = "crates/chelis-python/tests/manual_reef_context.rs"
+        workspace = metadata(
+            package(
+                "chelis-python",
+                [("manual_reef_context", path, [])],
+            ),
+            package(
+                "chelis-cli",
+                [("shoals_oracle", "crates/chelis-cli/tests/shoals_oracle.rs", [])],
+            ),
+        )
+        minimal = replace(
+            config,
+            standing_targets=(),
+            manual_only_targets={},
+            target_exclusions={},
+            test_exclusions={},
+            required_package_rules=(),
+            path_rules=(),
+        )
+        plan = owned.make_plan(
+            mode="pull_request",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            records=[owned.ChangeRecord("M", path)],
+            base_metadata=workspace,
+            candidate_metadata=workspace,
+            config=minimal,
+            tracked_paths={path, owned.MANUAL_GATES_PATH},
+            source_reader=lambda path: (root / path).read_text(),
+        )
+        changed_path = next(
+            row for row in plan["path_dispositions"] if row["path"] == path
+        )
+        self.assertEqual(changed_path.get("execution_mode"), "manual-gate")
 
     def test_repository_manifest_has_exact_selected_inventory_and_owners(self) -> None:
         config = owned.read_config(
