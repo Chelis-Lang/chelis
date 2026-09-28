@@ -244,10 +244,19 @@ impl Expr {
                 Some(Expr::Map(meta, _)) => Some(meta),
                 _ => None,
             },
-            Expr::BareList(items, _) => match items.as_mut_slice() {
-                [_, Expr::Map(meta, _)] => Some(meta),
-                _ => None,
-            },
+            // Indexed rather than a slice pattern on `items.as_mut_slice()`:
+            // the extraction does not support enum patterns inside a slice
+            // pattern on a mutable slice.
+            Expr::BareList(items, _) => {
+                if items.len() == 2 {
+                    match &mut items[1] {
+                        Expr::Map(meta, _) => Some(meta),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
             Expr::Atom(..) => None,
         };
         if let Some(meta) = meta {

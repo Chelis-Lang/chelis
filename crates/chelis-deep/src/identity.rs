@@ -87,23 +87,26 @@ fn assign(expr: &mut Expr, next: &mut usize) {
                 assign(child, next);
             }
         }
-        Expr::List(list, _) => match list.elements.as_mut_slice() {
-            [
-                Expr::Atom(Atom::Tag(_), _),
-                Expr::Map(metadata, _),
-                children @ ..,
-            ] => {
-                stamp(metadata, next);
-                for child in children {
+        // The shape test reads a shared slice and the writes go through
+        // indices: the extraction does not support enum patterns, or several
+        // bindings, inside a slice pattern on a mutable slice.
+        Expr::List(list, _) => {
+            if matches!(
+                list.elements.as_slice(),
+                [Expr::Atom(Atom::Tag(_), _), Expr::Map(_, _), ..]
+            ) {
+                if let Expr::Map(metadata, _) = &mut list.elements[1] {
+                    stamp(metadata, next);
+                }
+                for child in &mut list.elements[2..] {
                     assign(child, next);
                 }
-            }
-            elements => {
-                for element in elements {
+            } else {
+                for element in &mut list.elements {
                     assign(element, next);
                 }
             }
-        },
+        }
         Expr::BareList(children, _) => {
             for child in children {
                 assign(child, next);
