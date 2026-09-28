@@ -601,6 +601,9 @@ fn checked_library_round_trip_preserves_result_constraint_origins() {
     use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
     for library in [
         "def forward_grad(p) -> (f32 -> f32) = p",
+        "def forward_grad(p) = index(append([p], grad(fn (w: f32) -> 1.0f32)), 0i64)",
+        "def forward_grad(p) = index(concat([p], [grad(fn (w: f32) -> 1.0f32)]), 0i64)",
+        "def forward_grad(p, flag: bool) = sibling(p, flag)\ndef sibling(p, flag: bool) = if flag then p else forward_grad(grad(fn (w: f32) -> 1.0f32), true)",
         "def forward_grad(p, flag: bool) = if flag then {\n d: (f32 -> f32) = p\n d\n} else forward_grad(p, true)",
     ] {
         let parsed = parse_str(library).unwrap();
@@ -627,6 +630,169 @@ fn checked_library_round_trip_preserves_result_constraint_origins() {
                 let checked = check_ir_with_context(context, &program);
                 assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
             }
+        }
+    }
+}
+
+#[test]
+fn collection_operation_equalities_preserve_result_origin() {
+    for expression in [
+        "concat([g], [known])",
+        "concat([known], [g])",
+        "append([g], known)",
+        "append([known], g)",
+    ] {
+        for (parameter, application, accepted) in [
+            ("w: f32", "", true),
+            ("w", "zero = g(2.0f32)\n", true),
+            ("w", "zero = g(true)\n", false),
+            ("w", "", false),
+        ] {
+            check(
+                &format!(
+                    "def main() = {{\n g = grad(fn ({parameter}) -> 1.0f32)\n known = grad(fn (w: f32) -> 1.0f32)\n {application}{expression}\n}}"
+                ),
+                accepted,
+            );
+        }
+    }
+}
+
+#[test]
+fn collection_operation_origins_survive_helper_publication() {
+    for (operation, arguments) in [
+        ("concat", "[p], [grad(fn (w: f32) -> 1.0f32)]"),
+        ("append", "[p], grad(fn (w: f32) -> 1.0f32)"),
+    ] {
+        for callee in [
+            format!("{operation}({arguments})"),
+            format!("{{\n join = {operation}\n join({arguments})\n}}"),
+        ] {
+            for (parameter, application, accepted) in [
+                ("w: f32", "", true),
+                ("w", "(2.0f32)", true),
+                ("w", "(true)", false),
+                ("w", "", false),
+            ] {
+                check(
+                    &format!(
+                        "def pick(p) = index({callee}, 0i64)\ndef main() = (pick(grad(fn ({parameter}) -> 1.0f32))){application}"
+                    ),
+                    accepted,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn mutual_publication_preserves_required_branch_equalities() {
+    let first = "def first(p, flag: bool) = second(p, flag)";
+    let second = "def second(p, flag: bool) = if flag then p else first(1.0f32, true)";
+    for definitions in [format!("{first}\n{second}"), format!("{second}\n{first}")] {
+        check(
+            &format!("{definitions}\ndef main() -> f32 = first(2.0f32, false)"),
+            true,
+        );
+        check(
+            &format!("{definitions}\ndef main() -> bool = first(true, false)"),
+            false,
+        );
+        check(
+            &format!("{definitions}\ndef main() -> bool = first(2.0f32, false)"),
+            false,
+        );
+    }
+}
+
+#[test]
+fn mutual_publication_keeps_grad_result_equality_without_binding_its_input() {
+    for (prefix, wrap, project) in [
+        ("", "p", "second(p, flag)"),
+        ("", "[p]", "index(second(p, flag), 0i64)"),
+        (
+            "type Holder[a] = | Holder { value: a }\n",
+            "Holder { value: p }",
+            "second(p, flag).value",
+        ),
+    ] {
+        let first = format!("def first(p, flag: bool) = {project}");
+        let other = wrap.replace("p", "first(grad(fn (w: f32) -> 1.0f32), true)");
+        let second = format!("def second(p, flag: bool) = if flag then {wrap} else {other}");
+        for definitions in [format!("{first}\n{second}"), format!("{second}\n{first}")] {
+            for (parameter, application, accepted) in [
+                ("w: f32", "", true),
+                ("w", "(2.0f32)", true),
+                ("w", "", false),
+                ("w", "(true)", false),
+            ] {
+                check(
+                    &format!(
+                        "{prefix}{definitions}\ndef main() = (first(grad(fn ({parameter}) -> 1.0f32), false)){application}"
+                    ),
+                    accepted,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_library_round_trip_preserves_recursive_signature_compatibility() {
+    use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
+    let library = "def first(p, flag: bool) = second(p, flag)\ndef second(p, flag: bool) = if flag then p else first(1.0f32, true)";
+    let library = desugar_program(&parse_str(library).unwrap()).unwrap();
+    let context = build_type_env_from_library(&library).unwrap();
+    let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
+    for (ty, value, accepted) in [
+        ("f32", "2.0f32", true),
+        ("bool", "true", false),
+        ("bool", "2.0f32", false),
+    ] {
+        let source = format!("def main() -> {ty} = first({value}, false)");
+        let program = desugar_program(&parse_str(&source).unwrap()).unwrap();
+        for context in [&context, &restored] {
+            let checked = check_ir_with_context(context, &program);
+            assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
+        }
+    }
+}
+
+#[test]
+fn collection_value_holes_retain_their_required_element_equation() {
+    for body in [
+        "append([1.0f32], p)",
+        "{\n op = append\n op([1.0f32], p)\n}",
+    ] {
+        check(
+            &format!("def wrap(p) = {body}\ndef main() = wrap(2.0f32)"),
+            true,
+        );
+        check(
+            &format!("def wrap(p) = {body}\ndef main() = wrap(true)"),
+            false,
+        );
+    }
+}
+
+#[test]
+fn collection_value_holes_cannot_inherit_a_known_gradient_element() {
+    for body in [
+        "append([grad(fn (w: f32) -> 1.0f32)], p)",
+        "{\n op = append\n op([grad(fn (w: f32) -> 1.0f32)], p)\n}",
+    ] {
+        for (parameter, application, accepted) in [
+            ("w: f32", "", true),
+            ("w", "(2.0f32)", true),
+            ("w", "(true)", false),
+            ("w", "", false),
+        ] {
+            check(
+                &format!(
+                    "def wrap(p) = {body}\ndef main() = (index(wrap(grad(fn ({parameter}) -> 1.0f32)), 0i64)){application}"
+                ),
+                accepted,
+            );
         }
     }
 }

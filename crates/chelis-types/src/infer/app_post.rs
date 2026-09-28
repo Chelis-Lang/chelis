@@ -1364,10 +1364,19 @@ pub(super) fn finish_unified_app(
                 let value_arg = subst.apply(&arg_tys[1]);
                 match list_arg {
                     Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                        if let Err(te) = unify(&args[0], &value_arg, subst) {
-                            return report(errors, te.into());
-                        }
-                        return Type::Adt("List".to_string(), vec![subst.apply(&args[0])]);
+                        return publish_collection_equation(
+                            &CollectionConstraint::Append {
+                                list: Type::Adt(name, args),
+                                value: value_arg,
+                                result: result_ty.clone(),
+                            },
+                            node,
+                            subst,
+                            errors,
+                        )
+                        .unwrap_or_else(|| {
+                            site.defer(&arg_tys, &result_ty, product, result_ty.clone())
+                        });
                     }
                     Type::Error(_) => return result_ty,
                     Type::Var(_) => {
@@ -1449,10 +1458,19 @@ pub(super) fn finish_unified_app(
                             && lhs_args.len() == 1
                             && rhs_args.len() == 1 =>
                     {
-                        if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
-                            return report(errors, te.into());
-                        }
-                        return Type::Adt("List".to_string(), vec![subst.apply(&lhs_args[0])]);
+                        return publish_collection_equation(
+                            &CollectionConstraint::Concat {
+                                lhs: Type::Adt(lhs_name, lhs_args),
+                                rhs: Type::Adt(rhs_name, rhs_args),
+                                result: result_ty.clone(),
+                            },
+                            node,
+                            subst,
+                            errors,
+                        )
+                        .unwrap_or_else(|| {
+                            site.defer(&arg_tys, &result_ty, product, result_ty.clone())
+                        });
                     }
                     // chelis#1512: an upstream failure keeps the early
                     // return, so the cascade still suppresses. Order matters:

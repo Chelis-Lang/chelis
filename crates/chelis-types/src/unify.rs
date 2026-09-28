@@ -806,23 +806,9 @@ fn discharge_collection_constraint(
 ) -> CollectionDischarge {
     match crate::infer::decide_collection_constraint(constraint, tensor_concat, subst) {
         Ok(None) => CollectionDischarge::Unresolved,
-        Ok(Some(settled)) => {
-            let result = constraint.result();
-            if unify(result, &settled, subst).is_err() {
-                let expected = subst.apply(result);
-                subst.record_operand_gate_failure(OperandGateFailure::Decision {
-                    error: crate::errors::CheckError::new(
-                        crate::errors::CheckErrorKind::TypeMismatch,
-                        format!(
-                            "{} result does not match the type this call produces once its \
-                             operand is known: expected {expected}, got {settled}",
-                            constraint.builtin()
-                        ),
-                        Vec::new(),
-                    ),
-                });
-            }
-            CollectionDischarge::Settled(Some(settled))
+        Ok(Some(equation)) => {
+            subst.record_result_constraint(equation);
+            CollectionDischarge::Settled(Some(constraint.result().clone()))
         }
         Err(message) => {
             subst.record_operand_gate_failure(OperandGateFailure::Decision {

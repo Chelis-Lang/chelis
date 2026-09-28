@@ -1067,12 +1067,27 @@ impl Env {
         inference_subst: &Subst,
     ) -> InstantiatedScheme {
         let origin = scheme.result_origin.as_ref();
-        let tvars = origin.map_or(&scheme.tvars, |origin| &origin.tvars);
-        let dvars = origin.map_or(&scheme.dvars, |origin| &origin.dvars);
-        let rvars = origin.map_or(&scheme.rvars, |origin| &origin.rvars);
+        let mut tvars = origin.map_or(&scheme.tvars, |origin| &origin.tvars).clone();
+        let mut dvars = origin.map_or(&scheme.dvars, |origin| &origin.dvars).clone();
+        let mut rvars = origin.map_or(&scheme.rvars, |origin| &origin.rvars).clone();
+        for var in &scheme.tvars {
+            if !tvars.contains(var) {
+                tvars.push(*var);
+            }
+        }
+        for var in &scheme.dvars {
+            if !dvars.contains(var) {
+                dvars.push(*var);
+            }
+        }
+        for var in &scheme.rvars {
+            if !rvars.contains(var) {
+                rvars.push(*var);
+            }
+        }
         let mut subst = Subst::new();
         let mut tvar_mapping = Vec::with_capacity(tvars.len());
-        for &tv in tvars {
+        for &tv in &tvars {
             let fresh = var_gen.fresh_type();
             subst
                 .insert_type(tv, fresh.clone())
@@ -1109,7 +1124,7 @@ impl Env {
         // inserted below, so a constraint whose carried type mentions one gets
         // that variable renamed too.
         let mut dvar_mapping = Vec::with_capacity(scheme.dvars.len());
-        for &dv in dvars {
+        for &dv in &dvars {
             // Mint the variable directly rather than destructuring
             // `fresh_dim()`: that is `Dim::Var(fresh_dvar())` today, but a
             // pattern match would silently drop the mapping entry (and the
@@ -1128,7 +1143,7 @@ impl Env {
             }
         }
         let mut rvar_mapping = Vec::with_capacity(scheme.rvars.len());
-        for &rv in rvars {
+        for &rv in &rvars {
             // Each rank var instantiates to a fresh sole-`Rank` shape so every
             // call site gets its own rank (Tier-2 rank polymorphism).
             let fresh_rv = var_gen.fresh_rvar();
@@ -1142,6 +1157,18 @@ impl Env {
         if let Some(origin) = origin {
             for equation in &origin.equations {
                 inference_subst.record_result_constraint(equation.map_types(|ty| subst.apply(ty)));
+            }
+            // Origin controls when an equation may supply input evidence; it
+            // never replaces the checked signature's required equalities.
+            // Instantiate both views together and retain their compatibility
+            // as a result constraint, so it cannot admit an unresolved Grad.
+            if origin.body != scheme.body {
+                inference_subst.record_result_constraint(
+                    crate::types::ResultConstraint::Annotation {
+                        actual: subst.apply(&origin.body),
+                        declared: subst.apply(&scheme.body),
+                    },
+                );
             }
         }
         InstantiatedScheme {

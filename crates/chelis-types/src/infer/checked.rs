@@ -1123,8 +1123,10 @@ impl InferenceProduct {
             let before = self.deferred_shape_checks.len() + self.result_type_constraints.len();
             let joined = self.replay_result_joins(vg, subst, errors);
             self.replay_ready_shape_checks_once(vg, subst, adt_reg, errors);
+            let imported = self.import_result_constraints(subst);
             self.replay_result_type_constraints(subst, errors);
             if !joined
+                && !imported
                 && self.deferred_shape_checks.len() + self.result_type_constraints.len() >= before
             {
                 break;

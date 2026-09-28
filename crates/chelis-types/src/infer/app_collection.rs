@@ -36,8 +36,9 @@ pub(super) fn collection_helper_type_error(
 /// function value carries the generic operation rule; its application
 /// contributes the axis expression and any statically visible list elements.
 ///
-/// `Ok(Some(result))` is the type the rule produces, which the caller unifies
-/// into whatever the call already published. `Ok(None)` means an operand is
+/// `Ok(Some(equation))` is the required result relation. The shared origin
+/// ledger owns its equality; deciding a collection rule never binds an input
+/// from another element or from the published result. `Ok(None)` means an operand is
 /// still undecided -- a variable, or an error witness whose diagnostic is
 /// already owned upstream -- and the caller suspends or suppresses. `Err` is
 /// the rule's own rejection text.
@@ -45,8 +46,15 @@ pub(super) fn collection_helper_type_error(
 pub(crate) fn decide_collection_constraint(
     constraint: &CollectionConstraint,
     tensor_concat: Option<&TensorConcatCallEvidence>,
-    subst: &mut Subst,
-) -> Result<Option<Type>, String> {
+    subst: &Subst,
+) -> Result<Option<ResultConstraint>, String> {
+    let result = constraint.result().clone();
+    let joined = |inputs| {
+        Some(ResultConstraint::Join {
+            inputs,
+            result: result.clone(),
+        })
+    };
     let applied = constraint.map_types(|ty| subst.apply(ty));
     if applied
         .operands()
@@ -55,35 +63,34 @@ pub(crate) fn decide_collection_constraint(
     {
         return Ok(None);
     }
-    if applied
-        .operands()
-        .iter()
-        .any(|ty| matches!(ty, Type::Var(_)))
-    {
-        return Ok(None);
-    }
     match &applied {
         CollectionConstraint::Len { operand, .. } => match operand {
+            Type::Var(_) => Ok(None),
             Type::Adt(name, _) if name == "List" || name == "Dict" => {
-                Ok(Some(Type::Prim(Prim::Int64)))
+                Ok(joined(vec![Type::Prim(Prim::Int64)]))
             }
             other => Err(format!("len expects List or Dict input, got {other}")),
         },
         CollectionConstraint::Index { list, index, .. } => {
             match index {
+                Type::Var(_) => return Ok(None),
                 Type::Prim(Prim::Int64) => {}
                 other => return Err(format!("index expects i64 index, got {other}")),
             }
             match list {
+                Type::Var(_) => Ok(None),
                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                    Ok(Some(args[0].clone()))
+                    Ok(joined(vec![args[0].clone()]))
                 }
                 other => Err(format!("index expects List input, got {other}")),
             }
         }
         CollectionConstraint::Append { list, value, .. } => match list {
+            // Membership needs the list constructor; its element and the
+            // appended value may still be holes governed by the result join.
+            Type::Var(_) => Ok(None),
             Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                if let Err(te) = unify(&args[0], value, subst) {
+                if let Err(te) = unify(&args[0], value, &mut subst.clone()) {
                     // Name the rule. A bare unification message reads as a
                     // precision mismatch between two types the source never
                     // mentions together, and the eager arms all name the
@@ -93,14 +100,15 @@ pub(crate) fn decide_collection_constraint(
                         te.message
                     ));
                 }
-                Ok(Some(Type::Adt(
-                    "List".to_string(),
-                    vec![subst.apply(&args[0])],
-                )))
+                Ok(joined(vec![
+                    list.clone(),
+                    Type::Adt("List".to_string(), vec![value.clone()]),
+                ]))
             }
             other => Err(format!("append expects List input, got {other}")),
         },
         CollectionConstraint::Concat { lhs, rhs, .. } => match (lhs, rhs) {
+            (Type::Var(_), _) | (_, Type::Var(_)) => Ok(None),
             (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
                 if lhs_name == "List"
                     && rhs_name == "List"
@@ -110,16 +118,13 @@ pub(crate) fn decide_collection_constraint(
                 // The element equation, not just `(List, List)` membership:
                 // `concat(List[f32], List[i64])` satisfies membership and
                 // violates the rule.
-                if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
+                if let Err(te) = unify(&lhs_args[0], &rhs_args[0], &mut subst.clone()) {
                     return Err(format!(
                         "concat expects matching List inputs, got {lhs} and {rhs}; {}",
                         te.message
                     ));
                 }
-                Ok(Some(Type::Adt(
-                    "List".to_string(),
-                    vec![subst.apply(&lhs_args[0])],
-                )))
+                Ok(joined(vec![lhs.clone(), rhs.clone()]))
             }
             (Type::Adt(lhs_name, lhs_args), Type::Prim(Prim::Int32))
                 if lhs_name == "List" && lhs_args.len() == 1 =>
@@ -127,13 +132,40 @@ pub(crate) fn decide_collection_constraint(
                 let (raw_axis, list_info) = tensor_concat
                     .map(|evidence| (evidence.raw_axis, evidence.list_info.clone()))
                     .unwrap_or((None, ConcatListInfo::BindingLen(None)));
-                tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst).map(Some)
+                tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst)
+                    .map(|ty| joined(vec![ty]))
             }
             (lhs, rhs) => Err(format!(
                 "concat expects matching List inputs, got {lhs} and {rhs}"
             )),
         },
     }
+}
+
+/// Direct calls and transported contracts publish the same result equations.
+/// The decision validates compatibility on a private substitution; only the
+/// origin ledger may propagate its equality into inference.
+pub(super) fn publish_collection_equation(
+    constraint: &CollectionConstraint,
+    node: &DeepNode,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<Type> {
+    match decide_collection_constraint(constraint, None, subst) {
+        Ok(Some(equation)) => subst.record_result_constraint(equation),
+        Ok(None) => return None,
+        Err(message) => {
+            return Some(report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_node_provenance(node, message),
+                    vec![],
+                ),
+            ));
+        }
+    }
+    Some(constraint.result().clone())
 }
 
 /// Static source evidence used by the tensor overload of a consumed checked

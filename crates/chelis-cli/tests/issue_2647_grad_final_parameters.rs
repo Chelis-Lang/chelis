@@ -21,6 +21,11 @@ fn eval(source: &str) -> String {
 fn final_parameter_types_determine_evaluator_payloads() {
     for (name, source, expected) in [
         (
+            "recursive_result_equality",
+            "def first(p, flag: bool) = second(p, flag)\ndef second(p, flag: bool) = if flag then p else first(1.0f32, true)\nout = first(2.0f32, false)\n",
+            "out = 1.0",
+        ),
+        (
             "grad_inferred_float",
             "def result(ignored: unit) -> (f32, f32) = grad(fn (z: f32, w) -> mul(z, z))(3.0f32, 1.0f32)\nout = result(())\n",
             "out.0 = 6.0\nout.1 = 0.0",
@@ -55,6 +60,10 @@ fn incorrect_gradient_payloads_fail_at_checking() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("grad.ch");
     for source in [
+        "def main() = concat([grad(fn (w) -> 1.0f32)], [grad(fn (w: f32) -> 1.0f32)])",
+        "def main() = append([grad(fn (w) -> 1.0f32)], grad(fn (w: f32) -> 1.0f32))",
+        "def first(p, flag: bool) = second(p, flag)\ndef second(p, flag: bool) = if flag then p else first(1.0f32, true)\ndef main() -> bool = first(true, false)\nout = main()",
+        "def first(p, flag: bool) = second(p, flag)\ndef second(p, flag: bool) = if flag then p else first(grad(fn (w: f32) -> 1.0f32), true)\nout = (first(grad(fn (w) -> 1.0f32), false))(true)",
         "def main() -> f32 = grad(fn (z: f32, w) -> mul(z, z))(3.0f32, 1.0f32)",
         "def main() -> f32 = grad(fn (z: f32, w) -> mul(z, z), wrt=w)(3.0f32, true)",
         "def main() = grad(fn (z: f32, w) -> mul(z, z))",

@@ -35,8 +35,10 @@ impl InferenceProduct {
         !crate::env::free_tvars(&resolved(ty, subst)).is_empty()
     }
 
-    pub(in crate::infer) fn import_result_constraints(&mut self, subst: &Subst) {
-        for equation in subst.take_result_constraints() {
+    pub(in crate::infer) fn import_result_constraints(&mut self, subst: &Subst) -> bool {
+        let equations = subst.take_result_constraints();
+        let imported = !equations.is_empty();
+        for equation in equations {
             match equation {
                 ResultConstraint::Annotation { actual, declared } => self
                     .result_type_constraints
@@ -51,6 +53,7 @@ impl InferenceProduct {
                 ),
             }
         }
+        imported
     }
 
     /// Keep the equations that determined a helper's inputs alongside its
@@ -348,6 +351,22 @@ impl InferenceProduct {
             .collect();
         let mut progressed = false;
         for (id, inputs, published, last_propagated) in joins {
+            // A rule publishes its equation before knowing a result
+            // constructor. Expose only structure common to every producer;
+            // retain independent holes until binding evidence reaches it.
+            if matches!(resolved(&published, subst), Type::Var(_))
+                && let Some((first, rest)) = inputs.split_first()
+            {
+                let common = rest.iter().fold(resolved(first, subst), |common, input| {
+                    common_result_structure(&common, &resolved(input, subst), vg)
+                });
+                if !matches!(common, Type::Var(_)) {
+                    let structure = independent_type_variables(&common, vg, subst);
+                    if let Err(error) = unify(&published, &structure, subst) {
+                        errors.push(error.into());
+                    }
+                }
+            }
             let first_order = inputs
                 .iter()
                 .any(|ty| is_closed_first_order(&resolved(ty, subst)));
