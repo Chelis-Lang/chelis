@@ -143,16 +143,13 @@ Interactive execution policy:
 **Deliverable:** GPU execution through a single HIP backend plus executable grammar
 validation tooling.
 
-**Current shipped boundary:** HIP code generation, fusion, device memory planning,
-segmented and staged reductions, and hipBLAS-backed specialization for contiguous
-rank ≥ 2 `f32` matmul are in `main`. `chelis validate` provides executable grammar
-validation. The former fixed-workload benchmark runner has been retired; its
-[dated comparison](../../docs/archive/perf/phase1e/RESULTS.md) is historical evidence,
-not a current acceptance oracle. Backend correctness is exercised through the
+**Backend and validator coverage:** The HIP backend provides code generation, fusion,
+device memory planning, segmented and staged reductions, and hipBLAS-backed
+specialization for contiguous rank ≥ 2 `f32` matmul. `chelis validate` provides
+executable grammar validation. Backend correctness is exercised through the
 target-specific tests and manual gates in [`docs/phase_oracles.md`](../../docs/phase_oracles.md).
 
-**Known carried-forward limitations:** these are real debt and must stay documented, but
-they do not block Phase 2 language work.
+**Backend limitations:**
 
 - symbolic dimensions are implemented on the stable tensor ABI in both backends, so
   supported Phase 1 models bind batch/sequence-style dims from input metadata at runtime

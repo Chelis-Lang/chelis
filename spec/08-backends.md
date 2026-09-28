@@ -238,7 +238,7 @@ Authoritative Phase 1c oracle:
 cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
 ```
 
-Executable grammar validation:
+HIP memory planning:
 
 - greedy slot reuse for non-overlapping storage lifetimes in `chelis-backend-hip/src/memory.rs`
 - unique input copies transferred once, with repeated `Load(name)` nodes aliasing the first copy
@@ -278,7 +278,7 @@ Authoritative Phase 1f oracle:
 cargo test -p chelis-e2e --test example_corpus_validate
 ```
 
-Current implementation:
+Executable grammar validation:
 
 - `chelis validate --surf file.ch` validates Surf syntax against the PEG conformance grammar
 - `chelis validate --deep file.dp` validates Deep syntax plus the closed tag/metadata/arity rules
