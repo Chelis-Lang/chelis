@@ -233,10 +233,12 @@ In order of preference:
 ## CI Is the Fallback Oracle
 
 When local exec is wedged, do not block on the local run. The
-`macos-workspace-shard` matrix runs the full workspace test suite on
+`macos-workspace-shard` matrix runs the default-feature workspace test suite on
 macOS across two disjoint hash partitions. Shard 2 also runs the Metal smoke
-probe. The stable `macos-smoke` aggregate requires both shards and serves as
-the macOS signal in `.github/workflows/macos-nightly.yml` (daily 04:17 UTC and
+probe. The `macos-ownership-ledger` job runs the ownership-ledger targets, which
+require their packages' `ownership-ledger` feature. The stable `macos-smoke`
+aggregate requires both shards and that job, and serves as the macOS signal in
+`.github/workflows/macos-nightly.yml` (daily 04:17 UTC and
 manual dispatch only). Push the branch and dispatch this workflow on that branch
 for a Mac validation result; ordinary PR CI does not run it. Note in
 the PR or phase docs that local validation was blocked by this failure mode.
