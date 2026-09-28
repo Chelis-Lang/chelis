@@ -187,12 +187,12 @@ fn key_builtin_aliases_reject_wrong_domains_and_shapes() {
 fn key_builtin_aliases_preserve_affine_consumption() {
     for (good, bad) in [
         (
-            "def good(k: key) = {\n  derive = split_key\n  (a, b) = derive(k)\n  (derive(a), derive(b))\n}\n",
-            "def bad(k: key) = {\n  derive = split_key\n  (derive(k), derive(k))\n}\n",
+            "def good(k: key) -> ((key, key), (key, key)) = {\n  derive = split_key\n  (a, b) = derive(k)\n  (derive(a), derive(b))\n}\n",
+            "def bad(k: key) -> ((key, key), (key, key)) = {\n  derive = split_key\n  (derive(k), derive(k))\n}\n",
         ),
         (
-            "def good(k: tensor[2, key], n: tensor[2, i64]) = {\n  derive = fold_in\n  (a, b) = split_key(k)\n  (derive(a, n), derive(b, n))\n}\n",
-            "def bad(k: tensor[2, key], n: tensor[2, i64]) = {\n  derive = fold_in\n  (derive(k, n), derive(k, n))\n}\n",
+            "def good(k: tensor[2, key], n: tensor[2, i64]) -> (tensor[2, key], tensor[2, key]) = {\n  derive = fold_in\n  (a, b) = split_key(k)\n  (derive(a, n), derive(b, n))\n}\n",
+            "def bad(k: tensor[2, key], n: tensor[2, i64]) -> (tensor[2, key], tensor[2, key]) = {\n  derive = fold_in\n  (derive(k, n), derive(k, n))\n}\n",
         ),
     ] {
         accepts("alias consumes independently derived keys", good);
