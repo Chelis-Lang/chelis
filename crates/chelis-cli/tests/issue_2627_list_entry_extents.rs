@@ -442,3 +442,64 @@ fn agreeing_and_empty_lists_execute_without_inventing_a_witness() {
         "out = tensor(shape=[2], data=[4.0, 5.0])",
     );
 }
+
+#[test]
+fn enclosing_tensor_helper_preserves_inner_list_entry() {
+    let prefix = "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+                  def choose[a, n](xs: List[tensor[n, f32]], y: tensor[*, f32], z: a) -> tensor[n, f32] = y\n\
+                  def run(xs: List[tensor[*, f32]], y: tensor[*, f32]) -> tensor[*, f32] = choose(xs, y, true)\n";
+    assert_both_trap(
+        &format!(
+            "{prefix}out = run([to_tensor([1.0f32, 2.0f32]) |> hidden, to_tensor([3.0f32, 4.0f32, 5.0f32]) |> hidden], to_tensor([6.0f32, 7.0f32]) |> hidden)\n"
+        ),
+        "extent `n`: xs[0] axis 0 = 2, xs[1] axis 0 = 3",
+    );
+    assert_both_value(
+        &format!(
+            "{prefix}out = run([to_tensor([1.0f32, 2.0f32]) |> hidden, to_tensor([3.0f32, 4.0f32]) |> hidden], to_tensor([6.0f32, 7.0f32]) |> hidden)\n"
+        ),
+        "out = tensor(shape=[2], data=[6.0, 7.0])",
+    );
+}
+
+#[test]
+fn two_enclosing_tensor_calls_preserve_nongeneric_list_entry() {
+    let prefix = "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+                  def choose[n](xs: List[tensor[n, f32]], y: tensor[*, f32]) -> tensor[n, f32] = y\n\
+                  def run(xs: List[tensor[*, f32]], y: tensor[*, f32]) -> tensor[*, f32] = choose(xs, y)\n\
+                  def outer(xs: List[tensor[*, f32]], y: tensor[*, f32]) -> tensor[*, f32] = run(xs, y)\n";
+    assert_both_trap(
+        &format!(
+            "{prefix}out = outer([to_tensor([1.0f32, 2.0f32]) |> hidden, to_tensor([3.0f32, 4.0f32, 5.0f32]) |> hidden], to_tensor([6.0f32, 7.0f32]) |> hidden)\n"
+        ),
+        "extent `n`: xs[0] axis 0 = 2, xs[1] axis 0 = 3",
+    );
+    assert_both_value(
+        &format!(
+            "{prefix}out = outer([to_tensor([1.0f32, 2.0f32]) |> hidden, to_tensor([3.0f32, 4.0f32]) |> hidden], to_tensor([6.0f32, 7.0f32]) |> hidden)\n"
+        ),
+        "out = tensor(shape=[2], data=[6.0, 7.0])",
+    );
+}
+
+#[test]
+fn specialized_list_witness_guards_its_tensor_result() {
+    let prefix = "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+                  def choose[a, n](xs: List[tensor[n, f32]], y: tensor[*, f32], z: a) -> tensor[n, f32] = y\n";
+    assert_both_trap(
+        &format!(
+            "{prefix}out = choose([to_tensor([1.0f32, 2.0f32]) |> hidden], to_tensor([3.0f32, 4.0f32, 5.0f32]) |> hidden, true)\n"
+        ),
+        "extent `n`: xs[0] axis 0 = 2, load axis 0 = 3",
+    );
+    assert_both_value(
+        &format!(
+            "{prefix}out = choose([to_tensor([1.0f32, 2.0f32]) |> hidden], to_tensor([3.0f32, 4.0f32]) |> hidden, true)\n"
+        ),
+        "out = tensor(shape=[2], data=[3.0, 4.0])",
+    );
+    assert_both_value(
+        &format!("{prefix}out = choose([], to_tensor([3.0f32, 4.0f32, 5.0f32]) |> hidden, true)\n"),
+        "out = tensor(shape=[3], data=[3.0, 4.0, 5.0])",
+    );
+}

@@ -355,8 +355,8 @@ struct DefLaneFacts {
     subexpr_lowering_context: RefCell<Option<crate::lower::SubexprLoweringContext>>,
     /// Program-wide: which definitions reach `dropout`.
     dropout_reaching_defs: RefCell<Option<Arc<UnordSet<String>>>>,
-    /// Program-wide: which definitions reach a runtime-shaped `to_tensor`.
-    dynamic_to_tensor_def_summaries: RefCell<Option<Arc<BTreeMap<String, bool>>>>,
+    /// Program-wide tensor-helper preflight facts propagated through calls.
+    tensor_helper_def_summaries: RefCell<Option<Arc<BTreeMap<String, TensorHelperDefSummary>>>>,
 }
 
 /// One host-lowering session: a checked program, plus the facts host lowering
@@ -583,7 +583,14 @@ pub fn reset_host_summary_probe_builds() {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TensorHelperPreflightFacts {
     reaches_dynamic_to_tensor: bool,
+    reaches_list_entry: bool,
     contains_grad_like: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TensorHelperDefSummary {
+    reaches_dynamic_to_tensor: bool,
+    reaches_list_entry: bool,
 }
 
 /// The lexical callable bindings visible while precomputing tensor-helper
@@ -635,7 +642,7 @@ struct TensorHelperPreflightGuard;
 
 impl TensorHelperPreflightGuard {
     fn begin(expr: &Expr, program: &HostLoweringSession<'_>) -> Self {
-        let summaries = cached_dynamic_to_tensor_def_summaries(program);
+        let summaries = cached_tensor_helper_def_summaries(program);
         let mut facts = UnordMap::new();
         analyze_tensor_helper_preflight(expr, &summaries, &mut facts);
         TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| stack.borrow_mut().push(facts));
@@ -4215,7 +4222,7 @@ fn staged_def_kernel(
     // not our lane. Asked about the body rather than the def name: this
     // signature's body can be a rewritten tree (inlined callable lets, hoisted
     // locals), and the body is what the partition would receive.
-    if expr_reaches_dynamic_to_tensor(&signature.body_expr, program) {
+    if expr_reaches_staging_barrier(&signature.body_expr, program) {
         return Ok(StagingAttempt::NotApplicable);
     }
     let context = cached_subexpr_lowering_context(program);
@@ -5214,6 +5221,8 @@ fn lower_def_body_kernel(
     signature: &HostDefSignature,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    let _preflight_guard =
+        TensorHelperPreflightGuard::begin_if_uncovered(&signature.body_expr, program);
     if has_list_extent_entry(signature) {
         return Ok(None);
     }
@@ -12347,6 +12356,15 @@ fn lower_app_host_expr(
     } else {
         top_level_fn_helper_summary_rejects(program, &name)?
     };
+    // Both direct extraction and the inline-then-extract fallback must obey
+    // the original call's preflight. Once inlined, a callee's entry contract
+    // is no longer visible in the expression tree.
+    let helper_preflight_rejects = if helper_tensor_ty.is_some() {
+        let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(app_expr, program);
+        tensor_helper_preflight_rejects(app_expr)
+    } else {
+        false
+    };
     // A call into a staged function must retain that function's shared plan.
     // Re-extracting a tensor-only summary here loses its host scalar producers
     // and the claims attached before the original graph was partitioned.
@@ -12369,6 +12387,7 @@ fn lower_app_host_expr(
         && !callee_has_stages
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
+        && !helper_preflight_rejects
         && !should_keep_tensor_expr_in_host_lane(app_expr)
         && let Some(tensor_call) = try_lower_tensor_helper_call(
             helper_expr.as_ref(),
@@ -12394,6 +12413,7 @@ fn lower_app_host_expr(
         && !callee_has_stages
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
+        && !helper_preflight_rejects
         && !should_keep_tensor_expr_in_host_lane(app_expr)
         && let Some(specialized) = inline_top_level_host_call(app_expr, program, scope)
     {
@@ -14328,6 +14348,9 @@ fn ensure_mono_specialization(
     for (formal, actual) in authored.params.iter().zip(param_tys) {
         solve_host_type_vars(&formal.ty, actual, &mut authored_substitution);
     }
+    solve_host_type_vars(&authored.ret_ty, ret_ty, &mut authored_substitution);
+    let authored_result_ty =
+        substitute_host_type_term(authored.ret_ty.clone(), &authored_substitution);
     let entry_params = authored
         .params
         .into_iter()
@@ -14353,6 +14376,7 @@ fn ensure_mono_specialization(
         params: spec_params,
         entry_contract,
         ret_ty,
+        authored_result_ty,
         body_expr: &body_expr,
         fn_expr: body,
         program,
@@ -14373,6 +14397,7 @@ struct MonoSpecializedFunctionInput<'a> {
     params: Vec<HostParam>,
     entry_contract: EntryContract<HostTypeTerm>,
     ret_ty: &'a HostTypeTerm,
+    authored_result_ty: HostTypeTerm,
     body_expr: &'a Expr,
     fn_expr: &'a Expr,
     program: &'a HostLoweringSession<'a>,
@@ -14389,6 +14414,7 @@ fn lower_mono_specialized_function(
         mut params,
         entry_contract,
         ret_ty,
+        authored_result_ty,
         body_expr,
         fn_expr,
         program,
@@ -14428,7 +14454,9 @@ fn lower_mono_specialized_function(
     host_body.append_merged_span(body_expr.span_id());
     host_body.append_merged_span(fn_expr.span_id());
     refine_function_params_from_body(&mut params, &host_body);
-    let ret_ty = if ret_ty.is_unresolved() {
+    let ret_ty = if !authored_result_ty.is_unresolved() {
+        authored_result_ty
+    } else if ret_ty.is_unresolved() {
         host_expr_type(&host_body)
     } else {
         ret_ty.clone()
@@ -17079,15 +17107,44 @@ fn cached_subexpr_lowering_context(
     context
 }
 
-fn cached_dynamic_to_tensor_def_summaries(
+fn definition_declares_list_entry(
     program: &HostLoweringSession<'_>,
-) -> Arc<BTreeMap<String, bool>> {
-    if let Some(cached) = program
-        .facts
-        .dynamic_to_tensor_def_summaries
-        .borrow()
-        .clone()
-    {
+    name: &str,
+    body: &Expr,
+) -> bool {
+    let params = program
+        .defsig_named(name)
+        .and_then(|signature| parse_expanded_fn_type_expr(program, signature))
+        .map(|(types, _)| {
+            types
+                .into_iter()
+                .enumerate()
+                .map(|(index, ty)| HostParam {
+                    name: format!("arg{index}"),
+                    ty,
+                })
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| {
+            host_def_signature(name, body, None, program).map(|signature| signature.params)
+        });
+    let Some(params) = params else {
+        // A function with an unparseable signature cannot safely be flattened
+        // into a tensor helper. Its host lowering owns the eventual error.
+        return body.tag() == Some(DeepTag::Fn);
+    };
+    EntryContract::from_params(&params)
+        .formals()
+        .iter()
+        .any(|formal| {
+            matches!(formal.pattern(), EntryPattern::List(_)) && formal.pattern().has_extent_claim()
+        })
+}
+
+fn cached_tensor_helper_def_summaries(
+    program: &HostLoweringSession<'_>,
+) -> Arc<BTreeMap<String, TensorHelperDefSummary>> {
+    if let Some(cached) = program.facts.tensor_helper_def_summaries.borrow().clone() {
         return cached;
     }
 
@@ -17095,7 +17152,7 @@ fn cached_dynamic_to_tensor_def_summaries(
     let def_names = defs.keys().cloned().collect::<BTreeSet<_>>();
     let mut summaries = defs
         .keys()
-        .map(|name| (name.clone(), false))
+        .map(|name| (name.clone(), TensorHelperDefSummary::default()))
         .collect::<BTreeMap<_, _>>();
     let mut reverse_edges = UnordMap::<String, Vec<String>>::new();
     let mut queue = VecDeque::new();
@@ -17109,8 +17166,12 @@ fn cached_dynamic_to_tensor_def_summaries(
             &mut callable_scope,
             &mut referenced_defs,
         );
-        if directly_dynamic {
-            summaries.insert(name.clone(), true);
+        let direct = TensorHelperDefSummary {
+            reaches_dynamic_to_tensor: directly_dynamic,
+            reaches_list_entry: definition_declares_list_entry(program, name, body),
+        };
+        if direct != TensorHelperDefSummary::default() {
+            summaries.insert(name.clone(), direct);
             queue.push_back(name.clone());
         }
         for referenced in referenced_defs {
@@ -17125,20 +17186,26 @@ fn cached_dynamic_to_tensor_def_summaries(
     // both cycle-safe and linear in definitions plus reference edges; a DFS
     // memo can incorrectly seal one member of a cycle before another member's
     // direct runtime-shaped `to_tensor` is discovered.
-    while let Some(dynamic_name) = queue.pop_front() {
-        for caller in reverse_edges.get(&dynamic_name).into_iter().flatten() {
+    while let Some(name) = queue.pop_front() {
+        let reached = summaries[&name];
+        for caller in reverse_edges.get(&name).into_iter().flatten() {
             let reaches = summaries
                 .get_mut(caller)
                 .expect("call-graph names originate in program definitions");
-            if !*reaches {
-                *reaches = true;
+            let updated = TensorHelperDefSummary {
+                reaches_dynamic_to_tensor: reaches.reaches_dynamic_to_tensor
+                    || reached.reaches_dynamic_to_tensor,
+                reaches_list_entry: reaches.reaches_list_entry || reached.reaches_list_entry,
+            };
+            if updated != *reaches {
+                *reaches = updated;
                 queue.push_back(caller.clone());
             }
         }
     }
 
     let summaries = Arc::new(summaries);
-    *program.facts.dynamic_to_tensor_def_summaries.borrow_mut() = Some(summaries.clone());
+    *program.facts.tensor_helper_def_summaries.borrow_mut() = Some(summaries.clone());
     summaries
 }
 
@@ -17151,7 +17218,7 @@ fn collect_dynamic_to_tensor_def_refs(
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
     let mut directly_dynamic =
         !callable_scope.contains_key("to_tensor") && expr_is_runtime_shaped_to_tensor(expr);
-    if let Some(name) = app_callee_name(expr)
+    if let Some(name) = app_callee_name(expr).or_else(|| direct_var_name(expr))
         && let Some(target) = resolve_top_level_callable_from_names(name, callable_scope, def_names)
     {
         referenced_defs.insert(target);
@@ -17253,7 +17320,7 @@ fn collect_dynamic_to_tensor_def_refs(
 
 fn analyze_tensor_helper_preflight(
     expr: &Expr,
-    def_summaries: &BTreeMap<String, bool>,
+    def_summaries: &BTreeMap<String, TensorHelperDefSummary>,
     out: &mut UnordMap<usize, TensorHelperPreflightFacts>,
 ) -> TensorHelperPreflightFacts {
     analyze_tensor_helper_preflight_scoped(expr, def_summaries, &mut CallableScope::default(), out)
@@ -17261,7 +17328,7 @@ fn analyze_tensor_helper_preflight(
 
 fn analyze_tensor_helper_preflight_scoped(
     expr: &Expr,
-    def_summaries: &BTreeMap<String, bool>,
+    def_summaries: &BTreeMap<String, TensorHelperDefSummary>,
     callable_scope: &mut CallableScope,
     out: &mut UnordMap<usize, TensorHelperPreflightFacts>,
 ) -> TensorHelperPreflightFacts {
@@ -17269,6 +17336,7 @@ fn analyze_tensor_helper_preflight_scoped(
     let mut facts = TensorHelperPreflightFacts {
         reaches_dynamic_to_tensor: !callable_scope.contains_key("to_tensor")
             && expr_is_runtime_shaped_to_tensor(expr),
+        reaches_list_entry: false,
         contains_grad_like: stamped_parts(expr)
             .is_some_and(|(tag, _, _)| matches!(tag, DeepTag::Grad | DeepTag::Vmap))
             || matches!(expr, Expr::UnknownForm(data) if data.head == "vmap-grad"),
@@ -17276,8 +17344,10 @@ fn analyze_tensor_helper_preflight_scoped(
     if let Some(name) = app_callee_name(expr)
         && let Some(target) =
             resolve_top_level_callable_from_summaries(name, callable_scope, def_summaries)
+        && let Some(summary) = def_summaries.get(&target)
     {
-        facts.reaches_dynamic_to_tensor |= def_summaries.get(&target).copied().unwrap_or(false);
+        facts.reaches_dynamic_to_tensor |= summary.reaches_dynamic_to_tensor;
+        facts.reaches_list_entry |= summary.reaches_list_entry;
     }
 
     let merge_child =
@@ -17288,6 +17358,7 @@ fn analyze_tensor_helper_preflight_scoped(
             let child_facts =
                 analyze_tensor_helper_preflight_scoped(child, def_summaries, callable_scope, out);
             facts.reaches_dynamic_to_tensor |= child_facts.reaches_dynamic_to_tensor;
+            facts.reaches_list_entry |= child_facts.reaches_list_entry;
             facts.contains_grad_like |= child_facts.contains_grad_like;
         };
     match stamped_parts(expr) {
@@ -17381,7 +17452,7 @@ fn resolve_top_level_callable_from_names(
 fn resolve_top_level_callable_from_summaries(
     name: &str,
     callable_scope: &CallableScope,
-    def_summaries: &BTreeMap<String, bool>,
+    def_summaries: &BTreeMap<String, TensorHelperDefSummary>,
 ) -> Option<String> {
     match callable_scope.get(name) {
         Some(target) => target.clone(),
@@ -17425,17 +17496,17 @@ fn expr_is_runtime_shaped_to_tensor(expr: &Expr) -> bool {
     is_to_tensor && !crate::lower::is_static_to_tensor_literal(expr)
 }
 
-/// Does this expression reach a runtime-shaped `to_tensor`, accounting for
-/// lexical shadowing of the name and for the program's call graph?
+/// Does this expression reach a call that staged tensor lowering cannot
+/// preserve, accounting for lexical shadowing and the program's call graph?
 ///
-/// This is the extractor's `reaches_dynamic_to_tensor` fact asked about one
-/// body directly, rather than through the pointer-keyed preflight stack, so a
-/// decision taken before that stack exists can read the same signal.
+/// This asks about one body directly, rather than through the pointer-keyed
+/// preflight stack, so staging can read the same signal before extraction.
 /// chelis#1779.
-fn expr_reaches_dynamic_to_tensor(expr: &Expr, program: &HostLoweringSession<'_>) -> bool {
-    let summaries = cached_dynamic_to_tensor_def_summaries(program);
+fn expr_reaches_staging_barrier(expr: &Expr, program: &HostLoweringSession<'_>) -> bool {
+    let summaries = cached_tensor_helper_def_summaries(program);
     let mut facts = UnordMap::new();
-    analyze_tensor_helper_preflight(expr, &summaries, &mut facts).reaches_dynamic_to_tensor
+    let root = analyze_tensor_helper_preflight(expr, &summaries, &mut facts);
+    root.reaches_dynamic_to_tensor || root.reaches_list_entry
 }
 
 fn tensor_helper_preflight_rejects(expr: &Expr) -> bool {
@@ -17453,7 +17524,10 @@ fn tensor_helper_preflight_rejects(expr: &Expr) -> bool {
                 profile.tensor_helper_preflight_lookup_misses += 1;
             }
         });
-        facts.is_some_and(|facts| facts.reaches_dynamic_to_tensor && !facts.contains_grad_like)
+        facts.is_some_and(|facts| {
+            facts.reaches_list_entry
+                || (facts.reaches_dynamic_to_tensor && !facts.contains_grad_like)
+        })
     })
 }
 
@@ -22568,10 +22642,9 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
                             .expect("nested definition is present");
 
                         reset_host_work_profile();
-                        let summaries = cached_dynamic_to_tensor_def_summaries(
-                            &HostLoweringSession::new(&typed),
-                        );
-                        assert_eq!(summaries.get("nested"), Some(&true));
+                        let summaries =
+                            cached_tensor_helper_def_summaries(&HostLoweringSession::new(&typed));
+                        assert!(summaries["nested"].reaches_dynamic_to_tensor);
                         let summary_profile = take_host_work_profile();
                         let summary_work = summary_profile.tensor_helper_preflight_nodes
                             + summary_profile.callable_scope_work;
@@ -22656,7 +22729,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
              }\n\
              out = index(to_list(sibling(cast(1.0, f32))), 0i64)\n",
         );
-        let summaries = cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&typed));
+        let summaries = cached_tensor_helper_def_summaries(&HostLoweringSession::new(&typed));
         let defs = cached_program_defs(&HostLoweringSession::new(&typed));
         for (definition, final_callee) in [
             ("sibling", "bc"),
@@ -22665,8 +22738,10 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
             ("sequential", "h"),
         ] {
             assert_eq!(
-                summaries.get(definition),
-                Some(&true),
+                summaries
+                    .get(definition)
+                    .map(|summary| summary.reaches_dynamic_to_tensor),
+                Some(true),
                 "lexical shadow restoration must preserve the final dynamic call in {definition}"
             );
             let body = lookup_program_def(&defs, definition).expect("fixture definition exists");
@@ -22742,10 +22817,12 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
              def twice(bc: tensor[1, f32]) -> tensor[1, f32] = add(bc, bc)\n\
              r = index(to_list(twice(to_tensor([cast(1.0, f32)]))), 0i64)\n",
         );
-        let summaries = cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&typed));
+        let summaries = cached_tensor_helper_def_summaries(&HostLoweringSession::new(&typed));
         assert_eq!(
-            summaries.get("bc"),
-            Some(&true),
+            summaries
+                .get("bc")
+                .map(|summary| summary.reaches_dynamic_to_tensor),
+            Some(true),
             "the top-level bc definition must exercise the transitive summary"
         );
 
@@ -22775,12 +22852,17 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
              out = index(to_list(wrapper(to_tensor([cast(1.0, f32)]))), 0i64)\n",
         );
         let shadowed_summaries =
-            cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&shadowed));
-        assert_eq!(shadowed_summaries.get("bc"), Some(&true));
+            cached_tensor_helper_def_summaries(&HostLoweringSession::new(&shadowed));
+        assert!(
+            shadowed_summaries["bc"].reaches_dynamic_to_tensor,
+            "the top-level bc definition must reach dynamic to_tensor"
+        );
         for name in ["local", "wrapper", "out"] {
             assert_eq!(
-                shadowed_summaries.get(name),
-                Some(&false),
+                shadowed_summaries
+                    .get(name)
+                    .map(|summary| summary.reaches_dynamic_to_tensor),
+                Some(false),
                 "a local callable named bc must shadow the top-level helper in {name}"
             );
         }
@@ -22805,11 +22887,13 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
              out = index(to_list(wrapper(cast(1.0, f32))), 0i64)\n",
         );
         let aliased_summaries =
-            cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&aliased));
+            cached_tensor_helper_def_summaries(&HostLoweringSession::new(&aliased));
         for name in ["bc", "aliased", "wrapper", "out"] {
             assert_eq!(
-                aliased_summaries.get(name),
-                Some(&true),
+                aliased_summaries
+                    .get(name)
+                    .map(|summary| summary.reaches_dynamic_to_tensor),
+                Some(true),
                 "the alias f = bc must propagate the dynamic helper summary through {name}"
             );
         }
@@ -22833,6 +22917,29 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
             profile.tensor_helper_builtin_load_rejections, 0,
             "aliased dynamic helpers must be rejected by preflight, not after DAG lowering: {profile:?}"
         );
+    }
+
+    #[test]
+    fn list_entry_preflight_propagates_through_tensor_callers() {
+        let typed = surf_check(
+            "def choose[n](xs: List[tensor[n, f32]], y: tensor[*, f32]) -> tensor[n, f32] = y\n\
+             def run(xs: List[tensor[*, f32]], y: tensor[*, f32]) -> tensor[*, f32] = choose(xs, y)\n\
+             def outer(xs: List[tensor[*, f32]], y: tensor[*, f32]) -> tensor[*, f32] = run(xs, y)\n\
+             def plain(y: tensor[*, f32]) -> tensor[*, f32] = y\n\
+             out = outer([], plain(to_tensor([1.0f32, 2.0f32])))\n",
+        );
+        let session = HostLoweringSession::new(&typed);
+        let summaries = cached_tensor_helper_def_summaries(&session);
+        for name in ["choose", "run", "outer", "out"] {
+            assert!(
+                summaries[name].reaches_list_entry,
+                "{name} reaches the named List entry obligation"
+            );
+        }
+        assert!(!summaries["plain"].reaches_list_entry);
+        let (_, body) = session.def_named("outer").expect("checked declaration");
+        let mut facts = UnordMap::new();
+        assert!(analyze_tensor_helper_preflight(body, &summaries, &mut facts).reaches_list_entry);
     }
 
     /// harden-bounded-monomorphization D4: the interning identity is the
