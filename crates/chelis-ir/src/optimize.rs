@@ -621,7 +621,10 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{Dag, DeclId, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, TensorType};
+    use crate::dag::{
+        Dag, DeclId, DimInfo, ExtentWitnessSite, FusedInput, FusedStep, FusedStepOp,
+        ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
+    };
     use chelis_types::{ElementRef, scalar_from_f64, scalar_from_i64};
 
     fn scalar_f32() -> TensorType {
@@ -805,6 +808,326 @@ mod tests {
              an observable root even with no claim and no consumer"
         );
         let _ = trapping;
+    }
+
+    /// One retained/eliminated pair per member of
+    /// [`RuntimeCheck::OperandValues`], plus two neighbouring classes that
+    /// must NOT seed.
+    ///
+    /// `runtime_check`'s op match is exhaustive, so a *new* operation cannot
+    /// be added without classifying it. What that does not protect is an
+    /// existing arm being **reclassified**, and that is what this pins. Each
+    /// row flips with its own arm, at sub-arm granularity (`Neg` alone,
+    /// `Mod` alone, one shift alone, one `ReduceWindowKind` alone) and
+    /// per-dtype, and in **both** directions: an arm that stops seeding and
+    /// an arm that starts seeding when it should not.
+    ///
+    /// `Bitwise` is keyed on the operation KIND rather than the dtype (only
+    /// a shift checks anything), `ReduceWindow` on the reducer (only a sum
+    /// or mean is arithmetic), and `Iota` checks unconditionally; all three
+    /// are enumerated for the same reason.
+    ///
+    /// `EmptyAxis`, `MovementBounds`, `ExtentClaims` and `Random` are *not*
+    /// enumerated: their seed turns on a static fact rather than a dtype or
+    /// kind, and each is caught elsewhere — verified by mutation, `Random`
+    /// and `ExtentClaims` within `chelis-ir`, `EmptyAxis` and
+    /// `MovementBounds` in `chelis-backend-c::exec_compile`. No row here
+    /// belongs to those classes. The two non-seeding controls below are
+    /// float `Div` (`MeanDivisor`) and `Reshape` (`Ungated`).
+    ///
+    /// This comment deliberately does not claim which arms nothing else
+    /// catches. Two review rounds each refuted such a claim by running a
+    /// target the previous measurement had missed, so the coverage is stated
+    /// as what this test pins, not as what only it pins.
+    #[test]
+    fn every_dtype_conditional_trap_class_member_is_seeded_and_its_twin_is_not() {
+        use chelis_types::types::Prim;
+
+        fn ty(precision: Prim) -> TensorType {
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision,
+            }
+        }
+
+        // (label, op, arity, precision, must the discarded node survive DCE?)
+        let rows: Vec<(&str, RiscOp, usize, Prim, bool)> = vec![
+            // OperandValues: integer arithmetic overflows, float does not.
+            ("add", RiscOp::Add, 2, Prim::Int32, true),
+            ("add float twin", RiscOp::Add, 2, Prim::F32, false),
+            ("sub", RiscOp::Sub, 2, Prim::Int64, true),
+            ("sub float twin", RiscOp::Sub, 2, Prim::F64, false),
+            ("mul", RiscOp::Mul, 2, Prim::Int32, true),
+            ("mul float twin", RiscOp::Mul, 2, Prim::F32, false),
+            ("neg", RiscOp::Neg, 1, Prim::Int32, true),
+            ("neg float twin", RiscOp::Neg, 1, Prim::F32, false),
+            ("abs", RiscOp::Abs, 1, Prim::Int32, true),
+            ("abs float twin", RiscOp::Abs, 1, Prim::F32, false),
+            // OperandValues: division by zero and MIN / -1. The escape above.
+            ("floor_div", RiscOp::FloorDiv, 2, Prim::Int32, true),
+            (
+                "floor_div float twin",
+                RiscOp::FloorDiv,
+                2,
+                Prim::F32,
+                false,
+            ),
+            ("trunc_div", RiscOp::TruncDiv, 2, Prim::Int64, true),
+            (
+                "trunc_div float twin",
+                RiscOp::TruncDiv,
+                2,
+                Prim::F32,
+                false,
+            ),
+            ("mod", RiscOp::Mod, 2, Prim::Int32, true),
+            ("mod float twin", RiscOp::Mod, 2, Prim::F32, false),
+            // `Div` splits by dtype into two different classes: integer is
+            // OperandValues, float is MeanDivisor, which does not seed.
+            ("div integer", RiscOp::Div, 2, Prim::Int32, true),
+            ("div float is MeanDivisor", RiscOp::Div, 2, Prim::F32, false),
+            // OperandValues: integer reductions overflow.
+            (
+                "sum",
+                RiscOp::Sum {
+                    axis: 0,
+                    accumulator: Prim::Int32,
+                },
+                1,
+                Prim::Int32,
+                true,
+            ),
+            (
+                "sum float twin",
+                RiscOp::Sum {
+                    axis: 0,
+                    accumulator: Prim::F32,
+                },
+                1,
+                Prim::F32,
+                false,
+            ),
+            (
+                "prod_reduce",
+                RiscOp::ProdReduce { axis: 0 },
+                1,
+                Prim::Int64,
+                true,
+            ),
+            (
+                "prod_reduce float twin",
+                RiscOp::ProdReduce { axis: 0 },
+                1,
+                Prim::F32,
+                false,
+            ),
+            // OperandValues: a shift checks its shift count; the bitwise
+            // logical ops check nothing. This member is keyed on the KIND
+            // rather than the dtype, so both sides are integer.
+            (
+                "shift_left",
+                RiscOp::Bitwise(chelis_types::bitwise::BitwiseKind::ShiftLeft),
+                2,
+                Prim::Int32,
+                true,
+            ),
+            (
+                "shift_right",
+                RiscOp::Bitwise(chelis_types::bitwise::BitwiseKind::ShiftRight),
+                2,
+                Prim::Int32,
+                true,
+            ),
+            (
+                "bitand is not a shift",
+                RiscOp::Bitwise(chelis_types::bitwise::BitwiseKind::And),
+                2,
+                Prim::Int32,
+                false,
+            ),
+            (
+                "bitxor is not a shift",
+                RiscOp::Bitwise(chelis_types::bitwise::BitwiseKind::Xor),
+                2,
+                Prim::Int32,
+                false,
+            ),
+            // OperandValues unconditionally: `iota`'s length is checked in
+            // mathematical integers before allocation.
+            ("iota", RiscOp::Iota, 2, Prim::Int64, true),
+            // OperandValues: an integer windowed SUM or MEAN overflows; max
+            // and min select without arithmetic, so they check nothing even
+            // at an integer dtype.
+            (
+                "reduce_window sum",
+                RiscOp::ReduceWindow {
+                    reducer: ReduceWindowKind::Sum,
+                    window_shape: vec![1],
+                    strides: vec![1],
+                },
+                1,
+                Prim::Int32,
+                true,
+            ),
+            (
+                "reduce_window sum float twin",
+                RiscOp::ReduceWindow {
+                    reducer: ReduceWindowKind::Sum,
+                    window_shape: vec![1],
+                    strides: vec![1],
+                },
+                1,
+                Prim::F32,
+                false,
+            ),
+            (
+                "reduce_window mean",
+                RiscOp::ReduceWindow {
+                    reducer: ReduceWindowKind::Mean,
+                    window_shape: vec![1],
+                    strides: vec![1],
+                },
+                1,
+                Prim::Int32,
+                true,
+            ),
+            (
+                "reduce_window min is not arithmetic",
+                RiscOp::ReduceWindow {
+                    reducer: ReduceWindowKind::Min,
+                    window_shape: vec![1],
+                    strides: vec![1],
+                },
+                1,
+                Prim::Int32,
+                false,
+            ),
+            (
+                "reduce_window max is not arithmetic",
+                RiscOp::ReduceWindow {
+                    reducer: ReduceWindowKind::Max,
+                    window_shape: vec![1],
+                    strides: vec![1],
+                },
+                1,
+                Prim::Int32,
+                false,
+            ),
+            // OperandValues: a fused chain inherits its steps' checks.
+            (
+                "fused_elem",
+                RiscOp::FusedElem {
+                    ops: vec![FusedStep {
+                        op: FusedStepOp::Add,
+                        input_indices: vec![FusedInput::External(0), FusedInput::External(0)],
+                    }],
+                },
+                1,
+                Prim::Int32,
+                true,
+            ),
+            (
+                "fused_elem float twin",
+                RiscOp::FusedElem {
+                    ops: vec![FusedStep {
+                        op: FusedStepOp::Add,
+                        input_indices: vec![FusedInput::External(0), FusedInput::External(0)],
+                    }],
+                },
+                1,
+                Prim::F32,
+                false,
+            ),
+            // OperandValues: a cast into an integer or bool width checks its
+            // domain and range; one into a float width cannot.
+            (
+                "cast to integer",
+                RiscOp::Cast {
+                    new_precision: Prim::Int32,
+                },
+                1,
+                Prim::Int32,
+                true,
+            ),
+            (
+                "cast to bool",
+                RiscOp::Cast {
+                    new_precision: Prim::Bool,
+                },
+                1,
+                Prim::Bool,
+                true,
+            ),
+            (
+                "cast to float twin",
+                RiscOp::Cast {
+                    new_precision: Prim::F32,
+                },
+                1,
+                Prim::F32,
+                false,
+            ),
+            (
+                "cast_trunc to integer",
+                RiscOp::CastTrunc {
+                    new_precision: Prim::Int64,
+                },
+                1,
+                Prim::Int64,
+                true,
+            ),
+            (
+                "cast_trunc to float twin",
+                RiscOp::CastTrunc {
+                    new_precision: Prim::F32,
+                },
+                1,
+                Prim::F32,
+                false,
+            ),
+            // Ungated: an out-of-range index is not a seeded class.
+            (
+                "reshape is Ungated",
+                RiscOp::Reshape {
+                    new_shape: vec![RtDim::Lit(2)],
+                },
+                1,
+                Prim::Int32,
+                false,
+            ),
+        ];
+
+        for (label, op, arity, precision, expect_retained) in rows {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let source = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                Vec::new(),
+                ty(precision),
+                None,
+            );
+            let discarded =
+                dag.add_node(decl, op.clone(), vec![source; arity], ty(precision), None);
+            let root = dag.add_node(
+                decl,
+                RiscOp::synth_const(Prim::F32, 0.0),
+                Vec::new(),
+                scalar_f32(),
+                None,
+            );
+            dag.add_root(root);
+
+            let retained = dead_code_eliminate(&dag)
+                .nodes()
+                .iter()
+                .any(|node| node.op == op);
+            assert_eq!(
+                retained, expect_retained,
+                "{label} at {precision:?}: expected retained={expect_retained}, got \
+                 {retained} (discarded node {discarded:?})"
+            );
+        }
     }
 
     /// The negative control: §5.2's own example removes a FLOAT `Add`, which
