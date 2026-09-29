@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "e3b2963f23bd954ad00c4a56e61654b26bb14d2d7635de26d0e1a03a703d3226",
+  "corpus_sha256": "2c367c07d68dfcd37dca3fcc5790b6d355c77265d6ef82b4e1778135a8d11747",
   "rows": [
     {
       "id": "claim.combinator_result.c",
@@ -1201,6 +1201,24 @@
       "baseline": "executes_exactly",
       "phase_b": "executes_exactly",
       "receipt": "cli_signature_entry.inline_callback_entry_precedes_body_effects_on_every_invocation"
+    },
+    {
+      "id": "entry.inlined_literal.runtime_shrink.agrees.eval_c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_literal_call_entry.agreeing_runtime_argument_executes_on_both_lanes"
+    },
+    {
+      "id": "entry.inlined_literal.runtime_shrink.eval_c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_literal_call_entry.original_disagreeing_call_traps_before_g_computes_on_both_lanes"
+    },
+    {
+      "id": "entry.inlined_literal.shape_arithmetic_if.eval_c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_literal_call_entry.original_shape_arithmetic_in_a_taken_if_arm_traps_on_both_lanes"
     },
     {
       "id": "entry.kernel.repeated_binder.c",
