@@ -2499,12 +2499,9 @@ fn build_c_scalar_grad_multi_param_wrt_builds_and_is_numerically_correct() {
     assert!((dfdy - 1.0).abs() < 1e-5, "df/dy = {dfdy}, expected 1.0");
 }
 
-/// chelis#405 negative parity: `grad` over a host container parameter
-/// (`List[f32]`) must still be rejected — the dual transform only covers
-/// scalar `wrt`. The type checker rejects `wrt` over a non-differentiable
-/// container parameter before the host lane is even reached, so the build
-/// fails with a clear "not differentiable" diagnostic rather than emitting
-/// wrong C. This locks the spec's container-AD escalation (step 5).
+/// The List `wrt` is a local parameter whose recursive shape C cannot
+/// reconstruct. The checker accepts the gradient; C must reject it with
+/// the typed #2740 diagnostic instead of emitting a wrong result.
 #[test]
 fn build_c_scalar_grad_rejects_container_wrt() {
     let dir = tempdir().expect("tempdir");
@@ -2531,10 +2528,13 @@ fn build_c_scalar_grad_rejects_container_wrt() {
         .assert()
         .failure();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8 stderr");
-    assert!(
-        stderr.contains("not differentiable") || stderr.contains("can't lower these defs"),
-        "container `wrt` must be rejected with a clear diagnostic, got:\n{stderr}"
-    );
+    for expected in [
+        "unsupported: List gradient actual",
+        "(lowering)",
+        "unimplemented chelis#2740",
+    ] {
+        assert!(stderr.contains(expected), "missing `{expected}`:\n{stderr}");
+    }
 }
 
 /// Build a scalar-grad program, link, run, and return the scalar value parsed
