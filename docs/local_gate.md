@@ -186,13 +186,14 @@ only the working tree, so an in-place crate rename can be ambiguous to the
 planner and clean here.
 
 `--fast` exits non-zero for any failing stage (fmt, regeneration, path
-classification, lint, per-crate clippy, the tripwire run, the std-bundle
-self-test, or the bundled-lock guard) and never for a file it fixed; a regenerated `dist/` or `reef.lock`
-is reported as a changed file to commit, never as a failure. Changed files are
-reported from content hashes of the porcelain set before and after the run, so
-a file that was already dirty and that fmt changed further is still listed. It
-never runs a workspace clippy row, the chelis#908 oracle, or the
-runtime-representation oracle, and it never takes the lease.
+classification, lint, evaluator source guard, per-crate clippy, the tripwire
+run, the std-bundle self-test, or the bundled-lock guard) and never for a file
+it fixed; a regenerated `dist/` or `reef.lock` is reported as a changed file to
+commit, never as a failure. Changed files are reported from content hashes of
+the porcelain set before and after the run, so a file that was already dirty
+and that fmt changed further is still listed. It never runs a workspace clippy
+row, the chelis#908 oracle, or the runtime-representation oracle, and it never
+takes the lease.
 
 ## What `--validation` runs
 

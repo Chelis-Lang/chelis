@@ -2911,10 +2911,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help=(
             "Run the pre-push gate before every push: regen_all.py --tier 0 "
-            "and cargo fmt --all fix in place, then chelis lint --check ., "
-            "cargo clippy -p <crate> --tests per changed crate, and one nextest "
-            "run over the drift tripwires. Prints the files it changed; never "
-            "takes the lease."
+            "and cargo fmt --all fix in place, then classify-paths, chelis "
+            "lint --check ., eval_system_guard.py, cargo clippy -p <crate> "
+            "--tests per changed crate, and one nextest run over the drift "
+            "tripwires. Prints the files it changed; never takes the lease."
         ),
     )
     p.add_argument(
