@@ -1531,7 +1531,10 @@ cargo test -p chelis-cli --test runtime_extent_claim_preparation \
 ```
 
 `claimed_extent_contract` reports every failed cell rather than stopping at
-one, and must run before any fixture is claimed repaired. B2b-3 took its
+one, and must run before any fixture is claimed repaired. Exported cells with
+identical source and generated caller share a checked build, while each runtime
+input executes in a separate C process and retains its own value or trap
+assertion. B2b-3 took its
 `#[ignore]` off: it was there while the B2b repairs landed, beside a baseline
 test that locked the measured gaps and whose own last assertion said to retire
 it once no cell was unmet. That assertion fired on `main`, so the baseline test
