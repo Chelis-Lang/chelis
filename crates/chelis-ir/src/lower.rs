@@ -18147,13 +18147,38 @@ impl<'program> LowerCtx<'program> {
             };
             let mut witnesses = Vec::new();
             for axis in 0..rank {
+                // A literal in this signature is an obligation of this
+                // invocation even when the callee is inlined into a tensor
+                // kernel. Rank-spread axes have binder identities above and
+                // must not turn a caller-observed size into a new literal
+                // claim. A helper's own literal Load already has its ABI
+                // entry check; that checked declaration needs no second
+                // witness comparison.
+                let requirements = if authored_signature
+                    && authored_binders.get(axis).is_some_and(Option::is_none)
+                    && let Some(DimInfo::Lit(required)) = formal_type.dims.get(axis)
+                    && !self.dag.get(input).is_some_and(|node| {
+                        matches!(node.op, RiscOp::Load { .. })
+                            && node.output_type.dims.get(axis) == Some(&DimInfo::Lit(*required))
+                    }) {
+                    vec![
+                        chelis_types::scalar_from_i64(
+                            "load",
+                            Prim::Int64,
+                            i64::try_from(*required).expect("checked extent fits i64"),
+                        )
+                        .expect("i64 extent literal"),
+                    ]
+                } else {
+                    Vec::new()
+                };
                 let witness = self.dag.add_node(
                     self.owner(),
                     RiscOp::ExtentWitness {
                         site: crate::dag::ExtentWitnessSite::Caller,
                         parameter: name.clone(),
                         axis: RtAxis::Lit(i32::try_from(axis).expect("parameter rank fits i32")),
-                        requirements: Vec::new(),
+                        requirements,
                         claims: Vec::new(),
                     },
                     vec![input],

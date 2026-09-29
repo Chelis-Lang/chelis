@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "e3b2963f23bd954ad00c4a56e61654b26bb14d2d7635de26d0e1a03a703d3226",
+  "corpus_sha256": "ce8ddde2b30f2c665d167fb974c7ad05e28d8a99ee38346d9348e1114e524609",
   "rows": [
     {
       "id": "claim.combinator_result.c",
@@ -1201,6 +1201,18 @@
       "baseline": "executes_exactly",
       "phase_b": "executes_exactly",
       "receipt": "cli_signature_entry.inline_callback_entry_precedes_body_effects_on_every_invocation"
+    },
+    {
+      "id": "entry.inlined_literal.runtime_shrink.agrees.eval_c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_literal_call_entry.agreeing_runtime_argument_executes_on_both_lanes"
+    },
+    {
+      "id": "entry.inlined_literal.runtime_shrink.eval_c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_literal_call_entry.original_disagreeing_call_traps_before_g_computes_on_both_lanes"
     },
     {
       "id": "entry.kernel.repeated_binder.c",

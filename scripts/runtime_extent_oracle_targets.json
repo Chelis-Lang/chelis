@@ -1129,6 +1129,24 @@
       "phase": "b"
     },
     {
+      "id": "cli_literal_call_entry",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2632_literal_call_entry.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "agreeing_runtime_argument_executes_on_both_lanes",
+        "original_disagreeing_call_traps_before_g_computes_on_both_lanes",
+        "taken_call_checks_its_literal_before_the_body_on_both_lanes",
+        "untaken_call_does_not_check_its_literal_on_either_lane",
+        "wildcard_parameter_does_not_claim_the_callers_observed_extent"
+      ],
+      "note": "chelis#2632: Eval and compiled C check an inlined callee's authored literal after a runtime shrink; agreeing, taken and untaken controls retain entry order and selection.",
+      "phase": "b"
+    },
+    {
       "id": "ir_signature_entry_plan",
       "package": "chelis-ir",
       "kind": "lib",
