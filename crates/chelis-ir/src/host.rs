@@ -12356,15 +12356,11 @@ fn lower_app_host_expr(
     } else {
         top_level_fn_helper_summary_rejects(program, &name)?
     };
-    // Both direct extraction and the inline-then-extract fallback must obey
-    // the original call's preflight. Once inlined, a callee's entry contract
-    // is no longer visible in the expression tree.
-    let helper_preflight_rejects = if helper_tensor_ty.is_some() {
-        let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(app_expr, program);
-        tensor_helper_preflight_rejects(app_expr)
-    } else {
-        false
-    };
+    // A call reaching an authored List entry must stay in the host lane.
+    // Checking the original call also covers the inline-then-extract path,
+    // where the callee's entry contract is absent from the inlined tree.
+    let reaches_list_entry =
+        helper_tensor_ty.is_some() && expr_reaches_list_entry(app_expr, program);
     // A call into a staged function must retain that function's shared plan.
     // Re-extracting a tensor-only summary here loses its host scalar producers
     // and the claims attached before the original graph was partitioned.
@@ -12387,7 +12383,7 @@ fn lower_app_host_expr(
         && !callee_has_stages
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
-        && !helper_preflight_rejects
+        && !reaches_list_entry
         && !should_keep_tensor_expr_in_host_lane(app_expr)
         && let Some(tensor_call) = try_lower_tensor_helper_call(
             helper_expr.as_ref(),
@@ -12413,7 +12409,7 @@ fn lower_app_host_expr(
         && !callee_has_stages
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
-        && !helper_preflight_rejects
+        && !reaches_list_entry
         && !should_keep_tensor_expr_in_host_lane(app_expr)
         && let Some(specialized) = inline_top_level_host_call(app_expr, program, scope)
     {
@@ -17502,14 +17498,26 @@ fn expr_is_runtime_shaped_to_tensor(expr: &Expr) -> bool {
 /// This asks about one body directly, rather than through the pointer-keyed
 /// preflight stack, so staging can read the same signal before extraction.
 /// chelis#1779.
-fn expr_reaches_staging_barrier(expr: &Expr, program: &HostLoweringSession<'_>) -> bool {
+fn tensor_helper_preflight_root(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+) -> TensorHelperPreflightFacts {
     let summaries = cached_tensor_helper_def_summaries(program);
     let mut facts = UnordMap::new();
-    let root = analyze_tensor_helper_preflight(expr, &summaries, &mut facts);
+    analyze_tensor_helper_preflight(expr, &summaries, &mut facts)
+}
+
+fn expr_reaches_staging_barrier(expr: &Expr, program: &HostLoweringSession<'_>) -> bool {
+    let root = tensor_helper_preflight_root(expr, program);
     root.reaches_dynamic_to_tensor || root.reaches_list_entry
 }
 
-fn tensor_helper_preflight_rejects(expr: &Expr) -> bool {
+fn expr_reaches_list_entry(expr: &Expr, program: &HostLoweringSession<'_>) -> bool {
+    let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(expr, program);
+    tensor_helper_preflight_facts(expr).is_some_and(|facts| facts.reaches_list_entry)
+}
+
+fn tensor_helper_preflight_facts(expr: &Expr) -> Option<TensorHelperPreflightFacts> {
     let key = expr as *const Expr as usize;
     TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| {
         let stack = stack.borrow();
@@ -17524,10 +17532,13 @@ fn tensor_helper_preflight_rejects(expr: &Expr) -> bool {
                 profile.tensor_helper_preflight_lookup_misses += 1;
             }
         });
-        facts.is_some_and(|facts| {
-            facts.reaches_list_entry
-                || (facts.reaches_dynamic_to_tensor && !facts.contains_grad_like)
-        })
+        facts
+    })
+}
+
+fn tensor_helper_preflight_rejects(expr: &Expr) -> bool {
+    tensor_helper_preflight_facts(expr).is_some_and(|facts| {
+        facts.reaches_list_entry || (facts.reaches_dynamic_to_tensor && !facts.contains_grad_like)
     })
 }
 
