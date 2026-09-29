@@ -342,10 +342,31 @@ class VerifiedCompilerJsonBindings:
                 "control_packet": self.control_packet}
 
 
-def verify_compiler_json_bindings(root: Path, target: Path):
+@dataclass(frozen=True, init=False, slots=True)
+class _CompilerJsonWork:
+    root: Path
+    target: Path
+    source_sha256: str
+    registration: dict
+    execution: object
+    compiler_evidence: dict
+    binary: tuple
+    native_binary: tuple
+    driver: str
+    construction: tuple
+    controls: object
+    mir_controls: tuple
+    processes: tuple
+    control_packet: tuple
+    ownership: tuple
+
+    def __new__(cls, *args, **kwargs):
+        raise TypeError("compiler JSON collection requires actual current execution")
+
+
+def collect_compiler_json_bindings(root: Path, target: Path) -> _CompilerJsonWork:
+    """Execute binding-only controls without reading wire classifications."""
     from capacity_census_wire_calls import build_binding_driver, collect_library
-    from capacity_census_wire_schema import SchemaWireGraph
-    from capacity_census_wire_verifier import verify_wire_census
     from capacity_census_compiler_json_construction import compile_construction_controls
     from capacity_census_compiler_json_controls import verify_mir_controls
 
@@ -356,8 +377,8 @@ def verify_compiler_json_bindings(root: Path, target: Path):
         process_directory = target / "compiler-json-processes"
         controls = run_python_tests(root, PYTHON_CASES, log_prefix=process_directory / "verifier-controls")
         control_packet = (str(process_directory / "verifier-controls.execution.json"), controls.output_sha256)
-        # Finish ordinary consumers before wire/cache evidence binds dependency
-        # artifacts. Compiled invocation collection retains its own namespace.
+        # The binding target is disjoint from wire's clean/rebuild target.
+        # Compiled invocation collection retains its own namespace.
         with _target_lease(target):
             execution = build_and_run_rust_test(root, target, "chelis-python", "compiler_json_payloads", NATIVE_CASES,
                                               log_prefix=process_directory / "native-tests")
@@ -365,11 +386,6 @@ def verify_compiler_json_bindings(root: Path, target: Path):
             registration, binary, processes = _native_registration(root, target)
             processes += tuple(json.loads((process_directory / (name + ".json")).read_text())
                                for name in ("native-tests-build", "native-tests", "verifier-controls"))
-        wire = verify_wire_census(root, target)
-        documents = [json.loads(wire.schema.canonical.document), json.loads(wire.schema.document),
-                     *(json.loads(item) for item in wire.schema.imported_documents)]
-        graph = SchemaWireGraph(documents, wire.schema)
-        graph.publication_graph()
         driver = build_binding_driver(root, target)
         evidence = collect_library(root, target, driver, scope="compiler-json")
         # Retain the actual compiler packet before obligation reconciliation,
@@ -380,12 +396,44 @@ def verify_compiler_json_bindings(root: Path, target: Path):
         construction = compile_construction_controls(root, target, evidence)
         mir_controls = verify_mir_controls(root, target, driver, evidence)
         _require(source_identity(root) == before, "source changed during compiler JSON verification")
-        witness = object.__new__(VerifiedCompilerJsonBindings)
-        for key, value in dict(root=root, source_sha256=before, wire=wire, graph=graph, ownership=ownership,
-                               registration=registration, execution=execution, compiler_evidence=evidence,
-                               binary=binary, native_binary=native_binary, driver=str(driver),
-                               construction=construction, controls=controls, mir_controls=mir_controls,
-                               processes=processes, control_packet=control_packet).items():
-            object.__setattr__(witness, key, value)
-        witness.validate()
-        return witness
+        work = object.__new__(_CompilerJsonWork)
+        for key, value in dict(
+            root=root, target=target, source_sha256=before, ownership=ownership,
+            registration=registration, execution=execution, compiler_evidence=evidence,
+            binary=binary, native_binary=native_binary, driver=str(driver),
+            construction=construction, controls=controls, mir_controls=mir_controls,
+            processes=processes, control_packet=control_packet,
+        ).items():
+            object.__setattr__(work, key, value)
+        return work
+
+
+def finalize_compiler_json_bindings(
+    root: Path, target: Path, work: _CompilerJsonWork, wire: object
+) -> VerifiedCompilerJsonBindings:
+    """Join binding work to a current live wire witness before issuing authority."""
+    from capacity_census_wire_schema import SchemaWireGraph
+    from capacity_census_wire_verifier import VerifiedWireCensus
+
+    root, target = root.resolve(), target.resolve()
+    _require(type(wire) is VerifiedWireCensus, "compiler JSON requires a live wire witness")
+    _require(type(work) is _CompilerJsonWork and work.root == root and work.target == target,
+             "compiler JSON requires current binding collection")
+    _require(source_identity(root) == work.source_sha256 == wire.source_sha256,
+             "source changed before compiler JSON join")
+    wire.validate()
+    documents = [json.loads(wire.schema.canonical.document), json.loads(wire.schema.document),
+                 *(json.loads(item) for item in wire.schema.imported_documents)]
+    graph = SchemaWireGraph(documents, wire.schema)
+    graph.publication_graph()
+    witness = object.__new__(VerifiedCompilerJsonBindings)
+    for key, value in dict(root=root, source_sha256=work.source_sha256, wire=wire, graph=graph,
+                           ownership=work.ownership, registration=work.registration,
+                           execution=work.execution, compiler_evidence=work.compiler_evidence,
+                           binary=work.binary, native_binary=work.native_binary, driver=work.driver,
+                           construction=work.construction, controls=work.controls,
+                           mir_controls=work.mir_controls, processes=work.processes,
+                           control_packet=work.control_packet).items():
+        object.__setattr__(witness, key, value)
+    witness.validate()
+    return witness
