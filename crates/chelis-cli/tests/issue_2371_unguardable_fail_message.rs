@@ -32,13 +32,25 @@
 //! So the lowerer RECORDS the unguardable `fail`, and each transform checks
 //! the record after lowering its body, because the transform is the consumer.
 //!
-//! The untransformed half of this file is the evidence that the fence is
-//! bounded to consumers — but only for the rows that REACH the emit site. A
-//! rank-0 (`tensor[f32]`) body never reaches DAG lowering at all, so such a row
-//! passes under the refuted emit-site design too and discriminates nothing. The
-//! rows below therefore return `tensor[1, f32]` / `tensor[2, f32]`, which does
-//! reach it; `#2743` round 1 caught that four of five rows were rank-0 and only
-//! the `string`-parameter row was load-bearing.
+//! The untransformed rows below are two different kinds of evidence, and
+//! conflating them has now been wrong three times, so they are labelled:
+//!
+//! * **Behaviour preservation** (rows 1-4). These pin that an untransformed
+//!   `fail` with a computed message still aborts at run time with its message.
+//!   That is worth pinning on its own — but it does NOT discriminate *where*
+//!   the rejection lives, because these programs never reach the placeholder
+//!   emit site at all: their message is evaluated and aborted by the host
+//!   interpreter first.
+//! * **Placement** (row 5, the `string`-parameter canary shape). This is the
+//!   only row that reaches the emit site, and therefore the only one that reds
+//!   if the rejection is moved there.
+//!
+//! The measured discriminator for reaching the emit site is the message
+//! arriving as a `string` PARAMETER of the def containing the `fail`. Return
+//! rank is irrelevant — an earlier revision of this comment claimed a rank-0
+//! body never reaches DAG lowering and that a tensor-returning one does; both
+//! are false. A rank-0 body with a `string` parameter reaches it; a
+//! tensor-returning body with a local message does not.
 //!
 //! chelis#2383 is the diagnostic half. A direct `fail` branch that
 //! `fail_message_of` declined used to fall through and collect the
@@ -257,10 +269,12 @@ fn an_empty_message_keeps_its_own_diagnostic() {
 /// these.
 #[test]
 fn untransformed_non_literal_fails_still_abort_with_their_message() {
-    // Every body returns a TENSOR, so every row reaches the placeholder emit
-    // site and every row reds under the refuted emit-site design. A rank-0
-    // `tensor[f32]` body would short-circuit before DAG lowering and prove
-    // nothing (#2743 round 1, P3-2).
+    // Rows 1-4 are BEHAVIOUR-PRESERVATION rows: they pin that the abort still
+    // fires, and they do not reach the emit site, so they do not discriminate
+    // where the rejection lives. Row 5 is the PLACEMENT row and is the only one
+    // that reds if the rejection is moved to the emit site. Do not "strengthen"
+    // rows 1-4 by copying row 5's shape into them -- that would be four copies
+    // of one witness, which is what #2743 rounds 1 and 2 both pushed back on.
     let cases = [
         (
             "plain operand",
@@ -414,13 +428,16 @@ fn a_statically_taken_unguardable_fail_reports_the_selection_first() {
          out = grad(loss)(to_tensor([cast(3.0, f32)]))\n"
     );
     let stderr = eval_program(&program).expect_err("a statically-taken abort must be rejected");
+    let selection = stderr
+        .find("always selects its `fail(...)` branch")
+        .unwrap_or_else(|| panic!("the static-selection fact must be reported: {stderr}"));
+    let defect = stderr
+        .find("must be a string literal written at the `fail` itself")
+        .unwrap_or_else(|| panic!("the message defect must be reported too: {stderr}"));
     assert!(
-        stderr.contains("always selects its `fail(...)` branch"),
-        "the static-selection fact must be reported: {stderr}"
-    );
-    assert!(
-        stderr.contains("must be a string literal written at the `fail` itself"),
-        "the message defect must be reported too, not instead: {stderr}"
+        selection < defect,
+        "the selection fact must come FIRST -- it is the one that cannot be fixed by \
+         editing the message: {stderr}"
     );
 }
 
@@ -435,22 +452,31 @@ fn a_statically_taken_empty_fail_reports_the_selection_first() {
          else sum(mul(&x, &x), cast(0, i32))\n\
          out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
     let stderr = eval_program(program).expect_err("a statically-taken abort must be rejected");
+    let selection = stderr
+        .find("always selects its `fail(...)` branch")
+        .unwrap_or_else(|| panic!("the static-selection fact must be reported: {stderr}"));
+    let defect = stderr
+        .find("has no message to report")
+        .unwrap_or_else(|| panic!("the empty-message rule must be reported too: {stderr}"));
     assert!(
-        stderr.contains("always selects its `fail(...)` branch"),
-        "the static-selection fact must be reported: {stderr}"
-    );
-    assert!(
-        stderr.contains("has no message to report"),
-        "the empty-message rule must be reported too: {stderr}"
+        selection < defect,
+        "the selection fact must come FIRST: {stderr}"
     );
 }
 
-/// chelis#2371 acceptance 4: the evaluator and the C target must agree. The
-/// rejection is raised in `chelis-ir` lowering, upstream of target selection,
-/// so `chelis build --target c` must refuse the same programs for the same
-/// reason — and must NOT refuse the untransformed ones.
+/// chelis#2371 acceptance 4, **for the fatal record path only**.
+///
+/// `reject_recorded_unguardable_fail` is fatal, so the host fallback cannot
+/// absorb it and the C target reports the same reason as `eval`. The three
+/// non-fatal raisers (`reject_non_literal_fail_message`,
+/// `reject_fail_message_defect`, `reject_static_taken_unguardable_fail`) ARE
+/// absorbed, and the C lane reports a generic "can't lower these defs" instead.
+/// That absorption is pre-existing and identical on the base — it is not
+/// introduced here — but it means cross-lane agreement holds for this path and
+/// not yet for those, so this test's name says which
+/// (chelis#2743 round 2, NEW-2).
 #[test]
-fn the_c_target_agrees_with_the_evaluator() {
+fn the_c_target_agrees_with_the_evaluator_on_the_fatal_record_path() {
     let transformed = format!(
         "module M.Main\n{TAG}\
          def loss(x: tensor[1, f32]) -> tensor[f32] = \
@@ -465,16 +491,19 @@ fn the_c_target_agrees_with_the_evaluator() {
     assert_names_the_unguardable_reason(&c_err, "c lane");
 
     // The untransformed twin must still BUILD; its abort is a runtime abort.
+    // Asserted as a build SUCCESS, not merely as "did not fail with 05-OP-68":
+    // the weaker form also passed when the build failed for any other reason
+    // (chelis#2743 round 2, NEW-6).
     let untransformed = format!(
         "module M.Main\n{TAG}\
          def loss(x: tensor[1, f32]) -> tensor[1, f32] = \
          add(x, fail(string_concat(\"bad: \", tag())))\n\
          out = print(loss(to_tensor([cast(3.0, f32)])))\n"
     );
-    if let Err(c_err) = c_build_stderr(&untransformed, "unfenced") {
-        assert!(
-            !c_err.contains("05-OP-68"),
-            "the untransformed twin must not be fenced by the C target: {c_err}"
-        );
-    }
+    assert!(
+        c_build_stderr(&untransformed, "unfenced").is_ok(),
+        "the untransformed twin must still build; its abort is a runtime abort, so a \
+         build failure means the fence leaked into it: {:?}",
+        c_build_stderr(&untransformed, "unfenced").err()
+    );
 }

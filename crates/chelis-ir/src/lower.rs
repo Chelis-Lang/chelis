@@ -11908,6 +11908,12 @@ impl<'program> LowerCtx<'program> {
         // carry a recorded unguardable `fail` out of lowering unconsulted. The
         // record is a fact about the BODY, so the earliest point after lowering
         // it is the right one, and it needs neither `output` nor a root.
+        //
+        // Closed by construction, hazard UNWITNESSED: two review rounds failed
+        // to build a body that both reaches `output_depends_on_unresolved` and
+        // carries a recorded `fail` -- the unresolved-callable result must be
+        // the sole output, which leaves no position for one. The ordering costs
+        // nothing and has no test; it is not a fixed bug.
         Self::reject_recorded_unguardable_fail(&subctx, "grad");
         let output = lowered_output.expect_node("grad requires a scalar floating output");
         if subctx
@@ -13553,9 +13559,7 @@ impl<'program> LowerCtx<'program> {
             },
         );
 
-        let output = subctx
-            .lower_resolved_body(fn_expr, &param_names, body)
-            .expect_node("vmap(grad(...)) requires a scalar floating output");
+        let lowered_output = subctx.lower_resolved_body(fn_expr, &param_names, body);
         // chelis#2371: checked HERE, immediately after the body is lowered and
         // before any early return, because one stands between this point and the
         // transform's real work: `output_depends_on_unresolved` returns the
@@ -13564,7 +13568,15 @@ impl<'program> LowerCtx<'program> {
         // carry a recorded unguardable `fail` out of lowering unconsulted. The
         // record is a fact about the BODY, so the earliest point after lowering
         // it is the right one, and it needs neither `output` nor a root.
+        //
+        // Closed by construction, hazard UNWITNESSED: two review rounds failed
+        // to build a body that both reaches `output_depends_on_unresolved` and
+        // carries a recorded `fail` -- the unresolved-callable result must be
+        // the sole output, which leaves no position for one. The ordering costs
+        // nothing and has no test; it is not a fixed bug.
         Self::reject_recorded_unguardable_fail(&subctx, "vmap(grad(...))");
+        let output =
+            lowered_output.expect_node("vmap(grad(...)) requires a scalar floating output");
         // Even a constant body has one result per mapped input row. Keep the
         // formal's shape available through AD pruning so a symbolic batch
         // broadcast reads its cardinality from the actual at the call site.
@@ -15913,14 +15925,27 @@ impl<'program> LowerCtx<'program> {
                 // branch spellings by name.
                 //
                 // chelis#2371: the non-literal case used to `return fallback`
-                // here, which is the defect. Reaching this site at all means a
-                // transform is forcing DAG construction -- an untransformed
-                // `fail` is aborted by the host lane, which never builds this
-                // DAG -- so returning the placeholder handed a fabricated zero
-                // to the transform as an answer. Measured before the fix:
-                // `grad` over `sum(add(x, fail(string_concat("bad: ", tag()))),
-                // 0i32)` printed `1.0` at exit 0, and `vmap` printed the inputs
+                // here, which is the defect. Measured before the fix: `grad`
+                // over `sum(add(x, fail(string_concat("bad: ", tag()))), 0i32)`
+                // printed `1.0` at exit 0, and `vmap` printed the inputs
                 // unchanged with the abort gone entirely.
+                //
+                // WHAT REACHES THIS SITE is not "a transform is forcing DAG
+                // construction". Three wordings of that guess have been wrong
+                // in a row (chelis#2743 rounds 1 and 2), so here is the
+                // measured discriminator instead: the site is reached when the
+                // message cannot be evaluated by the host interpreter first --
+                // in practice when it arrives as a `string` PARAMETER of the
+                // def containing the `fail`. A message computed locally
+                // (`string_concat(..)` inline, a call) is evaluated and aborted
+                // by the host interpreter before any DAG is built. Return rank
+                // is irrelevant: a rank-0 `tensor[f32]` body with a `string`
+                // parameter reaches here, and a tensor-returning body with a
+                // local message does not.
+                //
+                // So this site cannot tell a transformed program from an
+                // untransformed one, which is exactly why the arm below records
+                // instead of rejecting.
                 let message = match self.classify_fail_message(args.first()) {
                     FailMessage::Usable(message) => message,
                     FailMessage::Unusable(FailMessageDefect::Empty) => {
@@ -20498,10 +20523,8 @@ impl<'program> LowerCtx<'program> {
             // in which case the function as a whole does NOT abort on every
             // execution, and saying so would be false.
             format!(
-                "this `if` always selects its `fail({message:?})` branch, so it has no \
-                 value on any path and cannot be differentiated or batched \
-                 (chelis#1464). Move the abort outside the transform, or make the \
-                 branch total."
+                "{} Move the abort outside the transform, or make the branch total.",
+                Self::static_selection_sentence(&format!("fail({message:?})"))
             ),
             Some(span),
             self.current_span_id.clone(),
@@ -20518,35 +20541,67 @@ impl<'program> LowerCtx<'program> {
     /// about where it was written (chelis#2384 review, F1).
     fn reject_empty_fail_message(&self, span: Option<Span>) -> NodeId {
         raise_lowering_error(
-            Self::fail_message_defect_sentence(FailMessageDefect::Empty),
+            format!(
+                "{} {}",
+                Self::fail_message_defect_reason(FailMessageDefect::Empty),
+                Self::fail_message_defect_remedy(FailMessageDefect::Empty)
+            ),
             span,
             self.current_span_id.clone(),
         )
     }
 
-    /// The one sentence that describes a [`FailMessageDefect`].
+    /// The REASON a [`FailMessageDefect`] has no guarded form, with no remedy
+    /// attached.
+    ///
+    /// Reason and remedy are split because a remedy is a property of the SITE,
+    /// not of the defect. "Inline the message as a literal" fixes an ordinary
+    /// unguardable `fail`; spliced into a statically-selected branch it is
+    /// wrong, because inlining the literal leaves the `if` selecting the abort
+    /// unconditionally and merely moves the author to the next diagnostic
+    /// (chelis#2743 round 2, NEW-3).
     ///
     /// Shared so a single reason cannot acquire two wordings. It did, briefly:
-    /// the emit-site rejection said the message "must be a string literal"
-    /// while the transform-site rejection said it "is not a string literal",
-    /// and a test asserting one failed against the other. One reason, one
-    /// sentence (chelis#2383).
-    fn fail_message_defect_sentence(defect: FailMessageDefect) -> &'static str {
+    /// one raiser said the message "must be" a literal while another said it
+    /// "is not" one, and a test asserting the first met the second.
+    fn fail_message_defect_reason(defect: FailMessageDefect) -> &'static str {
         match defect {
             FailMessageDefect::Empty => {
-                "`fail(\"\")` has no message to report. A guarded abort carries its message \
-                 as part of its identity and never synthesizes or defaults one ([05-OP-68]); \
-                 give the `fail` a non-empty message."
+                "`fail(\"\")` has no message to report, and a guarded abort carries its \
+                 message as part of its identity and never synthesizes or defaults one \
+                 ([05-OP-68])."
             }
             FailMessageDefect::NotALiteral => {
-                "`fail(...)`'s message must be a string literal written at the `fail` itself. \
-                 A guarded abort carries its message as part of its identity and takes no \
-                 string operand ([05-OP-68]), so a message that is computed -- \
-                 `string_concat(...)`, a call, a parameter, or a `let`-bound name -- has no \
-                 guarded form and the DAG cannot represent the abort. Inline the message as a \
-                 literal, or move the abort outside the transform."
+                "`fail(...)`'s message must be a string literal written at the `fail` \
+                 itself: a guarded abort carries its message as part of its identity and \
+                 takes no string operand ([05-OP-68]), so a message that is computed -- \
+                 `string_concat(...)`, a call, a parameter, or a `let`-bound name -- has \
+                 no guarded form and the DAG cannot represent the abort."
             }
         }
+    }
+
+    /// The remedy for a [`FailMessageDefect`] at an ORDINARY `fail` site, where
+    /// fixing the message is sufficient.
+    fn fail_message_defect_remedy(defect: FailMessageDefect) -> &'static str {
+        match defect {
+            FailMessageDefect::Empty => "Give the `fail` a non-empty message.",
+            FailMessageDefect::NotALiteral => {
+                "Inline the message as a literal, or move the abort outside the transform."
+            }
+        }
+    }
+
+    /// The one sentence stating that an `if` selects its `fail` branch on every
+    /// execution. Extracted for the same reason as the defect reason above: two
+    /// raisers rendered this fact with different wording, and the copies had
+    /// already drifted over whether the message is named inline
+    /// (chelis#2743 round 2, NEW-4).
+    fn static_selection_sentence(rendered_fail: &str) -> String {
+        format!(
+            "this `if` always selects its `{rendered_fail}` branch, so it has no value on \
+             any path and cannot be differentiated or batched (chelis#1464)."
+        )
     }
 
     /// chelis#2371: reject a transform whose body lowered an unguardable
@@ -20566,8 +20621,9 @@ impl<'program> LowerCtx<'program> {
             raise_fatal_lowering_error(
                 format!(
                     "`{transform}(...)` cannot be lowered: its body reaches a `fail(...)` \
-                     whose abort the DAG would replace with a fabricated value. {}",
-                    Self::fail_message_defect_sentence(defect)
+                     whose abort the DAG would replace with a fabricated value. {} {}",
+                    Self::fail_message_defect_reason(defect),
+                    Self::fail_message_defect_remedy(defect)
                 ),
                 Some(span),
                 None,
@@ -20590,10 +20646,11 @@ impl<'program> LowerCtx<'program> {
     ) -> NodeId {
         raise_lowering_error(
             format!(
-                "this `if` always selects its `fail(...)` branch, so it has no value on any \
-                 path and cannot be differentiated or batched (chelis#1464). {} Move the abort \
-                 outside the transform, or make the branch total.",
-                Self::fail_message_defect_sentence(defect)
+                "{} {} Move the abort outside the transform, or make the branch total -- \
+                 fixing the message alone cannot help here, because the branch is taken on \
+                 every execution.",
+                Self::static_selection_sentence("fail(...)"),
+                Self::fail_message_defect_reason(defect)
             ),
             Some(span),
             self.current_span_id.clone(),
@@ -20624,7 +20681,11 @@ impl<'program> LowerCtx<'program> {
     /// names something they already did (chelis#2383).
     fn reject_non_literal_fail_message(&self, span: Option<Span>) -> NodeId {
         raise_lowering_error(
-            Self::fail_message_defect_sentence(FailMessageDefect::NotALiteral),
+            format!(
+                "{} {}",
+                Self::fail_message_defect_reason(FailMessageDefect::NotALiteral),
+                Self::fail_message_defect_remedy(FailMessageDefect::NotALiteral)
+            ),
             span,
             self.current_span_id.clone(),
         )
