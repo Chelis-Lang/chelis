@@ -57,16 +57,24 @@ invariant predicate revalidation denies both before the adapter can access
 the OS. Seven filesystem builtins and `process_run` pass through this one
 boundary. `print` and `debug` remain transcript operations.
 
-Only `crates/chelis-compiler-api/src/runtime/system_adapter.rs` accesses the
-host filesystem or process API for those evaluator operations. The adapter
-preserves the language's directory-name byte ordering and strict UTF-8
-failure under `spec/05-risc-primitives.md` [05-HOST-4], rather than inventing
-a lossy or unsorted evaluator rule. The compiled C lane and `chelis-runtime`
-ABI are outside this *evaluator* policy; [05-HOST-2]'s outstanding compiled
-host `process_run` parity remains owned by chelis#1297. The focused acceptance
-command is `python3 scripts/eval_system_oracle.py`;
+For the current eight evaluator builtin routes, the default adapter in
+`crates/chelis-compiler-api/src/runtime/system_adapter.rs` performs the host
+filesystem and process calls after the policy wrapper checks permission.
+The adapter preserves directory-name byte ordering and strict UTF-8 failure
+under `spec/05-risc-primitives.md` [05-HOST-4], rather than inventing a lossy
+or unsorted evaluator rule. The compiled C lane and `chelis-runtime` ABI are
+outside this *evaluator* policy; [05-HOST-2]'s outstanding compiled host
+`process_run` parity remains owned by chelis#1297.
+
+The acceptance command is `python3 scripts/eval_system_oracle.py`.
 `scripts/eval_system_guard.py` also runs in the Python-only Rust-policy gate
-stage.
+stage as a **non-exhaustive source-drift tripwire** for recognized direct
+imports and calls. It is not a Rust type checker or a sandbox: for example,
+`extern crate std as host` and `.exists()` on a path derived through
+`.to_path_buf()` can evade the lexical scan. A green source scan does not
+prove that arbitrary Rust in the evaluator can access the OS only through
+the adapter; the runtime policy checks and oracle cover the eight shipped
+builtin routes, not future direct Rust callsites.
 
 ---
 

@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-"""Guard direct evaluator host access outside the single system adapter.
+"""Tripwire for recognized direct evaluator host-access syntax.
 
-`crates/chelis-compiler-api/src/runtime/` is the compiler API evaluator.
-Every filesystem, path-existence, and subprocess operation in that
-directory MUST route through the injected `EvalSystem` boundary
-(`runtime/system.rs`) instead of calling `std::fs`, `std::path::Path::exists`,
-or `std::process::Command` directly. The one exception is
-`runtime/system_adapter.rs`'s `DefaultEvalSystem`, the single adapter
-permitted to make those calls.
+The eight shipped filesystem/process evaluator builtins route through the
+mandatory typed `EvalSystem` policy boundary. This separate source scan
+reports conventional direct host calls and imports outside
+`runtime/system_adapter.rs`, including the tested `use std as host` and
+platform-specific filesystem spellings. It skips test-only modules.
 
-This source-level tripwire scans production Rust modules under `runtime/`.
-Separate `#[cfg(test)] mod name;` files and inline `#[cfg(test)] mod name
-{ ... }` blocks contain test fixtures and are excluded. Known direct-access
-spellings and imports are reported; this lexical scanner is not a Rust type
-checker and cannot certify the absence of all host effects.
+This lexical check is NOT proof that the adapter is the only possible Rust
+host-access path: for example, `extern crate std as host` and filesystem
+methods on path values derived through `.to_path_buf()` can evade it.
+Those cases require type-aware analysis; a PASS only means the recognized
+patterns were absent from the scanned production sources.
 
 Usage:
 
@@ -34,12 +32,12 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = REPO_ROOT / "crates" / "chelis-compiler-api" / "src" / "runtime"
 
-# The sole production module allowed direct filesystem or process access.
+# Exempt the default adapter from the recognized source patterns.
 ALLOWED_ADAPTER_FILE = "system_adapter.rs"
 
 
 class SourceGuardError(RuntimeError):
-    """A source file could not be read or classified (fail-closed)."""
+    """A source file could not be read or scanned."""
 
 
 @dataclass(frozen=True)
@@ -167,7 +165,7 @@ def blank_inline_test_modules(stripped: str) -> str:
     """Exclude balanced cfg(test) modules while retaining source line offsets.
 
     Strings and comments have already been stripped, so only Rust braces
-    remain. A malformed module fails closed instead of hiding later code.
+    remain. Raise for a malformed module instead of skipping later code.
     """
     result = list(stripped)
     for match in _CFG_TEST_INLINE_MODULE.finditer(stripped):
@@ -486,11 +484,9 @@ def parse_test_only_modules(mod_rs_text: str) -> frozenset[str]:
     fixtures is not a production bypass. Handles the inline form
     (`#[cfg(test)] mod x;`), the two-line form, a `pub`/`pub(crate)`
     visibility modifier on the `mod` line, and an unrelated attribute
-    stacked between `#[cfg(test)]` and the `mod` line. A parse this
-    permissive can only widen which files are treated as test-only, never
-    narrow it below what `parse_test_only_modules` recognized before --
-    the failure direction stays fail-closed (an unrecognized form is
-    scanned as production, not silently excluded).
+    stacked between `#[cfg(test)]` and the `mod` line. An unrecognized
+    form stays in the set of files scanned as production; this limited
+    module classifier does not establish which code rustc compiles.
     """
     test_only: set[str] = set()
     pending_cfg_test = False
@@ -545,8 +541,7 @@ def scan_directory(runtime_dir: Path) -> list[Violation]:
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
-            # Fail closed: an unreadable or unclassifiable source file is a
-            # guard failure, not a silent skip.
+            # An unreadable source file is an error, not an omitted scan.
             raise SourceGuardError(f"cannot read {path}: {error}") from error
         lines = text.splitlines()
         for hit in classify_source(text):
@@ -563,7 +558,7 @@ def main() -> int:
         return 1
     if violations:
         print(
-            "eval system guard: FAIL: direct system access outside "
+            "eval system guard: FAIL: recognized direct system access outside "
             f"`{ALLOWED_ADAPTER_FILE}`",
             file=sys.stderr,
         )

@@ -1,5 +1,5 @@
-//! The sole evaluator module allowed to access the host filesystem and spawn
-//! processes. The policy wrapper checks permission before calling this adapter.
+//! Default host adapter for the eight covered evaluator filesystem and process
+//! operations. Their policy wrapper checks permission before calling this adapter.
 
 use std::ffi::OsString;
 use std::path::Path;

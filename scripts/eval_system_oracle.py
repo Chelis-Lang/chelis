@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Evaluator-only system boundary acceptance oracle.
+"""Evaluator-only system boundary acceptance for the eight shipped builtins.
 
 From the repository root, run ``python3 scripts/eval_system_oracle.py``.
-The script resolves the checkout from its own path, so an absolute script path
-also works from other directories. Each leg executes against that checkout;
-compiled C and the runtime C ABI retain their own acceptance suites.
+Each leg executes against this checkout; compiled C and the runtime C ABI
+retain their own acceptance suites. The source-guard legs check recognized
+syntactic drift, not the absence of arbitrary Rust host access. Runtime
+boundary tests own the policy behavior for the eight evaluator builtins.
 """
 
 from __future__ import annotations
