@@ -22,12 +22,11 @@
 //! unresolvable dependency — remain invisible here, because reaching them
 //! would make the linter a partial build.
 //!
-//! One class inside that criterion is nonetheless invisible: a file that
-//! does not parse. It is decidable from the file alone, but the rule
-//! cannot reach it without a parse verdict `chelis lint` does not produce,
-//! so a package whose source is unparseable — including one declaring two
-//! modules — still passes `chelis lint --check`. That is a gap in the lint's
-//! parse-failure surface, not in this rule's remit, and is tracked separately.
+//! One class inside that criterion is not this rule's to report: a file
+//! that does not parse. It is decidable from the file alone, but reaching
+//! it from here would mean second-guessing the parser. `surf-parses`
+//! (§12.5) owns that verdict, which is what makes the deferral below safe
+//! rather than silent (chelis#2765).
 
 use crate::policy::TraversalPolicy;
 use crate::walker::Entry;
@@ -230,15 +229,12 @@ impl Rule for ReefModuleIdentity {
             return Vec::new();
         };
         // Reaching a module-identity verdict from a broken parse would invent
-        // one, so the rule defers, as the other parsing rules do. Note what
-        // that costs: a parse failure IS in chelis#2116's false-green class
-        // for a directory invocation. `chelis fmt --check` has no directory
-        // form (it exits with "Is a directory"), so `chelis lint --check .`,
-        // the form this repository's own gate runs, exits 0 on a package
-        // whose source does not parse and which `reef build` rejects. Closing
-        // that needs `chelis lint` to surface parse failures at all, which is
-        // a responsibility it does not have today and not one this rule can
-        // take on without reimplementing the parser's verdict.
+        // one, so the rule defers, as the other parsing rules do. The
+        // deferral is safe because `surf-parses` (§12.5) reports the parse
+        // failure itself; before that rule existed this silence was the
+        // chelis#2116 false green in miniature, since `chelis fmt --check`
+        // has no directory form and `chelis lint --check .` exited 0 on a
+        // package whose source `reef build` rejected (chelis#2765).
         let Ok(decls) = chelis_surf::parser::parse_str(source) else {
             return Vec::new();
         };

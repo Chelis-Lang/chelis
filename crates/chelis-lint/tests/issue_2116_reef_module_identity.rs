@@ -132,14 +132,13 @@ fn defers_on_two_module_declarations_because_the_parser_rejects_them() {
     // file"), not a module-identity error, so the rule reaches no verdict
     // rather than inventing a second diagnosis for a file nothing can parse.
     //
-    // This deferral has a cost, and an earlier version of this comment denied
-    // it. `chelis fmt --check <file>` does exit 1 here, but there is NO
-    // directory form: `chelis fmt --check <dir>` fails with "Is a directory".
-    // So `chelis lint --check .`, the form this repository's own gate runs,
-    // exits 0 on this package while `reef build` exits 1. The shape IS in
-    // chelis#2116's false-green class for that invocation. Closing it needs
-    // `chelis lint` to surface parse failures, which is outside this rule's
-    // remit and tracked separately.
+    // This deferral used to have a cost: `chelis fmt --check <file>` exits 1
+    // here, but there is NO directory form (`chelis fmt --check <dir>` fails
+    // with "Is a directory"), so `chelis lint --check .` exited 0 on this
+    // package while `reef build` exited 1. `surf-parses` (§12.5) now reports
+    // the parse failure, so the package is rejected by the directory
+    // invocation too (chelis#2765). This rule still reaches no verdict, which
+    // is the point: one rule owns the parse verdict and the rest defer.
     let body = "module Ub10.Data\nmodule Ub10.Other\ndef value() -> i64 = cast(1, i64)\n";
     assert!(
         chelis_surf::parser::parse_str(body).is_err(),
