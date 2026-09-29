@@ -11,7 +11,8 @@ import unittest
 from scripts import ci_failure_baseline as baseline
 
 
-ARTIFACTS = ("junit-linux-full-1", "junit-linux-full-2")
+ARTIFACTS = baseline.DEFAULT_ARTIFACTS
+SCOPE_ARTIFACT = "linux-extended-dispatch-scope"
 
 
 def run_listing(rows: list[dict]) -> str:
@@ -28,14 +29,31 @@ def artifact_listing(names: list[str], *, expired: tuple[str, ...] = ()) -> str:
     )
 
 
-def run_row(identifier: str, sha: str, created: str) -> dict:
+def run_row(
+    identifier: str, sha: str, created: str, *, event: str = "schedule",
+) -> dict:
     return {
         "id": identifier,
         "html_url": f"https://example.invalid/{identifier}",
         "head_sha": sha,
         "head_branch": "main",
         "created_at": created,
+        "event": event,
     }
+
+
+def scope_receipt(
+    identifier: str, sha: str, *, scope: str = "all",
+) -> str:
+    return json.dumps(
+        {
+            "version": 1,
+            "event": "workflow_dispatch",
+            "scope": scope,
+            "run_id": identifier,
+            "head_sha": sha,
+        }
+    )
 
 
 class FakeGh:
@@ -46,7 +64,9 @@ class FakeGh:
         self.artifacts = artifacts
         self.root = root
         self.downloaded: list[str] = []
+        self.download_names: list[tuple[str, tuple[str, ...]]] = []
         self.missing_documents: set[str] = set()
+        self.scope_receipts: dict[str, str] = {}
 
     def __call__(self, command):
         if command[1] == "api" and "/runs?" in command[-1]:
@@ -55,7 +75,14 @@ class FakeGh:
             run_id = command[-1].split("/runs/")[1].split("/")[0]
             return self.artifacts[run_id]
         if command[1] == "run" and command[2] == "download":
-            self.downloaded.append(command[3])
+            run_id = command[3]
+            self.downloaded.append(run_id)
+            names = tuple(
+                command[index + 1]
+                for index, item in enumerate(command)
+                if item == "--name"
+            )
+            self.download_names.append((run_id, names))
             destination = Path(command[command.index("--dir") + 1])
             for index, item in enumerate(command):
                 if item != "--name":
@@ -63,9 +90,15 @@ class FakeGh:
                 name = command[index + 1]
                 if name in self.missing_documents:
                     continue
-                document = destination / name / "junit.xml"
+                document = (
+                    destination / name if len(names) > 1 else destination
+                ) / ("scope.json" if name == SCOPE_ARTIFACT else "junit.xml")
                 document.parent.mkdir(parents=True, exist_ok=True)
-                document.write_text("<testsuites/>")
+                document.write_text(
+                    self.scope_receipts.get(run_id, "")
+                    if name == SCOPE_ARTIFACT
+                    else "<testsuites/>"
+                )
             return ""
         raise AssertionError(f"unexpected command: {command}")
 
@@ -200,9 +233,9 @@ class BaselineSelectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paginated = (
-                artifact_listing([ARTIFACTS[0]])
+                artifact_listing(list(ARTIFACTS[:2]))
                 + "\n"
-                + artifact_listing([ARTIFACTS[1]])
+                + artifact_listing(list(ARTIFACTS[2:]))
             )
             gh = FakeGh(
                 runs=run_listing(
@@ -213,6 +246,178 @@ class BaselineSelectionTests(unittest.TestCase):
             )
             manifest = self.prepare(gh, root / "out")
         self.assertEqual(manifest["run_id"], "200")
+
+    def test_a_scoped_dispatch_with_all_four_junits_is_not_a_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sha = "b" * 40
+            gh = FakeGh(
+                runs=run_listing([
+                    run_row("200", sha, "2026-09-19T03:31:04Z",
+                            event="workflow_dispatch"),
+                    run_row("100", "a" * 40, "2026-09-18T03:31:45Z"),
+                ]),
+                artifacts={
+                    "200": artifact_listing(
+                        [*baseline.DEFAULT_ARTIFACTS, SCOPE_ARTIFACT]
+                    ),
+                    "100": artifact_listing(list(baseline.DEFAULT_ARTIFACTS)),
+                },
+                root=root,
+            )
+            gh.scope_receipts["200"] = scope_receipt(
+                "200", sha, scope="runtime-representation"
+            )
+            manifest = self.prepare(
+                gh, root / "out", artifacts=baseline.DEFAULT_ARTIFACTS
+            )
+        self.assertEqual(manifest["run_id"], "100")
+        self.assertEqual(gh.download_names[0], ("200", (SCOPE_ARTIFACT,)))
+        self.assertNotIn(("200", baseline.DEFAULT_ARTIFACTS), gh.download_names)
+
+    def test_a_full_dispatch_with_exact_receipt_and_four_junits_qualifies(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sha = "b" * 40
+            gh = FakeGh(
+                runs=run_listing([
+                    run_row("200", sha, "2026-09-19T03:31:04Z",
+                            event="workflow_dispatch")
+                ]),
+                artifacts={
+                    "200": artifact_listing(
+                        [*baseline.DEFAULT_ARTIFACTS, SCOPE_ARTIFACT]
+                    )
+                },
+                root=root,
+            )
+            gh.scope_receipts["200"] = scope_receipt("200", sha)
+            manifest = self.prepare(
+                gh, root / "out", artifacts=baseline.DEFAULT_ARTIFACTS
+            )
+        self.assertEqual(manifest["run_id"], "200")
+        self.assertEqual(gh.downloaded, ["200", "200"])
+
+    def test_a_legacy_schedule_needs_four_junits_but_no_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = FakeGh(
+                runs=run_listing([
+                    run_row("100", "a" * 40, "2026-09-18T03:31:45Z")
+                ]),
+                artifacts={
+                    "100": artifact_listing(list(baseline.DEFAULT_ARTIFACTS))
+                },
+                root=root,
+            )
+            manifest = self.prepare(
+                gh, root / "out", artifacts=baseline.DEFAULT_ARTIFACTS
+            )
+        self.assertEqual(manifest["run_id"], "100")
+        self.assertEqual(gh.downloaded, ["100"])
+
+    def test_dispatch_receipt_must_bind_the_run_and_head_and_full_scope(
+        self,
+    ) -> None:
+        sha = "b" * 40
+        for receipt in (
+            scope_receipt("201", sha),
+            scope_receipt("200", "c" * 40),
+            scope_receipt("200", sha, scope="runtime-representation"),
+            json.dumps({"version": 1, "event": "schedule",
+                        "scope": "all", "run_id": "200", "head_sha": sha}),
+            json.dumps({"version": 2, "event": "workflow_dispatch",
+                        "scope": "all", "run_id": "200", "head_sha": sha}),
+            json.dumps({"version": True, "event": "workflow_dispatch",
+                        "scope": "all", "run_id": "200", "head_sha": sha}),
+            "{",
+            "",
+        ):
+            with self.subTest(receipt=receipt), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                gh = FakeGh(
+                    runs=run_listing([
+                        run_row("200", sha, "2026-09-19T03:31:04Z",
+                                event="workflow_dispatch")
+                    ]),
+                    artifacts={
+                        "200": artifact_listing(
+                            [*baseline.DEFAULT_ARTIFACTS, SCOPE_ARTIFACT]
+                        )
+                    },
+                    root=root,
+                )
+                gh.scope_receipts["200"] = receipt
+                with self.assertRaisesRegex(ValueError, "retains every baseline"):
+                    self.prepare(
+                        gh, root / "out", artifacts=baseline.DEFAULT_ARTIFACTS
+                    )
+                self.assertFalse((root / "out" / "baseline.json").exists())
+
+    def test_dispatch_missing_or_ambiguous_receipt_is_rejected(self) -> None:
+        for receipt_artifacts in (
+            list(baseline.DEFAULT_ARTIFACTS),
+            [*baseline.DEFAULT_ARTIFACTS, SCOPE_ARTIFACT, SCOPE_ARTIFACT],
+        ):
+            with self.subTest(artifacts=receipt_artifacts), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                gh = FakeGh(
+                    runs=run_listing([
+                        run_row("200", "b" * 40, "2026-09-19T03:31:04Z",
+                                event="workflow_dispatch")
+                    ]),
+                    artifacts={"200": artifact_listing(receipt_artifacts)},
+                    root=root,
+                )
+                gh.scope_receipts["200"] = scope_receipt("200", "b" * 40)
+                with self.assertRaisesRegex(ValueError, "retains every baseline"):
+                    self.prepare(
+                        gh, root / "out", artifacts=baseline.DEFAULT_ARTIFACTS
+                    )
+
+    def test_listed_receipt_without_scope_json_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = FakeGh(
+                runs=run_listing([
+                    run_row("200", "b" * 40, "2026-09-19T03:31:04Z",
+                            event="workflow_dispatch")
+                ]),
+                artifacts={
+                    "200": artifact_listing(
+                        [*baseline.DEFAULT_ARTIFACTS, SCOPE_ARTIFACT]
+                    )
+                },
+                root=root,
+            )
+            gh.missing_documents.add(SCOPE_ARTIFACT)
+            with self.assertRaisesRegex(ValueError, "retains every baseline"):
+                self.prepare(gh, root / "out", artifacts=baseline.DEFAULT_ARTIFACTS)
+
+    def test_default_workflow_cannot_narrow_the_required_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = FakeGh(runs=run_listing([]), artifacts={}, root=root)
+            with self.assertRaisesRegex(ValueError, "all four JUnit"):
+                self.prepare(gh, root / "out", artifacts=ARTIFACTS[:2])
+
+    def test_unknown_event_is_not_treated_as_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = FakeGh(
+                runs=run_listing([
+                    run_row("200", "b" * 40, "2026-09-19T03:31:04Z",
+                            event="push")
+                ]),
+                artifacts={
+                    "200": artifact_listing(list(baseline.DEFAULT_ARTIFACTS))
+                },
+                root=root,
+            )
+            with self.assertRaisesRegex(ValueError, "no completed"):
+                self.prepare(gh, root / "out", artifacts=baseline.DEFAULT_ARTIFACTS)
 
 
 class BaselineBaseContainmentTests(unittest.TestCase):

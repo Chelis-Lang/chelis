@@ -1,7 +1,11 @@
 """Lock daily ownership of exhaustive CI without running a Rust build."""
 import copy
+import json
+import os
 import re
 from pathlib import Path
+import subprocess
+import tempfile
 import tomllib
 import unittest
 
@@ -35,6 +39,20 @@ REF_SWITCH = re.compile(
     r"|format\('(?P<format>[^']+)', github\.run_id(?:, matrix\.(?P<axis>\w+))?\))"
     r" \}\}"
 )
+FULL_SCOPE_IF = (
+    "${{ github.event_name == 'schedule' || "
+    "(github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}"
+)
+RUNTIME_SCOPE_IF = (
+    "${{ github.event_name == 'schedule' || "
+    "(github.event_name == 'workflow_dispatch' && "
+    "(inputs.validation_scope == 'all' || "
+    "inputs.validation_scope == 'runtime-representation')) }}"
+)
+FULL_SCOPE_PREDICATE = (
+    "(github.event_name == 'schedule' || "
+    "(github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all'))"
+)
 
 
 def assert_complete_hash_partition(test, job, command):
@@ -59,12 +77,33 @@ def assert_complete_hash_partition(test, job, command):
 
 
 def assert_extended(test, pr, nightly):
-    test.assertEqual(nightly[True], {"schedule": [{"cron": "17 3 * * *"}], "workflow_dispatch": None})
+    test.assertEqual(
+        nightly[True],
+        {
+            "schedule": [{"cron": "17 3 * * *"}],
+            "workflow_dispatch": {
+                "inputs": {
+                    "validation_scope": {
+                        "description": "Extended validation scope",
+                        "required": True,
+                        "default": "all",
+                        "type": "choice",
+                        "options": ["all", "runtime-representation"],
+                    }
+                }
+            },
+        },
+    )
     jobs = nightly["jobs"]
     for name, command in MOVED.items():
         test.assertNotIn(name, pr["jobs"])
         job = jobs[name]
-        test.assertNotIn("if", job)
+        test.assertEqual(
+            job.get("if"),
+            RUNTIME_SCOPE_IF
+            if name == "runtime-representation-phase0-oracle"
+            else FULL_SCOPE_IF,
+        )
         test.assertFalse(job.get("continue-on-error", False))
         execution_budget = (
             120
@@ -115,7 +154,7 @@ def assert_extended(test, pr, nightly):
         test.assertFalse(steps[0].get("continue-on-error", False))
     for name in ("full-workspace", "script-nightly", "integration-support", "backend-sanitizers-full"):
         job = jobs[name]
-        test.assertNotIn("if", job)
+        test.assertEqual(job.get("if"), FULL_SCOPE_IF)
         test.assertFalse(job.get("continue-on-error", False))
         for step in job["steps"]:
             if step.get("run", "").startswith(("cargo ", "chelis-gate")):
@@ -187,7 +226,7 @@ def assert_extended(test, pr, nightly):
     # job report a shortfall again, and that is what this rejects.
     extents = jobs["runtime-extent-oracle"]
     test.assertNotIn("runtime-extent-oracle", pr["jobs"])
-    test.assertNotIn("if", extents)
+    test.assertEqual(extents.get("if"), FULL_SCOPE_IF)
     test.assertFalse(extents.get("continue-on-error", False))
     test.assertEqual(extents["timeout-minutes"], 115)
     extent_commands = [step.get("run") or "" for step in extents["steps"]]
@@ -217,6 +256,7 @@ def assert_extended(test, pr, nightly):
         set(report["needs"]),
         set(MOVED)
         | {
+            "dispatch-scope",
             "full-workspace",
             "script-nightly",
             "integration-support",
@@ -224,8 +264,83 @@ def assert_extended(test, pr, nightly):
             "runtime-extent-oracle",
         },
     )
-    test.assertIn("always()", report["if"])
+    test.assertEqual(
+        report["if"],
+        f"always() && github.ref == 'refs/heads/main' && {FULL_SCOPE_PREDICATE}",
+    )
     test.assertEqual(report["steps"][0]["env"]["RESULTS"], "${{ toJSON(needs) }}")
+    test.assertEqual(
+        jobs["generalize-sweep-oracle"]["if"],
+        f"${{{{ always() && {FULL_SCOPE_PREDICATE} }}}}",
+    )
+    test.assertEqual(
+        jobs["test-telemetry"]["if"],
+        "${{ !cancelled() && "
+        "needs.full-workspace.result == 'success' && "
+        "needs.dtype-phase3-oracle.result == 'success' && "
+        "needs.generalize-sweep-oracle-shard.result == 'success' && "
+        f"{FULL_SCOPE_PREDICATE} }}}}",
+    )
+
+
+def assert_dispatch_scopes(test, nightly):
+    """Lock the selected jobs, including matrix legs and aggregate jobs."""
+    jobs = nightly["jobs"]
+    full_jobs = {
+        "full-workspace",
+        "script-nightly",
+        "dtype-phase3-oracle",
+        "faithful-observation-phase2-oracle",
+        "compiled-value-ownership-phase0-oracle",
+        "runtime-representation-phase0-oracle",
+        "runtime-extent-oracle",
+        "generalize-sweep-oracle-shard",
+        "generalize-sweep-oracle",
+        "integration-support",
+        "backend-sanitizers-full",
+        "test-telemetry",
+        "report",
+    }
+    test.assertEqual(set(jobs), full_jobs | {"dispatch-scope"})
+    for name in full_jobs - {
+        "runtime-representation-phase0-oracle",
+        "generalize-sweep-oracle",
+        "test-telemetry",
+        "report",
+    }:
+        test.assertEqual(jobs[name].get("if"), FULL_SCOPE_IF, name)
+    test.assertEqual(
+        jobs["runtime-representation-phase0-oracle"].get("if"),
+        RUNTIME_SCOPE_IF,
+    )
+    receipt = jobs["dispatch-scope"]
+    test.assertEqual(receipt.get("if"), "${{ github.event_name == 'workflow_dispatch' }}")
+    test.assertEqual(receipt["runs-on"], "ubuntu-latest")
+    test.assertFalse(receipt.get("continue-on-error", False))
+    test.assertEqual(
+        [
+            step["with"]["name"]
+            for step in receipt["steps"]
+            if step.get("uses", "").startswith("actions/upload-artifact@")
+        ],
+        ["linux-extended-dispatch-scope"],
+    )
+    test.assertEqual(
+        receipt["steps"][0]["env"],
+        {
+            "VALIDATION_SCOPE": "${{ inputs.validation_scope }}",
+            "RECEIPT_RUN_ID": "${{ github.run_id }}",
+            "RECEIPT_HEAD_SHA": "${{ github.sha }}",
+        },
+    )
+    test.assertIn("scope.json", receipt["steps"][0]["run"])
+
+    def legs(names):
+        return sum(len(matrix_legs(jobs[name])) for name in names)
+
+    test.assertEqual(legs(full_jobs - {"report"}), 19)
+    test.assertEqual(legs(full_jobs), 20)
+    test.assertEqual(legs({"runtime-representation-phase0-oracle", "dispatch-scope"}), 2)
 
 
 def matrix_legs(job):
@@ -347,6 +462,53 @@ class ExtendedCadenceTests(unittest.TestCase):
 
     def test_extended_coverage_is_daily_and_explicit(self):
         assert_extended(self, self.pr, self.nightly)
+
+    def test_schedule_all_and_scoped_dispatch_job_selection(self):
+        assert_dispatch_scopes(self, self.nightly)
+
+    def test_dispatch_receipt_step_records_the_exact_scope_run_and_head(self):
+        step = self.nightly["jobs"]["dispatch-scope"]["steps"][0]
+        for scope in ("all", "runtime-representation", "unexpected"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as tmp:
+                completed = subprocess.run(
+                    ["bash", "-e", "-c", step["run"]],
+                    cwd=tmp,
+                    env={
+                        **os.environ,
+                        "VALIDATION_SCOPE": scope,
+                        "RECEIPT_RUN_ID": "2700",
+                        "RECEIPT_HEAD_SHA": "a" * 40,
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                document = Path(tmp) / "target/dispatch-scope/scope.json"
+                if scope == "unexpected":
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertFalse(document.exists())
+                    continue
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(
+                    json.loads(document.read_text()),
+                    {
+                        "version": 1,
+                        "event": "workflow_dispatch",
+                        "scope": scope,
+                        "run_id": "2700",
+                        "head_sha": "a" * 40,
+                    },
+                )
+
+    def test_report_tolerates_only_the_scheduled_absent_receipt(self):
+        report = self.nightly["jobs"]["report"]
+        script = report["steps"][0]["with"]["script"]
+        self.assertIn(
+            "name === 'dispatch-scope' && context.eventName === 'schedule'",
+            script,
+        )
+        self.assertIn("job.result === 'skipped'", script)
+        self.assertIn("job.result === 'success'", script)
 
     def test_missing_skipped_or_nonblocking_oracle_is_rejected(self):
         for name in MOVED:
