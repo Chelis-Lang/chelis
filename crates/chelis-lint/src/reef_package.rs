@@ -36,25 +36,20 @@ struct ManifestPackage {
     additional_sources: Vec<String>,
 }
 
-/// Read a `reef.toml`'s layout, or `None` when it is not a manifest reef could
-/// build a package from.
+/// Read a `reef.toml`'s layout, or `None` when it cannot be read as one.
 ///
-/// Declining is the conservative answer, because a layout read here decides
-/// what the traversal policy stops pruning. A manifest reef rejects must not
-/// widen the lint corpus: the package cannot build, so nothing under the roots
-/// it names is source. `additional_sources` is validated as
-/// `chelis_reef::validate_manifest` validates it, so a manifest declaring
-/// `additional_sources = [".git"]` grants nothing.
+/// This is deliberately not a manifest validator. It mirrors exactly one of
+/// reef's checks — `additional_sources`, because those values name directories
+/// the traversal policy will stop pruning, so a value reef rejects must not
+/// widen the lint corpus. Everything else reef validates (`name`, `version`,
+/// the compiler pin, schema selection, dependencies) is not checked here, so a
+/// manifest that fails those can still yield a layout. Mirroring them would
+/// make this a second manifest parser, which is the drift this module exists
+/// to avoid.
+///
+/// Whether a manifest is allowed to speak for the lint at all is a traversal
+/// question, not a parsing one: see `inside_package_source_root`.
 pub fn read_layout(manifest: &Path) -> Option<PackageLayout> {
-    // Governance follows the link path, not only the resolved target (§12.2).
-    // A symlinked `reef.toml` can name a file outside the lint's policy root,
-    // and a manifest there must not decide what the lint walks.
-    if std::fs::symlink_metadata(manifest)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(true)
-    {
-        return None;
-    }
     let text = std::fs::read_to_string(manifest).ok()?;
     let parsed: ManifestFile = toml::from_str(&text).ok()?;
     let package = parsed.package?;
@@ -96,11 +91,26 @@ fn is_valid_additional_source(entry: &str) -> bool {
 /// cannot change what the lint walks (§12.2: machine-local ancestors above the
 /// policy root cannot grant lint exceptions). The innermost package wins, as
 /// it does for the rule.
-pub fn inside_package_source_root(path: &Path, boundary: &Path) -> bool {
+///
+/// `admit_manifest` decides whether a located `reef.toml` may speak for the
+/// lint. The traversal policy owns that question and passes its own
+/// `is_admitted_ancillary`, which is the same admission
+/// `reef-module-identity` applies to the same file. One reader and one
+/// admission rule: an earlier version declined every symlinked manifest here
+/// instead, which refused the internal links §12.2 explicitly admits
+/// ("internal links to admitted regular files remain visible") and which the
+/// reef loader follows, so the lint went silent on a package that does not
+/// build.
+pub fn inside_package_source_root(
+    path: &Path,
+    boundary: &Path,
+    admit_manifest: &dyn Fn(&Path) -> bool,
+) -> bool {
     let mut cursor = path.parent();
     while let Some(directory) = cursor {
         let manifest = directory.join("reef.toml");
         if manifest.is_file()
+            && admit_manifest(&manifest)
             && let Some(layout) = read_layout(&manifest)
             && let Ok(relative) = path.strip_prefix(directory)
             && let Some(first) = relative.components().next()
@@ -121,6 +131,12 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+
+    /// Admit every manifest: these unit tests exercise the layout and climb
+    /// rules, not the policy's admission, which has its own tests.
+    const ADMIT_ALL: fn(&Path) -> bool = |_| true;
+    /// Refuse every manifest, to prove admission is load-bearing here.
+    const REFUSE_ALL: fn(&Path) -> bool = |_| false;
 
     fn pkg(root: &Path, extra: &str) -> PathBuf {
         fs::create_dir_all(root.join("src")).expect("mkdir");
@@ -176,11 +192,13 @@ mod tests {
         let root = pkg(tmp.path(), "");
         assert!(inside_package_source_root(
             &root.join("src/target/x.ch"),
-            &root
+            &root,
+            &ADMIT_ALL
         ));
         assert!(inside_package_source_root(
             &root.join("src/a/b/x.ch"),
-            &root
+            &root,
+            &ADMIT_ALL
         ));
     }
 
@@ -190,11 +208,13 @@ mod tests {
         let root = pkg(tmp.path(), "");
         assert!(!inside_package_source_root(
             &root.join("target/x.ch"),
-            &root
+            &root,
+            &ADMIT_ALL
         ));
         assert!(!inside_package_source_root(
             &root.join("docs/target/x.ch"),
-            &root
+            &root,
+            &ADMIT_ALL
         ));
     }
 
@@ -203,7 +223,11 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         std::fs::create_dir_all(root.join("src")).expect("mkdir");
-        assert!(!inside_package_source_root(&root.join("src/x.ch"), root));
+        assert!(!inside_package_source_root(
+            &root.join("src/x.ch"),
+            root,
+            &ADMIT_ALL
+        ));
     }
 
     #[test]
@@ -223,7 +247,7 @@ mod tests {
         let boundary = outer.join("src");
         fs::create_dir_all(boundary.join("src")).expect("mkdir");
         assert!(
-            !inside_package_source_root(&boundary.join("src/x.ch"), &boundary),
+            !inside_package_source_root(&boundary.join("src/x.ch"), &boundary, &ADMIT_ALL),
             "a manifest above the policy root must not grant a lint exception"
         );
     }
@@ -236,6 +260,9 @@ mod tests {
             "additional_sources = [\"..\"]\n",
             "additional_sources = [\"src\"]\n",
             "additional_sources = [\"p\", \"p\"]\n",
+            "additional_sources = [\"tests\"]\n",
+            "additional_sources = [\"\"]\n",
+            "additional_sources = [\"   \"]\n",
         ] {
             let tmp = tempfile::tempdir().expect("tempdir");
             let root = pkg(tmp.path(), bad);
@@ -247,20 +274,38 @@ mod tests {
     }
 
     #[test]
-    fn declines_a_symlinked_manifest() {
+    fn a_symlinked_manifest_is_read_and_admission_is_the_callers_call() {
+        // An earlier version declined every symlinked `reef.toml` here. That
+        // refused the internal links §12.2 explicitly admits ("internal links
+        // to admitted regular files remain visible") and that the reef loader
+        // follows, so `chelis lint --check` went silent on a package
+        // `chelis reef build` rejects -- reintroducing the very false green
+        // this change exists to remove. Reading is unconditional; whether a
+        // manifest may speak for the lint belongs to the traversal policy,
+        // which applies the same admission to it as `reef-module-identity`.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let outside = tmp.path().join("outside");
-        fs::create_dir_all(&outside).expect("mkdir");
+        let root = tmp.path().join("pkg");
+        fs::create_dir_all(root.join("src")).expect("mkdir");
+        fs::create_dir_all(root.join("shared")).expect("mkdir");
         fs::write(
-            outside.join("manifest.toml"),
+            root.join("shared/pkg.toml"),
             "[package]\nname = \"d\"\nversion = \"0.1.0\"\nmodule_prefix = \"Demo\"\n",
         )
         .expect("write");
-        let root = tmp.path().join("pkg");
-        fs::create_dir_all(root.join("src")).expect("mkdir");
-        std::os::unix::fs::symlink(outside.join("manifest.toml"), root.join("reef.toml"))
+        std::os::unix::fs::symlink(root.join("shared/pkg.toml"), root.join("reef.toml"))
             .expect("symlink");
-        assert!(read_layout(&root.join("reef.toml")).is_none());
-        assert!(!inside_package_source_root(&root.join("src/x.ch"), &root));
+
+        assert!(
+            read_layout(&root.join("reef.toml")).is_some(),
+            "an internal symlinked manifest is still a manifest"
+        );
+        assert!(
+            inside_package_source_root(&root.join("src/target/x.ch"), &root, &ADMIT_ALL),
+            "an admitted symlinked manifest grants its source roots"
+        );
+        assert!(
+            !inside_package_source_root(&root.join("src/target/x.ch"), &root, &REFUSE_ALL),
+            "a manifest the caller refuses grants nothing"
+        );
     }
 }

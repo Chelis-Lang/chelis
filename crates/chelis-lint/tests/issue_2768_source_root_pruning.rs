@@ -125,6 +125,67 @@ fn still_prunes_an_excluded_directory_where_no_package_exists() {
     );
 }
 
+// --- a manifest's admission, not its file kind, decides whether it speaks ---
+
+#[test]
+fn an_internally_symlinked_manifest_still_governs_its_package() {
+    // Round-2 P1. A first attempt at closing the admission asymmetry declined
+    // every symlinked `reef.toml`. That refused the internal links §12.2
+    // admits and that `chelis reef build` follows, so `chelis lint --check`
+    // exited 0 on a package the loader rejects -- the false green this whole
+    // change exists to remove, reintroduced by the repair.
+    //
+    // The violating file sits in an ORDINARY `src/`, so pruning is not
+    // involved: this is purely about whether the manifest is read.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("shared")).expect("mkdir");
+    write(
+        &root.join("shared/pkg.toml"),
+        "[package]\nname = \"ub10\"\nversion = \"0.1.0\"\ncompiler = \"=0.18.11\"\nmodule_prefix = \"Ub10\"\n",
+    );
+    std::os::unix::fs::symlink(root.join("shared/pkg.toml"), root.join("reef.toml"))
+        .expect("symlink");
+    write(
+        &root.join("src/bad.ch"),
+        "module Totally.Wrong\ndef v(x: i32) -> i32 = x\n",
+    );
+
+    let found = identity_violations(root);
+    assert_eq!(
+        found.len(),
+        1,
+        "an internal symlinked manifest governs its package; got {found:?}"
+    );
+}
+
+#[test]
+fn an_internally_symlinked_manifest_also_grants_its_source_roots() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("shared")).expect("mkdir");
+    write(
+        &root.join("shared/pkg.toml"),
+        "[package]\nname = \"ub10\"\nversion = \"0.1.0\"\ncompiler = \"=0.18.11\"\nmodule_prefix = \"Ub10\"\n",
+    );
+    std::os::unix::fs::symlink(root.join("shared/pkg.toml"), root.join("reef.toml"))
+        .expect("symlink");
+    write(
+        &root.join("src/data.ch"),
+        "module Ub10.Data\ndef value(x: i32) -> i32 = x\n",
+    );
+    write(
+        &root.join("src/target/x.ch"),
+        "module Totally.Wrong\ndef v(x: i32) -> i32 = x\n",
+    );
+
+    assert_eq!(
+        identity_violations(root).len(),
+        1,
+        "the exemption applies from a symlinked manifest too"
+    );
+}
+
 // --- repository policy still prunes inside a source root ---
 
 #[test]

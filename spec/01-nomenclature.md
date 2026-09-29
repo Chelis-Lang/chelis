@@ -1357,8 +1357,13 @@ should not be part of the editable lint corpus. They must not be added merely
 to hide current violations.
 
 A reef package's declared source roots are outside the shipped baseline's
-reach. The baseline names directories that are infrastructure, build output
-or vendored dependencies in a repository at large; beneath a package's `src`
+reach whenever the package's manifest is itself within the lint's policy root.
+A manifest above that root governs nothing, by the same rule that keeps
+machine-local ancestors from granting lint exceptions, so a lint invoked at or
+below a source root prunes as it otherwise would.
+
+The baseline names directories that are infrastructure, build output or
+vendored dependencies in a repository at large; beneath a package's `src`
 or an `additional_sources` root the same names are source, because the reef
 loader reads every `.ch` file there whatever the directory is called. Pruning
 one would make the lint disagree with the build about which files the package

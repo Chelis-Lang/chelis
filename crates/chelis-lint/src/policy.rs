@@ -240,7 +240,9 @@ impl TraversalPolicy {
                 Some(relative) => self.scope_root.join(relative),
                 None => path.to_path_buf(),
             };
-            if crate::reef_package::inside_package_source_root(&absolute, &self.scope_root) {
+            let admit = |manifest: &Path| self.is_admitted_ancillary(manifest, false);
+            if crate::reef_package::inside_package_source_root(&absolute, &self.scope_root, &admit)
+            {
                 return false;
             }
         }
