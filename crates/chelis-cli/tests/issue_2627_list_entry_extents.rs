@@ -164,6 +164,22 @@ fn indirect_callable_checks_nested_lists() {
 }
 
 #[test]
+fn inline_map_callback_checks_its_named_list_formal() {
+    assert_both_trap(
+        "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+         def outer[n](xss: List[List[tensor[*, f32]]]) -> List[i64] = map(fn (xs: List[tensor[n, f32]]) -> len(xs), xss)\n\
+         out = outer([[hidden(to_tensor([1.0, 2.0])), hidden(to_tensor([3.0, 4.0, 5.0]))]])\n",
+        "extent `n`: xs[0] axis 0 = 2, xs[1] axis 0 = 3",
+    );
+    assert_both_value(
+        "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+         def outer[n](xss: List[List[tensor[*, f32]]]) -> List[i64] = map(fn (xs: List[tensor[n, f32]]) -> len(xs), xss)\n\
+         out = outer([[hidden(to_tensor([1.0, 2.0])), hidden(to_tensor([3.0, 4.0]))]])\n",
+        "out = [2]",
+    );
+}
+
+#[test]
 fn agreeing_and_empty_lists_execute_without_inventing_a_witness() {
     assert_both_value(
         "def f[n](xs: List[tensor[n, f32]]) -> tensor[n, f32] = index(xs, 1i64)\n\

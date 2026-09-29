@@ -4015,23 +4015,10 @@ struct HostDefSignature {
 /// drops List parameters that the body does not read, even though their
 /// elements may witness a named result axis.
 fn has_named_list_entry(signature: &HostDefSignature) -> bool {
-    fn named_tensor_in_list(ty: &HostTypeTerm) -> bool {
-        match ty {
-            HostTypeTerm::List(item) => match item.as_ref() {
-                HostTypeTerm::List(_) => named_tensor_in_list(item),
-                HostTypeTerm::Tensor(tensor) => tensor
-                    .dims
-                    .iter()
-                    .any(|dim| matches!(dim, DimInfo::Named(name, _) if name != "*")),
-                _ => false,
-            },
-            _ => false,
-        }
-    }
     signature
         .params
         .iter()
-        .any(|param| named_tensor_in_list(&param.ty))
+        .any(|param| named_list_tensor(&param.ty))
 }
 
 /// The kernel-or-host decision for one def body, made before lowering.
@@ -15799,30 +15786,40 @@ fn lower_host_callback(
             let mut body = lower_host_expr(body_expr, program, &callback_scope, tensor_helpers)?;
             // Actualized callback types choose representation; the authored
             // parameter still supplies the obligation checked at invocation.
-            let plan = SignatureEntryPlan::new(
-                params_list.children_slice().iter().zip(&params).filter_map(
-                    |(declaration, param)| {
-                        let declared = param_host_type(declaration)
-                            .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_)))
-                            .unwrap_or_else(|| param.ty.clone());
-                        let HostTypeTerm::Tensor(ty) = declared else {
-                            return None;
-                        };
-                        Some(HostTensorInput {
+            // Both inline and retained callbacks use SignatureEntry so List
+            // observations reach the same invocation-local C check.
+            let mut inputs = Vec::new();
+            let mut args = Vec::new();
+            let mut positions = Vec::new();
+            let mut lists = Vec::new();
+            for (position, (declaration, param)) in
+                params_list.children_slice().iter().zip(&params).enumerate()
+            {
+                let declared = param_host_type(declaration)
+                    .map(|ty| expand_host_type_aliases(program, ty))
+                    .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_) | HostTypeTerm::List(_)))
+                    .unwrap_or_else(|| param.ty.clone());
+                let value = HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone()));
+                match declared {
+                    HostTypeTerm::Tensor(ty) => {
+                        inputs.push(HostTensorInput {
                             name: param.name.clone(),
                             ty,
-                        })
-                    },
-                ),
-            );
-            if !plan.guards().is_empty() {
-                let args: Vec<HostExpr> = params
-                    .iter()
-                    .filter(|param| matches!(param.ty, HostTypeTerm::Tensor(_)))
-                    .map(|param| {
-                        HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone()))
-                    })
-                    .collect();
+                        });
+                        args.push(value);
+                        positions.push(position);
+                    }
+                    ty if named_list_tensor(&ty) => lists.push(HostListEntry {
+                        position,
+                        name: param.name.clone(),
+                        ty,
+                        value,
+                    }),
+                    _ => {}
+                }
+            }
+            let plan = SignatureEntryPlan::new(inputs);
+            if !plan.guards().is_empty() || !lists.is_empty() {
                 let mut reserved = callback_scope
                     .to_sorted()
                     .into_iter()
@@ -15847,10 +15844,10 @@ fn lower_host_callback(
                         display_roots: Vec::new(),
                         ty: HostTypeTerm::Unit,
                         value: HostExpr::new(HostExprKind::SignatureEntry {
-                            positions: (0..args.len()).collect(),
+                            positions,
                             plan,
                             args,
-                            lists: Vec::new(),
+                            lists,
                         }),
                     }],
                     body: Box::new(body),
