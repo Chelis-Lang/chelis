@@ -636,6 +636,7 @@ pub(super) fn link_group_references(
     }
     if errors.iter_since(component_checkpoint).next().is_some() {
         product.group_result_origins.clear();
+        product.group_links_completed();
         return;
     }
     let mut canonical_origin = None;
@@ -749,6 +750,7 @@ pub(super) fn link_group_references(
             });
         }
     }
+    product.group_links_completed();
 }
 
 /// Identify each of a sibling reference's copies with the variable it copies.

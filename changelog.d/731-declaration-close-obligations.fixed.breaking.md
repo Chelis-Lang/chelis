@@ -168,20 +168,3 @@ completes.
   with the member's type is reported at that use, naming both types
   ([04-INF-2]), with the kind of the mismatch; `main` reported it at the use
   in some declaration orders and with no location in others.
-- Now rejected in every declaration order, with a typed not-yet-supported
-  diagnostic citing [#2651](https://github.com/Chelis-Lang/chelis/issues/2651):
-  a `vmap` whose mapped function has a parameter or result, directly or inside
-  a tuple or reference type, whose type a member of the enclosing recursive group has yet to
-  determine, however the function reaches `vmap`: a sibling that writes no
-  signature or omits a type, a lambda that calls one, such as
-  `vmap(fn (row: tensor[3, f32]) -> f(row, 0i32))` inside `g` where
-  `def f(x, n)` is a sibling, or a `let` binding of either. `vmap` decides
-  which parameters and result it batches before the group has determined
-  `f`'s types. `main` checked such a program as `f32` when `g`'s body adds
-  `1.0f32` to the mapped result, although `eval` returns a tensor: with `g`
-  declared first, and in every order when `f` omits only its result, as in
-  `def f(x: tensor[3, f32], n: i32)`. It rejected the others with unrelated
-  diagnostics. The diagnostic names the member, and writing its full
-  signature makes the same programs check in every order. A lambda that calls
-  such a member but whose parameters and result do not depend on it is not
-  rejected.

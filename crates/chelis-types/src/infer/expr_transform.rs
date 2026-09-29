@@ -4,7 +4,6 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
-use crate::unsupported::{SpanRef, Stage, Unsupported, UnsupportedKind};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_grad(
@@ -576,10 +575,26 @@ pub(super) fn infer_vmap(
 
     let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
-    if let Some(member) = vmap_batches_a_group_variable(&f_ty, subst, product) {
-        return report(errors, vmap_group_member_fence(node, member));
-    }
     let resolved = subst.apply(&f_ty);
+    if vmap_needs_batched_type(&resolved) {
+        let batch_var = vg.fresh_dvar();
+        subst.mark_mapped_axis(batch_var, axis);
+        let group_owned = vmap_batches_a_group_variable(&f_ty, subst, product).is_some()
+            || matches!(&resolved, Type::Var(_))
+                && product.group_variable_owner(&resolved, subst).is_some();
+        let published = vmap_provisional_type(&resolved, vg);
+        product.defer_shape_check(
+            DeferredShapeRule::Derivation(TypeDerivation::Vmap {
+                axis,
+                batch_var,
+                group_owned,
+            }),
+            Vec::new(),
+            vec![f_ty],
+            published.clone(),
+        );
+        return published;
+    }
 
     match resolved {
         Type::Fn(args, ret) => {
@@ -634,14 +649,46 @@ pub(super) fn infer_vmap(
     }
 }
 
-/// chelis#2651: the recursive-group member whose types the group has yet to
-/// determine and that a position `vmap` batches stands for: a parameter or
-/// the result of the mapped function type `f_ty`, through a reference or a
-/// tuple, that is a type variable the group's completion links
-/// ([`InferenceProduct::group_variable_owner`]). `vmap` decides whether it
-/// batches such a position where it is inferred, and passes a variable
-/// through unbatched; the group's completion can then make it a tensor or a
-/// scalar that should have been batched.
+/// The caller registers this provisional type with the deferred `vmap` rule
+/// before publishing it to an application.
+fn vmap_provisional_type(source: &Type, vg: &mut VarGen) -> Type {
+    match source {
+        Type::Fn(args, _) => Type::Fn(
+            args.iter()
+                .map(|arg| match arg {
+                    // Publish the known borrow before an application can
+                    // bind this parameter. Ordinary calls auto-borrow an
+                    // owned actual only when the formal is already Ref.
+                    Type::Ref(_) => Type::Ref(Box::new(vg.fresh_type())),
+                    _ => vg.fresh_type(),
+                })
+                .collect(),
+            Box::new(vg.fresh_type()),
+        ),
+        Type::Var(_) => vg.fresh_type(),
+        _ => unreachable!("only function and variable types defer vmap"),
+    }
+}
+
+fn vmap_needs_batched_type(ty: &Type) -> bool {
+    match ty {
+        Type::Fn(args, ret) => args.iter().any(vmap_unknown_position) || vmap_unknown_position(ret),
+        Type::Var(_) => true,
+        _ => false,
+    }
+}
+
+fn vmap_unknown_position(ty: &Type) -> bool {
+    match ty {
+        Type::Var(_) => true,
+        Type::Ref(inner) => vmap_unknown_position(inner),
+        Type::Tuple(elements) => elements.iter().any(vmap_unknown_position),
+        _ => false,
+    }
+}
+
+/// A group-owned variable must wait for the member's body and the group's
+/// links before an application of the mapped function can constrain it.
 fn vmap_batches_a_group_variable<'a>(
     f_ty: &Type,
     subst: &Subst,
@@ -663,41 +710,6 @@ fn vmap_batches_a_group_variable<'a>(
     args.iter()
         .chain(std::iter::once(ret.as_ref()))
         .find_map(|position| owner(position, subst, product))
-}
-
-/// chelis#2651: `vmap` decides which parameters and result it batches from
-/// the mapped function's type where it is inferred. Inside a recursive group,
-/// a reference to a sibling is typed at a copy of the sibling's type that the
-/// group links when it completes, so a position `vmap` batches can still be a
-/// variable that the group then determines. Deciding the batching once the
-/// group completes is not implemented, so the case is rejected. A body sees
-/// such a variable unbound in every declaration order
-/// (`group_link::sibling_instance`), so the rejection is the same in every
-/// order, whatever binding the function reached the operand through.
-fn vmap_group_member_fence(node: &DeepNode, member: &str) -> CheckError {
-    let unsupported = Unsupported::new(
-        UnsupportedKind::Construct(format!(
-            "`vmap` over a function whose type the recursive-group member `{member}` has yet \
-             to determine"
-        )),
-        "the batching decision, made before the group determines that member's types",
-        Stage::Checker,
-        crate::unimplemented_rejection!(
-            2651,
-            "write the full signature of the recursive-group member that the mapped function's \
-             parameter or result type depends on; `vmap` over a type its group has yet to \
-             determine is not implemented"
-        ),
-    )
-    .with_span(SpanRef {
-        offset: None,
-        len: None,
-        span_id: node_span_id(node).map(str::to_owned),
-    })
-    .with_supported_alternative(format!(
-        "write `{member}`'s full signature, with every parameter and result type"
-    ));
-    CheckError::from_unsupported(unsupported)
 }
 
 fn vmap_transform_dims(
