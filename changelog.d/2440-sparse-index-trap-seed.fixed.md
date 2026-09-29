@@ -8,7 +8,7 @@ run-time check class, which the one seed predicate reads, and each member is
 pinned individually against reclassification.
 
 The same §5.2 also says a node whose activation is false checks nothing, and
-this is the one checking class with no activation gate in any lane. An
+this is the only seeded class the lanes do not gate. An
 activated sparse node is therefore left to ordinary value reachability rather
 than seeded: seeding it would make a discarded out-of-bounds index in an
 untaken `if` arm abort a correct program. Closing that half needs an
@@ -20,7 +20,8 @@ Retaining a sparse node also makes the value declaration holding it
 re-lowered at each reference rather than shared, which §5.2 requires of a
 declaration whose initializer can trap. Results are unchanged and the public C
 declaration is unchanged, but emitted C grows for a program that references
-such a value repeatedly.
+such a value repeatedly — measured at 27% on a six-line program holding one
+gather referenced five times.
 
 The checker rejects an out-of-range literal index only when the base tensor is
 also a literal, so a provably in-range index is retained too and its plan is
