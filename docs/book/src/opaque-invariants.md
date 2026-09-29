@@ -9,11 +9,10 @@ invariant (it stays solver-free), but `chelis prove` turns the invariant
 into machine-discharged proof obligations: for every way the module can
 produce a value of the type, it proves the invariant holds.
 
-This chapter teaches the end-to-end workflow against the executable example
+This chapter explains the workflow through the executable example
 [`examples/opaque_invariants.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/opaque_invariants.ch).
-Read [the design record](https://github.com/Chelis-Lang/chelis/blob/main/spec/design/opaque_invariants_rfc.md)
-for the full contract and the soundness argument; this page is the user's
-guide to what shipped.
+The [type-system specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md)
+defines the language rules.
 
 ## The workflow at a glance
 
@@ -42,7 +41,7 @@ Rules to know:
 - The enclosing `module` must be **named**. `@opaque` outside a named
   module is a declaration error (an unnamed top-level scope would make the
   enforcement boundary ambiguous across combined sources).
-- The representation is the existing single-record-variant ADT form.
+- The representation uses a single-record-variant ADT.
 - `@invariant` is optional, takes exactly one binder, and must sit between
   `@opaque` and `type`. A bare `@invariant` without `@opaque` is an error:
   assumption injection would be unsound for a forgeable type.
@@ -130,7 +129,7 @@ literal byte-diff against this page will differ in field order only:
 Reading the obligation record:
 
 - `name` is `invariant:<Type>:<producer>`.
-- `obligation_kind` is `"invariant_producer"` in V1.
+- `obligation_kind` is `"invariant_producer"`.
 - `source_type` is the opaque type; `producer` is the exported def.
 - `proof_tier` is `"smt"` (the obligation lowered to the SMT solver) or
   `"fuzz"` (validated sampling). The three `Probability` producers here all
@@ -163,7 +162,7 @@ def bad_prob(x: f32) -> Option[Probability] =
 The input `2.0` satisfies `x >= 0.0` but produces a `Probability` whose
 value exceeds `1.0`. `prove` exits `1`.
 
-### Covered-or-rejected
+### Every producer is checked
 
 The producer set is computed from checker-**inferred** return types, so an
 unannotated exported def cannot escape it. A producer that returns the type
@@ -246,36 +245,33 @@ def make_simplex(a: f32, b: f32, c: f32) -> Simplex =
   }
 ```
 
-This is the
+The matching source file is
 [`examples/opaque_invariants_simplex.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/opaque_invariants_simplex.ch)
-companion. It checks and proves clean and is executable: the invariant
+. It is an executable example: the invariant
 predicate (including the `sum`-over-a-tensor-field form) is declaration
 metadata consumed only by `chelis prove`; it is never lowered to runtime IR,
-so the file `eval`/`build`s cleanly. Like `Probability` it is
-library-only-executable — it declares types and exported producers but has
-no top-level work to run.
+so it does not affect runtime evaluation or compilation. Its top-level `eps`
+definition supplies the tolerance used by the invariant; `chelis eval` and
+`chelis build` process that definition normally.
 
-Two things are worth seeing here:
+The example shows two useful details:
 
-- `make_simplex`'s producer obligation discharges at **Tier C**
+- The `make_simplex` producer obligation discharges through validated sampling
   (`proof_tier:"fuzz"`): its body divides by a running sum, which does not
-  reduce to a closed-form SMT query, so it is checked by validated
-  sampling. Tier C records carry no `arith_model` field.
+  reduce to a closed-form SMT query. Sampling records do not include an
+  `arith_model` field.
 - A `@property` quantifying over a `Simplex` binder is verified only over
   invariant-satisfying values. The tolerance band is measure-near-zero
-  under independent component sampling, so naive rejection sampling would
-  starve; instead the generator falls back to **constructor-based
-  generation**, evaluating `make_simplex` on sampled raw inputs. Every
-  generated sample is still predicate-validated before acceptance. This is
-  why the example's `forall(p: Simplex)` property generates without
-  starving.
+  under independent component sampling. The generator uses
+  **constructor-based generation** and evaluates `make_simplex` on sampled
+  inputs. It checks every generated value against the invariant before
+  accepting it, so the `forall(p: Simplex)` property receives valid samples.
 
-The documented idiom for a "sums to one" constraint is exactly this
-tolerance band over a module constant. An exact `sum(p.weights) == 1.0`
-would starve by design: validation is strict (no epsilon), and a correct
-normalizing producer still emits sums merely *near* the target in floating
-point. The starvation diagnostic for an equality-shaped predicate names
-Tier B (real semantics) as the only verification route.
+Use a tolerance band over a module constant for a "sums to one" constraint.
+An exact `sum(p.weights) == 1.0` does not work with sampled float values:
+validation is strict, and a normalizing producer emits sums that are near the
+target in floating point. An equality-shaped predicate needs a proof over the
+real-number model when that property can be expressed for the SMT solver.
 
 ## What this feature does NOT do
 
@@ -300,15 +296,14 @@ your own `@property` territory.
 **SMT-tier proofs are over the reals, not floats.** A
 `proof_tier:"smt"` obligation is discharged by the solver over the **reals**
 while runtime arithmetic is IEEE floating-point. Such records carry
-`arith_model:"real"`. No float-level soundness is claimed from a Tier B
-proof. Admission policies that cite the composed guarantee must quote this
-gap rather than rediscover it.
+`arith_model:"real"`. This record describes a proof over real-number
+arithmetic; it does not certify IEEE floating-point behavior. State this
+limitation when relying on the proof.
 
 **Argument egress is trusted, not obligated.** Producer obligations cover
 every value of the type *returned* across the module boundary. But a value
 the defining module passes *outward as a call argument* to an out-of-module
-callee is not mechanically obligated. The design record states the caveat
-in its quotable form:
+callee is not mechanically obligated. The rule is:
 
 > Producer obligations mechanically cover every value of the type
 > returned across the module boundary. Values of the type — and function
@@ -327,7 +322,7 @@ which is what owns transitive flows.
 
 **Tooling output discloses representation contents.** When `chelis eval`
 actually reduces an opaque value to a result it prints the constructor and
-its fields, and Tier C counterexamples print representation values. (The
+its fields, and sampling counterexamples print representation values. (The
 library examples in this chapter have no top-level expression, so `eval`
 prints no roots; the disclosure applies to a program that evaluates an
 opaque value to a root.) This is disclosure, not a secrecy break: none of

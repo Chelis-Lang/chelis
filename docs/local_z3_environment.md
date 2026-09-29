@@ -1,80 +1,57 @@
-# Local Z3 Environment
+# Local Z3 setup
 
-The `z3` cargo feature on `chelis-prove` (WI-12 / WS-5) adds a second SMT
-discharge engine backed by Z3's nonlinear-real-arithmetic decision procedure. It
-links a **prebuilt** libz3 rather than building Z3 from source, so a usable
-libz3 must be discoverable at build and run time.
+The optional `z3` feature lets `chelis-prove` use Z3 as an SMT solver. It links
+to a prebuilt Z3 library. The default build does not compile Z3 from source, so
+CMake is not required for this setup.
 
-## Quick reference (run z3-feature tests this way)
+## Run Z3 tests
 
-Use `scripts/z3_test.py` — it finds a prebuilt `libz3.so`, sets the link +
-loader env vars, and execs the cargo command (defaulting to
-`cargo nextest run -p chelis-prove --features z3`):
+Use `scripts/z3_test.py` to find the installed library and set Cargo's linker
+and runtime search paths:
 
 ```sh
 scripts/z3_test.py
 scripts/z3_test.py -p chelis-prove --features z3 --test cross_engine_oracle
-scripts/z3_test.py --features "smt z3" --test cross_engine_oracle   # cross-engine oracle
-# Inside an active Devenv shell, replace scripts/z3_test.py with chelis-z3-test.
+scripts/z3_test.py --features "smt z3" --test cross_engine_oracle
 ```
 
-If you need the env in your own shell:
+The helper also works inside a Devenv shell as `chelis-z3-test`. To print the
+environment settings without running Cargo:
 
 ```sh
-eval $(scripts/z3_test.py --print-env)
+scripts/z3_test.py --print-env
 ```
 
-## How the link works
+## Library names and search paths
 
-The feature pins `z3 = 0.20` / `z3-sys = 0.11` with
-`default-features = false`. That matters:
+The link library uses a different filename on each supported platform:
 
-- With default features OFF, z3-sys does **not** vendor/compile Z3 from source
-  (no cmake). Its build.rs takes the default branch, which calls
-  `pkg-config probe("z3")` (non-fatal) and adds a `-L` link-search path from the
-  `Z3_LIBRARY_PATH_OVERRIDE` env var. The actual link directive is
-  `#[link(name = "z3")]` in z3-sys's `lib.rs`, so the linker resolves `-lz3`.
-- z3-sys uses its **committed** bindings (`src/generated/functions.rs`) when the
-  `bindgen` feature is off, so no `z3.h` parsing happens at build time.
+| Platform | Link library | Runtime search path |
+|---|---|---|
+| Linux | `libz3.so` | `LD_LIBRARY_PATH` |
+| macOS | `libz3.dylib` | `DYLD_LIBRARY_PATH` |
+| Windows | `libz3.lib` or `liblibz3.dll.a` | `PATH` |
 
-So the two requirements are:
+The library directory must contain the unversioned link-library filename.
+Installing only a versioned Linux file such as `libz3.so.4` does not provide
+the link target needed by Cargo.
 
-1. **Build time:** the linker must find `libz3.so` for `-lz3`. Set
-   `Z3_LIBRARY_PATH_OVERRIDE=<dir containing libz3.so>` (build.rs turns it into a
-   `-L` search path), or have libz3 on the default linker path.
-2. **Run time:** the loader must find the shared object. Put the same dir on
-   `LD_LIBRARY_PATH`, or have libz3 on the default loader path.
+The helper searches the Python `z3-solver` package, `pkg-config`, configured
+linker and runtime paths, and common platform library locations. On macOS, it
+checks the Homebrew Z3 prefix on both Apple Silicon and Intel Macs. If Z3 is
+installed elsewhere, set
+`Z3_LIBRARY_PATH_OVERRIDE` to the directory containing the link library. The
+helper adds that directory to the platform's runtime search path while
+preserving existing entries.
 
-`-lz3` needs the **unversioned** `libz3.so` symlink, not only a versioned
-`libz3.so.4.15`.
+Linux package managers usually provide the link library through their Z3
+development package. On macOS, Homebrew installs both the command-line solver
+and the link library with `brew install z3`. On Windows, place the import
+library and its matching DLL in the configured library directory, or make the
+DLL directory available through `PATH`.
 
-## This workstation
+## CI and default builds
 
-The prebuilt libz3 ships inside the python `z3` package's site-packages:
-
-```
-~/.local/lib/python3.12/site-packages/z3/lib/libz3.so        # 4.15, unversioned symlink
-~/.local/lib/python3.12/site-packages/z3/lib/libz3.so.4.15
-```
-
-This is **not** on the default linker/loader paths, so the env vars are
-required. `scripts/z3_test.py` discovers this dir automatically (it probes `import z3`
-and globs `~/.local/lib/python3.*/site-packages/z3/lib`), so prefer the wrapper
-over setting the vars by hand. If the python z3 package is relocated or its
-python minor version changes, the glob still finds it; only an entirely
-different install location needs `Z3_LIBRARY_PATH_OVERRIDE` set explicitly.
-
-## CI
-
-In CI the prebuilt libz3 is the apt `libz3-dev` package, which installs to the
-default linker/loader paths. There `Z3_LIBRARY_PATH_OVERRIDE` and the
-`LD_LIBRARY_PATH` addition are no-ops (and `scripts/z3_test.py` prints
-"using system libz3"). The exact CI-lane recipe (apt deps + the test command)
-is owned by the workflow files, not this doc.
-
-## Default and `smt` builds are unaffected
-
-The `z3` feature is opt-in. The default build and the `smt` (cvc5) build pull no
-`z3` dependency and link no z3 symbols, so the solver-free corpus gate
-(`chelis check` links zero solver symbols) stays green. The Z3 engine is
-`#[cfg(feature = "z3")]`-gated end to end.
+Linux CI installs the Z3 development library on the system search paths, so
+the helper can use it without an override. The `z3` feature is optional:
+default builds and builds using only the `smt` feature do not link to Z3.

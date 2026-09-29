@@ -1,21 +1,16 @@
-//! Assumption injection into user-property verification (RFC D-INJECT).
+//! Property verification for binders with opaque invariants.
 //!
-//! When a `@property` binder's type is an invariant-carrying opaque type,
-//! verification assumes the invariant of that binder: Tier C generates
-//! only invariant-satisfying binder values (via the shared tiered
-//! generator, RFC D-STARVE), so a property is checked only over the values
-//! the invariant admits. Injection applies ONLY to invariant-carrying
-//! opaque binders; non-opaque and invariant-free binders are unaffected
-//! (a property that fails without injection still fails).
+//! When a `@property` binder has an opaque type with an invariant, the
+//! generator supplies values that satisfy that invariant. This lets the
+//! property run over values admitted by the opaque type. Other binders use
+//! their usual generation rules.
 //!
-//! This is the Tier C path. It desugars the module, collects the
-//! opaque-invariant registry, and for each accepted sample builds a Deep
-//! probe that binds the generated opaque records (and ordinary scalar/
-//! tensor binders) and evaluates the property body. The binder values are
-//! generated INSIDE the defining module so opaque construction is legal.
+//! The runner desugars the module and collects its opaque invariants. For
+//! each accepted sample, it builds a Deep probe that binds the generated
+//! opaque records and ordinary scalar or tensor values, then evaluates the
+//! property body. It generates opaque values inside their defining module.
 //!
-//! Gated on the `chelis-prove` optional dependency (the obligation /
-//! generation machinery lives there).
+//! This module is part of the optional `chelis-prove` dependency.
 
 use chelis_deep::Span;
 use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
@@ -70,8 +65,8 @@ fn validate_property_path(decls: &[Decl], property_path: &[usize]) -> Result<(),
     validate_property_path(decls, nested_path)
 }
 
-/// Run a user property that has an invariant-carrying opaque binder
-/// through the injection-aware Tier C path. Returns the property status.
+/// Run a user property that has an opaque binder with an invariant.
+/// Returns the property status.
 pub(super) fn prove_with_injection(
     decls: &[Decl],
     property_name: &str,
@@ -322,9 +317,8 @@ fn exhaustion_reason(attempts: usize, samples_needed: usize) -> String {
     )
 }
 
-/// Build an injection-path [`PropertyOutcome`]. All injection outcomes are
-/// Tier C (fuzz over generated invariant-valid binders) and carry
-/// `injected: true`.
+/// Build an outcome for a property checked with an invariant-valid binder.
+/// Every outcome from this path carries `injected: true`.
 fn outcome(
     name: &str,
     status: PropertyStatus,
@@ -556,13 +550,23 @@ fn resolve_constants(
                     bindings: Default::default(),
                 },
                 &[probe.to_string()],
-            ) && let [root] = result.roots.as_slice()
-                && let ExecutionValue::Tensor { value } = &root.value
-                && value.shape.is_empty()
-                && value.data.len() == 1
-            {
-                env.insert(name.clone(), value.data.element_f64_lossy(0));
-                break;
+            ) {
+                let [root] = result.roots.as_slice() else {
+                    continue;
+                };
+                let value = match &root.value {
+                    ExecutionValue::Scalar { value } => Some(value.get().as_f64_lossy()),
+                    ExecutionValue::Tensor { value }
+                        if value.shape.is_empty() && value.data.len() == 1 =>
+                    {
+                        Some(value.data.element_f64_lossy(0))
+                    }
+                    _ => None,
+                };
+                if let Some(value) = value.filter(|value| value.is_finite()) {
+                    env.insert(name.clone(), value);
+                    break;
+                }
             }
         }
     }
@@ -809,6 +813,30 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn referenced_module_float_constant_is_resolved_for_invariant_validation() {
+        let source = "module Stats.Simplex
+@opaque
+@invariant(p) sum(p.weights) >= 1.0 - eps && sum(p.weights) <= 1.0 + eps
+type Simplex =
+  | Simplex { weights: tensor[3, f32] }
+def eps() -> f32 = 0.0001
+@property generated forall(p: Simplex):
+  true
+";
+        let declarations =
+            chelis_surf::parser::parse_str(source).expect("parse the invariant module");
+        let exprs = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("desugar the invariant module");
+        let invariants = crate::opaque::collect_opaque_invariants(&exprs);
+        let constants = resolve_constants(&exprs, &invariants);
+
+        assert!(
+            (constants.get("eps").copied().unwrap_or_default() - 0.0001).abs() < 1e-8,
+            "the predicate's `eps` constant resolves before sample validation: {constants:?}"
+        );
+    }
 
     fn parsed_module_property(
         source: &str,
