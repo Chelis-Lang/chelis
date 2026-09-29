@@ -203,6 +203,60 @@ fn ignores_ch_file_outside_any_source_root() {
     assert!(found.is_empty(), "expected no violations, got {found:?}");
 }
 
+// --- agreement at the walker boundary ---
+
+#[test]
+fn ignores_a_symlinked_ch_file_because_the_loader_never_reads_it() {
+    // Measured: reef build exits 0 on this package. Its walk does not follow
+    // a symlink below the root, so the linked file is not a package module.
+    // The lint walker does follow it, so without the guard the rule reports a
+    // violation in a package that loads -- a false positive.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write(&root.join("reef.toml"), &manifest("Ub10", &[]));
+    write(&root.join("src/data.ch"), &source("Ub10.Data"));
+    write(&root.join("outside.ch"), &source("Totally.Wrong"));
+    std::os::unix::fs::symlink(root.join("outside.ch"), root.join("src/linked.ch"))
+        .expect("symlink");
+
+    let rules = chelis_lint::registry::all_rules();
+    let found: Vec<Violation> = chelis_lint::lint(root, &rules)
+        .expect("lint run")
+        .into_iter()
+        .filter(|violation| violation.rule_id == RULE)
+        .collect();
+    assert!(
+        found.is_empty(),
+        "a symlinked file is not a package module: {found:?}"
+    );
+}
+
+#[test]
+fn still_reports_a_real_file_beside_a_symlinked_one() {
+    // The guard must not become a blanket escape: a genuine violation in the
+    // same source root is still reported.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write(&root.join("reef.toml"), &manifest("Ub10", &[]));
+    write(&root.join("src/data.ch"), &source("Data"));
+    write(&root.join("outside.ch"), &source("Totally.Wrong"));
+    std::os::unix::fs::symlink(root.join("outside.ch"), root.join("src/linked.ch"))
+        .expect("symlink");
+
+    let rules = chelis_lint::registry::all_rules();
+    let found: Vec<Violation> = chelis_lint::lint(root, &rules)
+        .expect("lint run")
+        .into_iter()
+        .filter(|violation| violation.rule_id == RULE)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "expected the real violation only, got {found:?}"
+    );
+    assert!(found[0].path.ends_with("data.ch"), "{:?}", found[0].path);
+}
+
 // --- the rule blocks, which is what makes `lint --check` honest ---
 
 #[test]

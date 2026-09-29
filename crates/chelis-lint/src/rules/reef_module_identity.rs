@@ -204,6 +204,18 @@ impl Rule for ReefModuleIdentity {
         let Some(source) = ctx.source else {
             return Vec::new();
         };
+        // The loader's own walk does not follow a symlink below its root, so
+        // a symlinked `.ch` under a source root is a file the package does
+        // not contain and reef never reads. The lint walker does follow it.
+        // Judging it would flag a package the loader accepts -- a false
+        // positive, which blocks valid work and is the one failure worse
+        // than the false green this rule exists to remove.
+        if std::fs::symlink_metadata(ctx.path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Vec::new();
+        }
         let Some((context, relative)) = packages.enclosing(ctx.path) else {
             return Vec::new();
         };

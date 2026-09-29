@@ -568,10 +568,11 @@ uncompilable:
 has no discretion about it.** A file whose module identity disagrees
 with its path cannot be placed in the package's module graph at all, so
 the failure is a load-time rejection rather than a diagnostic the rest
-of the pipeline can route around. It follows that every tool reporting
-on a package's well-formedness — including the style surfaces of §12 —
-must be able to reach this verdict, and must not report success on a
-package that violates it.
+of the pipeline can route around. It follows that a tool reporting on a
+package's well-formedness must be able to reach this verdict, and must
+not report success on a package that violates it. §12's blocking lint
+gate is such a tool. `chelis fmt --check` is not: it judges one file's
+formatting and claims nothing about the package that file belongs to.
 
 ---
 
