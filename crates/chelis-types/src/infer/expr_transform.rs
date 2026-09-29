@@ -582,22 +582,7 @@ pub(super) fn infer_vmap(
         let group_owned = vmap_batches_a_group_variable(&f_ty, subst, product).is_some()
             || matches!(&resolved, Type::Var(_))
                 && product.group_variable_owner(&resolved, subst).is_some();
-        let published = match &resolved {
-            Type::Fn(args, _) => Type::Fn(
-                args.iter()
-                    .map(|arg| match arg {
-                        // Publish the known borrow before an application can
-                        // bind this parameter. Ordinary calls auto-borrow an
-                        // owned actual only when the formal is already Ref.
-                        Type::Ref(_) => Type::Ref(Box::new(vg.fresh_type())),
-                        _ => vg.fresh_type(),
-                    })
-                    .collect(),
-                Box::new(vg.fresh_type()),
-            ),
-            Type::Var(_) => vg.fresh_type(),
-            _ => unreachable!("only function and variable types defer vmap"),
-        };
+        let published = vmap_provisional_type(&resolved, vg);
         product.defer_shape_check(
             DeferredShapeRule::Derivation(TypeDerivation::Vmap {
                 axis,
@@ -661,6 +646,27 @@ pub(super) fn infer_vmap(
                 vec!["Apply `vmap` to a named function or inline lambda".to_string()],
             ),
         ),
+    }
+}
+
+/// The caller registers this provisional type with the deferred `vmap` rule
+/// before publishing it to an application.
+fn vmap_provisional_type(source: &Type, vg: &mut VarGen) -> Type {
+    match source {
+        Type::Fn(args, _) => Type::Fn(
+            args.iter()
+                .map(|arg| match arg {
+                    // Publish the known borrow before an application can
+                    // bind this parameter. Ordinary calls auto-borrow an
+                    // owned actual only when the formal is already Ref.
+                    Type::Ref(_) => Type::Ref(Box::new(vg.fresh_type())),
+                    _ => vg.fresh_type(),
+                })
+                .collect(),
+            Box::new(vg.fresh_type()),
+        ),
+        Type::Var(_) => vg.fresh_type(),
+        _ => unreachable!("only function and variable types defer vmap"),
     }
 }
 

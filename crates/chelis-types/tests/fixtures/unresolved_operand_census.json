@@ -1031,7 +1031,31 @@
       "ordinal": 1,
       "pattern": "var @ Type::Var(_)",
       "disposition": "not_a_route",
-      "reason": "asks which recursive-group member a variable at a position vmap batches stands for, so the caller can fence it (chelis#2651); no operand is admitted"
+      "reason": "asks which recursive-group member a variable at a position vmap batches stands for, so the caller can defer until group links settle; no operand is admitted"
+    },
+    {
+      "file": "expr_transform.rs",
+      "function": "vmap_needs_batched_type",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "not_a_route",
+      "reason": "predicate selects deferred batching when the row function has an unknown type"
+    },
+    {
+      "file": "expr_transform.rs",
+      "function": "vmap_provisional_type",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "not_a_route",
+      "reason": "constructs a provisional result; infer_vmap registers it on the deferred derivation before publishing it"
+    },
+    {
+      "file": "expr_transform.rs",
+      "function": "vmap_unknown_position",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "not_a_route",
+      "reason": "predicate only reports an unknown row type to the deferred batching caller"
     },
     {
       "file": "group_link.rs",
@@ -1096,10 +1120,42 @@
     },
     {
       "file": "type_derivation.rs",
+      "function": "infer_vmap_row_parameter",
+      "ordinal": 1,
+      "pattern": "(Type::Var(_) , Type::Var(_))",
+      "disposition": "not_a_route",
+      "reason": "returns pending when both row and mapped actual remain unknown; the deferred vmap derivation is replayed"
+    },
+    {
+      "file": "type_derivation.rs",
+      "function": "infer_vmap_row_parameter",
+      "ordinal": 2,
+      "pattern": "(row @ Type::Var(_) , mapped)",
+      "disposition": "not_a_route",
+      "reason": "unifies an unknown row with the slice of a known mapped actual; the deferred vmap derivation checks the complete function"
+    },
+    {
+      "file": "type_derivation.rs",
       "function": "resolve_type_derivation",
       "ordinal": 1,
       "pattern": "(Type::Var(_) , _)",
       "disposition": "not_a_route"
+    },
+    {
+      "file": "type_derivation.rs",
+      "function": "unmap_vmap_parameter",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "not_a_route",
+      "reason": "returns no row slice for an unknown actual; the deferred vmap derivation waits or rejects at the declaration boundary"
+    },
+    {
+      "file": "type_derivation.rs",
+      "function": "vmap_unknown_position",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "not_a_route",
+      "reason": "predicate only reports whether a row position remains unknown during derivation replay"
     },
     {
       "file": "validate.rs",
