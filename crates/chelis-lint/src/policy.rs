@@ -44,6 +44,10 @@ struct PolicyDocument {
 struct CompiledExclusion {
     exclusion: TraversalExclusion,
     matcher: Gitignore,
+    /// True for the shipped baseline policy, false for a repository
+    /// `chelis-lint.toml`. The two are not interchangeable inside a reef
+    /// package source root; see `is_excluded`.
+    shipped: bool,
 }
 
 /// Why an explicitly named lint root failed depth-zero admission.
@@ -144,6 +148,7 @@ impl TraversalPolicy {
             baseline_root,
             Path::new(SHIPPED_POLICY_PATH),
             shipped.exclusions,
+            true,
         )?;
 
         if let (Some(policy_path), Some(policy_root)) =
@@ -177,6 +182,7 @@ impl TraversalPolicy {
                 policy_root,
                 policy_path,
                 document.exclusions,
+                false,
             )?);
         }
 
@@ -213,10 +219,54 @@ impl TraversalPolicy {
         if !is_dir && !self.may_exclude_files {
             return false;
         }
-        match self.path_relative_to_scope(path) {
-            Some(relative) => self.scope_relative_excluded(&relative, is_dir),
+        let relative = self.path_relative_to_scope(path);
+        let matched = match relative.as_deref() {
+            Some(relative) => self.scope_relative_excluded(relative, is_dir),
             None => self.matcher.matched(path, is_dir).is_ignore(),
+        };
+        if !matched {
+            return false;
         }
+        // §12.2: the shipped baseline names repository infrastructure, build
+        // output and vendored dependencies. Inside a reef package's declared
+        // source root those same names are source: the reef loader reads
+        // `src/target/x.ch`, so pruning it makes the lint disagree with the
+        // build about what the package contains, and every rule goes blind on
+        // a file that is compiled (chelis#2768). A repository
+        // `chelis-lint.toml` entry is a deliberate local statement carrying
+        // its own cross-reference, so it keeps pruning there.
+        if self.only_shipped_exclusions_match(relative.as_deref(), path, is_dir) {
+            let absolute = match relative {
+                Some(relative) => self.scope_root.join(relative),
+                None => path.to_path_buf(),
+            };
+            let admit = |manifest: &Path| self.is_admitted_ancillary(manifest, false);
+            if crate::reef_package::inside_package_source_root(&absolute, &self.scope_root, &admit)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether every exclusion matching this path came from the shipped
+    /// baseline.
+    ///
+    /// Probed with the same spelling the combined matcher used, so a
+    /// per-exclusion check cannot disagree with the hot path about anchoring.
+    fn only_shipped_exclusions_match(
+        &self,
+        relative: Option<&Path>,
+        path: &Path,
+        is_dir: bool,
+    ) -> bool {
+        !self.exclusions.iter().any(|compiled| {
+            !compiled.shipped
+                && match relative {
+                    Some(relative) => compiled.matcher.matched(relative, is_dir).is_ignore(),
+                    None => compiled.matcher.matched(path, is_dir).is_ignore(),
+                }
+        })
     }
 
     /// Match a path already expressed relative to the policy scope root.
@@ -589,6 +639,7 @@ fn compile_exclusions(
     root: &Path,
     policy_path: &Path,
     exclusions: Vec<TraversalExclusion>,
+    shipped: bool,
 ) -> Result<Vec<CompiledExclusion>, TraversalPolicyError> {
     exclusions
         .into_iter()
@@ -617,7 +668,11 @@ fn compile_exclusions(
                     pattern: exclusion.pattern.clone(),
                     source,
                 })?;
-            Ok(CompiledExclusion { exclusion, matcher })
+            Ok(CompiledExclusion {
+                exclusion,
+                matcher,
+                shipped,
+            })
         })
         .collect()
 }

@@ -1356,6 +1356,25 @@ build output, dependencies, generated artifacts, or immutable inputs that
 should not be part of the editable lint corpus. They must not be added merely
 to hide current violations.
 
+A reef package's declared source roots are outside the shipped baseline's
+reach whenever the package's manifest is itself within the lint's policy root.
+A manifest above that root governs nothing, by the same rule that keeps
+machine-local ancestors from granting lint exceptions, so a lint whose policy
+root lies below the package prunes as it otherwise would. Which root applies is
+a property of the policy, not of the invocation: a repository policy sets it at
+the repository, so the exemption still reaches a source root named directly.
+
+The baseline names directories that are infrastructure, build output or
+vendored dependencies in a repository at large; beneath a package's `src`
+or an `additional_sources` root the same names are source, because the reef
+loader reads every `.ch` file there whatever the directory is called. Pruning
+one would make the lint disagree with the build about which files the package
+contains, and the disagreement is silent: no rule sees a file that is
+compiled. A repository `chelis-lint.toml` entry is a deliberate local
+declaration carrying its own cross-reference, so it continues to prune inside
+a source root — excluding generated `.ch` is exactly what that mechanism is
+for.
+
 `chelis-lint` composes its shipped baseline policy with the nearest ancestor
 `chelis-lint.toml`. Nearest-ancestor discovery resolves a relative lint
 target against the invocation working directory before walking ancestors, so
@@ -1503,6 +1522,28 @@ the blocking registry:
   ambiguity around `x |> f(y)`, add coverage that preserves the
   first-argument semantics in §3.6 rather than accepting last-argument
   insertion.
+
+### 12.5 Source the lint cannot parse
+
+**Rule:** A `.ch` file the lint cannot parse is itself a blocking
+violation. `chelis lint --check` must not report success on a file whose
+contents it was unable to judge.
+
+Rules that need an abstract syntax tree obtain it by parsing, and a rule
+that cannot parse its input reaches no verdict and reports nothing. That
+deferral is correct per rule: a rule must not invent a diagnosis from a
+broken parse. It is wrong in aggregate: silence from every rule is
+indistinguishable from a clean file, so without this rule the command
+would report success over input no rule could read.
+
+Exactly one rule therefore owns the parse verdict and reports the
+failure; every other rule keeps deferring. This is what makes the
+per-rule deferral safe rather than silent.
+
+The requirement is on the lint, not on the formatter. `chelis fmt
+--check` claims that the file it is named on is canonically formatted,
+and claims nothing about any other file; it therefore does not discharge
+this requirement, whatever it reports.
 
 ---
 
