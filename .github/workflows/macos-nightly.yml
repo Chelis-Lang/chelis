@@ -126,11 +126,10 @@ jobs:
       matrix:
         shard: [1, 2]
     runs-on: macos-latest
-    # The full C6 wire verifier compiles and executes its schema, codec,
-    # publication, and native-consumer controls. A cold shard exhausted the
-    # former 30-minute cap inside that verifier; retain a bounded allowance
-    # for it and the required post-test ABI and Metal smoke checks.
-    timeout-minutes: 45
+    # Workspace tests can consume most of 45 minutes on shard 1, leaving too
+    # little time for both required Clippy configurations. Allow two hours
+    # for each shard's tests and platform-specific follow-up checks to finish.
+    timeout-minutes: 120
     # Every other cargo *test* job in this workflow drops debuginfo; this
     # one was the only omission, and it is the workflow's critical path
     # (the `Workspace tests` step alone is longer than any whole job).

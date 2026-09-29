@@ -5,6 +5,7 @@ The 37 actual Rust cases remain the separate executable acceptance matrix.
 """
 import copy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -142,6 +143,45 @@ class MatrixContractTests(unittest.TestCase):
                          ("root", "target"))
         with self.assertRaises(TypeError):
             execution.CheckedNativeExecution(packet={"passed": 37})
+
+    def test_native_worker_packet_keeps_exact_lifecycle_and_rejects_wire_probe(self):
+        from capacity_census_wire_runner import TestExecution
+
+        root = Path(execution.__file__).resolve().parent.parent
+        target = root / "target" / "native-worker-packet-probe"
+        directory = target / "capture"
+        group = execution.GROUPS[0]
+        selected = tuple(sorted(group.selected))
+        result = TestExecution(("/bin/native-test", "--exact", "case"),
+                               selected, selected, "a" * 64)
+
+        def emitted_packet(worker_result):
+            environment = {
+                "CHELIS_NATIVE_EXECUTION_CAPTURE": str(directory),
+                "CHELIS_NATIVE_EXECUTION_SUITE": group.name,
+            }
+            with mock.patch.dict(os.environ, environment), \
+                 mock.patch.object(execution, "build_and_run_rust_test", return_value=worker_result) as build, \
+                 mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                execution._collect_worker(root, target, directory, group.name)
+            build.assert_called_once_with(
+                root, target, "chelis-python", group.name, group.selected,
+                kind=group.kind, log_prefix=directory / "test",
+            )
+            return json.loads(output.getvalue())
+
+        self.assertEqual(emitted_packet(result), {
+            "command": ["/bin/native-test", "--exact", "case"],
+            "selected": list(selected),
+            "executed": list(selected),
+            "output_sha256": "a" * 64,
+        })
+        selected_probe = TestExecution(
+            result.command, result.selected, result.executed, result.output_sha256,
+            "/owned/wire-target", "b" * 64,
+        )
+        with self.assertRaisesRegex(GraphError, "native worker cannot carry a selected wire probe"):
+            emitted_packet(selected_probe)
 
     def test_worker_environment_is_explicit_without_mutating_parent_or_falling_back(self):
         with tempfile.TemporaryDirectory() as directory:

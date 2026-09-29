@@ -3,7 +3,7 @@
 Device cases use simulated SDK/foreign ABI fixtures. This bounded witness
 does not establish GPU execution, owner-flow authority or final binding closure.
 """
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -402,6 +402,20 @@ def _validate_captures(directory, group, binary):
     return results
 
 
+def _native_worker_packet(result):
+    """Project only the native lifecycle attested by the parent process."""
+    _require(
+        result.wire_probe_target is None and result.wire_probe_sha256 is None,
+        "native worker cannot carry a selected wire probe",
+    )
+    return {
+        "command": result.command,
+        "selected": result.selected,
+        "executed": result.executed,
+        "output_sha256": result.output_sha256,
+    }
+
+
 def _collect_worker(root, target, directory, name):
     _require((root / "scripts/capacity_census_native_execution.py").resolve() == Path(__file__).resolve(),
              "native worker root differs from its current source")
@@ -413,7 +427,7 @@ def _collect_worker(root, target, directory, name):
              "native worker requires its framework-owned environment")
     result = build_and_run_rust_test(root, target, "chelis-python", group.name,
                                      group.selected, kind=group.kind, log_prefix=directory / "test")
-    print(canonical(asdict(result)))
+    print(canonical(_native_worker_packet(result)))
 
 
 @dataclass(frozen=True, init=False, slots=True)
