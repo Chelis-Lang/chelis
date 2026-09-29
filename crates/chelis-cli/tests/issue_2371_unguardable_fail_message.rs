@@ -31,8 +31,14 @@
 //!
 //! So the lowerer RECORDS the unguardable `fail`, and each transform checks
 //! the record after lowering its body, because the transform is the consumer.
-//! The untransformed half of this file is not decoration: it is the evidence
-//! that the fence is bounded to consumers.
+//!
+//! The untransformed half of this file is the evidence that the fence is
+//! bounded to consumers — but only for the rows that REACH the emit site. A
+//! rank-0 (`tensor[f32]`) body never reaches DAG lowering at all, so such a row
+//! passes under the refuted emit-site design too and discriminates nothing. The
+//! rows below therefore return `tensor[1, f32]` / `tensor[2, f32]`, which does
+//! reach it; `#2743` round 1 caught that four of five rows were rank-0 and only
+//! the `string`-parameter row was load-bearing.
 //!
 //! chelis#2383 is the diagnostic half. A direct `fail` branch that
 //! `fail_message_of` declined used to fall through and collect the
@@ -72,6 +78,32 @@ fn eval_program(program: &str) -> Result<String, String> {
         .unwrap_or("")
         .trim()
         .to_string())
+}
+
+/// `chelis build --target c`: the rejection fires during lowering, so the build
+/// fails and its stderr is the artifact. Returns `Ok(())` when a build
+/// unexpectedly succeeded.
+fn c_build_stderr(program: &str, name: &str) -> Result<(), String> {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    write_file(&path, program);
+    let built = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("out").to_str().unwrap(),
+        ])
+        .output()
+        .expect("chelis build should run");
+    if built.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&built.stderr).into_owned())
 }
 
 const TAG: &str = "def tag() -> string = \"t\"\n";
@@ -225,14 +257,18 @@ fn an_empty_message_keeps_its_own_diagnostic() {
 /// these.
 #[test]
 fn untransformed_non_literal_fails_still_abort_with_their_message() {
+    // Every body returns a TENSOR, so every row reaches the placeholder emit
+    // site and every row reds under the refuted emit-site design. A rank-0
+    // `tensor[f32]` body would short-circuit before DAG lowering and prove
+    // nothing (#2743 round 1, P3-2).
     let cases = [
         (
             "plain operand",
             format!(
                 "module M.Main\n{TAG}\
-                 def loss(x: tensor[1, f32]) -> tensor[f32] = \
-                 sum(add(x, fail(string_concat(\"bad: \", tag()))), cast(0, i32))\n\
-                 out = loss(to_tensor([cast(3.0, f32)]))\n"
+                 def loss(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 add(x, fail(string_concat(\"bad: \", tag())))\n\
+                 out = print(loss(to_tensor([cast(3.0, f32)])))\n"
             ),
             "bad: t",
         ),
@@ -240,9 +276,9 @@ fn untransformed_non_literal_fails_still_abort_with_their_message() {
             "whole body",
             format!(
                 "module M.Main\n{TAG}\
-                 def loss(x: tensor[1, f32]) -> tensor[f32] = \
+                 def loss(x: tensor[1, f32]) -> tensor[1, f32] = \
                  fail(string_concat(\"bad: \", tag()))\n\
-                 out = loss(to_tensor([cast(3.0, f32)]))\n"
+                 out = print(loss(to_tensor([cast(3.0, f32)])))\n"
             ),
             "bad: t",
         ),
@@ -250,28 +286,29 @@ fn untransformed_non_literal_fails_still_abort_with_their_message() {
             "if branch",
             format!(
                 "module M.Main\n{TAG}\
-                 def loss(x: tensor[1, f32]) -> tensor[f32] =\n\
+                 def loss(x: tensor[1, f32]) -> tensor[1, f32] =\n\
                  \x20 if gt(tensor_to_scalar(sum(&x, cast(0, i32))), cast(0.5, f32)) \
                  then fail(string_concat(\"bad: \", tag())) \
-                 else sum(mul(&x, &x), cast(0, i32))\n\
-                 out = loss(to_tensor([cast(3.0, f32)]))\n"
+                 else mul(&x, &x)\n\
+                 out = print(loss(to_tensor([cast(3.0, f32)])))\n"
             ),
             "bad: t",
         ),
         (
             "let-bound message",
             "module M.Main\n\
-             def loss(x: tensor[1, f32]) -> tensor[f32] = {\n\
+             def loss(x: tensor[1, f32]) -> tensor[1, f32] = {\n\
                m = \"bad\"\n\
-               sum(add(x, fail(m)), cast(0, i32))\n\
+               add(x, fail(m))\n\
              }\n\
-             out = loss(to_tensor([cast(3.0, f32)]))\n"
+             out = print(loss(to_tensor([cast(3.0, f32)])))\n"
                 .to_string(),
             "bad",
         ),
         (
-            // The census canary's shape: the message is a PARAMETER. This is
-            // the row that refuted rejecting at the emit site.
+            // The census canary's shape: the message is a PARAMETER, and the
+            // def is nullary, so this row reached the emit site even before
+            // rows 1-4 were made tensor-returning.
             "message through a string parameter",
             "module M.Main\n\
              def boom(msg: string) -> tensor[2, f32] = fail(msg)\n\
@@ -282,7 +319,13 @@ fn untransformed_non_literal_fails_still_abort_with_their_message() {
         ),
     ];
     for (what, program, expected) in cases {
-        let stderr = eval_program(&program).unwrap_or_else(|e| e).to_string();
+        let outcome = eval_program(&program);
+        let stderr = match outcome {
+            Ok(stdout) => panic!(
+                "untransformed `{what}` must ABORT, not produce a value; got stdout {stdout:?}"
+            ),
+            Err(stderr) => stderr,
+        };
         assert!(
             stderr.contains(expected),
             "untransformed `{what}` must abort with its message ({expected:?}): {stderr}"
@@ -330,4 +373,108 @@ fn an_untaken_literal_guard_still_differentiates() {
         line.contains("1.0, 1.0"),
         "d(sum(x))/dx = ones through an untaken guard; got {line}"
     );
+}
+
+// ===========================================================================
+// The third wired transform site, and cross-lane agreement
+// ===========================================================================
+
+/// `vmap(grad(..))` is a THIRD lowering site with its own check, and it had no
+/// test: disabling all three checks reddened four tests, none of them this
+/// shape, so deleting this site's call alone would have gone unnoticed
+/// (#2743 round 1, P2-1).
+#[test]
+fn a_non_literal_message_rejects_under_vmap_of_grad() {
+    let program = format!(
+        "module M.Main\n{TAG}\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = \
+         sum(add(x, fail(string_concat(\"bad: \", tag()))), cast(0, i32))\n\
+         out = vmap(grad(loss))(to_tensor([[cast(3.0, f32)], [cast(4.0, f32)]]))\n"
+    );
+    let stderr = eval_program(&program).expect_err("[05-OP-68]: this must not produce a value");
+    assert_names_the_unguardable_reason(&stderr, "vmap(grad(...))");
+    assert!(
+        stderr.contains("vmap(grad(...))"),
+        "the rejection must name the composed transform, not just `vmap` or `grad`: {stderr}"
+    );
+}
+
+/// A statically-selected `fail` branch whose message is ALSO unguardable
+/// carries two facts, and the static-selection one is the more useful: the `if`
+/// has no value on any path. Reporting only the message defect sent the author
+/// to fix the message and re-run to discover that (#2743 round 1, P3-1).
+#[test]
+fn a_statically_taken_unguardable_fail_reports_the_selection_first() {
+    let program = format!(
+        "module M.Main\n{TAG}\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = \
+         if gt(cast(2, i64), cast(1, i64)) \
+         then fail(string_concat(\"bad: \", tag())) \
+         else sum(mul(&x, &x), cast(0, i32))\n\
+         out = grad(loss)(to_tensor([cast(3.0, f32)]))\n"
+    );
+    let stderr = eval_program(&program).expect_err("a statically-taken abort must be rejected");
+    assert!(
+        stderr.contains("always selects its `fail(...)` branch"),
+        "the static-selection fact must be reported: {stderr}"
+    );
+    assert!(
+        stderr.contains("must be a string literal written at the `fail` itself"),
+        "the message defect must be reported too, not instead: {stderr}"
+    );
+}
+
+/// The same, for the `fail("")` spelling. This is the shape whose diagnostic
+/// regressed in round 1: it used to report the static selection and briefly
+/// reported only the empty-message rule.
+#[test]
+fn a_statically_taken_empty_fail_reports_the_selection_first() {
+    let program = "module M.Main\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = \
+         if gt(cast(2, i64), cast(1, i64)) then fail(\"\") \
+         else sum(mul(&x, &x), cast(0, i32))\n\
+         out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
+    let stderr = eval_program(program).expect_err("a statically-taken abort must be rejected");
+    assert!(
+        stderr.contains("always selects its `fail(...)` branch"),
+        "the static-selection fact must be reported: {stderr}"
+    );
+    assert!(
+        stderr.contains("has no message to report"),
+        "the empty-message rule must be reported too: {stderr}"
+    );
+}
+
+/// chelis#2371 acceptance 4: the evaluator and the C target must agree. The
+/// rejection is raised in `chelis-ir` lowering, upstream of target selection,
+/// so `chelis build --target c` must refuse the same programs for the same
+/// reason — and must NOT refuse the untransformed ones.
+#[test]
+fn the_c_target_agrees_with_the_evaluator() {
+    let transformed = format!(
+        "module M.Main\n{TAG}\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = \
+         sum(add(x, fail(string_concat(\"bad: \", tag()))), cast(0, i32))\n\
+         def d(x: tensor[1, f32]) -> tensor[1, f32] = grad(loss, wrt = x)(x)\n\
+         out = d(to_tensor([cast(3.0, f32)]))\n"
+    );
+    let eval_err = eval_program(&transformed).expect_err("eval must reject the transformed shape");
+    assert_names_the_unguardable_reason(&eval_err, "eval lane");
+    let c_err = c_build_stderr(&transformed, "fenced")
+        .expect_err("the C target must reject the transformed shape too");
+    assert_names_the_unguardable_reason(&c_err, "c lane");
+
+    // The untransformed twin must still BUILD; its abort is a runtime abort.
+    let untransformed = format!(
+        "module M.Main\n{TAG}\
+         def loss(x: tensor[1, f32]) -> tensor[1, f32] = \
+         add(x, fail(string_concat(\"bad: \", tag())))\n\
+         out = print(loss(to_tensor([cast(3.0, f32)])))\n"
+    );
+    if let Err(c_err) = c_build_stderr(&untransformed, "unfenced") {
+        assert!(
+            !c_err.contains("05-OP-68"),
+            "the untransformed twin must not be fenced by the C target: {c_err}"
+        );
+    }
 }

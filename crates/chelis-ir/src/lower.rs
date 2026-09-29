@@ -11900,6 +11900,15 @@ impl<'program> LowerCtx<'program> {
         }
         let wrt: Vec<_> = targets.iter().map(|target| target.formal).collect();
         let lowered_output = subctx.lower_resolved_body(fn_expr, &param_names, body);
+        // chelis#2371: checked HERE, immediately after the body is lowered and
+        // before any early return, because one stands between this point and the
+        // transform's real work: `output_depends_on_unresolved` returns the
+        // chelis#1095 rootless placeholder for a body whose output depends on an
+        // unresolved callable. With the check placed later, such a body could
+        // carry a recorded unguardable `fail` out of lowering unconsulted. The
+        // record is a fact about the BODY, so the earliest point after lowering
+        // it is the right one, and it needs neither `output` nor a root.
+        Self::reject_recorded_unguardable_fail(&subctx, "grad");
         let output = lowered_output.expect_node("grad requires a scalar floating output");
         if subctx
             .callable_dependency_state
@@ -11958,11 +11967,6 @@ impl<'program> LowerCtx<'program> {
             });
         }
         subctx.dag.add_root(output);
-        // chelis#2371: `grad` is about to differentiate this body, so a placeholder
-        // standing in for an unguardable `fail` would become part of the gradient.
-        // Checked before AD so the diagnostic names the `fail`, not whatever AD
-        // makes of a zero Const.
-        Self::reject_recorded_unguardable_fail(&subctx, "grad");
         // Issue #197: route through grad_dag_checked so a
         // non-differentiable op in the gradient body (argmax/argmin,
         // floor/ceil, scatter_replace) surfaces a structured
@@ -13552,6 +13556,15 @@ impl<'program> LowerCtx<'program> {
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
+        // chelis#2371: checked HERE, immediately after the body is lowered and
+        // before any early return, because one stands between this point and the
+        // transform's real work: `output_depends_on_unresolved` returns the
+        // chelis#1095 rootless placeholder for a body whose output depends on an
+        // unresolved callable. With the check placed later, such a body could
+        // carry a recorded unguardable `fail` out of lowering unconsulted. The
+        // record is a fact about the BODY, so the earliest point after lowering
+        // it is the right one, and it needs neither `output` nor a root.
+        Self::reject_recorded_unguardable_fail(&subctx, "vmap(grad(...))");
         // Even a constant body has one result per mapped input row. Keep the
         // formal's shape available through AD pruning so a symbolic batch
         // broadcast reads its cardinality from the actual at the call site.
@@ -13573,9 +13586,6 @@ impl<'program> LowerCtx<'program> {
             return LoweredValue::Tuple(Vec::new());
         }
         subctx.dag.add_root(output);
-        // chelis#2371: same as the plain `grad` site -- `vmap(grad(..))` both
-        // differentiates and batches this body.
-        Self::reject_recorded_unguardable_fail(&subctx, "vmap(grad(...))");
         let mapped_formals = param_names.iter().cloned().collect::<UnordSet<_>>();
         let captured_loads = subctx
             .dag
@@ -20565,6 +20575,31 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// chelis#2371: a statically-selected `fail(...)` branch whose message is
+    /// also unguardable.
+    ///
+    /// Two independent facts hold, and the first is the more useful one: the
+    /// `if` selects this branch on every execution, so it has no value on any
+    /// path, AND the message cannot become an [05-OP-68] identity. Reporting
+    /// only the second sent the author to fix the message and re-run to
+    /// discover the first.
+    fn reject_static_taken_unguardable_fail(
+        &self,
+        span: Span,
+        defect: FailMessageDefect,
+    ) -> NodeId {
+        raise_lowering_error(
+            format!(
+                "this `if` always selects its `fail(...)` branch, so it has no value on any \
+                 path and cannot be differentiated or batched (chelis#1464). {} Move the abort \
+                 outside the transform, or make the branch total.",
+                Self::fail_message_defect_sentence(defect)
+            ),
+            Some(span),
+            self.current_span_id.clone(),
+        )
+    }
+
     /// Route a [`FailMessageDefect`] to its diagnostic. One place, so a new
     /// reason cannot acquire a second rejection site for the same defect.
     fn reject_fail_message_defect(&self, defect: FailMessageDefect, span: Span) -> NodeId {
@@ -20812,8 +20847,18 @@ impl<'program> LowerCtx<'program> {
                 Some(FailMessage::Usable(message)) => {
                     return LoweredValue::Node(self.reject_static_taken_fail(span, &message));
                 }
+                // chelis#2743 review, P3-1: the STATIC-SELECTION fact outranks
+                // the message defect and must be reported first. Before this
+                // arm existed, `fail("")` in a statically-taken branch got
+                // `reject_static_taken_fail` (which says the `if` has no value
+                // on any path); routing it straight to the defect diagnostic
+                // told the author to fix the message, after which they would
+                // re-run and learn the branch is unconditional anyway. Report
+                // both, strongest first.
                 Some(FailMessage::Unusable(defect)) => {
-                    return LoweredValue::Node(self.reject_fail_message_defect(defect, span));
+                    return LoweredValue::Node(
+                        self.reject_static_taken_unguardable_fail(span, defect),
+                    );
                 }
                 None => {}
             }
