@@ -412,6 +412,8 @@ class SchemaCases(unittest.TestCase):
                 ]
                 self.assertTrue(any(c.expected is not None for c in selected))
                 self.assertTrue(any(c.expected is None for c in selected))
+            future = f"{carrier}/json/version-24"
+            self.assertIsNone(next(c for c in cases if c.identity == future).expected)
 
     def test_source_coordinates_preserve_point_empty_absent_and_checked_access(self):
         from capacity_census_wire_sources import source_cases
@@ -564,6 +566,7 @@ class SchemaCases(unittest.TestCase):
         self.assertIsNone(cases["WireDag/json/version-20"].expected)
         self.assertIsNone(cases["WireDag/json/version-21"].expected)
         self.assertIsNone(cases["WireDag/json/version-22"].expected)
+        self.assertIsNone(cases["WireDag/json/version-24"].expected)
         for codec in ("json", "construct", "admit"):
             for owner in ("expand", "reshape", "pad", "shrink", "stride"):
                 prefix = f"WireDag/{codec}/owner-{owner}-"
