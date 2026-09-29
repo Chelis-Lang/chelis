@@ -518,8 +518,9 @@ name = "issue_2563_local_ascription_eval_file"
 
 # chelis#2413 PR canaries pin the reviewer-found claimed-join wrong values,
 # with taken-arm success and trap controls in Eval, DAG Eval and C. The full
-# generated 100-cell matrix is `issue_2413_claimed_join_lanes_full`, owned by
-# final package expansion and nightly.
+# generated 100-cell matrix is `issue_2413_claimed_join_lanes_full`: a direct
+# change selects it in required change-owned CI; otherwise affected-package
+# final expansion and nightly run it.
 [[standing_target]]
 package = "chelis-cli"
 name = "issue_2413_claimed_join_lanes"

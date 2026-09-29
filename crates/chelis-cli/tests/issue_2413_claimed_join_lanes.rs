@@ -1,7 +1,8 @@
 //! Standing PR canary for claimed joins. The complete 100-cell matrix lives in
-//! `issue_2413_claimed_join_lanes_full` and runs in final package expansion
-//! and nightly. These cases keep the reviewer-found wrong values and their
-//! success/trap controls visible on every pull request.
+//! `issue_2413_claimed_join_lanes_full`. A direct change selects that target
+//! in required change-owned CI; otherwise affected-package final expansion
+//! and nightly run it. The standing cases keep the reviewer-found wrong values
+//! and their success/trap controls visible on every pull request.
 
 #[path = "common/mod.rs"]
 mod common;
