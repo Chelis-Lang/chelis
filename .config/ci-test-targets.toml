@@ -3351,6 +3351,33 @@ reason = "the dtype oracle executes current compiler JSON binding authority and 
 tracking_issue = "chelis#2048"
 
 [[path_rule]]
+prefix = "scripts/capacity_census_typed.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the live wire and binding census join"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_compiler_json.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes compiler JSON ownership, collection and rejection controls"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_typed.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes typed census target and concurrent join controls"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
 prefix = "scripts/capacity_census_native_authority.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
