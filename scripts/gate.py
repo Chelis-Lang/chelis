@@ -800,9 +800,10 @@ FULL_GATE_SPLIT_ANNOTATION = "full gate; CI coverage split"
 FAST_DYNAMIC_NOTE = (
     "# --fast runs, fixing in place: <managed-python> scripts/regen_all.py "
     "--tier 0 (and --tier 1 when a std path changed); cargo fmt --all; the "
-    "chelis lint row above; cargo clippy -p <crate> --tests -- -D warnings "
-    "per changed crate; one nextest run over the drift tripwires; when "
-    "a std path changed, cargo nextest run -p chelis-std-bundle --lib; and "
+    "chelis lint and eval-system guard rows above; cargo clippy -p <crate> "
+    "--tests -- -D warnings per changed crate; one nextest run over the "
+    "drift tripwires; when a std path changed, cargo nextest run -p "
+    "chelis-std-bundle --lib; and "
     "when a std path, any reef.lock, or the root Cargo.toml changed, the "
     "chelis-reef bundled-lock hash guard"
 )
@@ -1358,12 +1359,12 @@ def fast_command_list(
     changed_paths: list[str],
     lock_guard_changed: bool,
 ) -> list[list[str]]:
-    """The `--fast` command list: fix-in-place regeneration and fmt, the
-    changed-path classification, the lint row (which also builds `chelis`),
-    `cargo clippy -p <crate> --tests` per changed crate, one nextest run over
-    the drift tripwires, and, when a std path changed, the tier-1
-    regeneration before the checks and the bundle self-consistency test after
-    them. Every writer precedes every check: a changed `.ch` source makes the
+    """The `--fast` command list: fix-in-place regeneration and fmt, changed-path
+    classification, lint, evaluator system guard, `cargo clippy -p <crate>
+    --tests` per changed crate, and one nextest run over the drift tripwires.
+    When a std path changed, tier-1 regeneration precedes the checks and the
+    bundle self-consistency test follows them. Every writer precedes every
+    check: a changed `.ch` source makes the
     embedded bundle stale, and the `bundled_chelis_std_loader` tripwire would
     fail on it before a later regeneration could fix it.
 
@@ -1391,6 +1392,7 @@ def fast_command_list(
     commands.append(FMT_WRITE)
     commands.append(classify_paths_command(changed_paths))
     commands.append(CHELIS_LINT_CHECK)
+    commands.append(EVAL_SYSTEM_GUARD)
     for crate in crates:
         commands.append(
             ["cargo", "clippy", "-p", crate, "--tests", "--", "-D", "warnings"]

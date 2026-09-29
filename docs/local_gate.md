@@ -123,8 +123,9 @@ rather than skipping it.
 `scripts/regen_all.py --tier 0` (the rejection registry, the embedded
 conformance skill assets, and the opaque-invariants corpus) and
 `cargo fmt --all`, then `ci_change_owned.py classify-paths` over the changed
-set, `chelis lint --check .`, `cargo clippy -p <crate> --tests -- -D warnings`
-for each changed crate, one `cargo nextest run` over the drift tripwires (atom
+set, `chelis lint --check .`, `scripts/eval_system_guard.py` over the evaluator
+source, `cargo clippy -p <crate> --tests -- -D warnings` for each changed crate,
+one `cargo nextest run` over the drift tripwires (atom
 partition, generated dtype header, compiler pins, opaque corpus,
 loud-unsupported, payload census, bundled std loader, conformance manifest,
 asset drift, skill-set uniformity, phase-3 gate inventory, stack-guard
