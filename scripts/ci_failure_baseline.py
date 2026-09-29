@@ -9,14 +9,14 @@ merge base contains the commit they ran on. The nightly full-workspace job in
 JUnit, so this script selects one of those runs and writes a manifest naming
 the downloaded documents and the run they came from.
 
-Selection is deliberately narrow. Only completed runs of the named workflow on
-the named branch qualify, newest first, and a run qualifies only when every
-expected JUnit artifact is present and unexpired. A run that is still in
-progress, or that lost an artifact to retention, is skipped rather than
-partially used, because a baseline missing a shard reports that shard's
-inherited failures as introduced. When no run in the search window qualifies
-the script fails, and the report that consumes the manifest fails with it: a
-report that quietly skips the comparison would call every failure clean.
+Selection is deliberately narrow for ``heavy-e2e.yml``: only completed
+schedule and full-scope workflow_dispatch runs on the named branch qualify.
+Every expected JUnit artifact must be present and unexpired. Dispatches also
+need an exact run/head-bound full-scope receipt. If the recent mixed run window
+has no usable baseline, a second bounded schedule window keeps scoped
+dispatches from crowding out a complete nightly. Other workflows retain their
+supplied artifact and event behavior. When no run qualifies, the consuming
+report fails with it.
 
 Newest is not the same as usable. The consumer refuses a baseline the
 candidate's merge base does not contain, and a pull request's merge ref is not
@@ -38,6 +38,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -50,6 +51,8 @@ DEFAULT_ARTIFACTS = (
     "junit-linux-full-3",
     "junit-linux-full-4",
 )
+DISPATCH_SCOPE_ARTIFACT = "linux-extended-dispatch-scope"
+DISPATCH_SCOPE_FILENAME = "scope.json"
 DEFAULT_SEARCH_RUNS = 10
 
 Runner = Callable[[Sequence[str]], str]
@@ -76,13 +79,16 @@ def list_candidate_runs(
     branch: str,
     limit: int,
     runner: Runner,
+    *,
+    event: str | None = None,
 ) -> list[dict[str, Any]]:
+    event_filter = f"&event={event}" if event is not None else ""
     payload = runner(
         [
             "gh",
             "api",
             f"repos/{repository}/actions/workflows/{workflow}/runs"
-            f"?branch={branch}&status=completed&per_page={limit}",
+            f"?branch={branch}&status=completed&per_page={limit}{event_filter}",
         ]
     )
     document = json.loads(payload)
@@ -91,7 +97,13 @@ def list_candidate_runs(
         raise ValueError(f"unexpected workflow run listing for {workflow}")
     rows = []
     for run in runs:
+        if not isinstance(run, dict):
+            continue
         if run.get("head_branch") != branch:
+            continue
+        if workflow == DEFAULT_WORKFLOW and run.get("event") not in {
+            "schedule", "workflow_dispatch",
+        }:
             continue
         rows.append(
             {
@@ -99,6 +111,7 @@ def list_candidate_runs(
                 "run_url": run["html_url"],
                 "head_sha": run["head_sha"],
                 "created_at": run["created_at"],
+                "event": run.get("event"),
             }
         )
     return rows
@@ -118,12 +131,57 @@ def run_has_artifacts(
             f"repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100",
         ]
     )
-    available: set[str] = set()
+    matches: dict[str, list[dict[str, Any]]] = {
+        name: [] for name in expected
+    }
     for chunk in _json_documents(payload):
-        for artifact in chunk.get("artifacts", []):
-            if not artifact.get("expired", False):
-                available.add(artifact.get("name", ""))
-    return set(expected) <= available
+        artifacts = chunk.get("artifacts")
+        if not isinstance(artifacts, list):
+            raise ValueError(f"unexpected artifact listing for run {run_id}")
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                raise ValueError(f"unexpected artifact row for run {run_id}")
+            name = artifact.get("name")
+            if isinstance(name, str) and name in matches:
+                matches[name].append(artifact)
+    return all(
+        len(rows) == 1 and rows[0].get("expired") is False
+        for rows in matches.values()
+    )
+
+
+def dispatch_is_full_scope(
+    repository: str,
+    candidate: dict[str, Any],
+    runner: Runner,
+) -> bool:
+    """Check the dispatch receipt against the API's exact run and head."""
+    with tempfile.TemporaryDirectory() as tmp:
+        destination = Path(tmp)
+        try:
+            runner([
+                "gh", "run", "download", candidate["run_id"],
+                "--repo", repository, "--dir", str(destination),
+                "--name", DISPATCH_SCOPE_ARTIFACT,
+            ])
+        except (ValueError, OSError):
+            return False
+        document = destination / DISPATCH_SCOPE_FILENAME
+        if not document.is_file():
+            return False
+        try:
+            receipt = json.loads(document.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+    if not isinstance(receipt, dict) or type(receipt.get("version")) is not int:
+        return False
+    return receipt == {
+        "version": 1,
+        "event": "workflow_dispatch",
+        "scope": "all",
+        "run_id": candidate["run_id"],
+        "head_sha": candidate["head_sha"],
+    }
 
 
 def _json_documents(payload: str) -> list[dict[str, Any]]:
@@ -228,64 +286,96 @@ def prepare(
     repo: Path | None = None,
     contains: Callable[[Path, str, str], bool] = base_contains,
 ) -> dict[str, Any]:
-    candidates = list_candidate_runs(
-        repository,
-        workflow,
-        branch,
-        search_runs,
-        runner,
-    )
-    if not candidates:
+    if workflow == DEFAULT_WORKFLOW and tuple(artifacts) != DEFAULT_ARTIFACTS:
+        raise ValueError(
+            f"{DEFAULT_WORKFLOW} baseline requires all four JUnit artifacts"
+        )
+    def candidate_windows():
+        yield list_candidate_runs(
+            repository, workflow, branch, search_runs, runner,
+        )
+        if workflow == DEFAULT_WORKFLOW:
+            # Scoped dispatches can fill the mixed window without leaving a
+            # complete nightly in it. Search a second bounded schedule window.
+            yield list_candidate_runs(
+                repository, workflow, branch, search_runs, runner,
+                event="schedule",
+            )
+
+    skipped_ahead = 0
+    inspected: set[str] = set()
+    for candidates in candidate_windows():
+        for candidate in candidates:
+            if candidate["run_id"] in inspected:
+                continue
+            inspected.add(candidate["run_id"])
+            if base_sha is not None and not contains(
+                repo or Path("."),
+                candidate["head_sha"],
+                base_sha,
+            ):
+                skipped_ahead += 1
+                continue
+            is_default_dispatch = (
+                workflow == DEFAULT_WORKFLOW
+                and candidate["event"] == "workflow_dispatch"
+            )
+            expected = (
+                (*artifacts, DISPATCH_SCOPE_ARTIFACT)
+                if is_default_dispatch
+                else artifacts
+            )
+            if not run_has_artifacts(
+                repository,
+                candidate["run_id"],
+                expected,
+                runner,
+            ):
+                continue
+            if is_default_dispatch and not dispatch_is_full_scope(
+                repository, candidate, runner,
+            ):
+                continue
+            documents = download_artifacts(
+                repository,
+                candidate["run_id"],
+                artifacts,
+                output,
+                runner,
+            )
+            manifest = {
+                "version": BASELINE_VERSION,
+                "workflow": workflow,
+                "run_id": candidate["run_id"],
+                "run_url": candidate["run_url"],
+                "head_sha": candidate["head_sha"],
+                "created_at": candidate["created_at"],
+                "documents": documents,
+            }
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "baseline.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+            )
+            return manifest
+    if not inspected:
         raise ValueError(
             f"no completed {workflow} run on {branch} to use as a baseline"
         )
-    skipped_ahead = 0
-    for candidate in candidates:
-        if base_sha is not None and not contains(
-            repo or Path("."),
-            candidate["head_sha"],
-            base_sha,
-        ):
-            skipped_ahead += 1
-            continue
-        if not run_has_artifacts(
-            repository,
-            candidate["run_id"],
-            artifacts,
-            runner,
-        ):
-            continue
-        documents = download_artifacts(
-            repository,
-            candidate["run_id"],
-            artifacts,
-            output,
-            runner,
-        )
-        manifest = {
-            "version": BASELINE_VERSION,
-            "workflow": workflow,
-            "run_id": candidate["run_id"],
-            "run_url": candidate["run_url"],
-            "head_sha": candidate["head_sha"],
-            "created_at": candidate["created_at"],
-            "documents": documents,
-        }
-        output.mkdir(parents=True, exist_ok=True)
-        (output / "baseline.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-        )
-        return manifest
     ahead = (
         f" ({skipped_ahead} of them are not contained in the candidate base "
         f"{base_sha})"
         if skipped_ahead
         else ""
     )
+    receipt_requirement = (
+        " and, for a dispatch, a matching full-scope receipt"
+        if workflow == DEFAULT_WORKFLOW else ""
+    )
     raise ValueError(
-        f"none of the {len(candidates)} most recent completed {workflow} runs "
+        f"none of the {len(inspected)} inspected completed {workflow} runs "
         f"on {branch}{ahead} retains every baseline artifact "
-        f"{list(artifacts)}; without a complete baseline the expansion report "
+        f"{list(artifacts)}{receipt_requirement}; "
+        f"without a complete baseline the expansion report "
         f"cannot tell an introduced failure from an inherited one"
     )
 

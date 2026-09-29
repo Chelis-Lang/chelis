@@ -1861,7 +1861,11 @@ def _assert_support_slice_contract(block: str) -> None:
     command = "chelis-gate integration --support-only --support-slice ${{ matrix.slice }}"
     _assert_executable_run_once(block, command)
     assert block.count("--support-only") == 1
-    assert re.search(r"^    if\s*:", block, re.MULTILINE) is None
+    job_conditions = re.findall(r"^    if:[ \t]*(.+)$", block, re.MULTILINE)
+    assert job_conditions == [
+        "${{ github.event_name == 'schedule' || "
+        "(github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}"
+    ], f"unexpected integration-support job scope: {job_conditions!r}"
     step = _ci_step_block(block, "Gate (integration support subset)")
     _assert_executable_run_once(step, command)
     assert re.search(r"^\s+if\s*:", step, re.MULTILINE) is None
@@ -2333,6 +2337,23 @@ class CiParityTests(unittest.TestCase):
                 "      - name: Gate (integration support subset)\n        if: false",
             ),
             block + "      - run: chelis-gate integration --support-only --support-slice ${{ matrix.slice }}\n",
+        )
+        for changed in mutations:
+            with self.subTest(workflow=changed), self.assertRaises(AssertionError):
+                _assert_support_slice_contract(changed)
+
+    def test_support_slice_contract_rejects_missing_or_weakened_job_scope(self):
+        block = _ci_job_block("integration-support")
+        guard = (
+            "    if: ${{ github.event_name == 'schedule' || "
+            "(github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}"
+        )
+        self.assertIn(guard, block)
+        mutations = (
+            block.replace(guard + "\n", "", 1),
+            block.replace(guard, "    if: true", 1),
+            block.replace(guard, "    if: ${{ github.event_name == 'schedule' }}", 1),
+            block.replace(guard, guard + "\n    if: false", 1),
         )
         for changed in mutations:
             with self.subTest(workflow=changed), self.assertRaises(AssertionError):
