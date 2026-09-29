@@ -362,6 +362,161 @@ fn encode_signed(values: &[i64], precision: Prim) -> Vec<u64> {
         .collect()
 }
 
+fn direct_bitwise_dag(precision: Prim, kinds: &[chelis_types::BitwiseKind]) -> Dag {
+    let mut dag = Dag::new();
+    let decl = dag.declare("bitwise");
+    let lhs = dag.add_node(
+        decl,
+        RiscOp::Load { name: "lhs".into() },
+        vec![],
+        ty(precision),
+        None,
+    );
+    let rhs = dag.add_node(
+        decl,
+        RiscOp::Load { name: "rhs".into() },
+        vec![],
+        ty(precision),
+        None,
+    );
+    for &kind in kinds {
+        let out = dag.add_node(
+            decl,
+            RiscOp::Bitwise(kind),
+            vec![lhs, rhs],
+            ty(precision),
+            None,
+        );
+        dag.add_root(out);
+    }
+    dag
+}
+
+#[test]
+#[ignore = "requires a real HIP GPU; run through scripts/hip_test.py"]
+fn real_hip_bitwise_signed_width_matrix_is_bit_exact() {
+    use chelis_types::{BitwiseKind, bitwise_scalar, scalar_from_i64};
+    let kinds = [
+        BitwiseKind::And,
+        BitwiseKind::Or,
+        BitwiseKind::Xor,
+        BitwiseKind::ShiftLeft,
+        BitwiseKind::ShiftRight,
+    ];
+    for (precision, width, minimum) in [
+        (Prim::Int8, 8, i8::MIN as i64),
+        (Prim::Int16, 16, i16::MIN as i64),
+        (Prim::Int32, 32, i32::MIN as i64),
+        (Prim::Int64, 64, i64::MIN),
+    ] {
+        let lhs = [-1, 1, minimum, 8, 0, 42, -17, 7];
+        let rhs = [1, width - 1, width, width + 1, 0, 3, 2, width - 2];
+        let inputs = BTreeMap::from([
+            (
+                "lhs".into(),
+                RawInput {
+                    precision,
+                    bits: encode_signed(&lhs, precision),
+                },
+            ),
+            (
+                "rhs".into(),
+                RawInput {
+                    precision,
+                    bits: encode_signed(&rhs, precision),
+                },
+            ),
+        ]);
+        let actual = compile_and_run(
+            &direct_bitwise_dag(precision, &kinds),
+            &format!("bitwise_{}", precision.name()),
+            &inputs,
+            &[precision; 5],
+        );
+        for (slot, kind) in kinds.iter().enumerate() {
+            let expected = lhs
+                .into_iter()
+                .zip(rhs)
+                .map(|(a, b)| {
+                    let value = bitwise_scalar(
+                        *kind,
+                        scalar_from_i64("bitwise", precision, a).unwrap(),
+                        scalar_from_i64("bitwise", precision, b).unwrap(),
+                    )
+                    .unwrap()
+                    .as_i64_exact()
+                    .unwrap();
+                    (value as u64) & width_mask(precision)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual[slot], expected, "{kind:?} {}", precision.name());
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a real HIP GPU; run through scripts/hip_test.py"]
+fn real_hip_bitwise_first_negative_shift_has_exact_diagnostic() {
+    use chelis_types::BitwiseKind;
+    for precision in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+        for kind in [BitwiseKind::ShiftLeft, BitwiseKind::ShiftRight] {
+            let dag = direct_bitwise_dag(precision, &[kind]);
+            let inputs = BTreeMap::from([
+                (
+                    "lhs".into(),
+                    RawInput {
+                        precision,
+                        bits: encode_signed(&[1; N], precision),
+                    },
+                ),
+                (
+                    "rhs".into(),
+                    RawInput {
+                        precision,
+                        bits: encode_signed(&[-3, -7, 1, 1, 1, 1, 1, 1], precision),
+                    },
+                ),
+            ]);
+            let result = codegen_hip(&dag, "bitwise_trap").expect("HIP bitwise codegen");
+            let temporary = tempfile::tempdir().expect("tempdir");
+            stage_hip_support(temporary.path());
+            let staged = chelis_runtime_bundle::stage(temporary.path()).expect("stage runtime");
+            fs::write(temporary.path().join("model.cpp"), &result.c_source).expect("write model");
+            fs::write(
+                temporary.path().join("main.cpp"),
+                build_main("bitwise_trap", &result, &inputs, &[(precision, N)]),
+            )
+            .expect("write driver");
+            let binary = temporary.path().join("bitwise_trap");
+            let compile = Command::new("hipcc")
+                .arg("-O2")
+                .args(&result.compile_flags)
+                .arg(temporary.path().join("main.cpp"))
+                .arg(temporary.path().join("model.cpp"))
+                .arg(temporary.path().join("chelis_device_owner.cpp"))
+                .arg(&staged.archive)
+                .args(["-lpthread", "-ldl"])
+                .args(&result.link_flags)
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .expect("compile HIP shift trap");
+            assert!(
+                compile.status.success(),
+                "{kind:?} {precision:?}: {}",
+                String::from_utf8_lossy(&compile.stderr)
+            );
+            let run = Command::new(binary).output().expect("run HIP shift trap");
+            assert!(!run.status.success(), "negative count must trap");
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            assert!(
+                stderr.contains("shift amount must be non-negative, got -3"),
+                "{kind:?} {precision:?}: {stderr}"
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore = "requires a real HIP GPU; run through scripts/hip_test.py"]
 fn real_hip_direct_nonnumeric_matrix_is_bit_exact() {

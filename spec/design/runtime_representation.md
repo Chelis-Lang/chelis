@@ -1163,6 +1163,21 @@ direct-arithmetic command.
 Another owner, spelling, or template remains unclassified; Metal remains the
 separate chelis#2338 capability gap rather than inheriting these HIP forms.
 
+The [05-OP-47] bitwise device cutover registers `binary_bitwise_typed` on HIP,
+`bitwise_body` on Metal, and `Emitter::emit_bitwise` on Metal as exact
+`backend-element-spelling` final forms. The last owner also supplies the
+`load-store-template` final form for its typed host/device transfer.
+Both select only i8/i16/i32/i64, perform operations on width-matched unsigned
+words, and restore signed result storage without float conversion. Each shift
+records the first negative logical index and the host reports that input's
+exact signed count before exposing output. The default HIP generated-kernel
+CPU projection checks all 20 kind/width cases; the real HIP manual gate in
+`logical_comparison_where_gpu` owns hardware execution. The Metal manual
+`gpu_correctness` gate executes the 20-case matrix and first-negative trap on
+Apple Silicon. Metal rejects activated shifts until it has a checked
+activation gate. Empty elementwise tensors allocate but do not dispatch.
+No raw dtype id or public numeric carrier is introduced.
+
 ## C4. Validated typed tensor access
 
 The runtime moves the raw descriptor into a `tensor_storage` module. Its fields,

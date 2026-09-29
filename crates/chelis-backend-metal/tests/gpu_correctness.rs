@@ -27,6 +27,218 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use support::codegen_metal;
 
+/// Exercise raw signed storage through the generated Objective-C++ wrapper
+/// and actual MSL, including the host-visible first-negative shift trap.
+#[cfg(target_os = "macos")]
+fn run_bitwise_gpu_case(
+    prim: Prim,
+    kinds: &[chelis_types::BitwiseKind],
+    rhs: &[i64],
+) -> std::process::Output {
+    let n = rhs.len();
+    assert!(n <= 4);
+    let (c_ty, tag, width, min_literal) = match prim {
+        Prim::Int8 => ("int8_t", "CHELIS_DTYPE_I8", 8, "-128LL"),
+        Prim::Int16 => ("int16_t", "CHELIS_DTYPE_I16", 16, "-32768LL"),
+        Prim::Int32 => ("int32_t", "CHELIS_DTYPE_I32", 32, "-2147483648LL"),
+        Prim::Int64 => ("int64_t", "CHELIS_DTYPE_I64", 64, "INT64_MIN"),
+        _ => panic!("integer bitwise GPU case only"),
+    };
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: prim,
+    };
+    let mut dag = Dag::new();
+    let decl = dag.declare("bitwise");
+    let lhs = dag.add_node(
+        decl,
+        RiscOp::Load { name: "lhs".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let rhs_node = dag.add_node(
+        decl,
+        RiscOp::Load { name: "rhs".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    for &kind in kinds {
+        let result = dag.add_node(
+            decl,
+            RiscOp::Bitwise(kind),
+            vec![lhs, rhs_node],
+            ty.clone(),
+            None,
+        );
+        dag.add_root(result);
+    }
+    require_clangxx();
+    let generated = codegen_metal(&dag, "bitwise_device");
+    assert_eq!(generated.input_labels, ["lhs", "rhs"]);
+    assert_eq!(generated.output_labels.len(), kinds.len());
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let runtime = metal_runtime_src_dir();
+    write_temp_file(
+        temporary.path(),
+        "chelis_metal_runtime.h",
+        &fs::read_to_string(runtime.join("chelis_metal_runtime.h")).expect("metal runtime"),
+    );
+    let staged = chelis_runtime_bundle::stage(temporary.path()).expect("stage runtime");
+    write_temp_file(temporary.path(), "model.mm", &generated.mm_source);
+    let rhs_values = rhs
+        .iter()
+        .map(|value| format!("{value}LL"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let driver = format!(
+        r#"#import <Foundation/Foundation.h>
+#include "chelis_runtime.h"
+#include <stdint.h>
+#include <stdio.h>
+extern "C" void bitwise_device(chelis_tensor**, int, chelis_tensor**, int);
+int main(void) {{
+  @autoreleasepool {{
+    int64_t shape[1] = {{{n}}};
+    int64_t lhs_values[4] = {{-1LL, 1LL, {min_literal}, 8LL}};
+    int64_t rhs_values[4] = {{{rhs_values}}};
+    chelis_tensor* inputs[2] = {{chelis_alloc(1, shape, {tag}), chelis_alloc(1, shape, {tag})}};
+    for (int slot = 0; slot < 2; ++slot) {{
+      chelis_tensor_write* guard = chelis_tensor_begin_write(inputs[slot]);
+      chelis_write_view view = chelis_tensor_write_view(guard);
+      for (int i = 0; i < {n}; ++i) (({c_ty}*)view.data)[i] = ({c_ty})(slot == 0 ? lhs_values[i] : rhs_values[i]);
+      chelis_tensor_end_write(guard);
+    }}
+    chelis_tensor* outputs[{roots}] = {{0}};
+    bitwise_device(inputs, 2, outputs, {roots});
+    for (int root = 0; root < {roots}; ++root) {{
+      chelis_read_view view = chelis_tensor_read_view(outputs[root]);
+      printf("OUT %d", root);
+      for (int i = 0; i < {n}; ++i) printf(" %lld", (long long)((const {c_ty}*)view.data)[i]);
+      printf("\n");
+      chelis_tensor_release(outputs[root]);
+    }}
+    chelis_tensor_release(inputs[0]);
+    chelis_tensor_release(inputs[1]);
+  }}
+  return 0;
+}}
+"#,
+        roots = kinds.len(),
+    );
+    write_temp_file(temporary.path(), "driver.mm", &driver);
+    let binary = temporary.path().join(format!("bitwise_{width}"));
+    let build = Command::new("xcrun")
+        .args(["-sdk", "macosx", "clang++", "-O2"])
+        .args(&generated.compile_flags)
+        .arg(temporary.path().join("driver.mm"))
+        .arg(temporary.path().join("model.mm"))
+        .arg(format!("-I{}", temporary.path().display()))
+        .arg(&staged.archive)
+        .args(&generated.link_flags)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("compile Metal bitwise driver");
+    assert!(
+        build.status.success(),
+        "Metal bitwise host compile failed: {}\n{}",
+        String::from_utf8_lossy(&build.stderr),
+        generated.mm_source
+    );
+    Command::new(binary)
+        .output()
+        .expect("run Metal bitwise driver")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn bitwise_exact_signed_width_gpu_matches_reference() {
+    use chelis_types::{BitwiseKind, bitwise_scalar, scalar_from_i64};
+    let kinds = [
+        BitwiseKind::And,
+        BitwiseKind::Or,
+        BitwiseKind::Xor,
+        BitwiseKind::ShiftLeft,
+        BitwiseKind::ShiftRight,
+    ];
+    for (prim, width, minimum) in [
+        (Prim::Int8, 8, i8::MIN as i64),
+        (Prim::Int16, 16, i16::MIN as i64),
+        (Prim::Int32, 32, i32::MIN as i64),
+        (Prim::Int64, 64, i64::MIN),
+    ] {
+        let lhs = [-1, 1, minimum, 8];
+        let rhs = [1, width - 1, width, width + 1];
+        let run = run_bitwise_gpu_case(prim, &kinds, &rhs);
+        assert!(
+            run.status.success(),
+            "{}: {}",
+            prim.name(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let actual = String::from_utf8(run.stdout).expect("utf8 output");
+        for (root, kind) in kinds.iter().enumerate() {
+            let expected = lhs
+                .into_iter()
+                .zip(rhs)
+                .map(|(a, b)| {
+                    bitwise_scalar(
+                        *kind,
+                        scalar_from_i64("bitwise", prim, a).unwrap(),
+                        scalar_from_i64("bitwise", prim, b).unwrap(),
+                    )
+                    .unwrap()
+                    .as_i64_exact()
+                    .unwrap()
+                    .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                actual
+                    .lines()
+                    .any(|line| line == format!("OUT {root} {expected}")),
+                "{kind:?} {prim:?}: {actual}"
+            );
+        }
+    }
+    let empty = run_bitwise_gpu_case(Prim::Int8, &kinds, &[]);
+    assert!(
+        empty.status.success(),
+        "empty bitwise tensors: {}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let output = String::from_utf8(empty.stdout).expect("utf8 empty output");
+    assert_eq!(
+        output.lines().collect::<Vec<_>>(),
+        (0..kinds.len())
+            .map(|root| format!("OUT {root}"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn bitwise_first_negative_shift_gpu_reports_exact_count() {
+    for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+        let run = run_bitwise_gpu_case(
+            prim,
+            &[chelis_types::BitwiseKind::ShiftRight],
+            &[-3, -7, 1, 2],
+        );
+        assert!(!run.status.success(), "negative count must trap");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            stderr.contains("shift amount must be non-negative, got -3"),
+            "{prim:?}: {stderr}"
+        );
+    }
+}
+
 // f32 tolerance for Metal vs evaluator agreement. MSL's default
 // transcendentals are fast-math; widen vs HIP's tolerance for safety.
 // Tighten per-test if a kernel doesn't actually need the slack.

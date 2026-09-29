@@ -365,6 +365,29 @@ KEY_CALLABLE_BACKEND_FINAL_FORMS = (
     ),
 )
 DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS = (
+    # chelis#2702 / [05-OP-47]: width-matched unsigned HIP words and MSL
+    # as_type signed storage preserve every bit; shifts record the first
+    # negative-count lane before host observation.
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "backend-element-spelling",
+        "binary_bitwise_typed",
+    ),
+    (
+        "crates/chelis-backend-metal/src/kernels.rs",
+        "backend-element-spelling",
+        "bitwise_body",
+    ),
+    (
+        "crates/chelis-backend-metal/src/emit.rs",
+        "backend-element-spelling",
+        "Emitter < 'plan >::emit_bitwise",
+    ),
+    (
+        "crates/chelis-backend-metal/src/emit.rs",
+        "load-store-template",
+        "Emitter < 'plan >::emit_bitwise",
+    ),
     (
         "crates/chelis-backend-hip/src/kernels.rs",
         "backend-element-spelling",
