@@ -184,6 +184,11 @@ slow-timeout = { period = "60s", terminate-after = 50 }
 [profile.ci-fast.junit]
 path = "junit.xml"
 
+# Start the workspace source guard while other Fast cases run.
+[[profile.ci-fast.overrides]]
+filter = 'binary_id(/^chelis-compiler-api$/) & test(/^source_arch::guarded_upper_consumers_do_not_recreate_the_semantic_pipeline$/)'
+priority = 100
+
 [profile.ci-full]
 inherits = "default"
 fail-fast = false
