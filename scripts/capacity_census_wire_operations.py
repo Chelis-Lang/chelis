@@ -46,6 +46,15 @@ def operation_contracts():
                 schema + "WireRiscOp::" + field, ty, f"[05-OP-{number}]", anchor
             )
         )
+    for field in ("Gather.batch_rank", "Scatter.batch_rank", "ScatterAdd.batch_rank"):
+        result.append(
+            OperationContract(
+                schema + "WireRiscOp::" + field,
+                ("primitive", "u32"),
+                "[05-OP-66]",
+                "Wire `batch_rank` counts the paired",
+            )
+        )
     result.append(
         OperationContract(
             schema + "WireRtAxis::Lit.value",

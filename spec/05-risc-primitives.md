@@ -1477,7 +1477,9 @@ The tensor-lane Surf builtin
 > routes update cotangents through `Gather`. Index and axis arguments have
 > zero cotangent. Integer and bool payloads are forward-only; `Scatter` and
 > `ScatterElements` retain §3.5's structural AD rejection. Wire axis parameters
-> preserve these exact operation identities; serialization supplies no
+> preserve these exact operation identities. Wire `batch_rank` counts the paired
+> leading data and index axes; it cannot exceed the data target axis or index
+> rank, and every paired extent must match. Serialization supplies no
 > alternative operation, dtype, or accumulator rule.
 
 ### 3.6 Host-Runtime Operations
