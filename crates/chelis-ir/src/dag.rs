@@ -2253,6 +2253,7 @@ impl DagNode {
             | RuntimeCheck::MovementBounds
             | RuntimeCheck::ExtentClaims
             | RuntimeCheck::Random
+            | RuntimeCheck::SparseIndex
             | RuntimeCheck::Ungated => None,
         }
     }
@@ -2357,13 +2358,16 @@ impl DagNode {
             | RiscOp::FoldIn
             | RiscOp::KeySelect => RuntimeCheck::Random,
             RiscOp::GuardedFail { .. } => RuntimeCheck::Abort,
-            RiscOp::Reshape { .. }
-            | RiscOp::Expand { .. }
-            | RiscOp::Gather { .. }
+            // [05-OP-52]: "out-of-bounds indices fail loudly". The index
+            // is data, so no static fact rules the failure out for a
+            // non-literal one, and the checker rejects a literal one before
+            // lowering.
+            RiscOp::Gather { .. }
             | RiscOp::ScatterAdd { .. }
             | RiscOp::Scatter { .. }
             | RiscOp::ScatterElements { .. }
-            | RiscOp::OneHot { .. } => RuntimeCheck::Ungated,
+            | RiscOp::OneHot { .. } => RuntimeCheck::SparseIndex,
+            RiscOp::Reshape { .. } | RiscOp::Expand { .. } => RuntimeCheck::Ungated,
             RiscOp::Compare(_)
             | RiscOp::Logical(_)
             | RiscOp::Where
@@ -2446,6 +2450,12 @@ pub enum RuntimeCheck {
     /// An authored abort ([05-OP-68]): gated like [`Self::OperandValues`],
     /// its condition reading the value that does not fire. Always a seed.
     Abort,
+    /// Checks a sparse index against its base axis ([05-OP-52]: gather,
+    /// every scatter mode, and `one_hot`). The index is data, so the check
+    /// can always fail; a seed (chelis#2440). Not gated: its emitters read
+    /// no activation, so under a false one it checks as usual, which
+    /// chelis#2440 records as the residual this class does not close.
+    SparseIndex,
     /// Can trap, and neither checks nothing under a false activation nor
     /// is a seed (chelis#2440's remaining kinds).
     Ungated,
@@ -2478,7 +2488,9 @@ impl TrapSeeds<'_> {
     /// roots; purity alone does not make a possible trap dead."
     ///
     /// The members: an unconditional effect (chelis#2368, [05-OP-68]); a
-    /// numeric node that can trap (chelis#2440); and a random node that can
+    /// numeric node that can trap (chelis#2440); a sparse operation whose
+    /// index the base axis can reject ([`RuntimeCheck::SparseIndex`],
+    /// chelis#2440); and a random node that can
     /// trap by itself ([`Dag::random_node_may_trap`], chelis#2413). A
     /// backward-synthesized adjoint is not a numeric member: its trap
     /// obligation belongs to the forward node it was derived from, and it is
@@ -2499,7 +2511,8 @@ impl TrapSeeds<'_> {
             RuntimeCheck::OperandValues
             | RuntimeCheck::EmptyAxis
             | RuntimeCheck::MovementBounds
-            | RuntimeCheck::ExtentClaims => !synthesized_adjoint && self.check_may_fail(node),
+            | RuntimeCheck::ExtentClaims
+            | RuntimeCheck::SparseIndex => !synthesized_adjoint && self.check_may_fail(node),
             RuntimeCheck::Random => self.check_may_fail(node),
             RuntimeCheck::Nothing | RuntimeCheck::MeanDivisor | RuntimeCheck::Ungated => false,
         }
@@ -2520,6 +2533,7 @@ impl TrapSeeds<'_> {
             RuntimeCheck::OperandValues
             | RuntimeCheck::MeanDivisor
             | RuntimeCheck::Abort
+            | RuntimeCheck::SparseIndex
             | RuntimeCheck::Ungated => true,
             RuntimeCheck::ExtentClaims => self.extent_claims_may_fail(node),
             RuntimeCheck::EmptyAxis => self.dag.reduced_axis_may_be_empty(node),
@@ -2592,7 +2606,10 @@ impl TrapSeeds<'_> {
                     | RuntimeCheck::MovementBounds
                     | RuntimeCheck::ExtentClaims
                     | RuntimeCheck::Abort => true,
-                    RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
+                    RuntimeCheck::Nothing
+                    | RuntimeCheck::Random
+                    | RuntimeCheck::SparseIndex
+                    | RuntimeCheck::Ungated => false,
                 })
                 || self.is_claim_sized(node))
     }

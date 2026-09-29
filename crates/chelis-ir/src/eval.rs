@@ -5075,6 +5075,7 @@ fn inactive_unchecked_value(
         | RuntimeCheck::MeanDivisor
         | RuntimeCheck::Random
         | RuntimeCheck::Abort
+        | RuntimeCheck::SparseIndex
         | RuntimeCheck::Ungated => Ok(None),
     }
 }
