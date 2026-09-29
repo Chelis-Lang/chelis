@@ -7746,7 +7746,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             reduce_kind == "sum",
         );
         if reduce_kind == "max" {
-            let empty = self.gated_check(&format!("t{id}_leaf_count == 0"));
+            // The checked plan reports zero leaves for an empty result even
+            // when the selected axis is nonempty ([05-OP-12]). The Domain
+            // condition belongs to the axis itself, not that plan count.
+            let selected_extent = Self::emit_dim_info(&fused_input_type.dims[axis]);
+            let empty = self.gated_check(&format!("({selected_extent}) == 0"));
             let trap = NumericTrap::Domain {
                 op: "max_reduce",
                 prim: out_ty.precision,
