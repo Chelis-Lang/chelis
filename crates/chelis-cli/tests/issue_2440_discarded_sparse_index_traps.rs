@@ -4,10 +4,15 @@
 //! observable root: "purity alone does not make a possible trap dead". The
 //! index of a `gather`, of every scatter mode, and of `one_hot` is data, so
 //! [05-OP-52]'s "out-of-bounds indices fail loudly" cannot be ruled out
-//! statically for a non-literal one, and the checker rejects a literal one
-//! before lowering. Those five operations were nonetheless outside the trap
+//! statically. Those five operations were nonetheless outside the trap
 //! seed, so an out-of-bounds index that nothing consumed was eliminated and
 //! its failure did not occur — in BOTH lanes.
+//!
+//! The seed covers a sparse node under no activation. §5.2 also says a node
+//! whose activation is false checks nothing, and this class has no
+//! activation gate in any lane, so seeding an activated one would abort a
+//! correct program; `an_out_of_bounds_index_under_a_false_activation_…`
+//! below is the guard for that.
 //!
 //! Each family below is one `g` whose out-of-bounds index sits in a
 //! discarded `let`, beside the same `g` with that index consumed. The two
@@ -60,10 +65,13 @@ out = g(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0i64, INDEX]))
 /// What one lane did with a program: it stopped, or it printed a root.
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
-    /// Stopped. Carries the `numeric trap:` line when there is one, so the
-    /// compiled lane's message is still pinned, and `None` for a stop
-    /// without one (the evaluator's chelis#1636 panic).
-    Stopped(Option<String>),
+    /// Stopped, carrying WHY. The `numeric trap:` line when there is one,
+    /// so the compiled lane's message stays pinned; otherwise the panic's
+    /// own message line, so the evaluator's chelis#1636 stop is compared by
+    /// reason too. Carrying `None` for every trapless stop would have made
+    /// a type error, an unsupported diagnostic and a lowering panic all
+    /// compare equal to the stop this test means.
+    Stopped(String),
     Value(String),
 }
 
@@ -97,10 +105,27 @@ fn verdict(output: &std::process::Output) -> Verdict {
         Verdict::Value(value.to_string())
     } else {
         let all = text(output);
+        if let Some(trap) = all.lines().find(|line| line.starts_with("numeric trap:")) {
+            return Verdict::Stopped(trap.to_string());
+        }
+        // A panic prints `thread '<name>' (<id>) panicked at <file>:<line>:`
+        // and its message on the NEXT line. The header carries a varying
+        // thread id and a source line number, so the message alone is what
+        // is stable enough to compare.
+        let mut lines = all.lines();
+        while let Some(line) = lines.next() {
+            if line.contains("panicked at") {
+                if let Some(message) = lines.next() {
+                    return Verdict::Stopped(message.trim().to_string());
+                }
+            }
+        }
         Verdict::Stopped(
             all.lines()
-                .find(|line| line.starts_with("numeric trap:"))
-                .map(str::to_string),
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("stopped with no output")
+                .trim()
+                .to_string(),
         )
     }
 }
@@ -160,6 +185,13 @@ fn a_discarded_out_of_bounds_gather_stops_exactly_where_a_consumed_one_does() {
         matches!(consumed_eval, Verdict::Stopped(_)),
         "control: a CONSUMED out-of-bounds index must stop the evaluator, got {consumed_eval:?}"
     );
+    // ...and it stops for the reason this test is about, not some other
+    // failure that would also satisfy the equality below.
+    assert_eq!(
+        consumed_eval,
+        Verdict::Stopped("gather index 9 out of bounds for axis 0".to_string()),
+        "control: the evaluator's stop must be the chelis#1636 bounds panic"
+    );
 
     // chelis#2440 itself: liveness must not decide whether the check runs.
     assert_eq!(
@@ -175,8 +207,42 @@ fn a_discarded_out_of_bounds_gather_stops_exactly_where_a_consumed_one_does() {
     // stop until chelis#1636 gives it the same line.
     assert_eq!(
         discarded_c,
-        Verdict::Stopped(Some(C_TRAP.to_string())),
+        Verdict::Stopped(C_TRAP.to_string()),
         "C must report the sparse-index domain trap by name"
+    );
+}
+
+/// The index sits in an `if` arm the program does not take, so its
+/// activation is false at run time. `spec/06-transformations.md` §5.2: "A
+/// potentially trapping node traps only within its activation (spec/10 §3):
+/// where its activation is false it computes a value and **checks nothing**."
+///
+/// This is the regression guard for the seed's first shape, which seeded
+/// every sparse node and so turned this correct program into an abort in
+/// both lanes. `SparseIndex` is the only checking class with no activation
+/// gate in any lane, so seeding an activated node makes it check where the
+/// spec says it must not. The activation is computed from an input rather
+/// than a literal, so nothing can fold the arm away before lowering.
+const FALSE_ACTIVATION: &str =
+    "def g(v: tensor[3, f32], idx: tensor[2, i64], flags: tensor[3, f32]) -> tensor[3, f32] = {
+  take = gt(tensor_to_scalar(sum(flags, cast(0, i32))), 100.0f32)
+  dead = if take then gather(copy(v), idx, 0) else to_tensor([0.0f32, 0.0f32])
+  v
+}
+out = g(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0i64, INDEX]), to_tensor([1.0f32, 1.0f32, 1.0f32]))
+";
+
+#[test]
+fn an_out_of_bounds_index_under_a_false_activation_checks_nothing_in_either_lane() {
+    let (eval, c) = lane_verdicts("sparse_false_activation", FALSE_ACTIVATION, BAD);
+    let want = Verdict::Value("tensor(shape=[3], data=[1.0, 2.0, 3.0])".to_string());
+    assert_eq!(
+        eval, want,
+        "eval: an out-of-bounds index in an untaken arm must check nothing"
+    );
+    assert_eq!(
+        c, want,
+        "C: an out-of-bounds index in an untaken arm must check nothing"
     );
 }
 

@@ -1116,9 +1116,10 @@ mod tests {
                 true,
             ),
             ("one_hot", RiscOp::OneHot { vocab: 2 }, 1, Prim::Int32, true),
-            // Ungated: the movement ops left in that class carry no check of
-            // their own. A reshape's extent claim is a separate
-            // `CheckedReshapeExtent` node (`ExtentClaims`), not this one.
+            // Ungated: still not a seeded class. A reshape DOES carry a
+            // runtime element-count check of its own, distinct from the
+            // `CheckedReshapeExtent` extent claim (`ExtentClaims`); it is
+            // simply not seeded, which chelis#2440 lists as residual.
             (
                 "reshape is Ungated",
                 RiscOp::Reshape {

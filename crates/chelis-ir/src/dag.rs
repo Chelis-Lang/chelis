@@ -2281,7 +2281,7 @@ impl DagNode {
     /// | `Random` | `Dropout` `DropoutReplay` `UniformLike` `UniformBoundAdjoint` `SplitN` `FoldIn` `KeySelect` | controls, key extents, a negative count |
     /// | `Abort` | `GuardedFail` | its authored condition |
     /// | `Ungated` | `Reshape` `Expand` | a runtime target extent |
-    /// | | `Gather` `ScatterAdd` `Scatter` `ScatterElements` `OneHot` | an index out of range |
+    /// | `SparseIndex` | `Gather` `ScatterAdd` `Scatter` `ScatterElements` `OneHot` | an index out of range |
     /// | `Nothing` | every other operation, and float arithmetic and reductions | |
     ///
     /// Three checks are not an operation kind's and are listed here for
@@ -2359,9 +2359,10 @@ impl DagNode {
             | RiscOp::KeySelect => RuntimeCheck::Random,
             RiscOp::GuardedFail { .. } => RuntimeCheck::Abort,
             // [05-OP-52]: "out-of-bounds indices fail loudly". The index
-            // is data, so no static fact rules the failure out for a
-            // non-literal one, and the checker rejects a literal one before
-            // lowering.
+            // is data, so no static fact rules the failure out. The checker
+            // rejects an out-of-range LITERAL index only where the base is
+            // also a literal, so this class does not try to prove a literal
+            // index safe: it may fail is the conservative answer.
             RiscOp::Gather { .. }
             | RiscOp::ScatterAdd { .. }
             | RiscOp::Scatter { .. }
@@ -2450,11 +2451,18 @@ pub enum RuntimeCheck {
     /// An authored abort ([05-OP-68]): gated like [`Self::OperandValues`],
     /// its condition reading the value that does not fire. Always a seed.
     Abort,
-    /// Checks a sparse index against its base axis ([05-OP-52]: gather,
-    /// every scatter mode, and `one_hot`). The index is data, so the check
-    /// can always fail; a seed (chelis#2440). Not gated: its emitters read
-    /// no activation, so under a false one it checks as usual, which
-    /// chelis#2440 records as the residual this class does not close.
+    /// Checks a sparse index against its base axis: gather and every
+    /// scatter mode ([05-OP-52]), and the internal `one_hot` marker
+    /// ([05-SPARSE-2]). The index is data, so the check can always fail.
+    ///
+    /// A seed only where the node has no activation (chelis#2440). This is
+    /// the one checking class with no activation gate in any lane -- its
+    /// emitters read no activation, so a node of it checks even where its
+    /// activation is false. Seeding one that has an activation would
+    /// therefore trap where spec/06 5.2 says it "checks nothing", so an
+    /// activated sparse node is left to ordinary value reachability. Gating
+    /// the class needs an inactive-value contract in the evaluator and the
+    /// C emitter, which chelis#2440 tracks.
     SparseIndex,
     /// Can trap, and neither checks nothing under a false activation nor
     /// is a seed (chelis#2440's remaining kinds).
@@ -2488,9 +2496,9 @@ impl TrapSeeds<'_> {
     /// roots; purity alone does not make a possible trap dead."
     ///
     /// The members: an unconditional effect (chelis#2368, [05-OP-68]); a
-    /// numeric node that can trap (chelis#2440); a sparse operation whose
-    /// index the base axis can reject ([`RuntimeCheck::SparseIndex`],
-    /// chelis#2440); and a random node that can
+    /// numeric node that can trap (chelis#2440); an UNACTIVATED sparse
+    /// operation whose index the base axis can reject
+    /// ([`RuntimeCheck::SparseIndex`], chelis#2440); and a random node that can
     /// trap by itself ([`Dag::random_node_may_trap`], chelis#2413). A
     /// backward-synthesized adjoint is not a numeric member: its trap
     /// obligation belongs to the forward node it was derived from, and it is
@@ -2511,9 +2519,17 @@ impl TrapSeeds<'_> {
             RuntimeCheck::OperandValues
             | RuntimeCheck::EmptyAxis
             | RuntimeCheck::MovementBounds
-            | RuntimeCheck::ExtentClaims
-            | RuntimeCheck::SparseIndex => !synthesized_adjoint && self.check_may_fail(node),
+            | RuntimeCheck::ExtentClaims => !synthesized_adjoint && self.check_may_fail(node),
             RuntimeCheck::Random => self.check_may_fail(node),
+            // Unlike every other seeded class, this one has no activation
+            // gate in any lane, so a seeded node under a false activation
+            // would check and trap where 5.2 says it "checks nothing". Seed
+            // only an unconditional one until the class is gated
+            // (chelis#2440); a discarded sparse node under an activation is
+            // therefore still eliminated, trap and all.
+            RuntimeCheck::SparseIndex => {
+                !synthesized_adjoint && node.owner.activation.is_none() && self.check_may_fail(node)
+            }
             RuntimeCheck::Nothing | RuntimeCheck::MeanDivisor | RuntimeCheck::Ungated => false,
         }
     }
