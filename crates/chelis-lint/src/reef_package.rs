@@ -36,9 +36,25 @@ struct ManifestPackage {
     additional_sources: Vec<String>,
 }
 
-/// Read a `reef.toml`'s layout, or `None` if it is not a package manifest this
-/// crate can read: unreadable, not TOML, or declaring no `module_prefix`.
+/// Read a `reef.toml`'s layout, or `None` when it is not a manifest reef could
+/// build a package from.
+///
+/// Declining is the conservative answer, because a layout read here decides
+/// what the traversal policy stops pruning. A manifest reef rejects must not
+/// widen the lint corpus: the package cannot build, so nothing under the roots
+/// it names is source. `additional_sources` is validated as
+/// `chelis_reef::validate_manifest` validates it, so a manifest declaring
+/// `additional_sources = [".git"]` grants nothing.
 pub fn read_layout(manifest: &Path) -> Option<PackageLayout> {
+    // Governance follows the link path, not only the resolved target (§12.2).
+    // A symlinked `reef.toml` can name a file outside the lint's policy root,
+    // and a manifest there must not decide what the lint walks.
+    if std::fs::symlink_metadata(manifest)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(true)
+    {
+        return None;
+    }
     let text = std::fs::read_to_string(manifest).ok()?;
     let parsed: ManifestFile = toml::from_str(&text).ok()?;
     let package = parsed.package?;
@@ -47,11 +63,30 @@ pub fn read_layout(manifest: &Path) -> Option<PackageLayout> {
         return None;
     }
     let mut source_roots = vec!["src".to_string()];
-    source_roots.extend(package.additional_sources);
+    for entry in package.additional_sources {
+        if !is_valid_additional_source(&entry) || source_roots.contains(&entry) {
+            return None;
+        }
+        source_roots.push(entry);
+    }
     Some(PackageLayout {
         module_prefix,
         source_roots,
     })
+}
+
+/// Reserved source-root names, mirroring `chelis_reef`.
+const RESERVED_ADDITIONAL_SOURCE_DIRS: [&str; 2] = ["src", "tests"];
+
+/// Whether `entry` is an `additional_sources` value reef would accept.
+fn is_valid_additional_source(entry: &str) -> bool {
+    !entry.trim().is_empty()
+        && !RESERVED_ADDITIONAL_SOURCE_DIRS.contains(&entry)
+        && !entry.contains('/')
+        && !entry.contains('\\')
+        && entry
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Whether `path` lies inside a declared source root of a reef package rooted
@@ -173,13 +208,59 @@ mod tests {
 
     #[test]
     fn does_not_climb_above_the_boundary() {
-        // The manifest is at `outer`, the boundary is `outer/inner`. A file
-        // under `outer/inner/src` must not be granted by a manifest the lint's
-        // policy root does not cover.
+        // An earlier version of this test put the boundary at `outer/inner`
+        // and asserted a file under `outer/inner/src` was not granted. It
+        // passed whether or not the boundary existed: without the break the
+        // climb reached `outer`, and the path relative to `outer` starts with
+        // `inner`, which is not a source root, so the answer was `false`
+        // either way. Deleting the boundary killed 0 of 411 tests.
+        //
+        // The knob only moves when the intermediate directory is itself named
+        // like the outer package's source root, so a climb past the boundary
+        // WOULD find a granting manifest.
         let tmp = tempfile::tempdir().expect("tempdir");
         let outer = pkg(tmp.path(), "");
-        let inner = outer.join("inner");
-        fs::create_dir_all(inner.join("src")).expect("mkdir");
-        assert!(!inside_package_source_root(&inner.join("src/x.ch"), &inner));
+        let boundary = outer.join("src");
+        fs::create_dir_all(boundary.join("src")).expect("mkdir");
+        assert!(
+            !inside_package_source_root(&boundary.join("src/x.ch"), &boundary),
+            "a manifest above the policy root must not grant a lint exception"
+        );
+    }
+
+    #[test]
+    fn declines_a_manifest_reef_would_reject() {
+        for bad in [
+            "additional_sources = [\".git\"]\n",
+            "additional_sources = [\"a/b\"]\n",
+            "additional_sources = [\"..\"]\n",
+            "additional_sources = [\"src\"]\n",
+            "additional_sources = [\"p\", \"p\"]\n",
+        ] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = pkg(tmp.path(), bad);
+            assert!(
+                read_layout(&root.join("reef.toml")).is_none(),
+                "reef rejects {bad:?}, so the lint must grant nothing from it"
+            );
+        }
+    }
+
+    #[test]
+    fn declines_a_symlinked_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).expect("mkdir");
+        fs::write(
+            outside.join("manifest.toml"),
+            "[package]\nname = \"d\"\nversion = \"0.1.0\"\nmodule_prefix = \"Demo\"\n",
+        )
+        .expect("write");
+        let root = tmp.path().join("pkg");
+        fs::create_dir_all(root.join("src")).expect("mkdir");
+        std::os::unix::fs::symlink(outside.join("manifest.toml"), root.join("reef.toml"))
+            .expect("symlink");
+        assert!(read_layout(&root.join("reef.toml")).is_none());
+        assert!(!inside_package_source_root(&root.join("src/x.ch"), &root));
     }
 }

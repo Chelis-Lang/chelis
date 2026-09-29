@@ -1525,18 +1525,18 @@ contents it was unable to judge.
 Rules that need an abstract syntax tree obtain it by parsing, and a rule
 that cannot parse its input reaches no verdict and reports nothing. That
 deferral is correct per rule: a rule must not invent a diagnosis from a
-broken parse. It is wrong in aggregate, because silence from every rule
-is indistinguishable from a clean file, and the command then reports
-success over input no rule could read.
+broken parse. It is wrong in aggregate: silence from every rule is
+indistinguishable from a clean file, so without this rule the command
+would report success over input no rule could read.
 
 Exactly one rule therefore owns the parse verdict and reports the
 failure; every other rule keeps deferring. This is what makes the
 per-rule deferral safe rather than silent.
 
 The requirement is on the lint, not on the formatter. `chelis fmt
---check` reports a parse failure for the file it is given, but it judges
-one named file; it is not the surface that walks a directory, so it
-cannot stand in for this rule when the lint is run over a tree.
+--check` claims that the file it is named on is canonically formatted,
+and claims nothing about any other file; it therefore does not discharge
+this requirement, whatever it reports.
 
 ---
 
