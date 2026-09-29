@@ -39,7 +39,7 @@ def assert_hosted_coverage(test, workflow, nightly):
     macos = jobs["macos-workspace-shard"]
     test.assertEqual(macos["runs-on"], "macos-latest")
     test.assertNotIn("if", macos)
-    test.assertEqual(macos["timeout-minutes"], 45)
+    test.assertEqual(macos["timeout-minutes"], 120)
     test.assertFalse(macos.get("continue-on-error", False))
     test.assertIn(1, macos["strategy"]["matrix"]["shard"])
     toolchains = [step for step in macos["steps"] if step.get("uses", "").startswith("dtolnay/rust-toolchain@")]
