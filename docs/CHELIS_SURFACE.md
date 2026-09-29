@@ -344,7 +344,8 @@ expressions used as runtime extents. `grad` retains discrete expressions
 that are fixed coefficients and rejects a selected discrete path; `vmap`
 maps admitted bitwise work elementwise. HIP has direct typed tensor kernels and
 Metal has direct rank-one tensor kernels for all four signed widths; source
-tensor admission remains tracked in #2076. Shifts use declared-width
+tensor admission remains tracked in #2076. Metal rejects activated shifts
+until it can gate their checks. Shifts use declared-width
 two's-complement semantics; counts at or above the width fully shift out
 the value, while negative counts trap ([04-NUM-13]).
 

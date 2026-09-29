@@ -317,6 +317,23 @@ pub(crate) fn emit_verified_dag(
             ),
         ));
     }
+    if let Some(node) = dag.nodes().iter().find(|node| {
+        matches!(&node.op, RiscOp::Bitwise(kind) if kind.is_shift())
+            && dag.trap_seeds().is_activation_gated(node)
+    }) {
+        let RiscOp::Bitwise(kind) = &node.op else {
+            unreachable!("selected bitwise shift")
+        };
+        return Err(Unsupported::new(
+            UnsupportedKind::Op(kind.name().to_string()),
+            format!("an activated bitwise shift at Metal DAG node {}", node.id.0),
+            Stage::Codegen("metal"),
+            chelis_types::unimplemented_rejection!(
+                2702,
+                "Metal bitwise shifts have no operand activation gate; use the C or HIP target"
+            ),
+        ));
+    }
 
     validate_count_nodes(dag)?;
     let mut e = Emitter::new(func_name, plan);
@@ -1715,10 +1732,12 @@ impl<'plan> Emitter<'plan> {
             self.extra_peak_device_bytes += dtype::metal_elem_size(Prim::Int32);
             self.body
                 .push(format!("*((uint32_t*)[{status} contents]) = UINT32_MAX;"));
-            self.body.push(format!(
-                "{{ __unsafe_unretained id<MTLBuffer> bufs[4] = {{ {}, {}, {out}, {status} }}; \
-                 chelis_metal_launch({pso}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 4, &n_{id}, sizeof(uint32_t)); }}",
-                lhs.buf, rhs.buf
+            self.body.extend(launch_1d(
+                &pso,
+                n,
+                n.min(256),
+                &[&lhs.buf, &rhs.buf, &out, &status],
+                &[(&format!("&n_{id}"), "sizeof(uint32_t)")],
             ));
             self.body.push(format!(
                 "uint32_t shift_first_{id} = *((uint32_t*)[{status} contents]);"
@@ -1738,10 +1757,12 @@ impl<'plan> Emitter<'plan> {
                 rhs.buf
             ));
         } else {
-            self.body.push(format!(
-                "{{ __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {}, {out} }}; \
-                 chelis_metal_launch({pso}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 3, &n_{id}, sizeof(uint32_t)); }}",
-                lhs.buf, rhs.buf
+            self.body.extend(launch_1d(
+                &pso,
+                n,
+                n.min(256),
+                &[&lhs.buf, &rhs.buf, &out],
+                &[(&format!("&n_{id}"), "sizeof(uint32_t)")],
             ));
         }
         self.plans[id] = Some(TensorPlan {

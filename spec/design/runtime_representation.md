@@ -1174,7 +1174,9 @@ exact signed count before exposing output. The default HIP generated-kernel
 CPU projection checks all 20 kind/width cases; the real HIP manual gate in
 `logical_comparison_where_gpu` owns hardware execution. The Metal manual
 `gpu_correctness` gate executes the 20-case matrix and first-negative trap on
-Apple Silicon. No raw dtype id or public numeric carrier is introduced.
+Apple Silicon. Metal rejects activated shifts until it has a checked
+activation gate. Empty elementwise tensors allocate but do not dispatch.
+No raw dtype id or public numeric carrier is introduced.
 
 ## C4. Validated typed tensor access
 

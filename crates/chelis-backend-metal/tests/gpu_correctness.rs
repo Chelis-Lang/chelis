@@ -33,8 +33,10 @@ use support::codegen_metal;
 fn run_bitwise_gpu_case(
     prim: Prim,
     kinds: &[chelis_types::BitwiseKind],
-    rhs: [i64; 4],
+    rhs: &[i64],
 ) -> std::process::Output {
+    let n = rhs.len();
+    assert!(n <= 4);
     let (c_ty, tag, width, min_literal) = match prim {
         Prim::Int8 => ("int8_t", "CHELIS_DTYPE_I8", 8, "-128LL"),
         Prim::Int16 => ("int16_t", "CHELIS_DTYPE_I16", 16, "-32768LL"),
@@ -43,7 +45,7 @@ fn run_bitwise_gpu_case(
         _ => panic!("integer bitwise GPU case only"),
     };
     let ty = TensorType {
-        dims: vec![DimInfo::Lit(4)],
+        dims: vec![DimInfo::Lit(n)],
         precision: prim,
     };
     let mut dag = Dag::new();
@@ -98,14 +100,14 @@ fn run_bitwise_gpu_case(
 extern "C" void bitwise_device(chelis_tensor**, int, chelis_tensor**, int);
 int main(void) {{
   @autoreleasepool {{
-    int64_t shape[1] = {{4}};
+    int64_t shape[1] = {{{n}}};
     int64_t lhs_values[4] = {{-1LL, 1LL, {min_literal}, 8LL}};
     int64_t rhs_values[4] = {{{rhs_values}}};
     chelis_tensor* inputs[2] = {{chelis_alloc(1, shape, {tag}), chelis_alloc(1, shape, {tag})}};
     for (int slot = 0; slot < 2; ++slot) {{
       chelis_tensor_write* guard = chelis_tensor_begin_write(inputs[slot]);
       chelis_write_view view = chelis_tensor_write_view(guard);
-      for (int i = 0; i < 4; ++i) (({c_ty}*)view.data)[i] = ({c_ty})(slot == 0 ? lhs_values[i] : rhs_values[i]);
+      for (int i = 0; i < {n}; ++i) (({c_ty}*)view.data)[i] = ({c_ty})(slot == 0 ? lhs_values[i] : rhs_values[i]);
       chelis_tensor_end_write(guard);
     }}
     chelis_tensor* outputs[{roots}] = {{0}};
@@ -113,7 +115,7 @@ int main(void) {{
     for (int root = 0; root < {roots}; ++root) {{
       chelis_read_view view = chelis_tensor_read_view(outputs[root]);
       printf("OUT %d", root);
-      for (int i = 0; i < 4; ++i) printf(" %lld", (long long)((const {c_ty}*)view.data)[i]);
+      for (int i = 0; i < {n}; ++i) printf(" %lld", (long long)((const {c_ty}*)view.data)[i]);
       printf("\n");
       chelis_tensor_release(outputs[root]);
     }}
@@ -170,7 +172,7 @@ fn bitwise_exact_signed_width_gpu_matches_reference() {
     ] {
         let lhs = [-1, 1, minimum, 8];
         let rhs = [1, width - 1, width, width + 1];
-        let run = run_bitwise_gpu_case(prim, &kinds, rhs);
+        let run = run_bitwise_gpu_case(prim, &kinds, &rhs);
         assert!(
             run.status.success(),
             "{}: {}",
@@ -203,6 +205,19 @@ fn bitwise_exact_signed_width_gpu_matches_reference() {
             );
         }
     }
+    let empty = run_bitwise_gpu_case(Prim::Int8, &kinds, &[]);
+    assert!(
+        empty.status.success(),
+        "empty bitwise tensors: {}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let output = String::from_utf8(empty.stdout).expect("utf8 empty output");
+    assert_eq!(
+        output.lines().collect::<Vec<_>>(),
+        (0..kinds.len())
+            .map(|root| format!("OUT {root}"))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -213,7 +228,7 @@ fn bitwise_first_negative_shift_gpu_reports_exact_count() {
         let run = run_bitwise_gpu_case(
             prim,
             &[chelis_types::BitwiseKind::ShiftRight],
-            [-3, -7, 1, 2],
+            &[-3, -7, 1, 2],
         );
         assert!(!run.status.success(), "negative count must trap");
         let stderr = String::from_utf8_lossy(&run.stderr);

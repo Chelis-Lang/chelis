@@ -71,6 +71,56 @@ fn metal_bitwise_kernels_preserve_exact_integer_width_and_shift_traps() {
 }
 
 #[test]
+fn metal_activated_shift_rejects_before_emitting_an_ungated_check() {
+    for kind in [
+        chelis_types::BitwiseKind::ShiftLeft,
+        chelis_types::BitwiseKind::ShiftRight,
+    ] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("activated_bitwise");
+        let mask = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "mask".into(),
+            },
+            vec![],
+            vector(Prim::Bool),
+            None,
+        );
+        let lhs = dag.add_node(
+            decl,
+            RiscOp::Load { name: "lhs".into() },
+            vec![],
+            vector(Prim::Int8),
+            None,
+        );
+        let rhs = dag.add_node(
+            decl,
+            RiscOp::Load { name: "rhs".into() },
+            vec![],
+            vector(Prim::Int8),
+            None,
+        );
+        let out = dag.add_node(
+            decl,
+            RiscOp::Bitwise(kind),
+            vec![lhs, rhs],
+            vector(Prim::Int8),
+            None,
+        );
+        dag.node_mut(out).unwrap().owner.activation = Some(mask);
+        dag.add_root(out);
+        let error = try_codegen_metal(&dag, "activated_shift").unwrap_err();
+        assert_eq!(error.stage, Stage::Codegen("metal"));
+        assert_eq!(
+            error.authority.issue().map(|issue| issue.number()),
+            Some(2702)
+        );
+        assert!(error.to_string().contains("activation gate"));
+    }
+}
+
+#[test]
 fn metal_rank_one_kernel_rejects_unrepresentable_device_indices() {
     let extent = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
     let mut dag = Dag::new();
