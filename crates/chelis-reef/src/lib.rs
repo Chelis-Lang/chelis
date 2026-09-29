@@ -12025,6 +12025,43 @@ mod tests {
         BundleHashDrift::InSync
     }
 
+    /// Every committed bundled `reef.lock` the discovery walk must find, as
+    /// workspace-relative paths. Keep this in `PathBuf` order, which is
+    /// component-wise and differs from string order (`a/x` sorts before
+    /// `a-b/x`); getting it wrong is a loud, self-explaining failure.
+    ///
+    /// chelis#585 removed a hand-maintained list from *discovery*, whose defect
+    /// was silent under-coverage: a lock absent from that list was never
+    /// checked and nothing said so. This constant is in the *assertion* path
+    /// instead. Discovery still walks, so a lock at a new path is read, parsed
+    /// and classified from the moment it exists; this only pins the walk's
+    /// reach, and its failure mode is a loud red naming the remedy.
+    ///
+    /// The comparison is deliberately a **subset**, not an equality. A missing
+    /// entry is the whole point: either the walk pruned it, or it stopped
+    /// parsing and discovery dropped it silently (chelis#2758). An *extra*
+    /// discovered lock is not a defect: discovery walks the working tree, not
+    /// the index, so an uncommitted scratch `reef.lock` - exactly what
+    /// `chelis-reef` work creates in-tree, and that crate now triggers this
+    /// leg - would otherwise hard-fail the guard and tell the developer to add
+    /// a scratch file to a committed constant. A newly *committed* lock is
+    /// still checked for drift either way; only this reach assertion ignores
+    /// it (chelis#2309 round 1).
+    ///
+    /// The canary this replaces checked *membership* of one lock, not
+    /// *completeness*. A prune that kept `packages/chelis-std/reef.lock` and
+    /// dropped the other three satisfied it while the guard walked away
+    /// reporting nothing, and `bundled_chelis_std_lock_hashes_match_embedded_artifacts`
+    /// prints `N of M` off `locks.len()`, so a partial prune made that printed
+    /// denominator silently wrong. Total vacuity was defended; partial vacuity
+    /// was not (chelis#2309 round 1).
+    const EXPECTED_COMMITTED_BUNDLED_STD_LOCKS: &[&str] = &[
+        "crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.lock",
+        "examples/nautilus_quantile_contract/fixtures/nautilus/reef.lock",
+        "examples/nautilus_quantile_contract/reef.lock",
+        "packages/chelis-std/reef.lock",
+    ];
+
     /// Every committed `reef.lock` under the workspace that records a
     /// **bundled** chelis-std dependency. Discovered by walking the source
     /// tree rather than hard-coding paths, so a newly-added committed lock (a
@@ -12085,6 +12122,66 @@ mod tests {
     /// [`discover_committed_bundled_std_locks`]), so a new committed bundled
     /// lock is covered without editing a hand-maintained list. The rlib-vs-disk
     /// half of the invariant lives in [`embedded_bundle_rlib_matches_disk`].
+    /// One report line per committed lock that fails the bundled-lock
+    /// invariant, over the **whole** discovered set.
+    ///
+    /// The guard used to `panic!` on the first drifted lock. Because the
+    /// discovery walk is sorted, that reported the `crates/` row and hid every
+    /// `examples/` one: chelis#2305 had three stale locks, and repairing only
+    /// the row CI named would have cost three CI rounds to learn three facts
+    /// one run already held. A guard that has classified the full set reports
+    /// the full set (chelis#2309). Aggregating also gives the reporting
+    /// behaviour its own parity test, which a first-failure panic cannot have.
+    ///
+    /// `examples_root` is the one directory under which a lock may legitimately
+    /// pin a different released toolchain during a compiler-first cascade. A
+    /// `DifferentCompiler` lock anywhere else is itself reportable, and is a
+    /// report line here rather than the separate `assert!` it used to be, so it
+    /// cannot short-circuit the locks that follow it either.
+    fn bundled_std_lock_drift_reports(
+        locks: &[(PathBuf, ReefLock)],
+        compiler_version: &str,
+        disk_archive_sha: &str,
+        disk_shell_sha: &str,
+        examples_root: &Path,
+    ) -> Vec<String> {
+        const REFRESH: &str = "refresh the lock with `chelis reef update --offline` (a \
+             schema-1 package: remove `reef.lock`, then run `chelis reef build`), or \
+             scripts/bump_compiler_pins.py step 5 for a compiler bump. chelis#585";
+        let mut reports = Vec::new();
+        for (lock_path, lock) in locks {
+            match bundled_std_lock_hash_drift(
+                lock,
+                compiler_version,
+                disk_archive_sha,
+                disk_shell_sha,
+            ) {
+                BundleHashDrift::InSync => {}
+                BundleHashDrift::DifferentCompiler => {
+                    if !lock_path.starts_with(examples_root) {
+                        reports.push(format!(
+                            "{} is not a historical example lock and may not escape \
+                             current bundle validation",
+                            lock_path.display()
+                        ));
+                    }
+                }
+                BundleHashDrift::ArchiveDrift => reports.push(format!(
+                    "{} archive_sha256 is stale vs the embedded bundle; {REFRESH}",
+                    lock_path.display()
+                )),
+                BundleHashDrift::ShellDrift => reports.push(format!(
+                    "{} shell_sha256 is stale vs the embedded bundle; {REFRESH}",
+                    lock_path.display()
+                )),
+                BundleHashDrift::NoBundledDep => {
+                    unreachable!("discovery only yields locks with a bundled chelis-std dep")
+                }
+            }
+        }
+        reports
+    }
+
     #[test]
     fn bundled_chelis_std_lock_hashes_match_embedded_artifacts() {
         let here = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -12094,63 +12191,71 @@ mod tests {
             .join("../..")
             .canonicalize()
             .expect("workspace root resolves");
-        let locks = discover_committed_bundled_std_locks(&workspace_root);
+        let lock_paths = discover_committed_bundled_std_locks(&workspace_root);
 
-        // Canary: the primary runtime lock must always be discovered, so an
-        // over-aggressive prune can never turn this guard into a vacuous pass.
+        // Canary: every expected lock must be among the discovered ones, so
+        // neither a total nor a partial prune can turn this guard into a
+        // vacuous pass. A membership check on one lock would let a prune drop
+        // three of four and still pass (chelis#2309 round 1).
+        let discovered: Vec<String> = lock_paths
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&workspace_root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        let missing: Vec<&&str> = EXPECTED_COMMITTED_BUNDLED_STD_LOCKS
+            .iter()
+            .filter(|expected| !discovered.iter().any(|found| found == *expected))
+            .collect();
         assert!(
-            locks
-                .iter()
-                .any(|p| p.ends_with("packages/chelis-std/reef.lock")),
-            "discovery walk under {} found no packages/chelis-std/reef.lock; \
-             the bundled-lock guard would pass vacuously. found: {:?}",
+            missing.is_empty(),
+            "the discovery walk under {} did not reach {:?}, so this guard is \
+             partly vacuous: those locks are never compared with the embedded \
+             bundle, and the `N of M` count below is computed only from what it \
+             did walk. Either the walk pruned them, or they no longer parse - \
+             discovery drops an unreadable or unparseable `reef.lock` silently \
+             (chelis#2758), so check that they are valid TOML before assuming a \
+             prune. Found: {:?}",
             workspace_root.display(),
-            locks
+            missing,
+            discovered,
         );
 
-        for lock_path in &locks {
-            let text = fs::read_to_string(lock_path).unwrap_or_else(|e| {
-                panic!(
-                    "could not read {}: {e}: \
-                     chelis-std lock hash sync test cannot run",
-                    lock_path.display()
-                )
-            });
-            let lock: ReefLock = toml::from_str(&text)
-                .unwrap_or_else(|e| panic!("{} must parse: {e}", lock_path.display()));
-            match bundled_std_lock_hash_drift(
-                &lock,
-                env!("CARGO_PKG_VERSION"),
-                &disk_archive_sha,
-                &disk_shell_sha,
-            ) {
-                BundleHashDrift::InSync => {}
-                BundleHashDrift::DifferentCompiler => assert!(
-                    lock_path.starts_with(workspace_root.join("examples")),
-                    "{} is not a historical example lock and may not escape current bundle validation",
-                    lock_path.display()
-                ),
-                BundleHashDrift::ArchiveDrift => panic!(
-                    "{} archive_sha256 is stale vs the embedded bundle; \
-                     refresh the lock with `chelis reef update --offline` (a \
-                     schema-1 package: remove `reef.lock`, then run `chelis reef \
-                     build`), or scripts/bump_compiler_pins.py step 5 for a \
-                     compiler bump. chelis#585",
-                    lock_path.display()
-                ),
-                BundleHashDrift::ShellDrift => panic!(
-                    "{} shell_sha256 is stale vs the embedded bundle; \
-                     refresh the lock with `chelis reef update --offline` (a \
-                     schema-1 package: remove `reef.lock`, then run `chelis reef \
-                     build`), or scripts/bump_compiler_pins.py step 5 for a \
-                     compiler bump. chelis#585",
-                    lock_path.display()
-                ),
-                BundleHashDrift::NoBundledDep => {
-                    unreachable!("discovery only yields locks with a bundled chelis-std dep")
-                }
-            }
-        }
+        let locks: Vec<(PathBuf, ReefLock)> = lock_paths
+            .iter()
+            .map(|lock_path| {
+                let text = fs::read_to_string(lock_path).unwrap_or_else(|e| {
+                    panic!(
+                        "could not read {}: {e}: \
+                         chelis-std lock hash sync test cannot run",
+                        lock_path.display()
+                    )
+                });
+                let lock: ReefLock = toml::from_str(&text)
+                    .unwrap_or_else(|e| panic!("{} must parse: {e}", lock_path.display()));
+                (lock_path.clone(), lock)
+            })
+            .collect();
+
+        let reports = bundled_std_lock_drift_reports(
+            &locks,
+            env!("CARGO_PKG_VERSION"),
+            &disk_archive_sha,
+            &disk_shell_sha,
+            &workspace_root.join("examples"),
+        );
+        assert!(
+            reports.is_empty(),
+            "{} of {} committed bundled reef.lock file(s) disagree with the \
+             embedded bundle. Every one is listed so a single run repairs all \
+             of them (chelis#2309):\n{}",
+            reports.len(),
+            locks.len(),
+            reports.join("\n"),
+        );
     }
 
     /// The rlib-vs-disk half of the bundled-lock invariant: the hashes baked
@@ -12200,7 +12305,17 @@ mod tests {
     /// deserializer so the negative test exercises the same parse the guard
     /// runs on committed locks.
     fn synth_bundled_std_lock(archive_sha256: &str, shell_sha256: &str) -> ReefLock {
-        let ver = env!("CARGO_PKG_VERSION");
+        synth_bundled_std_lock_for_compiler(env!("CARGO_PKG_VERSION"), archive_sha256, shell_sha256)
+    }
+
+    /// [`synth_bundled_std_lock`] with the recorded compiler version chosen by
+    /// the caller, so one aggregator call can mix a lock pinned to this
+    /// toolchain with a historical example lock pinned to another.
+    fn synth_bundled_std_lock_for_compiler(
+        ver: &str,
+        archive_sha256: &str,
+        shell_sha256: &str,
+    ) -> ReefLock {
         let text = format!(
             r#"[package]
 name = "downstream"
@@ -12219,6 +12334,213 @@ compiler_version = "{ver}"
 "#
         );
         toml::from_str(&text).expect("synthesized bundled lock parses")
+    }
+
+    /// Reporting parity for [`bundled_std_lock_drift_reports`]: when several
+    /// committed locks have drifted, **every** one is reported.
+    ///
+    /// Before chelis#2309 the guard panicked on the first drifted lock. The
+    /// discovery walk is sorted, so `crates/` was always reported and every
+    /// `examples/` row stayed hidden — chelis#2305 surrendered one of its three
+    /// stale locks per CI round. The lock set below is ordered the way the walk
+    /// orders it and reproduces exactly that shape: a drifted `crates/` row
+    /// first, so a first-failure implementation still satisfies every
+    /// assertion about `reports[0]` and fails only on the `examples/` row it
+    /// would have hidden.
+    ///
+    /// The in-sync row and the historical example row are the controls: an
+    /// aggregator that reported everything it looked at would turn the new
+    /// `--fast` leg red on a clean tree, which is worse than the false green
+    /// this replaces.
+    #[test]
+    fn every_drifted_lock_is_reported_not_only_the_first() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (real_archive, real_shell) = disk_bundle_hashes(here);
+        let drifted_archive = flip_leading_hex_nibble(&real_archive);
+        let drifted_shell = flip_leading_hex_nibble(&real_shell);
+        let examples_root = Path::new("/w/examples");
+
+        let locks = vec![
+            (
+                PathBuf::from("/w/crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.lock"),
+                synth_bundled_std_lock(&drifted_archive, &real_shell),
+            ),
+            (
+                PathBuf::from("/w/examples/nautilus_quantile_contract/reef.lock"),
+                synth_bundled_std_lock(&real_archive, &drifted_shell),
+            ),
+            // Control: in sync, and must contribute no line.
+            (
+                PathBuf::from("/w/packages/chelis-std/reef.lock"),
+                synth_bundled_std_lock(&real_archive, &real_shell),
+            ),
+            // Control: a historical example lock pinned to another released
+            // toolchain is a deliberate escape, not drift (see the
+            // `DifferentCompiler` arm). Its hashes are drifted too, so a guard
+            // that dropped the compiler check would report it here.
+            (
+                PathBuf::from("/w/examples/nautilus_quantile_contract/fixtures/nautilus/reef.lock"),
+                synth_bundled_std_lock_for_compiler(
+                    "0.0.0-previous-release",
+                    &drifted_archive,
+                    &drifted_shell,
+                ),
+            ),
+        ];
+
+        let reports = bundled_std_lock_drift_reports(
+            &locks,
+            env!("CARGO_PKG_VERSION"),
+            &real_archive,
+            &real_shell,
+            examples_root,
+        );
+
+        assert_eq!(
+            reports.len(),
+            2,
+            "both drifted locks must be reported and neither control may be: {reports:#?}"
+        );
+        assert!(
+            reports[0].contains("crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.lock")
+                && reports[0].contains("archive_sha256"),
+            "the sorted-first drifted lock must still be named: {reports:#?}"
+        );
+        assert!(
+            reports[1].contains("examples/nautilus_quantile_contract/reef.lock")
+                && reports[1].contains("shell_sha256"),
+            "the second drifted lock, the one a first-failure panic hid, must \
+             be reported in the same run: {reports:#?}"
+        );
+        for report in &reports {
+            assert!(
+                !report.contains("packages/chelis-std/reef.lock"),
+                "an in-sync lock must contribute no report line: {reports:#?}"
+            );
+            assert!(
+                !report.contains("fixtures/nautilus/reef.lock"),
+                "a historical example lock at another compiler is a deliberate \
+                 escape, not drift: {reports:#?}"
+            );
+        }
+    }
+
+    /// The `examples/` escape matches a path **component**, not a string
+    /// prefix: a sibling directory whose name merely begins with `examples`
+    /// does not inherit it.
+    ///
+    /// The shipped code is already correct - `Path::starts_with` is
+    /// component-wise - but round 1 found that no test would catch a refactor
+    /// to `lock_path.to_string_lossy().starts_with(...)`, which would silently
+    /// hand every `examples_other/` and `examples-archive/` lock a permanent
+    /// exemption from bundle validation.
+    #[test]
+    fn only_a_real_examples_component_escapes_not_a_name_prefix() {
+        let locks = vec![
+            (
+                PathBuf::from("/w/examples-archive/reef.lock"),
+                synth_bundled_std_lock("archive", "shell"),
+            ),
+            (
+                PathBuf::from("/w/examples/genuinely_historical/reef.lock"),
+                synth_bundled_std_lock("archive", "shell"),
+            ),
+            (
+                PathBuf::from("/w/examples_other/reef.lock"),
+                synth_bundled_std_lock("archive", "shell"),
+            ),
+        ];
+        let reports = bundled_std_lock_drift_reports(
+            &locks,
+            "0.0.0-different-toolchain",
+            "archive",
+            "shell",
+            Path::new("/w/examples"),
+        );
+        assert_eq!(
+            reports.len(),
+            2,
+            "only the lock genuinely under examples/ may escape: {reports:#?}"
+        );
+        for report in &reports {
+            assert!(
+                !report.contains("genuinely_historical"),
+                "a real examples/ lock must still escape: {reports:#?}"
+            );
+        }
+        assert!(
+            reports.iter().any(|r| r.contains("examples-archive")),
+            "examples-archive/ is a sibling, not examples/: {reports:#?}"
+        );
+        assert!(
+            reports.iter().any(|r| r.contains("examples_other")),
+            "examples_other/ is a sibling, not examples/: {reports:#?}"
+        );
+    }
+
+    /// Positive control for the aggregator: an all-in-sync set reports nothing.
+    /// Without this, an empty report from the guard above would be equally
+    /// consistent with a helper that can never produce a line.
+    #[test]
+    fn in_sync_lock_set_produces_no_drift_report() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (real_archive, real_shell) = disk_bundle_hashes(here);
+        let locks = vec![
+            (
+                PathBuf::from("/w/packages/chelis-std/reef.lock"),
+                synth_bundled_std_lock(&real_archive, &real_shell),
+            ),
+            (
+                PathBuf::from("/w/examples/e/reef.lock"),
+                synth_bundled_std_lock(&real_archive, &real_shell),
+            ),
+        ];
+        assert!(
+            bundled_std_lock_drift_reports(
+                &locks,
+                env!("CARGO_PKG_VERSION"),
+                &real_archive,
+                &real_shell,
+                Path::new("/w/examples"),
+            )
+            .is_empty(),
+            "an in-sync lock set must produce no report lines"
+        );
+    }
+
+    /// The `DifferentCompiler` escape stays scoped to `examples/`. This was an
+    /// `assert!` inside the old first-failure loop; aggregating turned it into
+    /// a report line, and this pins that the move preserved both directions —
+    /// an example lock escapes, a lock anywhere else does not.
+    #[test]
+    fn different_compiler_lock_escapes_only_under_examples() {
+        let locks = vec![
+            (
+                PathBuf::from("/w/examples/historical/reef.lock"),
+                synth_bundled_std_lock("archive", "shell"),
+            ),
+            (
+                PathBuf::from("/w/crates/chelis-cli/tests/fixtures/f/reef.lock"),
+                synth_bundled_std_lock("archive", "shell"),
+            ),
+        ];
+        let reports = bundled_std_lock_drift_reports(
+            &locks,
+            "0.0.0-different-toolchain",
+            "archive",
+            "shell",
+            Path::new("/w/examples"),
+        );
+        assert_eq!(
+            reports.len(),
+            1,
+            "exactly the non-example lock may be reported: {reports:#?}"
+        );
+        assert!(
+            reports[0].contains("crates/chelis-cli/tests/fixtures/f/reef.lock")
+                && reports[0].contains("may not escape current bundle validation"),
+            "a non-example lock at another compiler must be reported: {reports:#?}"
+        );
     }
 
     /// Negative parity for `bundled_chelis_std_lock_hashes_match_embedded_artifacts`.

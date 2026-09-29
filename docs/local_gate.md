@@ -133,6 +133,29 @@ or `crates/chelis-std-bundle/` path changed, `regen_all.py --tier 1` right
 after tier 0 (so every check sees the regenerated bundle) and
 `cargo nextest run -p chelis-std-bundle --lib` after the tripwires.
 
+One further conditional leg runs last: when a std path, **any `reef.lock`**, or
+the **root `Cargo.toml`** changed, `cargo nextest run -p chelis-reef --lib` over
+`bundled_chelis_std_lock_hashes_match_embedded_artifacts` and
+`embedded_bundle_rlib_matches_disk`. Those two are the halves of the
+bundled-lock invariant: every committed bundled `reef.lock` must pin the
+embedded bundle's hashes, and the compiled `chelis-std-bundle` rlib must embed
+the bytes that are on disk. They are lib unit tests in `chelis-reef`, and the
+changed-crate stage never selects that crate, because the paths that invalidate
+them belong to other crates (`crates/chelis-cli/tests/fixtures/**/reef.lock`) or
+to no crate at all (`examples/**/reef.lock`, and the root `Cargo.toml` whose
+workspace version `chelis-reef` inherits and feeds into the comparison). Before
+chelis#2309 no local invocation reached either one, so chelis#2305 got PASS from
+`--fast` in 202.3 s on a head that CI then rejected on this exact test. A fourth
+class was added in review: `crates/chelis-reef/` itself, because `--fast` runs
+clippy rather than nextest per changed crate, so editing the discovery walk never
+ran the guard either. The trigger is
+a **superset** of the std one and matches locks by basename rather than by a path
+prefix, because the guard discovers its lock set by walking the tree: a lock
+committed at a new path is in scope the moment it exists. The guard reports
+**every** drifted lock in one run, not the first — chelis#2305 had three, and the
+sorted walk meant a fix-the-named-row loop would have spent one CI round per
+lock.
+
 Every writer runs before every check, and the path classification is the first
 check because it is the cheapest row that can reject a push: it is the
 planner's own rule lookup, and a new tracked file that no `[[path_rule]]`
@@ -162,8 +185,8 @@ only the working tree, so an in-place crate rename can be ambiguous to the
 planner and clean here.
 
 `--fast` exits non-zero for any failing stage (fmt, regeneration, path
-classification, lint, per-crate clippy, the tripwire run, or the std-bundle
-self-test) and never for a file it fixed; a regenerated `dist/` or `reef.lock`
+classification, lint, per-crate clippy, the tripwire run, the std-bundle
+self-test, or the bundled-lock guard) and never for a file it fixed; a regenerated `dist/` or `reef.lock`
 is reported as a changed file to commit, never as a failure. Changed files are
 reported from content hashes of the porcelain set before and after the run, so
 a file that was already dirty and that fmt changed further is still listed. It
