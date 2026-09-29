@@ -221,3 +221,93 @@ fn claimed_list_does_not_move_option_extents_into_internal_call() {
         assert!(output.contains("out = 1"), "native={native}: {output}");
     }
 }
+
+#[test]
+fn exported_literal_list_field_precedes_later_tuple_tensor() {
+    use std::fs;
+
+    let dir = tempfile::tempdir().expect("entry fixture");
+    let source = dir.path().join("tuple_list.ch");
+    fs::write(
+        &source,
+        "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+         def f(t: (List[tensor[2, f32]], tensor[3, f32]), xs: List[tensor[2, f32]]) -> i64 = 7i64\n\
+         out = f(([hidden(to_tensor([1.0f32, 2.0f32]))], hidden(to_tensor([1.0f32, 2.0f32, 3.0f32]))), [hidden(to_tensor([4.0f32, 5.0f32]))])\n",
+    )
+    .expect("source");
+    let out = dir.path().join("c");
+    let built = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", "--allow-style-violations"])
+        .arg(&source)
+        .args(["--target", "c", "-o"])
+        .arg(&out)
+        .output()
+        .expect("build");
+    assert!(built.status.success(), "{built:?}");
+
+    let run = |first: i64, second: i64, later: i64, name: &str| {
+        let harness = format!(
+            "#define main generated_main\n#include \"tuple_list.c\"\n#undef main\n\
+             int main(void) {{\n\
+             chelis_value first_item = chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{{first}}}, CHELIS_DTYPE_F32));\n\
+             chelis_list *first_list = chelis_list_from_values(&first_item, 1);\n\
+             chelis_value_release(first_item);\n\
+             chelis_value tuple_items[2] = {{\n\
+               chelis_value_take_list(first_list),\n\
+               chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{{second}}}, CHELIS_DTYPE_F32))\n\
+             }};\n\
+             chelis_tuple *t = chelis_tuple_from_values(tuple_items, 2);\n\
+             chelis_value_release(tuple_items[0]); chelis_value_release(tuple_items[1]);\n\
+             chelis_value later_item = chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{{later}}}, CHELIS_DTYPE_F32));\n\
+             chelis_list *xs = chelis_list_from_values(&later_item, 1);\n\
+             chelis_value_release(later_item);\n\
+             printf(\"out = %lld\\n\", (long long){}(t, xs));\n\
+             chelis_tuple_release(t); chelis_list_release(xs);\n\
+             return 0;\n}}\n",
+            common::authored_c_symbol("f")
+        );
+        let file = format!("{name}.c");
+        fs::write(out.join(&file), harness).expect("harness");
+        assert!(
+            common::link_generated(&out, &file, name).success(),
+            "{name} link"
+        );
+        let result = std::process::Command::new(out.join(name))
+            .output()
+            .expect("execute");
+        (
+            result.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            ),
+        )
+    };
+
+    let (ok, output) = run(4, 5, 2, "both_bad");
+    assert!(!ok, "{output}");
+    assert!(
+        output.contains(
+            "input `t.0[0]` axis 0 expected 2, got 4\nnumeric trap: domain in load at i64"
+        ),
+        "{output}"
+    );
+    let (ok, output) = run(4, 3, 2, "list_bad");
+    assert!(!ok, "{output}");
+    assert!(
+        output.contains("input `t.0[0]` axis 0 expected 2, got 4"),
+        "{output}"
+    );
+    let (ok, output) = run(2, 5, 2, "tensor_bad");
+    assert!(!ok, "{output}");
+    assert!(
+        output.contains("input `t.1` axis 0 expected 3, got 5"),
+        "{output}"
+    );
+    let (ok, output) = run(2, 3, 2, "both_good");
+    assert!(ok, "{output}");
+    assert!(output.contains("out = 7"), "{output}");
+}

@@ -743,6 +743,9 @@ order before entering the owned body. It passes a private receipt only when
 it discharged the owned body's checks completely; otherwise the body checks
 them. Internal calls check direct and claimed-List formals in the owned body.
 Other aggregate walks keep their public-entry owner.
+Codegen uses the same ordered fixed-observation/aggregate-walk schedule whether
+or not a List carries a named binder, and rejects a missing or repeated fixed
+observation before emitting the entry.
 This includes obligations whose witnesses the body never reads and
 preserved monomorphized signatures. A private helper may omit only the exact
 signature obligations already executed by its dominating host entry; its

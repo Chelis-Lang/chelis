@@ -2819,6 +2819,29 @@ fn signature_entry_lines(
     let owners = work.map_or_else(|| (0..args.len()).collect(), |work| work.owners.clone());
     let params = work.map_or(&[][..], |work| work.params.as_slice());
     let param_count = work.map_or(args.len(), |work| work.params.len());
+    if let Some(work) = work {
+        let mut fixed_seen = vec![false; args.len()];
+        for (owner, param) in work.params.iter().enumerate() {
+            for step in &param.ordered_extents {
+                let entry_walk::ExtentStep::Fixed(index) = step else {
+                    continue;
+                };
+                if owners.get(*index) != Some(&owner) || fixed_seen[*index] {
+                    return Err(invalid_abi_shape(
+                        "signature entry changed an ordered tensor observation".into(),
+                        "signature entry",
+                    ));
+                }
+                fixed_seen[*index] = true;
+            }
+        }
+        if fixed_seen.iter().any(|seen| !seen) {
+            return Err(invalid_abi_shape(
+                "signature entry omitted an ordered tensor observation".into(),
+                "signature entry",
+            ));
+        }
+    }
     let label_of = |node: &chelis_ir::dag::DagNode| {
         let RiscOp::Load { name } = &node.op else {
             unreachable!("signature observation")
@@ -2899,12 +2922,10 @@ fn signature_entry_lines(
             }
         }
     };
-    if !named_list_binders.is_empty() {
-        // A List may have zero elements, so the canonical witness is chosen
-        // by the first observed element or fixed tensor in signature order.
-        // The ordered work records fixed tuple positions and dynamic walks
-        // together; a separate pass over named Loads would move a later
-        // parameter's comparison ahead of an earlier List.
+    if work.is_some() {
+        // The ordered work interleaves fixed tuple positions and aggregate
+        // walks even when a List has only literal claims. An observation-only
+        // pass would move a later tuple field ahead of an earlier List walk.
         for param in params {
             for step in &param.ordered_extents {
                 match step {
