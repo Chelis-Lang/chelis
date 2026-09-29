@@ -3048,7 +3048,11 @@ impl<'a> EvalContext<'a> {
                             }
                             (_, arg) => arg,
                         };
-                        let callable_contract = declared
+                        let authored_callable = declared
+                            .as_ref()
+                            .map(|ty| expand_authored_entry_aliases(ty, &self.adt_registry))
+                            .transpose()?;
+                        let callable_contract = authored_callable
                             .as_ref()
                             .filter(|ty| checked_function_children(ty).is_some())
                             .or_else(|| checked_params.and_then(|params| params.get(index)));

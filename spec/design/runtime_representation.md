@@ -1782,6 +1782,11 @@ existing command is an addition: it executes and is reported without changing
 the required floor. Neither a previous receipt nor a regenerated selection is an
 acceptance input.
 
+The named List entry and result-witness leg is also inherited from Phase 0.
+It pairs the `issue_2627_list_entry_extents` and `issue_1788_entry_obligations`
+execution targets; the Phase 1 manifest now freezes their 46 selected test
+identities and the exact inherited command.
+
 The integer-unary typed-lane amendment retains two inherited Phase 0 execution
 legs in the Phase 1 manifest: integer-to-float finalization freezes two native
 C/UBSan positive and invalid-target controls; integer device lowering freezes

@@ -195,6 +195,28 @@ fn indirect_callable_alias_keeps_its_named_list_entry() {
 }
 
 #[test]
+fn callable_type_alias_keeps_its_named_list_entry() {
+    let prefix = "type Row[n] = tensor[n, f32]\n\
+                  type Batch[n] = List[Row[n]]\n\
+                  type Action[n] = Batch[n] -> i64\n\
+                  def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+                  def broad(xs: List[tensor[*, f32]]) -> i64 = len(xs)\n\
+                  def invoke[n](g: Action[n], xs: List[tensor[*, f32]]) -> i64 = g(xs)\n";
+    assert_both_trap(
+        &format!(
+            "{prefix}out = invoke(broad, [hidden(to_tensor([1.0f32, 2.0f32])), hidden(to_tensor([3.0f32, 4.0f32, 5.0f32]))])\n"
+        ),
+        "extent `n`: arg0[0] axis 0 = 2, arg0[1] axis 0 = 3",
+    );
+    assert_both_value(
+        &format!(
+            "{prefix}out = invoke(broad, [hidden(to_tensor([1.0f32, 2.0f32])), hidden(to_tensor([3.0f32, 4.0f32]))])\n"
+        ),
+        "out = 2",
+    );
+}
+
+#[test]
 fn inline_callback_alias_keeps_its_named_list_entry() {
     let prefix = "type Batch[n] = List[tensor[n, f32]]\n\
                   def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
