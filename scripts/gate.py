@@ -734,7 +734,8 @@ FAST_TRIPWIRE_NEXTEST: list[str] = [
 # them belong to other crates (`crates/chelis-cli/tests/fixtures/**/reef.lock`)
 # or to no crate at all (`examples/**/reef.lock`, the root `Cargo.toml` whose
 # workspace version the verdict keys on). Until chelis#2309 that made `--fast`
-# report PASS on a head CI then failed on this exact test (chelis#2305). The
+# report PASS on a head that CI then failed on, on this exact test
+# (chelis#2305). The
 # `-E` filterset keeps the rest of `chelis-reef`'s lib suite out; the two named
 # tests share one target, so covering both costs one filter token, and leaving
 # the rlib half out would reproduce the same false green one test over.
@@ -768,8 +769,14 @@ STD_PATH_PREFIXES: tuple[str, ...] = (
 #     workspace version bump that does not also refresh the locks moves the
 #     verdict. The root manifest belongs to no workspace member, so the
 #     changed-crate stage cannot see it either.
+#   * `crates/chelis-reef/` - the guard's own crate. `--fast` runs clippy, not
+#     nextest, per changed crate, so a change to the discovery walk, the
+#     package-name constant, or the `ReefLock` deserializer never ran the guard
+#     locally either. This PR's own refactor of that file would not have
+#     triggered its own leg (chelis#2309 round 1).
 LOCK_FILE_NAME = "reef.lock"
 WORKSPACE_MANIFEST = "Cargo.toml"
+GUARD_CRATE_PREFIX = "crates/chelis-reef/"
 
 LOCAL_ANNOTATION = "validation + ci"
 FAST_ANNOTATION = "fast + validation + ci"
@@ -1311,9 +1318,10 @@ def bundled_lock_guard_paths_changed(paths: list[str]) -> bool:
     guard, which no other local stage reaches (chelis#2309).
 
     Either side of the invariant counts: a std path moves the embedded bundle
-    bytes, and a committed `reef.lock` or the root `Cargo.toml` moves what those
-    bytes are compared against. `STD_PATH_PREFIXES`, `LOCK_FILE_NAME`, and
-    `WORKSPACE_MANIFEST` carry the reasoning for each.
+    bytes; a committed `reef.lock` or the root `Cargo.toml` moves what those
+    bytes are compared against; and the guard's own crate moves the comparison
+    itself. `STD_PATH_PREFIXES`, `LOCK_FILE_NAME`, `WORKSPACE_MANIFEST`, and
+    `GUARD_CRATE_PREFIX` carry the reasoning for each.
 
     This is deliberately not `std_paths_changed`: of the three path classes
     chelis#2309 names, the std prefixes cover only `crates/chelis-std-bundle/
@@ -1323,6 +1331,7 @@ def bundled_lock_guard_paths_changed(paths: list[str]) -> bool:
         path == LOCK_FILE_NAME
         or path.endswith("/" + LOCK_FILE_NAME)
         or path == WORKSPACE_MANIFEST
+        or path.startswith(GUARD_CRATE_PREFIX)
         for path in paths
     )
 

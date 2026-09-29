@@ -145,7 +145,10 @@ them belong to other crates (`crates/chelis-cli/tests/fixtures/**/reef.lock`) or
 to no crate at all (`examples/**/reef.lock`, and the root `Cargo.toml` whose
 workspace version `chelis-reef` inherits and feeds into the comparison). Before
 chelis#2309 no local invocation reached either one, so chelis#2305 got PASS from
-`--fast` in 202.3 s on a head CI then rejected on this exact test. The trigger is
+`--fast` in 202.3 s on a head that CI then rejected on this exact test. A fourth
+class was added in review: `crates/chelis-reef/` itself, because `--fast` runs
+clippy rather than nextest per changed crate, so editing the discovery walk never
+ran the guard either. The trigger is
 a **superset** of the std one and matches locks by basename rather than by a path
 prefix, because the guard discovers its lock set by walking the tree: a lock
 committed at a new path is in scope the moment it exists. The guard reports

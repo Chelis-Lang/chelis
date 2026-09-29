@@ -12025,6 +12025,30 @@ mod tests {
         BundleHashDrift::InSync
     }
 
+    /// Every committed bundled `reef.lock` the discovery walk must find, as
+    /// workspace-relative paths in the walk's own sort order.
+    ///
+    /// chelis#585 removed a hand-maintained list from *discovery*, so a lock
+    /// added at a new path is still checked from the moment it is committed.
+    /// This list is the opposite direction and keeps that property: it pins
+    /// only what the walk is known to reach, and it fails closed both ways. A
+    /// missing entry is an over-aggressive prune; an unexpected one is a new
+    /// committed lock, which is fine - add it here in the same change.
+    ///
+    /// The canary this replaces checked *membership* of one lock, not
+    /// *completeness*. A prune that kept `packages/chelis-std/reef.lock` and
+    /// dropped the other three satisfied it while the guard walked away
+    /// reporting nothing, and `bundled_chelis_std_lock_hashes_match_embedded_artifacts`
+    /// prints `N of M` off `locks.len()`, so a partial prune made that printed
+    /// denominator silently wrong. Total vacuity was defended; partial vacuity
+    /// was not (chelis#2309 round 1).
+    const EXPECTED_COMMITTED_BUNDLED_STD_LOCKS: &[&str] = &[
+        "crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.lock",
+        "examples/nautilus_quantile_contract/fixtures/nautilus/reef.lock",
+        "examples/nautilus_quantile_contract/reef.lock",
+        "packages/chelis-std/reef.lock",
+    ];
+
     /// Every committed `reef.lock` under the workspace that records a
     /// **bundled** chelis-std dependency. Discovered by walking the source
     /// tree rather than hard-coding paths, so a newly-added committed lock (a
@@ -12156,16 +12180,28 @@ mod tests {
             .expect("workspace root resolves");
         let lock_paths = discover_committed_bundled_std_locks(&workspace_root);
 
-        // Canary: the primary runtime lock must always be discovered, so an
-        // over-aggressive prune can never turn this guard into a vacuous pass.
-        assert!(
-            lock_paths
-                .iter()
-                .any(|p| p.ends_with("packages/chelis-std/reef.lock")),
-            "discovery walk under {} found no packages/chelis-std/reef.lock; \
-             the bundled-lock guard would pass vacuously. found: {:?}",
+        // Canary: the discovered set must be exactly the expected one, so
+        // neither a total nor a partial prune can turn this guard into a
+        // vacuous pass. A membership check would let a prune drop three of
+        // four locks and still pass (chelis#2309 round 1).
+        let discovered: Vec<String> = lock_paths
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&workspace_root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(
+            discovered,
+            EXPECTED_COMMITTED_BUNDLED_STD_LOCKS,
+            "the discovery walk under {} did not find exactly the expected \
+             committed bundled locks. A MISSING entry means an over-aggressive \
+             prune and the guard is now partly vacuous; an EXTRA entry means a \
+             new committed lock, which is fine - add it to \
+             EXPECTED_COMMITTED_BUNDLED_STD_LOCKS in the same change.",
             workspace_root.display(),
-            lock_paths
         );
 
         let locks: Vec<(PathBuf, ReefLock)> = lock_paths
@@ -12367,6 +12403,59 @@ compiler_version = "{ver}"
                  escape, not drift: {reports:#?}"
             );
         }
+    }
+
+    /// The `examples/` escape matches a path **component**, not a string
+    /// prefix: a sibling directory whose name merely begins with `examples`
+    /// does not inherit it.
+    ///
+    /// The shipped code is already correct - `Path::starts_with` is
+    /// component-wise - but round 1 found that no test would catch a refactor
+    /// to `lock_path.to_string_lossy().starts_with(...)`, which would silently
+    /// hand every `examples_other/` and `examples-archive/` lock a permanent
+    /// exemption from bundle validation.
+    #[test]
+    fn only_a_real_examples_component_escapes_not_a_name_prefix() {
+        let locks = vec![
+            (
+                PathBuf::from("/w/examples-archive/reef.lock"),
+                synth_bundled_std_lock("archive", "shell"),
+            ),
+            (
+                PathBuf::from("/w/examples/genuinely_historical/reef.lock"),
+                synth_bundled_std_lock("archive", "shell"),
+            ),
+            (
+                PathBuf::from("/w/examples_other/reef.lock"),
+                synth_bundled_std_lock("archive", "shell"),
+            ),
+        ];
+        let reports = bundled_std_lock_drift_reports(
+            &locks,
+            "0.0.0-different-toolchain",
+            "archive",
+            "shell",
+            Path::new("/w/examples"),
+        );
+        assert_eq!(
+            reports.len(),
+            2,
+            "only the lock genuinely under examples/ may escape: {reports:#?}"
+        );
+        for report in &reports {
+            assert!(
+                !report.contains("genuinely_historical"),
+                "a real examples/ lock must still escape: {reports:#?}"
+            );
+        }
+        assert!(
+            reports.iter().any(|r| r.contains("examples-archive")),
+            "examples-archive/ is a sibling, not examples/: {reports:#?}"
+        );
+        assert!(
+            reports.iter().any(|r| r.contains("examples_other")),
+            "examples_other/ is a sibling, not examples/: {reports:#?}"
+        );
     }
 
     /// Positive control for the aggregator: an all-in-sync set reports nothing.

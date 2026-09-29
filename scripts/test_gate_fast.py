@@ -188,8 +188,8 @@ class FastCommandListTests(unittest.TestCase):
     def test_bundled_lock_guard_leg_appears_only_when_its_own_trigger_fires(self):
         """chelis#2309: the `chelis-reef` bundled-lock guard is a lib unit test
         in a crate the changed-crate stage never selects, so before this leg no
-        local invocation reached it and `--fast` reported PASS on a head CI then
-        failed (chelis#2305)."""
+        local invocation reached it and `--fast` reported PASS on a head that CI
+        then rejected (chelis#2305)."""
         without = gate.fast_command_list(
             [], std_changed=False, changed_paths=[], lock_guard_changed=False
         )
@@ -232,11 +232,16 @@ class FastCommandListTests(unittest.TestCase):
         # takes `version.workspace = true` and the guard feeds its own
         # CARGO_PKG_VERSION into the comparison.
         self.assertTrue(fires(["Cargo.toml"]))
+        # The guard's own crate: --fast runs clippy, not nextest, per changed
+        # crate, so editing the discovery walk never ran the guard locally.
+        # This asserted False before round 1, which pinned the hole open -- and
+        # was only true while chelis-reef reads `version.workspace = true`.
+        self.assertTrue(fires(["crates/chelis-reef/src/lib.rs"]))
+        self.assertTrue(fires(["crates/chelis-reef/Cargo.toml"]))
 
         # Negative parity: none of these can move either side.
         self.assertFalse(fires([]))
         self.assertFalse(fires(["crates/chelis-cli/src/main.rs"]))
-        self.assertFalse(fires(["crates/chelis-reef/Cargo.toml"]))
         self.assertFalse(fires(["docs/local_gate.md"]))
         self.assertFalse(fires(["reef.lock.bak"]))
         self.assertFalse(fires(["examples/x/not-a-reef.lock"]))
@@ -262,6 +267,11 @@ class FastCommandListTests(unittest.TestCase):
         self.assertEqual(command[:3], ["cargo", "nextest", "run"])
         self.assertEqual(command[3:6], ["-p", "chelis-reef", "--lib"])
         self.assertNotIn("--workspace", command)
+        # Without --no-fail-fast an rlib-half failure suppresses the lock
+        # report: one failure per round at stage granularity, which is the
+        # defect this leg removes at lock granularity. Round 1 mutated the flag
+        # away and no test noticed.
+        self.assertIn("--no-fail-fast", command)
         filterset = command[command.index("-E") + 1]
         source = (REPO_ROOT / "crates" / "chelis-reef" / "src" / "lib.rs").read_text()
         for name in (
