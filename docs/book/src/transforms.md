@@ -33,6 +33,12 @@ semantics in the numbered specification. The remaining alias and shadowing
 rows are [#1952](https://github.com/Chelis-Lang/chelis/issues/1952) and
 [#1954](https://github.com/Chelis-Lang/chelis/issues/1954).
 
+For a direct named `grad` with a List argument, the C build currently
+requires an argument whose recursive List shape it can reconstruct from a
+literal or a resolved top-level value. A local List actual is rejected during
+lowering, including when it shadows a top-level value; Eval can differentiate
+it. See [#2740](https://github.com/Chelis-Lang/chelis/issues/2740).
+
 ## grad
 
 `grad(f)` is reverse-mode differentiation. It produces a new function from `f`'s arguments to
