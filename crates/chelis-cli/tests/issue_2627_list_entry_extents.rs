@@ -41,11 +41,60 @@ fn assert_both_value(source: &str, value: &str) {
 }
 
 #[test]
+fn shipped_example_result_literal_accepts_and_rejects_on_both_lanes() {
+    let source = include_str!("../../../examples/list_shared_extent.ch");
+    assert_both_value(source, "main = tensor(shape=[2], data=[4.0, 6.0])");
+
+    let mismatched = source
+        .replacen(
+            "def add_pair",
+            "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\ndef add_pair",
+            1,
+        )
+        .replace(
+            "to_tensor([1.0f32, 2.0f32])",
+            "hidden(to_tensor([1.0f32, 2.0f32, 5.0f32]))",
+        )
+        .replace(
+            "to_tensor([3.0f32, 4.0f32])",
+            "hidden(to_tensor([3.0f32, 4.0f32, 6.0f32]))",
+        );
+    for native in [false, true] {
+        let (ok, output) = result_claims::run(&mismatched, native);
+        assert!(!ok, "native={native}: {output}");
+        assert!(output.contains("extent `2`"), "native={native}: {output}");
+        assert!(
+            output.contains("numeric trap: domain in add at i64"),
+            "native={native}: {output}"
+        );
+        assert!(!output.contains("main ="), "native={native}: {output}");
+    }
+}
+
+#[test]
 fn differing_elements_trap_even_when_body_selects_only_one() {
     assert_both_trap(
         "def f[n](xs: List[tensor[n, f32]]) -> tensor[n, f32] = index(xs, 1i64)\n\
          out = f([to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0])])\n",
         "extent `n`: xs[0] axis 0 = 2, xs[1] axis 0 = 3",
+    );
+}
+
+#[test]
+fn top_level_main_call_preserves_named_list_entry() {
+    let prefix = "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+                  def f[n](xs: List[tensor[n, f32]]) -> i64 = 7i64\n";
+    assert_both_trap(
+        &format!(
+            "{prefix}def main() -> i64 = f([hidden(to_tensor([1.0f32, 2.0f32])), hidden(to_tensor([3.0f32, 4.0f32, 5.0f32]))])\n"
+        ),
+        "extent `n`: xs[0] axis 0 = 2, xs[1] axis 0 = 3",
+    );
+    assert_both_value(
+        &format!(
+            "{prefix}def main() -> i64 = f([hidden(to_tensor([1.0f32, 2.0f32])), hidden(to_tensor([3.0f32, 4.0f32]))])\n"
+        ),
+        "main = 7",
     );
 }
 

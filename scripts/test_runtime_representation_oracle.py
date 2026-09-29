@@ -1150,6 +1150,46 @@ class ManifestTests(unittest.TestCase):
             for command in commands
         ))
 
+    def test_named_list_entry_metadata_owners_require_exact_execution_controls(self) -> None:
+        expected = (
+            (
+                "crates/chelis-backend-c/src/host_emit.rs",
+                "backend-element-spelling",
+                "HostResultClaim::frame_lines",
+            ),
+            (
+                "crates/chelis-backend-c/src/host_emit/entry_walk.rs",
+                "load-store-template",
+                "EntryWalkers < 'a >::render",
+            ),
+            (
+                "crates/chelis-backend-c/src/host_emit/entry_walk.rs",
+                "backend-element-spelling",
+                "retained_list_pass::walk",
+            ),
+        )
+        self.assertEqual(oracle.LIST_ENTRY_METADATA_FINAL_FORMS, expected)
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        for path, kind, owner in expected:
+            self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+            self.assertFalse(
+                oracle.owner_module_final_form(kind, path.replace("host_emit", "emit"), owner)
+            )
+            other_kind = (
+                "load-store-template"
+                if kind == "backend-element-spelling"
+                else "backend-element-spelling"
+            )
+            self.assertFalse(oracle.owner_module_final_form(other_kind, path, owner))
+            self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
+        self.assertTrue(any(
+            "--test issue_2627_list_entry_extents" in command
+            and "--test issue_1788_entry_obligations" in command
+            for command in commands
+        ))
+
     def test_key_callable_load_store_owner_requires_exact_execution_controls(self) -> None:
         path = "crates/chelis-backend-c/src/host_emit.rs"
         kind = "load-store-template"

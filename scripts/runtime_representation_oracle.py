@@ -410,6 +410,26 @@ RESULT_CLAIM_METADATA_FINAL_FORMS = (
         "append_host_result_interface_origin_support",
     ),
 )
+# chelis#2627: these generated-C forms carry only private entry metadata.
+# The count indexes a bounded result-axis array; the List loops fetch typed
+# values and observe tensor shape metadata, never tensor element storage.
+LIST_ENTRY_METADATA_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "backend-element-spelling",
+        "HostResultClaim::frame_lines",
+    ),
+    (
+        "crates/chelis-backend-c/src/host_emit/entry_walk.rs",
+        "load-store-template",
+        "EntryWalkers < 'a >::render",
+    ),
+    (
+        "crates/chelis-backend-c/src/host_emit/entry_walk.rs",
+        "backend-element-spelling",
+        "retained_list_pass::walk",
+    ),
+)
 PHASE2_FINAL_FORMS = (
     ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::byte_capacity"),
     ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::count"),
@@ -517,6 +537,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         (path, kind, owner) in UTF8_STRING_FINAL_FORMS
     ) or (
         (path, kind, owner) in RESULT_CLAIM_METADATA_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in LIST_ENTRY_METADATA_FINAL_FORMS
     ) or (
         (path, kind, owner) in PHASE2_FINAL_FORMS
     )
@@ -903,6 +925,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS,
         *UTF8_STRING_FINAL_FORMS,
         *RESULT_CLAIM_METADATA_FINAL_FORMS,
+        *LIST_ENTRY_METADATA_FINAL_FORMS,
         *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
         *((ELEMENT_OWNER, "dtype-contract", owner) for owner in ELEMENT_FINAL_CONTRACT_OWNERS),
         (ELEMENT_OWNER, "width-arithmetic", "assert_registration"),
@@ -2299,6 +2322,14 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "test(c_nested_list_pattern_retains_selected_tail_producer) | "
                 "test(c_option_projection_distinguishes_local_and_formal_origins) | "
                 "test(c_aggregate_origin_arena_is_fresh_for_repeated_public_calls)",
+            ),
+        ),
+        OracleLeg(
+            "named List entry metadata and result witness execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-cli",
+                "--test", "issue_2627_list_entry_extents",
+                "--test", "issue_1788_entry_obligations",
             ),
         ),
         OracleLeg(

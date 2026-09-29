@@ -1604,6 +1604,17 @@ active-debt rows therefore do not
 grow, and their reviewed digest stays fixed; only the code-derived final-form
 and execution manifest changes.
 
+Named List entry checks add three exact private metadata final forms for
+chelis#2627: `HostResultClaim::frame_lines` counts the axes witnessed by this
+invocation, `EntryWalkers::render` records the first observed shape and walks
+typed Lists, and `retained_list_pass::walk` walks an invoked callable's List
+formal. Their integer spellings serve shape comparison and bounded List
+indexing; they do not read tensor element storage or add a public carrier.
+The exact path, kind, and owner identities have wrong-path, wrong-kind, and
+wrong-owner negatives. The Phase 0 execution leg runs the named List entry
+and retained callable tests on Eval and C. The frozen foundation and active
+debt do not grow.
+
 The captured activation-claim comparison adds the private
 `load-store-template` owner, `CEmitter::emit_runtime_dim_sites` in
 `chelis-backend-c/src/emit.rs`. It reads the captured int64 witness before the
