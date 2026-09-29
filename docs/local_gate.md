@@ -34,11 +34,11 @@ legacy/full/manual gate selections remain available.
 commands permitted in the gate-owned CI jobs, so shell syntax cannot hide an
 unreviewed command. `--list` prints the canonical full list. Each printed
 command carries one of four annotations: `fast + validation + ci` (the lint
-row, which `--fast` and `--validation` share), `validation + ci`, `ci-owned`,
-and `full gate; CI coverage split` (the workspace nextest row). Two trailing `#`
-notes describe the dynamic stages: what `--fast` runs, and the per-crate nextest
-`--validation` appends. The gate's own output is the only authoritative list; no document
-transcribes it.
+and evaluator source-guard rows shared by `--fast` and `--validation`),
+`validation + ci`, `ci-owned`, and `full gate; CI coverage split` (the workspace
+nextest row). Two trailing `#` notes describe the dynamic stages: what
+`--fast` runs, and the per-crate nextest `--validation` appends. The gate's own
+output is the only authoritative list; no document transcribes it.
 
 Before `--fast`, `--validation`, or another long local validation, fetch
 `origin/main` so the changed-crate selection and inherited-failure comparison

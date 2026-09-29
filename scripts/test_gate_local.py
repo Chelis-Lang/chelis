@@ -268,7 +268,7 @@ class ListAnnotationTests(unittest.TestCase):
             annotations[gate.render(gate.FMT_CHECK)],
             gate.LOCAL_ANNOTATION,
         )
-        # The lint row is the one command `--fast` shares with `--validation`.
+        # Lint, like the evaluator source guard, runs in both local modes.
         self.assertEqual(
             annotations[gate.render(gate.CHELIS_LINT_CHECK)],
             gate.FAST_ANNOTATION,
