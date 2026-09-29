@@ -309,9 +309,14 @@ impl<'a> Walker<'a> {
             HostExprKind::FormalIngress { value, .. } => {
                 self.walk(value, env, facts);
             }
-            HostExprKind::SignatureEntry { plan, args } => {
+            HostExprKind::SignatureEntry {
+                plan, args, lists, ..
+            } => {
                 for arg in args {
                     self.walk(arg, env, facts);
+                }
+                for entry in lists {
+                    self.walk(&entry.value, env, facts);
                 }
                 facts.extend(plan_facts(plan, args, env));
             }
@@ -718,6 +723,8 @@ mod tests {
                 value: HostExpr::new(HostExprKind::SignatureEntry {
                     plan,
                     args: vec![var("a"), var("b")],
+                    positions: vec![0, 1],
+                    lists: Vec::new(),
                 }),
             }],
             ty: function.ret_ty.clone(),

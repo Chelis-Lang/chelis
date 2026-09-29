@@ -9,16 +9,14 @@
 //! function per carried type, run over the value once for null, dtype and
 //! rank and once for literal extents, with the same check renderers.
 //!
-//! A named extent inside such a value is not compared. An ADT's dimension
-//! arguments have no host representation, so a field's name cannot be tied to
-//! the signature's, and a list's elements share one declared extent that no
-//! fixed observation carries.
+//! A List element's named extent joins an invocation-local witness, including
+//! the first nonempty element. ADT dimension arguments have no host
+//! representation, so a walk through an ADT cannot assert that name's
+//! identity.
 //!
-//! A walk costs the size of the value, so it runs once, where a value enters
-//! from outside: the exported entry of an authored function. The body that
-//! recursive and internal calls enter keeps only the fixed-position checks;
-//! the values those calls pass were validated where they entered or built by
-//! checked code.
+//! A walk costs the size of the value. An ordinary aggregate walk runs at
+//! the exported entry. A named List walk runs in the body or retained call
+//! boundary, since each invocation needs its own extent witness.
 
 use super::*;
 use chelis_ir::host::{HostAdtLayout, HostFunctionOrigin, HostTensorInput, SignatureEntryPlan};
@@ -104,6 +102,13 @@ pub(super) struct ParamEntryWork {
     pub metadata: Vec<String>,
     /// Walker calls for the literal-extent pass.
     pub extents: Vec<String>,
+    /// Fixed observations and walks in the parameter's structural order.
+    pub ordered_extents: Vec<ExtentStep>,
+}
+
+pub(super) enum ExtentStep {
+    Fixed(usize),
+    Walk(String),
 }
 
 /// A function entry's nested-value work.
@@ -113,6 +118,8 @@ pub(super) struct FunctionEntryWork {
     /// The parameter each plan observation belongs to.
     pub owners: Vec<usize>,
     pub params: Vec<ParamEntryWork>,
+    /// Names whose first witness may be a List element at this invocation.
+    pub named_list_binders: Vec<String>,
     /// Releases of the values `fetch` read, after every check.
     pub release: Vec<String>,
 }
@@ -129,6 +136,42 @@ impl FunctionEntryWork {
 pub(super) struct EntryWork {
     pub body: FunctionEntryWork,
     pub exported: Option<FunctionEntryWork>,
+}
+
+#[derive(Clone, Copy)]
+enum EntryWalkMode {
+    FixedOnly,
+    Exported,
+    NamedLists,
+}
+
+/// A List preserves its element tensor's named axes through its type. ADTs
+/// do not retain that binder identity, so this walk crosses only List layers.
+pub(super) fn list_named_dims(ty: &HostAbiType, out: &mut Vec<String>) {
+    match ty {
+        HostAbiType::List(item) => list_named_dims(item, out),
+        HostAbiType::Tensor(tensor) => {
+            for dim in &tensor.dims {
+                if let DimInfo::Named(name, _) = dim
+                    && name != "*"
+                    && !out.contains(name)
+                {
+                    out.push(name.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn named_list_binders(function: &HostFunction) -> Vec<String> {
+    let mut names = Vec::new();
+    for param in &function.params {
+        if matches!(param.ty, HostAbiType::List(_)) {
+            list_named_dims(&param.ty, &mut names);
+        }
+    }
+    names
 }
 
 /// A tensor-carrying ADT field: its index, path segment and walker.
@@ -338,10 +381,22 @@ impl<'a> EntryWalkers<'a> {
 
     /// The entry work of one function's body and of its exported entry.
     pub fn entry_work(&mut self, function: &HostFunction) -> Result<EntryWork, Unsupported> {
+        let named_list_binders = named_list_binders(function);
+        let has_named_list = !named_list_binders.is_empty();
+        // A List's named witness is invocation-local. Its body owns this walk
+        // on every call; the exported wrapper does not repeat it.
         Ok(EntryWork {
-            body: self.function_work(function, false)?,
+            body: self.function_work(
+                function,
+                if has_named_list {
+                    EntryWalkMode::NamedLists
+                } else {
+                    EntryWalkMode::FixedOnly
+                },
+                named_list_binders,
+            )?,
             exported: has_exported_entry(function)
-                .then(|| self.function_work(function, true))
+                .then(|| self.function_work(function, EntryWalkMode::Exported, Vec::new()))
                 .transpose()?,
         })
     }
@@ -352,7 +407,8 @@ impl<'a> EntryWalkers<'a> {
     fn function_work(
         &mut self,
         function: &HostFunction,
-        walk: bool,
+        mode: EntryWalkMode,
+        named_list_binders: Vec<String>,
     ) -> Result<FunctionEntryWork, Unsupported> {
         let mut work = FunctionEntryWork {
             args: Vec::new(),
@@ -360,10 +416,21 @@ impl<'a> EntryWalkers<'a> {
             params: (0..function.params.len())
                 .map(|_| ParamEntryWork::default())
                 .collect(),
+            named_list_binders,
             release: Vec::new(),
         };
         let mut serial = 0usize;
         for (index, param) in function.params.iter().enumerate() {
+            let named_list = matches!(param.ty, HostAbiType::List(_)) && {
+                let mut names = Vec::new();
+                list_named_dims(&param.ty, &mut names);
+                !names.is_empty()
+            };
+            let walk = match mode {
+                EntryWalkMode::FixedOnly => false,
+                EntryWalkMode::Exported => !named_list,
+                EntryWalkMode::NamedLists => named_list,
+            };
             self.param_work(
                 &param.ty,
                 c_ident(&param.name).into_owned(),
@@ -390,6 +457,9 @@ impl<'a> EntryWalkers<'a> {
     ) -> Result<(), Unsupported> {
         match ty {
             HostAbiType::Tensor(_) => {
+                work.params[param]
+                    .ordered_extents
+                    .push(ExtentStep::Fixed(work.args.len()));
                 work.args.push(value);
                 work.owners.push(param);
             }
@@ -428,10 +498,23 @@ impl<'a> EntryWalkers<'a> {
                     "const __chelis_entry_path {root} = {{ NULL, {}, 0 }};",
                     c_utf8_byte_literal(&path)
                 ));
-                let call =
-                    |pass| format!("__chelis_entry_walk_{walker}({value}, &{root}, {pass});");
+                let states =
+                    if matches!(ty, HostAbiType::List(_)) && !work.named_list_binders.is_empty() {
+                        "__chelis_entry_named_states"
+                    } else {
+                        "NULL"
+                    };
+                let state_count = work.named_list_binders.len();
+                let call = |pass| {
+                    format!(
+                        "__chelis_entry_walk_{walker}({value}, &{root}, {pass}, {states}, {state_count});"
+                    )
+                };
                 work.params[param].metadata.push(call(0));
                 work.params[param].extents.push(call(1));
+                work.params[param]
+                    .ordered_extents
+                    .push(ExtentStep::Walk(call(1)));
             }
             _ => {}
         }
@@ -440,9 +523,40 @@ impl<'a> EntryWalkers<'a> {
 
     /// The path type, its printer, and every registered walker.
     pub fn render(&self, out: &mut Vec<String>) {
-        if self.types.is_empty() {
-            return;
+        out.push(
+            r#"
+typedef struct __chelis_entry_named_state {
+    const char *key;
+    const char *claim;
+    int seen;
+    int64_t value;
+    int axis;
+    char path[512];
+} __chelis_entry_named_state;
+
+static inline void __chelis_entry_named_observe(__chelis_entry_named_state *states, size_t count,
+        const char *key, const char *path, int axis, int64_t value) {
+    if (states == NULL) return;
+    for (size_t i = 0; i < count; ++i) {
+        __chelis_entry_named_state *state = &states[i];
+        if (strcmp(state->key, key) != 0) continue;
+        if (!state->seen) {
+            state->seen = 1;
+            state->value = value;
+            state->axis = axis;
+            snprintf(state->path, sizeof state->path, "%s", path);
+        } else if (state->value != value) {
+            fprintf(stderr, "extent `%s`: %s axis %d = %lld, %s axis %d = %lld\n",
+                state->claim, state->path, state->axis, (long long)state->value,
+                path, axis, (long long)value);
+            chelis_numeric_trap("numeric trap: domain in load at i64");
         }
+        return;
+    }
+}
+"#
+            .to_string(),
+        );
         // A path segment's list index is an `i64` extent position.
         let index_type = CEmitter::prim_elem_type(Prim::Int64);
         out.push(format!(
@@ -452,7 +566,7 @@ impl<'a> EntryWalkers<'a> {
             r#"
 
 /* `used` counts the whole path's length, including what did not fit. */
-static void __chelis_entry_path_append(const __chelis_entry_path *path, char *buffer, size_t size, size_t *used) {
+static inline void __chelis_entry_path_append(const __chelis_entry_path *path, char *buffer, size_t size, size_t *used) {
     if (path->parent != NULL) __chelis_entry_path_append(path->parent, buffer, size, used);
     size_t room = *used < size ? size - *used : 0;
     char *at = room > 0 ? buffer + *used : NULL;
@@ -463,7 +577,7 @@ static void __chelis_entry_path_append(const __chelis_entry_path *path, char *bu
 }
 
 /* Renders only on a failing check, into storage the trap that follows ends. */
-static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
+static inline const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
     static const char marker[] = "...(truncated)";
     static char buffer[512];
     size_t used = 0;
@@ -480,16 +594,19 @@ static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
 "#
             .to_string(),
         );
+        if self.types.is_empty() {
+            return;
+        }
         for (id, ty) in self.types.iter().enumerate() {
             out.push(format!(
-                "static void __chelis_entry_walk_{id}({}value, const __chelis_entry_path *path, int extents);",
+                "static void __chelis_entry_walk_{id}({}value, const __chelis_entry_path *path, int extents, __chelis_entry_named_state *states, size_t count);",
                 c_pointer_type(ty)
             ));
         }
         for (id, ty) in self.types.iter().enumerate() {
             out.push(String::new());
             out.push(format!(
-                "static void __chelis_entry_walk_{id}({}value, const __chelis_entry_path *path, int extents) {{",
+                "static void __chelis_entry_walk_{id}({}value, const __chelis_entry_path *path, int extents, __chelis_entry_named_state *states, size_t count) {{",
                 c_pointer_type(ty)
             ));
             let label = TensorLabel::path("path");
@@ -502,13 +619,17 @@ static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
                 out.push("        abort();".to_string());
                 out.push("    }".to_string());
             }
-            let child = |segment: String, fetch: String, item: &HostAbiType, walker: usize| {
+            let child = |segment: String,
+                         fetch: String,
+                         item: &HostAbiType,
+                         walker: usize,
+                         state_arg: &str| {
                 [
                     "    {".to_string(),
                     format!("        chelis_value item = {fetch};"),
                     format!("        const __chelis_entry_path segment = {segment};"),
                     format!(
-                        "        __chelis_entry_walk_{walker}({}, &segment, extents);",
+                        "        __chelis_entry_walk_{walker}({}, &segment, extents, {state_arg}, count);",
                         borrow_value(item, "item")
                     ),
                     "        chelis_value_release(item);".to_string(),
@@ -529,12 +650,19 @@ static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
                     out.push("        return;".to_string());
                     out.push("    }".to_string());
                     for (axis, dim) in tensor.dims.iter().enumerate() {
-                        if let DimInfo::Lit(required) = dim {
-                            out.extend(
+                        match dim {
+                            DimInfo::Lit(required) => out.extend(
                                 literal_extent_check("value", &label, axis, *required)
                                     .into_iter()
                                     .map(|line| format!("    {line}")),
-                            );
+                            ),
+                            DimInfo::Named(name, _) if name != "*" => {
+                                out.push(format!(
+                                    "    if (states != NULL) __chelis_entry_named_observe(states, count, {}, __chelis_entry_path_text(path), {axis}, chelis_tensor_shape(value, {axis}));",
+                                    c_string_literal(name)
+                                ));
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -548,6 +676,7 @@ static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
                             format!("chelis_tuple_get(value, {index})"),
                             &items[*index],
                             *walker,
+                            "NULL",
                         ));
                     }
                 }
@@ -572,6 +701,7 @@ static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
                                     format!("chelis_adt_get_field(value, {index})"),
                                     &constructor.fields[*index].ty,
                                     *walker,
+                                    "NULL",
                                 )
                                 .into_iter()
                                 .map(|line| format!("    {line}")),
@@ -596,6 +726,7 @@ static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
                             "chelis_list_index(value, index)".to_string(),
                             item,
                             *walker,
+                            "states",
                         )
                         .into_iter()
                         .map(|line| format!("    {line}")),
@@ -613,6 +744,7 @@ static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
                             "chelis_option_unwrap(value)".to_string(),
                             item,
                             *walker,
+                            "NULL",
                         )
                         .into_iter()
                         .map(|line| format!("    {line}")),
@@ -633,6 +765,7 @@ static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
                             "chelis_list_index(values, index)".to_string(),
                             item,
                             *walker,
+                            "NULL",
                         )
                         .into_iter()
                         .map(|line| format!("    {line}")),
@@ -671,6 +804,107 @@ impl TensorLabel {
             args: format!(", __chelis_entry_path_text({path})"),
         }
     }
+}
+
+/// A retained callback's formal List is checked at its inlined boundary.
+/// These loops use the same metadata and extent renderers as a function entry.
+pub(super) fn retained_list_pass(
+    ty: &HostAbiType,
+    actual: &str,
+    name: &str,
+    extents: bool,
+    state_count: usize,
+) -> Vec<String> {
+    fn walk(
+        ty: &HostAbiType,
+        value: &str,
+        path: &str,
+        depth: usize,
+        extents: bool,
+        state_count: usize,
+        out: &mut Vec<String>,
+    ) {
+        match ty {
+            HostAbiType::List(item) => {
+                if !extents {
+                    out.push(format!(
+                        "if ({value} == NULL) {{ fprintf(stderr, \"input `%s` is NULL\\n\", __chelis_entry_path_text({path})); abort(); }}"
+                    ));
+                }
+                let index = format!("__chelis_list_index_{depth}");
+                let element = format!("__chelis_list_element_{depth}");
+                let child = format!("__chelis_list_child_{depth}");
+                let child_path = format!("__chelis_list_path_{depth}");
+                out.push(format!(
+                    "for (int64_t {index} = 0; {index} < chelis_list_len({value}); ++{index}) {{"
+                ));
+                out.push(format!(
+                    "    chelis_value {element} = chelis_list_index({value}, {index});"
+                ));
+                out.push(format!(
+                    "    {}{child} = {};",
+                    c_pointer_type(item),
+                    borrow_value(item, &element)
+                ));
+                out.push(format!(
+                    "    const __chelis_entry_path {child_path} = {{ {path}, NULL, {index} }};"
+                ));
+                let mut inner = Vec::new();
+                walk(
+                    item,
+                    &child,
+                    &format!("&{child_path}"),
+                    depth + 1,
+                    extents,
+                    state_count,
+                    &mut inner,
+                );
+                out.extend(inner.into_iter().map(|line| format!("    {line}")));
+                out.push(format!("    chelis_value_release({element});"));
+                out.push("}".into());
+            }
+            HostAbiType::Tensor(tensor) => {
+                let label = TensorLabel::path(path);
+                if extents {
+                    for (axis, dim) in tensor.dims.iter().enumerate() {
+                        match dim {
+                            DimInfo::Lit(required) => {
+                                out.extend(literal_extent_check(value, &label, axis, *required));
+                            }
+                            DimInfo::Named(key, _) if key != "*" => {
+                                out.push(format!(
+                                    "__chelis_entry_named_observe(__chelis_entry_named_states, {state_count}, {}, __chelis_entry_path_text({path}), {axis}, chelis_tensor_shape({value}, {axis}));",
+                                    c_string_literal(key)
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    out.extend(tensor_metadata_checks(value, &label, tensor));
+                }
+            }
+            _ => unreachable!("retained List entry contains only List layers and a tensor"),
+        }
+    }
+    let mut out = vec![
+        "{".into(),
+        format!(
+            "const __chelis_entry_path __chelis_list_root = {{ NULL, {}, 0 }};",
+            c_utf8_byte_literal(name)
+        ),
+    ];
+    walk(
+        ty,
+        actual,
+        "&__chelis_list_root",
+        0,
+        extents,
+        state_count,
+        &mut out,
+    );
+    out.push("}".into());
+    out
 }
 
 /// The null, dtype and rank checks every entry tensor gets, in that order.

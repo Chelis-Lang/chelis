@@ -1181,7 +1181,9 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 };
                 self.lower_call(function, values, ty, tail)
             }
-            ConcreteHostExprKind::SignatureEntry { plan, args } => {
+            ConcreteHostExprKind::SignatureEntry {
+                plan, args, lists, ..
+            } => {
                 if plan.observations().nodes().len() != args.len() {
                     return Err(OwnershipError::CallArityMismatch {
                         unit: self.unit_name.clone(),
@@ -1204,6 +1206,22 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     }
                     let value = self.with_site(HostSiteKind::Argument, |lowerer| {
                         lowerer.lower_expr(arg, None)
+                    })?;
+                    operands.push(self.borrow(value)?);
+                }
+                for entry in lists {
+                    let actual = expr_type(&entry.value);
+                    if !matches!(actual, ConcreteHostType::List(_)) {
+                        return Err(OwnershipError::CallArgumentType {
+                            unit: self.unit_name.clone(),
+                            callee: "signature entry".into(),
+                            argument: entry.position,
+                            expected: render_type(&entry.ty),
+                            actual: render_type(&actual),
+                        });
+                    }
+                    let value = self.with_site(HostSiteKind::Argument, |lowerer| {
+                        lowerer.lower_expr(&entry.value, None)
                     })?;
                     operands.push(self.borrow(value)?);
                 }

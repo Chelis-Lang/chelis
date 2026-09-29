@@ -726,12 +726,29 @@ fn project_expr(
                 ty: HostAbiType::try_from_concrete(&ty)?,
             }
         }
-        ConcreteHostExprKind::SignatureEntry { plan, args } => HostAbiExprKind::SignatureEntry {
+        ConcreteHostExprKind::SignatureEntry {
+            plan,
+            args,
+            positions,
+            lists,
+        } => HostAbiExprKind::SignatureEntry {
             plan,
             args: args
                 .into_iter()
                 .map(|expr| project_expr(expr, allowed_callbacks))
                 .collect::<Result<Vec<_>, _>>()?,
+            positions,
+            lists: lists
+                .into_iter()
+                .map(|entry| {
+                    Ok(chelis_ir::host::HostListEntry {
+                        position: entry.position,
+                        name: entry.name,
+                        ty: HostAbiType::try_from_concrete(&entry.ty)?,
+                        value: project_expr(entry.value, allowed_callbacks)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, Unsupported>>()?,
         },
         ConcreteHostExprKind::Builtin { name, args, ty } => {
             if chelis_ir::host::is_host_unresolved_marker(&name) {

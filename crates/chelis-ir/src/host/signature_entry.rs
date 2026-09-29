@@ -13,6 +13,7 @@ use crate::{Dag, DimInfo, NodeId, RiscOp};
 #[derive(Debug, Clone)]
 pub struct SignatureEntryPlan {
     observations: Dag,
+    labels: Vec<String>,
     guards: Vec<EntryExtentGuard>,
 }
 
@@ -24,16 +25,22 @@ impl SignatureEntryPlan {
         let decl = observations.declare("signature entry");
         let mut guards = Vec::new();
         let mut first: Vec<(String, (NodeId, usize))> = Vec::new();
+        let mut labels = Vec::new();
         for input in inputs {
+            let label = input.name;
+            // A dynamic List observation has a display path such as `xs[1]`,
+            // which is not a Load identifier. Keep the path off the DAG name.
+            let load_name = crate::LoadStoreName::new(label.clone()).unwrap_or_else(|_| {
+                crate::LoadStoreName::must(format!("__entry_observation_{}", labels.len()))
+            });
             let load = observations.add_node(
                 decl,
-                RiscOp::Load {
-                    name: input.name.into(),
-                },
+                RiscOp::Load { name: load_name },
                 Vec::new(),
                 input.ty.clone(),
                 None,
             );
+            labels.push(label);
             for (axis, dim) in input.ty.dims.iter().enumerate() {
                 let observed = (load, axis);
                 match dim {
@@ -58,6 +65,7 @@ impl SignatureEntryPlan {
         }
         Self {
             observations,
+            labels,
             guards,
         }
     }
@@ -65,6 +73,10 @@ impl SignatureEntryPlan {
     /// Each node is exactly one tensor parameter, in declaration order.
     pub fn observations(&self) -> &Dag {
         &self.observations
+    }
+
+    pub fn label(&self, observation: NodeId) -> &str {
+        &self.labels[observation.0]
     }
 
     /// Literal and repeated-binder checks already interleaved by signature axis.

@@ -643,6 +643,16 @@ fn parity_list_foundation() {
 }
 
 #[test]
+fn parity_list_shared_extent() {
+    let path = examples_root().join("list_shared_extent.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"main = tensor(shape=[2], data=[4.0, 6.0])\n"
+    );
+}
+
+#[test]
 fn parity_checked_host_local_ascription() {
     drive_parity(
         &examples_root().join("checked_host_local_ascription.ch"),

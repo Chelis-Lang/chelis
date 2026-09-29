@@ -1036,6 +1036,15 @@ pub struct HostParam<T = HostTypeTerm> {
     pub ty: T,
 }
 
+/// A dynamically sized List observation at an inlined signature entry.
+#[derive(Debug, Clone)]
+pub struct HostListEntry<T = HostTypeTerm> {
+    pub position: usize,
+    pub name: String,
+    pub ty: T,
+    pub value: HostExpr<T>,
+}
+
 pub type ConcreteHostProgram = HostProgram<ConcreteHostType>;
 pub type ConcreteHostBinding = HostBinding<ConcreteHostType>;
 pub type ConcreteHostFunction = HostFunction<ConcreteHostType>;
@@ -1784,6 +1793,8 @@ pub enum HostExprKind<T = HostTypeTerm> {
     SignatureEntry {
         plan: SignatureEntryPlan,
         args: Vec<HostExpr<T>>,
+        positions: Vec<usize>,
+        lists: Vec<HostListEntry<T>>,
     },
     /// Keep an authored declaration's literal result obligation around an
     /// inlined invocation. This is private host-lowering state, not a public
@@ -2030,12 +2041,29 @@ fn resolve_host_callback(
 
 fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostTypeResolutionError> {
     let kind = match expr.kind {
-        HostExprKind::SignatureEntry { plan, args } => ConcreteHostExprKind::SignatureEntry {
+        HostExprKind::SignatureEntry {
+            plan,
+            args,
+            positions,
+            lists,
+        } => ConcreteHostExprKind::SignatureEntry {
             plan,
             args: args
                 .into_iter()
                 .map(resolve_host_expr)
                 .collect::<Result<Vec<_>, _>>()?,
+            positions,
+            lists: lists
+                .into_iter()
+                .map(|entry| {
+                    Ok(HostListEntry {
+                        position: entry.position,
+                        name: entry.name,
+                        ty: entry.ty.into_concrete()?,
+                        value: resolve_host_expr(entry.value)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, crate::HostTypeResolutionError>>()?,
         },
         HostExprKind::ResultClaimScope { plan, body, ty } => {
             ConcreteHostExprKind::ResultClaimScope {
@@ -3368,8 +3396,14 @@ fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
         HostExprKind::Builtin { name, args, .. } => {
             name == builtin || args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
         }
-        HostExprKind::Call { args, .. } | HostExprKind::SignatureEntry { args, .. } => {
+        HostExprKind::Call { args, .. } => {
             args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
+        }
+        HostExprKind::SignatureEntry { args, lists, .. } => {
+            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
+                || lists
+                    .iter()
+                    .any(|entry| host_body_uses_builtin(&entry.value, builtin))
         }
         HostExprKind::TensorCall { args, .. } => {
             args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
@@ -3554,8 +3588,13 @@ fn body_callsite_span_per_helper(expr: &HostExpr) -> UnordMap<usize, Option<Stri
                     walk(arg, out);
                 }
             }
-            HostExprKind::Builtin { args, .. } | HostExprKind::SignatureEntry { args, .. } => {
+            HostExprKind::Builtin { args, .. } => {
                 for arg in args {
+                    walk(arg, out);
+                }
+            }
+            HostExprKind::SignatureEntry { args, lists, .. } => {
+                for arg in args.iter().chain(lists.iter().map(|entry| &entry.value)) {
                     walk(arg, out);
                 }
             }
@@ -3885,7 +3924,9 @@ fn host_body_has_call_matching<T>(
     let recurse =
         |e: &HostExpr<T>| host_body_has_call_matching(e, builtin_matches, function_matches);
     match &expr.kind {
-        HostExprKind::SignatureEntry { args, .. } => args.iter().any(recurse),
+        HostExprKind::SignatureEntry { args, lists, .. } => {
+            args.iter().any(recurse) || lists.iter().any(|entry| recurse(&entry.value))
+        }
         HostExprKind::Builtin { name, args, .. } => {
             builtin_matches(name) || args.iter().any(recurse)
         }
@@ -8480,10 +8521,13 @@ fn collect_named_callback_signatures(
         HostExprKind::FormalIngress { value, .. } => {
             collect_named_callback_signatures(value, out);
         }
-        HostExprKind::Call { args, .. }
-        | HostExprKind::Builtin { args, .. }
-        | HostExprKind::SignatureEntry { args, .. } => {
+        HostExprKind::Call { args, .. } | HostExprKind::Builtin { args, .. } => {
             for arg in args {
+                collect_named_callback_signatures(arg, out);
+            }
+        }
+        HostExprKind::SignatureEntry { args, lists, .. } => {
+            for arg in args.iter().chain(lists.iter().map(|entry| &entry.value)) {
                 collect_named_callback_signatures(arg, out);
             }
         }
@@ -8665,8 +8709,13 @@ fn infer_callable_param_types_in_expr(
                 infer_callable_param_types_in_expr(item, unknown, out);
             }
         }
-        HostExprKind::Builtin { args, .. } | HostExprKind::SignatureEntry { args, .. } => {
+        HostExprKind::Builtin { args, .. } => {
             for arg in args {
+                infer_callable_param_types_in_expr(arg, unknown, out);
+            }
+        }
+        HostExprKind::SignatureEntry { args, lists, .. } => {
+            for arg in args.iter().chain(lists.iter().map(|entry| &entry.value)) {
                 infer_callable_param_types_in_expr(arg, unknown, out);
             }
         }
@@ -8829,9 +8878,12 @@ fn refine_host_expr_types(
                 }
             }
         }
-        HostExprKind::SignatureEntry { args, .. } => {
+        HostExprKind::SignatureEntry { args, lists, .. } => {
             for arg in args {
                 changed |= refine_host_expr_types(arg, scope, signatures);
+            }
+            for entry in lists {
+                changed |= refine_host_expr_types(&mut entry.value, scope, signatures);
             }
         }
         HostExprKind::Builtin { name, args, ty } => {
@@ -9785,14 +9837,18 @@ fn collect_lowered_host_names(expr: &HostExpr, out: &mut UnordSet<String>) {
         HostExprKind::ResultClaimScope { body, .. } => collect_lowered_host_names(body, out),
         HostExprKind::FormalIngress { value, .. } => collect_lowered_host_names(value, out),
         HostExprKind::AdtFieldAccess { base, .. } => collect_lowered_host_names(base, out),
-        HostExprKind::SignatureEntry { args, .. }
-        | HostExprKind::List(args, _)
+        HostExprKind::List(args, _)
         | HostExprKind::Tuple(args, _)
         | HostExprKind::Call { args, .. }
         | HostExprKind::Builtin { args, .. }
         | HostExprKind::AdtConstruct { fields: args, .. }
         | HostExprKind::TensorCall { args, .. } => {
             for arg in args {
+                collect_lowered_host_names(arg, out);
+            }
+        }
+        HostExprKind::SignatureEntry { args, lists, .. } => {
+            for arg in args.iter().chain(lists.iter().map(|entry| &entry.value)) {
                 collect_lowered_host_names(arg, out);
             }
         }
@@ -12959,8 +13015,22 @@ struct RetainedHostInvocation<'a> {
     params: &'a [HostParam],
     body: &'a Expr,
     entry: SignatureEntryPlan,
-    callable_entries: Vec<Option<SignatureEntryPlan>>,
+    callable_entries: Vec<bool>,
     name: Option<&'a str>,
+}
+
+fn named_list_tensor(ty: &HostTypeTerm) -> bool {
+    match ty {
+        HostTypeTerm::List(item) => match item.as_ref() {
+            HostTypeTerm::Tensor(tensor) => tensor
+                .dims
+                .iter()
+                .any(|dim| matches!(dim, DimInfo::Named(name, _) if name != "*")),
+            nested @ HostTypeTerm::List(_) => named_list_tensor(nested),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 impl<'a> RetainedHostInvocation<'a> {
@@ -12978,7 +13048,7 @@ impl<'a> RetainedHostInvocation<'a> {
             .iter()
             .map(|param| {
                 let HostTypeTerm::Fn(param_tys, _) = &param.ty else {
-                    return None;
+                    return false;
                 };
                 let entry = SignatureEntryPlan::new(param_tys.iter().enumerate().filter_map(
                     |(index, ty)| {
@@ -12991,7 +13061,7 @@ impl<'a> RetainedHostInvocation<'a> {
                         })
                     },
                 ));
-                (!entry.guards().is_empty()).then_some(entry)
+                param_tys.iter().any(named_list_tensor) || !entry.guards().is_empty()
             })
             .collect();
         Self {
@@ -13183,7 +13253,6 @@ fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> 
 fn retain_callable_entry_contract(
     actual: &Expr,
     formal: &HostTypeTerm,
-    entry: &SignatureEntryPlan,
     formal_index: usize,
     reserved: &mut UnordSet<String>,
     span: chelis_deep::Span,
@@ -13207,10 +13276,6 @@ fn retain_callable_entry_contract(
         };
         param_names.push(name);
     }
-    if entry.guards().is_empty() {
-        return actual.clone();
-    }
-
     let declarations = param_names
         .iter()
         .zip(param_tys)
@@ -13462,23 +13527,18 @@ fn lower_retained_host_invocation(
     let mut local_scope = scope.clone();
     let mut bindings = Vec::new();
     let mut observations = Vec::new();
+    let mut observation_positions = Vec::new();
+    let mut list_observations = Vec::new();
     for (index, ((arg, formal), callable_entry)) in args
         .iter()
         .zip(invocation.params)
         .zip(&invocation.callable_entries)
         .enumerate()
     {
-        if let Some(callable_entry) = callable_entry {
+        if *callable_entry {
             substitutions.insert(
                 formal.name.clone(),
-                retain_callable_entry_contract(
-                    arg,
-                    &formal.ty,
-                    callable_entry,
-                    index,
-                    &mut reserved,
-                    *span,
-                ),
+                retain_callable_entry_contract(arg, &formal.ty, index, &mut reserved, *span),
             );
             continue;
         }
@@ -13541,10 +13601,18 @@ fn lower_retained_host_invocation(
         });
         bind_host_local(&mut local_scope, formal_local.clone(), ty.clone());
         if matches!(formal.ty, HostTypeTerm::Tensor(_)) {
+            observation_positions.push(index);
             observations.push(HostExpr::new(HostExprKind::Var(
                 formal_local.clone(),
                 ty.clone(),
             )));
+        } else if named_list_tensor(&formal.ty) {
+            list_observations.push(HostListEntry {
+                position: index,
+                name: formal.name.clone(),
+                ty: formal.ty.clone(),
+                value: HostExpr::new(HostExprKind::Var(formal_local.clone(), ty.clone())),
+            });
         }
         substitutions.insert(
             formal.name.clone(),
@@ -13561,7 +13629,7 @@ fn lower_retained_host_invocation(
         &substitutions,
         &UnordSet::new(),
     ));
-    if !invocation.entry.guards().is_empty() {
+    if !invocation.entry.guards().is_empty() || !list_observations.is_empty() {
         let mut serial = bindings.len();
         let guard_name = loop {
             let candidate = format!("__chelis_entry_check_{serial}");
@@ -13578,6 +13646,8 @@ fn lower_retained_host_invocation(
             value: HostExpr::new(HostExprKind::SignatureEntry {
                 plan: invocation.entry,
                 args: observations,
+                positions: observation_positions,
+                lists: list_observations,
             }),
         });
     }
@@ -15717,7 +15787,7 @@ fn lower_host_callback(
                 ),
             );
             if !plan.guards().is_empty() {
-                let args = params
+                let args: Vec<HostExpr> = params
                     .iter()
                     .filter(|param| matches!(param.ty, HostTypeTerm::Tensor(_)))
                     .map(|param| {
@@ -15747,7 +15817,12 @@ fn lower_host_callback(
                         display_name: None,
                         display_roots: Vec::new(),
                         ty: HostTypeTerm::Unit,
-                        value: HostExpr::new(HostExprKind::SignatureEntry { plan, args }),
+                        value: HostExpr::new(HostExprKind::SignatureEntry {
+                            positions: (0..args.len()).collect(),
+                            plan,
+                            args,
+                            lists: Vec::new(),
+                        }),
                     }],
                     body: Box::new(body),
                     ty,

@@ -1572,6 +1572,8 @@ fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
                     "x".into(),
                     function.params[0].ty.clone(),
                 ))],
+                positions: vec![0],
+                lists: Vec::new(),
             }),
         }],
         body: Box::new(function.body.clone()),
