@@ -6430,6 +6430,16 @@ fn vscode_extension_manifest_registers_languages_and_command() {
 
 #[test]
 fn vscode_grammars_exist_and_parse_as_json() {
+    let configuration =
+        fs::read_to_string(editor_file("language-configuration.json")).expect("language config");
+    let configuration: Value =
+        serde_json::from_str(&configuration).expect("valid language config json");
+    assert_eq!(configuration["comments"]["lineComment"], "--");
+    assert_eq!(
+        configuration["comments"]["blockComment"],
+        serde_json::json!(["{-", "-}"])
+    );
+
     for path in [
         editor_file("syntaxes/chelis.tmLanguage.json"),
         editor_file("syntaxes/chelis-deep.tmLanguage.json"),

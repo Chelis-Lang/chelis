@@ -10,9 +10,11 @@ opens its read-only canonical Deep form.
 
 ## Run from a Chelis checkout
 
-Open the checkout in VS Code's Extension Development Host:
+From the checkout root, install the extension dependency and open the Extension
+Development Host:
 
 ```sh
+(cd editors/vscode && npm ci)
 code --extensionDevelopmentPath="$PWD/editors/vscode" "$PWD"
 ```
 

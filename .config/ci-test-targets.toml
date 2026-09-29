@@ -1185,8 +1185,21 @@ packages = ["chelis-cli"]
 
 [[path_rule]]
 prefix = "editors/vscode/syntaxes/chelis-deep.tmLanguage.json"
-disposition = "packages"
-packages = ["chelis-cli"]
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the editor grammar numeric-scope boundary checks run in script-unit"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_vscode_numeric_grammar.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks positive and negative Surf and Deep numeric token scopes"
+tracking_issue = "chelis#1592"
 
 # Exact executable-corpus source exercised by both
 # chelis-cli::parity::parity_kinded_nominal_dimensions and
