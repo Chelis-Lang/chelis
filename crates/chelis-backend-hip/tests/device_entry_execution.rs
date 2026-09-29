@@ -267,6 +267,28 @@ fn compiled_kernels(model: &str) -> String {
         ));
     }
     output.push_str("abort();\n}\n");
+    output.push_str("extern \"C\" hipDeviceptr_t fixture_symbol(const char *kernel, const char *symbol, size_t *bytes) {\n");
+    for (index, (name, source)) in kernels.iter().enumerate() {
+        output.push_str(&format!("if (!strcmp(kernel, \"{name}\")) {{\n"));
+        for (symbol, declaration) in [
+            (
+                "chelis_numeric_failure_flag",
+                "__device__ unsigned int chelis_numeric_failure_flag",
+            ),
+            (
+                "chelis_numeric_failure_index",
+                "__device__ unsigned long long chelis_numeric_failure_index",
+            ),
+        ] {
+            if source.contains(declaration) {
+                output.push_str(&format!(
+                    "if (!strcmp(symbol, \"{symbol}\")) {{ *bytes = sizeof(compiled_{index}::{symbol}); return reinterpret_cast<hipDeviceptr_t>(&compiled_{index}::{symbol}); }}\n"
+                ));
+            }
+        }
+        output.push_str("}\n");
+    }
+    output.push_str("return 0;\n}\n");
     output
 }
 
@@ -445,6 +467,7 @@ fn generated_sparse_entries_preserve_supplied_strides_and_duplicate_update_order
                 None,
             );
             run(&executable, "positive", true);
+            run(&executable, "wrong-index", false);
             run(&executable, "wrong-second-device", false);
         }
     }
