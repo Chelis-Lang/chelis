@@ -799,6 +799,23 @@ const DEEP_UNREADABLE_TYPE_NAME_WITH_INVARIANT: &str = r#"
     (variant {} Probability (field {} value (t-prim {} f32)))))
 "#;
 
+/// Decoding untrusted Deep must not execute filesystem effects in a declared
+/// invariant, even when the normal source checker would reject this predicate.
+const DEEP_FILESYSTEM_INVARIANT: &str = r#"
+(module {}
+  stats.prob
+  (deftype {opaque: true,
+            invariant_amenability: "linear",
+            invariant: (fn {}
+                          (params {} p)
+                          (app {}
+                            (var {} file_exists)
+                            (lit {} "eval-boundary-absent-file")))}
+    Guarded
+    ()
+    (variant {} Guarded (field {} value (t-prim {} f32)))))
+"#;
+
 /// Negative control: the same unreadable type-name child WITHOUT an
 /// `invariant` metadata entry. No invariant is declared, so there is
 /// nothing to fail closed over and the payload decodes cleanly.
@@ -859,6 +876,24 @@ fn invariant_declaring_deftype_with_unreadable_name_fails_closed() {
              failure, not a structural one, got {other:?}"
         ),
     }
+}
+
+#[test]
+fn invariant_predicate_refuses_filesystem_access() {
+    let exprs = program_exprs_deep(DEEP_FILESYSTEM_INVARIANT);
+    let value = ExecutionValue::Adt {
+        ctor: "Guarded".to_string(),
+        fields: vec![wire_values::scalar_f32(0.5)],
+    };
+    let error = try_decode_adt_value(&exprs, &value)
+        .expect_err("decoding must refuse the filesystem effect");
+    let DecodeError::Invariant(message) = error else {
+        panic!("expected invariant failure, got {error:?}");
+    };
+    assert!(
+        message.contains("file_exists refused: Filesystem capability is not permitted"),
+        "unexpected invariant error: {message}"
+    );
 }
 
 #[test]

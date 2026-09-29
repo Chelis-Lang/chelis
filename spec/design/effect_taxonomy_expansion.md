@@ -28,25 +28,45 @@ explicit `key`, [05-RNG-1]):
 
 - `Accum` — internal design hook for backward-pass accumulation. Not yet
   user-facing as a checked effect; reserved.
-- `Io` — host-side print and debug. Narrow today; covers stdout/stderr-style
-  output only, not network or filesystem.
+- `Io` — host-side print/debug, filesystem builtins (`read_file`,
+  `write_file`, `read_lines`, `read_bytes`, `file_exists`, `list_dir`,
+  `mmap_file`), and subprocess execution (`process_run`). Today the latter
+  runs in the evaluator; [05-HOST-2] also requires compiled host support,
+  which chelis#1297 has not completed. Network access is not part of this effect.
 - `Test` — the in-language test runner's effect. Functions defined as
   `! { Test }` may use test-only assertions.
 - `Resource(String)` — device resource boundaries (`gpu:0`, `cpu`). Validated
   at build boundaries by `chelis build --target c` (rejects GPU resource
   regions) and `chelis build --target hip` (rejects CPU-only regions).
 
-The set is correct for what it tracks: each variant has a well-defined
-compile-time guarantee and at least one production code path that exercises
-it. The set is narrow because two categories that matter for trust stories
-beyond reproducibility and determinism are absent: network access and
-filesystem access. Subprocess execution is a third category that does not
-fire today because Chelis programs cannot spawn subprocesses (no FFI, no
-`exec` primitive, no string-to-code path); it can be added when FFI is
-designed in a later phase.
+The set is narrower than the proposed trust taxonomy: neither `Network` nor
+`Filesystem` is a *separate* language-visible variant. Existing filesystem
+operations and `process_run` already carry `Io` under `spec/04-type-system.md`
+§7.1. A distinct subprocess effect remains deferred; that does not make
+`process_run` evaluator-only in the language contract ([05-HOST-2]). The
+expansion below covers `Network` and `Filesystem` only.
 
-The expansion below covers `Network` and `Filesystem` only. Subprocess
-tracking is intentionally deferred to the FFI design conversation.
+### Evaluator system boundary
+
+The compiler API's host evaluator carries a mandatory `EvalSystemBoundary`
+through each evaluation context. Its `Filesystem` and `Process` capabilities
+are evaluator-internal policy categories with **independent** allow decisions,
+not additions to language effect rows. Every adapter call checks the
+operation's capability first. Normal program evaluation permits both;
+invariant predicate revalidation denies both before the adapter can access
+the OS. Seven filesystem builtins and `process_run` pass through this one
+boundary. `print` and `debug` remain transcript operations.
+
+Only `crates/chelis-compiler-api/src/runtime/system_adapter.rs` accesses the
+host filesystem or process API for those evaluator operations. The adapter
+preserves the language's directory-name byte ordering and strict UTF-8
+failure under `spec/05-risc-primitives.md` [05-HOST-4], rather than inventing
+a lossy or unsorted evaluator rule. The compiled C lane and `chelis-runtime`
+ABI are outside this *evaluator* policy; [05-HOST-2]'s outstanding compiled
+host `process_run` parity remains owned by chelis#1297. The focused acceptance
+command is `python3 scripts/eval_system_oracle.py`;
+`scripts/eval_system_guard.py` also runs in the Python-only Rust-policy gate
+stage.
 
 ---
 

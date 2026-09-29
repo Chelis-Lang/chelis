@@ -453,6 +453,17 @@ PIPELINE_CORE_COMPILE_FAIL: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_pipeline_core_compile_fail.py",
 ]
+# Source isolation runs without nextest in the Rust-policy stage; the
+# behavioral oracle runs where nextest is available in integration support.
+EVAL_SYSTEM_GUARD: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/eval_system_guard.py",
+]
+EVAL_SYSTEM_ORACLE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/eval_system_oracle.py",
+]
+
 # The chelis#908 unrepresentable-domain oracle. #908's "Constraint on every
 # fix in this class" requires it to run in a continuous job: before this it
 # was invoked by no workflow and no gate stage, so the only thing exercising
@@ -592,6 +603,7 @@ STAGES: dict[str, list[list[str]]] = {
         PIPELINE_CORE_DEPENDENCY_GUARD,
         PIPELINE_CORE_DOCUMENTATION_GUARD,
         PIPELINE_CORE_COMPILE_FAIL,
+        EVAL_SYSTEM_GUARD,
     ],
     "integration": [
         NEXTEST_WORKSPACE_CI,
@@ -601,6 +613,7 @@ STAGES: dict[str, list[list[str]]] = {
         COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
         [MANAGED_PYTHON, "scripts/dtype_builtin_atom_closure_oracle.py"],
+        EVAL_SYSTEM_ORACLE,
         OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
@@ -657,6 +670,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CONFIGURATION_CLOSURE,
     PIPELINE_CORE_DEPENDENCY_GUARD,
     PIPELINE_CORE_DOCUMENTATION_GUARD,
+    EVAL_SYSTEM_GUARD,
     UNREPRESENTABLE_DOMAIN_ORACLE,
     RUNTIME_REPRESENTATION_ORACLE,
     LOWERING_TRACE_TESTS,
@@ -750,6 +764,7 @@ FAST_STATIC_COMMANDS: list[list[str]] = [
     REGEN_TIER0_WRITE,
     FMT_WRITE,
     CHELIS_LINT_CHECK,
+    EVAL_SYSTEM_GUARD,
 ]
 # A change under either prefix appends the two std legs to `--fast`.
 STD_PATH_PREFIXES: tuple[str, ...] = (

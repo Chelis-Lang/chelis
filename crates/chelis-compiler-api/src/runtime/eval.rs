@@ -1,6 +1,6 @@
 use chelis_deep::DeepTag;
 use chelis_unord::UnordMap;
-use std::fs;
+use std::path::Path;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use super::host_ops::*;
 use super::named_axis::*;
+#[cfg(test)]
+use super::system_adapter::list_dir_names_to_strings;
 use super::transforms::*;
 use super::*;
 
@@ -275,27 +277,6 @@ fn tensor_type_dim_exprs(expr: &Expr) -> Option<(&Expr, &[Expr])> {
         return None;
     };
     kids.split_last()
-}
-
-/// [05-HOST-4]: choose the first invalid host name in the declared order.
-/// Complete validation precedes construction of language/runtime list values.
-fn list_dir_names_to_strings(
-    mut names: Vec<std::ffi::OsString>,
-    path: &str,
-) -> Result<Vec<String>, String> {
-    names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
-    names
-        .into_iter()
-        .map(|name| {
-            name.into_string().map_err(|name| {
-                format!(
-                    "IO trap in list_dir: directory b\"{}\", entry b\"{}\": name is not valid UTF-8",
-                    path.as_bytes().escape_ascii(),
-                    name.as_encoded_bytes().escape_ascii()
-                )
-            })
-        })
-        .collect()
 }
 
 fn close_at_f32_width(actual: f32, expected: f32, tolerance: f32) -> bool {
@@ -3995,8 +3976,7 @@ impl<'a> EvalContext<'a> {
             }
             "read_file" => {
                 let path = expect_string_arg(args, 0)?;
-                let text = fs::read_to_string(&path)
-                    .map_err(|err| format!("read_file failed for `{path}`: {err}"))?;
+                let text = self.system.read_file(Path::new(&path))?;
                 Ok(RuntimeValue::String(text))
             }
             "round_to" => {
@@ -4112,12 +4092,12 @@ impl<'a> EvalContext<'a> {
             }
             // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
             //
-            // Eval/test-only subprocess exec. Arguments are passed straight to
-            // the OS as argv via `Command::args` -- there is no shell, no glob
-            // expansion, and no `$VAR`/backtick interpolation, so a hostile
-            // `cmd` or `args` value cannot inject extra shell commands. The C
-            // and HIP build backends deliberately reject this builtin (see
-            // `reject_eval_only_builtins_host`) rather than emit a silent `0`.
+            // Current eval/test implementation of subprocess exec. Arguments
+            // pass straight to the OS as argv, without implicit shell, glob,
+            // `$VAR`, or backtick interpolation. The C and HIP build backends
+            // currently reject this builtin; compiled host parity remains
+            // required by [05-HOST-2] and tracked by chelis#1297. This
+            // evaluator boundary does not implement that separate lane.
             "process_run" => {
                 let cmd = expect_string_arg(args, 0)?;
                 let raw_args = expect_list_arg(args, 1)?;
@@ -4132,13 +4112,10 @@ impl<'a> EvalContext<'a> {
                         }
                     }
                 }
-                let output = std::process::Command::new(&cmd)
-                    .args(&argv)
-                    .output()
-                    .map_err(|err| format!("process_run failed to spawn `{cmd}`: {err}"))?;
+                let output = self.system.run_process(&cmd, &argv)?;
                 // A process killed by a signal has no exit code; report -1 so
                 // callers can distinguish it from a clean exit 0.
-                let exit_code = output.status.code().map_or(-1_i64, i64::from);
+                let exit_code = output.exit_status.map_or(-1_i64, i64::from);
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 Ok(RuntimeValue::Tuple(
@@ -4153,14 +4130,12 @@ impl<'a> EvalContext<'a> {
             "write_file" => {
                 let path = expect_string_arg(args, 0)?;
                 let contents = expect_string_arg(args, 1)?;
-                fs::write(&path, contents)
-                    .map_err(|err| format!("write_file failed for `{path}`: {err}"))?;
+                self.system.write_file(Path::new(&path), &contents)?;
                 Ok(RuntimeValue::Unit)
             }
             "read_lines" => {
                 let path = expect_string_arg(args, 0)?;
-                let text = fs::read_to_string(&path)
-                    .map_err(|err| format!("read_lines failed for `{path}`: {err}"))?;
+                let text = self.system.read_lines_source(Path::new(&path))?;
                 Ok(RuntimeValue::List(
                     text.lines()
                         .map(|line| RuntimeValue::String(line.to_string()))
@@ -4169,8 +4144,7 @@ impl<'a> EvalContext<'a> {
             }
             "read_bytes" => {
                 let path = expect_string_arg(args, 0)?;
-                let bytes = fs::read(&path)
-                    .map_err(|err| format!("read_bytes failed for `{path}`: {err}"))?;
+                let bytes = self.system.read_bytes(Path::new(&path))?;
                 Ok(RuntimeValue::List(
                     bytes
                         .into_iter()
@@ -4180,29 +4154,20 @@ impl<'a> EvalContext<'a> {
             }
             "file_exists" => {
                 let path = expect_string_arg(args, 0)?;
-                Ok(RuntimeValue::Bool(std::path::Path::new(&path).exists()))
+                Ok(RuntimeValue::Bool(
+                    self.system.file_exists(Path::new(&path))?,
+                ))
             }
             "list_dir" => {
                 let path = expect_string_arg(args, 0)?;
-                let entries = fs::read_dir(&path)
-                    .map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
-                let mut names = Vec::new();
-                for entry in entries {
-                    let entry =
-                        entry.map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
-                    names.push(entry.file_name());
-                }
+                let names = self.system.list_dir(Path::new(&path))?;
                 Ok(RuntimeValue::List(
-                    list_dir_names_to_strings(names, &path)?
-                        .into_iter()
-                        .map(RuntimeValue::String)
-                        .collect(),
+                    names.into_iter().map(RuntimeValue::String).collect(),
                 ))
             }
             "mmap_file" => {
                 let path = expect_string_arg(args, 0)?;
-                let bytes = fs::read(&path)
-                    .map_err(|err| format!("mmap_file failed for `{path}`: {err}"))?;
+                let bytes = self.system.load_mapped_file_bytes(Path::new(&path))?;
                 Ok(RuntimeValue::MappedFile(bytes))
             }
             "mmap_read" => {
@@ -5418,6 +5383,7 @@ mod legacy_capture_order_tests {
             transcript_capture: None,
             resolving_top_levels: Vec::new(),
             cancel: None,
+            system: system::EvalSystemBoundary::permissive(),
             failure_kind: RuntimeFailureKind::Ordinary,
         }
     }
@@ -6412,6 +6378,7 @@ mod legacy_capture_order_tests {
 mod list_dir_conversion_tests {
     use super::list_dir_names_to_strings;
     use std::ffi::OsString;
+    use std::path::Path;
 
     #[test]
     fn list_dir_conversion_preserves_unicode_and_empty_lists() {
@@ -6419,10 +6386,17 @@ mod list_dir_conversion_tests {
         let mut expected = names.to_vec();
         expected.sort();
         assert_eq!(
-            list_dir_names_to_strings(names.into_iter().map(OsString::from).collect(), "/dir"),
+            list_dir_names_to_strings(
+                names.into_iter().map(OsString::from).collect(),
+                Path::new("/dir")
+            )
+            .map_err(|error| error.to_string()),
             Ok(expected.into_iter().map(str::to_owned).collect())
         );
-        assert_eq!(list_dir_names_to_strings(vec![], "/dir"), Ok(vec![]));
+        assert_eq!(
+            list_dir_names_to_strings(vec![], Path::new("/dir")).map_err(|error| error.to_string()),
+            Ok(vec![])
+        );
     }
 
     #[cfg(unix)]
@@ -6438,7 +6412,7 @@ mod list_dir_conversion_tests {
             let mut names: Vec<_> = names.into_iter().map(OsString::from_vec).collect();
             names.push(OsString::from("0-valid"));
             assert_eq!(
-                list_dir_names_to_strings(names, "/dir"),
+                list_dir_names_to_strings(names, Path::new("/dir")).map_err(|error| error.to_string()),
                 Err("IO trap in list_dir: directory b\"/dir\", entry b\"a\\xfe\": name is not valid UTF-8".to_owned())
             );
         }
@@ -6448,7 +6422,7 @@ mod list_dir_conversion_tests {
             OsString::from_vec(b"\x80z".to_vec()),
         ];
         assert_eq!(
-            list_dir_names_to_strings(names, "/dir"),
+            list_dir_names_to_strings(names, Path::new("/dir")).map_err(|error| error.to_string()),
             Err("IO trap in list_dir: directory b\"/dir\", entry b\"\\x80z\": name is not valid UTF-8".to_owned())
         );
     }
@@ -6459,7 +6433,7 @@ mod list_dir_conversion_tests {
         use std::os::unix::ffi::OsStringExt;
         let names = vec![OsString::from_vec(b"bad\n\r\t\\\"'\xff".to_vec())];
         assert_eq!(
-            list_dir_names_to_strings(names, "/d\n\r\t\\\"'é"),
+            list_dir_names_to_strings(names, Path::new("/d\n\r\t\\\"'é")).map_err(|error| error.to_string()),
             Err("IO trap in list_dir: directory b\"/d\\n\\r\\t\\\\\\\"\\'\\xc3\\xa9\", entry b\"bad\\n\\r\\t\\\\\\\"\\'\\xff\": name is not valid UTF-8".to_owned())
         );
     }
