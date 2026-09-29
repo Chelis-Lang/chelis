@@ -270,6 +270,15 @@ cadence = "pull_request and push"
 reason = "script-unit runs the keyed randomness acceptance runner contract tests without compiling its manual corpus"
 tracking_issue = "chelis#2413"
 
+[[path_rule]]
+prefix = "scripts/bump_compiler_pins.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the compiler-pin updater's consistency, argument, and mutation tests"
+tracking_issue = "chelis#1824"
+
 # The completion runner consumes these exact runtime-extent corpus inputs.
 [[path_rule]]
 prefix = "scripts/runtime_extent_oracle.py"
@@ -1375,6 +1384,16 @@ packages = ["chelis-cli"]
 
 [[path_rule]]
 prefix = "examples/illustrative/io_pipeline/src/main.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/io_pipeline/config.json"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/io_pipeline/train.csv"
 disposition = "packages"
 packages = ["chelis-cli"]
 

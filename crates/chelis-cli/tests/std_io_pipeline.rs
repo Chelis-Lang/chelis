@@ -195,8 +195,8 @@ x = missing_symbol("foo")
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("missing_symbol"))
-        .stderr(predicate::str::contains("does not export"));
+        .stdout(predicate::str::contains("missing_symbol"))
+        .stdout(predicate::str::contains("does not export"));
 }
 
 #[test]
@@ -527,8 +527,8 @@ x = nonexistent_parquet_fn("foo")
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("nonexistent_parquet_fn"))
-        .stderr(predicate::str::contains("does not export"));
+        .stdout(predicate::str::contains("nonexistent_parquet_fn"))
+        .stdout(predicate::str::contains("does not export"));
 }
 
 /// PR #1213 review finding: the malformed-CSV None contract was only
