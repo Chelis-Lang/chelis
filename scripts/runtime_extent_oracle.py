@@ -2408,6 +2408,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_literal_call_entry.agreeing_runtime_argument_executes_on_both_lanes",
         ),
+        _row(
+            "entry.inlined_literal.shape_arithmetic_if.eval_c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_literal_call_entry.original_shape_arithmetic_in_a_taken_if_arm_traps_on_both_lanes",
+        ),
         # #1788 residual: host entry owns every signature obligation before
         # body/helper execution. Eval already enforced these measured claims;
         # C omitted mixed witnesses or reported a later unrelated failure.

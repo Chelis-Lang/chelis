@@ -1139,6 +1139,7 @@
       "expected": [
         "agreeing_runtime_argument_executes_on_both_lanes",
         "original_disagreeing_call_traps_before_g_computes_on_both_lanes",
+        "original_shape_arithmetic_in_a_taken_if_arm_traps_on_both_lanes",
         "taken_call_checks_its_literal_before_the_body_on_both_lanes",
         "untaken_call_does_not_check_its_literal_on_either_lane",
         "wildcard_parameter_does_not_claim_the_callers_observed_extent"

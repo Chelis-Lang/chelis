@@ -63,6 +63,32 @@ fn wildcard_parameter_does_not_claim_the_callers_observed_extent() {
     }
 }
 
+#[test]
+fn original_shape_arithmetic_in_a_taken_if_arm_traps_on_both_lanes() {
+    let source = "def g(y: tensor[3, f32]) -> tensor[f32] = sum(y, 0i32)\n\
+                  def f(x: tensor[4, f32]) -> tensor[f32] = {\n\
+                    s = tensor_to_scalar(sum(&x, 0i32))\n\
+                    k = sub(shape(&x, 0i32), 2i64)\n\
+                    if gt(s, -5.0f32) then g(shrink(&x, [[0i64, k]])) else sum(x, 0i32)\n\
+                  }\n\
+                  out = f(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))\n";
+    for native in [false, true] {
+        let (ok, output) = run(source, native);
+        assert!(!ok, "native={native}: {output}");
+        assert!(
+            output.contains("extent `3`: claimed = 3, y axis 0 = 2"),
+            "native={native}: {output}"
+        );
+        assert!(
+            output
+                .lines()
+                .any(|line| line == "numeric trap: domain in load at i64"),
+            "native={native}: {output}"
+        );
+        assert!(!output.contains("out = 2.0"), "native={native}: {output}");
+    }
+}
+
 fn selected_source(taken: bool) -> String {
     format!(
         "def g(y: tensor[3, f32]) -> tensor[f32] ! {{ IO }} = {{\n\
