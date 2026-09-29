@@ -519,6 +519,14 @@ impl InferenceProduct {
             .any(|linked| crate::env::free_tvars(&resolved(linked, subst)).contains(&var))
     }
 
+    pub(super) fn group_links_in_progress(&self) -> bool {
+        !self.group_provisional_types.is_empty() || !self.closing_group_types.is_empty()
+    }
+
+    pub(super) fn group_links_completed(&mut self) {
+        self.closing_group_types.clear();
+    }
+
     /// chelis#2651: the member of the recursive group being inferred whose
     /// types the group has yet to determine and that `ty`, a type variable,
     /// stands for part of: a variable of a signature-less member's
@@ -1122,11 +1130,12 @@ impl InferenceProduct {
         loop {
             let before = self.deferred_shape_checks.len() + self.result_type_constraints.len();
             let joined = self.replay_result_joins(vg, subst, errors);
-            self.replay_ready_shape_checks_once(vg, subst, adt_reg, errors);
+            let progressed = self.replay_ready_shape_checks_once(vg, subst, adt_reg, errors);
             let imported = self.import_result_constraints(subst);
             self.replay_result_type_constraints(subst, errors);
             if !joined
                 && !imported
+                && !progressed
                 && self.deferred_shape_checks.len() + self.result_type_constraints.len() >= before
             {
                 break;
@@ -1141,15 +1150,19 @@ impl InferenceProduct {
         subst: &mut Subst,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
-    ) {
+    ) -> bool {
         let checks = std::mem::take(&mut self.deferred_shape_checks);
         let prior_owner = self.replaying_owner.take();
+        let mut progressed = false;
         for check in checks {
             if matches!(check.rule, DeferredShapeRule::ResultJoin { .. }) {
                 self.deferred_shape_checks.push(check);
                 continue;
             }
-            if check
+            if !matches!(
+                check.rule,
+                DeferredShapeRule::Derivation(TypeDerivation::Vmap { .. })
+            ) && check
                 .arg_tys
                 .iter()
                 .any(|ty| shape_operand_awaits_binding(ty, subst))
@@ -1234,6 +1247,7 @@ impl InferenceProduct {
                         &check.result_ty,
                         &|ty, subst| product.awaits_group_completion(ty, subst),
                         true,
+                        product.group_links_in_progress(),
                         vg,
                         subst,
                         adt_reg,
@@ -1241,6 +1255,10 @@ impl InferenceProduct {
                     );
                     match step {
                         DerivationStep::Decided => {}
+                        DerivationStep::Progress => {
+                            progressed = true;
+                            self.deferred_shape_checks.push(check);
+                        }
                         // The readiness test above already waits on a variable
                         // target, so this keeps an undecided entry only in
                         // principle; an entry is never dropped undecided.
@@ -1291,6 +1309,7 @@ impl InferenceProduct {
             let _ = resolved;
         }
         self.replaying_owner = prior_owner;
+        progressed
     }
 
     /// Re-decide one suspended `PostApp` call against the operand types
@@ -1441,25 +1460,26 @@ impl InferenceProduct {
                     continue;
                 }
                 DeferredShapeRule::Derivation(ref derivation) => {
-                    // Decide a gradient only after all local applications and
-                    // recursive-group links have settled. Any parameter still
-                    // unknown is rejected; it cannot be silently skipped.
-                    if matches!(derivation, TypeDerivation::Grad { .. })
-                        && matches!(
-                            resolve_type_derivation(
-                                derivation,
-                                &check.arg_tys[0],
-                                &check.result_ty,
-                                &|_, _| false,
-                                false,
-                                vg,
-                                subst,
-                                adt_reg,
-                                errors,
-                            ),
-                            DerivationStep::Decided
-                        )
-                    {
+                    // A transformation must either derive its checked type
+                    // from settled inputs or reject at this boundary.
+                    if matches!(
+                        derivation,
+                        TypeDerivation::Grad { .. } | TypeDerivation::Vmap { .. }
+                    ) && matches!(
+                        resolve_type_derivation(
+                            derivation,
+                            &check.arg_tys[0],
+                            &check.result_ty,
+                            &|_, _| false,
+                            false,
+                            false,
+                            vg,
+                            subst,
+                            adt_reg,
+                            errors,
+                        ),
+                        DerivationStep::Decided
+                    ) {
                         continue;
                     }
                     decide_at_boundary(

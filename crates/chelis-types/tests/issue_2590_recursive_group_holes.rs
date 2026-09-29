@@ -926,37 +926,79 @@ const VMAP_OVER_A_SIGNATURE_LESS_MEMBER: [&str; 4] = [
      def main() -> f32 = g(1)\n",
 ];
 
-/// REGRESSION TEST (fails on `448018919`, which accepted `vA` and `vB` with
-/// `f` declared first and rejected them with `g` first, and accepted `vC` with
-/// `g` first, where `chelis eval` returns a tensor for its `f32` result, as
-/// `main` also does). chelis#2651: `vmap` decides its batching where it is
-/// inferred, which in one order is before `f`'s body has determined `f`'s
-/// types. Deciding it once the group completes is not implemented, so a
-/// `vmap` over a member of its own recursive group that writes no signature,
-/// or over a lambda that calls one, is rejected in every order with the typed
-/// not-yet-supported diagnostic, which names the member and asks for its
-/// signature. `main` rejects `vA`, `vB` and `vD` in both orders, with other
-/// diagnostics.
+/// [04-INF-5] and spec/06 section 3.4: after the group finishes, both orders
+/// use the same body-determined row function type. The first two programs
+/// have a scalar row result and hence a tensor-valued mapped result.
 #[test]
-fn vmap_over_a_signature_less_member_of_its_own_group_is_fenced_in_every_order() {
-    for program in VMAP_OVER_A_SIGNATURE_LESS_MEMBER {
-        let orders = declaration_orders(program);
-        let first = outcome(&orders[0]);
-        for order in &orders {
-            rejects_with(order, &VMAP_FENCE);
-            assert_eq!(outcome(order), first, "{order}");
+fn vmap_batches_body_determined_group_types_in_every_order() {
+    for program in &VMAP_OVER_A_SIGNATURE_LESS_MEMBER[..2] {
+        for order in declaration_orders(program) {
+            accepts(&order);
         }
     }
 }
 
-/// The fragments of the chelis#2651 fence's diagnostic, which names the
-/// member whose types the mapped function's type is waiting on.
-const VMAP_FENCE: [&str; 4] = [
-    "[unsupported_feature]",
-    "unsupported: `vmap` over a function whose type the recursive-group member `f` has yet to determine",
-    "unimplemented chelis#2651",
-    "write the full signature",
-];
+/// [04-INF-1] and spec/06 section 3.4: a use of the mapped result cannot
+/// settle the row result itself. `h`'s unknown result must be decided from
+/// within `app`, or `app` must reject at its declaration boundary.
+#[test]
+fn vmap_of_unresolved_function_parameter_does_not_certify_a_scalar_result() {
+    rejects_with(
+        "def app(h) = {\n\
+           v = vmap(fn (row: tensor[3, f32]) -> h(row))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n\
+           add(v, 1.0f32)\n\
+         }\n\n\
+         def main() -> f32 = app(fn (row: tensor[3, f32]) -> tensor_to_scalar(sum(row, 0)))\n",
+        &["vmap"],
+    );
+}
+
+/// spec/06 section 3.4: an untyped row parameter receives one slice of the
+/// batched actual, so the row reduction returns tensor[3], and mapping it
+/// returns tensor[5,3]. Both a direct lambda and a local alias obey that rule.
+#[test]
+fn vmap_types_an_untyped_row_parameter_against_the_slice() {
+    accepts(
+        "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = \
+           vmap(fn (v) -> sum(v, 0i32))(t)\n",
+    );
+    accepts(
+        "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+           mapped = fn (v) -> sum(v, 0i32)\n\
+           vmap(mapped)(t)\n\
+         }\n",
+    );
+}
+
+/// [04-INF-1]: annotating a declaration's result does not bind an untyped
+/// parameter of a lambda inside that declaration.
+#[test]
+fn vmap_result_annotation_does_not_infer_an_untyped_row_parameter() {
+    rejects_with(
+        "def make() -> (tensor[2, 3, f32] -> tensor[2, 3, f32]) = \
+           vmap(fn (row) -> row)\n",
+        &["`vmap` has an unresolved row parameter"],
+    );
+}
+
+/// chelis#2651: the completed group determines `f`'s row type in either
+/// declaration order. `vC` claims a scalar after adding to a mapped tensor
+/// and must reject, while the three correctly typed forms accept.
+#[test]
+fn vmap_over_a_signature_less_member_uses_the_solved_row_type_in_every_order() {
+    for (index, program) in VMAP_OVER_A_SIGNATURE_LESS_MEMBER.into_iter().enumerate() {
+        let orders = declaration_orders(program);
+        let first = outcome(&orders[0]);
+        for order in &orders {
+            if index == 2 {
+                rejects_with(order, &[]);
+            } else {
+                accepts(order);
+            }
+            assert_eq!(outcome(order), first, "{order}");
+        }
+    }
+}
 
 /// Round 5's witnesses: the mapped function reaches `f` through a binding
 /// rather than in the operand's own syntax. A `let`-bound lambda that calls
@@ -981,23 +1023,20 @@ const VMAP_THROUGH_A_BINDING: [&str; 5] = [
      def main() -> f32 = g(1)\n",
 ];
 
-/// REGRESSION TEST (fails on `4ea492b6e`, whose fence read the operand's
-/// syntax: it accepted the `let`-bound lambda with `f` declared first, where
-/// `f`'s body had already determined `f`'s result, and rejected it with `g`
-/// first; it accepted the `add` variant with `g` first, where `chelis eval`
-/// returns a tensor for its `f32` result; and it accepted the partially
-/// written `f` in both orders, unsoundly, as `main` does). A sibling
-/// reference is typed at a fresh instance of the member's type until the
-/// group completes, so the fence reads the mapped function's type: a
-/// parameter or result that `vmap` batches is a variable of that instance,
-/// in every order, however the function reached the operand.
+/// The mapped callable may pass through a local lambda or alias, and an
+/// omitted result is as deferred as an omitted parameter. The scalar claims
+/// after `add` are invalid; the row-sum cases accept in every order.
 #[test]
-fn vmap_over_a_type_its_group_has_yet_to_determine_is_fenced_through_any_binding() {
-    for program in VMAP_THROUGH_A_BINDING {
+fn vmap_over_a_type_its_group_has_yet_to_determine_resolves_through_any_binding() {
+    for (index, program) in VMAP_THROUGH_A_BINDING.into_iter().enumerate() {
         let orders = declaration_orders(program);
         let first = outcome(&orders[0]);
         for order in &orders {
-            rejects_with(order, &VMAP_FENCE);
+            if matches!(index, 1..=3) {
+                rejects_with(order, &[]);
+            } else {
+                accepts(order);
+            }
             assert_eq!(outcome(order), first, "{order}");
         }
     }

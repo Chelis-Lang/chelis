@@ -536,6 +536,14 @@ unchanged. The transformed DAG makes its use shape-equal with mapped values by
 the explicit `Insert` rule in §3.3. A plain elementwise application to
 different-rank tensors remains a type error under spec/04 and spec/05.
 
+When a row function has an unknown parameter or result type, the checker
+retains this type rule until the function's body and any enclosing declaration
+group determine the types it transforms. An application of the mapped
+function can bind an untyped row parameter from the corresponding slice of a
+mapped tensor actual, under [04-INF-1]. A claimed type for the mapped result
+does not determine the row function's result. Every remaining unknown
+transform-relevant type is a type error at the declaration boundary.
+
 ### 3.5 Composition
 
 **vmap of vmap:** repeated application adds multiple batch axes. Nested

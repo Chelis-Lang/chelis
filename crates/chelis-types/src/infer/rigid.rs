@@ -562,6 +562,7 @@ fn replay_at_instantiation(
                 result_ty,
                 &|_, _| false,
                 false,
+                false,
                 &mut trial_vg,
                 &mut trial_subst,
                 adt_reg,

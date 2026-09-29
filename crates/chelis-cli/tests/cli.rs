@@ -8814,11 +8814,9 @@ fn check_accepts_supported_core_transform_targets() {
     );
 }
 
-/// #1887, #1952, #1954, and #2109: local aliases, shadowing local lambdas,
-/// and untyped inline or locally bound `vmap` lambdas can be accepted with a
-/// false transform contract. They are outside the documented core fragment
-/// until their independent semantics land, so `check` must reject each form
-/// loudly rather than let a later lane choose a different callable or rank.
+/// Top-level aliases and shadows retain their core-fragment fence. The
+/// #1887/#2109 row-typing cases now use the inferred slice, so their correct
+/// signatures pass and their old false signatures fail at the type boundary.
 #[test]
 fn check_fences_non_direct_transform_targets() {
     let cases = [
@@ -9073,10 +9071,6 @@ fn check_fences_non_direct_transform_targets() {
 
         for path in [&surf_path, &deep_path] {
             let json = run_json_check(path);
-            assert!(
-                json["score"].as_f64().is_some_and(|score| score < 1.0),
-                "{stem} ({path:?}) must not receive a perfect check score: {json}"
-            );
             let errors = json["errors"].as_array().expect("errors array");
             let owned_fence_errors = errors
                 .iter()
@@ -9088,10 +9082,45 @@ fn check_fences_non_direct_transform_targets() {
                         })
                 })
                 .count();
-            assert_eq!(
-                owned_fence_errors, 1,
-                "{stem} ({path:?}) must carry exactly one owned core-transform fence diagnostic: {json}"
-            );
+            let vmap_row_typing = transform == "vmap"
+                && !matches!(
+                    stem,
+                    "vmap_local_alias"
+                        | "vmap_module_to_local_alias"
+                        | "vmap_direct_module_alias"
+                        | "vmap_module_alias_match_binding"
+                );
+            if vmap_row_typing {
+                assert_eq!(
+                    owned_fence_errors, 0,
+                    "{stem} ({path:?}) is decided by row typing, not the core fence: {json}"
+                );
+                let correct_result = matches!(
+                    stem,
+                    "vmap_untyped_local_lambda_correct_result"
+                        | "vmap_untyped_local_lambda_alias"
+                        | "vmap_untyped_alias_survives_typed_shadow"
+                        | "vmap_untyped_shadow_of_module_alias"
+                );
+                if correct_result {
+                    assert_eq!(json["score"].as_f64(), Some(1.0), "{stem}: {json}");
+                    assert!(errors.is_empty(), "{stem}: {json}");
+                } else {
+                    assert!(
+                        json["score"].as_f64().is_some_and(|score| score < 1.0),
+                        "{stem} ({path:?}) must reject its false result: {json}"
+                    );
+                }
+            } else {
+                assert!(
+                    json["score"].as_f64().is_some_and(|score| score < 1.0),
+                    "{stem} ({path:?}) must not receive a perfect check score: {json}"
+                );
+                assert_eq!(
+                    owned_fence_errors, 1,
+                    "{stem} ({path:?}) must carry one owned core-transform fence: {json}"
+                );
+            }
         }
     }
 }
@@ -9294,7 +9323,16 @@ fn check_tracks_core_transform_values_across_forwarding_results() {
                         })
                 })
                 .count();
-            if must_fence {
+            if stem.ends_with("_untyped") {
+                assert!(
+                    json["score"].as_f64().is_some_and(|score| score < 1.0),
+                    "{stem} ({path:?}) must reject its false mapped result: {json}"
+                );
+                assert_eq!(
+                    owned_fence_errors, 0,
+                    "{stem} ({path:?}) must be decided by row typing: {json}"
+                );
+            } else if must_fence {
                 assert!(
                     json["score"].as_f64().is_some_and(|score| score < 1.0),
                     "{stem} ({path:?}) must not receive a perfect score: {json}"
@@ -9344,7 +9382,7 @@ fn check_classifies_generated_deep_tensor_holes_by_mapped_structure() {
                vmap(fn (v: tensor[..r, f32]) -> relu(v))(t)\n",
             "(d-rank {} r)",
             "(d-rank {} _)",
-            true,
+            false,
         ),
     ];
 
