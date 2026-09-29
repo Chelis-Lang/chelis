@@ -20653,7 +20653,17 @@ impl<'program> LowerCtx<'program> {
                  fixing the message alone cannot help here, because the branch is taken on \
                  every execution.",
                 Self::static_selection_sentence("fail(...)"),
+                // `Empty`'s reason ends in `;` so that reason + remedy
+                // reproduces base's sentence exactly at the emit site. This
+                // composer supplies its own capitalised remedy instead, so it
+                // normalises that separator rather than rendering `([05-OP-68]);
+                // Move ...` (chelis#2743, NEW-8a). Byte-restoring base coupled
+                // the reason to one call site; this is where that coupling is
+                // paid off, not by re-editing the reason.
                 Self::fail_message_defect_reason(defect)
+                    .strip_suffix(';')
+                    .map(|reason| format!("{reason}."))
+                    .unwrap_or_else(|| { Self::fail_message_defect_reason(defect).to_string() })
             ),
             Some(span),
             self.current_span_id.clone(),

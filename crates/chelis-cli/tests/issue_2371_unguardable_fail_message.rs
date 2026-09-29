@@ -521,8 +521,14 @@ fn the_c_target_agrees_with_the_evaluator_on_the_fatal_record_path() {
 /// base was not shipping a wrong artifact either, because DCE omitted the def
 /// entirely. No value is produced on either head; only the exit status moved.
 ///
-/// The control below isolates the cause to the transform: the same unguardable
-/// `fail` in an uncalled def with NO transform still builds, on both heads.
+/// The control below establishes one fact and no more: the same unguardable
+/// `fail` in an uncalled def with NO transform still builds, on base and on
+/// this head. It is NOT a leak detector — reapplying the refuted emit-site
+/// design does not red it either, because this shape does not reach the emit
+/// site in the build lane (chelis#2743, NEW-8b). An earlier version of this
+/// control did not build on EITHER head, for an unrelated rank-0 `expand` type
+/// error, so it satisfied its own weak assertion trivially while its comment
+/// claimed the opposite.
 #[test]
 fn an_uncalled_def_applying_a_transform_over_an_unguardable_fail_is_refused() {
     let with_transform = format!(
@@ -540,19 +546,21 @@ fn an_uncalled_def_applying_a_transform_over_an_unguardable_fail_is_refused() {
         .expect_err("an uncalled transform over an unguardable `fail` is refused at lowering");
     assert_names_the_unguardable_reason(&err, "an uncalled transform def");
 
-    // Control: no transform, so the fence does not reach it.
+    // Control: no transform, so the fence does not reach it. Asserted as a
+    // build SUCCESS -- the weak `if let Err { assert!(!contains(..)) }` form is
+    // what let the previous control pass while failing to build at all.
     let without_transform = format!(
         "module M.Main\n{TAG}\
-         def bfail() -> f32 = fail(string_concat(\"bad: \", tag()))\n\
          def never_called(x: tensor[1, f32]) -> tensor[1, f32] = \
-         mul(&x, expand(scalar_to_tensor(bfail()), cast(0, i32), cast(1, i64)))\n\
+         add(x, fail(string_concat(\"bad: \", tag())))\n\
          def used(y: tensor[2, f32]) -> tensor[f32] = sum(y, cast(0, i32))\n\
          out = used(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n"
     );
     if let Err(c_err) = c_build_stderr(&without_transform, "uncalled_plain") {
-        assert!(
-            !c_err.contains("05-OP-68"),
-            "the fence must not reach an uncalled def with no transform: {c_err}"
+        panic!(
+            "an uncalled def with an unguardable `fail` and NO transform must still \
+             build, as it does on base; a failure here means the fence reached past \
+             the transform sites: {c_err}"
         );
     }
 }
