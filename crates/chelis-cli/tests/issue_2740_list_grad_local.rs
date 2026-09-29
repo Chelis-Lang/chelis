@@ -82,6 +82,43 @@ from_local = {
 }
 
 #[test]
+fn top_level_list_excluded_from_wrt_still_runs_in_c() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-2740-top-level-excluded-from-wrt");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+import Std.Index (list_index)
+def scale_selected(xs: List[f32], scale: f32, index: i64) -> f32 = {
+  selected = list_index(xs, index)
+  mul(selected, scale)
+}
+values: List[f32] = [2.0f32, 3.0f32, 5.0f32]
+from_top = grad(scale_selected, wrt=scale)(values, 2.0f32, 1i64)
+"#,
+    );
+    let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
+    assert!(compiled.contains("from_top = 3.0"), "{compiled}");
+}
+
+#[test]
+fn unused_local_list_excluded_from_wrt_still_runs_in_c() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-2740-unused-local-excluded-from-wrt");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+def scale_square(xs: List[f32], scale: f32) -> f32 = mul(scale, scale)
+values: List[f32] = [2.0f32, 3.0f32, 5.0f32]
+from_local = {
+  values: List[f32] = [17.0f32, 19.0f32, 23.0f32]
+  grad(scale_square, wrt=scale)(values, 2.0f32)
+}
+"#,
+    );
+    let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
+    assert!(compiled.contains("from_local = 4.0"), "{compiled}");
+}
+
+#[test]
 fn top_level_list_actual_still_runs_in_c() {
     let (_dir, reef_home, app_pkg) = make_app("issue-2740-top-level-control");
     write_file(

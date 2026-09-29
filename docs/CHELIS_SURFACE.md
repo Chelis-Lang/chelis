@@ -293,9 +293,9 @@ The spec defines positional List cotangents for several forms. Eval/C tests
 cover selected list gradients, including
 `to_list`/`map`/`to_tensor` paths; other transforms and callback shapes
 may reject (`crates/chelis-cli/tests/ad_host_list_combinators.rs`). The C
-build rejects a direct named List gradient whose List actual is local when
-it cannot reconstruct that local value's recursive shape; Eval handles the
-form. See [#2740](https://github.com/Chelis-Lang/chelis/issues/2740).
+build rejects a direct named List gradient when the List actual selected for
+differentiation is local and its recursive shape cannot be reconstructed;
+Eval handles the form. See [#2740](https://github.com/Chelis-Lang/chelis/issues/2740).
 
 ### 3.4 Collections, strings, conversions
 
