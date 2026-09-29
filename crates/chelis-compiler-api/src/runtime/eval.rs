@@ -480,6 +480,143 @@ fn checked_list_element(actual: &Expr) -> Option<&Expr> {
     }
 }
 
+/// Expand a declared alias with its authored arguments before entry planning.
+/// Checked alias expansions can carry fresh checker dimension names, which
+/// must not replace the caller's shared binder across List elements, later
+/// parameters, and a declared result.
+fn expand_authored_entry_aliases(
+    authored: &Expr,
+    registry: &chelis_types::adt::AdtRegistry,
+) -> Result<Expr, String> {
+    use chelis_types::types::{Dim, NominalArg, Type};
+
+    fn replace_binders(
+        expr: &Expr,
+        type_args: &UnordMap<String, Expr>,
+        dim_args: &UnordMap<String, Expr>,
+    ) -> Expr {
+        if let Some((tag, children)) = tagged_expr_children(expr)
+            && let Some(name) = children.first().and_then(symbol_name)
+        {
+            let replacement = match tag {
+                DeepTag::TVar => type_args.get(name),
+                DeepTag::DVar => dim_args.get(name),
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                return replacement.clone();
+            }
+        }
+        match expr {
+            Expr::Node(node, span) => Expr::node(
+                node.tag(),
+                node.meta().clone(),
+                node.children_slice()
+                    .iter()
+                    .map(|child| replace_binders(child, type_args, dim_args))
+                    .collect(),
+                *span,
+            ),
+            _ => expr.clone(),
+        }
+    }
+
+    fn expand(
+        authored: &Expr,
+        registry: &chelis_types::adt::AdtRegistry,
+        visiting: &mut Vec<String>,
+    ) -> Result<Expr, String> {
+        let authored = strip_type_wrappers(authored);
+        if let Some((DeepTag::TAdt, children)) = tagged_expr_children(authored)
+            && let Some((name, arguments)) = children
+                .split_first()
+                .and_then(|(name, args)| symbol_name(name).map(|name| (name, args)))
+            && let Some(alias) = registry.resolve_alias(name).or_else(|| {
+                if registry.defs.contains_key(name) {
+                    return None;
+                }
+                fn terminal(path: &str) -> &str {
+                    path.rsplit_once("__")
+                        .map(|(_, tail)| tail)
+                        .or_else(|| path.rsplit_once('.').map(|(_, tail)| tail))
+                        .unwrap_or(path)
+                }
+                let mut matches = registry.aliases.iter().filter_map(|(candidate, alias)| {
+                    (terminal(candidate) == terminal(name)).then_some(alias)
+                });
+                let first = matches.next()?;
+                matches.next().is_none().then_some(first)
+            })
+        {
+            if alias.param_args.len() != arguments.len() {
+                return Err(format!(
+                    "host runtime: type alias `{name}` lost argument alignment"
+                ));
+            }
+            if visiting.iter().any(|active| active == name) {
+                return Err(format!(
+                    "host runtime: recursive type alias `{name}` at entry"
+                ));
+            }
+            let mut type_args = UnordMap::new();
+            let mut dim_args = UnordMap::new();
+            for (parameter, argument) in alias.param_args.iter().zip(arguments) {
+                match parameter {
+                    NominalArg::Type(Type::Var(variable)) => {
+                        type_args.insert(format!("t{}", variable.0), argument.clone());
+                    }
+                    NominalArg::Dimension(Dim::Var(variable)) => {
+                        // Surf uses `t-var` for an alias argument spelling
+                        // until the nominal header assigns its dimension
+                        // kind. The substituted tensor axis must be `d-var`.
+                        let dimension = match argument {
+                            Expr::Node(node, span) if node.tag() == DeepTag::TVar => Expr::node(
+                                DeepTag::DVar,
+                                node.meta().clone(),
+                                node.children_slice().to_vec(),
+                                *span,
+                            ),
+                            Expr::Atom(Atom::Int(_), span) => Expr::node(
+                                DeepTag::DLit,
+                                chelis_deep::Metadata::default(),
+                                vec![argument.clone()],
+                                *span,
+                            ),
+                            _ => argument.clone(),
+                        };
+                        dim_args.insert(format!("d{}", variable.0), dimension);
+                    }
+                    _ => {
+                        return Err(format!(
+                            "host runtime: type alias `{name}` has an invalid parameter"
+                        ));
+                    }
+                }
+            }
+            let body = chelis_types::infer::type_to_deep_expr(&alias.body);
+            let substituted = replace_binders(&body, &type_args, &dim_args);
+            visiting.push(name.to_owned());
+            let result = expand(&substituted, registry, visiting);
+            visiting.pop();
+            return result;
+        }
+        match authored {
+            Expr::Node(node, span) => Ok(Expr::node(
+                node.tag(),
+                node.meta().clone(),
+                node.children_slice()
+                    .iter()
+                    .map(|child| expand(child, registry, visiting))
+                    .collect::<Result<Vec<_>, _>>()?,
+                *span,
+            )),
+            _ => Ok(authored.clone()),
+        }
+    }
+
+    expand(authored, registry, &mut Vec::new())
+}
+
 fn checked_function_children(actual: &Expr) -> Option<&[Expr]> {
     let (tag, children) = tagged_expr_children(actual)?;
     match tag {
@@ -536,6 +673,7 @@ fn check_signature_entry_plan(
 fn check_callable_invocation_contract(
     contract: &Expr,
     args: &[RuntimeValue],
+    registry: &chelis_types::adt::AdtRegistry,
 ) -> Result<(), String> {
     let Some((_, params)) = checked_function_children(contract).and_then(<[Expr]>::split_last)
     else {
@@ -545,7 +683,8 @@ fn check_callable_invocation_contract(
     let names = (0..args.len())
         .map(|index| format!("arg{index}"))
         .collect::<Vec<_>>();
-    let actualized = actualize_tensor_entry_parameters(Some(params), &authored, args, &names)?;
+    let actualized =
+        actualize_tensor_entry_parameters(Some(params), &authored, args, &names, registry)?;
     let mut entry_inputs = Vec::with_capacity(actualized.len());
     let mut entry_shapes: Vec<Vec<usize>> = Vec::with_capacity(actualized.len());
     for (parameter, ty, shape) in actualized {
@@ -575,6 +714,7 @@ fn actualize_tensor_entry_parameters(
     authored_params: &[Option<Expr>],
     args: &[RuntimeValue],
     names: &[String],
+    registry: &chelis_types::adt::AdtRegistry,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
     struct EntryActual {
         checked: Expr,
@@ -635,9 +775,18 @@ fn actualize_tensor_entry_parameters(
         Ok(())
     }
 
+    let expanded_authored = authored_params
+        .iter()
+        .map(|formal| {
+            formal
+                .as_ref()
+                .map(|formal| expand_authored_entry_aliases(formal, registry))
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut actuals = Vec::new();
     for (index, arg) in args.iter().enumerate() {
-        let authored = authored_params
+        let authored = expanded_authored
             .get(index)
             .and_then(Option::as_ref)
             .filter(|formal| {
@@ -2666,7 +2815,7 @@ impl<'a> EvalContext<'a> {
     ) -> Result<RuntimeValue, String> {
         if let Some(contracts) = callable.invocation_contracts() {
             for contract in contracts {
-                check_callable_invocation_contract(contract, &args)?;
+                check_callable_invocation_contract(contract, &args, &self.adt_registry)?;
             }
         }
         self.apply_resolved_callable_with_arg_types_impl(
@@ -2757,6 +2906,7 @@ impl<'a> EvalContext<'a> {
                         &param_types,
                         &args,
                         &params,
+                        &self.adt_registry,
                     )?;
                     let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
                     let mut entry_shapes: Vec<Vec<usize>> =
@@ -2851,15 +3001,16 @@ impl<'a> EvalContext<'a> {
                         .as_ref()
                         .and_then(checked_function_children)
                         .and_then(<[Expr]>::last);
-                    // A direct authored tensor retains its literal axes and
-                    // rank-spread identities. A named alias needs the checked
-                    // expansion, as in the established fixed-rank path.
-                    let declared_result = return_type.as_ref().and_then(|authored| {
-                        tensor_type_dim_exprs(authored)
-                            .is_some()
-                            .then_some(authored)
-                            .or(checked_result)
-                    });
+                    // Alias substitution retains the authored dimension names
+                    // through the result, just as through List parameters.
+                    let authored_result = return_type
+                        .as_ref()
+                        .map(|ty| expand_authored_entry_aliases(ty, &self.adt_registry))
+                        .transpose()?;
+                    let declared_result = authored_result
+                        .as_ref()
+                        .filter(|ty| tensor_type_dim_exprs(ty).is_some())
+                        .or(checked_result);
                     let declaration_claim = Self::declared_result_claim_at_callsite(
                         declared_result,
                         checked_params,
@@ -2897,13 +3048,13 @@ impl<'a> EvalContext<'a> {
                             }
                             (_, arg) => arg,
                         };
-                        let callable_contract = checked_params
-                            .and_then(|params| params.get(index))
-                            .or(declared.as_ref());
-                        if callable_contract.is_some_and(|contract| {
-                            tagged_expr_children(contract)
-                                .is_some_and(|(tag, _)| tag == DeepTag::TFn)
-                        }) && let Some(invocation_contracts) = arg.invocation_contracts_mut()
+                        let callable_contract = declared
+                            .as_ref()
+                            .filter(|ty| checked_function_children(ty).is_some())
+                            .or_else(|| checked_params.and_then(|params| params.get(index)));
+                        if callable_contract
+                            .is_some_and(|ty| checked_function_children(ty).is_some())
+                            && let Some(invocation_contracts) = arg.invocation_contracts_mut()
                         {
                             // This parameter is a new adapter around any
                             // contracts the supplied callable already carries,
@@ -5352,6 +5503,7 @@ mod tensor_entry_actualization_tests {
         ];
         let authored = checked.iter().cloned().map(Some).collect::<Vec<_>>();
         let names = ["arg0".into(), "arg1".into(), "arg2".into()];
+        let registry = chelis_types::adt::AdtRegistry::default();
 
         let actualized = actualize_tensor_entry_parameters(
             Some(&checked),
@@ -5362,6 +5514,7 @@ mod tensor_entry_actualization_tests {
                 RuntimeValue::int64(3),
             ],
             &names,
+            &registry,
         )
         .expect("scalar neighbors do not contaminate the rank-zero tensor formal");
         assert_eq!(
@@ -5385,6 +5538,7 @@ mod tensor_entry_actualization_tests {
                 RuntimeValue::int64(3),
             ],
             &names,
+            &registry,
         )
         .expect_err("the rank mismatch remains owned by the tensor at position one");
         assert_eq!(error, "input `arg1` expected rank 0, got 1");

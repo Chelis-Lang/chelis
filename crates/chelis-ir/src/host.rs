@@ -15795,8 +15795,12 @@ fn lower_host_callback(
             for (position, (declaration, param)) in
                 params_list.children_slice().iter().zip(&params).enumerate()
             {
-                let declared = param_host_type(declaration)
-                    .map(|ty| expand_host_type_aliases(program, ty))
+                let declared = param_declared_type_expr(declaration)
+                    .as_ref()
+                    .and_then(|authored| decode_expanded_host_type_expr(program, authored))
+                    .or_else(|| {
+                        param_host_type(declaration).map(|ty| expand_host_type_aliases(program, ty))
+                    })
                     .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_) | HostTypeTerm::List(_)))
                     .unwrap_or_else(|| param.ty.clone());
                 let value = HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone()));

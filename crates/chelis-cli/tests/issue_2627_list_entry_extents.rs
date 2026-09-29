@@ -118,6 +118,102 @@ fn list_witness_precedes_a_later_direct_parameter() {
 }
 
 #[test]
+fn aliased_list_witness_keeps_the_authored_binder() {
+    let prefix = "type Batch[n] = List[tensor[n, f32]]\n\
+                  def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n";
+    let direct = "def f[n](xs: Batch[n], y: tensor[n, f32]) -> i64 = len(xs)\n";
+    assert_both_trap(
+        &format!(
+            "{prefix}{direct}out = f([hidden(to_tensor([1.0f32, 2.0f32]))], hidden(to_tensor([3.0f32, 4.0f32, 5.0f32])))\n"
+        ),
+        "extent `n`: xs[0] axis 0 = 2, y axis 0 = 3",
+    );
+    assert_both_value(
+        &format!(
+            "{prefix}{direct}out = f([hidden(to_tensor([1.0f32, 2.0f32]))], hidden(to_tensor([3.0f32, 4.0f32])))\n"
+        ),
+        "out = 1",
+    );
+    assert_both_trap(
+        &format!(
+            "{prefix}{direct}def main() -> i64 = f([hidden(to_tensor([1.0f32, 2.0f32]))], hidden(to_tensor([3.0f32, 4.0f32, 5.0f32])))\n"
+        ),
+        "extent `n`: xs[0] axis 0 = 2, y axis 0 = 3",
+    );
+
+    let result = "def f[n](xs: Batch[n], y: tensor[*, f32]) -> tensor[n, f32] = y\n";
+    assert_both_trap(
+        &format!(
+            "{prefix}{result}out = f([hidden(to_tensor([1.0f32, 2.0f32]))], hidden(to_tensor([3.0f32, 4.0f32, 5.0f32])))\n"
+        ),
+        "extent `n`: xs[0] axis 0 = 2, load axis 0 = 3",
+    );
+    assert_both_value(
+        &format!(
+            "{prefix}{result}out = f([hidden(to_tensor([1.0f32, 2.0f32]))], hidden(to_tensor([3.0f32, 4.0f32])))\n"
+        ),
+        "out = tensor(shape=[2], data=[3.0, 4.0])",
+    );
+    assert_both_value(
+        &format!("{prefix}{result}out = f([], hidden(to_tensor([3.0f32, 4.0f32, 5.0f32])))\n"),
+        "out = tensor(shape=[3], data=[3.0, 4.0, 5.0])",
+    );
+}
+
+#[test]
+fn chained_aliases_keep_the_list_and_result_binder() {
+    let prefix = "type Row[n] = tensor[n, f32]\n\
+                  type Batch[n] = List[Row[n]]\n\
+                  type NamedBatch[n] = Batch[n]\n\
+                  def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n";
+    assert_both_trap(
+        &format!(
+            "{prefix}def f[n](xs: NamedBatch[n], y: tensor[n, f32]) -> i64 = len(xs)\n\
+             out = f([hidden(to_tensor([1.0f32, 2.0f32]))], hidden(to_tensor([3.0f32, 4.0f32, 5.0f32])))\n"
+        ),
+        "extent `n`: xs[0] axis 0 = 2, y axis 0 = 3",
+    );
+    assert_both_trap(
+        &format!(
+            "{prefix}def f[n](xs: NamedBatch[n], y: tensor[*, f32]) -> Row[n] = y\n\
+             out = f([hidden(to_tensor([1.0f32, 2.0f32]))], hidden(to_tensor([3.0f32, 4.0f32, 5.0f32])))\n"
+        ),
+        "extent `n`: xs[0] axis 0 = 2, load axis 0 = 3",
+    );
+}
+
+#[test]
+fn indirect_callable_alias_keeps_its_named_list_entry() {
+    assert_both_trap(
+        "type Batch[n] = List[tensor[n, f32]]\n\
+         def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+         def broad(xs: List[tensor[*, f32]]) -> i64 = len(xs)\n\
+         def invoke[n](f: Batch[n] -> i64, xs: List[tensor[*, f32]]) -> i64 = f(xs)\n\
+         out = invoke(broad, [hidden(to_tensor([1.0f32, 2.0f32])), hidden(to_tensor([3.0f32, 4.0f32, 5.0f32]))])\n",
+        "extent `n`: arg0[0] axis 0 = 2, arg0[1] axis 0 = 3",
+    );
+}
+
+#[test]
+fn inline_callback_alias_keeps_its_named_list_entry() {
+    let prefix = "type Batch[n] = List[tensor[n, f32]]\n\
+                  def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+                  def outer[n](xss: List[List[tensor[*, f32]]]) -> List[i64] = map(fn (xs: Batch[n]) -> len(xs), xss)\n";
+    assert_both_trap(
+        &format!(
+            "{prefix}out = outer([[hidden(to_tensor([1.0f32, 2.0f32])), hidden(to_tensor([3.0f32, 4.0f32, 5.0f32]))]])\n"
+        ),
+        "extent `n`: xs[0] axis 0 = 2, xs[1] axis 0 = 3",
+    );
+    assert_both_value(
+        &format!(
+            "{prefix}out = outer([[hidden(to_tensor([1.0f32, 2.0f32])), hidden(to_tensor([3.0f32, 4.0f32]))]])\n"
+        ),
+        "out = [2]",
+    );
+}
+
+#[test]
 fn direct_parameter_precedes_a_later_list_witness() {
     assert_both_trap(
         "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
