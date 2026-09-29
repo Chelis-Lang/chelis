@@ -45,9 +45,12 @@
 //!   only row that reaches the emit site, and therefore the only one that reds
 //!   if the rejection is moved there.
 //!
-//! The measured discriminator for reaching the emit site is the message
-//! arriving as a `string` PARAMETER of the def containing the `fail`. Return
-//! rank is irrelevant — an earlier revision of this comment claimed a rank-0
+//! **In an untransformed program**, the measured discriminator for reaching the
+//! emit site is the message arriving as a `string` PARAMETER of the def
+//! containing the `fail`. The scope clause is load-bearing: a TRANSFORMED body
+//! with a purely local `string_concat(..)` message reaches the site too — that
+//! is how the record gets set at all, and it is this file's central case.
+//! Return rank is irrelevant — an earlier revision of this comment claimed a rank-0
 //! body never reaches DAG lowering and that a tensor-returning one does; both
 //! are false. A rank-0 body with a `string` parameter reaches it; a
 //! tensor-returning body with a local message does not.
@@ -500,10 +503,56 @@ fn the_c_target_agrees_with_the_evaluator_on_the_fatal_record_path() {
          add(x, fail(string_concat(\"bad: \", tag())))\n\
          out = print(loss(to_tensor([cast(3.0, f32)])))\n"
     );
-    assert!(
-        c_build_stderr(&untransformed, "unfenced").is_ok(),
-        "the untransformed twin must still build; its abort is a runtime abort, so a \
-         build failure means the fence leaked into it: {:?}",
-        c_build_stderr(&untransformed, "unfenced").err()
+    if let Err(c_err) = c_build_stderr(&untransformed, "unfenced") {
+        panic!(
+            "the untransformed twin must still build; its abort is a runtime abort, so a \
+             build failure means the fence leaked into it: {c_err}"
+        );
+    }
+}
+
+/// chelis#2743 round 2, NEW-7b: an UNCALLED def whose body applies a transform
+/// over an unguardable `fail` now fails `chelis build --target c`, where the
+/// base exited 0.
+///
+/// Pinned deliberately rather than left uncharacterised. The rejection is a
+/// lowering-time decision and lowering is not DCE-sensitive, so a def that
+/// would abort if called is refused whether or not anything calls it — and the
+/// base was not shipping a wrong artifact either, because DCE omitted the def
+/// entirely. No value is produced on either head; only the exit status moved.
+///
+/// The control below isolates the cause to the transform: the same unguardable
+/// `fail` in an uncalled def with NO transform still builds, on both heads.
+#[test]
+fn an_uncalled_def_applying_a_transform_over_an_unguardable_fail_is_refused() {
+    let with_transform = format!(
+        "module M.Main\n{TAG}\
+         def bfail() -> f32 = fail(string_concat(\"bad: \", tag()))\n\
+         def loss(x: tensor[1, f32]) -> f32 = {{\n\
+           u = bfail()\n\
+           cast(1.0, f32)\n\
+         }}\n\
+         def never_called(x: tensor[1, f32]) -> tensor[1, f32] = grad(loss)(x)\n\
+         def used(y: tensor[2, f32]) -> tensor[f32] = sum(y, cast(0, i32))\n\
+         out = used(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n"
     );
+    let err = c_build_stderr(&with_transform, "uncalled_transform")
+        .expect_err("an uncalled transform over an unguardable `fail` is refused at lowering");
+    assert_names_the_unguardable_reason(&err, "an uncalled transform def");
+
+    // Control: no transform, so the fence does not reach it.
+    let without_transform = format!(
+        "module M.Main\n{TAG}\
+         def bfail() -> f32 = fail(string_concat(\"bad: \", tag()))\n\
+         def never_called(x: tensor[1, f32]) -> tensor[1, f32] = \
+         mul(&x, expand(scalar_to_tensor(bfail()), cast(0, i32), cast(1, i64)))\n\
+         def used(y: tensor[2, f32]) -> tensor[f32] = sum(y, cast(0, i32))\n\
+         out = used(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n"
+    );
+    if let Err(c_err) = c_build_stderr(&without_transform, "uncalled_plain") {
+        assert!(
+            !c_err.contains("05-OP-68"),
+            "the fence must not reach an uncalled def with no transform: {c_err}"
+        );
+    }
 }

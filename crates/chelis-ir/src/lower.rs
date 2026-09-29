@@ -20566,10 +20566,13 @@ impl<'program> LowerCtx<'program> {
     /// "is not" one, and a test asserting the first met the second.
     fn fail_message_defect_reason(defect: FailMessageDefect) -> &'static str {
         match defect {
+            // Punctuation is base's, byte-for-byte: this is a pre-existing
+            // diagnostic on a path this change does not own, and splitting
+            // reason from remedy must not perturb it. Reason + " " + remedy
+            // reproduces the original sentence exactly (chelis#2743, NEW-7a).
             FailMessageDefect::Empty => {
-                "`fail(\"\")` has no message to report, and a guarded abort carries its \
-                 message as part of its identity and never synthesizes or defaults one \
-                 ([05-OP-68])."
+                "`fail(\"\")` has no message to report. A guarded abort carries its message \
+                 as part of its identity and never synthesizes or defaults one ([05-OP-68]);"
             }
             FailMessageDefect::NotALiteral => {
                 "`fail(...)`'s message must be a string literal written at the `fail` \
@@ -20585,7 +20588,7 @@ impl<'program> LowerCtx<'program> {
     /// fixing the message is sufficient.
     fn fail_message_defect_remedy(defect: FailMessageDefect) -> &'static str {
         match defect {
-            FailMessageDefect::Empty => "Give the `fail` a non-empty message.",
+            FailMessageDefect::Empty => "give the `fail` a non-empty message.",
             FailMessageDefect::NotALiteral => {
                 "Inline the message as a literal, or move the abort outside the transform."
             }
