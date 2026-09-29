@@ -517,6 +517,9 @@ fn project_function(
     Ok(HostAbiFunction {
         helper_result_claim_axes: function.helper_result_claim_axes().to_vec(),
         name: function.name().to_string(),
+        entry_contract: function
+            .entry_contract()
+            .try_map_tensor(|_, tensor| HostAbiType::try_from_concrete(tensor))?,
         params: function
             .params()
             .iter()
@@ -726,12 +729,32 @@ fn project_expr(
                 ty: HostAbiType::try_from_concrete(&ty)?,
             }
         }
-        ConcreteHostExprKind::SignatureEntry { plan, args } => HostAbiExprKind::SignatureEntry {
+        ConcreteHostExprKind::SignatureEntry {
+            contract,
+            plan,
+            args,
+            positions,
+            lists,
+        } => HostAbiExprKind::SignatureEntry {
+            contract: contract
+                .try_map_tensor(|_, tensor| HostAbiType::try_from_concrete(tensor))?,
             plan,
             args: args
                 .into_iter()
                 .map(|expr| project_expr(expr, allowed_callbacks))
                 .collect::<Result<Vec<_>, _>>()?,
+            positions,
+            lists: lists
+                .into_iter()
+                .map(|entry| {
+                    Ok(chelis_ir::host::HostListEntry {
+                        position: entry.position,
+                        name: entry.name,
+                        ty: HostAbiType::try_from_concrete(&entry.ty)?,
+                        value: project_expr(entry.value, allowed_callbacks)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, Unsupported>>()?,
         },
         ConcreteHostExprKind::Builtin { name, args, ty } => {
             if chelis_ir::host::is_host_unresolved_marker(&name) {
