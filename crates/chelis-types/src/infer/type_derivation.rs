@@ -453,9 +453,11 @@ fn unmap_vmap_parameter(
             }
             let mut row_dims = dims.clone();
             let batch = row_dims.remove(axis);
-            let expected = Type::Tensor(vec![Dim::Var(batch_var)], precision.clone());
-            let actual = Type::Tensor(vec![batch], precision.clone());
-            unify(&expected, &actual, subst).map_err(|error| Box::new(CheckError::from(error)))?;
+            // This is one dimension equation. The batch marker's position
+            // belongs to the full mapped tensor, so wrapping it in a rank-one
+            // tensor makes a nonzero axis appear out of bounds.
+            unify_dim(&Dim::Var(batch_var), &batch, subst)
+                .map_err(|error| Box::new(CheckError::from(error)))?;
             Ok(Some(Type::Tensor(row_dims, precision.clone())))
         }
         Type::Ref(inner) => Ok(unmap_vmap_parameter(inner, axis, batch_var, subst)?

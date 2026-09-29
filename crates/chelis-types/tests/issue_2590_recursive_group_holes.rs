@@ -88,6 +88,22 @@ fn rejects_with(source: &str, fragments: &[&str]) {
     );
 }
 
+fn rejects_vmap_scalar_claim(source: &str) {
+    let found = diagnostics(source);
+    assert!(
+        found.iter().any(|message| {
+            message.contains("[TypeMismatch]")
+                && message.contains("f32")
+                && message.contains("tensor")
+        }),
+        "the mapped tensor must contradict the scalar claim:\n{source}\ngot {found:#?}"
+    );
+    assert!(
+        found.iter().all(|message| !message.contains("unsupported")),
+        "the retired vmap fence must not decide:\n{source}\ngot {found:#?}"
+    );
+}
+
 /// Renumber `?N` type variables in order of first occurrence.
 fn normalized(text: &str) -> String {
     let mut seen: Vec<String> = Vec::new();
@@ -968,6 +984,19 @@ fn vmap_types_an_untyped_row_parameter_against_the_slice() {
            vmap(mapped)(t)\n\
          }\n",
     );
+    accepts(
+        "def probe(t: tensor[4, 5, 3, f32]) -> tensor[4, 5, 3, f32] = \
+           vmap(fn (v) -> v, axis=1)(t)\n",
+    );
+    accepts(
+        "def probe(t: tensor[4, 3, 5, f32]) -> tensor[4, 3, 5, f32] = \
+           vmap(fn (v) -> v, axis=2)(t)\n",
+    );
+    rejects_with(
+        "def probe(t: tensor[4, 5, 3, f32]) -> tensor[4, 5, 3, f32] = \
+           vmap(fn (v) -> v, axis=3)(t)\n",
+        &["vmap axis 3 is out of bounds"],
+    );
 }
 
 /// [04-INF-1]: annotating a declaration's result does not bind an untyped
@@ -991,7 +1020,7 @@ fn vmap_over_a_signature_less_member_uses_the_solved_row_type_in_every_order() {
         let first = outcome(&orders[0]);
         for order in &orders {
             if index == 2 {
-                rejects_with(order, &[]);
+                rejects_vmap_scalar_claim(order);
             } else {
                 accepts(order);
             }
@@ -1033,7 +1062,7 @@ fn vmap_over_a_type_its_group_has_yet_to_determine_resolves_through_any_binding(
         let first = outcome(&orders[0]);
         for order in &orders {
             if matches!(index, 1..=3) {
-                rejects_with(order, &[]);
+                rejects_vmap_scalar_claim(order);
             } else {
                 accepts(order);
             }
