@@ -2688,12 +2688,19 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
 /// literal-extent pass runs before the first comparison a later parameter
 /// owes. A retained invocation supplies work when its formal carries a named
 /// List.
+#[derive(Clone, Copy)]
+enum SignatureEntryPass {
+    MetadataOnly,
+    Full,
+}
+
 fn signature_entry_lines(
     plan: &chelis_ir::host::SignatureEntryPlan,
     args: &[String],
     indent: &str,
     delegated: &[chelis_ir::axis_sources::EntryExtentGuard],
     work: Option<&entry_walk::FunctionEntryWork>,
+    pass: SignatureEntryPass,
 ) -> Result<Vec<String>, Unsupported> {
     use chelis_ir::axis_sources::EntryExtentGuard;
     if args.len() != plan.observations().nodes().len()
@@ -2752,6 +2759,15 @@ fn signature_entry_lines(
         if let Some(work) = params.get(param) {
             lines.extend(work.metadata.iter().cloned());
         }
+    }
+    if matches!(pass, SignatureEntryPass::MetadataOnly) {
+        if let Some(work) = work {
+            lines.extend(work.release.iter().cloned());
+        }
+        return Ok(lines
+            .into_iter()
+            .map(|line| format!("{indent}{line}"))
+            .collect());
     }
     let read = |(load, axis): (chelis_ir::NodeId, usize)| {
         let node = plan.observations().get(load).expect("signature witness");
@@ -2976,6 +2992,7 @@ fn emit_function(
         &emitter.indent,
         &delegated_entry_guards,
         Some(&entry_work.body),
+        SignatureEntryPass::Full,
     )?);
     // A frame belongs to this invocation, not to a selected callee name.
     // The expression spine forwards the frame; branch arms share its immutable
@@ -3020,11 +3037,11 @@ fn emit_function(
 
     if authored {
         let entry_uses = authored_entry_uses(ownership_sites, function.params.len())?;
-        // chelis#2506: a walk costs the size of the value, so it runs here,
-        // once per exported call, and never on the body's recursive or
-        // internal calls. The whole signature entry runs with it, so every
-        // metadata check still dominates every extent read; the body then
-        // repeats only its constant-cost checks.
+        // chelis#2506: for signatures without named Lists, aggregate walks
+        // run once at the exported entry. A named List needs ordered
+        // invocation-local witnesses, so its body owns all extent walks.
+        // The exported entry still validates metadata before retaining
+        // externally supplied values.
         let exported_work = entry_work.exported.as_ref().ok_or_else(|| {
             invalid_abi_shape(
                 "authored function has no exported entry work".into(),
@@ -3038,6 +3055,11 @@ fn emit_function(
                 "    ",
                 &delegated_entry_guards,
                 Some(exported_work),
+                if entry_work.body.named_list_binders.is_empty() {
+                    SignatureEntryPass::Full
+                } else {
+                    SignatureEntryPass::MetadataOnly
+                },
             )?
         } else {
             Vec::new()
@@ -5706,6 +5728,7 @@ impl<'a> HostEmitter<'a> {
                         &self.indent,
                         &[],
                         None,
+                        SignatureEntryPass::Full,
                     )?);
                 } else {
                     let Some(last) = positions
@@ -5771,6 +5794,7 @@ impl<'a> HostEmitter<'a> {
                         &self.indent,
                         &[],
                         Some(&work),
+                        SignatureEntryPass::Full,
                     )?);
                 }
                 self.lines.push(format!("{}{target} = 0;", self.indent));

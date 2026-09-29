@@ -141,8 +141,7 @@ pub(super) struct EntryWork {
 #[derive(Clone, Copy)]
 enum EntryWalkMode {
     FixedOnly,
-    Exported,
-    NamedLists,
+    All,
 }
 
 /// A List preserves its element tensor's named axes through its type. ADTs
@@ -383,20 +382,21 @@ impl<'a> EntryWalkers<'a> {
     pub fn entry_work(&mut self, function: &HostFunction) -> Result<EntryWork, Unsupported> {
         let named_list_binders = named_list_binders(function);
         let has_named_list = !named_list_binders.is_empty();
-        // A List's named witness is invocation-local. Its body owns this walk
-        // on every call; the exported wrapper does not repeat it.
+        // A List's named witness is invocation-local. When one exists, the
+        // body owns every extent walk so a later parameter cannot overtake
+        // an earlier List across the exported entry and body boundary.
         Ok(EntryWork {
             body: self.function_work(
                 function,
                 if has_named_list {
-                    EntryWalkMode::NamedLists
+                    EntryWalkMode::All
                 } else {
                     EntryWalkMode::FixedOnly
                 },
                 named_list_binders,
             )?,
             exported: has_exported_entry(function)
-                .then(|| self.function_work(function, EntryWalkMode::Exported, Vec::new()))
+                .then(|| self.function_work(function, EntryWalkMode::All, Vec::new()))
                 .transpose()?,
         })
     }
@@ -421,16 +421,7 @@ impl<'a> EntryWalkers<'a> {
         };
         let mut serial = 0usize;
         for (index, param) in function.params.iter().enumerate() {
-            let named_list = matches!(param.ty, HostAbiType::List(_)) && {
-                let mut names = Vec::new();
-                list_named_dims(&param.ty, &mut names);
-                !names.is_empty()
-            };
-            let walk = match mode {
-                EntryWalkMode::FixedOnly => false,
-                EntryWalkMode::Exported => !named_list,
-                EntryWalkMode::NamedLists => named_list,
-            };
+            let walk = matches!(mode, EntryWalkMode::All);
             self.param_work(
                 &param.ty,
                 c_ident(&param.name).into_owned(),
