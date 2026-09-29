@@ -154,7 +154,7 @@ impl FunctionEntryWork {
 pub(super) struct EntryWork {
     pub body: FunctionEntryWork,
     pub exported: Option<FunctionEntryWork>,
-    /// A List claim moves the single ordered extent pass into the owned body.
+    /// A List claim runs at every owned-body call and at exported entry.
     pub extent_at_body: bool,
 }
 
@@ -551,20 +551,10 @@ impl<'a> EntryWalkers<'a> {
             })
             .collect::<Vec<_>>();
         let extent_at_body = claimed_lists.iter().any(|claimed| *claimed);
-        // A List claim must run for internal calls and in signature order
-        // with fixed observations. Other aggregate walks keep their existing
-        // single public-entry owner.
+        // The exported entry checks every aggregate in signature order.
+        // Internal calls retain the established List-only admission boundary.
         let exported = if has_exported_entry(function) {
-            let mut work = self.function_work(function, EntryWalkMode::All, Vec::new())?;
-            if extent_at_body {
-                for (claimed, param) in claimed_lists.iter().zip(&mut work.params) {
-                    if *claimed {
-                        param.extents.clear();
-                        param.ordered_extents.clear();
-                    }
-                }
-            }
-            Some(work)
+            Some(self.function_work(function, EntryWalkMode::All, named_list_binders.clone())?)
         } else {
             None
         };
@@ -603,32 +593,30 @@ impl<'a> EntryWalkers<'a> {
         };
         let mut serial = 0usize;
         for (index, param) in function.params.iter().enumerate() {
+            let claimed_list = function
+                .entry_contract
+                .formals()
+                .get(index)
+                .filter(|formal| {
+                    matches!(formal.pattern(), EntryPattern::List(_))
+                        && entry_pattern_has_extent_claim(formal.pattern())
+                });
             let walk = match mode {
                 EntryWalkMode::FixedOnly => false,
-                EntryWalkMode::ClaimedLists => function
-                    .entry_contract
-                    .formals()
-                    .get(index)
-                    .is_some_and(|formal| {
-                        matches!(formal.pattern(), EntryPattern::List(_))
-                            && entry_pattern_has_extent_claim(formal.pattern())
-                    }),
+                EntryWalkMode::ClaimedLists => claimed_list.is_some(),
                 EntryWalkMode::All => true,
             };
-            let contract_ty = if matches!(mode, EntryWalkMode::ClaimedLists) && walk {
-                Some(
-                    function
-                        .entry_contract
-                        .formals()
-                        .get(index)
-                        .and_then(|formal| claimed_list_type(formal.pattern()))
-                        .ok_or_else(|| {
+            let contract_ty = if walk {
+                claimed_list
+                    .map(|formal| {
+                        claimed_list_type(formal.pattern()).ok_or_else(|| {
                             invalid_abi_shape(
                                 "claimed List has no representable C entry shape".into(),
                                 "signature entry",
                             )
-                        })?,
-                )
+                        })
+                    })
+                    .transpose()?
             } else {
                 None
             };

@@ -1613,9 +1613,10 @@ indexing; they do not read tensor element storage or add a public carrier.
 The C emitter may pass a private entry receipt across a direct call when
 both bodies have the same positional contract and every observed argument
 has the verified owner admitted by the caller. A callee copies the named
-witness state into its own frame before executing its body. Other calls run
-the complete ordered entry walk. This keeps carried-List recursion from
-repeating the walk while preserving checks for new values.
+witness state into its own frame before executing its body. An exported
+wrapper may pass the receipt after its complete ordered entry check. Other
+calls run the direct/claimed-List entry walk. This keeps carried-List
+recursion from repeating the walk while preserving checks for new values.
 The exact path, kind, and owner identities have wrong-path, wrong-kind, and
 wrong-owner negatives. The Phase 0 execution leg runs the named List entry
 and retained callable tests on Eval and C. The frozen foundation and active

@@ -2707,12 +2707,6 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
 /// literal-extent pass runs before the first comparison a later parameter
 /// owes. A retained invocation supplies work when its formal carries a named
 /// List.
-#[derive(Clone, Copy)]
-enum SignatureEntryPass {
-    MetadataAndAggregateExtents,
-    Full,
-}
-
 fn entry_named_state_lines(names: &[String]) -> Vec<String> {
     if names.is_empty() {
         return Vec::new();
@@ -2808,7 +2802,6 @@ fn signature_entry_lines(
     indent: &str,
     delegated: &[chelis_ir::axis_sources::EntryExtentGuard],
     work: Option<&entry_walk::FunctionEntryWork>,
-    pass: SignatureEntryPass,
     declare_named_states: bool,
 ) -> Result<Vec<String>, Unsupported> {
     use chelis_ir::axis_sources::EntryExtentGuard;
@@ -2860,18 +2853,6 @@ fn signature_entry_lines(
         if let Some(work) = params.get(param) {
             lines.extend(work.metadata.iter().cloned());
         }
-    }
-    if matches!(pass, SignatureEntryPass::MetadataAndAggregateExtents) {
-        if let Some(work) = work {
-            for param in &work.params {
-                lines.extend(param.extents.iter().cloned());
-            }
-            lines.extend(work.release.iter().cloned());
-        }
-        return Ok(lines
-            .into_iter()
-            .map(|line| format!("{indent}{line}"))
-            .collect());
     }
     let read = |(load, axis): (chelis_ir::NodeId, usize)| {
         let node = plan.observations().get(load).expect("signature witness");
@@ -3179,7 +3160,6 @@ fn emit_function(
             &format!("{}    ", emitter.indent),
             &delegated_entry_guards,
             Some(&entry_work.body),
-            SignatureEntryPass::Full,
             false,
         )?);
         emitter.lines.push(format!("{}}}", emitter.indent));
@@ -3195,7 +3175,6 @@ fn emit_function(
             &emitter.indent,
             &delegated_entry_guards,
             Some(&entry_work.body),
-            SignatureEntryPass::Full,
             true,
         )?);
     }
@@ -3242,8 +3221,8 @@ fn emit_function(
 
     if authored {
         let entry_uses = authored_entry_uses(ownership_sites, function.params.len())?;
-        // A List extent claim runs at every owned-body invocation. Other
-        // aggregate walks keep their public-entry owner.
+        // A public call admits every aggregate extent in signature order.
+        // Internal calls retain their List-only entry boundary.
         let exported_work = entry_work.exported.as_ref().ok_or_else(|| {
             invalid_abi_shape(
                 "authored function has no exported entry work".into(),
@@ -3257,11 +3236,6 @@ fn emit_function(
                 "    ",
                 &delegated_entry_guards,
                 Some(exported_work),
-                if entry_work.extent_at_body {
-                    SignatureEntryPass::MetadataAndAggregateExtents
-                } else {
-                    SignatureEntryPass::Full
-                },
                 true,
             )?
         } else {
@@ -3285,6 +3259,27 @@ fn emit_function(
         ));
         out.push(format!("{} {{", declaration.trim_end_matches(';')));
         out.extend(exported_entry.iter().cloned());
+        let wrapper_receipt = if entry_work.extent_at_body && delegated_entry_guards.is_empty() {
+            let group = entry_groups
+                .get(&function.name)
+                .copied()
+                .expect("every emitted function has an entry group");
+            let (states, bytes) = if exported_work.named_list_binders.is_empty() {
+                ("NULL", "0")
+            } else {
+                (
+                    "__chelis_entry_named_states",
+                    "sizeof __chelis_entry_named_states",
+                )
+            };
+            out.push(format!(
+                "    const __chelis_entry_receipt __chelis_exported_entry_receipt = \
+                 {{ &__chelis_entry_contract_token_{group}, {states}, {bytes} }};"
+            ));
+            "&__chelis_exported_entry_receipt"
+        } else {
+            "NULL"
+        };
         append_invocation_origin_context(out);
         let mut args = Vec::with_capacity(function.params.len());
         for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
@@ -3305,7 +3300,7 @@ fn emit_function(
                 args.push(c_ident(&param.name).into_owned());
             }
         }
-        append_private_host_context_args(&mut args, "NULL");
+        append_private_host_context_args(&mut args, wrapper_receipt);
         args.push("NULL".to_string());
         args.push("NULL".to_string());
         out.push(format!(
@@ -5984,7 +5979,6 @@ impl<'a> HostEmitter<'a> {
                         &self.indent,
                         &[],
                         None,
-                        SignatureEntryPass::Full,
                         true,
                     )?);
                 } else {
@@ -6042,7 +6036,6 @@ impl<'a> HostEmitter<'a> {
                         &self.indent,
                         &[],
                         Some(&work),
-                        SignatureEntryPass::Full,
                         true,
                     )?);
                 }

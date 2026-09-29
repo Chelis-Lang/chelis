@@ -738,8 +738,11 @@ host function and retained invocation, including an inline callback, and its
 projection must preserve every formal position, List child, and named axis.
 Eval and C consume this contract; neither rebuilds a binder roster from
 runtime values or backend types. For a List extent claim, the public C wrapper
-validates untrusted metadata, while its owned body executes one ordered extent
-pass before body work. Other aggregate walks keep their public-entry owner.
+validates untrusted metadata and executes all interface extents in signature
+order before entering the owned body. It passes a private receipt only when
+it discharged the owned body's checks completely; otherwise the body checks
+them. Internal calls check direct and claimed-List formals in the owned body.
+Other aggregate walks keep their public-entry owner.
 This includes obligations whose witnesses the body never reads and
 preserved monomorphized signatures. A private helper may omit only the exact
 signature obligations already executed by its dominating host entry; its

@@ -451,6 +451,167 @@ fn exported_c_entry_keeps_named_list_ahead_of_later_list_failure() {
 }
 
 #[test]
+fn exported_c_entry_orders_list_before_later_option_extent() {
+    use std::fs;
+
+    let dir = tempfile::tempdir().expect("entry fixture");
+    let source = dir.path().join("list_option.ch");
+    fs::write(
+        &source,
+        "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+         def f[n](xs: List[tensor[n, f32]], o: Option[tensor[2, f32]]) -> i64 = 7i64\n\
+         out = f([hidden(to_tensor([1.0f32, 2.0f32]))], Some(hidden(to_tensor([3.0f32, 4.0f32]))))\n",
+    )
+    .expect("source");
+    let out = dir.path().join("c");
+    let built = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", "--allow-style-violations"])
+        .arg(&source)
+        .args(["--target", "c", "-o"])
+        .arg(&out)
+        .output()
+        .expect("build");
+    assert!(built.status.success(), "{built:?}");
+
+    let run = |second: i64, option_width: i64, name: &str| {
+        let harness = format!(
+            "#define main generated_main\n#include \"list_option.c\"\n#undef main\n\
+             int main(void) {{\n\
+             chelis_value items[2] = {{\n\
+               chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{2}}, CHELIS_DTYPE_F32)),\n\
+               chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{{second}}}, CHELIS_DTYPE_F32))\n\
+             }};\n\
+             chelis_list *xs = chelis_list_from_values(items, 2);\n\
+             chelis_value_release(items[0]); chelis_value_release(items[1]);\n\
+             chelis_value value = chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{{option_width}}}, CHELIS_DTYPE_F32));\n\
+             chelis_option *o = chelis_option_some(value);\n\
+             chelis_value_release(value);\n\
+             printf(\"out = %lld\\n\", (long long){}(xs, o));\n\
+             chelis_list_release(xs); chelis_option_release(o);\n\
+             return 0;\n}}\n",
+            common::authored_c_symbol("f")
+        );
+        let file = format!("{name}.c");
+        fs::write(out.join(&file), harness).expect("harness");
+        assert!(
+            common::link_generated(&out, &file, name).success(),
+            "{name} link"
+        );
+        let result = std::process::Command::new(out.join(name))
+            .output()
+            .expect("execute");
+        (
+            result.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            ),
+        )
+    };
+
+    let (ok, output) = run(3, 3, "both_bad");
+    assert!(!ok, "{output}");
+    assert!(
+        output.contains(
+            "extent `n`: xs[0] axis 0 = 2, xs[1] axis 0 = 3\nnumeric trap: domain in load at i64"
+        ),
+        "{output}"
+    );
+    let (ok, output) = run(3, 2, "list_bad");
+    assert!(!ok, "{output}");
+    assert!(
+        output.contains("extent `n`: xs[0] axis 0 = 2, xs[1] axis 0 = 3"),
+        "{output}"
+    );
+    let (ok, output) = run(2, 3, "option_bad");
+    assert!(!ok, "{output}");
+    assert!(
+        output.contains(
+            "input `o.Some.value` axis 0 expected 2, got 3\nnumeric trap: domain in load at i64"
+        ),
+        "{output}"
+    );
+    let (ok, output) = run(2, 2, "both_good");
+    assert!(ok, "{output}");
+    assert!(output.contains("out = 7"), "{output}");
+}
+
+#[test]
+fn exported_c_entry_receipt_keeps_list_result_witness() {
+    use std::fs;
+
+    let dir = tempfile::tempdir().expect("entry fixture");
+    let source = dir.path().join("result_witness.ch");
+    fs::write(
+        &source,
+        "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+         def f[n](xs: List[tensor[n, f32]], y: tensor[*, f32]) -> tensor[n, f32] = y\n\
+         out = f([hidden(to_tensor([1.0f32, 2.0f32]))], hidden(to_tensor([3.0f32, 4.0f32])))\n",
+    )
+    .expect("source");
+    let out = dir.path().join("c");
+    let built = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", "--allow-style-violations"])
+        .arg(&source)
+        .args(["--target", "c", "-o"])
+        .arg(&out)
+        .output()
+        .expect("build");
+    assert!(built.status.success(), "{built:?}");
+
+    let run = |width: i64, name: &str| {
+        let harness = format!(
+            "#define main generated_main\n#include \"result_witness.c\"\n#undef main\n\
+             int main(void) {{\n\
+             chelis_value item = chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{2}}, CHELIS_DTYPE_F32));\n\
+             chelis_list *xs = chelis_list_from_values(&item, 1);\n\
+             chelis_value_release(item);\n\
+             chelis_tensor *y = chelis_alloc(1, (int64_t[]){{{width}}}, CHELIS_DTYPE_F32);\n\
+             chelis_tensor *result = {}(xs, y);\n\
+             puts(\"completed\");\n\
+             chelis_tensor_release(result); chelis_list_release(xs); chelis_tensor_release(y);\n\
+             return 0;\n}}\n",
+            common::authored_c_symbol("f")
+        );
+        let file = format!("{name}.c");
+        fs::write(out.join(&file), harness).expect("harness");
+        assert!(
+            common::link_generated(&out, &file, name).success(),
+            "{name} link"
+        );
+        let result = std::process::Command::new(out.join(name))
+            .output()
+            .expect("execute");
+        (
+            result.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            ),
+        )
+    };
+
+    let (ok, output) = run(3, "wrong_result");
+    assert!(!ok, "{output}");
+    assert!(
+        output.contains(
+            "extent `n`: xs[0] axis 0 = 2, load axis 0 = 3\nnumeric trap: domain in load at i64"
+        ),
+        "{output}"
+    );
+    assert!(!output.contains("completed"), "{output}");
+    let (ok, output) = run(2, "matching_result");
+    assert!(ok, "{output}");
+    assert!(output.contains("completed"), "{output}");
+}
+
+#[test]
 fn agreeing_and_empty_lists_execute_without_inventing_a_witness() {
     assert_both_value(
         "def f[n](xs: List[tensor[n, f32]]) -> tensor[n, f32] = index(xs, 1i64)\n\

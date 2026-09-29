@@ -433,11 +433,11 @@ fn a_matching_nested_tensor_runs_at_every_carrier() {
     }
 }
 
-/// chelis#2506/#2752: the public entry checks foreign metadata, and each
-/// recursive internal invocation checks the List's literal extents. Four
-/// elements across five invocations produce twenty shape reads.
+/// chelis#2506/#2752: the public entry checks foreign metadata, and the owned
+/// body checks the List's literal extents. The verified recursive calls carry
+/// that admission, so four elements across five invocations need four reads.
 #[test]
-fn list_literal_extents_are_checked_on_each_internal_invocation() {
+fn carried_list_reuses_verified_literal_extent_admission() {
     if !gcc_available() {
         return;
     }
@@ -464,8 +464,8 @@ fn list_literal_extents_are_checked_on_each_internal_invocation() {
     let (succeeded, output) = link_and_run(&out, "walk_once", &harness);
     assert!(succeeded, "{output}");
     assert!(
-        output.contains("steps 4 shape reads 20\n"),
-        "one literal extent pass per invocation: {output}"
+        output.contains("steps 4 shape reads 4\n"),
+        "one literal extent pass per unchanged List: {output}"
     );
     let (succeeded, output) = run_nested(&out, "walk_once_trap", Carrier::List, "F64", &[3]);
     assert!(
