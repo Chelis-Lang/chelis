@@ -538,6 +538,7 @@ mod tests {
         dag.add_root(sum);
         HostFunction {
             helper_result_claim_axes: Vec::new(),
+            entry_contract: Default::default(),
             name: "entry".into(),
             params: ["a", "b"]
                 .into_iter()
@@ -721,6 +722,7 @@ mod tests {
                 display_roots: Vec::new(),
                 ty: HostAbiType::Unit,
                 value: HostExpr::new(HostExprKind::SignatureEntry {
+                    contract: function.entry_contract.clone(),
                     plan,
                     args: vec![var("a"), var("b")],
                     positions: vec![0, 1],

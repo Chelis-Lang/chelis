@@ -433,14 +433,11 @@ fn a_matching_nested_tensor_runs_at_every_carrier() {
     }
 }
 
-/// chelis#2506 REGRESSION TEST: an exported entry walks a nested value once,
-/// and the recursive calls its body makes do not walk it again. The harness
-/// counts every `chelis_tensor_shape` read in the generated program; walking
-/// four elements reads four literal extents. At the pre-fix tree the walk ran
-/// in the body every call entered, so `list_walk` over four elements read
-/// twenty, one walk per call.
+/// chelis#2506/#2752: the public entry checks foreign metadata, and each
+/// recursive internal invocation checks the List's literal extents. Four
+/// elements across five invocations produce twenty shape reads.
 #[test]
-fn an_exported_entry_walks_a_nested_value_once_and_its_internal_calls_do_not() {
+fn list_literal_extents_are_checked_on_each_internal_invocation() {
     if !gcc_available() {
         return;
     }
@@ -467,8 +464,8 @@ fn an_exported_entry_walks_a_nested_value_once_and_its_internal_calls_do_not() {
     let (succeeded, output) = link_and_run(&out, "walk_once", &harness);
     assert!(succeeded, "{output}");
     assert!(
-        output.contains("steps 4 shape reads 4\n"),
-        "one walk of four elements at the exported entry: {output}"
+        output.contains("steps 4 shape reads 20\n"),
+        "one literal extent pass per invocation: {output}"
     );
     let (succeeded, output) = run_nested(&out, "walk_once_trap", Carrier::List, "F64", &[3]);
     assert!(

@@ -2276,7 +2276,7 @@ impl HostResultClaim {
         let HostAbiType::Tensor(ty) = &function.ret_ty else {
             return None;
         };
-        let named_lists = entry_walk::named_list_binders(function);
+        let named_lists = function.entry_contract.named_list_binders().to_vec();
         let witness = |binder: &str| {
             function.params.iter().find_map(|param| {
                 let HostAbiType::Tensor(param_ty) = &param.ty else {
@@ -2694,6 +2694,79 @@ enum SignatureEntryPass {
     Full,
 }
 
+fn validate_retained_entry_contract(
+    contract: &chelis_ir::host::EntryContract<HostType>,
+    plan: &chelis_ir::host::SignatureEntryPlan,
+    positions: &[usize],
+    lists: &[chelis_ir::host::HostListEntry<HostType>],
+) -> Result<(), Unsupported> {
+    use chelis_ir::host::EntryPattern;
+    let mut represented = vec![false; contract.formals().len()];
+    if positions.len() != plan.observations().nodes().len() {
+        return Err(invalid_abi_shape(
+            "retained entry lost a fixed tensor observation".into(),
+            "signature entry",
+        ));
+    }
+    for (node, position) in plan.observations().nodes().iter().zip(positions) {
+        let Some(formal) = contract.formals().get(*position) else {
+            return Err(invalid_abi_shape(
+                "retained entry has an invalid tensor position".into(),
+                "signature entry",
+            ));
+        };
+        if represented[*position]
+            || formal.name() != plan.label(node.id)
+            || !entry_walk::entry_pattern_matches_type(
+                formal.pattern(),
+                &HostType::Tensor(node.output_type.clone()),
+            )
+        {
+            return Err(invalid_abi_shape(
+                "retained entry changed a tensor formal".into(),
+                "signature entry",
+            ));
+        }
+        represented[*position] = true;
+    }
+    let mut projected_binders = Vec::new();
+    for entry in lists {
+        let Some(formal) = contract.formals().get(entry.position) else {
+            return Err(invalid_abi_shape(
+                "retained entry has an invalid List position".into(),
+                "signature entry",
+            ));
+        };
+        if represented[entry.position]
+            || formal.name() != entry.name
+            || !matches!(formal.pattern(), EntryPattern::List(_))
+            || !entry_walk::entry_pattern_matches_type(formal.pattern(), &entry.ty)
+        {
+            return Err(invalid_abi_shape(
+                "retained entry changed a List formal".into(),
+                "signature entry",
+            ));
+        }
+        entry_walk::list_named_dims(&entry.ty, &mut projected_binders);
+        represented[entry.position] = true;
+    }
+    if projected_binders != contract.named_list_binders() {
+        return Err(invalid_abi_shape(
+            "retained entry lost a List binder".into(),
+            "signature entry",
+        ));
+    }
+    for (formal, represented) in contract.formals().iter().zip(represented) {
+        if entry_walk::entry_pattern_has_extent_claim(formal.pattern()) && !represented {
+            return Err(invalid_abi_shape(
+                "retained entry omitted a declared extent formal".into(),
+                "signature entry",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn signature_entry_lines(
     plan: &chelis_ir::host::SignatureEntryPlan,
     args: &[String],
@@ -3037,11 +3110,8 @@ fn emit_function(
 
     if authored {
         let entry_uses = authored_entry_uses(ownership_sites, function.params.len())?;
-        // chelis#2506: for signatures without named Lists, aggregate walks
-        // run once at the exported entry. A named List needs ordered
-        // invocation-local witnesses, so its body owns all extent walks.
-        // The exported entry still validates metadata before retaining
-        // externally supplied values.
+        // A List extent claim runs at every owned-body invocation. Other
+        // aggregate walks keep their public-entry owner.
         let exported_work = entry_work.exported.as_ref().ok_or_else(|| {
             invalid_abi_shape(
                 "authored function has no exported entry work".into(),
@@ -3055,10 +3125,10 @@ fn emit_function(
                 "    ",
                 &delegated_entry_guards,
                 Some(exported_work),
-                if entry_work.body.named_list_binders.is_empty() {
-                    SignatureEntryPass::Full
-                } else {
+                if entry_work.extent_at_body {
                     SignatureEntryPass::MetadataOnly
+                } else {
+                    SignatureEntryPass::Full
                 },
             )?
         } else {
@@ -5709,12 +5779,14 @@ impl<'a> HostEmitter<'a> {
                 )?;
             }
             HostExprKind::SignatureEntry {
+                contract,
                 plan,
                 args,
                 positions,
                 lists,
             } => {
                 require_same_abi_type(ty, &HostType::Unit, "signature entry")?;
+                validate_retained_entry_contract(contract, plan, positions, lists)?;
                 let mut actuals = Vec::with_capacity(args.len());
                 for arg in args {
                     let temp = self.next_temp("entry_arg");
@@ -5731,32 +5803,19 @@ impl<'a> HostEmitter<'a> {
                         SignatureEntryPass::Full,
                     )?);
                 } else {
-                    let Some(last) = positions
-                        .iter()
-                        .chain(lists.iter().map(|entry| &entry.position))
-                        .max()
-                    else {
-                        return Err(invalid_abi_shape(
-                            "retained List entry has no parameter position".into(),
-                            "signature entry",
-                        ));
-                    };
-                    let count = last + 1;
+                    let count = contract.formals().len();
                     let mut work = entry_walk::FunctionEntryWork {
                         args: actuals.clone(),
                         owners: positions.clone(),
                         params: (0..count)
                             .map(|_| entry_walk::ParamEntryWork::default())
                             .collect(),
-                        named_list_binders: Vec::new(),
+                        named_list_binders: contract.named_list_binders().to_vec(),
                         release: Vec::new(),
                     };
-                    for entry in lists {
-                        entry_walk::list_named_dims(&entry.ty, &mut work.named_list_binders);
-                    }
-                    if positions.len() != args.len() || work.named_list_binders.is_empty() {
+                    if positions.len() != args.len() {
                         return Err(invalid_abi_shape(
-                            "retained List entry lost its named tensor declaration".into(),
+                            "retained List entry lost its fixed tensor observations".into(),
                             "signature entry",
                         ));
                     }
@@ -5784,9 +5843,13 @@ impl<'a> HostEmitter<'a> {
                             true,
                             work.named_list_binders.len(),
                         );
+                        let extent_call = extent_lines.join("\n");
+                        work.params[entry.position]
+                            .extents
+                            .push(extent_call.clone());
                         work.params[entry.position]
                             .ordered_extents
-                            .push(entry_walk::ExtentStep::Walk(extent_lines.join("\n")));
+                            .push(entry_walk::ExtentStep::Walk(extent_call));
                     }
                     self.lines.extend(signature_entry_lines(
                         plan,

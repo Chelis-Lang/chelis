@@ -26,6 +26,7 @@ fn identity_result(precision: Prim, result: Ty, dims: Vec<chelis_ir::DimInfo>) -
         functions: vec![Function {
             helper_result_claim_axes: vec![],
             name: "the_fn".into(),
+            entry_contract: Default::default(),
             params: vec![Param {
                 name: "x".into(),
                 ty: Ty::Tensor(tensor.clone()),

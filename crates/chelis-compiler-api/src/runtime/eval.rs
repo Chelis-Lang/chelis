@@ -5,7 +5,7 @@ use std::fs;
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::host::{HostDefKernel, host_def_kernel};
+use chelis_ir::host::{EntryPattern, HostDefKernel, host_def_kernel};
 use chelis_ir::tier2;
 use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
@@ -480,141 +480,17 @@ fn checked_list_element(actual: &Expr) -> Option<&Expr> {
     }
 }
 
-/// Expand a declared alias with its authored arguments before entry planning.
-/// Checked alias expansions can carry fresh checker dimension names, which
-/// must not replace the caller's shared binder across List elements, later
-/// parameters, and a declared result.
-fn expand_authored_entry_aliases(
+/// The compiler and evaluator read one authored-alias normalization rule.
+/// The session-less invariant predicate evaluator has no checked program or
+/// declaration registry; its already-typed formals are used directly.
+fn normalize_authored_entry_type(
     authored: &Expr,
-    registry: &chelis_types::adt::AdtRegistry,
+    session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
 ) -> Result<Expr, String> {
-    use chelis_types::types::{Dim, NominalArg, Type};
-
-    fn replace_binders(
-        expr: &Expr,
-        type_args: &UnordMap<String, Expr>,
-        dim_args: &UnordMap<String, Expr>,
-    ) -> Expr {
-        if let Some((tag, children)) = tagged_expr_children(expr)
-            && let Some(name) = children.first().and_then(symbol_name)
-        {
-            let replacement = match tag {
-                DeepTag::TVar => type_args.get(name),
-                DeepTag::DVar => dim_args.get(name),
-                _ => None,
-            };
-            if let Some(replacement) = replacement {
-                return replacement.clone();
-            }
-        }
-        match expr {
-            Expr::Node(node, span) => Expr::node(
-                node.tag(),
-                node.meta().clone(),
-                node.children_slice()
-                    .iter()
-                    .map(|child| replace_binders(child, type_args, dim_args))
-                    .collect(),
-                *span,
-            ),
-            _ => expr.clone(),
-        }
+    match session {
+        Some(session) => session.normalized_authored_entry_type(authored),
+        None => Ok(authored.clone()),
     }
-
-    fn expand(
-        authored: &Expr,
-        registry: &chelis_types::adt::AdtRegistry,
-        visiting: &mut Vec<String>,
-    ) -> Result<Expr, String> {
-        let authored = strip_type_wrappers(authored);
-        if let Some((DeepTag::TAdt, children)) = tagged_expr_children(authored)
-            && let Some((name, arguments)) = children
-                .split_first()
-                .and_then(|(name, args)| symbol_name(name).map(|name| (name, args)))
-            && let Some(alias) = registry.resolve_alias(name).or_else(|| {
-                if registry.defs.contains_key(name) {
-                    return None;
-                }
-                fn terminal(path: &str) -> &str {
-                    path.rsplit_once("__")
-                        .map(|(_, tail)| tail)
-                        .or_else(|| path.rsplit_once('.').map(|(_, tail)| tail))
-                        .unwrap_or(path)
-                }
-                let mut matches = registry.aliases.iter().filter_map(|(candidate, alias)| {
-                    (terminal(candidate) == terminal(name)).then_some(alias)
-                });
-                let first = matches.next()?;
-                matches.next().is_none().then_some(first)
-            })
-        {
-            if alias.param_args.len() != arguments.len() {
-                return Err(format!(
-                    "host runtime: type alias `{name}` lost argument alignment"
-                ));
-            }
-            if visiting.iter().any(|active| active == name) {
-                return Err(format!(
-                    "host runtime: recursive type alias `{name}` at entry"
-                ));
-            }
-            let mut type_args = UnordMap::new();
-            let mut dim_args = UnordMap::new();
-            for (parameter, argument) in alias.param_args.iter().zip(arguments) {
-                match parameter {
-                    NominalArg::Type(Type::Var(variable)) => {
-                        type_args.insert(format!("t{}", variable.0), argument.clone());
-                    }
-                    NominalArg::Dimension(Dim::Var(variable)) => {
-                        // Surf uses `t-var` for an alias argument spelling
-                        // until the nominal header assigns its dimension
-                        // kind. The substituted tensor axis must be `d-var`.
-                        let dimension = match argument {
-                            Expr::Node(node, span) if node.tag() == DeepTag::TVar => Expr::node(
-                                DeepTag::DVar,
-                                node.meta().clone(),
-                                node.children_slice().to_vec(),
-                                *span,
-                            ),
-                            Expr::Atom(Atom::Int(_), span) => Expr::node(
-                                DeepTag::DLit,
-                                chelis_deep::Metadata::default(),
-                                vec![argument.clone()],
-                                *span,
-                            ),
-                            _ => argument.clone(),
-                        };
-                        dim_args.insert(format!("d{}", variable.0), dimension);
-                    }
-                    _ => {
-                        return Err(format!(
-                            "host runtime: type alias `{name}` has an invalid parameter"
-                        ));
-                    }
-                }
-            }
-            let body = chelis_types::infer::type_to_deep_expr(&alias.body);
-            let substituted = replace_binders(&body, &type_args, &dim_args);
-            visiting.push(name.to_owned());
-            let result = expand(&substituted, registry, visiting);
-            visiting.pop();
-            return result;
-        }
-        match authored {
-            Expr::Node(node, span) => Ok(Expr::node(
-                node.tag(),
-                node.meta().clone(),
-                node.children_slice()
-                    .iter()
-                    .map(|child| expand(child, registry, visiting))
-                    .collect::<Result<Vec<_>, _>>()?,
-                *span,
-            )),
-            _ => Ok(authored.clone()),
-        }
-    }
-
-    expand(authored, registry, &mut Vec::new())
 }
 
 fn checked_function_children(actual: &Expr) -> Option<&[Expr]> {
@@ -673,7 +549,7 @@ fn check_signature_entry_plan(
 fn check_callable_invocation_contract(
     contract: &Expr,
     args: &[RuntimeValue],
-    registry: &chelis_types::adt::AdtRegistry,
+    session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
 ) -> Result<(), String> {
     let Some((_, params)) = checked_function_children(contract).and_then(<[Expr]>::split_last)
     else {
@@ -684,7 +560,7 @@ fn check_callable_invocation_contract(
         .map(|index| format!("arg{index}"))
         .collect::<Vec<_>>();
     let actualized =
-        actualize_tensor_entry_parameters(Some(params), &authored, args, &names, registry)?;
+        actualize_tensor_entry_parameters(Some(params), &authored, args, &names, session)?;
     let mut entry_inputs = Vec::with_capacity(actualized.len());
     let mut entry_shapes: Vec<Vec<usize>> = Vec::with_capacity(actualized.len());
     for (parameter, ty, shape) in actualized {
@@ -714,7 +590,7 @@ fn actualize_tensor_entry_parameters(
     authored_params: &[Option<Expr>],
     args: &[RuntimeValue],
     names: &[String],
-    registry: &chelis_types::adt::AdtRegistry,
+    session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
     struct EntryActual {
         checked: Expr,
@@ -725,16 +601,24 @@ fn actualize_tensor_entry_parameters(
     }
 
     fn collect(
-        checked: &Expr,
-        authored: &Expr,
+        pattern: &EntryPattern<Expr>,
+        checked: Option<&Expr>,
         value: &RuntimeValue,
         path: String,
         out: &mut Vec<EntryActual>,
     ) -> Result<(), String> {
-        match value {
-            RuntimeValue::Tensor(tensor) if tensor_type_dim_exprs(checked).is_some() => {
+        match pattern {
+            EntryPattern::Tensor(authored) => {
+                let RuntimeValue::Tensor(tensor) = value else {
+                    return Err(format!(
+                        "input `{path}` does not match its declared tensor type"
+                    ));
+                };
                 out.push(EntryActual {
-                    checked: checked.clone(),
+                    checked: checked
+                        .filter(|checked| tensor_type_dim_exprs(checked).is_some())
+                        .unwrap_or(authored)
+                        .clone(),
                     authored: authored.clone(),
                     actual_type: TensorType {
                         dims: tensor
@@ -750,66 +634,63 @@ fn actualize_tensor_entry_parameters(
                     shape: tensor.value.shape.clone(),
                 });
             }
-            RuntimeValue::List(items) if checked_list_element(checked).is_some() => {
-                let checked_item = checked_list_element(checked).expect("list type");
-                let authored_item = checked_list_element(authored).unwrap_or(checked_item);
+            EntryPattern::List(inner) => {
+                let RuntimeValue::List(items) = value else {
+                    return Err(format!(
+                        "input `{path}` does not match its declared tensor type"
+                    ));
+                };
+                let checked_item = checked.and_then(checked_list_element);
                 for (index, item) in items.iter().enumerate() {
-                    collect(
-                        checked_item,
-                        authored_item,
-                        item,
-                        format!("{path}[{index}]"),
-                        out,
-                    )?;
+                    collect(inner, checked_item, item, format!("{path}[{index}]"), out)?;
                 }
             }
-            _ if tensor_type_dim_exprs(checked).is_some()
-                || checked_list_element(checked).is_some() =>
-            {
-                return Err(format!(
-                    "input `{path}` does not match its declared tensor type"
-                ));
-            }
-            _ => {}
+            EntryPattern::Other => {}
         }
         Ok(())
     }
 
-    let expanded_authored = authored_params
+    let normalized_authored = authored_params
         .iter()
         .map(|formal| {
             formal
                 .as_ref()
-                .map(|formal| expand_authored_entry_aliases(formal, registry))
+                .map(|formal| normalize_authored_entry_type(formal, session))
                 .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let contract = chelis_ir::host::EntryContract::from_normalized_types(
+        &normalized_authored,
+        checked_params,
+        names,
+    )?
+    .try_map_tensor(|index, _tensor| {
+        fn tensor_leaf(expr: &Expr) -> Option<&Expr> {
+            if tensor_type_dim_exprs(expr).is_some() {
+                return Some(expr);
+            }
+            checked_list_element(expr).and_then(tensor_leaf)
+        }
+        normalized_authored[index]
+            .as_ref()
+            .and_then(tensor_leaf)
+            .or_else(|| checked_params.and_then(|items| items.get(index)))
+            .and_then(tensor_leaf)
+            .cloned()
+            .ok_or_else(|| "host runtime: could not retain entry tensor syntax".to_string())
+    })?;
     let mut actuals = Vec::new();
-    for (index, arg) in args.iter().enumerate() {
-        let authored = expanded_authored
-            .get(index)
-            .and_then(Option::as_ref)
-            .filter(|formal| {
-                tensor_type_dim_exprs(formal).is_some() || checked_list_element(formal).is_some()
-            });
-        let checked = checked_params
-            .and_then(|params| params.get(index))
-            .filter(|formal| {
-                tensor_type_dim_exprs(formal).is_some() || checked_list_element(formal).is_some()
-            })
-            .or(authored);
-        let authored = authored.or(checked);
-        let (Some(checked), Some(authored)) = (checked, authored) else {
-            continue;
-        };
+    if args.len() != contract.formals().len() {
+        return Err("host runtime: entry contract lost argument alignment".into());
+    }
+    for (index, (formal, arg)) in contract.formals().iter().zip(args).enumerate() {
         collect(
-            checked,
-            authored,
+            formal.pattern(),
+            checked_params
+                .and_then(|params| params.get(index))
+                .or_else(|| normalized_authored.get(index).and_then(Option::as_ref)),
             arg,
-            names
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| format!("arg{index}")),
+            formal.name().to_string(),
             &mut actuals,
         )?;
     }
@@ -2815,7 +2696,7 @@ impl<'a> EvalContext<'a> {
     ) -> Result<RuntimeValue, String> {
         if let Some(contracts) = callable.invocation_contracts() {
             for contract in contracts {
-                check_callable_invocation_contract(contract, &args, &self.adt_registry)?;
+                check_callable_invocation_contract(contract, &args, self.session.as_ref())?;
             }
         }
         self.apply_resolved_callable_with_arg_types_impl(
@@ -2906,7 +2787,7 @@ impl<'a> EvalContext<'a> {
                         &param_types,
                         &args,
                         &params,
-                        &self.adt_registry,
+                        self.session.as_ref(),
                     )?;
                     let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
                     let mut entry_shapes: Vec<Vec<usize>> =
@@ -3005,7 +2886,7 @@ impl<'a> EvalContext<'a> {
                     // through the result, just as through List parameters.
                     let authored_result = return_type
                         .as_ref()
-                        .map(|ty| expand_authored_entry_aliases(ty, &self.adt_registry))
+                        .map(|ty| normalize_authored_entry_type(ty, self.session.as_ref()))
                         .transpose()?;
                     let declared_result = authored_result
                         .as_ref()
@@ -3050,7 +2931,7 @@ impl<'a> EvalContext<'a> {
                         };
                         let authored_callable = declared
                             .as_ref()
-                            .map(|ty| expand_authored_entry_aliases(ty, &self.adt_registry))
+                            .map(|ty| normalize_authored_entry_type(ty, self.session.as_ref()))
                             .transpose()?;
                         let callable_contract = authored_callable
                             .as_ref()
@@ -5507,8 +5388,6 @@ mod tensor_entry_actualization_tests {
         ];
         let authored = checked.iter().cloned().map(Some).collect::<Vec<_>>();
         let names = ["arg0".into(), "arg1".into(), "arg2".into()];
-        let registry = chelis_types::adt::AdtRegistry::default();
-
         let actualized = actualize_tensor_entry_parameters(
             Some(&checked),
             &authored,
@@ -5518,7 +5397,7 @@ mod tensor_entry_actualization_tests {
                 RuntimeValue::int64(3),
             ],
             &names,
-            &registry,
+            None,
         )
         .expect("scalar neighbors do not contaminate the rank-zero tensor formal");
         assert_eq!(
@@ -5542,7 +5421,7 @@ mod tensor_entry_actualization_tests {
                 RuntimeValue::int64(3),
             ],
             &names,
-            &registry,
+            None,
         )
         .expect_err("the rank mismatch remains owned by the tensor at position one");
         assert_eq!(error, "input `arg1` expected rank 0, got 1");

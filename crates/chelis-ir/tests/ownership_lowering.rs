@@ -1567,6 +1567,7 @@ fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
             display_roots: Vec::new(),
             ty: ConcreteHostType::Unit,
             value: HostExpr::new(HostExprKind::SignatureEntry {
+                contract: function.entry_contract.clone(),
                 plan,
                 args: vec![HostExpr::new(HostExprKind::Var(
                     "x".into(),

@@ -721,20 +721,29 @@ or local callable aliases (#1947).
 
 ##### Host entry guards (#1788)
 
-Retain the expanded checked signature before helper extraction, body
-refinement, inlining, or parameter pruning. Construct one ordered entry plan
-from that retained declaration. The plan retains each literal obligation and
-repeated binder's ordered parameter-axis
-witnesses, source labels, and scoped identity. Compare every later binder
-witness with its first witness; equal spellings in independent signatures do
-not create an equality. Signature order, not helper extraction order, selects
-the first semantic failure.
+Retain the authored signature and its checked positional types before helper
+extraction, body refinement, inlining, or parameter pruning. Normalize
+checker-validated aliases once, preserving the authored dimension binders, and
+compile one ordered entry contract from that signature. Its formal slots carry
+direct tensor observations and recursive List element observations, including
+their literal obligations, repeated-binder identities, and source paths.
+Instantiation supplies checked rank and precision without replacing authored
+claims. An empty List contributes no witness. Compare every later binder
+witness with the first observation in signature, element, then axis order;
+equal spellings in independent signatures do not create an equality.
 
-The owning invocation executes the complete plan before entry ownership drops
-or body operations. This includes obligations whose witnesses the body never
-reads and preserved monomorphized signatures. A private helper may omit only
-the exact signature obligations already executed by its dominating host entry;
-its local operation and result guards remain independent. Standalone helper
+The owning invocation executes the complete contract before entry ownership
+drops, helper dispatch, or body operations. The contract travels with each
+host function and retained invocation, including an inline callback, and its
+projection must preserve every formal position, List child, and named axis.
+Eval and C consume this contract; neither rebuilds a binder roster from
+runtime values or backend types. For a List extent claim, the public C wrapper
+validates untrusted metadata, while its owned body executes one ordered extent
+pass before body work. Other aggregate walks keep their public-entry owner.
+This includes obligations whose witnesses the body never reads and
+preserved monomorphized signatures. A private helper may omit only the exact
+signature obligations already executed by its dominating host entry; its
+local operation and result guards remain independent. Standalone helper
 entry retains the complete checks.
 Executable beta reduction retains this invocation boundary: evaluate every
 actual once in caller order, including unused actuals, then check the authored
@@ -746,7 +755,7 @@ one obligation.
 
 Higher-order inlining must retain an invocation boundary: evaluate actual
 arguments once in caller order, map the original signature witnesses to those
-values, execute its entry plan, then run the substituted body and callbacks.
+values, execute its entry contract, then run the substituted body and callbacks.
 An indirect invocation likewise retains its checked callable contract.
 Host specialization represents a callable formal with entry obligations as an
 explicit checked adapter around the supplied callable syntax. Eval retains the

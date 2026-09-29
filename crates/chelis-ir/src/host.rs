@@ -1,6 +1,6 @@
 mod signature_entry;
 pub mod staged;
-pub use signature_entry::SignatureEntryPlan;
+pub use signature_entry::{EntryContract, EntryPattern, SignatureEntryPlan};
 
 use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::{UnordMap, UnordSet};
@@ -1015,6 +1015,9 @@ pub struct HostFunction<T = HostTypeTerm> {
     /// this body's tensor helpers. Empty means the host owns those claims.
     pub helper_result_claim_axes: Vec<crate::dag::RtAxis>,
     pub name: String,
+    /// Authored parameter order and recursive List admission, retained
+    /// before body refinement and projected unchanged across host lanes.
+    pub entry_contract: EntryContract<T>,
     pub params: Vec<HostParam<T>>,
     pub ret_ty: T,
     pub body: HostExpr<T>,
@@ -1791,6 +1794,7 @@ pub enum HostExprKind<T = HostTypeTerm> {
     /// have been evaluated and before its specialized body runs. All operands
     /// are borrowed observations, including parameters unused by that body.
     SignatureEntry {
+        contract: EntryContract<T>,
         plan: SignatureEntryPlan,
         args: Vec<HostExpr<T>>,
         positions: Vec<usize>,
@@ -1991,6 +1995,9 @@ fn resolve_host_function(
     Ok(ConcreteHostFunction {
         helper_result_claim_axes: function.helper_result_claim_axes,
         name: function.name,
+        entry_contract: function
+            .entry_contract
+            .try_map_tensor(|_, tensor| tensor.clone().into_concrete())?,
         params: function
             .params
             .into_iter()
@@ -2042,11 +2049,13 @@ fn resolve_host_callback(
 fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostTypeResolutionError> {
     let kind = match expr.kind {
         HostExprKind::SignatureEntry {
+            contract,
             plan,
             args,
             positions,
             lists,
         } => ConcreteHostExprKind::SignatureEntry {
+            contract: contract.try_map_tensor(|_, tensor| tensor.clone().into_concrete())?,
             plan,
             args: args
                 .into_iter()
@@ -4011,14 +4020,15 @@ struct HostDefSignature {
     body_expr: Expr,
 }
 
-/// A tensor-only helper cannot carry this host entry obligation: its DAG
-/// drops List parameters that the body does not read, even though their
-/// elements may witness a named result axis.
-fn has_named_list_entry(signature: &HostDefSignature) -> bool {
-    signature
-        .params
+/// A tensor-only helper drops List parameters that the body does not read.
+/// Such a helper cannot own their declared literal or named extent checks.
+fn has_list_extent_entry(signature: &HostDefSignature) -> bool {
+    EntryContract::from_params(&signature.params)
+        .formals()
         .iter()
-        .any(|param| named_list_tensor(&param.ty))
+        .any(|formal| {
+            matches!(formal.pattern(), EntryPattern::List(_)) && formal.pattern().has_extent_claim()
+        })
 }
 
 /// The kernel-or-host decision for one def body, made before lowering.
@@ -4096,7 +4106,7 @@ pub fn host_def_kernel(
     let Some(signature) = host_def_signature(name, body, None, program) else {
         return Ok(None);
     };
-    if has_named_list_entry(&signature) {
+    if has_list_extent_entry(&signature) {
         return Ok(None);
     }
     let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
@@ -5204,7 +5214,7 @@ fn lower_def_body_kernel(
     signature: &HostDefSignature,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
-    if has_named_list_entry(signature) {
+    if has_list_extent_entry(signature) {
         return Ok(None);
     }
     // A returned/dynamically-computed callable has no C value ABI. Do not
@@ -5583,6 +5593,7 @@ fn lower_host_function(
     let HostDefSignature {
         mut params, ret_ty, ..
     } = signature;
+    let entry_contract = EntryContract::from_params(&params);
     refine_function_params_from_body(&mut params, &host_body);
     let ret_ty = if ret_ty.is_unresolved() {
         host_expr_type(&host_body)
@@ -5595,6 +5606,7 @@ fn lower_host_function(
         function: HostFunction {
             helper_result_claim_axes,
             name: name.to_string(),
+            entry_contract,
             params,
             ret_ty,
             body: host_body,
@@ -13030,27 +13042,15 @@ fn beta_reduce_inline_host_call(expr: &Expr) -> Option<Expr> {
 struct RetainedHostInvocation<'a> {
     params: &'a [HostParam],
     body: &'a Expr,
+    contract: EntryContract<HostTypeTerm>,
     entry: SignatureEntryPlan,
     callable_entries: Vec<bool>,
     name: Option<&'a str>,
 }
 
-fn named_list_tensor(ty: &HostTypeTerm) -> bool {
-    match ty {
-        HostTypeTerm::List(item) => match item.as_ref() {
-            HostTypeTerm::Tensor(tensor) => tensor
-                .dims
-                .iter()
-                .any(|dim| matches!(dim, DimInfo::Named(name, _) if name != "*")),
-            nested @ HostTypeTerm::List(_) => named_list_tensor(nested),
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
 impl<'a> RetainedHostInvocation<'a> {
     fn new(params: &'a [HostParam], body: &'a Expr) -> Self {
+        let contract = EntryContract::from_params(params);
         let entry = SignatureEntryPlan::new(params.iter().filter_map(|param| {
             let HostTypeTerm::Tensor(ty) = &param.ty else {
                 return None;
@@ -13066,6 +13066,15 @@ impl<'a> RetainedHostInvocation<'a> {
                 let HostTypeTerm::Fn(param_tys, _) = &param.ty else {
                     return false;
                 };
+                let formals = param_tys
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| HostParam {
+                        name: format!("arg{index}"),
+                        ty: ty.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let contract = EntryContract::from_params(&formals);
                 let entry = SignatureEntryPlan::new(param_tys.iter().enumerate().filter_map(
                     |(index, ty)| {
                         let HostTypeTerm::Tensor(ty) = ty else {
@@ -13077,12 +13086,16 @@ impl<'a> RetainedHostInvocation<'a> {
                         })
                     },
                 ));
-                param_tys.iter().any(named_list_tensor) || !entry.guards().is_empty()
+                contract.formals().iter().any(|formal| {
+                    matches!(formal.pattern(), EntryPattern::List(_))
+                        && formal.pattern().has_extent_claim()
+                }) || !entry.guards().is_empty()
             })
             .collect();
         Self {
             params,
             body,
+            contract,
             entry,
             callable_entries,
             name: None,
@@ -13616,13 +13629,14 @@ fn lower_retained_host_invocation(
             }),
         });
         bind_host_local(&mut local_scope, formal_local.clone(), ty.clone());
-        if matches!(formal.ty, HostTypeTerm::Tensor(_)) {
+        let pattern = invocation.contract.formals()[index].pattern();
+        if matches!(pattern, EntryPattern::Tensor(_)) {
             observation_positions.push(index);
             observations.push(HostExpr::new(HostExprKind::Var(
                 formal_local.clone(),
                 ty.clone(),
             )));
-        } else if named_list_tensor(&formal.ty) {
+        } else if matches!(pattern, EntryPattern::List(_)) && pattern.has_extent_claim() {
             list_observations.push(HostListEntry {
                 position: index,
                 name: formal.name.clone(),
@@ -13660,6 +13674,7 @@ fn lower_retained_host_invocation(
             display_roots: Vec::new(),
             ty: HostTypeTerm::Unit,
             value: HostExpr::new(HostExprKind::SignatureEntry {
+                contract: invocation.contract,
                 plan: invocation.entry,
                 args: observations,
                 positions: observation_positions,
@@ -14374,6 +14389,7 @@ fn lower_mono_specialized_function(
     // form's and body's source regions surface on the specialized body.
     host_body.append_merged_span(body_expr.span_id());
     host_body.append_merged_span(fn_expr.span_id());
+    let entry_contract = EntryContract::from_params(&params);
     refine_function_params_from_body(&mut params, &host_body);
     let ret_ty = if ret_ty.is_unresolved() {
         host_expr_type(&host_body)
@@ -14385,6 +14401,7 @@ fn lower_mono_specialized_function(
         function: HostFunction {
             helper_result_claim_axes: Vec::new(),
             name: symbol.to_string(),
+            entry_contract,
             params,
             ret_ty,
             body: host_body,
@@ -15792,33 +15809,43 @@ fn lower_host_callback(
             let mut args = Vec::new();
             let mut positions = Vec::new();
             let mut lists = Vec::new();
-            for (position, (declaration, param)) in
-                params_list.children_slice().iter().zip(&params).enumerate()
-            {
-                let declared = param_declared_type_expr(declaration)
-                    .as_ref()
-                    .and_then(|authored| decode_expanded_host_type_expr(program, authored))
-                    .or_else(|| {
-                        param_host_type(declaration).map(|ty| expand_host_type_aliases(program, ty))
-                    })
-                    .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_) | HostTypeTerm::List(_)))
-                    .unwrap_or_else(|| param.ty.clone());
+            let declared_params = params_list
+                .children_slice()
+                .iter()
+                .zip(&params)
+                .map(|(declaration, param)| HostParam {
+                    name: param.name.clone(),
+                    ty: param_declared_type_expr(declaration)
+                        .as_ref()
+                        .and_then(|authored| decode_expanded_host_type_expr(program, authored))
+                        .or_else(|| {
+                            param_host_type(declaration)
+                                .map(|ty| expand_host_type_aliases(program, ty))
+                        })
+                        .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_) | HostTypeTerm::List(_)))
+                        .unwrap_or_else(|| param.ty.clone()),
+                })
+                .collect::<Vec<_>>();
+            let contract = EntryContract::from_params(&declared_params);
+            for (position, (declared, param)) in declared_params.iter().zip(&params).enumerate() {
                 let value = HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone()));
-                match declared {
-                    HostTypeTerm::Tensor(ty) => {
+                match contract.formals()[position].pattern() {
+                    EntryPattern::Tensor(HostTypeTerm::Tensor(ty)) => {
                         inputs.push(HostTensorInput {
                             name: param.name.clone(),
-                            ty,
+                            ty: ty.clone(),
                         });
                         args.push(value);
                         positions.push(position);
                     }
-                    ty if named_list_tensor(&ty) => lists.push(HostListEntry {
-                        position,
-                        name: param.name.clone(),
-                        ty,
-                        value,
-                    }),
+                    pattern @ EntryPattern::List(_) if pattern.has_extent_claim() => {
+                        lists.push(HostListEntry {
+                            position,
+                            name: param.name.clone(),
+                            ty: declared.ty.clone(),
+                            value,
+                        })
+                    }
                     _ => {}
                 }
             }
@@ -15848,6 +15875,7 @@ fn lower_host_callback(
                         display_roots: Vec::new(),
                         ty: HostTypeTerm::Unit,
                         value: HostExpr::new(HostExprKind::SignatureEntry {
+                            contract,
                             positions,
                             plan,
                             args,
@@ -18453,6 +18481,43 @@ fn decode_expanded_host_type_expr(
     decode_host_type(expr)
         .ok()
         .map(|term| expand_host_type_aliases(program, term))
+}
+
+impl HostLoweringSession<'_> {
+    /// The checker-validated alias normalization used by host lowering, made
+    /// available to Eval's signature-entry path. In particular a nominal
+    /// dimension argument keeps its authored binder after substitution.
+    pub fn normalized_authored_entry_type(&self, expr: &Expr) -> Result<Expr, String> {
+        fn contains_alias(program: &HostLoweringSession<'_>, expr: &Expr) -> bool {
+            match expr {
+                Expr::MetaExpr(meta, _) => contains_alias(program, &meta.expr),
+                Expr::Node(node, _) => {
+                    (node.tag() == DeepTag::TAdt
+                        && node
+                            .children_slice()
+                            .first()
+                            .and_then(symbol_name)
+                            .is_some_and(|name| {
+                                resolve_host_type_alias(program.adt_registry(), name).is_some()
+                            }))
+                        || node
+                            .children_slice()
+                            .iter()
+                            .any(|child| contains_alias(program, child))
+                }
+                _ => false,
+            }
+        }
+        // Reifying a non-aliased type can erase the checker's synthetic
+        // dimension syntax. Such a type is already normalized.
+        if !contains_alias(self, expr) {
+            return Ok(expr.clone());
+        }
+        let term = decode_expanded_host_type_expr(self, expr)
+            .ok_or_else(|| "host runtime: could not normalize authored entry type".to_string())?;
+        host_type_syntax(&term, expr.span())
+            .ok_or_else(|| "host runtime: could not reify authored entry type".to_string())
+    }
 }
 
 fn parse_expanded_fn_type_expr(
@@ -21622,6 +21687,7 @@ def bad[b](box: Box[b]) -> bool =
                 function: HostFunction {
                     helper_result_claim_axes: Vec::new(),
                     name: "seeded__mono_0123456789abcdef".to_string(),
+                    entry_contract: EntryContract::default(),
                     params: Vec::new(),
                     ret_ty: HostTypeTerm::Unit,
                     body: HostExpr::new(HostExprKind::Unit),
@@ -21818,6 +21884,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
         HostFunction {
             helper_result_claim_axes: Vec::new(),
             name: name.to_string(),
+            entry_contract: EntryContract::default(),
             params: vec![HostParam {
                 name: "x".to_string(),
                 ty: tensor(),

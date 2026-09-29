@@ -517,6 +517,9 @@ fn project_function(
     Ok(HostAbiFunction {
         helper_result_claim_axes: function.helper_result_claim_axes().to_vec(),
         name: function.name().to_string(),
+        entry_contract: function
+            .entry_contract()
+            .try_map_tensor(|_, tensor| HostAbiType::try_from_concrete(tensor))?,
         params: function
             .params()
             .iter()
@@ -727,11 +730,14 @@ fn project_expr(
             }
         }
         ConcreteHostExprKind::SignatureEntry {
+            contract,
             plan,
             args,
             positions,
             lists,
         } => HostAbiExprKind::SignatureEntry {
+            contract: contract
+                .try_map_tensor(|_, tensor| HostAbiType::try_from_concrete(tensor))?,
             plan,
             args: args
                 .into_iter()

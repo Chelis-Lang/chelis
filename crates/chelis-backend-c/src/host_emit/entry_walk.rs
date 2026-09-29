@@ -19,7 +19,9 @@
 //! boundary, since each invocation needs its own extent witness.
 
 use super::*;
-use chelis_ir::host::{HostAdtLayout, HostFunctionOrigin, HostTensorInput, SignatureEntryPlan};
+use chelis_ir::host::{
+    EntryPattern, HostAdtLayout, HostFunctionOrigin, HostTensorInput, SignatureEntryPlan,
+};
 
 /// One tensor the entry plan observes: a tensor parameter, or a tensor at a
 /// fixed tuple position inside a parameter.
@@ -136,6 +138,8 @@ impl FunctionEntryWork {
 pub(super) struct EntryWork {
     pub body: FunctionEntryWork,
     pub exported: Option<FunctionEntryWork>,
+    /// A List claim moves the single ordered extent pass into the owned body.
+    pub extent_at_body: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -163,14 +167,101 @@ pub(super) fn list_named_dims(ty: &HostAbiType, out: &mut Vec<String>) {
     }
 }
 
-pub(super) fn named_list_binders(function: &HostFunction) -> Vec<String> {
-    let mut names = Vec::new();
+fn tensor_has_extent_claim(tensor: &TensorType) -> bool {
+    tensor.dims.iter().any(|dim| {
+        matches!(dim, DimInfo::Lit(_)) || matches!(dim, DimInfo::Named(name, _) if name != "*")
+    })
+}
+
+pub(super) fn entry_type_has_extent_claim(ty: &HostAbiType) -> bool {
+    match ty {
+        HostAbiType::Tensor(tensor) => tensor_has_extent_claim(tensor),
+        HostAbiType::List(inner) => entry_type_has_extent_claim(inner),
+        _ => false,
+    }
+}
+
+pub(super) fn entry_pattern_has_extent_claim(pattern: &EntryPattern<HostAbiType>) -> bool {
+    match pattern {
+        EntryPattern::Tensor(ty) => entry_type_has_extent_claim(ty),
+        EntryPattern::List(inner) => entry_pattern_has_extent_claim(inner),
+        EntryPattern::Other => false,
+    }
+}
+
+pub(super) fn entry_pattern_matches_type(
+    pattern: &EntryPattern<HostAbiType>,
+    ty: &HostAbiType,
+) -> bool {
+    match (pattern, ty) {
+        (EntryPattern::Tensor(HostAbiType::Tensor(declared)), HostAbiType::Tensor(actual)) => {
+            declared.dims.len() == actual.dims.len()
+                && declared.precision == actual.precision
+                && declared
+                    .dims
+                    .iter()
+                    .zip(&actual.dims)
+                    .all(|(claim, observed)| match claim {
+                        DimInfo::Lit(required) => {
+                            matches!(observed, DimInfo::Lit(actual) if actual == required)
+                        }
+                        DimInfo::Named(name, _) if name != "*" => {
+                            matches!(observed, DimInfo::Named(actual, _) if actual == name)
+                        }
+                        _ => true,
+                    })
+        }
+        (EntryPattern::List(inner), HostAbiType::List(actual)) => {
+            entry_pattern_matches_type(inner, actual)
+        }
+        (EntryPattern::Other, _) => true,
+        _ => false,
+    }
+}
+
+fn validate_entry_contract(function: &HostFunction) -> Result<(), Unsupported> {
+    let contract = &function.entry_contract;
+    if contract.formals().is_empty() {
+        // Manually assembled helper fixtures may not carry authored entry
+        // metadata, but a List extent claim can never take that route.
+        if !function.params.iter().any(|param| {
+            matches!(param.ty, HostAbiType::List(_)) && entry_type_has_extent_claim(&param.ty)
+        }) {
+            return Ok(());
+        }
+        return Err(invalid_abi_shape(
+            "List entry has no projected signature contract".into(),
+            "signature entry",
+        ));
+    }
+    if contract.formals().len() != function.params.len()
+        || !contract
+            .formals()
+            .iter()
+            .zip(&function.params)
+            .all(|(formal, param)| {
+                formal.name() == param.name
+                    && entry_pattern_matches_type(formal.pattern(), &param.ty)
+            })
+    {
+        return Err(invalid_abi_shape(
+            "signature entry contract lost formal order or List shape".into(),
+            "signature entry",
+        ));
+    }
+    let mut projected_names = Vec::new();
     for param in &function.params {
         if matches!(param.ty, HostAbiType::List(_)) {
-            list_named_dims(&param.ty, &mut names);
+            list_named_dims(&param.ty, &mut projected_names);
         }
     }
-    names
+    if projected_names != contract.named_list_binders() {
+        return Err(invalid_abi_shape(
+            "signature entry contract lost a List binder".into(),
+            "signature entry",
+        ));
+    }
+    Ok(())
 }
 
 /// A tensor-carrying ADT field: its index, path segment and walker.
@@ -380,15 +471,19 @@ impl<'a> EntryWalkers<'a> {
 
     /// The entry work of one function's body and of its exported entry.
     pub fn entry_work(&mut self, function: &HostFunction) -> Result<EntryWork, Unsupported> {
-        let named_list_binders = named_list_binders(function);
-        let has_named_list = !named_list_binders.is_empty();
-        // A List's named witness is invocation-local. When one exists, the
-        // body owns every extent walk so a later parameter cannot overtake
-        // an earlier List across the exported entry and body boundary.
+        validate_entry_contract(function)?;
+        let named_list_binders = function.entry_contract.named_list_binders().to_vec();
+        let extent_at_body = function.entry_contract.formals().iter().any(|formal| {
+            matches!(formal.pattern(), EntryPattern::List(_))
+                && entry_pattern_has_extent_claim(formal.pattern())
+        });
+        // A List claim must run for internal calls and in signature order
+        // with fixed observations. Other aggregate walks keep their existing
+        // single public-entry owner.
         Ok(EntryWork {
             body: self.function_work(
                 function,
-                if has_named_list {
+                if extent_at_body {
                     EntryWalkMode::All
                 } else {
                     EntryWalkMode::FixedOnly
@@ -398,6 +493,7 @@ impl<'a> EntryWalkers<'a> {
             exported: has_exported_entry(function)
                 .then(|| self.function_work(function, EntryWalkMode::All, Vec::new()))
                 .transpose()?,
+            extent_at_body,
         })
     }
 
@@ -933,4 +1029,100 @@ pub(super) fn literal_extent_check(
         "    chelis_numeric_trap(\"numeric trap: domain in load at i64\");".to_string(),
         "}".to_string(),
     ]
+}
+
+#[cfg(test)]
+mod entry_contract_tests {
+    use super::*;
+    use chelis_ir::host::{EntryContract, HostFunctionOrigin, HostParam};
+    use chelis_ir::host_type_state::HostTypeTerm;
+    use chelis_types::types::Prim;
+
+    fn function() -> HostFunction {
+        let literal = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let named = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let declared = [
+            HostParam {
+                name: "unused".into(),
+                ty: HostTypeTerm::Unit,
+            },
+            HostParam {
+                name: "xs".into(),
+                ty: HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(literal.clone()))),
+            },
+            HostParam {
+                name: "xss".into(),
+                ty: HostTypeTerm::List(Box::new(HostTypeTerm::List(Box::new(
+                    HostTypeTerm::Tensor(named.clone()),
+                )))),
+            },
+        ];
+        let entry_contract = EntryContract::from_params(&declared)
+            .try_map_tensor(|_, ty| match ty {
+                HostTypeTerm::Tensor(tensor) => Ok::<_, ()>(HostAbiType::Tensor(tensor.clone())),
+                _ => Err(()),
+            })
+            .unwrap();
+        HostFunction {
+            helper_result_claim_axes: Vec::new(),
+            name: "f".into(),
+            entry_contract,
+            params: [
+                HostParam {
+                    name: "unused".into(),
+                    ty: HostAbiType::Unit,
+                },
+                HostParam {
+                    name: "xs".into(),
+                    ty: HostAbiType::List(Box::new(HostAbiType::Tensor(literal))),
+                },
+                HostParam {
+                    name: "xss".into(),
+                    ty: HostAbiType::List(Box::new(HostAbiType::List(Box::new(
+                        HostAbiType::Tensor(named),
+                    )))),
+                },
+            ]
+            .into(),
+            ret_ty: HostAbiType::Unit,
+            body: HostExpr::new(HostExprKind::Unit),
+            tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn projection_requires_all_claimed_list_formals_in_order() {
+        let mut function = function();
+        assert!(validate_entry_contract(&function).is_ok());
+
+        function.params.swap(1, 2);
+        assert!(validate_entry_contract(&function).is_err());
+        function.params.swap(1, 2);
+
+        let HostAbiType::List(inner) = &mut function.params[1].ty else {
+            panic!("literal List")
+        };
+        let HostAbiType::Tensor(tensor) = inner.as_mut() else {
+            panic!("literal tensor")
+        };
+        tensor.dims[0] = DimInfo::Lit(3);
+        assert!(validate_entry_contract(&function).is_err());
+    }
+
+    #[test]
+    fn projection_rejects_a_missing_literal_only_contract() {
+        let mut function = function();
+        function.params.pop();
+        function.entry_contract = EntryContract::default();
+        assert!(validate_entry_contract(&function).is_err());
+    }
 }

@@ -289,11 +289,13 @@ paths reject unsupported `tensor_scan` forms
 and the List overload of `concat`. Higher-order forms accept callable values
 and execute eagerly in list order. `len` and `index` auto-borrow a List or
 Dict query argument; they do not consume that container (`spec/05` §1.3.1).
-At a function entry, every tensor in a `List[tensor[n, p]]` parameter
-contributes to the named extent `n` check, including through nested Lists
-and a retained callable invocation. An empty List contributes no witness.
-Eval and C enforce this before the function body; see
-[`list_shared_extent.ch`](../examples/list_shared_extent.ch) and [#2627](https://github.com/Chelis-Lang/chelis/issues/2627).
+At each function entry, tensors in a `List[tensor[n, p]]` parameter
+contribute to the named extent `n` check; `List[tensor[2, p]]` checks the
+literal extent of each element. This includes nested Lists, internal calls,
+and retained callable invocations. An empty List contributes no named witness.
+Eval and C enforce these checks before the function body; see
+[`list_shared_extent.ch`](../examples/list_shared_extent.ch), [#2627](https://github.com/Chelis-Lang/chelis/issues/2627),
+and [#2752](https://github.com/Chelis-Lang/chelis/issues/2752).
 The spec defines positional List cotangents for several forms. Eval/C tests
 cover selected list gradients, including
 `to_list`/`map`/`to_tensor` paths; other transforms and callback shapes
