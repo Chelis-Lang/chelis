@@ -999,6 +999,21 @@ fn vmap_types_an_untyped_row_parameter_against_the_slice() {
     );
 }
 
+/// [04-INF-1] and spec/06 §3.4: an owned mapped tensor is implicitly borrowed
+/// when the row parameter is a reference with an unknown inner type.
+#[test]
+fn vmap_infers_a_referenced_row_from_an_owned_mapped_actual() {
+    accepts(
+        "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = \
+           vmap(fn (v: &_) -> sum(v, 0i32))(t)\n",
+    );
+    rejects_with(
+        "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = \
+           vmap(fn (v: &_) -> sum(v, 0i32))(t)\n",
+        &["[DimensionMismatch]", "tensor[5, 3, f32]"],
+    );
+}
+
 /// [04-INF-1]: annotating a declaration's result does not bind an untyped
 /// parameter of a lambda inside that declaration.
 #[test]

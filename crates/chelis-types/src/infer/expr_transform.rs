@@ -584,7 +584,15 @@ pub(super) fn infer_vmap(
                 && product.group_variable_owner(&resolved, subst).is_some();
         let published = match &resolved {
             Type::Fn(args, _) => Type::Fn(
-                args.iter().map(|_| vg.fresh_type()).collect(),
+                args.iter()
+                    .map(|arg| match arg {
+                        // Publish the known borrow before an application can
+                        // bind this parameter. Ordinary calls auto-borrow an
+                        // owned actual only when the formal is already Ref.
+                        Type::Ref(_) => Type::Ref(Box::new(vg.fresh_type())),
+                        _ => vg.fresh_type(),
+                    })
+                    .collect(),
                 Box::new(vg.fresh_type()),
             ),
             Type::Var(_) => vg.fresh_type(),
