@@ -726,6 +726,25 @@ FAST_TRIPWIRE_NEXTEST: list[str] = [
     "--test", "stack_guard_coverage",
     "--test", "runtime_extent_target_manifest",
 ]
+# Both halves of the bundled-lock invariant in `chelis-reef`'s lib suite: every
+# committed bundled `reef.lock` must pin the embedded bundle's hashes, and the
+# compiled `chelis-std-bundle` rlib must embed the same bytes that are on disk.
+# Neither is reachable from any other local stage. They are lib unit tests in a
+# crate the changed-crate stage never selects, because the paths that invalidate
+# them belong to other crates (`crates/chelis-cli/tests/fixtures/**/reef.lock`)
+# or to no crate at all (`examples/**/reef.lock`, the root `Cargo.toml` whose
+# workspace version the verdict keys on). Until chelis#2309 that made `--fast`
+# report PASS on a head CI then failed on this exact test (chelis#2305). The
+# `-E` filterset keeps the rest of `chelis-reef`'s lib suite out; the two named
+# tests share one target, so covering both costs one filter token, and leaving
+# the rlib half out would reproduce the same false green one test over.
+REEF_BUNDLED_LOCK_HASHES: list[str] = [
+    "cargo", "nextest", "run", "-p", "chelis-reef", "--lib",
+    "-E",
+    "test(bundled_chelis_std_lock_hashes_match_embedded_artifacts) "
+    "| test(embedded_bundle_rlib_matches_disk)",
+    "--no-fail-fast",
+]
 FAST_STATIC_COMMANDS: list[list[str]] = [
     REGEN_TIER0_WRITE,
     FMT_WRITE,
@@ -736,6 +755,21 @@ STD_PATH_PREFIXES: tuple[str, ...] = (
     "packages/chelis-std/",
     "crates/chelis-std-bundle/",
 )
+# The bundled-lock invariant has two sides, and a std path is only one of them.
+# The other is the committed locks that record the hashes the bundle must still
+# have, and the workspace version those locks pin the compiler to:
+#
+#   * any `reef.lock` - matched by basename, not by a path prefix, because the
+#     guard discovers its lock set by walking the tree rather than from an
+#     enumerated list, so a lock added at a new path is in scope the moment it
+#     is committed;
+#   * the root `Cargo.toml` - `chelis-reef` takes `version.workspace = true`,
+#     and the guard feeds its own `CARGO_PKG_VERSION` into the comparison, so a
+#     workspace version bump that does not also refresh the locks moves the
+#     verdict. The root manifest belongs to no workspace member, so the
+#     changed-crate stage cannot see it either.
+LOCK_FILE_NAME = "reef.lock"
+WORKSPACE_MANIFEST = "Cargo.toml"
 
 LOCAL_ANNOTATION = "validation + ci"
 FAST_ANNOTATION = "fast + validation + ci"
@@ -745,8 +779,10 @@ FAST_DYNAMIC_NOTE = (
     "# --fast runs, fixing in place: <managed-python> scripts/regen_all.py "
     "--tier 0 (and --tier 1 when a std path changed); cargo fmt --all; the "
     "chelis lint row above; cargo clippy -p <crate> --tests -- -D warnings "
-    "per changed crate; one nextest run over the drift tripwires; and, when "
-    "a std path changed, cargo nextest run -p chelis-std-bundle --lib"
+    "per changed crate; one nextest run over the drift tripwires; when "
+    "a std path changed, cargo nextest run -p chelis-std-bundle --lib; and "
+    "when a std path, any reef.lock, or the root Cargo.toml changed, the "
+    "chelis-reef bundled-lock hash guard"
 )
 LOCAL_DYNAMIC_NOTE = (
     "# --validation also runs: cargo nextest run -p <crate> --no-fail-fast "
@@ -1270,8 +1306,33 @@ def std_paths_changed(paths: list[str]) -> bool:
     )
 
 
+def bundled_lock_guard_paths_changed(paths: list[str]) -> bool:
+    """Whether the changed set can invalidate the `chelis-reef` bundled-lock
+    guard, which no other local stage reaches (chelis#2309).
+
+    Either side of the invariant counts: a std path moves the embedded bundle
+    bytes, and a committed `reef.lock` or the root `Cargo.toml` moves what those
+    bytes are compared against. `STD_PATH_PREFIXES`, `LOCK_FILE_NAME`, and
+    `WORKSPACE_MANIFEST` carry the reasoning for each.
+
+    This is deliberately not `std_paths_changed`: of the three path classes
+    chelis#2309 names, the std prefixes cover only `crates/chelis-std-bundle/
+    dist/`, and `examples/**/reef.lock` belongs to no crate at all, so neither
+    the std prefixes nor the changed-crate stage can see it."""
+    return std_paths_changed(paths) or any(
+        path == LOCK_FILE_NAME
+        or path.endswith("/" + LOCK_FILE_NAME)
+        or path == WORKSPACE_MANIFEST
+        for path in paths
+    )
+
+
 def fast_command_list(
-    crates: list[str], *, std_changed: bool, changed_paths: list[str]
+    crates: list[str],
+    *,
+    std_changed: bool,
+    changed_paths: list[str],
+    lock_guard_changed: bool,
 ) -> list[list[str]]:
     """The `--fast` command list: fix-in-place regeneration and fmt, the
     changed-path classification, the lint row (which also builds `chelis`),
@@ -1281,6 +1342,12 @@ def fast_command_list(
     them. Every writer precedes every check: a changed `.ch` source makes the
     embedded bundle stale, and the `bundled_chelis_std_loader` tripwire would
     fail on it before a later regeneration could fix it.
+
+    `lock_guard_changed` appends the `chelis-reef` bundled-lock leg last, after
+    the tier-1 regeneration has written whatever `dist/` bytes the committed
+    locks are about to be compared against. Its trigger is a superset of
+    `std_changed` (see `bundled_lock_guard_paths_changed`) and it is the only
+    local stage that reaches that guard at all.
 
     The classification is first among the checks because it is the cheapest
     thing here that can reject a push, and because until chelis#2250 an
@@ -1307,6 +1374,8 @@ def fast_command_list(
     commands.append(FAST_TRIPWIRE_NEXTEST)
     if std_changed:
         commands.append(STD_BUNDLE_SELF_CONSISTENCY)
+    if lock_guard_changed:
+        commands.append(REEF_BUNDLED_LOCK_HASHES)
     return commands
 
 
@@ -2667,11 +2736,19 @@ def run_fast(
         return derived
     paths, crates = derived
     std_changed = std_paths_changed(paths)
+    lock_guard_changed = bundled_lock_guard_paths_changed(paths)
     report.git["std_changed"] = std_changed
+    report.git["lock_guard_changed"] = lock_guard_changed
     if std_changed:
         print(
             "gate --fast: chelis-std paths changed; appending the bundle "
             "self-consistency test and regen_all.py --tier 1",
+            flush=True,
+        )
+    if lock_guard_changed:
+        print(
+            "gate --fast: the bundled-lock invariant can have moved; appending "
+            "the chelis-reef bundled-lock hash guard (chelis#2309)",
             flush=True,
         )
     take_lease(mode="fast", args=args, report=report, environ=environment)
@@ -2679,7 +2756,10 @@ def run_fast(
     before = _porcelain_hashes()
     code = run_commands(
         fast_command_list(
-            crates, std_changed=std_changed, changed_paths=paths
+            crates,
+            std_changed=std_changed,
+            changed_paths=paths,
+            lock_guard_changed=lock_guard_changed,
         ),
         stage_label="fast",
         environ=environment,
