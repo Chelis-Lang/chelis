@@ -10900,7 +10900,7 @@ fn resolve_list_grad_shape_expr(
                 .is_some()
             {
                 if let Some(body) = lookup_program_def(defs, name) {
-                    resolved = body.clone();
+                    resolved = qualify_top_level_value_reads(program, body);
                     continue;
                 }
             } else if matches!(scope.get(name), Some(HostTypeTerm::List(_))) {
@@ -11308,7 +11308,7 @@ fn try_lower_general_list_grad_app(
                 .is_some()
             && let Some(body) = lookup_program_def(&defs, name)
         {
-            rewritten_actual = body.clone();
+            rewritten_actual = qualify_top_level_value_reads(program, body);
             rewritten_children[actual_index] = rewritten_actual.clone();
         }
         if wrt_names.contains(&param_names[param_index]) {

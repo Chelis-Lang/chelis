@@ -102,3 +102,47 @@ from_top = grad(square_selected, wrt=xs)(values, 1i64)
         "{compiled}"
     );
 }
+
+#[test]
+fn top_level_list_aliases_and_wrapper_still_run_in_c() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-2740-top-level-aliases");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+import Std.Index (list_index)
+def square_selected(xs: List[f32], index: i64) -> f32 = {
+  selected = list_index(xs, index)
+  mul(selected, selected)
+}
+values: List[f32] = [2.0f32, 3.0f32, 5.0f32]
+alias: List[f32] = values
+alias2: List[f32] = alias
+def wrapped_values() -> List[f32] = alias2
+from_alias = grad(square_selected, wrt=xs)(alias2, 1i64)
+from_wrapper = grad(square_selected, wrt=xs)(wrapped_values(), 1i64)
+"#,
+    );
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let eval = String::from_utf8(eval.get_output().stdout.clone()).expect("utf-8 eval output");
+    let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
+    for (output, lane) in [(&eval, "eval"), (&compiled, "C")] {
+        assert!(
+            output.contains("from_alias = [0.0, 6.0, 0.0]"),
+            "{lane}: {output}"
+        );
+        assert!(
+            output.contains("from_wrapper = [0.0, 6.0, 0.0]"),
+            "{lane}: {output}"
+        );
+    }
+}
