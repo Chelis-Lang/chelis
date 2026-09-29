@@ -1185,8 +1185,8 @@ Deliverables, with phase homes:
      exports and exported stdlib numeric defs are exhaustively
      discovered and keyed by exact canonical callable identity. Stdlib
      discovery follows nominal ADT/container fields recursively to a fixed
-     point, so a callable accepting `Decimal`, `Date`, `Duration`, `Json`,
-     `Tokenizer`, or a container that reaches one of them cannot disappear
+     point, so a callable accepting `Decimal`, `Date`, `Duration`, `Json`, or
+     a container that reaches one of them cannot disappear
      merely because its signature has no directly spelled primitive. A
      tensor precision variable and every linked scalar occurrence are numeric
      for the same reason. Their
@@ -2025,7 +2025,7 @@ generated rejection registry at byte agreement. The named consumers of the
 pre-4C composite are this document and `capability_table.md`; both are amended
 here, and the release ledger in `remediation_roadmap.md` records the same
 narrowing. The same change corrects the stale eighty-three-definition stdlib
-count to the seventy-eight the `[05-OP-35]` registry and the census now
+count to the seventy-three the `[05-OP-35]` registry and the census now
 carry, and settles the `capability_table.md` seed row that still cited the
 closed [#691] as an `Unimplemented` owner.
 
@@ -2559,7 +2559,7 @@ callable from bypassing review while the capability tables are built.
    tensor carriers; byte-exact recursive runtime List/tuple/Dict/ADT
    observation; every active signed-integer sparse-index width across IR and
    public C; canonical gradient consumer-edge order by forward node ordinal
-   and input slot; the 78-definition stdlib manifest; legal compiled host
+   and input slot; the 73-definition stdlib manifest; legal compiled host
    effects with the exact language spelling `IO`; and target-independent
    runtime reduction windows, the [05-OP-42] `stop_gradient` transformation
    barrier, and [05-OP-43]'s dedicated ReLU identity and zero-boundary
