@@ -9,10 +9,11 @@ or `std::process::Command` directly. The one exception is
 `runtime/system_adapter.rs`'s `DefaultEvalSystem`, the single adapter
 permitted to make those calls.
 
-This guard scans every production Rust module under `runtime/`. Separate
-`#[cfg(test)] mod name;` files and inline `#[cfg(test)] mod name { ... }`
-blocks contain only test fixtures and are excluded. All other code fails on
-direct-access forms, including aliased imports.
+This source-level tripwire scans production Rust modules under `runtime/`.
+Separate `#[cfg(test)] mod name;` files and inline `#[cfg(test)] mod name
+{ ... }` blocks contain test fixtures and are excluded. Known direct-access
+spellings and imports are reported; this lexical scanner is not a Rust type
+checker and cannot certify the absence of all host effects.
 
 Usage:
 
@@ -63,18 +64,46 @@ class Violation:
 
 
 def strip_comments_and_strings(source: str) -> str:
-    """Mask ordinary comments and literals before scanning Rust source.
+    """Mask comments and Rust string/character literals, preserving line numbers.
 
-    This lexical prefilter avoids false positives from examples and
-    documentation while preserving line numbers. It is not a Rust parser and
-    does not promise exhaustive handling of raw-string syntax. The mandatory
-    runtime policy check, not this source guard, enforces permission before
-    any adapter access.
+    Raw and byte-raw literals may contain unescaped quotes, comments and host
+    API names. This is a lexical prefilter, not a Rust parser or a security
+    boundary; the evaluator's runtime policy enforces adapter permissions.
     """
     out: list[str] = []
-    i = 0
     n = len(source)
+
+    def raw_literal_end(start: int) -> int | None:
+        if start and (source[start - 1].isalnum() or source[start - 1] == "_"):
+            return None
+        prefix = 1 if source[start] == "r" else 2
+        if prefix == 2 and (
+            source[start] not in "bc" or source[start + 1 : start + 2] != "r"
+        ):
+            return None
+        hashes = start + prefix
+        while hashes < n and source[hashes] == "#":
+            hashes += 1
+        if hashes == n or source[hashes] != '"':
+            return None  # An identifier such as r#type, not a raw literal.
+        terminator = '"' + source[start + prefix : hashes]
+        close = source.find(terminator, hashes + 1)
+        if close == -1:
+            raise SourceGuardError("unterminated Rust raw string literal")
+        return close + len(terminator)
+
+    i = 0
     while i < n:
+        if source[i] in "rbc":
+            raw_end = raw_literal_end(i)
+            if raw_end is not None:
+                out.append(
+                    "".join(
+                        "\n" if char == "\n" else " " for char in source[i:raw_end]
+                    )
+                )
+                i = raw_end
+                continue
         two = source[i : i + 2]
         if two == "//":
             while i < n and source[i] != "\n":
@@ -168,6 +197,10 @@ _PATH_EFFECT_METHOD = (
 _DIRECT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bstd\s*::\s*fs\s*::"), "direct `std::fs::` access"),
     (
+        re.compile(r"\bstd\s*::\s*os\s*::\s*(?:unix|windows)\s*::\s*fs\s*::"),
+        "direct platform filesystem access",
+    ),
+    (
         re.compile(r"\bstd\s*::\s*process\s*::"),
         "direct `std::process` access",
     ),
@@ -180,10 +213,6 @@ _DIRECT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(rf"\b(?:Path|PathBuf)\s*::\s*{_PATH_EFFECT_METHOD}\s*\("),
         "qualified `Path` filesystem call",
-    ),
-    (
-        re.compile(rf"\.\s*{_PATH_EFFECT_METHOD}\s*\("),
-        "method-form path filesystem call",
     ),
 )
 
@@ -204,20 +233,41 @@ _USE_FS_ITEMS = re.compile(r"\buse\s+std\s*::\s*fs\s*::\s*\{([^}]*)\}\s*;")
 _USE_FS_SINGLE_ITEM = re.compile(
     r"\buse\s+std\s*::\s*fs\s*::\s*(\w+)\s*(?:as\s+(\w+))?\s*;"
 )
+_USE_OS_FS_MODULE = re.compile(
+    r"\buse\s+std\s*::\s*os\s*::\s*(?:unix|windows)\s*::\s*fs\s*(?:as\s+(\w+))?\s*;"
+)
+_USE_OS_FS_ITEMS = re.compile(
+    r"\buse\s+std\s*::\s*os\s*::\s*(?:unix|windows)\s*::\s*fs\s*::\s*\{([^}]*)\}\s*;"
+)
+_USE_OS_FS_SINGLE_ITEM = re.compile(
+    r"\buse\s+std\s*::\s*os\s*::\s*(?:unix|windows)\s*::\s*fs\s*::\s*(\w+)\s*(?:as\s+(\w+))?\s*;"
+)
+_USE_STD_ALIAS = re.compile(r"\buse\s+std\s+as\s+(\w+)\s*;")
 _USE_PROCESS_MODULE = re.compile(r"\buse\s+std\s*::\s*process\s*(?:as\s+(\w+))?\s*;")
 _USE_COMMAND = re.compile(
     r"\buse\s+std\s*::\s*process\s*::\s*Command\s*(?:as\s+(\w+))?\s*;"
 )
-_USE_PATH = re.compile(r"\buse\s+std\s*::\s*path\s*::\s*Path\s*(?:as\s+(\w+))?\s*;")
+_USE_PATH = re.compile(
+    r"\buse\s+std\s*::\s*path\s*::\s*(Path|PathBuf)\s*(?:as\s+(\w+))?\s*;"
+)
 _USE_GUARDED_MODULE = re.compile(r"\buse\s+std\s*::\s*(fs|process)\b")
-_USE_BRACED_PATH = re.compile(r"\buse\s+std\s*::\s*path\s*::\s*\{[^}]*\bPath\b")
+_USE_OS_FS_IMPORT = re.compile(
+    r"\buse\s+std\s*::\s*os\s*::\s*(?:unix|windows)\s*::\s*fs\b"
+)
+_USE_BRACED_PATH = re.compile(
+    r"\buse\s+std\s*::\s*path\s*::\s*\{[^}]*\bPath(?:Buf)?\b"
+)
 _USE_STD_TREE_START = re.compile(r"\buse\s+std\s*::\s*\{")
 _STD_TREE_GUARDED_ROOTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?:^|,)\s*fs\b"), "nested `std` filesystem import"),
     (re.compile(r"(?:^|,)\s*process\b"), "nested `std` process import"),
     (
-        re.compile(r"(?:^|,)\s*path\s*::\s*(?:\{\s*)?Path\b"),
+        re.compile(r"(?:^|,)\s*path\s*::\s*(?:\{\s*)?Path(?:Buf)?\b"),
         "nested `std` path import",
+    ),
+    (
+        re.compile(r"(?:^|,)\s*os\s*::\s*(?:unix|windows)\s*::\s*fs\b"),
+        "nested `std` platform filesystem import",
     ),
 )
 
@@ -254,6 +304,8 @@ def _collect_bound_aliases(
 
     for match in _USE_FS_MODULE.finditer(stripped):
         fs_module_names.add(match.group(1) or "fs")
+    for match in _USE_OS_FS_MODULE.finditer(stripped):
+        fs_module_names.add(match.group(1) or "fs")
     for match in _USE_FS_ITEMS.finditer(stripped):
         for item in match.group(1).split(","):
             item = item.strip()
@@ -261,14 +313,21 @@ def _collect_bound_aliases(
                 continue
             parts = [part.strip() for part in item.split(" as ")]
             fs_function_names.add(parts[-1])
+    for match in _USE_OS_FS_ITEMS.finditer(stripped):
+        for item in match.group(1).split(","):
+            item = item.strip()
+            if item:
+                fs_function_names.add(item.split(" as ")[-1].strip())
     for match in _USE_FS_SINGLE_ITEM.finditer(stripped):
+        fs_function_names.add(match.group(2) or match.group(1))
+    for match in _USE_OS_FS_SINGLE_ITEM.finditer(stripped):
         fs_function_names.add(match.group(2) or match.group(1))
     for match in _USE_PROCESS_MODULE.finditer(stripped):
         process_module_names.add(match.group(1) or "process")
     for match in _USE_COMMAND.finditer(stripped):
         command_names.add(match.group(1) or "Command")
     for match in _USE_PATH.finditer(stripped):
-        path_names.add(match.group(1) or "Path")
+        path_names.add(match.group(2) or match.group(1))
 
     return (
         fs_module_names,
@@ -306,6 +365,11 @@ def classify_source(text: str) -> list[Hit]:
     since `\\s` in every pattern below already matches `\\n`.
     """
     stripped = blank_inline_test_modules(strip_comments_and_strings(text))
+    # Keep source line numbers while canonicalizing bound `std` roots for the
+    # existing qualified and imported-item checks. An alias with no host
+    # access is harmless; only its later guarded paths produce hits.
+    for alias in set(_USE_STD_ALIAS.findall(stripped)) - {"std"}:
+        stripped = re.sub(rf"\b{re.escape(alias)}\s*::", "std::", stripped)
     line_starts = _line_starts(stripped)
     (
         fs_module_names,
@@ -327,6 +391,8 @@ def classify_source(text: str) -> list[Hit]:
         add(match.start(), f"direct `std::{match.group(1)}` import")
     for match in _USE_BRACED_PATH.finditer(stripped):
         add(match.start(), "braced `std::path::Path` import")
+    for match in _USE_OS_FS_IMPORT.finditer(stripped):
+        add(match.start(), "direct platform filesystem import")
     for name in fs_module_names:
         for match in re.finditer(rf"(?<!\w){re.escape(name)}\s*::", stripped):
             add(match.start(), f"imported filesystem-module alias `{name}::` access")
@@ -359,6 +425,35 @@ def classify_source(text: str) -> list[Hit]:
             rf"(?<!\w){re.escape(name)}\s*::\s*{_PATH_EFFECT_METHOD}\s*\(", stripped
         ):
             add(match.start(), f"imported path alias `{name}` filesystem call")
+    # A method named `exists` is not evidence of a path effect by itself:
+    # `Inventory.exists()` is legitimate. Require an explicit Path/PathBuf
+    # constructor or a receiver bound to one of those types.
+    path_types = "|".join(map(re.escape, sorted({"Path", "PathBuf"} | path_names)))
+    path_type = rf"(?:std\s*::\s*path\s*::\s*)?(?:{path_types})"
+    for match in re.finditer(
+        rf"\b{path_type}\s*::\s*(?:new|from)\s*\([^)]*\)\s*\.\s*{_PATH_EFFECT_METHOD}\s*\(",
+        stripped,
+    ):
+        add(match.start(), "method-form path filesystem call")
+    receivers = {
+        match.group(1)
+        for match in re.finditer(
+            rf"\b(\w+)\s*:\s*&?\s*(?:mut\s+)?{path_type}\b", stripped
+        )
+    }
+    receivers.update(
+        match.group(1)
+        for match in re.finditer(
+            rf"\blet\s+(?:mut\s+)?(\w+)\s*=\s*{path_type}\s*::\s*(?:new|from)\s*\(",
+            stripped,
+        )
+    )
+    for receiver in receivers:
+        for match in re.finditer(
+            rf"(?<![\w.]){re.escape(receiver)}\s*\.\s*{_PATH_EFFECT_METHOD}\s*\(",
+            stripped,
+        ):
+            add(match.start(), "method-form path filesystem call")
     for body_start, body in _iter_std_use_trees(stripped):
         for pattern, reason in _STD_TREE_GUARDED_ROOTS:
             for match in pattern.finditer(body):

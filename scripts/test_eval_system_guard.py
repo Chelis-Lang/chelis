@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Adversarial bypass and test-scope controls for `eval_system_guard.py`.
 
-Positive fixtures assert that legitimate evaluator code (the real adapter,
-comments/strings mentioning a banned form, ordinary `Path` construction that
-never touches the operating system) produces zero hits. Negative fixtures
-cover every accepted-Rust-spelling bypass named in the capability design:
-`std::fs` and imported `fs` calls, `std::process::Command` and imported
-`Command` calls, `std::path::Path::exists` and imported `Path::exists`
-calls, and a bare method-form `.exists()` call.
+Positive fixtures assert that legitimate evaluator code (adapter delegation,
+raw literals mentioning host names, non-path methods) produces zero hits.
+Negative fixtures cover qualified and imported filesystem/process calls,
+platform-specific filesystem modules, aliased `std` roots, and filesystem
+methods on explicitly constructed or typed `Path`/`PathBuf` receivers.
 """
 
 from pathlib import Path
@@ -58,6 +56,35 @@ class ClassifySourcePositiveFixturesTests(unittest.TestCase):
         )
         self.assertEqual(reasons(source), [])
 
+    def test_raw_literals_mask_quotes_comments_and_host_names(self):
+        source = (
+            'let doc = r##"quote " end # std::fs::read /* fake */'
+            ' std::process::Command::new("echo")"##;\n'
+            'let bytes = br#"// std::fs::write"#;\n'
+        )
+        self.assertEqual(reasons(source), [])
+
+    def test_multiline_raw_literal_preserves_production_line_numbers(self):
+        source = 'let doc = r#"quote "\nstd::fs::read(fake)\n"#;\nstd::fs::read(path);\n'
+        hits = guard.classify_source(source)
+        self.assertEqual([hit.line_number for hit in hits], [4])
+
+    def test_unterminated_raw_literal_fails_closed(self):
+        with self.assertRaises(guard.SourceGuardError):
+            reasons('let _doc = r##"unterminated')
+
+    def test_non_path_exists_method_is_accepted(self):
+        source = (
+            "struct Inventory;\n"
+            "impl Inventory { fn exists(&self) -> bool { true } }\n"
+            "fn f() { let inventory = Inventory; "
+            "let _ = inventory.exists(); let _ = Inventory.exists(); }\n"
+        )
+        self.assertEqual(reasons(source), [])
+
+    def test_std_alias_without_host_effect_is_accepted(self):
+        source = "use std as host;\nfn f() { let _ = host::fmt::Error; }\n"
+        self.assertEqual(reasons(source), [])
 
     def test_inline_test_fixture_is_not_production_but_next_item_is(self):
         source = '''
@@ -93,12 +120,21 @@ class ClassifySourceDirectFormsTests(unittest.TestCase):
         self.assertTrue(any("filesystem" in reason for reason in hits), hits)
 
     def test_method_form_exists_call(self):
-        hits = reasons("let ok = candidate.exists();")
+        hits = reasons("fn f(candidate: &Path) { let ok = candidate.exists(); }")
         self.assertTrue(any("method-form" in reason for reason in hits), hits)
 
     def test_method_form_try_exists_call(self):
-        hits = reasons("let ok = candidate.try_exists()?;")
+        hits = reasons("fn f(candidate: &Path) { let ok = candidate.try_exists()?; }")
         self.assertTrue(any("method-form" in reason for reason in hits), hits)
+
+    def test_pathbuf_alias_and_inferred_receiver_are_guarded(self):
+        source = (
+            "use std::path::PathBuf as P;\n"
+            'fn f() { let candidate = P::from("path"); candidate.exists(); }\n'
+        )
+        hits = reasons(source)
+        self.assertTrue(any("method-form" in reason for reason in hits), hits)
+
 
     def test_path_filesystem_methods_are_rejected(self):
         source = """
@@ -113,6 +149,30 @@ class ClassifySourceDirectFormsTests(unittest.TestCase):
     def test_direct_std_path_path_try_exists(self):
         hits = reasons("let ok = std::path::Path::new(&p).try_exists()?;")
         self.assertTrue(any("filesystem" in reason for reason in hits), hits)
+
+    def test_raw_literal_embedded_quote_does_not_hide_real_host_read(self):
+        source = (
+            'fn leak() { let _doc = r#"quote " end"#; '
+            'let path = Path::new("/etc/hosts"); '
+            'let contents = std::fs::read(path).unwrap(); }\n'
+        )
+        hits = reasons(source)
+        self.assertTrue(any("std::fs::" in reason for reason in hits), hits)
+
+    def test_byte_raw_literal_before_host_read_does_not_hide_call(self):
+        source = 'let _doc = br##"quote " end"##; std::fs::read(path);'
+        hits = reasons(source)
+        self.assertTrue(any("std::fs::" in reason for reason in hits), hits)
+
+    def test_platform_specific_filesystem_modules_are_guarded(self):
+        source = (
+            '#[cfg(unix)] fn u() { std::os::unix::fs::symlink("a", "b"); }\n'
+            '#[cfg(windows)] fn w() { std::os::windows::fs::symlink_file("a", "b"); }\n'
+        )
+        hits = reasons(source)
+        self.assertEqual(
+            sum("platform filesystem" in reason for reason in hits), 2, hits
+        )
 
 
 class ClassifySourceImportedAliasFormsTests(unittest.TestCase):
@@ -134,6 +194,39 @@ class ClassifySourceImportedAliasFormsTests(unittest.TestCase):
         self.assertTrue(
             any("filesystem-module alias" in reason for reason in hits), hits
         )
+
+    def test_aliased_std_root_cannot_hide_filesystem_or_process_calls(self):
+        source = (
+            "use std as host;\n"
+            'fn f() { host::fs::write("a", b"x"); '
+            'host::process::Command::new("echo").output(); }\n'
+        )
+        hits = reasons(source)
+        self.assertTrue(any("std::fs::" in reason for reason in hits), hits)
+        self.assertTrue(any("std::process" in reason for reason in hits), hits)
+
+    def test_aliased_platform_filesystem_module_is_guarded(self):
+        source = (
+            "use std::os::unix::fs as osfs;\n"
+            'fn f() { osfs::symlink("a", "b"); }\n'
+        )
+        hits = reasons(source)
+        self.assertTrue(any("platform filesystem" in reason for reason in hits), hits)
+        self.assertTrue(
+            any("filesystem-module alias" in reason for reason in hits), hits
+        )
+
+    def test_aliased_platform_filesystem_item_is_guarded(self):
+        source = (
+            "use std::os::windows::fs::symlink_file as link;\n"
+            'fn f() { link("a", "b"); }\n'
+        )
+        hits = reasons(source)
+        self.assertTrue(
+            any("directly imported filesystem function" in reason for reason in hits),
+            hits,
+        )
+
 
     def test_imported_fs_function_bare_call(self):
         source = (
@@ -268,7 +361,7 @@ class ClassifySourceImportedAliasFormsTests(unittest.TestCase):
         self.assertTrue(any("std::fs::" in reason for reason in hits), hits)
 
     def test_multiline_split_method_form_exists_is_still_caught(self):
-        source = "let ok = candidate.\n    exists();\n"
+        source = "fn f(candidate: &Path) { let ok = candidate.\n    exists(); }\n"
         hits = reasons(source)
         self.assertTrue(
             any("method-form" in reason for reason in hits), hits
