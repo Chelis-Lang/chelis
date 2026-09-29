@@ -1214,6 +1214,13 @@ prefix = "examples/checked_sparse_axes.ch"
 disposition = "packages"
 packages = ["chelis-e2e"]
 
+# Exact executable source exercised by chelis-cli::parity::parity_vmap_sparse_axes
+# and chelis-e2e::spec_all_executable_examples_parse_and_check.
+[[path_rule]]
+prefix = "examples/vmap_sparse_axes.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
 [[path_rule]]
 prefix = "examples/count_bool_axes.ch"
 disposition = "packages"

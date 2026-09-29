@@ -2560,7 +2560,7 @@ extern \"C\" __global__ void {kernel_name}(
   chelis_device_metadata index_pos = (b / outer_per_batch) * index_count + local_index;
   chelis_device_metadata g = (chelis_device_metadata)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
   if (g < 0 || g >= axis_size || b >= before) {{
-    CHELIS_GUARD_INDEX(g, axis_size, 2);
+    chelis_record_numeric_failure((unsigned long long)i);
     return;
   }}
   chelis_device_metadata src = ((b * axis_size + g) * after) + d;
@@ -2607,7 +2607,7 @@ extern \"C\" __global__ void {kernel_name}(
   chelis_device_metadata index_pos = (b / outer_per_batch) * index_count + local_index;
   chelis_device_metadata g = (chelis_device_metadata)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
   if (g < 0 || g >= axis_size || b >= before) {{
-    CHELIS_GUARD_INDEX(g, axis_size, 3);
+    chelis_record_numeric_failure((unsigned long long)i);
     return;
   }}
   chelis_device_metadata dst = ((b * axis_size + g) * after) + d;
@@ -2665,7 +2665,7 @@ extern \"C\" __global__ void {kernel_name}(
     chelis_device_metadata index_pos = (b / outer_per_batch) * index_count + local_index;
     chelis_device_metadata g = (chelis_device_metadata)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
     if (g < 0 || g >= axis_size || b >= before) {{
-      CHELIS_GUARD_INDEX(g, axis_size, 4);
+      chelis_record_numeric_failure((unsigned long long)i);
       return;
     }}
     chelis_device_metadata dst = ((b * axis_size + g) * after) + d;
@@ -2720,7 +2720,7 @@ extern \"C\" __global__ void {kernel_name}(
     chelis_device_metadata update_offset = chelis_indices_to_flat(coord, updates_s, ndim);
     chelis_device_metadata g = (chelis_device_metadata)indices[index_offset];
     if (g < 0 || g >= axis_size) {{
-      CHELIS_GUARD_INDEX(g, axis_size, 4);
+      chelis_record_numeric_failure((unsigned long long)i);
       return;
     }}
     coord[axis] = g;

@@ -3745,12 +3745,13 @@ impl HipEmitter {
         self.line(&format!(
             "void *args[] = {{ &p_t{values}, &p_t{indices}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_outer_per_batch, &t{id}_total, {values_metadata}, {indices_metadata} }};"
         ));
-        self.emit_kernel_launch_expr(
+        self.emit_numeric_trap_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
             &format!("t{id}_total / 256 + (t{id}_total % 256 != 0)"),
             "256",
             "args",
+            NumericTrapReport::Static("numeric trap: domain in gather at i64"),
         );
         self.indent -= 1;
         self.line("}");
@@ -3811,12 +3812,13 @@ impl HipEmitter {
         self.line(&format!(
             "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_outer_per_batch, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
         ));
-        self.emit_kernel_launch_expr(
+        self.emit_numeric_trap_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
             &format!("t{id}_total / 256 + (t{id}_total % 256 != 0)"),
             "256",
             "args",
+            NumericTrapReport::Static("numeric trap: domain in scatter at i64"),
         );
         self.indent -= 1;
         self.line("}");
@@ -3883,7 +3885,14 @@ impl HipEmitter {
             "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_outer_per_batch, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
-        self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
+        self.emit_numeric_trap_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            "1",
+            "1",
+            "args",
+            NumericTrapReport::Static("numeric trap: domain in scatter_replace at i64"),
+        );
         self.indent -= 1;
         self.line("}");
     }
@@ -3956,7 +3965,14 @@ impl HipEmitter {
             "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, {idx_sh_refs}, {out_sh_refs}, &t{id}_ndim, &t{id}_axis, &t{id}_axis_size, &t{id}_total, {idx_stride_refs}, {update_stride_refs}, {out_stride_refs} }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
-        self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
+        self.emit_numeric_trap_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            "1",
+            "1",
+            "args",
+            NumericTrapReport::Static("numeric trap: domain in scatter_elements at i64"),
+        );
         self.indent -= 1;
         self.line("}");
     }

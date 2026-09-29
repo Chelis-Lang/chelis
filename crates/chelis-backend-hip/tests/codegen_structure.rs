@@ -2187,6 +2187,7 @@ fn vmapped_sparse_kernels_select_indices_from_the_matching_batch() {
             axis: 1,
             batch_rank: 1,
         },
+        RiscOp::ScatterElements { axis: 1 },
     ] {
         let mut dag = Dag::new();
         let decl = dag.declare("test");
@@ -2233,14 +2234,35 @@ fn vmapped_sparse_kernels_select_indices_from_the_matching_batch() {
         let result = dag.add_node(decl, operation.clone(), inputs, result_ty, None);
         dag.add_root(result);
         let source = codegen_hip(&dag, "paired_sparse").unwrap().c_source;
+        if !matches!(operation, RiscOp::ScatterElements { .. }) {
+            assert!(
+                source.contains("_batch_count *= chelis_metadata_plan_shape("),
+                "{operation:?}"
+            );
+            assert!(source.contains("_outer_per_batch = "), "{operation:?}");
+            assert!(
+                source.contains("index_pos = (b / outer_per_batch) * index_count + local_index"),
+                "{operation:?}"
+            );
+        }
+        let trap_name = match operation {
+            RiscOp::Gather { .. } => "gather",
+            RiscOp::ScatterAdd { .. } => "scatter",
+            RiscOp::Scatter { .. } => "scatter_replace",
+            RiscOp::ScatterElements { .. } => "scatter_elements",
+            _ => unreachable!(),
+        };
         assert!(
-            source.contains("_batch_count *= chelis_metadata_plan_shape("),
-            "{operation:?}"
+            source.contains("chelis_record_numeric_failure((unsigned long long)i);"),
+            "{operation:?}: sparse bounds failure was not recorded"
         );
-        assert!(source.contains("_outer_per_batch = "), "{operation:?}");
         assert!(
-            source.contains("index_pos = (b / outer_per_batch) * index_count + local_index"),
-            "{operation:?}"
+            source.contains("hipMemcpyDtoH(&chelis_numeric_flag"),
+            "{operation:?}: sparse bounds failure was not read back"
+        );
+        assert!(
+            source.contains(&format!("numeric trap: domain in {trap_name} at i64")),
+            "{operation:?}: missing sparse domain trap"
         );
     }
 }
