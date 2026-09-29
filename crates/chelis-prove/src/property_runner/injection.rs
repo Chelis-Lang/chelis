@@ -814,6 +814,15 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
 mod tests {
     use super::*;
 
+    fn resolved_module_constants(source: &str) -> crate::opaque::ConstEnv {
+        let declarations =
+            chelis_surf::parser::parse_str(source).expect("parse the invariant module");
+        let exprs = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("desugar the invariant module");
+        let invariants = crate::opaque::collect_opaque_invariants(&exprs);
+        resolve_constants(&exprs, &invariants)
+    }
+
     #[test]
     fn referenced_module_float_constant_is_resolved_for_invariant_validation() {
         let source = "module Stats.Simplex
@@ -825,17 +834,54 @@ def eps() -> f32 = 0.0001
 @property generated forall(p: Simplex):
   true
 ";
-        let declarations =
-            chelis_surf::parser::parse_str(source).expect("parse the invariant module");
-        let exprs = chelis_surf::desugar::desugar_program(&declarations)
-            .expect("desugar the invariant module");
-        let invariants = crate::opaque::collect_opaque_invariants(&exprs);
-        let constants = resolve_constants(&exprs, &invariants);
+        let constants = resolved_module_constants(source);
 
         assert!(
             (constants.get("eps").copied().unwrap_or_default() - 0.0001).abs() < 1e-8,
             "the predicate's `eps` constant resolves before sample validation: {constants:?}"
         );
+    }
+
+    #[test]
+    fn referenced_module_rank_zero_tensor_constant_is_resolved_for_invariant_validation() {
+        let source = "module Stats.Simplex
+@opaque
+@invariant(p) sum(p.weights) >= eps && sum(p.weights) <= 1.0 + eps
+type Simplex =
+  | Simplex { weights: tensor[3, f32] }
+def eps() -> tensor[f32] = scalar_to_tensor(0.0001f32)
+@property generated forall(p: Simplex):
+  true
+";
+        let constants = resolved_module_constants(source);
+
+        assert!(
+            (constants.get("eps").copied().unwrap_or_default() - 0.0001).abs() < 1e-8,
+            "the rank-zero tensor `eps` constant resolves: {constants:?}"
+        );
+    }
+
+    #[test]
+    fn non_finite_module_float_constants_are_omitted_from_invariant_validation() {
+        let source = "module Stats.Simplex
+@opaque
+@invariant(p) sum(p.weights) >= nan && sum(p.weights) >= positive_inf && sum(p.weights) >= negative_inf
+type Simplex =
+  | Simplex { weights: tensor[3, f32] }
+def nan() -> f32 = 0.0f32 / 0.0f32
+def positive_inf() -> f32 = 1.0f32 / 0.0f32
+def negative_inf() -> f32 = -1.0f32 / 0.0f32
+@property generated forall(p: Simplex):
+  true
+";
+        let constants = resolved_module_constants(source);
+
+        for name in ["nan", "positive_inf", "negative_inf"] {
+            assert!(
+                !constants.contains_key(name),
+                "non-finite constant `{name}` is omitted: {constants:?}"
+            );
+        }
     }
 
     fn parsed_module_property(
