@@ -482,14 +482,25 @@ fn dynamic_driver(inputs: &[Input], header: &str) -> (String, Vec<String>) {
 
 // The exported call-route matrix varies runtime input extents while compiling
 // the same generated C for several cases. Keep one binary per exact generated
-// source/header/caller pair within this test invocation. Every case still runs
-// its own check and build and executes a fresh C process with exact input bits.
+// source/header/caller pair within this test invocation. An identical Surf
+// source and caller can also share its check and build; every case still
+// executes a fresh C process with exact input bits.
+struct PreparedExport {
+    source: String,
+    header: String,
+    caller: String,
+    checker: Value,
+    binary: PathBuf,
+}
+
 struct ExportBinaryCache {
     dir: TempDir,
     binaries: BTreeMap<(String, String, String, String), PathBuf>,
+    prepared: Vec<PreparedExport>,
     runtime_identity: Option<Value>,
     toolchains: [Option<String>; 2],
     reused: usize,
+    prepared_reused: usize,
 }
 
 impl ExportBinaryCache {
@@ -497,9 +508,11 @@ impl ExportBinaryCache {
         Self {
             dir: tempdir().expect("export binary cache directory"),
             binaries: BTreeMap::new(),
+            prepared: Vec::new(),
             runtime_identity: None,
             toolchains: [None, None],
             reused: 0,
+            prepared_reused: 0,
         }
     }
 
@@ -567,11 +580,21 @@ impl ExportBinaryCache {
 
     fn report(&self, matrix: &str) {
         eprintln!(
-            "{matrix} C BINARIES: {} compiled, {} reused",
+            "{matrix} C BINARIES: {} compiled, {} reused; {} checked builds reused",
             self.binaries.len(),
-            self.reused
+            self.reused,
+            self.prepared_reused,
         );
     }
+}
+
+fn normalize_fixture(value: &Value, dir: &Path) -> Value {
+    serde_json::from_str(
+        &value
+            .to_string()
+            .replace(&dir.display().to_string(), "<fixture>"),
+    )
+    .expect("normalized observation")
 }
 
 fn observe(case: &Case) -> Value {
@@ -591,9 +614,38 @@ fn observe_host_lane(
     library: Option<&str>,
     target: &str,
     api: bool,
-    cache: Option<&mut ExportBinaryCache>,
+    mut cache: Option<&mut ExportBinaryCache>,
 ) -> Value {
     let dir = tempdir().expect("fixture directory");
+    if library.is_none()
+        && target == "c"
+        && !api
+        && let (Some(inputs), Some(cache)) = (&case.exported, cache.as_deref_mut())
+    {
+        let prepared = cache.prepared.iter().find_map(|prepared| {
+            if prepared.source != case.source {
+                return None;
+            }
+            let (caller, args) = dynamic_driver(inputs, &prepared.header);
+            (caller == prepared.caller)
+                .then(|| (prepared.binary.clone(), prepared.checker.clone(), args))
+        });
+        if let Some((binary, checker, args)) = prepared {
+            cache.prepared_reused += 1;
+            let executed = receipt(
+                "execute",
+                &Command::new(binary)
+                    .args(args)
+                    .current_dir(dir.path())
+                    .output()
+                    .expect("execute independently prepared C"),
+            );
+            return normalize_fixture(
+                &json!({"issue":case.issue, "check":checker, "eval":Value::Null, "c":executed}),
+                dir.path(),
+            );
+        }
+    }
     if let Some(library) = library {
         let version = chelis_compiler_api::COMPILER_VERSION;
         fs::create_dir_all(dir.path().join("mylib/src")).unwrap();
@@ -747,7 +799,15 @@ fn observe_host_lane(
                 let (driver, args) = dynamic_driver(inputs, &header);
                 source.push_str(&driver);
                 fs::write(&c_path, &source).expect("append dynamic exported caller");
-                cached_binary = Some(cache.binary(&out, &source, &header));
+                let binary = cache.binary(&out, &source, &header);
+                cache.prepared.push(PreparedExport {
+                    source: case.source.clone(),
+                    header: header.clone(),
+                    caller: driver,
+                    checker: normalize_fixture(&checker, dir.path()),
+                    binary: binary.clone(),
+                });
+                cached_binary = Some(binary);
                 args
             } else {
                 let (driver, args) = driver(inputs, &header);
@@ -783,9 +843,10 @@ fn observe_host_lane(
     };
     // Generated diagnostics can name the task-owned temporary path. Normalize
     // only that path; trap lines, node identities, values and source names stay.
-    let raw = json!({"issue":case.issue, "check":checker, "eval":eval, "c":compiled}).to_string();
-    serde_json::from_str(&raw.replace(&dir.path().display().to_string(), "<fixture>"))
-        .expect("normalized observation")
+    normalize_fixture(
+        &json!({"issue":case.issue, "check":checker, "eval":eval, "c":compiled}),
+        dir.path(),
+    )
 }
 
 fn tensor(stdout: &str, name: &str) -> Option<(Vec<usize>, Vec<f64>)> {
@@ -975,7 +1036,7 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
     failures
 }
 
-fn collect() -> (Value, Vec<String>) {
+fn collect() -> (Value, Vec<String>, usize) {
     assert!(
         gcc_available(),
         "the fixture suite requires a working host C toolchain; no lane may skip"
@@ -997,7 +1058,7 @@ fn collect() -> (Value, Vec<String>) {
         failures.len()
     );
     cache.report("CLAIMED EXTENT");
-    (Value::Object(observed), failures)
+    (Value::Object(observed), failures, cache.prepared_reused)
 }
 
 /// THE ACCEPTANCE RUNNER for chelis#1277's preparation matrix: every cell of
@@ -1026,12 +1087,24 @@ fn collect() -> (Value, Vec<String>) {
 /// contract.
 #[test]
 fn claimed_extent_contract() {
-    let (_, failures) = collect();
+    let (observed, failures, reused_preparations) = collect();
     assert!(
         failures.is_empty(),
         "{} contract cells remain:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+    assert_eq!(
+        observed["named.export.satisfied"]["c"]["success"], true,
+        "the matching exported input must execute"
+    );
+    assert_eq!(
+        observed["named.export.mismatch"]["c"]["success"], false,
+        "the mismatching exported input must execute and trap independently"
+    );
+    assert!(
+        reused_preparations > 0,
+        "exact-source exported inputs must share checked and built preparation"
     );
 }
 
