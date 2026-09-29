@@ -39,6 +39,18 @@ fn literal_list_internal_call_rejects_mismatch_and_accepts_match() {
 }
 
 #[test]
+fn recursive_call_scans_a_new_list_even_after_a_matching_entry() {
+    assert_both_trap(
+        "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+         def f(xs: List[tensor[2, f32]], again: bool) -> i64 =\n\
+           if again then f([hidden(to_tensor([1.0f32, 2.0f32, 3.0f32]))], false) else len(xs)\n\
+         out = f([hidden(to_tensor([4.0f32, 5.0f32]))], true)\n",
+        "extent `2`: claimed = 2, xs[0] axis 0 = 3",
+        "input `xs[0]` axis 0 expected 2, got 3",
+    );
+}
+
+#[test]
 fn nested_literal_list_checks_each_element_before_body() {
     let prefix = "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
                   def f(xss: List[List[tensor[2, f32]]]) -> i64 = 7i64\n";

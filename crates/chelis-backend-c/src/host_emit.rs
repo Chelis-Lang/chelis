@@ -377,6 +377,14 @@ pub(crate) fn emit_host_abi_program(
         .map(|function| entry_walkers.entry_work(function))
         .collect::<Result<Vec<_>, _>>()?;
     entry_walkers.render(&mut body);
+    let entry_groups = entry_receipt_groups(program);
+    for (index, function) in program.functions.iter().enumerate() {
+        if entry_groups.get(&function.name) == Some(&index) {
+            body.push(format!(
+                "static const char __chelis_entry_contract_token_{index} = 0;"
+            ));
+        }
+    }
 
     let mut stubbed_functions: UnordSet<String> = UnordSet::new();
     let mut function_bodies: Vec<String> = Vec::new();
@@ -414,6 +422,7 @@ pub(crate) fn emit_host_abi_program(
             external_helpers,
             &captured_globals,
             &entry_work[function_index],
+            &entry_groups,
         ) {
             Ok(()) => {
                 function_bodies.extend(fn_buf);
@@ -2114,8 +2123,9 @@ fn join_params(params: &str, rest: &str) -> String {
     }
 }
 
-fn append_private_host_context_args(args: &mut Vec<String>) {
+fn append_private_host_context_args(args: &mut Vec<String>, entry_receipt: &str) {
     args.push("__chelis_origin_arena".to_string());
+    args.push(entry_receipt.to_string());
 }
 
 fn append_invocation_origin_context(out: &mut Vec<String>) {
@@ -2456,7 +2466,7 @@ fn private_host_function_params(params: &str) -> String {
     join_params(
         params,
         &format!(
-            "__chelis_host_result_origin_arena *__chelis_origin_arena, const __chelis_host_result_claim *__chelis_caller_result_claims, const __chelis_host_result_origin **{PRIVATE_RESULT_ORIGIN_RETURN_SLOT}"
+            "__chelis_host_result_origin_arena *__chelis_origin_arena, const __chelis_entry_receipt *__chelis_caller_entry_receipt, const __chelis_host_result_claim *__chelis_caller_result_claims, const __chelis_host_result_origin **{PRIVATE_RESULT_ORIGIN_RETURN_SLOT}"
         ),
     )
 }
@@ -2498,6 +2508,15 @@ typedef struct __chelis_host_result_origin_arena {
     __chelis_host_result_origin *head;
     __chelis_host_result_origin *leaf_head;
 } __chelis_host_result_origin_arena;
+
+/* Private proof of one complete, successful entry contract. Only a verified
+   direct call may forward it. The state bytes belong to the caller's stack
+   frame and are copied at the callee entry before any body operation. */
+typedef struct __chelis_entry_receipt {
+    const void *contract;
+    const void *named_states;
+    size_t named_state_bytes;
+} __chelis_entry_receipt;
 
 static void __chelis_host_result_origin_arena_destroy(__chelis_host_result_origin_arena *arena) {
     __chelis_host_result_origin *node = arena->head;
@@ -2694,6 +2713,22 @@ enum SignatureEntryPass {
     Full,
 }
 
+fn entry_named_state_lines(names: &[String]) -> Vec<String> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["__chelis_entry_named_state __chelis_entry_named_states[] = {".into()];
+    for name in names {
+        lines.push(format!(
+            "    {{ {}, {}, 0, 0, 0, {{0}} }},",
+            c_string_literal(name),
+            c_string_literal(&chelis_ir::lower::extent_binder_label(name))
+        ));
+    }
+    lines.push("};".into());
+    lines
+}
+
 fn validate_retained_entry_contract(
     contract: &chelis_ir::host::EntryContract<HostType>,
     plan: &chelis_ir::host::SignatureEntryPlan,
@@ -2774,6 +2809,7 @@ fn signature_entry_lines(
     delegated: &[chelis_ir::axis_sources::EntryExtentGuard],
     work: Option<&entry_walk::FunctionEntryWork>,
     pass: SignatureEntryPass,
+    declare_named_states: bool,
 ) -> Result<Vec<String>, Unsupported> {
     use chelis_ir::axis_sources::EntryExtentGuard;
     if args.len() != plan.observations().nodes().len()
@@ -2798,16 +2834,8 @@ fn signature_entry_lines(
     };
     let mut lines = Vec::new();
     let named_list_binders = work.map_or(&[][..], |work| work.named_list_binders.as_slice());
-    if !named_list_binders.is_empty() {
-        lines.push("__chelis_entry_named_state __chelis_entry_named_states[] = {".into());
-        for name in named_list_binders {
-            lines.push(format!(
-                "    {{ {}, {}, 0, 0, 0, {{0}} }},",
-                c_string_literal(name),
-                c_string_literal(&chelis_ir::lower::extent_binder_label(name))
-            ));
-        }
-        lines.push("};".into());
+    if declare_named_states {
+        lines.extend(entry_named_state_lines(named_list_binders));
     }
     // No extent read may obscure a malformed external input's null, dtype or
     // rank diagnostic. These metadata checks dominate the ordered comparisons.
@@ -2963,6 +2991,29 @@ fn signature_entry_lines(
         .collect())
 }
 
+/// A receipt crosses a direct call only when both owned bodies check the
+/// identical positional contract and ABI types. Display paths are part of
+/// that equality, so replaying the first named witness keeps its label.
+fn entry_receipt_groups(program: &HostProgram) -> UnordMap<String, usize> {
+    let mut groups = UnordMap::new();
+    for (index, function) in program.functions.iter().enumerate() {
+        let representative = program.functions[..index]
+            .iter()
+            .position(|prior| {
+                prior.entry_contract == function.entry_contract
+                    && prior.params.len() == function.params.len()
+                    && prior
+                        .params
+                        .iter()
+                        .zip(&function.params)
+                        .all(|(left, right)| left.name == right.name && left.ty == right.ty)
+            })
+            .unwrap_or(index);
+        groups.insert(function.name.clone(), representative);
+    }
+    groups
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_function(
     out: &mut Vec<String>,
@@ -2978,6 +3029,7 @@ fn emit_function(
     external_helpers: &UnordSet<String>,
     captured_globals: &[String],
     entry_work: &entry_walk::EntryWork,
+    entry_groups: &UnordMap<String, usize>,
 ) -> Result<(), Unsupported> {
     let params = function
         .params
@@ -3016,6 +3068,32 @@ fn emit_function(
         },
         ownership_sites,
     );
+    emitter.entry_group = entry_groups.get(&function.name).copied();
+    emitter.entry_groups = entry_groups.clone();
+    if entry_work.extent_at_body {
+        emitter.entry_proof_owners = entry_work
+            .body
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, work)| {
+                !work.fetch.is_empty()
+                    || !work.metadata.is_empty()
+                    || !work.ordered_extents.is_empty()
+            })
+            .map(|(index, _)| {
+                owner_bindings
+                    .get(index)
+                    .map(|(owner, _)| (index, *owner))
+                    .ok_or_else(|| {
+                        invalid_abi_shape(
+                            "entry receipt lost a verified formal owner".into(),
+                            "signature entry",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+    }
     emitter.entry_projection = entry::helper_coverage_with_verified(function, verified_helpers);
     emitter.external_helpers = external_helpers.clone();
     emitter.interface_reload_names = captured_globals.iter().cloned().collect();
@@ -3062,14 +3140,65 @@ fn emit_function(
         })?;
     let entry_plan = function_entry_plan(function);
     let delegated_entry_guards = entry::delegated_function_guards(function, verified_helpers);
-    emitter.lines.extend(signature_entry_lines(
-        &entry_plan,
-        &entry_work.body.args,
-        &emitter.indent,
-        &delegated_entry_guards,
-        Some(&entry_work.body),
-        SignatureEntryPass::Full,
-    )?);
+    if entry_work.extent_at_body {
+        let group = emitter
+            .entry_group
+            .expect("every emitted function has an entry group");
+        let token = format!("&__chelis_entry_contract_token_{group}");
+        emitter.lines.extend(
+            entry_named_state_lines(&entry_work.body.named_list_binders)
+                .into_iter()
+                .map(|line| format!("{}{}", emitter.indent, line)),
+        );
+        let (states, bytes) = if entry_work.body.named_list_binders.is_empty() {
+            ("NULL", "0")
+        } else {
+            (
+                "__chelis_entry_named_states",
+                "sizeof __chelis_entry_named_states",
+            )
+        };
+        emitter.lines.push(format!(
+            "{}if (__chelis_caller_entry_receipt != NULL && \
+             __chelis_caller_entry_receipt->contract == {token} && \
+             __chelis_caller_entry_receipt->named_state_bytes == {bytes} && \
+             ({bytes} == 0 || __chelis_caller_entry_receipt->named_states != NULL)) {{",
+            emitter.indent
+        ));
+        if !entry_work.body.named_list_binders.is_empty() {
+            emitter.lines.push(format!(
+                "{}    memcpy(__chelis_entry_named_states, \
+                 __chelis_caller_entry_receipt->named_states, {bytes});",
+                emitter.indent
+            ));
+        }
+        emitter.lines.push(format!("{}}} else {{", emitter.indent));
+        emitter.lines.extend(signature_entry_lines(
+            &entry_plan,
+            &entry_work.body.args,
+            &format!("{}    ", emitter.indent),
+            &delegated_entry_guards,
+            Some(&entry_work.body),
+            SignatureEntryPass::Full,
+            false,
+        )?);
+        emitter.lines.push(format!("{}}}", emitter.indent));
+        emitter.lines.push(format!(
+            "{}const __chelis_entry_receipt __chelis_entry_receipt_current = \
+             {{ {token}, {states}, {bytes} }};",
+            emitter.indent
+        ));
+    } else {
+        emitter.lines.extend(signature_entry_lines(
+            &entry_plan,
+            &entry_work.body.args,
+            &emitter.indent,
+            &delegated_entry_guards,
+            Some(&entry_work.body),
+            SignatureEntryPass::Full,
+            true,
+        )?);
+    }
     // A frame belongs to this invocation, not to a selected callee name.
     // The expression spine forwards the frame; branch arms share its immutable
     // contents and arguments/sibling bindings never inherit it. A named axis
@@ -3133,6 +3262,7 @@ fn emit_function(
                 } else {
                     SignatureEntryPass::Full
                 },
+                true,
             )?
         } else {
             Vec::new()
@@ -3175,7 +3305,7 @@ fn emit_function(
                 args.push(c_ident(&param.name).into_owned());
             }
         }
-        append_private_host_context_args(&mut args);
+        append_private_host_context_args(&mut args, "NULL");
         args.push("NULL".to_string());
         args.push("NULL".to_string());
         out.push(format!(
@@ -3808,6 +3938,9 @@ struct HostEmitter<'a> {
     pre_emitted_clone_sites: UnordSet<HostSiteId>,
     pre_emitted_terminals: UnordSet<(HostSiteId, VerifiedOperationId)>,
     owner_vars: UnordMap<VerifiedOwnerId, String>,
+    entry_group: Option<usize>,
+    entry_groups: UnordMap<String, usize>,
+    entry_proof_owners: Vec<(usize, VerifiedOwnerId)>,
     temp_counter: usize,
     /// Immutable invocation context. Only the expression on the returned-value
     /// spine receives it; nested arguments and sibling bindings get no context.
@@ -3820,6 +3953,51 @@ struct HostTensorHelpers<'a> {
     helpers: &'a [HostTensorHelper],
     output_types: &'a [Vec<TensorType>],
     result_origins: Vec<Option<String>>,
+}
+
+/// The verified direct-call operands identify logical owners, independent of
+/// source variable spellings or emitted C temporaries. A receipt crosses an
+/// edge only when every value observed by the entry contract is the same
+/// positional owner that the caller admitted.
+fn call_forwards_entry_owners(
+    site: &ProjectedHostSite<'_>,
+    owners: &[(usize, VerifiedOwnerId)],
+) -> bool {
+    let clones = site
+        .directives
+        .iter()
+        .filter_map(|action| match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                dest, source, ..
+            }) => Some((dest.id(), source.owner().id())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let original_owner = |mut owner| {
+        for _ in 0..clones.len() {
+            let Some((_, source)) = clones.iter().find(|(dest, _)| *dest == owner) else {
+                break;
+            };
+            owner = *source;
+        }
+        owner
+    };
+    let mut calls = site.directives.iter().filter_map(|action| match action {
+        VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+            kind: VerifiedApplyKind::DirectCall { .. },
+            args,
+            ..
+        }) => Some(args),
+        _ => None,
+    });
+    let Some(args) = calls.next() else {
+        return false;
+    };
+    calls.next().is_none()
+        && owners.iter().all(|(position, owner)| {
+            args.get(*position)
+                .is_some_and(|arg| original_owner(arg.owner().id()) == *owner)
+        })
 }
 
 /// Whether the verified intrinsic application labelled `label` at this site
@@ -3977,6 +4155,9 @@ impl<'a> HostEmitter<'a> {
             pre_emitted_clone_sites: UnordSet::new(),
             pre_emitted_terminals: UnordSet::new(),
             owner_vars: UnordMap::new(),
+            entry_group: None,
+            entry_groups: UnordMap::new(),
+            entry_proof_owners: Vec::new(),
             temp_counter: 0,
             result_claims: None,
             claim_on_spine: false,
@@ -5804,6 +5985,7 @@ impl<'a> HostEmitter<'a> {
                         &[],
                         None,
                         SignatureEntryPass::Full,
+                        true,
                     )?);
                 } else {
                     let count = contract.formals().len();
@@ -5861,6 +6043,7 @@ impl<'a> HostEmitter<'a> {
                         &[],
                         Some(&work),
                         SignatureEntryPass::Full,
+                        true,
                     )?);
                 }
                 self.lines.push(format!("{}{target} = 0;", self.indent));
@@ -8883,7 +9066,19 @@ impl<'a> HostEmitter<'a> {
         // Calls to declared functions use private bodies and inherit this
         // invocation. Callback parameters retain their authored C signature.
         if self.emitted_names.contains_key(function) {
-            append_private_host_context_args(&mut arg_vars);
+            let forwards_receipt = self
+                .entry_group
+                .is_some_and(|group| self.entry_groups.get(function) == Some(&group))
+                && !self.entry_proof_owners.is_empty()
+                && call_forwards_entry_owners(site, &self.entry_proof_owners);
+            append_private_host_context_args(
+                &mut arg_vars,
+                if forwards_receipt {
+                    "&__chelis_entry_receipt_current"
+                } else {
+                    "NULL"
+                },
+            );
             arg_vars.push(result_claims.unwrap_or("NULL").to_string());
             arg_vars.push(format!("&{}", result_origin_name(target)));
         }
@@ -9848,7 +10043,7 @@ impl<'a> HostEmitter<'a> {
             HostCallbackKind::Named { function, .. } => {
                 let mut arg_vars = arg_vars.to_vec();
                 if self.emitted_names.contains_key(function) {
-                    append_private_host_context_args(&mut arg_vars);
+                    append_private_host_context_args(&mut arg_vars, "NULL");
                     arg_vars.push("NULL".to_string());
                     arg_vars.push(format!("&{}", result_origin_name(target)));
                 }

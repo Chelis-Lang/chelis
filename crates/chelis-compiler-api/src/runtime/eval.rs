@@ -550,6 +550,7 @@ fn check_callable_invocation_contract(
     contract: &Expr,
     args: &[RuntimeValue],
     session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
+    present: Option<&[bool]>,
 ) -> Result<(), String> {
     let Some((_, params)) = checked_function_children(contract).and_then(<[Expr]>::split_last)
     else {
@@ -560,7 +561,7 @@ fn check_callable_invocation_contract(
         .map(|index| format!("arg{index}"))
         .collect::<Vec<_>>();
     let actualized =
-        actualize_tensor_entry_parameters(Some(params), &authored, args, &names, session)?;
+        actualize_tensor_entry_parameters(Some(params), &authored, args, &names, session, present)?;
     let mut entry_inputs = Vec::with_capacity(actualized.len());
     let mut entry_shapes: Vec<Vec<usize>> = Vec::with_capacity(actualized.len());
     for (parameter, ty, shape) in actualized {
@@ -577,6 +578,14 @@ fn check_callable_invocation_contract(
     )
 }
 
+struct EntryActual {
+    checked: Expr,
+    authored: Expr,
+    actual_type: TensorType,
+    path: String,
+    shape: Vec<usize>,
+}
+
 /// Rebuild tensor declarations, including List elements, at one invocation.
 ///
 /// Runtime shapes determine rank-spread widths and dtypes, but their extents
@@ -591,15 +600,8 @@ fn actualize_tensor_entry_parameters(
     args: &[RuntimeValue],
     names: &[String],
     session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
+    present: Option<&[bool]>,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
-    struct EntryActual {
-        checked: Expr,
-        authored: Expr,
-        actual_type: TensorType,
-        path: String,
-        shape: Vec<usize>,
-    }
-
     fn collect(
         pattern: &EntryPattern<Expr>,
         checked: Option<&Expr>,
@@ -683,7 +685,13 @@ fn actualize_tensor_entry_parameters(
     if args.len() != contract.formals().len() {
         return Err("host runtime: entry contract lost argument alignment".into());
     }
+    if present.is_some_and(|present| present.len() != args.len()) {
+        return Err("host runtime: selected-root entry lost argument presence".into());
+    }
     for (index, (formal, arg)) in contract.formals().iter().zip(args).enumerate() {
+        if present.is_some_and(|present| !present[index]) {
+            continue;
+        }
         collect(
             formal.pattern(),
             checked_params
@@ -1992,6 +2000,7 @@ impl<'a> EvalContext<'a> {
             &arg_type_exprs,
             result_type_expr.as_ref(),
             claims,
+            None,
         )
     }
 
@@ -2665,6 +2674,25 @@ impl<'a> EvalContext<'a> {
         self.apply_resolved_callable_with_arg_types(callable, args, &[], None)
     }
 
+    /// A selected Host root may have dead authored tensor parameters. Its
+    /// admission records which positional actuals exist; the Unit values in
+    /// absent slots supply closure arity and must never become tensor claims.
+    pub(super) fn apply_selected_root_callable(
+        &mut self,
+        callable: RuntimeValue,
+        args: Vec<RuntimeValue>,
+        present: &[bool],
+    ) -> Result<RuntimeValue, String> {
+        self.apply_resolved_callable_under_result_claim(
+            callable,
+            args,
+            &[],
+            None,
+            &[],
+            Some(present),
+        )
+    }
+
     /// Like [`Self::apply_resolved_callable`], but additionally records a
     /// static Deep type expression per argument into the callee frame's
     /// `binding_types` (chelis#338 named-axis routing). The closure's own
@@ -2683,6 +2711,7 @@ impl<'a> EvalContext<'a> {
             arg_type_exprs,
             result_type_expr,
             &[],
+            None,
         )
     }
 
@@ -2693,10 +2722,16 @@ impl<'a> EvalContext<'a> {
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
         claims: &[DeclaredResultClaim],
+        present: Option<&[bool]>,
     ) -> Result<RuntimeValue, String> {
         if let Some(contracts) = callable.invocation_contracts() {
             for contract in contracts {
-                check_callable_invocation_contract(contract, &args, self.session.as_ref())?;
+                check_callable_invocation_contract(
+                    contract,
+                    &args,
+                    self.session.as_ref(),
+                    present,
+                )?;
             }
         }
         self.apply_resolved_callable_with_arg_types_impl(
@@ -2705,6 +2740,7 @@ impl<'a> EvalContext<'a> {
             arg_type_exprs,
             result_type_expr,
             claims,
+            present,
         )
     }
 
@@ -2715,6 +2751,7 @@ impl<'a> EvalContext<'a> {
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
         inherited_claims: &[DeclaredResultClaim],
+        present: Option<&[bool]>,
     ) -> Result<RuntimeValue, String> {
         match callable {
             RuntimeValue::Closure {
@@ -2788,6 +2825,7 @@ impl<'a> EvalContext<'a> {
                         &args,
                         &params,
                         self.session.as_ref(),
+                        present,
                     )?;
                     let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
                     let mut entry_shapes: Vec<Vec<usize>> =
@@ -5398,6 +5436,7 @@ mod tensor_entry_actualization_tests {
             ],
             &names,
             None,
+            None,
         )
         .expect("scalar neighbors do not contaminate the rank-zero tensor formal");
         assert_eq!(
@@ -5421,6 +5460,7 @@ mod tensor_entry_actualization_tests {
                 RuntimeValue::int64(3),
             ],
             &names,
+            None,
             None,
         )
         .expect_err("the rank mismatch remains owned by the tensor at position one");

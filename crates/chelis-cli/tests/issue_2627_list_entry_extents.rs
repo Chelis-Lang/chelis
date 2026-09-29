@@ -108,6 +108,27 @@ fn unused_list_still_checks_all_elements_at_entry() {
 }
 
 #[test]
+fn recursive_carried_list_replays_its_result_witness_before_caller_effects() {
+    let source = "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+                  def f[n](xs: List[tensor[n, f32]], again: bool, bad: tensor[*, f32]) -> tensor[n, f32] =\n\
+                    if again then { y = f(xs, false, bad)\n\
+                                    _ = print(\"after inner\")\n\
+                                    y } else bad\n\
+                  out = f([hidden(to_tensor([1.0f32, 2.0f32]))], true, hidden(to_tensor([3.0f32, 4.0f32, 5.0f32])))\n";
+    for native in [false, true] {
+        let (ok, output) = result_claims::run(source, native);
+        assert!(!ok, "native={native}: {output}");
+        assert!(output.contains("extent `n`"), "native={native}: {output}");
+        assert!(
+            output.contains("numeric trap: domain in load at i64"),
+            "native={native}: {output}"
+        );
+        assert!(!output.contains("after inner"), "native={native}: {output}");
+        assert!(!output.contains("out ="), "native={native}: {output}");
+    }
+}
+
+#[test]
 fn list_witness_precedes_a_later_direct_parameter() {
     assert_both_trap(
         "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
