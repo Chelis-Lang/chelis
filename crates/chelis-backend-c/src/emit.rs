@@ -7745,6 +7745,17 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             },
             reduce_kind == "sum",
         );
+        if reduce_kind == "max" {
+            let empty = self.gated_check(&format!("t{id}_leaf_count == 0"));
+            let trap = NumericTrap::Domain {
+                op: "max_reduce",
+                prim: out_ty.precision,
+            }
+            .to_string();
+            self.line(&format!(
+                "if ({empty}) {{ chelis_numeric_trap({trap:?}); }}"
+            ));
+        }
         self.emit_slot_wrapper(id, out_ty);
         if reduce_kind == "sum" {
             self.line(&Self::fill_zero_call(out_ty, &format!("t{id}_write_guard")));

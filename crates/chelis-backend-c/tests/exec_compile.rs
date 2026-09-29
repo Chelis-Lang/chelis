@@ -7433,6 +7433,96 @@ fn direct_fused_max_reduce_runtime_shape_guard_precedes_allocation_and_executes(
     direct_fused_reduction_runtime_shape_guard_case("max");
 }
 
+/// #2634: an empty runtime axis must trap even when the producer was inlined
+/// into the C reduction. Both cases use the same generated entry.
+fn fused_max_reduce_runtime_axis_source() -> String {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let input_ty = TensorType {
+        dims: vec![DimInfo::Named("n".into(), None)],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        input_ty.clone(),
+        None,
+    );
+    let doubled = dag.add_node(decl, RiscOp::Add, vec![x, x], input_ty.clone(), None);
+    let exponentiated = dag.add_node(decl, RiscOp::Exp, vec![doubled], input_ty, None);
+    let reduced = dag.add_node(
+        decl,
+        RiscOp::MaxReduce { axis: 0 },
+        vec![exponentiated],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(reduced);
+    let fused = fuse(&dag);
+    let fused_node = fused
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::FusedElem { .. }))
+        .expect("the elementwise chain must fuse");
+    assert!(
+        chelis_ir::fuse::reduction_inlined_fused_elems(&fused).contains(&fused_node.id),
+        "the test must exercise the inlined reduction path"
+    );
+    codegen(&fused, "fused_max_empty_axis")
+        .expect("fused max_reduce codegen")
+        .c_source
+}
+
+fn fused_max_reduce_runtime_axis_harness(n: usize) -> String {
+    format!(
+        r#"{HARNESS_HEADER}
+extern void fused_max_empty_axis(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float values[2] = {{0.0f, 1.0f}};
+    chelis_tensor *x = make_view_1d(values, {n});
+    chelis_tensor *inputs[1] = {{x}};
+    chelis_tensor *outputs[1] = {{NULL}};
+    fused_max_empty_axis(inputs, 1, outputs, 1);
+    if ({n} == 0) {{ puts("UNREACHABLE"); return 2; }}
+    float result = ((const float *)chelis_tensor_read_view(outputs[0]).data)[0];
+    if (fabsf(result - expf(2.0f)) > 0.00001f) return 3;
+    puts("PASS");
+    return 0;
+}}
+"#
+    )
+}
+
+#[test]
+fn fused_max_reduce_nonempty_runtime_axis_returns_maximum() {
+    let source = fused_max_reduce_runtime_axis_source();
+    let harness = fused_max_reduce_runtime_axis_harness(2);
+    let output = compile_and_run_kernel("fused_max_nonempty", &source, &harness)
+        .expect("nonempty fused max_reduce must succeed");
+    assert!(output.contains("PASS"), "{output}");
+}
+
+#[test]
+fn fused_max_reduce_empty_runtime_axis_traps_domain() {
+    let source = fused_max_reduce_runtime_axis_source();
+    let harness = fused_max_reduce_runtime_axis_harness(0);
+    let run = compile_and_capture_run("fused_max_empty", &source, &harness);
+    assert!(!run.status.success(), "empty fused max_reduce returned");
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("numeric trap: domain in max_reduce at f32"),
+        "wrong empty-axis diagnostic: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&run.stdout).contains("UNREACHABLE"),
+        "empty fused max_reduce did not trap"
+    );
+}
+
 #[derive(Clone, Copy)]
 struct DirectExtremaBitCase<'a> {
     tag: &'a str,
