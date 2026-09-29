@@ -1490,18 +1490,12 @@ fn historical_numeric_prefix(value: &str) -> Option<&str> {
 }
 
 fn historical_nautilus_version(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("nautilus")?;
-    let inline = rest
-        .trim_start_matches([' ', '\t'])
-        .strip_prefix('=')?
-        .trim_start_matches([' ', '\t'])
-        .strip_prefix('{')?;
-    // The historical grep finds the first numeric `version = "X.Y.Z"` token
-    // anywhere on this same anchored line. Neither a closing brace nor a
-    // trailing comment/other inline field changes what it extracts. Parsed
-    // TOML independently owns the validity and meaning of the declaration.
-    for (index, _) in inline.match_indices("version") {
-        let Some(rest) = inline[index + "version".len()..]
+    let source = line.strip_prefix("nautilus")?;
+    // The historical pipeline selects the first numeric version token on
+    // any anchored `^nautilus` line, even an adjacent dependency name.
+    // Parsed TOML independently owns which dependency that value describes.
+    for (index, _) in source.match_indices("version") {
+        let Some(rest) = source[index + "version".len()..]
             .trim_start_matches([' ', '\t'])
             .strip_prefix('=')
             .and_then(|value| value.trim_start_matches([' ', '\t']).strip_prefix('"'))
@@ -1522,8 +1516,8 @@ fn historical_guard_sources(
     nautilus: Option<&str>,
 ) -> HistoricalGuardSources {
     // The pinned guard uses anchored raw grep lines, not TOML table lookups.
-    // A single compiler/nautilus source is a safe readable subset; for Coral
-    // package version the guard explicitly takes the first anchored match.
+    // A single compiler source is a safe readable subset; package and
+    // Nautilus sources use the first extractable grep match.
     fn unique<'a>(
         mut lines: impl Iterator<Item = &'a str>,
         parse: impl Fn(&'a str) -> Option<&'a str>,
@@ -1544,10 +1538,11 @@ fn historical_guard_sources(
             .find(|line| line.starts_with("version"))
             .and_then(|line| historical_quoted_version(line, "version", false))
             == package,
-        nautilus_matches: unique(
-            reef.lines().filter(|line| line.starts_with("nautilus")),
-            historical_nautilus_version,
-        ) == nautilus,
+        nautilus_matches: reef
+            .lines()
+            .filter(|line| line.starts_with("nautilus"))
+            .find_map(historical_nautilus_version)
+            == nautilus,
     }
 }
 
@@ -1744,15 +1739,19 @@ enum CentralWorkflowEvidence {
 /// and accepted commit revision are not interchangeable with other values.
 fn classify_central_reference(uses: &str) -> Option<CentralWorkflowReference> {
     let (owner, rest) = uses.split_once('/')?;
-    let (repository, workflow) = rest.split_once('/')?;
-    if !owner.eq_ignore_ascii_case("Chelis-Lang") || !repository.eq_ignore_ascii_case("ci") {
+    if !owner.eq_ignore_ascii_case("Chelis-Lang") {
         return None;
     }
-    let (path, revision) = workflow.split_once('@').unwrap_or((workflow, ""));
-    if path != CENTRAL_WORKFLOW_PATH {
+    let repository_end = rest.find(['/', '@']).unwrap_or(rest.len());
+    let (repository, suffix) = rest.split_at(repository_end);
+    if !repository.eq_ignore_ascii_case("ci") {
         return None;
     }
-    Some(if revision == KNOWN_LEGACY_CENTRAL_WORKFLOW_SHA {
+    let workflow = suffix.strip_prefix('/').unwrap_or("");
+    let known = workflow.split_once('@').is_some_and(|(path, revision)| {
+        path == CENTRAL_WORKFLOW_PATH && revision == KNOWN_LEGACY_CENTRAL_WORKFLOW_SHA
+    });
+    Some(if known {
         CentralWorkflowReference::Known
     } else {
         CentralWorkflowReference::Unrecognized

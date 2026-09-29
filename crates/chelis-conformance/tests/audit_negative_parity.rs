@@ -727,7 +727,7 @@ fn historical_non_ci_profiles_require_their_raw_reef_sources() {
 }
 
 #[test]
-fn historical_coral_inline_nautilus_source_accepts_grep_readable_suffixes() {
+fn historical_coral_source_uses_first_grep_readable_nautilus_version() {
     for profile in ["coral-ci", "coral-release"] {
         let tmp = tempfile::tempdir().unwrap();
         let root = stamp(tmp.path(), "coral");
@@ -759,10 +759,22 @@ fn historical_coral_inline_nautilus_source_accepts_grep_readable_suffixes() {
             "nautilus = { version = \"4.5.6\" } # pin",
             "nautilus = { version = \"4.5.6\", features = [\"x\"] }",
             "nautilus = { features = [\"x\"], version = \"4.5.6\" }",
+            "nautilus = { version = \"4.5.6\" }\nnautilus-addons = { version = \"0.1.0\" }",
+            "nautilus-addons = { version = \"4.5.6\" }\nnautilus = { version = \"4.5.6\" }",
         ] {
             std::fs::write(&manifest, valid.replace(original, inline)).unwrap();
             let report = audit::audit(&root);
-            for row in ["workflow-env-pins", "toolchain-installer"] {
+            let rows: &[&str] = if profile == "coral-ci" {
+                &[
+                    "workflow-env-pins",
+                    "toolchain-installer",
+                    "pin-consistency-guard",
+                    "tests-neg",
+                ]
+            } else {
+                &["workflow-env-pins", "toolchain-installer"]
+            };
+            for row in rows {
                 assert_eq!(
                     verdict_of(&report, row),
                     Verdict::Pass,
@@ -774,6 +786,7 @@ fn historical_coral_inline_nautilus_source_accepts_grep_readable_suffixes() {
             "[dependencies.nautilus]\nversion = \"4.5.6\"",
             "nautilus = { extra_version = \"9.9.9\", version = \"4.5.6\" }",
             "nautilus = { version = \"4.5.6\"",
+            "nautilus-addons = { version = \"0.1.0\" }\nnautilus = { version = \"4.5.6\" }",
         ] {
             std::fs::write(&manifest, valid.replace(original, unreadable)).unwrap();
             let report = audit::audit(&root);
@@ -783,6 +796,15 @@ fn historical_coral_inline_nautilus_source_accepts_grep_readable_suffixes() {
                 "{profile}: {unreadable} must not certify the historical raw source"
             );
             assert_ne!(verdict_of(&report, "toolchain-installer"), Verdict::Pass);
+            if profile == "coral-ci" {
+                for row in ["pin-consistency-guard", "tests-neg"] {
+                    assert_eq!(
+                        verdict_of(&report, row),
+                        Verdict::Fail,
+                        "{unreadable}: {row}"
+                    );
+                }
+            }
         }
     }
 }
@@ -909,39 +931,67 @@ fn unrecognized_release_wrapper_cannot_hide_behind_known_ci_profile() {
 }
 
 #[test]
-fn mixed_central_revisions_cannot_hide_behind_github_repository_casing() {
+fn mixed_central_repository_paths_and_revisions_cannot_hide_behind_known_ci() {
     for package in ["coral", "nautilus"] {
-        for (repository, revision) in [
-            ("chelis-lang/ci", "main"),
-            ("CHELIS-LANG/CI", "31ab77c35018d72bccdcae8d7330b25312a38114"),
-            ("Chelis-Lang/CI", "main"),
-            ("cHeLiS-lAnG/cI", "31ab77c35018d72bccdcae8d7330b25312a38114"),
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        std::fs::write(
+            root.join(".github/workflows/ci.yml"),
+            central_ci_wrapper(package, VER),
+        )
+        .unwrap();
+        let release = central_profile_wrapper(
+            &format!("{package}-release"),
+            &[format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+        );
+        let other = root.join(".github/workflows/other.yml");
+        std::fs::write(&other, &release).unwrap();
+        let accepted = audit::audit(&root);
+        assert_eq!(
+            verdict_of(&accepted, "workflow-env-pins"),
+            Verdict::Pass,
+            "{package}: the accepted workflow path and revision must pass"
+        );
+        assert!(
+            accepted.ok(),
+            "{package}: valid CI and release callers must audit green"
+        );
+
+        for (repository, path, revision) in [
+            ("chelis-lang/ci", ".github/workflows/consumer.yml", "main"),
+            (
+                "CHELIS-LANG/CI",
+                ".github/workflows/consumer.yml",
+                "31ab77c35018d72bccdcae8d7330b25312a38114",
+            ),
+            ("Chelis-Lang/CI", ".github/workflows/consumer.yml", "main"),
+            (
+                "cHeLiS-lAnG/cI",
+                ".github/workflows/consumer.yml",
+                "31ab77c35018d72bccdcae8d7330b25312a38114",
+            ),
+            ("Chelis-Lang/ci", ".github/workflows/consumer.yaml", "main"),
+            (
+                "CHELIS-LANG/CI",
+                ".github/workflows/consumer.yaml",
+                CENTRAL_SHA,
+            ),
+            ("chelis-lang/ci", ".github/workflows/other.yml", CENTRAL_SHA),
         ] {
-            let tmp = tempfile::tempdir().unwrap();
-            let root = stamp(tmp.path(), package);
-            std::fs::write(
-                root.join(".github/workflows/ci.yml"),
-                central_ci_wrapper(package, VER),
-            )
-            .unwrap();
-            let release = central_profile_wrapper(
-                &format!("{package}-release"),
-                &[format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
-            )
-            .replace(
+            let unrecognized = release.replace(
                 &format!("Chelis-Lang/ci/.github/workflows/consumer.yml@{CENTRAL_SHA}"),
-                &format!("{repository}/.github/workflows/consumer.yml@{revision}"),
+                &format!("{repository}/{path}@{revision}"),
             );
-            std::fs::write(root.join(".github/workflows/other.yml"), release).unwrap();
+            std::fs::write(&other, unrecognized).unwrap();
             let report = audit::audit(&root);
             assert_eq!(
                 verdict_of(&report, "workflow-env-pins"),
                 Verdict::Fail,
-                "{package}: {repository}@{revision} is an unaccepted central pointer"
+                "{package}: {repository}/{path}@{revision} is an unaccepted central pointer"
             );
             assert!(
                 !report.ok(),
-                "{package}: another valid CI caller must not conceal {repository}@{revision}"
+                "{package}: known CI must not conceal {repository}/{path}@{revision}"
             );
         }
     }

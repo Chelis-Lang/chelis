@@ -116,9 +116,9 @@ even if another workflow invokes the known legacy revision.
 Central workflow references use GitHub's case-insensitive owner/repository
 identity; the `.github/workflows/consumer.yml` path and accepted commit
 revision stay exact. A job-level `uses` pointing at the same central
-repository with a mutable or different revision fails the workflow-pin row
-even if another job calls the known revision. Comments and run strings are
-not central callers.
+repository with any other workflow path, mutable ref, or different revision
+fails the workflow-pin row even if another job calls the known revision.
+Comments and run strings are not central callers.
 The offline auditor reads YAML jobs structurally, independent of indentation
 width or quoted keys, and resolves aliases before deciding whether a job
 calls that central workflow. Duplicate keys or malformed YAML fail closed.
@@ -136,12 +136,15 @@ Nautilus sources; `nautilus-release` requires compiler and package;
 `nautilus-ci` and `nautilus-nightly` require compiler. Release callers have
 no `chelis-version` or `chelis-tag` inputs, but their asset jobs still grep
 the raw compiler line under pipefail. The compiler source is an unindented
-`compiler = "=X.Y.Z"` line, package is the first unindented
-`version = "X.Y.Z"` source, and Coral's Nautilus source is an unindented
-same-line `nautilus = { version = "X.Y.Z" }` declaration. That line may
-have other valid inline fields or a trailing comment when its first numeric
-`version` token is the parsed dependency version; a separate
-`[dependencies.nautilus]` table is not readable by the historical grep.
+`compiler = "=X.Y.Z"` line, and package is the first unindented
+`version = "X.Y.Z"` source. Coral's Nautilus source is the first numeric
+`version = "X.Y.Z"` token on any unindented line beginning `nautilus`,
+including an adjacent dependency such as `nautilus-addons`: a later line
+cannot replace an earlier extractable token. That first raw token must match
+the parsed `[dependencies].nautilus.version` and any caller input. When its
+own line supplies the token, the valid inline `nautilus` dependency may
+include other fields or a trailing comment; a separate
+`[dependencies.nautilus]` table does not itself supply a raw grep match.
 Every required raw source must agree with parsed TOML and any caller input
 for that profile. This narrow 439 rule does not constrain newer central
 profiles or the shell's own TOML interpretation.
