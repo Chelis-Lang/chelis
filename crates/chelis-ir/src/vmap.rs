@@ -1,6 +1,8 @@
 use chelis_unord::{UnordMap, UnordSet};
 
-use crate::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
+use crate::dag::{
+    Dag, DimExpr, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim, TensorType,
+};
 
 pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
     vectorize_axis0_with_node_map(dag, batch_dim).map(|(batched, _)| batched)
@@ -184,7 +186,7 @@ fn vectorize_axis0_impl(
                     .chain(strides.iter().map(shift_input_axis))
                     .collect(),
             },
-            RiscOp::Shape { axis } if shared => RiscOp::Shape { axis: axis + 1 },
+            RiscOp::Shape { axis } => RiscOp::Shape { axis: axis + 1 },
             RiscOp::ExtentWitness {
                 site,
                 parameter,
@@ -214,7 +216,9 @@ fn vectorize_axis0_impl(
                                 .expect("vmap local claim axis fits int32"),
                         ),
                     },
-                    other => other.clone(),
+                    ExtentWitnessSite::LiteralResultClaim
+                    | ExtentWitnessSite::Caller
+                    | ExtentWitnessSite::LocalExpand => site.clone(),
                 },
                 parameter: parameter.clone(),
                 axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits i32")),
@@ -235,8 +239,101 @@ fn vectorize_axis0_impl(
             } => RiscOp::CheckedUnitAxis {
                 axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits i32")),
             },
-            RiscOp::Load { name } => RiscOp::Load { name: name.clone() },
-            other => other.clone(),
+            // Sparse operands acquire a leading batch axis, so the authored
+            // target axis moves one position to the right. Index values are
+            // unchanged and stay local to each row.
+            RiscOp::Gather { axis, batch_rank } => RiscOp::Gather {
+                axis: axis + 1,
+                batch_rank: batch_rank + 1,
+            },
+            RiscOp::ScatterAdd { axis, batch_rank } => RiscOp::ScatterAdd {
+                axis: axis + 1,
+                batch_rank: batch_rank + 1,
+            },
+            RiscOp::Scatter { axis, batch_rank } => RiscOp::Scatter {
+                axis: axis + 1,
+                batch_rank: batch_rank + 1,
+            },
+            RiscOp::ScatterElements { axis } => RiscOp::ScatterElements { axis: axis + 1 },
+            // OneHot has no target axis: it appends vocab after every index
+            // axis, so prepending batch to the indices also prepends it to
+            // the result while leaving vocab last.
+            RiscOp::OneHot { vocab } => RiscOp::OneHot { vocab: *vocab },
+            RiscOp::SplitN { count } => RiscOp::SplitN {
+                count: shift_input_axis(count),
+            },
+            RiscOp::BlasMatmul {
+                batch_dims,
+                m,
+                n,
+                k,
+                accumulator,
+            } => RiscOp::BlasMatmul {
+                batch_dims: std::iter::once(match &batch_dim {
+                    DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => DimExpr::Concrete(*size),
+                    DimInfo::Named(name, None) => DimExpr::Sym(name.clone()),
+                })
+                .chain(batch_dims.iter().cloned())
+                .collect(),
+                m: m.clone(),
+                n: n.clone(),
+                k: k.clone(),
+                accumulator: *accumulator,
+            },
+            // These operations are pointwise, preserve their non-axis
+            // parameters, or use only trailing axes, so the added leading
+            // batch axis passes through them unchanged. Keep this list
+            // exhaustive: a new RiscOp needs an explicit batching rule.
+            RiscOp::Add
+            | RiscOp::Sub
+            | RiscOp::Mul
+            | RiscOp::Div
+            | RiscOp::FloorDiv
+            | RiscOp::TruncDiv
+            | RiscOp::Mod
+            | RiscOp::Bitwise(_)
+            | RiscOp::Compare(_)
+            | RiscOp::Logical(_)
+            | RiscOp::Where
+            | RiscOp::GuardedFail { .. }
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::ExtremaAdjoint { .. }
+            | RiscOp::Relu
+            | RiscOp::ReluAdjoint
+            | RiscOp::Neg
+            | RiscOp::Exp
+            | RiscOp::Log
+            | RiscOp::Sin
+            | RiscOp::Sqrt
+            | RiscOp::Cos
+            | RiscOp::Tan
+            | RiscOp::Atan
+            | RiscOp::Abs
+            | RiscOp::Floor
+            | RiscOp::Ceil
+            | RiscOp::Round
+            | RiscOp::Recip
+            | RiscOp::UniformLike
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::KeyFromSeed
+            | RiscOp::Split { .. }
+            | RiscOp::FoldIn
+            | RiscOp::KeySelect
+            | RiscOp::ReduceWindow { .. }
+            | RiscOp::ReduceWindowGrad { .. }
+            | RiscOp::Const { .. }
+            | RiscOp::ConstTensor { .. }
+            | RiscOp::Load { .. }
+            | RiscOp::Store { .. }
+            | RiscOp::Copy
+            | RiscOp::Drop
+            | RiscOp::Realize
+            | RiscOp::Cast { .. }
+            | RiscOp::CastTrunc { .. }
+            | RiscOp::FusedElem { .. } => node.op.clone(),
         };
 
         // The activation maps like a value input: an `if` over a row makes
@@ -578,7 +675,7 @@ fn shift_input_axis(dim: &RtDim) -> RtDim {
             tensor: *tensor,
             axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits i32")),
         },
-        other => other.clone(),
+        RtDim::Lit(_) | RtDim::ToEnd | RtDim::Node(_) | RtDim::Sym(_) => dim.clone(),
     }
 }
 

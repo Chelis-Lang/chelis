@@ -1315,8 +1315,10 @@ first-class unary primitive `RiscOp::Cos` (see §2.2), alongside `tan`,
 | `where(cond, a, b)` | Element-wise selection of `a` where `cond` is true and `b` where it is false; the boolean condition is not converted to or combined through a numeric dtype |
 
 The sparse operations lower to the first-class
-IR nodes `RiscOp::Gather { axis }`, `RiscOp::ScatterAdd { axis }`,
-`RiscOp::Scatter { axis }`, and `RiscOp::ScatterElements { axis }` (the
+IR nodes `RiscOp::Gather { axis, batch_rank }`,
+`RiscOp::ScatterAdd { axis, batch_rank }`,
+`RiscOp::Scatter { axis, batch_rank }`, and
+`RiscOp::ScatterElements { axis }` (the
 element-wise ONNX `ScatterElements`, §3.5.1). Tensor-lane Surf
 `gather(values, indices, axis)` lowers directly to `RiscOp::Gather`, not to a
 host-runtime call or dense one-hot materialization. The tensor-lane Surf
@@ -1325,7 +1327,9 @@ builtin `scatter_replace(base, indices, updates, axis)` lowers directly to
 also recognizes the internal `RiscOp::OneHot { vocab } + Expand + Mul + Sum`
 gather tree and collapses it before DCE/codegen. Arbitrary const/eq
 one-hot encodings are not recognized because they do not preserve the original
-index operand.
+index operand. The authored forms have `batch_rank = 0`. Batching pairs each
+leading data and index axis through `batch_rank` and inserts only the remaining
+index axes at `axis`; each paired axis occurs once in the result or update shape.
 
 #### Replace-scatter vs scatter-add
 
@@ -1340,8 +1344,8 @@ index operand.
 
 `Scatter` and `ScatterAdd` are intentionally distinct primitives. Both
 take inputs `(target, indices, updates)` with the same shape contract
-(updates shape equals `target.dims[..axis] ++ indices.dims ++
-target.dims[axis+1..]`) and the same precision constraints
+(updates shape equals `target.dims[..axis] ++
+indices.dims[batch_rank..] ++ target.dims[axis+1..]`) and the same precision constraints
 (any one active signed-integer index dtype; target/updates/output precision
 identical).
 They differ only in how duplicate target indices are resolved and in
@@ -1355,8 +1359,8 @@ their AD policies:
 
 | Op | Duplicate-index semantics | AD adjoint |
 |---|---|---|
-| `ScatterAdd { axis }` | commutative accumulation (`+=`) | `Gather { axis }` — duplicate indices fan-out correctly |
-| `Scatter { axis }` | last-write-wins (deterministic order rule below) | **no_grad** — fail-closed with `AdError::NotSupported` |
+| `ScatterAdd { axis, batch_rank }` | commutative accumulation (`+=`) | `Gather { axis, batch_rank }` — duplicate indices fan-out correctly |
+| `Scatter { axis, batch_rank }` | last-write-wins (deterministic order rule below) | **no_grad** — fail-closed with `AdError::NotSupported` |
 
 **Deterministic-order rule for `Scatter`:** updates-tensor row-major
 (C order) flat iteration. For each `i ∈ 0..updates.size` in
@@ -2337,13 +2341,18 @@ exact ADT identity by [05-OP-34].
 >
 > `chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)
 > update metadata before output allocation or reuse. Its exact tagged i64 axis
-> normalizes once against the base rank. The closed `chelis_sparse_op` identifies
-> gather, scatter-add, replace-scatter, or element-wise scatter; canonical numeric
+> normalizes once against the base rank. The nonnegative `chelis_sparse_op`
+> value has one of four operation kinds in its low two bits and a paired
+> leading batch-axis count in its remaining bits. The unbatched forms have
+> count zero. Element-wise scatter requires count zero because it already
+> pairs every non-scattered coordinate. Canonical numeric
 > failure identities are respectively `gather`, `scatter`, `scatter_replace`, and
 > `scatter_elements`. Index tensors have an active signed-integer dtype. Scatter
 > updates have the base dtype and the exact section 3.5 shape, including every
 > dimension of an empty tensor. Gather supplies no update tensor. Hyperplane
-> iteration replaces the base axis with the complete index shape; element-wise
+> iteration replaces the base axis with the index shape after its paired
+> batch prefix; the batch prefix of the base and index shapes is equal
+> and occurs once in the iteration shape. Element-wise
 > iteration has the index shape and validates every non-scattered bound.
 > Counts, strides, representation bytes, and target projection are checked before
 > the independently owned opaque plan is returned.

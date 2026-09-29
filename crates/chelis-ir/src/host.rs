@@ -7049,9 +7049,27 @@ fn try_summarize_sparse_helper(
         }));
     }
     let root_kind = root_sparse_kind.expect("root_sparse_kind is Some by guard");
+    // The host helper summary carries only an authored axis. A transformed
+    // sparse op also needs its paired batch prefix; let the ordinary IR C
+    // emitter handle that operation instead of erasing the prefix here.
+    if matches!(
+        root.op,
+        RiscOp::Gather {
+            batch_rank: 1..,
+            ..
+        } | RiscOp::ScatterAdd {
+            batch_rank: 1..,
+            ..
+        } | RiscOp::Scatter {
+            batch_rank: 1..,
+            ..
+        }
+    ) {
+        return Err(SparseSummaryAttempt::NotEligible);
+    }
 
     match &root.op {
-        RiscOp::Gather { axis } => {
+        RiscOp::Gather { axis, .. } => {
             // Inputs: [values, indices].
             if root.inputs.len() != 2 {
                 return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
@@ -7128,7 +7146,7 @@ fn try_summarize_sparse_helper(
                 },
             ))
         }
-        RiscOp::ScatterAdd { axis } | RiscOp::Scatter { axis } => {
+        RiscOp::ScatterAdd { axis, .. } | RiscOp::Scatter { axis, .. } => {
             // Inputs: [target, indices, updates].
             if root.inputs.len() != 3 {
                 return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {

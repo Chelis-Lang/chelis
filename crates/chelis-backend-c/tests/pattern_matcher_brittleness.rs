@@ -295,10 +295,13 @@ fn internal_one_hot_gather_tree_specializes_to_sparse_gather() {
 
     let specialized = specialize_for_blas(&dag);
     assert!(
-        specialized
-            .nodes()
-            .iter()
-            .any(|node| matches!(node.op, RiscOp::Gather { axis: 0 })),
+        specialized.nodes().iter().any(|node| matches!(
+            node.op,
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0
+            }
+        )),
         "the IR specialize pass must collapse the internal dense gather tree \
          to first-class sparse Gather"
     );

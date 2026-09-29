@@ -602,6 +602,8 @@ pub struct SparseMetadata {
     elementwise: bool,
     inner: ElementCount,
     source_axis: AxisDecomposition,
+    index_per_batch: ElementCount,
+    base_outer_per_batch: ElementCount,
 }
 
 impl SparseMetadata {
@@ -611,8 +613,33 @@ impl SparseMetadata {
         axis: i64,
         elementwise: bool,
     ) -> Result<Self, MetadataError> {
+        Self::new_paired(base, indices, axis, elementwise, 0)
+    }
+
+    pub fn new_paired(
+        base: &ShapeMetadata,
+        indices: &ShapeMetadata,
+        axis: i64,
+        elementwise: bool,
+        batch_rank: usize,
+    ) -> Result<Self, MetadataError> {
         let axis = base.normalize_axis(axis)?;
+        if batch_rank > axis
+            || batch_rank > indices.shape().len()
+            || base.shape()[..batch_rank] != indices.shape()[..batch_rank]
+        {
+            return Err(MetadataError::Domain(
+                "invalid paired sparse batch prefix".into(),
+            ));
+        }
+        let index_per_batch = ElementCount::from_extents(&indices.shape()[batch_rank..])?;
+        let base_outer_per_batch = ElementCount::from_extents(&base.shape()[batch_rank..axis])?;
         let shape = if elementwise {
+            if batch_rank != 0 {
+                return Err(MetadataError::Domain(
+                    "element-wise sparse plan has no paired batch prefix".into(),
+                ));
+            }
             if base.shape().len() != indices.shape().len()
                 || base
                     .shape()
@@ -630,14 +657,14 @@ impl SparseMetadata {
             let rank = base
                 .shape()
                 .len()
-                .checked_sub(1)
+                .checked_sub(1 + batch_rank)
                 .and_then(|rank| rank.checked_add(indices.shape().len()))
                 .ok_or(MetadataError::Overflow("sparse domain rank overflow"))?;
             ShapeMetadata::checked_rank(rank)?;
             ElementCount::scratch_entries(rank, 0)?.scratch_len::<i64>()?;
             base.shape()[..axis]
                 .iter()
-                .chain(indices.shape().iter())
+                .chain(indices.shape()[batch_rank..].iter())
                 .chain(base.shape()[axis + 1..].iter())
                 .copied()
                 .collect()
@@ -657,6 +684,8 @@ impl SparseMetadata {
             elementwise,
             inner,
             source_axis: base.axis_decomposition(axis)?,
+            index_per_batch,
+            base_outer_per_batch,
         })
     }
 
@@ -671,7 +700,10 @@ impl SparseMetadata {
         Ok(if self.elementwise {
             linear
         } else {
-            linear / self.inner.get() % self.indices.elements().get()
+            (linear / self.inner.get() / self.index_per_batch.get())
+                / self.base_outer_per_batch.get()
+                * self.index_per_batch.get()
+                + linear / self.inner.get() % self.index_per_batch.get()
         })
     }
     pub fn data_index(&self, linear: i64, selected: i64) -> Result<i64, MetadataError> {
@@ -699,7 +731,7 @@ impl SparseMetadata {
             self.base.require_index(offset)?;
             Ok(offset)
         } else {
-            let outer = linear / self.inner.get() / self.indices.elements().get();
+            let outer = linear / self.inner.get() / self.index_per_batch.get();
             let inner = linear % self.inner.get();
             let offset = self.source_axis.linear_index(
                 usize::try_from(outer)

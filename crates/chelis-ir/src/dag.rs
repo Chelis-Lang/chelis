@@ -1212,12 +1212,16 @@ pub enum RiscOp {
     /// AD has run. Inputs are `values, indices`.
     Gather {
         axis: usize,
+        /// Leading axes paired positionwise between values and indices.
+        /// They occur once in the result, never once per operand.
+        batch_rank: usize,
     },
 
     /// Sparse scatter-add used by gather's adjoint. Inputs are
     /// `target, indices, updates`; duplicate indices accumulate.
     ScatterAdd {
         axis: usize,
+        batch_rank: usize,
     },
 
     /// Sparse replace-scatter (last-write-wins). Inputs are
@@ -1237,6 +1241,7 @@ pub enum RiscOp {
     /// `ScatterAdd` (whose adjoint is well-defined as `Gather`).
     Scatter {
         axis: usize,
+        batch_rank: usize,
     },
 
     /// Element-wise replace-scatter with ONNX `ScatterElements`
@@ -4811,9 +4816,18 @@ mod tests {
                 k: DimExpr::Concrete(2),
                 accumulator: Prim::F32,
             },
-            RiscOp::Gather { axis: 0 },
-            RiscOp::ScatterAdd { axis: 0 },
-            RiscOp::Scatter { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
+            RiscOp::Scatter {
+                axis: 0,
+                batch_rank: 0,
+            },
             RiscOp::ScatterElements { axis: 0 },
             RiscOp::Relu,
             RiscOp::ReluAdjoint,

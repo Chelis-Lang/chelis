@@ -147,6 +147,9 @@ fn axis_graph(kind: &str) -> Value {
         }
     }
     let mut op = json!({"kind":kind,"axis":0});
+    if matches!(kind, "gather" | "scatter" | "scatter_add") {
+        op["batch_rank"] = json!(0);
+    }
     if kind == "sum" {
         op["accumulator"] = json!("f32");
     }
@@ -166,6 +169,54 @@ fn axis_graph(kind: &str) -> Value {
     output["inputs"] = json!((0..id).collect::<Vec<_>>());
     nodes.push(output);
     json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":[id]})
+}
+
+#[test]
+fn paired_sparse_batch_axes_are_explicit_and_match_index_prefix() {
+    for kind in ["gather", "scatter_add", "scatter"] {
+        let mut nodes = vec![
+            typed_load(0, "data", &[5, 2, 3], "f32"),
+            typed_load(1, "indices", &[5, 1], "int64"),
+        ];
+        if kind != "gather" {
+            nodes.push(typed_load(2, "updates", &[5, 1, 3], "f32"));
+        }
+        let id = nodes.len() as u64;
+        let mut result = typed_load(
+            id,
+            "unused",
+            if kind == "gather" {
+                &[5, 1, 3]
+            } else {
+                &[5, 2, 3]
+            },
+            "f32",
+        );
+        result["op"] = json!({"kind":kind,"axis":1,"batch_rank":1});
+        result["inputs"] = json!((0..id).collect::<Vec<_>>());
+        nodes.push(result);
+        let valid = json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":[id]});
+        assert!(admits(&valid), "{kind}: paired batch rejected");
+
+        for batch_rank in [json!(2), json!(3), json!(-1), json!(1.0)] {
+            let mut changed = valid.clone();
+            changed["nodes"][id as usize]["op"]["batch_rank"] = batch_rank;
+            assert!(!admits(&changed), "{kind}: invalid batch rank accepted");
+        }
+        let mut missing = valid.clone();
+        missing["nodes"][id as usize]["op"]
+            .as_object_mut()
+            .unwrap()
+            .remove("batch_rank");
+        assert!(!admits(&missing), "{kind}: missing batch rank accepted");
+
+        let mut mismatched = valid.clone();
+        mismatched["nodes"][1]["output_type"]["dims"][0]["size"] = json!(4);
+        assert!(
+            !admits(&mismatched),
+            "{kind}: mismatched batch prefix accepted"
+        );
+    }
 }
 
 #[test]
@@ -215,9 +266,9 @@ fn every_registered_single_axis_operation_checks_its_own_input_rank() {
             | WireRiscOp::Argmax { axis }
             | WireRiscOp::Argmin { axis }
             | WireRiscOp::Shape { axis }
-            | WireRiscOp::Gather { axis }
-            | WireRiscOp::ScatterAdd { axis }
-            | WireRiscOp::Scatter { axis }
+            | WireRiscOp::Gather { axis, .. }
+            | WireRiscOp::ScatterAdd { axis, .. }
+            | WireRiscOp::Scatter { axis, .. }
             | WireRiscOp::ScatterElements { axis } => axis,
             other => panic!("wrong fixture: {other:?}"),
         };

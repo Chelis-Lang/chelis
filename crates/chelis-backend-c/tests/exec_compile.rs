@@ -764,7 +764,10 @@ fn checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers() {
         ] {
             for (op, base_shape, output_shape, selected, map) in [
                 (
-                    RiscOp::Gather { axis: 1 },
+                    RiscOp::Gather {
+                        axis: 1,
+                        batch_rank: 0,
+                    },
                     vec![2, 3, 2],
                     vec![2, 2, 2, 2],
                     "2,0,1,2",
@@ -772,7 +775,10 @@ fn checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers() {
                 ),
                 // Negative map entries select unchanged base cells (-index-1).
                 (
-                    RiscOp::Scatter { axis: 1 },
+                    RiscOp::Scatter {
+                        axis: 1,
+                        batch_rank: 0,
+                    },
                     vec![2, 3, 2],
                     vec![2, 3, 2],
                     "2,0,2,0",
@@ -913,9 +919,27 @@ fn checked_c_sparse_empty_and_invalid_domains_execute_under_sanitizers() {
         precision,
     };
     for (op, diagnostic) in [
-        (RiscOp::Gather { axis: 1 }, "gather"),
-        (RiscOp::ScatterAdd { axis: 1 }, "scatter"),
-        (RiscOp::Scatter { axis: 1 }, "scatter_replace"),
+        (
+            RiscOp::Gather {
+                axis: 1,
+                batch_rank: 0,
+            },
+            "gather",
+        ),
+        (
+            RiscOp::ScatterAdd {
+                axis: 1,
+                batch_rank: 0,
+            },
+            "scatter",
+        ),
+        (
+            RiscOp::Scatter {
+                axis: 1,
+                batch_rank: 0,
+            },
+            "scatter_replace",
+        ),
         (RiscOp::ScatterElements { axis: 1 }, "scatter_elements"),
     ] {
         for (empty, selected) in [(true, 0), (false, -1), (false, 3), (false, 2)] {

@@ -1467,7 +1467,10 @@ pub fn lower_conv(
     let windows = add_synth(
         owner,
         dag,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![flat, index_node],
         ty(&matrix_shape, precision),
         parent_span,

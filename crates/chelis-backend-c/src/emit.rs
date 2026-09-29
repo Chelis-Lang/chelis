@@ -167,6 +167,12 @@ enum SparseEmission {
 }
 
 #[derive(Clone, Copy)]
+struct SparseAxes {
+    axis: usize,
+    batch_rank: usize,
+}
+
+#[derive(Clone, Copy)]
 enum UnaryEmission {
     Neg,
 }
@@ -1782,17 +1788,57 @@ impl CEmitter {
                     &node.output_type,
                 );
             }
-            RiscOp::Gather { axis } => {
-                self.emit_sparse_gather(id, *axis, &node.inputs, &node.output_type, dag);
+            RiscOp::Gather { axis, batch_rank } => {
+                self.emit_sparse_checked(
+                    id,
+                    SparseAxes {
+                        axis: *axis,
+                        batch_rank: *batch_rank,
+                    },
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
+                    SparseEmission::Gather,
+                );
             }
-            RiscOp::ScatterAdd { axis } => {
-                self.emit_sparse_scatter_add(id, *axis, &node.inputs, &node.output_type, dag);
+            RiscOp::ScatterAdd { axis, batch_rank } => {
+                self.emit_sparse_checked(
+                    id,
+                    SparseAxes {
+                        axis: *axis,
+                        batch_rank: *batch_rank,
+                    },
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
+                    SparseEmission::Add,
+                );
             }
-            RiscOp::Scatter { axis } => {
-                self.emit_sparse_scatter_replace(id, *axis, &node.inputs, &node.output_type, dag);
+            RiscOp::Scatter { axis, batch_rank } => {
+                self.emit_sparse_checked(
+                    id,
+                    SparseAxes {
+                        axis: *axis,
+                        batch_rank: *batch_rank,
+                    },
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
+                    SparseEmission::Replace,
+                );
             }
             RiscOp::ScatterElements { axis } => {
-                self.emit_sparse_scatter_elements(id, *axis, &node.inputs, &node.output_type, dag);
+                self.emit_sparse_checked(
+                    id,
+                    SparseAxes {
+                        axis: *axis,
+                        batch_rank: 0,
+                    },
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
+                    SparseEmission::Elements,
+                );
             }
         }
         self.close_inactive_zeros(node)
@@ -6245,56 +6291,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("chelis_matmul_plan_release(t{id}_matmul);"));
     }
 
-    fn emit_sparse_gather(
-        &mut self,
-        id: usize,
-        axis: usize,
-        inputs: &[NodeId],
-        ty: &TensorType,
-        dag: VerifiedDagView<'_>,
-    ) {
-        self.emit_sparse_checked(id, axis, inputs, ty, dag, SparseEmission::Gather);
-    }
-
-    fn emit_sparse_scatter_add(
-        &mut self,
-        id: usize,
-        axis: usize,
-        inputs: &[NodeId],
-        ty: &TensorType,
-        dag: VerifiedDagView<'_>,
-    ) {
-        self.emit_sparse_checked(id, axis, inputs, ty, dag, SparseEmission::Add);
-    }
-
-    fn emit_sparse_scatter_replace(
-        &mut self,
-        id: usize,
-        axis: usize,
-        inputs: &[NodeId],
-        ty: &TensorType,
-        dag: VerifiedDagView<'_>,
-    ) {
-        self.emit_sparse_checked(id, axis, inputs, ty, dag, SparseEmission::Replace);
-    }
-
-    fn emit_sparse_scatter_elements(
-        &mut self,
-        id: usize,
-        axis: usize,
-        inputs: &[NodeId],
-        ty: &TensorType,
-        dag: VerifiedDagView<'_>,
-    ) {
-        self.emit_sparse_checked(id, axis, inputs, ty, dag, SparseEmission::Elements);
-    }
-
     /// Validate the whole iteration shape before storage submission; each loop
     /// position then obtains both its index slot and base offset from that plan.
     fn emit_sparse_checked(
         &mut self,
         id: usize,
-        axis: usize,
+        axes: SparseAxes,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
@@ -6318,7 +6320,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         });
         let index_element = Self::elem_type(&dag.get(inputs[1]).unwrap().output_type);
         let element = Self::elem_type(ty);
-        self.line(&format!("chelis_sparse_plan *t{id}_sparse = chelis_tensor_sparse_plan(t{base}, t{indices}, {updates_arg}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}), {operation});"));
+        self.line(&format!("chelis_sparse_plan *t{id}_sparse = chelis_tensor_sparse_plan(t{base}, t{indices}, {updates_arg}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {operation} + 4 * {});", axes.axis, axes.batch_rank));
         let extents = (0..ty.dims.len()).map(|axis| (axis, format!("chelis_sparse_extent(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"))).collect::<Vec<_>>();
         self.emit_runtime_dim_sites(id, &extents);
         let rank = ty.dims.len();
@@ -10952,7 +10954,10 @@ mod tests {
         );
         dag.add_node(
             decl,
-            RiscOp::Gather { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![values, indices],
             tensor_ty(&[3, 2], Prim::F64),
             None,
@@ -10989,7 +10994,10 @@ mod tests {
         );
         dag.add_node(
             decl,
-            RiscOp::Gather { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![values, indices],
             tensor_ty(&[128, 1024], Prim::F32),
             None,
@@ -11031,7 +11039,10 @@ mod tests {
         );
         dag.add_node(
             decl,
-            RiscOp::Gather { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![values, indices],
             tensor_ty(&[3, 2], Prim::F32),
             None,
@@ -11073,7 +11084,10 @@ mod tests {
         );
         dag.add_node(
             decl,
-            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![target, indices, updates],
             tensor_ty(&[4, 2], Prim::F64),
             None,
@@ -11115,7 +11129,10 @@ mod tests {
         );
         dag.add_node(
             decl,
-            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![target, indices, updates],
             tensor_ty(&[4, 2], Prim::F32),
             None,

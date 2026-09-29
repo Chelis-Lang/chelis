@@ -2481,7 +2481,10 @@ int main(int argc, char **argv) {{
         );
         let gathered = dag.add_node(
             decl,
-            RiscOp::Gather { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![values, indices],
             tensor_ty(&[3, 2], Prim::F32),
             None,
@@ -2506,7 +2509,10 @@ int main(int argc, char **argv) {{
         );
         let scattered = dag.add_node(
             decl,
-            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![target, indices, updates],
             tensor_ty(&[4, 2], Prim::F32),
             None,

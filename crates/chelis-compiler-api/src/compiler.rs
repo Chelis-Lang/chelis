@@ -7100,14 +7100,20 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
             k: wire_dim_expr(k)?,
             accumulator: accumulator.name().to_string(),
         },
-        RiscOp::Gather { axis } => WireRiscOp::Gather {
+        RiscOp::Gather { axis, batch_rank } => WireRiscOp::Gather {
             axis: wire_axis(*axis)?,
+            batch_rank: u32::try_from(*batch_rank)
+                .map_err(|_| "sparse batch rank exceeds u32".to_string())?,
         },
-        RiscOp::ScatterAdd { axis } => WireRiscOp::ScatterAdd {
+        RiscOp::ScatterAdd { axis, batch_rank } => WireRiscOp::ScatterAdd {
             axis: wire_axis(*axis)?,
+            batch_rank: u32::try_from(*batch_rank)
+                .map_err(|_| "sparse batch rank exceeds u32".to_string())?,
         },
-        RiscOp::Scatter { axis } => WireRiscOp::Scatter {
+        RiscOp::Scatter { axis, batch_rank } => WireRiscOp::Scatter {
             axis: wire_axis(*axis)?,
+            batch_rank: u32::try_from(*batch_rank)
+                .map_err(|_| "sparse batch rank exceeds u32".to_string())?,
         },
         RiscOp::ScatterElements { axis } => WireRiscOp::ScatterElements {
             axis: wire_axis(*axis)?,
@@ -7151,7 +7157,7 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 22);
+        assert_eq!(wire.schema_version, 23);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -7464,7 +7470,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 22);
+        assert_eq!(json["schema_version"], 23);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()
@@ -8320,7 +8326,10 @@ mod tests {
         );
         let gather = dag.add_node(
             decl,
-            RiscOp::Gather { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
             None,
@@ -8460,7 +8469,10 @@ mod tests {
         );
         let gather = dag.add_node(
             decl,
-            RiscOp::Gather { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
             None,
@@ -8540,7 +8552,10 @@ mod tests {
         );
         let gather = dag.add_node(
             decl,
-            RiscOp::Gather { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
             None,
@@ -8589,7 +8604,10 @@ mod tests {
         );
         let scatter = dag.add_node(
             decl,
-            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![target, indices, updates],
             tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
             None,
@@ -8920,7 +8938,10 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
         );
         let scatter = dag.add_node(
             decl,
-            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![target, indices, updates],
             tensor_type(vec![3, 2], chelis_types::types::Prim::F64),
             None,

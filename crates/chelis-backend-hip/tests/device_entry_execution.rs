@@ -99,9 +99,18 @@ fn sparse_model(operation: usize, index_precision: Prim) -> String {
         ));
     }
     let op = match operation {
-        0 => RiscOp::Gather { axis: 0 },
-        1 => RiscOp::ScatterAdd { axis: 0 },
-        2 => RiscOp::Scatter { axis: 0 },
+        0 => RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
+        1 => RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
+        2 => RiscOp::Scatter {
+            axis: 0,
+            batch_rank: 0,
+        },
         3 => RiscOp::ScatterElements { axis: 0 },
         _ => unreachable!(),
     };

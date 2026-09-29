@@ -503,6 +503,14 @@ or shape broadcasting in elementwise primitives.
 
 The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension. The rank-0 subgraph that produces a bound, and the bound carrier inside a movement operation, follow §3.7: in the rewritten DAG's numbering a positional `dim` and an `InputAxis` axis shift by the inserted batch axis, and a rank-0 extent value is shared rather than batched.
 
+For `gather` and the scatter operations, a mapped index tensor's leading
+batch axes pair positionwise with the data tensor's leading batch axes. Each
+paired axis occurs once in the result or update shape; only the remaining
+index axes replace the selected data axis. Index bounds are checked against
+that data axis within each batch element. `vmap(grad(f))` preserves this
+pairing through `gather`'s scatter-add adjoint. The internal `OneHot` marker
+keeps its vocabulary axis last after batching.
+
 ### 3.4 Type Rule
 
 ```

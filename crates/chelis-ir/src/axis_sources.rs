@@ -700,21 +700,32 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             }
         }
 
-        // `values.dims[..axis] ++ indices.dims ++ values.dims[axis + 1..]`
+        // `values.dims[..axis] ++ indices.dims[batch_rank..] ++ values.dims[axis + 1..]`
         // (`spec/05` section 3.5): every output axis is an input axis of one
         // of the two operands.
-        RiscOp::Gather { axis } => match (input_rank(dag, node, 0), input_rank(dag, node, 1)) {
-            (Some(values_rank), Some(indices_rank)) if *axis < values_rank => or_op_computed(
-                (0..*axis)
-                    .map(|leading| pass_through(id, 0, leading))
-                    .chain((0..indices_rank).map(|index| pass_through(id, 1, index)))
-                    .chain((*axis + 1..values_rank).map(|trailing| pass_through(id, 0, trailing)))
-                    .collect(),
-                id,
-                rank,
-            ),
-            _ => op_computed(id, rank),
-        },
+        RiscOp::Gather { axis, batch_rank } => {
+            match (input_rank(dag, node, 0), input_rank(dag, node, 1)) {
+                (Some(values_rank), Some(indices_rank))
+                    if *axis < values_rank && *batch_rank <= indices_rank =>
+                {
+                    or_op_computed(
+                        (0..*axis)
+                            .map(|leading| pass_through(id, 0, leading))
+                            .chain(
+                                (*batch_rank..indices_rank).map(|index| pass_through(id, 1, index)),
+                            )
+                            .chain(
+                                (*axis + 1..values_rank)
+                                    .map(|trailing| pass_through(id, 0, trailing)),
+                            )
+                            .collect(),
+                        id,
+                        rank,
+                    )
+                }
+                _ => op_computed(id, rank),
+            }
+        }
 
         // Every scatter family writes into a copy of its target, so the
         // output shape is the target's shape.
@@ -4410,7 +4421,10 @@ mod tests {
         );
         let gathered = dag.add_node(
             decl,
-            RiscOp::Gather { axis: 1 },
+            RiscOp::Gather {
+                axis: 1,
+                batch_rank: 0,
+            },
             vec![values, indices],
             ty(
                 vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(7)],
@@ -4956,8 +4970,14 @@ mod tests {
     #[test]
     fn the_scatter_family_reads_its_output_axes_off_the_target() {
         for op in [
-            RiscOp::ScatterAdd { axis: 1 },
-            RiscOp::Scatter { axis: 1 },
+            RiscOp::ScatterAdd {
+                axis: 1,
+                batch_rank: 0,
+            },
+            RiscOp::Scatter {
+                axis: 1,
+                batch_rank: 0,
+            },
             RiscOp::ScatterElements { axis: 1 },
         ] {
             let mut dag = Dag::new();

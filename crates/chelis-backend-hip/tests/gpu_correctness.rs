@@ -3315,7 +3315,10 @@ fn g16_sparse_gather_i64_matches_eval() {
     );
     let out = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![table, indices],
         mat_f32(3, 3),
         None,
@@ -3372,7 +3375,10 @@ fn g16_sparse_scatter_add_i32_matches_eval_with_duplicate_indices() {
     );
     let out = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         mat_f32(3, 2),
         None,
@@ -3428,7 +3434,10 @@ fn g16_sparse_scatter_replace_i64_duplicate_indices_are_last_write_wins() {
     );
     let out = dag.add_node(
         decl,
-        RiscOp::Scatter { axis: 0 },
+        RiscOp::Scatter {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         mat_f32(3, 2),
         None,

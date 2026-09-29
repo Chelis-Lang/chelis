@@ -605,7 +605,10 @@ fn a_gather_past_the_count_domain_traps_overflow() {
     let gathered = add(
         &mut dag,
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         vec![DimInfo::Lit(3), named("w")],
         Prim::F32,

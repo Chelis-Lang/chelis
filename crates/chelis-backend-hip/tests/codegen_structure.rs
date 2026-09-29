@@ -2082,7 +2082,10 @@ fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
     );
     let out = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![table, indices],
         mat_f32(3, 4),
         None,
@@ -2138,7 +2141,10 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
     );
     let out = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         mat_f32(3, 2),
         None,
@@ -2164,6 +2170,79 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
         !result.c_source.contains("_after = ("),
         "sparse suffixes must project checked geometry"
     );
+}
+
+#[test]
+fn vmapped_sparse_kernels_select_indices_from_the_matching_batch() {
+    for operation in [
+        RiscOp::Gather {
+            axis: 1,
+            batch_rank: 1,
+        },
+        RiscOp::ScatterAdd {
+            axis: 1,
+            batch_rank: 1,
+        },
+        RiscOp::Scatter {
+            axis: 1,
+            batch_rank: 1,
+        },
+    ] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let base = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "base".into(),
+            },
+            vec![],
+            mat_f32(2, 4),
+            None,
+        );
+        let indices = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        let inputs = if matches!(operation, RiscOp::Gather { .. }) {
+            vec![base, indices]
+        } else {
+            let updates = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "updates".into(),
+                },
+                vec![],
+                mat_f32(2, 2),
+                None,
+            );
+            vec![base, indices, updates]
+        };
+        let result_ty = if matches!(operation, RiscOp::Gather { .. }) {
+            mat_f32(2, 2)
+        } else {
+            mat_f32(2, 4)
+        };
+        let result = dag.add_node(decl, operation.clone(), inputs, result_ty, None);
+        dag.add_root(result);
+        let source = codegen_hip(&dag, "paired_sparse").unwrap().c_source;
+        assert!(
+            source.contains("_batch_count *= chelis_metadata_plan_shape("),
+            "{operation:?}"
+        );
+        assert!(source.contains("_outer_per_batch = "), "{operation:?}");
+        assert!(
+            source.contains("index_pos = (b / outer_per_batch) * index_count + local_index"),
+            "{operation:?}"
+        );
+    }
 }
 
 #[test]
