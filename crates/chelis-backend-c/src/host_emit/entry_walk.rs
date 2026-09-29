@@ -15,7 +15,7 @@
 //! identity.
 //!
 //! A walk costs the size of the value. An ordinary aggregate walk runs at
-//! the exported entry. A named List walk runs in the body or retained call
+//! the exported entry. A claimed List walk runs in the body or retained call
 //! boundary, since each invocation needs its own extent witness.
 
 use super::*;
@@ -35,7 +35,8 @@ pub(super) struct EntryObservation {
 }
 
 /// Every tensor at a fixed tuple position of every parameter, in signature
-/// order.
+/// order. Direct tensor obligations use the authored contract: a specialized
+/// call's ABI can have wildcard axes even when its callee binds them.
 pub(super) fn entry_observations(function: &HostFunction) -> Vec<EntryObservation> {
     fn collect(
         ty: &HostAbiType,
@@ -63,7 +64,22 @@ pub(super) fn entry_observations(function: &HostFunction) -> Vec<EntryObservatio
     }
     let mut out = Vec::new();
     for (index, param) in function.params.iter().enumerate() {
-        collect(&param.ty, index, param.name.clone(), Vec::new(), &mut out);
+        let declared = function
+            .entry_contract
+            .formals()
+            .get(index)
+            .filter(|formal| formal.name() == param.name)
+            .and_then(|formal| match formal.pattern() {
+                EntryPattern::Tensor(ty) => Some(ty),
+                _ => None,
+            });
+        collect(
+            declared.unwrap_or(&param.ty),
+            index,
+            param.name.clone(),
+            Vec::new(),
+            &mut out,
+        );
     }
     out
 }
@@ -145,6 +161,7 @@ pub(super) struct EntryWork {
 #[derive(Clone, Copy)]
 enum EntryWalkMode {
     FixedOnly,
+    ClaimedLists,
     All,
 }
 
@@ -189,6 +206,18 @@ pub(super) fn entry_pattern_has_extent_claim(pattern: &EntryPattern<HostAbiType>
     }
 }
 
+/// Rebuild the List walker shape from the signature that owns its checks.
+/// Call-site ABI axes may be wildcards and cannot supply this walker's guards.
+fn claimed_list_type(pattern: &EntryPattern<HostAbiType>) -> Option<HostAbiType> {
+    match pattern {
+        EntryPattern::Tensor(HostAbiType::Tensor(tensor)) => {
+            Some(HostAbiType::Tensor(tensor.clone()))
+        }
+        EntryPattern::List(inner) => Some(HostAbiType::List(Box::new(claimed_list_type(inner)?))),
+        _ => None,
+    }
+}
+
 pub(super) fn entry_pattern_matches_type(
     pattern: &EntryPattern<HostAbiType>,
     ty: &HostAbiType,
@@ -219,6 +248,27 @@ pub(super) fn entry_pattern_matches_type(
     }
 }
 
+fn mono_entry_pattern_matches_abi(pattern: &EntryPattern<HostAbiType>, ty: &HostAbiType) -> bool {
+    match (pattern, ty) {
+        (EntryPattern::Tensor(HostAbiType::Tensor(declared)), HostAbiType::Tensor(actual)) => {
+            declared.dims.len() == actual.dims.len()
+                && declared.precision == actual.precision
+                && declared
+                    .dims
+                    .iter()
+                    .zip(&actual.dims)
+                    .all(|(claim, observed)| {
+                        !matches!((claim, observed), (DimInfo::Lit(a), DimInfo::Lit(b)) if a != b)
+                    })
+        }
+        (EntryPattern::List(inner), HostAbiType::List(actual)) => {
+            mono_entry_pattern_matches_abi(inner, actual)
+        }
+        (EntryPattern::Other, _) => true,
+        _ => false,
+    }
+}
+
 fn validate_entry_contract(function: &HostFunction) -> Result<(), Unsupported> {
     let contract = &function.entry_contract;
     if contract.formals().is_empty() {
@@ -241,7 +291,11 @@ fn validate_entry_contract(function: &HostFunction) -> Result<(), Unsupported> {
             .zip(&function.params)
             .all(|(formal, param)| {
                 formal.name() == param.name
-                    && entry_pattern_matches_type(formal.pattern(), &param.ty)
+                    && if function.origin == HostFunctionOrigin::Monomorphized {
+                        mono_entry_pattern_matches_abi(formal.pattern(), &param.ty)
+                    } else {
+                        entry_pattern_matches_type(formal.pattern(), &param.ty)
+                    }
             })
     {
         return Err(invalid_abi_shape(
@@ -250,9 +304,11 @@ fn validate_entry_contract(function: &HostFunction) -> Result<(), Unsupported> {
         ));
     }
     let mut projected_names = Vec::new();
-    for param in &function.params {
-        if matches!(param.ty, HostAbiType::List(_)) {
-            list_named_dims(&param.ty, &mut projected_names);
+    for formal in contract.formals() {
+        if let EntryPattern::List(_) = formal.pattern()
+            && let Some(ty) = claimed_list_type(formal.pattern())
+        {
+            list_named_dims(&ty, &mut projected_names);
         }
     }
     if projected_names != contract.named_list_binders() {
@@ -312,7 +368,7 @@ fn borrow_value(ty: &HostAbiType, value: &str) -> String {
     format!("chelis_{kind}_borrow_value({value})")
 }
 
-/// Whether `function` has an exported entry, the only place a walk runs.
+/// Whether `function` has an exported C entry.
 fn has_exported_entry(function: &HostFunction) -> bool {
     function.origin == HostFunctionOrigin::Authored
 }
@@ -334,13 +390,25 @@ impl<'a> EntryWalkers<'a> {
             shapes: Vec::new(),
             carrying: Vec::new(),
         };
-        walkers.carrying = walkers.carrying_types(
-            program
-                .functions
-                .iter()
-                .filter(|function| has_exported_entry(function))
-                .flat_map(|function| function.params.iter().map(|param| param.ty.clone())),
-        )?;
+        let mut roots = Vec::new();
+        for function in &program.functions {
+            if has_exported_entry(function) {
+                roots.extend(function.params.iter().map(|param| param.ty.clone()));
+            }
+            for formal in function.entry_contract.formals() {
+                if matches!(formal.pattern(), EntryPattern::List(_))
+                    && entry_pattern_has_extent_claim(formal.pattern())
+                {
+                    roots.push(claimed_list_type(formal.pattern()).ok_or_else(|| {
+                        invalid_abi_shape(
+                            "claimed List has no representable C entry shape".into(),
+                            "signature entry",
+                        )
+                    })?);
+                }
+            }
+        }
+        walkers.carrying = walkers.carrying_types(roots.into_iter())?;
         Ok(walkers)
     }
 
@@ -473,26 +541,44 @@ impl<'a> EntryWalkers<'a> {
     pub fn entry_work(&mut self, function: &HostFunction) -> Result<EntryWork, Unsupported> {
         validate_entry_contract(function)?;
         let named_list_binders = function.entry_contract.named_list_binders().to_vec();
-        let extent_at_body = function.entry_contract.formals().iter().any(|formal| {
-            matches!(formal.pattern(), EntryPattern::List(_))
-                && entry_pattern_has_extent_claim(formal.pattern())
-        });
+        let claimed_lists = function
+            .entry_contract
+            .formals()
+            .iter()
+            .map(|formal| {
+                matches!(formal.pattern(), EntryPattern::List(_))
+                    && entry_pattern_has_extent_claim(formal.pattern())
+            })
+            .collect::<Vec<_>>();
+        let extent_at_body = claimed_lists.iter().any(|claimed| *claimed);
         // A List claim must run for internal calls and in signature order
         // with fixed observations. Other aggregate walks keep their existing
         // single public-entry owner.
+        let exported = if has_exported_entry(function) {
+            let mut work = self.function_work(function, EntryWalkMode::All, Vec::new())?;
+            if extent_at_body {
+                for (claimed, param) in claimed_lists.iter().zip(&mut work.params) {
+                    if *claimed {
+                        param.extents.clear();
+                        param.ordered_extents.clear();
+                    }
+                }
+            }
+            Some(work)
+        } else {
+            None
+        };
         Ok(EntryWork {
             body: self.function_work(
                 function,
                 if extent_at_body {
-                    EntryWalkMode::All
+                    EntryWalkMode::ClaimedLists
                 } else {
                     EntryWalkMode::FixedOnly
                 },
                 named_list_binders,
             )?,
-            exported: has_exported_entry(function)
-                .then(|| self.function_work(function, EntryWalkMode::All, Vec::new()))
-                .transpose()?,
+            exported,
             extent_at_body,
         })
     }
@@ -517,9 +603,44 @@ impl<'a> EntryWalkers<'a> {
         };
         let mut serial = 0usize;
         for (index, param) in function.params.iter().enumerate() {
-            let walk = matches!(mode, EntryWalkMode::All);
+            let walk = match mode {
+                EntryWalkMode::FixedOnly => false,
+                EntryWalkMode::ClaimedLists => function
+                    .entry_contract
+                    .formals()
+                    .get(index)
+                    .is_some_and(|formal| {
+                        matches!(formal.pattern(), EntryPattern::List(_))
+                            && entry_pattern_has_extent_claim(formal.pattern())
+                    }),
+                EntryWalkMode::All => true,
+            };
+            let contract_ty = if matches!(mode, EntryWalkMode::ClaimedLists) && walk {
+                Some(
+                    function
+                        .entry_contract
+                        .formals()
+                        .get(index)
+                        .and_then(|formal| claimed_list_type(formal.pattern()))
+                        .ok_or_else(|| {
+                            invalid_abi_shape(
+                                "claimed List has no representable C entry shape".into(),
+                                "signature entry",
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
+            let ty = contract_ty.as_ref().unwrap_or(&param.ty);
+            if contract_ty.is_some() && !self.carries(ty) {
+                return Err(invalid_abi_shape(
+                    "C walker inventory omitted a claimed List entry".into(),
+                    "signature entry",
+                ));
+            }
             self.param_work(
-                &param.ty,
+                ty,
                 c_ident(&param.name).into_owned(),
                 param.name.clone(),
                 index,
@@ -1123,6 +1244,31 @@ mod entry_contract_tests {
         let mut function = function();
         function.params.pop();
         function.entry_contract = EntryContract::default();
+        assert!(validate_entry_contract(&function).is_err());
+    }
+
+    #[test]
+    fn monomorphized_contract_keeps_claims_when_abi_axes_are_wildcards() {
+        fn list_tensor(function: &mut HostFunction) -> &mut TensorType {
+            let HostAbiType::List(inner) = &mut function.params[1].ty else {
+                panic!("literal List")
+            };
+            let HostAbiType::Tensor(tensor) = inner.as_mut() else {
+                panic!("literal tensor")
+            };
+            tensor
+        }
+        let mut function = function();
+        function.origin = HostFunctionOrigin::Monomorphized;
+        list_tensor(&mut function).dims[0] = DimInfo::Named("*".into(), None);
+        assert!(validate_entry_contract(&function).is_ok());
+
+        list_tensor(&mut function).precision = Prim::F64;
+        assert!(validate_entry_contract(&function).is_err());
+        list_tensor(&mut function).precision = Prim::F32;
+        list_tensor(&mut function)
+            .dims
+            .push(DimInfo::Named("*".into(), None));
         assert!(validate_entry_contract(&function).is_err());
     }
 }

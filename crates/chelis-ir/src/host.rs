@@ -14302,6 +14302,41 @@ fn ensure_mono_specialization(
             ty: param_ty.clone(),
         });
     }
+    // A specialization's parameter types describe the call ABI. They may
+    // contain wildcard axes even when the callee declared a named or literal
+    // List extent. Keep the callee's own, actualized signature as the entry
+    // contract; rebuilding it from the ABI erases the obligation.
+    let authored = host_def_signature(name, body, None, program).ok_or_else(|| {
+        host_expr_lowering_error(
+            app_expr,
+            format!("generic host call `{name}` lost its authored entry signature"),
+        )
+    })?;
+    if authored.params.len() != spec_params.len()
+        || !authored
+            .params
+            .iter()
+            .zip(&spec_params)
+            .all(|(authored, abi)| authored.name == abi.name)
+    {
+        return Err(host_expr_lowering_error(
+            app_expr,
+            format!("generic host call `{name}` lost positional entry signature alignment"),
+        ));
+    }
+    let mut authored_substitution = UnordMap::new();
+    for (formal, actual) in authored.params.iter().zip(param_tys) {
+        solve_host_type_vars(&formal.ty, actual, &mut authored_substitution);
+    }
+    let entry_params = authored
+        .params
+        .into_iter()
+        .map(|param| HostParam {
+            name: param.name,
+            ty: substitute_host_type_term(param.ty, &authored_substitution),
+        })
+        .collect::<Vec<_>>();
+    let entry_contract = EntryContract::from_params(&entry_params);
 
     MONO_SPECIALIZATIONS.with(|state| {
         let mut state = state.borrow_mut();
@@ -14316,6 +14351,7 @@ fn ensure_mono_specialization(
         symbol: &symbol,
         declaration_name: name,
         params: spec_params,
+        entry_contract,
         ret_ty,
         body_expr: &body_expr,
         fn_expr: body,
@@ -14335,6 +14371,7 @@ struct MonoSpecializedFunctionInput<'a> {
     symbol: &'a str,
     declaration_name: &'a str,
     params: Vec<HostParam>,
+    entry_contract: EntryContract<HostTypeTerm>,
     ret_ty: &'a HostTypeTerm,
     body_expr: &'a Expr,
     fn_expr: &'a Expr,
@@ -14350,6 +14387,7 @@ fn lower_mono_specialized_function(
         symbol,
         declaration_name,
         mut params,
+        entry_contract,
         ret_ty,
         body_expr,
         fn_expr,
@@ -14389,7 +14427,6 @@ fn lower_mono_specialized_function(
     // form's and body's source regions surface on the specialized body.
     host_body.append_merged_span(body_expr.span_id());
     host_body.append_merged_span(fn_expr.span_id());
-    let entry_contract = EntryContract::from_params(&params);
     refine_function_params_from_body(&mut params, &host_body);
     let ret_ty = if ret_ty.is_unresolved() {
         host_expr_type(&host_body)

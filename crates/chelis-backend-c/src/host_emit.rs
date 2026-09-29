@@ -2690,7 +2690,7 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
 /// List.
 #[derive(Clone, Copy)]
 enum SignatureEntryPass {
-    MetadataOnly,
+    MetadataAndAggregateExtents,
     Full,
 }
 
@@ -2833,8 +2833,11 @@ fn signature_entry_lines(
             lines.extend(work.metadata.iter().cloned());
         }
     }
-    if matches!(pass, SignatureEntryPass::MetadataOnly) {
+    if matches!(pass, SignatureEntryPass::MetadataAndAggregateExtents) {
         if let Some(work) = work {
+            for param in &work.params {
+                lines.extend(param.extents.iter().cloned());
+            }
             lines.extend(work.release.iter().cloned());
         }
         return Ok(lines
@@ -3126,7 +3129,7 @@ fn emit_function(
                 &delegated_entry_guards,
                 Some(exported_work),
                 if entry_work.extent_at_body {
-                    SignatureEntryPass::MetadataOnly
+                    SignatureEntryPass::MetadataAndAggregateExtents
                 } else {
                     SignatureEntryPass::Full
                 },
