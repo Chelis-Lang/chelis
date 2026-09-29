@@ -934,6 +934,56 @@ fn eval_json_file_form_emits_json() {
     assert_eq!(answer["value"]["value"]["value"], 2);
 }
 
+#[test]
+fn eval_vmap_inferred_reference_row_keeps_reduction_rank() {
+    let dir = tempdir().expect("tempdir");
+    for row_type in ["&_", "&tensor[2, 2, f32]"] {
+        let path = dir.path().join(if row_type == "&_" {
+            "inferred_ref.ch"
+        } else {
+            "explicit_ref.ch"
+        });
+        write_file(
+            &path,
+            &format!(
+                "out: tensor[2, 2, f32] = vmap(fn (v: {row_type}) -> sum(v, 0i32))(\
+                 to_tensor([[[1.0f32, 2.0f32], [3.0f32, 4.0f32]], \
+                 [[5.0f32, 6.0f32], [7.0f32, 8.0f32]]]))\n"
+            ),
+        );
+        let check = run_json_check(&path);
+        assert_eq!(check["score"], 1, "{row_type}: {check}");
+        assert_eq!(
+            check["errors"],
+            serde_json::json!([]),
+            "{row_type}: {check}"
+        );
+
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["eval", "--json", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("evaluate vmap reference row");
+        assert!(
+            output.status.success(),
+            "{row_type}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: Value = serde_json::from_slice(&output.stdout).expect("eval JSON");
+        let roots = json["roots"].as_array().expect("roots array");
+        let result = roots
+            .iter()
+            .find(|root| root["name"] == "out")
+            .expect("out root");
+        assert_eq!(result["value"]["value"]["shape"], serde_json::json!([2, 2]));
+        assert_eq!(
+            result["value"]["value"]["data"]["bits"],
+            serde_json::json!(["40800000", "40c00000", "41400000", "41600000"]),
+            "{row_type}"
+        );
+    }
+}
+
 // Empty-roots input (only `def` declarations) emits valid JSON
 // `{"roots":[]}` on stdout with exit 0, instead of the human-mode
 // stderr-only breadcrumb. Negative parity for the non-empty cases.

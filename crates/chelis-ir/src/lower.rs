@@ -8405,6 +8405,16 @@ impl<'program> LowerCtx<'program> {
         kids.first()
     }
 
+    fn ref_to_inference_hole(expr: &Expr) -> bool {
+        let Some(inner) = Self::try_extract_ref_type(expr) else {
+            return false;
+        };
+        matches!(
+            stamped_parts(inner),
+            Some((DeepTag::TVar, _, [name])) if symbol_name(name) == Some("_")
+        )
+    }
+
     fn try_extract_prim(expr: &Expr) -> Option<Prim> {
         // (t-prim {} f32)
         let (DeepTag::TPrim, _, kids) = stamped_parts(expr)? else {
@@ -12890,7 +12900,17 @@ impl<'program> LowerCtx<'program> {
         ));
         let parameter_types = authored_formal_type_exprs
             .iter()
-            .map(|formal| {
+            .enumerate()
+            .map(|(index, formal)| {
+                // A `&_` formal promises a borrow but leaves its tensor
+                // shape to the checked application. Its row receives the
+                // actual tensor with the mapped axis removed; using the
+                // authored hole here would create a rank-zero Load.
+                if let Some(invocation) = invocation_types.get(index)
+                    && formal.as_ref().is_some_and(Self::ref_to_inference_hole)
+                {
+                    return invocation.clone();
+                }
                 formal
                     .as_ref()
                     .map(|expr| {
