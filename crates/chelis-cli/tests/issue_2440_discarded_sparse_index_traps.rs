@@ -251,6 +251,14 @@ fn an_out_of_bounds_index_under_a_false_activation_checks_nothing_in_either_lane
 fn an_in_range_index_still_returns_a_value_in_both_lanes() {
     // The negative control for the seed: retaining the node must not turn a
     // valid program into a trap, and must not change its result.
+    //
+    // Scoped to these two lanes deliberately. Retention is not free
+    // everywhere: a target that cannot lower the retained op now refuses a
+    // program whose sparse op is dead, where before it only refused one
+    // whose sparse op was live. `--target metal` does exactly that
+    // (chelis#1383), and a `vmap`ped sparse op fails to lower at all
+    // (chelis#2772). Both are lane limits meeting a retention spec/06 5.2
+    // requires, not something this seed can decide away.
     let (discarded_eval, discarded_c) = lane_verdicts("sparse_discarded_good", DISCARDED, GOOD);
     let want = Verdict::Value("tensor(shape=[3], data=[1.0, 2.0, 3.0])".to_string());
     assert_eq!(discarded_eval, want, "eval, in-range index");

@@ -2455,10 +2455,10 @@ pub enum RuntimeCheck {
     /// scatter mode ([05-OP-52]), and the internal `one_hot` marker
     /// ([05-SPARSE-2]). The index is data, so the check can always fail.
     ///
-    /// A seed only where the node has no activation (chelis#2440). This is
-    /// the one checking class with no activation gate in any lane -- its
-    /// emitters read no activation, so a node of it checks even where its
-    /// activation is false. Seeding one that has an activation would
+    /// A seed only where the node has no activation (chelis#2440). It is
+    /// the only SEEDED class the lanes do not gate -- [`Self::Ungated`] is
+    /// ungated too, but never seeds -- so its emitters read no activation
+    /// and a node of it checks even where its activation is false. Seeding one that has an activation would
     /// therefore trap where spec/06 5.2 says it "checks nothing", so an
     /// activated sparse node is left to ordinary value reachability. Gating
     /// the class needs an inactive-value contract in the evaluator and the

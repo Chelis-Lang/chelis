@@ -836,9 +836,13 @@ mod tests {
     /// float `Div` (`MeanDivisor`) and `Reshape` and `Expand` (`Ungated`).
     ///
     /// [`RuntimeCheck::SparseIndex`] is enumerated in full (chelis#2440):
-    /// its seed turns on neither a dtype nor a static fact, so every member
-    /// seeds unconditionally and a reclassification of any one of them would
-    /// otherwise be silent.
+    /// its seed turns on neither a dtype nor a kind, so no member would be
+    /// singled out by a row that varied either, and a reclassification of
+    /// any one of them would otherwise be silent. It does turn on a
+    /// per-node fact -- the node must carry no activation -- which every row
+    /// here satisfies, because `Dag::add_node` gives each node an
+    /// unconditional owner. The false-activation half is pinned at the CLI
+    /// surface instead, in `issue_2440_discarded_sparse_index_traps`.
     ///
     /// This comment deliberately does not claim which arms nothing else
     /// catches. Two review rounds each refuted such a claim by running a

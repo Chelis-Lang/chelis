@@ -25,5 +25,15 @@ such a value repeatedly.
 The checker rejects an out-of-range literal index only when the base tensor is
 also a literal, so a provably in-range index is retained too and its plan is
 emitted. Over-retention is the safe direction; a static index-range refinement
-is not attempted here. See
+is not attempted here.
+
+Because the node is now retained, a lane that cannot lower it refuses a program
+whose sparse operation is dead, where before it refused only one whose sparse
+operation was live. `chelis build --target metal` rejects any `gather` or
+`scatter` this way ([#1383](https://github.com/Chelis-Lang/chelis/issues/1383)),
+and a `vmap`ped sparse operation fails to lower in the C lane and misreports its
+index in the evaluator
+([#2772](https://github.com/Chelis-Lang/chelis/issues/2772)). Both are
+pre-existing lane limits now reachable from dead code; the default C target and
+HIP are unaffected. See
 [#2440](https://github.com/Chelis-Lang/chelis/issues/2440).

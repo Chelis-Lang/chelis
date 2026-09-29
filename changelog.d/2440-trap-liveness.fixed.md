@@ -60,9 +60,11 @@ traps in every lane.
 
 Not yet covered: an unused float `mean` over an empty axis, and an unused
 runtime `reshape` or `expand` target, may still be removed, and those target
-checks still run in an untaken arm. The `gather`, `scatter`, `scatter_add`,
-`scatter_elements` and `one_hot` index checks are no longer removed, under a
-separate entry for the same issue, but they too still run in an untaken arm.
+checks still run in an untaken arm. A `gather`, `scatter`, `scatter_add`,
+`scatter_elements` or `one_hot` index check is no longer removed where its
+node carries no activation, under a separate entry for the same issue; under
+an activation it is still removed whether or not the arm is taken, while a
+consumed one still runs even in an untaken arm.
 A host-only scalar
 operation (such as a shift) discarded inside a `grad` or `vmap` body does
 not run, so its trap does not occur in any lane; [05-OP-68] and
