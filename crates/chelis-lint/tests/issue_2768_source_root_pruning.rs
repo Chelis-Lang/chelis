@@ -125,6 +125,88 @@ fn still_prunes_an_excluded_directory_where_no_package_exists() {
     );
 }
 
+// --- a bad source root must not delete the package ---
+
+#[test]
+fn an_invalid_additional_source_does_not_silence_the_rule_in_src() {
+    // Round-3 P1, and the second instance of one class: a guard that declines
+    // a manifest too broadly makes the lint silent on a package `reef build`
+    // rejects. `additional_sources = [".git"]` is rejected by reef, so it must
+    // grant no exemption -- but it must not delete `module_prefix` and the
+    // `src` root with it, which is what returning None for the whole manifest
+    // did. The violating file is in an ORDINARY `src/`, so pruning is not
+    // involved.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write(
+        &root.join("reef.toml"),
+        "[package]\nname = \"ub10\"\nversion = \"0.1.0\"\ncompiler = \"=0.18.11\"\nmodule_prefix = \"Ub10\"\nadditional_sources = [\".git\"]\n",
+    );
+    write(
+        &root.join("src/bad.ch"),
+        "module Totally.Wrong\ndef v(x: i32) -> i32 = x\n",
+    );
+    assert_eq!(
+        identity_violations(root).len(),
+        1,
+        "a rejected source root must not stop the rule judging src/"
+    );
+}
+
+#[test]
+fn an_invalid_additional_source_still_grants_no_exemption() {
+    // The other half of the same property: dropping the entry must not quietly
+    // turn it into a source root.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write(
+        &root.join("reef.toml"),
+        "[package]\nname = \"ub10\"\nversion = \"0.1.0\"\ncompiler = \"=0.18.11\"\nmodule_prefix = \"Ub10\"\nadditional_sources = [\".git\"]\n",
+    );
+    write(
+        &root.join("src/data.ch"),
+        "module Ub10.Data\ndef value(x: i32) -> i32 = x\n",
+    );
+    write(
+        &root.join(".git/objects/sneaky.ch"),
+        "module Totally.Wrong\ndef v(x: i32) -> i32 = x\n",
+    );
+    assert!(
+        identity_violations(root).is_empty(),
+        "`.git` is not a source root, so it stays pruned"
+    );
+}
+
+#[test]
+fn a_manifest_whose_content_lives_under_an_excluded_directory_grants_nothing() {
+    // §12.2: content under an excluded directory must not change an admitted
+    // entry's verdict indirectly. The policy passes its own
+    // `is_admitted_ancillary` as the manifest admission; without that call
+    // this tree would un-prune `src/target/`. `surf-parses` is the probe
+    // because `reef-module-identity` re-checks admission itself and would mask
+    // the difference.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write(
+        &root.join("target/m.toml"),
+        "[package]\nname = \"ub10\"\nversion = \"0.1.0\"\ncompiler = \"=0.18.11\"\nmodule_prefix = \"Ub10\"\n",
+    );
+    std::os::unix::fs::symlink(root.join("target/m.toml"), root.join("reef.toml"))
+        .expect("symlink");
+    write(&root.join("src/target/broken.ch"), "@@@ not Surf (((\n");
+
+    let rules = chelis_lint::registry::all_rules();
+    let found: Vec<Violation> = chelis_lint::lint(root, &rules)
+        .expect("lint run")
+        .into_iter()
+        .filter(|violation| violation.rule_id == "surf-parses")
+        .collect();
+    assert!(
+        found.is_empty(),
+        "a manifest under an excluded directory must not un-prune: {found:?}"
+    );
+}
+
 // --- a manifest's admission, not its file kind, decides whether it speaks ---
 
 #[test]

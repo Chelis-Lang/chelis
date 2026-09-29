@@ -57,17 +57,36 @@ pub fn read_layout(manifest: &Path) -> Option<PackageLayout> {
     if module_prefix.trim().is_empty() {
         return None;
     }
-    let mut source_roots = vec!["src".to_string()];
-    for entry in package.additional_sources {
-        if !is_valid_additional_source(&entry) || source_roots.contains(&entry) {
-            return None;
-        }
-        source_roots.push(entry);
-    }
     Some(PackageLayout {
         module_prefix,
-        source_roots,
+        source_roots: source_roots_from(package.additional_sources),
     })
+}
+
+/// Build the source-root list, discarding any `additional_sources` value reef
+/// would reject.
+///
+/// **This function cannot fail, and that is the point.** The two facts a
+/// layout carries have different failure tolerances, and conflating them
+/// caused the same defect twice. `module_prefix` and the always-present `src`
+/// root are what `reef-module-identity` judges a package by: losing them means
+/// the rule reports nothing anywhere in the package, which IS the chelis#2116
+/// false green. The additional roots are what the traversal exemption reads:
+/// there, a value reef rejects must grant nothing.
+///
+/// An earlier version returned `None` for the whole manifest when any entry
+/// was invalid, so `additional_sources = [".git"]` — which reef rejects
+/// outright — silently deleted the package and stopped the rule judging an
+/// ordinary `src/`. Discarding the entry satisfies the exemption's
+/// requirement without touching the rule's.
+fn source_roots_from(additional: Vec<String>) -> Vec<String> {
+    let mut source_roots = vec!["src".to_string()];
+    for entry in additional {
+        if is_valid_additional_source(&entry) && !source_roots.contains(&entry) {
+            source_roots.push(entry);
+        }
+    }
+    source_roots
 }
 
 /// Reserved source-root names, mirroring `chelis_reef`.
@@ -253,24 +272,47 @@ mod tests {
     }
 
     #[test]
-    fn declines_a_manifest_reef_would_reject() {
+    fn discards_additional_sources_reef_would_reject_without_deleting_the_package() {
+        // Regression: this used to return None for the whole manifest, which
+        // deleted `module_prefix` and the `src` root along with the bad entry
+        // and silenced `reef-module-identity` across the entire package.
         for bad in [
             "additional_sources = [\".git\"]\n",
             "additional_sources = [\"a/b\"]\n",
             "additional_sources = [\"..\"]\n",
             "additional_sources = [\"src\"]\n",
-            "additional_sources = [\"p\", \"p\"]\n",
             "additional_sources = [\"tests\"]\n",
             "additional_sources = [\"\"]\n",
             "additional_sources = [\"   \"]\n",
+            "additional_sources = [\"p\", \"p\"]\n",
         ] {
             let tmp = tempfile::tempdir().expect("tempdir");
             let root = pkg(tmp.path(), bad);
+            let layout = read_layout(&root.join("reef.toml"))
+                .unwrap_or_else(|| panic!("the package must survive {bad:?}"));
+            assert_eq!(
+                layout.module_prefix, "Demo",
+                "the prefix must survive {bad:?}"
+            );
             assert!(
-                read_layout(&root.join("reef.toml")).is_none(),
-                "reef rejects {bad:?}, so the lint must grant nothing from it"
+                layout.source_roots.contains(&"src".to_string()),
+                "`src` must survive {bad:?}"
+            );
+            assert!(
+                layout.source_roots.len() <= 2,
+                "a rejected entry must not become a source root: {:?} from {bad:?}",
+                layout.source_roots
             );
         }
+
+        // A duplicate is dropped, not fatal, and does not appear twice.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = pkg(tmp.path(), "additional_sources = [\"p\", \"p\"]\n");
+        let layout = read_layout(&root.join("reef.toml")).expect("layout");
+        assert_eq!(
+            layout.source_roots,
+            vec!["src".to_string(), "p".to_string()]
+        );
     }
 
     #[test]
