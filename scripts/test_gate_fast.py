@@ -244,6 +244,9 @@ class FastCommandListTests(unittest.TestCase):
         self.assertFalse(fires(["crates/chelis-cli/src/main.rs"]))
         self.assertFalse(fires(["docs/local_gate.md"]))
         self.assertFalse(fires(["reef.lock.bak"]))
+        # The trailing slash on GUARD_CRATE_PREFIX is load-bearing: a sibling
+        # crate whose name merely starts with it must stay quiet.
+        self.assertFalse(fires(["crates/chelis-reef-foo/src/lib.rs"]))
         self.assertFalse(fires(["examples/x/not-a-reef.lock"]))
 
     def test_lock_guard_trigger_is_a_superset_of_the_std_trigger(self):

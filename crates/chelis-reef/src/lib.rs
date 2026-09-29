@@ -12026,14 +12026,26 @@ mod tests {
     }
 
     /// Every committed bundled `reef.lock` the discovery walk must find, as
-    /// workspace-relative paths in the walk's own sort order.
+    /// workspace-relative paths. Keep this in `PathBuf` order, which is
+    /// component-wise and differs from string order (`a/x` sorts before
+    /// `a-b/x`); getting it wrong is a loud, self-explaining failure.
     ///
-    /// chelis#585 removed a hand-maintained list from *discovery*, so a lock
-    /// added at a new path is still checked from the moment it is committed.
-    /// This list is the opposite direction and keeps that property: it pins
-    /// only what the walk is known to reach, and it fails closed both ways. A
-    /// missing entry is an over-aggressive prune; an unexpected one is a new
-    /// committed lock, which is fine - add it here in the same change.
+    /// chelis#585 removed a hand-maintained list from *discovery*, whose defect
+    /// was silent under-coverage: a lock absent from that list was never
+    /// checked and nothing said so. This constant is in the *assertion* path
+    /// instead. Discovery still walks, so a lock at a new path is read, parsed
+    /// and classified from the moment it exists; this only pins the walk's
+    /// reach, and its failure mode is a loud red naming the remedy.
+    ///
+    /// The comparison is deliberately a **subset**, not an equality. A missing
+    /// entry is an over-aggressive prune and is the whole point. An *extra*
+    /// discovered lock is not a defect: discovery walks the working tree, not
+    /// the index, so an uncommitted scratch `reef.lock` - exactly what
+    /// `chelis-reef` work creates in-tree, and that crate now triggers this
+    /// leg - would otherwise hard-fail the guard and tell the developer to add
+    /// a scratch file to a committed constant. A newly *committed* lock is
+    /// still checked for drift either way; only this reach assertion ignores
+    /// it (chelis#2309 round 1).
     ///
     /// The canary this replaces checked *membership* of one lock, not
     /// *completeness*. A prune that kept `packages/chelis-std/reef.lock` and
@@ -12180,10 +12192,10 @@ mod tests {
             .expect("workspace root resolves");
         let lock_paths = discover_committed_bundled_std_locks(&workspace_root);
 
-        // Canary: the discovered set must be exactly the expected one, so
+        // Canary: every expected lock must be among the discovered ones, so
         // neither a total nor a partial prune can turn this guard into a
-        // vacuous pass. A membership check would let a prune drop three of
-        // four locks and still pass (chelis#2309 round 1).
+        // vacuous pass. A membership check on one lock would let a prune drop
+        // three of four and still pass (chelis#2309 round 1).
         let discovered: Vec<String> = lock_paths
             .iter()
             .map(|path| {
@@ -12193,15 +12205,20 @@ mod tests {
                     .replace('\\', "/")
             })
             .collect();
-        assert_eq!(
-            discovered,
-            EXPECTED_COMMITTED_BUNDLED_STD_LOCKS,
-            "the discovery walk under {} did not find exactly the expected \
-             committed bundled locks. A MISSING entry means an over-aggressive \
-             prune and the guard is now partly vacuous; an EXTRA entry means a \
-             new committed lock, which is fine - add it to \
-             EXPECTED_COMMITTED_BUNDLED_STD_LOCKS in the same change.",
+        let missing: Vec<&&str> = EXPECTED_COMMITTED_BUNDLED_STD_LOCKS
+            .iter()
+            .filter(|expected| !discovered.iter().any(|found| found == *expected))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the discovery walk under {} did not reach {:?}. An over-aggressive \
+             prune has made this guard partly vacuous: the locks it no longer \
+             walks are never compared with the embedded bundle, and the \
+             `N of M` count below is computed from what it did walk. Found: \
+             {:?}",
             workspace_root.display(),
+            missing,
+            discovered,
         );
 
         let locks: Vec<(PathBuf, ReefLock)> = lock_paths
