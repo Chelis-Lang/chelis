@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use syn::visit::{self, Visit};
@@ -2720,29 +2721,72 @@ const GUARDED_SOURCE_ROOTS: [&str; 5] = [
     "crates/chelis-e2e/src",
 ];
 
-fn guarded_sources(workspace: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for relative in GUARDED_SOURCE_ROOTS {
-        collect_rust_files(&workspace.join(relative), &mut files);
-    }
-    files.sort();
-    files
+fn guarded_sources(workspace: &Path) -> io::Result<Vec<PathBuf>> {
+    guarded_sources_with(workspace, &|directory| fs::read_dir(directory))
 }
 
-fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
+fn guarded_sources_with<F, I>(workspace: &Path, read_dir: &F) -> io::Result<Vec<PathBuf>>
+where
+    F: Fn(&Path) -> io::Result<I>,
+    I: Iterator<Item = io::Result<fs::DirEntry>>,
+{
+    let mut files = Vec::new();
+    for relative in GUARDED_SOURCE_ROOTS {
+        collect_rust_files(&workspace.join(relative), &mut files, read_dir)?;
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn collect_rust_files<F, I>(
+    directory: &Path,
+    files: &mut Vec<PathBuf>,
+    read_dir: &F,
+) -> io::Result<()>
+where
+    F: Fn(&Path) -> io::Result<I>,
+    I: Iterator<Item = io::Result<fs::DirEntry>>,
+{
+    let entries = read_dir(directory).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "failed to enumerate guarded source directory {}: {error}",
+                directory.display()
+            ),
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to read entry in guarded source directory {}: {error}",
+                    directory.display()
+                ),
+            )
+        })?;
         let path = entry.path();
-        if path.is_dir() {
-            collect_rust_files(&path, files);
+        let is_dir = fs::metadata(&path)
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to inspect guarded source path {}: {error}",
+                        path.display()
+                    ),
+                )
+            })?
+            .is_dir();
+        if is_dir {
+            collect_rust_files(&path, files, read_dir)?;
         } else if path.extension().is_some_and(|extension| extension == "rs")
             && !path.ends_with(CANONICAL_SOURCE_GUARD_PATH)
         {
             files.push(path);
         }
     }
+    Ok(())
 }
 
 fn source_identity(workspace: &Path, path: &Path) -> (String, Vec<String>) {
@@ -2780,6 +2824,7 @@ fn source_identity(workspace: &Path, path: &Path) -> (String, Vec<String>) {
 
 fn actual_workspace_findings(workspace: &Path) -> Vec<Finding> {
     let sources = guarded_sources(workspace)
+        .unwrap_or_else(|error| panic!("guarded source enumeration failed: {error}"))
         .into_iter()
         .map(|path| {
             let relative = path.strip_prefix(workspace).unwrap_or(&path);
@@ -2801,6 +2846,14 @@ fn actual_workspace_findings(workspace: &Path) -> Vec<Finding> {
         .collect()
 }
 
+fn complete_guarded_fixture() -> tempfile::TempDir {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    for relative in GUARDED_SOURCE_ROOTS {
+        fs::create_dir_all(workspace.path().join(relative)).expect("guarded fixture source root");
+    }
+    workspace
+}
+
 #[test]
 fn guarded_source_roots_match_the_semantic_pipeline_scope() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
@@ -2818,6 +2871,7 @@ fn guarded_source_roots_match_the_semantic_pipeline_scope() {
     }
 
     let actual = guarded_sources(workspace.path())
+        .expect("all guarded fixture roots must be readable")
         .into_iter()
         .map(|path| {
             path.strip_prefix(workspace.path())
@@ -2831,8 +2885,88 @@ fn guarded_source_roots_match_the_semantic_pipeline_scope() {
 }
 
 #[test]
-fn production_test_named_paths_cannot_bypass_the_guard() {
+fn missing_guarded_root_is_an_error_not_a_clean_scan() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
+    for relative in GUARDED_SOURCE_ROOTS {
+        if relative != "crates/chelis-reef/src" {
+            fs::create_dir_all(workspace.path().join(relative)).expect("fixture source root");
+        }
+    }
+    let missing = workspace.path().join("crates/chelis-reef/src");
+    let failure = std::panic::catch_unwind(|| actual_workspace_findings(workspace.path()))
+        .expect_err("a missing required source root must not report a clean pipeline");
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .expect("path-bearing source enumeration panic");
+    assert!(
+        message.contains(&missing.display().to_string()),
+        "{message}"
+    );
+}
+
+#[test]
+fn nested_guarded_directory_and_entry_errors_are_not_ignored() {
+    let workspace = complete_guarded_fixture();
+    let nested = workspace.path().join("crates/chelis-reef/src/hidden");
+    fs::create_dir_all(&nested).expect("nested fixture directory");
+    let nested_source = nested.join("probe.rs");
+    fs::write(&nested_source, "fn probe() {}\n").expect("nested fixture source");
+    assert!(
+        guarded_sources(workspace.path())
+            .expect("readable fixture")
+            .contains(&nested_source)
+    );
+
+    type Entries = Box<dyn Iterator<Item = io::Result<fs::DirEntry>>>;
+    for fail_on_entry in [false, true] {
+        let read_dir = |directory: &Path| -> io::Result<Entries> {
+            if directory == nested && !fail_on_entry {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected read_dir failure",
+                ));
+            }
+            let entries = fs::read_dir(directory)?;
+            if directory == nested && fail_on_entry {
+                Ok(Box::new(entries.chain(std::iter::once(Err(
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "injected ReadDir entry failure",
+                    ),
+                )))))
+            } else {
+                Ok(Box::new(entries))
+            }
+        };
+        let error = guarded_sources_with(workspace.path(), &read_dir)
+            .expect_err("nested directory or entry errors must fail the full scan");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains(&nested.display().to_string()),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_source_metadata_error_is_not_skipped() {
+    let workspace = complete_guarded_fixture();
+    let broken = workspace.path().join("crates/chelis-reef/src/broken-link");
+    std::os::unix::fs::symlink("missing-target", &broken).expect("broken fixture link");
+    let error = guarded_sources(workspace.path())
+        .expect_err("an unreadable source entry must fail the scan");
+    assert!(
+        error.to_string().contains(&broken.display().to_string()),
+        "{error}"
+    );
+}
+
+#[test]
+fn production_test_named_paths_cannot_bypass_the_guard() {
+    let workspace = complete_guarded_fixture();
     let planted = [
         "crates/chelis-reef/src/tests.rs",
         "crates/chelis-reef/src/tests/duplicate.rs",
@@ -2863,7 +2997,7 @@ fn production_test_named_paths_cannot_bypass_the_guard() {
 
 #[test]
 fn planted_reef_semantic_sequence_is_rejected() {
-    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let workspace = complete_guarded_fixture();
     let reef = workspace.path().join("crates/chelis-reef/src/duplicate.rs");
     fs::create_dir_all(reef.parent().expect("fixture parent")).expect("fixture directory");
     fs::write(
@@ -3300,7 +3434,7 @@ fn imported_stage_module_aliases_cannot_bypass_the_guard() {
 
 #[test]
 fn core_owner_exclusion_does_not_hide_an_e2e_pipeline_file() {
-    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let workspace = complete_guarded_fixture();
     let owner = workspace
         .path()
         .join("crates/chelis-pipeline-core/src/pipeline.rs");
@@ -3449,7 +3583,7 @@ fn imported_local_module_alias_cannot_bypass_the_guard() {
 
 #[test]
 fn cross_file_helper_composition_cannot_bypass_the_guard() {
-    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let workspace = complete_guarded_fixture();
     let root = workspace.path().join("crates/chelis-e2e/src");
     fs::create_dir_all(&root).expect("fixture directory");
     fs::write(
