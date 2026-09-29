@@ -6,6 +6,7 @@ pub mod desugar;
 mod dtype_name;
 pub mod format;
 pub mod lexer;
+pub mod module_identity;
 pub mod parser;
 pub mod resugar;
 pub mod token;

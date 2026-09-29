@@ -532,6 +532,47 @@ libraries that build on `chelis-std`. The currently shipped shells
 are `nautilus`, `coral`, `shoals`, and `octant`. Designed but not
 yet shipped: `school`, `darwin`, `hull`, `hydrostatic`, `beacon`.
 
+### 6.5 Module identity inside a reef package
+
+**Rule:** A `.ch` source file inside a reef package declares exactly one
+module, and that module's name is fixed by the package's `module_prefix`
+(§2.6) together with the file's path beneath its source root. The file
+does not choose its own name.
+
+The name is built by taking `module_prefix`, then one component per path
+segment beneath the source root, in order, with the file's extension
+dropped. Each component is the path segment itself; the comparison
+between the declared name and the derived name ignores case only. For a
+package declaring `module_prefix = "Demo"`:
+
+| File | Module it must declare |
+|------|------------------------|
+| `src/linalg.ch`      | `Demo.Linalg`      |
+| `src/nn/linear.ch`   | `Demo.Nn.Linear`   |
+| `src/io/json.ch`     | `Demo.Io.Json`     |
+
+A source root other than `src` contributes its own name as the first
+component after the prefix, so `properties/laws.ch` declares
+`Demo.Properties.Laws`.
+
+Three ways to violate the rule, each of which makes the package
+uncompilable:
+
+- the declared module is not rooted at `module_prefix`
+  (`module Data` in a `Demo` package);
+- the declared module is rooted at the prefix but does not derive from
+  the file's path (`module Demo.Other` in `src/data.ch`);
+- the file declares no module, or more than one.
+
+**This rule is not a style preference, and a conforming implementation
+has no discretion about it.** A file whose module identity disagrees
+with its path cannot be placed in the package's module graph at all, so
+the failure is a load-time rejection rather than a diagnostic the rest
+of the pipeline can route around. It follows that every tool reporting
+on a package's well-formedness — including the style surfaces of §12 —
+must be able to reach this verdict, and must not report success on a
+package that violates it.
+
 ---
 
 ## 7. Function naming patterns
