@@ -706,15 +706,13 @@ impl<'a> CallCollector<'a> {
         }
         match expression {
             syn::Expr::Path(expression) => {
-                vec![(
-                    path.clone(),
-                    self.abstract_value_for_path(&path, &expression.path),
-                )]
+                let value = self.abstract_value_for_path(&path, &expression.path);
+                vec![(path, value)]
             }
-            syn::Expr::Closure(closure) => vec![(
-                path.clone(),
-                AbstractValue::Callable(self.closure_target(&path, closure)),
-            )],
+            syn::Expr::Closure(closure) => {
+                let target = self.closure_target(&path, closure);
+                vec![(path, AbstractValue::Callable(target))]
+            }
             syn::Expr::Lit(expression) => match &expression.lit {
                 syn::Lit::Bool(value) => vec![(path, AbstractValue::Bool(value.value))],
                 _ => vec![(path, AbstractValue::Unknown)],
@@ -866,7 +864,7 @@ impl<'a> CallCollector<'a> {
                 branch.binding_depth += 1;
                 let arm_depth = branch.binding_depth;
                 Self::bind_pattern_value(&mut branch.paths, &arm.pat, scrutinee.clone(), arm_depth);
-                let branch_paths = branch.paths.clone();
+                let branch_paths = std::mem::take(&mut branch.paths);
                 let guard_paths = if let Some((_, guard)) = &arm.guard {
                     branch_paths
                         .into_iter()
@@ -920,17 +918,16 @@ impl<'a> CallCollector<'a> {
             branch.visit_stmt(statement);
         }
 
+        // Tail evaluation consumes this frontier; the collector's scope
+        // metadata remains available to resolve calls inside the tail.
+        let paths = std::mem::take(&mut branch.paths);
         let mut results: Vec<(CallPath, AbstractValue)> = if let Some(tail) = tail {
-            branch
-                .paths
-                .clone()
+            paths
                 .into_iter()
                 .flat_map(|path| branch.evaluate_expression_value(path, tail))
                 .collect()
         } else {
-            branch
-                .paths
-                .clone()
+            paths
                 .into_iter()
                 .map(|path| (path, AbstractValue::Unknown))
                 .collect()
