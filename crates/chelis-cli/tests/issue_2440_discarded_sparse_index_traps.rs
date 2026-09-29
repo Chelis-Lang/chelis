@@ -114,10 +114,11 @@ fn verdict(output: &std::process::Output) -> Verdict {
         // is stable enough to compare.
         let mut lines = all.lines();
         while let Some(line) = lines.next() {
-            if line.contains("panicked at") {
-                if let Some(message) = lines.next() {
-                    return Verdict::Stopped(message.trim().to_string());
-                }
+            if !line.contains("panicked at") {
+                continue;
+            }
+            if let Some(message) = lines.next() {
+                return Verdict::Stopped(message.trim().to_string());
             }
         }
         Verdict::Stopped(
