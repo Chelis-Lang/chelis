@@ -1617,6 +1617,7 @@ class VerifiedSchemaCodecs:
     structural_executions: tuple[str, ...]
     materialization_executions: tuple[str, ...]
     local_declarations: str
+    local_probe_sha256: str
     consumer_executions: tuple
     classifications: tuple[LeafClassification, ...]
     binary_sha256: str
@@ -1626,6 +1627,11 @@ class VerifiedSchemaCodecs:
 
     def validate(self, documents):
         self.canonical.validate(documents)
+        _require(
+            json.loads(self.local_declarations)["probe_sha256"]
+            == self.local_probe_sha256,
+            "schema probe digest differs from executed local publication evidence",
+        )
         _require(
             self.canonical.profile == "compiler-api",
             "schema evidence requires the actual API feature profile",
@@ -1923,6 +1929,7 @@ def verify_schema_codecs(root: Path, target: Path) -> VerifiedSchemaCodecs:
             structural_executions=structural_executions,
             materialization_executions=materialization_executions,
             local_declarations=local_declarations,
+            local_probe_sha256=local_probe_hash,
             consumer_executions=consumer_executions,
             classifications=classifications,
             binary_sha256=binary_hash,

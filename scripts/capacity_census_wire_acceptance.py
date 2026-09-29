@@ -250,9 +250,13 @@ def authority_controls():
     )
 
 
-def execute_acceptance_controls(root: Path, target: Path):
+def execute_acceptance_controls(root: Path, target: Path, schema):
     executions = [
-        run_python_tests(root, MUTATION_CONTROLS),
+        run_python_tests(
+            root, MUTATION_CONTROLS,
+            wire_probe_target=target,
+            wire_probe_sha256=schema.local_probe_sha256,
+        ),
         run_python_tests(root, HULL_CONSUMER_CONTROLS),
     ]
     for package, name, selected in RUST_CONSUMER_CONTROLS:

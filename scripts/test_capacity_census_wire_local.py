@@ -4,9 +4,11 @@ from pathlib import Path
 import shutil
 from dataclasses import replace
 import os
+import hashlib
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -15,9 +17,24 @@ class LocalPublicationControls(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from capacity_census_wire_local import build_probe
+        from capacity_census_wire_runner import (
+            WIRE_PROBE_SHA256_ENV,
+            WIRE_PROBE_TARGET_ENV,
+            validate_wire_probe,
+        )
 
         cls.target = ROOT / "target/agents/wire-codec-rustdoc"
-        cls.probe = build_probe(ROOT, cls.target)
+        selected_target = os.environ.get(WIRE_PROBE_TARGET_ENV)
+        selected_digest = os.environ.get(WIRE_PROBE_SHA256_ENV)
+        if (selected_target is None) != (selected_digest is None):
+            raise ValueError("selected wire probe requires both target and digest")
+        probe_target = (
+            validate_wire_probe(ROOT, Path(selected_target), selected_digest)
+            if selected_target is not None else cls.target
+        )
+        cls.probe = build_probe(ROOT, probe_target)
+        if selected_target is not None:
+            validate_wire_probe(ROOT, probe_target, selected_digest)
 
     def artifact(self, source, *, cfg=(), rustc_args=(), schema=False):
         from capacity_census_wire_local import expand_library
@@ -300,6 +317,49 @@ fn shape(g: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
             self.check(
                 "struct Module; fn work() { struct _SchemarsSchemaWithFunction; }"
             )
+
+
+class LocalProbeTargetRouting(unittest.TestCase):
+    def test_supervised_probe_reuses_verified_target_but_fixture_expansion_stays_separate(self):
+        from capacity_census_wire_local import ExpandedLibrary
+
+        (ROOT / "target").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as directory:
+            target = Path(directory).resolve()
+            probe = target / "debug/examples/wire_publication_probe"
+            probe.parent.mkdir(parents=True)
+            probe.write_bytes(b"verified probe")
+            digest = hashlib.sha256(probe.read_bytes()).hexdigest()
+            with (
+                patch.dict(os.environ, {
+                    "CHELIS_WIRE_SELECTED_PROBE_TARGET": str(target),
+                    "CHELIS_WIRE_SELECTED_PROBE_SHA256": digest,
+                }),
+                patch("capacity_census_wire_local.build_probe", return_value=probe) as build,
+                patch("capacity_census_wire_local.expand_library",
+                      return_value=ExpandedLibrary("", "", ("",), "")) as expand,
+            ):
+                LocalPublicationControls.setUpClass()
+                control = LocalPublicationControls(
+                    "test_module_dtos_allow_serde_internals_but_local_dtos_fail"
+                )
+                control.artifact("struct Fixture;")
+            build.assert_called_once_with(ROOT, target)
+            self.assertEqual(
+                expand.call_args.args[:2],
+                (ROOT, ROOT / "target/agents/wire-codec-rustdoc"),
+            )
+            self.assertNotEqual(target, LocalPublicationControls.target)
+
+    def test_standalone_control_keeps_its_original_probe_target(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("capacity_census_wire_local.build_probe") as build,
+        ):
+            LocalPublicationControls.setUpClass()
+        build.assert_called_once_with(
+            ROOT, ROOT / "target/agents/wire-codec-rustdoc"
+        )
 
 
 if __name__ == "__main__":
