@@ -309,9 +309,14 @@ impl<'a> Walker<'a> {
             HostExprKind::FormalIngress { value, .. } => {
                 self.walk(value, env, facts);
             }
-            HostExprKind::SignatureEntry { plan, args } => {
+            HostExprKind::SignatureEntry {
+                plan, args, lists, ..
+            } => {
                 for arg in args {
                     self.walk(arg, env, facts);
+                }
+                for entry in lists {
+                    self.walk(&entry.value, env, facts);
                 }
                 facts.extend(plan_facts(plan, args, env));
             }
@@ -533,6 +538,7 @@ mod tests {
         dag.add_root(sum);
         HostFunction {
             helper_result_claim_axes: Vec::new(),
+            entry_contract: Default::default(),
             name: "entry".into(),
             params: ["a", "b"]
                 .into_iter()
@@ -716,8 +722,11 @@ mod tests {
                 display_roots: Vec::new(),
                 ty: HostAbiType::Unit,
                 value: HostExpr::new(HostExprKind::SignatureEntry {
+                    contract: function.entry_contract.clone(),
                     plan,
                     args: vec![var("a"), var("b")],
+                    positions: vec![0, 1],
+                    lists: Vec::new(),
                 }),
             }],
             ty: function.ret_ty.clone(),

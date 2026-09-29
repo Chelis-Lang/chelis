@@ -1886,6 +1886,7 @@ fn no_shipped_example_gains_a_host_lane_guard() {
             "keyed_state_wrapper: main guards __let_19 axis 1 claiming 1",
             "keyed_state_wrapper: main guards __let_19 axis 2 claiming 1",
             "keyed_state_wrapper: main guards __let_19 axis 3 claiming 1",
+            "list_shared_extent: main guards __result axis 0 claiming 2",
             "staged_adt_control: main guards __result axis 0 claiming 2",
             "staged_adt_control: main guards __result axis 1 claiming 1",
         ],

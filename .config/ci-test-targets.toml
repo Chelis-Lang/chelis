@@ -1261,6 +1261,13 @@ prefix = "examples/list_foundation.ch"
 disposition = "packages"
 packages = ["chelis-e2e"]
 
+# The per-file parity test, executable-example census, and Surf formatter
+# corpus all consume this named-extent example.
+[[path_rule]]
+prefix = "examples/list_shared_extent.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 [[path_rule]]
 prefix = "examples/recursive_cast_targets.ch"
 disposition = "packages"

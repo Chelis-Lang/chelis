@@ -372,7 +372,7 @@
         "a_compile_time_record_projection_keeps_its_dag_route",
         "a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c",
         "a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval",
-        "a_container_nested_binder_is_unchecked_pending_the_container_walk",
+        "a_container_nested_binder_checks_the_later_tensor_on_both_lanes",
         "a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval",
         "a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes",
         "a_def_returned_scalar_mixed_with_a_shape_read_is_an_admissible_expand_size_on_eval",
