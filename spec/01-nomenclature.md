@@ -1359,8 +1359,10 @@ to hide current violations.
 A reef package's declared source roots are outside the shipped baseline's
 reach whenever the package's manifest is itself within the lint's policy root.
 A manifest above that root governs nothing, by the same rule that keeps
-machine-local ancestors from granting lint exceptions, so a lint invoked at or
-below a source root prunes as it otherwise would.
+machine-local ancestors from granting lint exceptions, so a lint whose policy
+root lies below the package prunes as it otherwise would. Which root applies is
+a property of the policy, not of the invocation: a repository policy sets it at
+the repository, so the exemption still reaches a source root named directly.
 
 The baseline names directories that are infrastructure, build output or
 vendored dependencies in a repository at large; beneath a package's `src`

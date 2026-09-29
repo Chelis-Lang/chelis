@@ -157,24 +157,41 @@ fn an_invalid_additional_source_does_not_silence_the_rule_in_src() {
 fn an_invalid_additional_source_still_grants_no_exemption() {
     // The other half of the same property: dropping the entry must not quietly
     // turn it into a source root.
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
-    write(
-        &root.join("reef.toml"),
-        "[package]\nname = \"ub10\"\nversion = \"0.1.0\"\ncompiler = \"=0.18.11\"\nmodule_prefix = \"Ub10\"\nadditional_sources = [\".git\"]\n",
-    );
-    write(
-        &root.join("src/data.ch"),
-        "module Ub10.Data\ndef value(x: i32) -> i32 = x\n",
-    );
-    write(
-        &root.join(".git/objects/sneaky.ch"),
-        "module Totally.Wrong\ndef v(x: i32) -> i32 = x\n",
-    );
-    assert!(
-        identity_violations(root).is_empty(),
-        "`.git` is not a source root, so it stays pruned"
-    );
+    //
+    // Every spelling reef rejects gets a row. An earlier version used `.git`
+    // alone, which trips only the character-set check, so the reserved-name,
+    // empty and separator checks each had no killing test. `tests` is the one
+    // that matters: accepting it would un-prune and judge `tests/` in a
+    // package reef rejects.
+    for (entry, dir) in [
+        (".git", ".git/objects"),
+        ("tests", "tests"),
+        ("a/b", "a/b"),
+        ("", "sub"),
+        ("   ", "sub"),
+        ("..", "sub"),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                "[package]\nname = \"ub10\"\nversion = \"0.1.0\"\ncompiler = \"=0.18.11\"\nmodule_prefix = \"Ub10\"\nadditional_sources = [\"{entry}\"]\n"
+            ),
+        );
+        write(
+            &root.join("src/data.ch"),
+            "module Ub10.Data\ndef value(x: i32) -> i32 = x\n",
+        );
+        write(
+            &root.join(dir).join("sneaky.ch"),
+            "module Totally.Wrong\ndef v(x: i32) -> i32 = x\n",
+        );
+        assert!(
+            identity_violations(root).is_empty(),
+            "reef rejects {entry:?}, so {dir} is not a source root and stays pruned"
+        );
+    }
 }
 
 #[test]

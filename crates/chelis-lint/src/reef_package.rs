@@ -89,7 +89,13 @@ fn source_roots_from(additional: Vec<String>) -> Vec<String> {
     source_roots
 }
 
-/// Reserved source-root names, mirroring `chelis_reef`.
+/// Reserved source-root names, mirroring the list of the same name in
+/// `crates/chelis-reef/src/lib.rs` that `validate_manifest` consults.
+///
+/// Duplicated rather than imported, because `chelis-lint` is dependency-pure.
+/// Nothing fails if reef's list grows: a name reef newly reserves would still
+/// be accepted here and would un-prune a directory in a package reef rejects.
+/// Keep the two in step by hand when touching either.
 const RESERVED_ADDITIONAL_SOURCE_DIRS: [&str; 2] = ["src", "tests"];
 
 /// Whether `entry` is an `additional_sources` value reef would accept.
@@ -114,12 +120,17 @@ fn is_valid_additional_source(entry: &str) -> bool {
 /// `admit_manifest` decides whether a located `reef.toml` may speak for the
 /// lint. The traversal policy owns that question and passes its own
 /// `is_admitted_ancillary`, which is the same admission
-/// `reef-module-identity` applies to the same file. One reader and one
-/// admission rule: an earlier version declined every symlinked manifest here
-/// instead, which refused the internal links §12.2 explicitly admits
-/// ("internal links to admitted regular files remain visible") and which the
-/// reef loader follows, so the lint went silent on a package that does not
-/// build.
+/// `reef-module-identity` applies to the same file. An earlier version declined
+/// every symlinked manifest here instead, which refused the internal links
+/// §12.2 explicitly admits ("internal links to admitted regular files remain
+/// visible") and which the reef loader follows, so the lint went silent on a
+/// package that does not build.
+///
+/// One reader and one admission rule, but not one reachability rule: this
+/// climb stops at `boundary`, while `reef_module_identity`'s does not stop at
+/// all. The rule can therefore consult a manifest above the lint's policy root
+/// that the policy refuses, and judge a package whose excluded directories
+/// stay pruned. That asymmetry predates this module and is not closed here.
 pub fn inside_package_source_root(
     path: &Path,
     boundary: &Path,
