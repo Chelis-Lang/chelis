@@ -6,6 +6,7 @@ use chelis_surf::ast::{
     Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
     PropertyOption, TypeExpr, TypeInvariant, Variant, VariantFields,
 };
+use chelis_surf::module_identity::validate_module_path;
 use chelis_unord::{UnordMap, UnordSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9001,36 +9002,6 @@ fn modules_from_source_files(
         ));
     }
     Ok(modules)
-}
-
-fn validate_module_path(prefix: &str, module: &str, rel: &Path) -> Result<(), String> {
-    let prefix_lower = prefix.to_lowercase();
-    let module_lower = module.to_lowercase();
-    if module_lower == prefix_lower || !module_lower.starts_with(&(prefix_lower.clone() + ".")) {
-        return Err(format!(
-            "module `{module}` does not belong to module_prefix `{prefix}`"
-        ));
-    }
-    let rel_no_ext = rel.with_extension("");
-    let rel_module = rel_no_ext
-        .iter()
-        .map(|seg| seg.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join(".");
-    let expected = format!("{prefix_lower}.{rel_module}");
-    if module_lower != expected {
-        // The caller passes `rel` already prefixed with the source root
-        // name for non-src roots (see `load_package_modules`), so the
-        // displayed path is the source-root-relative-from-package-root
-        // form ("src/foo.ch" or "properties/foo.ch") and the expected
-        // module name reflects the same rule.
-        return Err(format!(
-            "module `{module}` does not match file path {} (expected `{}`)",
-            rel.display(),
-            expected
-        ));
-    }
-    Ok(())
 }
 
 fn compute_exports(decls: &[Decl]) -> BTreeSet<String> {

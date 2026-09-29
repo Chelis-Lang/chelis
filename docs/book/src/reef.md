@@ -46,9 +46,13 @@ readme = "README.md"
 nautilus = "^0.7"
 ```
 
-Package source normally lives under `src/`. Module declarations should line up with the
-manifest `module_prefix`; for example, `src/nn/linear.ch` in the manifest above would
-declare a module under `Demo.Nn.Linear`.
+Package source normally lives under `src/`. A file's module declaration is fixed by the
+manifest `module_prefix` and the file's path beneath its source root: `src/nn/linear.ch`
+in the manifest above must declare `module Demo.Nn.Linear`. This is a load-time
+requirement, not a convention — reef rejects a package whose module identities disagree
+with its layout, and `chelis lint --check` reports the same mismatch as
+`reef-module-identity`. The rule, including how additional source roots contribute a
+component, is `spec/01-nomenclature.md` §6.5.
 
 A conformant shell can declare owned domain skills through `[conform] local_skills`. Reef validates and preserves this table.
 
