@@ -63,9 +63,9 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let std_root = manifest.join("../../packages/chelis-std");
     let mut paths: Vec<PathBuf> = [
-        "src/init/kaiming.ch",
-        "src/init/random.ch",
-        "src/init/xavierext.ch",
+        "src/decimal.ch",
+        "src/time.ch",
+        "src/process.ch",
         "src/tensor/construct.ch",
         "src/test.ch",
     ]
@@ -359,7 +359,7 @@ fn stale_stdlib_byte_mutation_misses_not_stale_hit() {
     publish(&local_std, &cache_home_b);
     let mutated_out = run_capture(
         "check",
-        &local_std.join("src/init/kaiming.ch"),
+        &local_std.join("src/decimal.ch"),
         &cache_home_b,
         &[],
         None,
@@ -389,7 +389,7 @@ fn stale_stdlib_byte_mutation_misses_not_stale_hit() {
     // monolithic recompute over the mutated stdlib.
     let mutated_monolithic = run_capture(
         "check",
-        &local_std.join("src/init/kaiming.ch"),
+        &local_std.join("src/decimal.ch"),
         &cache_home_b,
         &[("CHELIS_STDLIB_CACHE_DISABLE", "1")],
         None,

@@ -345,8 +345,7 @@ EXPECTED_OP_MANIFESTS = {
 | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
 | `decimal::Decimal` | `Decimal { coefficient: i64, scale: i64 }` |
 | `time::Date` | `Date { year: i64, month: i64, day: i64 }` |
-| `time::Duration` | `Duration { days: i64, hours: i64, minutes: i64, seconds: i64 }` |
-| `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,i64], Dict[string,i64], Dict[i64,string], i64)` |""".splitlines()
+| `time::Duration` | `Duration { days: i64, hours: i64, minutes: i64, seconds: i64 }` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
@@ -371,12 +370,6 @@ EXPECTED_OP_MANIFESTS = {
 | `index::list_index` | `(List[T],i64)->T` |
 | `index::skip_list` | `(List[T],i64)->List[T]` |
 | `index::take_list` | `(List[T],i64)->List[T]` |
-| `init/kaiming::kaiming_normal` | `(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]` |
-| `init/kaiming::kaiming_uniform` | `(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]` |
-| `init/random::normal_like` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
-| `init/xavierext::trunc_normal` | `(key,&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]` |
-| `init/xavierext::xavier_normal` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
-| `init/xavierext::xavier_uniform` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
 | `io/json::json_array` | `(Option[Json])->Option[List[Json]]` |
 | `io/json::json_bigint` | `(Option[Json])->Option[string]` |
 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
@@ -428,12 +421,7 @@ EXPECTED_OP_MANIFESTS = {
 | `time::is_leap_year` | `(i64)->bool` |
 | `time::parse_date` | `(string)->Option[Date]` |
 | `time::sub_days` | `(Date,i64)->Date` |
-| `time::try_date` | `(i64,i64,i64)->Option[Date]` |
-| `tokenizer::batch_encode` | `(Tokenizer,List[string],i64,i64)->tensor[batch,seq,i64]` |
-| `tokenizer::decode` | `(Tokenizer,List[i64])->string` |
-| `tokenizer::encode` | `(Tokenizer,string)->List[i64]` |
-| `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
-| `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |""".splitlines()
+| `time::try_date` | `(i64,i64,i64)->Option[Date]` |""".splitlines()
     ),
     "05-OP-44": tuple(
         """\
@@ -757,9 +745,9 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 84 or len(set(identities)) != 84:
+    if len(identities) != 73 or len(set(identities)) != 73:
         violations.append(
-            "[05-OP-35] stdlib numeric manifest must have exactly eighty-four "
+            "[05-OP-35] stdlib numeric manifest must have exactly seventy-three "
             "unique identities"
         )
 
@@ -2298,7 +2286,6 @@ def validate_normative_contract(
             "`decimal::Decimal`",
             "`time::Date`",
             "`time::Duration`",
-            "`tokenizer::Tokenizer`",
             "accepts every representable declared field tuple",
             "validation and normalization belong to named stdlib functions",
             "A public signature is numeric when any reachable field of an admitted ADT",
@@ -2315,11 +2302,9 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the eighty-four final exported stdlib numeric definitions",
+            "exactly the seventy-three final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
-            "`init/random::normal_like` | "
-            "`(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]`",
             "`tensor/construct::linspace` | "
             "`(p_float,p_float,i64)->tensor[n,p_float]`",
             "`tensor/construct::arange` | "
@@ -2399,13 +2384,11 @@ def validate_normative_contract(
             "and stop receives exact zero",
             "enumerated by increasing output index",
             "separate canonical adjacent-pair balanced trees",
-            "Kaiming requires finite `fan_in > 0`",
             "rejects a zero divisor or negative result scale",
             "interpreted in exact arithmetic and normalized before either "
             "representation check",
             "removable trailing zeros do not cause `Overflow`",
             "proleptic Gregorian calendar",
-            "lowest merge rank and then the leftmost pair",
             "NaN is unequal to every value, including itself",
             "Test tolerances have the same active float dtype as the values",
             "`assert_close_tensor` admits exactly one common active float dtype `p`",
@@ -2428,21 +2411,11 @@ def validate_normative_contract(
             "width and is close exactly when that difference is less than or equal "
             "to the converted tolerance",
             "without invoking a shell",
-            "every random stdlib callable has the pathwise adjoint of its exact "
-            "graph above",
-            "the key, source units, and mask comparisons contribute zero cotangent",
-            "splits `k` by [05-OP-70] into `(k1, k2)`",
-            "rounded result equals the stored upper endpoint",
-            "computed denominator must be finite and strictly positive",
             "`days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`",
             "final normalized `days` field has no i64 representation",
             "A negative year uses `-` followed by exactly "
             "`max(4, digits(|year|))` decimal digits",
             "`|year|` is the exact mathematical magnitude rather than an i64 `abs`",
-            "no token pair occurs at more than one merge rank",
-            "repeatedly selects the lowest merge rank and then the leftmost pair",
-            "`encode` maps each final token through `vocab`",
-            "`decode` maps each ID through the inverse vocabulary",
             "No callable derives authority from its implementation body or age",
         ),
         "05-OP-36": (

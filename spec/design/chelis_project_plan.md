@@ -505,7 +505,7 @@ Shipped.
   inputs
 - make the tokenizer/data-loader path a first-class Phase 3 deliverable, not a Python
   sidecar
-- acceptance oracle: `cargo test -p chelis-cli --test std_io_pipeline phase3g_text_pipeline_acceptance_oracle -- --ignored --exact --nocapture`
+- acceptance oracle: `cargo test -p chelis-cli --test std_io_pipeline io_pipeline_acceptance_oracle -- --ignored --exact --nocapture`
 
 ### 3i: Standard Library Expansion
 

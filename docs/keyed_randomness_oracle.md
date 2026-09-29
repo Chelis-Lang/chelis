@@ -56,7 +56,7 @@ share another worktree's target or accept cached execution reports.
 | [05-OP-69..72] tensor surface forms, runtime count/shape failures | `key_tensor_forms` |
 | [04-LIN-9/10] affinity, tensor-key ranks and transported contracts, captures, generics and builtin policies | `key_linearity`, `key_builtin_cases` |
 | Symbolic derivations, one consumer and replay on the wire | `key_operations_ir`, `key_operand_random_ir`, `wire_random_domains` |
-| Stdlib initialization and the executable dropout example | `key_std_initialisers_cli`, `dropout_fixed_stream_cli` |
+| Standard-library module boundaries and the executable dropout example | `stdlib_removed_modules_cli`, `dropout_fixed_stream_cli` |
 | `par` disposition: typed #2503 refusal, before Eval/C execution | `jit_par_passthrough`, `jit_par_runtime_gap` |
 
 Expected words come from checked-in independent Rust transcriptions of the

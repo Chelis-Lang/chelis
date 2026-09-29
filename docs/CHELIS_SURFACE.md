@@ -654,14 +654,13 @@ owns neural-network layers, losses, optimizers, and training loops
 |---|---|
 | `Std.Tensor.Construct` | `linspace`, `arange`, `stack`, `squeeze`, `unsqueeze`. `Float`/`Int` bounds are checked; compiled-host generic casts and some concrete calls have gaps ([#1418](https://github.com/Chelis-Lang/chelis/issues/1418), [#1416](https://github.com/Chelis-Lang/chelis/issues/1416)). |
 | `Std.Tensor.Mask` | `where_indices`, a source-defined mask index helper. |
-| `Std.Init.Random`, `Std.Init.Kaiming`, `Std.Init.XavierExt` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal`; random initializers take and consume a `key`. |
 | `Std.Sort`, `Std.Scan`, `Std.Index` | `sort`; `scan_list`; `list_index`, `take_list`, `skip_list`. The `sort` wrapper and host builtin return `i64` indices. Selected List index/selection adjoints have Eval/C coverage. |
 | `Std.Io` | `read_text`, `write_text`, `read_trimmed_lines`, `read_head_bytes`, `exists`, `list`, `mmap_size`. |
 | `Std.Io.Csv` | `read_csv`, `try_read_csv`, `to_csv`, `try_to_csv`, `write_csv`, `try_write_csv`. These are source-defined functions, distinct from the eval-only CSV builtin family. The line-based reader and serializer do not accept CR/LF inside a cell. |
 | `Std.Io.Json` | `Json` with `JsonNull`, `JsonBool`, `JsonInt`, `JsonBigInt`, `JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; parsing, serialization, file I/O, accessors, and `try_*` forms. Integer tokens preserve the `JsonInt(i64)`/`JsonBigInt(string)` distinction instead of passing through `f64`; decimal/exponent tokens use `JsonFloat(f64)`. |
 | `Std.Io.Parquet`, `Std.Io.Safetensors` | `read_parquet`/`write_parquet`; `save_tensors`/`load_tensors`. Check concrete dtype, shape, and target support for a selected call. |
 | `Std.Scalar`, `Std.Text`, `Std.Test` | Scalar `max`/`min`/`abs`; `join`; assertions, shape checks, and failure helpers. |
-| `Std.Time`, `Std.Decimal`, `Std.Tokenizer`, `Std.Process`, `Std.Contracts` | Dates/durations; fixed-point arithmetic; tokenizer loading/encoding/decoding; `run`/`run_chelis`; named contract predicates. |
+| `Std.Time`, `Std.Decimal`, `Std.Process`, `Std.Contracts` | Dates/durations; fixed-point arithmetic; `run`/`run_chelis`; named contract predicates. |
 
 Compiled-host support for a source-defined module depends on its
 selected dependencies and execution path.

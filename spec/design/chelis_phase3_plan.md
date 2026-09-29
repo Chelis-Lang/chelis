@@ -634,7 +634,7 @@ def load_training_data(data_path: string, tok_path: string,
 - Tokenizer: decode(encode(text)) round-trips for ASCII text
 - Tokenizer: batch_encode produces correctly padded tensor
 - Tokenizer: load_tokenizer parses HuggingFace tokenizer.json correctly
-- Data loader: `examples/illustrative/phase3g_text_pipeline/` checks, evaluates, builds,
+- Data loader: `examples/illustrative/io_pipeline/` checks, evaluates, builds,
   and compiled output matches `chelis eval`
 
 ### Acceptance Oracle
@@ -642,11 +642,11 @@ def load_training_data(data_path: string, tok_path: string,
 Authoritative oracle:
 
 ```sh
-cargo test -p chelis-cli --test std_io_pipeline phase3g_text_pipeline_acceptance_oracle -- --ignored --exact --nocapture
+cargo test -p chelis-cli --test std_io_pipeline io_pipeline_acceptance_oracle -- --ignored --exact --nocapture
 ```
 
 The checked-in illustrative Reef package at
-`examples/illustrative/phase3g_text_pipeline/` must:
+`examples/illustrative/io_pipeline/` must:
 
 - read CSV and JSON files
 - load a HuggingFace-format tokenizer

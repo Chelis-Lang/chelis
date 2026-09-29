@@ -598,7 +598,7 @@ classification, configuration-invariant declarations, and exact semantic
 registrations for numeric callables and stdlib constructors. Its 313 rows have
 final authority; none uses an exception disposition. The stdlib closure resolves
 imported and generic nominal types to a finite fixed point and rejects unresolved
-names. Its execution controls preserve the 84 exact [05-OP-35] identities.
+names. Its execution controls preserve the 73 exact [05-OP-35] identities.
 
 The wire census verifies the compiler/Python publication graph, exact carrier
 shapes, codec and admission execution, and the default compiler-api library's
@@ -1163,7 +1163,7 @@ Deliverables, with phase homes:
      dtype bounds and the existing precision-name backstop remain capacity;
      an ordinary unbounded `p -> p` stays nonnumeric. The stdlib closure cases
      in `capacity_census_tripwire` exercise these boundaries and preserve the
-     existing 84 definition and five ADT identities. This is declared-surface
+     existing 73 definitions and four ADT identities. This is declared-surface
      evidence, not body inference, backend acceptance or completion of [#1288].
    - **Matched rows freeze enforcement metadata.** Equality is not
      merely `(kind, id)`: the tripwire compares the complete
@@ -2025,7 +2025,7 @@ generated rejection registry at byte agreement. The named consumers of the
 pre-4C composite are this document and `capability_table.md`; both are amended
 here, and the release ledger in `remediation_roadmap.md` records the same
 narrowing. The same change corrects the stale eighty-three-definition stdlib
-count to the eighty-four the `[05-OP-35]` registry and the census already
+count to the seventy-eight the `[05-OP-35]` registry and the census now
 carry, and settles the `capability_table.md` seed row that still cited the
 closed [#691] as an `Unimplemented` owner.
 
@@ -2559,7 +2559,7 @@ callable from bypassing review while the capability tables are built.
    tensor carriers; byte-exact recursive runtime List/tuple/Dict/ADT
    observation; every active signed-integer sparse-index width across IR and
    public C; canonical gradient consumer-edge order by forward node ordinal
-   and input slot; the 84-definition stdlib manifest; legal compiled host
+   and input slot; the 78-definition stdlib manifest; legal compiled host
    effects with the exact language spelling `IO`; and target-independent
    runtime reduction windows, the [05-OP-42] `stop_gradient` transformation
    barrier, and [05-OP-43]'s dedicated ReLU identity and zero-boundary

@@ -29,12 +29,6 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `index::list_index` | `(List[T],i64)->T` |
 | `index::skip_list` | `(List[T],i64)->List[T]` |
 | `index::take_list` | `(List[T],i64)->List[T]` |
-| `init/kaiming::kaiming_normal` | `(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]` |
-| `init/kaiming::kaiming_uniform` | `(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]` |
-| `init/random::normal_like` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
-| `init/xavierext::trunc_normal` | `(key,&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]` |
-| `init/xavierext::xavier_normal` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
-| `init/xavierext::xavier_uniform` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
 | `io/json::json_array` | `(Option[Json])->Option[List[Json]]` |
 | `io/json::json_bigint` | `(Option[Json])->Option[string]` |
 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
@@ -87,8 +81,3 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `time::parse_date` | `(string)->Option[Date]` |
 | `time::sub_days` | `(Date,i64)->Date` |
 | `time::try_date` | `(i64,i64,i64)->Option[Date]` |
-| `tokenizer::batch_encode` | `(Tokenizer,List[string],i64,i64)->tensor[batch,seq,i64]` |
-| `tokenizer::decode` | `(Tokenizer,List[i64])->string` |
-| `tokenizer::encode` | `(Tokenizer,string)->List[i64]` |
-| `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
-| `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |

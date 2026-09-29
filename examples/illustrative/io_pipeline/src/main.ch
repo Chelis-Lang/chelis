@@ -1,7 +1,6 @@
 module Demo.Main
 import Std.Io.Csv (read_csv)
 import Std.Io.Json (load_json, json_bool, json_float, json_get, json_int)
-import Std.Tokenizer (batch_encode, decode, encode, load_tokenizer)
 rows: List[Dict[string, string]] = read_csv("train.csv")
 first_row = index(rows, cast(0, i64))
 text = match dict_get(first_row, "text") with {
@@ -25,12 +24,9 @@ lr = match json_float(json_get(cfg, "learning_rate")) with {
   | Some(rate) => rate
   | None => cast(0.0, f64)
 }
-tok = load_tokenizer("tokenizer.json")
-tokens = encode(tok, text)
-decoded = decode(tok, tokens)
-batch = batch_encode(tok, [text, "hello"], max_length, pad_value)
-decoded_view = print(decoded)
-shape_view = print((shape(batch, 0), shape(batch, 1)))
+text_view = print(text)
+row_count_view = print(len(rows))
 enabled_view = print(enabled)
 lr_view = print(lr)
-token_count_view = print(len(tokens))
+max_length_view = print(max_length)
+pad_value_view = print(pad_value)

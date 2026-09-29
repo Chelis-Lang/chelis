@@ -162,12 +162,9 @@ SUITES = (
         "an_unselected_split_keys_does_not_trap_on_its_count",
         "a_selected_split_keys_still_traps_on_a_negative_count",
     ), ("cli", "eval", "c", "reference")),
-    Suite("chelis-cli", "key_std_initialisers_cli", (
-        "std_initialisers_draw_from_the_key_they_are_given_in_eval_and_c",
-        "std_initialisers_validate_before_the_draw_is_consumed_in_eval_and_c",
-        "std_initialisers_validate_before_the_draw_is_consumed_under_grad_in_eval_and_c",
-        "std_initialisers_with_valid_parameters_run_in_eval_and_c",
-    ), ("stdlib", "eval", "c", "reference")),
+    Suite("chelis-cli", "stdlib_removed_modules_cli", (
+        "removed_shell_modules_cannot_be_imported_from_chelis_std",
+    ), ("stdlib-boundary", "cli")),
     Suite("chelis-cli", "jit_par_runtime_gap", (
         "eval_par_scalar_is_fenced_before_execution",
         "eval_par_tensor_is_fenced_before_execution",
