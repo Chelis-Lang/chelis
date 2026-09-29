@@ -18,7 +18,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, runtime-representation]
+        options: [all, runtime-representation, dtype-phase3, runtime-extent]
 
 permissions:
   contents: read
@@ -37,19 +37,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
       - name: Write dispatch scope receipt
         env:
           VALIDATION_SCOPE: ${{ inputs.validation_scope }}
           RECEIPT_RUN_ID: ${{ github.run_id }}
           RECEIPT_HEAD_SHA: ${{ github.sha }}
         run: |
-          python3 - <<'PY'
+          .venv/bin/python - <<'PY'
           import json
           import os
           from pathlib import Path
 
           scope = os.environ["VALIDATION_SCOPE"]
-          if scope not in {"all", "runtime-representation"}:
+          if scope not in {
+              "all", "runtime-representation", "dtype-phase3", "runtime-extent",
+          }:
               raise SystemExit(f"invalid validation scope: {scope!r}")
           receipt = {
               "version": 1,
@@ -223,7 +231,7 @@ jobs:
           retention-days: 14
 
   dtype-phase3-oracle:
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.validation_scope == 'all' || inputs.validation_scope == 'dtype-phase3')) }}
     name: Dtype Phase 0-3 Oracle
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:
@@ -459,7 +467,7 @@ jobs:
           retention-days: 14
 
   runtime-extent-oracle:
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.validation_scope == 'all' || inputs.validation_scope == 'runtime-extent')) }}
     name: Runtime Extent Oracle (chelis#1277)
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:

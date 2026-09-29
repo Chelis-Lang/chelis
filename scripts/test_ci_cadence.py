@@ -3,8 +3,10 @@ import copy
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -49,6 +51,18 @@ RUNTIME_SCOPE_IF = (
     "(inputs.validation_scope == 'all' || "
     "inputs.validation_scope == 'runtime-representation')) }}"
 )
+DTYPE_SCOPE_IF = (
+    "${{ github.event_name == 'schedule' || "
+    "(github.event_name == 'workflow_dispatch' && "
+    "(inputs.validation_scope == 'all' || "
+    "inputs.validation_scope == 'dtype-phase3')) }}"
+)
+EXTENT_SCOPE_IF = (
+    "${{ github.event_name == 'schedule' || "
+    "(github.event_name == 'workflow_dispatch' && "
+    "(inputs.validation_scope == 'all' || "
+    "inputs.validation_scope == 'runtime-extent')) }}"
+)
 FULL_SCOPE_PREDICATE = (
     "(github.event_name == 'schedule' || "
     "(github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all'))"
@@ -88,7 +102,12 @@ def assert_extended(test, pr, nightly):
                         "required": True,
                         "default": "all",
                         "type": "choice",
-                        "options": ["all", "runtime-representation"],
+                        "options": [
+                            "all",
+                            "runtime-representation",
+                            "dtype-phase3",
+                            "runtime-extent",
+                        ],
                     }
                 }
             },
@@ -100,9 +119,10 @@ def assert_extended(test, pr, nightly):
         job = jobs[name]
         test.assertEqual(
             job.get("if"),
-            RUNTIME_SCOPE_IF
-            if name == "runtime-representation-phase0-oracle"
-            else FULL_SCOPE_IF,
+            {
+                "runtime-representation-phase0-oracle": RUNTIME_SCOPE_IF,
+                "dtype-phase3-oracle": DTYPE_SCOPE_IF,
+            }.get(name, FULL_SCOPE_IF),
         )
         test.assertFalse(job.get("continue-on-error", False))
         execution_budget = (
@@ -226,7 +246,7 @@ def assert_extended(test, pr, nightly):
     # job report a shortfall again, and that is what this rejects.
     extents = jobs["runtime-extent-oracle"]
     test.assertNotIn("runtime-extent-oracle", pr["jobs"])
-    test.assertEqual(extents.get("if"), FULL_SCOPE_IF)
+    test.assertEqual(extents.get("if"), EXTENT_SCOPE_IF)
     test.assertFalse(extents.get("continue-on-error", False))
     test.assertEqual(extents["timeout-minutes"], 115)
     extent_commands = [step.get("run") or "" for step in extents["steps"]]
@@ -303,7 +323,9 @@ def assert_dispatch_scopes(test, nightly):
     }
     test.assertEqual(set(jobs), full_jobs | {"dispatch-scope"})
     for name in full_jobs - {
+        "dtype-phase3-oracle",
         "runtime-representation-phase0-oracle",
+        "runtime-extent-oracle",
         "generalize-sweep-oracle",
         "test-telemetry",
         "report",
@@ -313,6 +335,8 @@ def assert_dispatch_scopes(test, nightly):
         jobs["runtime-representation-phase0-oracle"].get("if"),
         RUNTIME_SCOPE_IF,
     )
+    test.assertEqual(jobs["dtype-phase3-oracle"].get("if"), DTYPE_SCOPE_IF)
+    test.assertEqual(jobs["runtime-extent-oracle"].get("if"), EXTENT_SCOPE_IF)
     receipt = jobs["dispatch-scope"]
     test.assertEqual(receipt.get("if"), "${{ github.event_name == 'workflow_dispatch' }}")
     test.assertEqual(receipt["runs-on"], "ubuntu-latest")
@@ -326,21 +350,37 @@ def assert_dispatch_scopes(test, nightly):
         ["linux-extended-dispatch-scope"],
     )
     test.assertEqual(
-        receipt["steps"][0]["env"],
+        receipt["steps"][0],
+        {"name": "Install uv", "uses": "astral-sh/setup-uv@v8.1.0"},
+    )
+    test.assertEqual(
+        receipt["steps"][1],
+        {"name": "Create uv-managed venv", "run": "uv venv --python 3.11"},
+    )
+    producer = receipt["steps"][2]
+    test.assertEqual(producer["name"], "Write dispatch scope receipt")
+    test.assertTrue(producer["run"].startswith(".venv/bin/python - <<'PY'\n"))
+    test.assertEqual(
+        producer["env"],
         {
             "VALIDATION_SCOPE": "${{ inputs.validation_scope }}",
             "RECEIPT_RUN_ID": "${{ github.run_id }}",
             "RECEIPT_HEAD_SHA": "${{ github.sha }}",
         },
     )
-    test.assertIn("scope.json", receipt["steps"][0]["run"])
+    test.assertIn("scope.json", producer["run"])
 
     def legs(names):
         return sum(len(matrix_legs(jobs[name])) for name in names)
 
     test.assertEqual(legs(full_jobs - {"report"}), 19)
     test.assertEqual(legs(full_jobs), 20)
-    test.assertEqual(legs({"runtime-representation-phase0-oracle", "dispatch-scope"}), 2)
+    for name in (
+        "runtime-representation-phase0-oracle",
+        "dtype-phase3-oracle",
+        "runtime-extent-oracle",
+    ):
+        test.assertEqual(legs({name, "dispatch-scope"}), 2)
 
 
 def matrix_legs(job):
@@ -466,12 +506,34 @@ class ExtendedCadenceTests(unittest.TestCase):
     def test_schedule_all_and_scoped_dispatch_job_selection(self):
         assert_dispatch_scopes(self, self.nightly)
 
+    def test_dtype_and_extent_scopes_reject_missing_or_extra_jobs(self):
+        for job, condition in (
+            ("dtype-phase3-oracle", DTYPE_SCOPE_IF),
+            ("runtime-extent-oracle", EXTENT_SCOPE_IF),
+        ):
+            for mutation in ("missing-owner", "extra-full-workspace"):
+                nightly = copy.deepcopy(self.nightly)
+                if mutation == "missing-owner":
+                    nightly["jobs"][job]["if"] = FULL_SCOPE_IF
+                else:
+                    nightly["jobs"]["full-workspace"]["if"] = condition
+                with self.subTest(job=job, mutation=mutation):
+                    with self.assertRaises(AssertionError):
+                        assert_dispatch_scopes(self, nightly)
+
     def test_dispatch_receipt_step_records_the_exact_scope_run_and_head(self):
-        step = self.nightly["jobs"]["dispatch-scope"]["steps"][0]
-        for scope in ("all", "runtime-representation", "unexpected"):
+        step = self.nightly["jobs"]["dispatch-scope"]["steps"][2]
+        self.assertTrue(step["run"].startswith(".venv/bin/python - <<'PY'\n"))
+        test_command = step["run"].replace(
+            ".venv/bin/python", shlex.quote(sys.executable), 1
+        )
+        for scope in (
+            "all", "runtime-representation", "dtype-phase3",
+            "runtime-extent", "unexpected",
+        ):
             with self.subTest(scope=scope), tempfile.TemporaryDirectory() as tmp:
                 completed = subprocess.run(
-                    ["bash", "-e", "-c", step["run"]],
+                    ["bash", "-e", "-c", test_command],
                     cwd=tmp,
                     env={
                         **os.environ,

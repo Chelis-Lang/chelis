@@ -59,17 +59,30 @@ def scope_receipt(
 class FakeGh:
     """A recorded `gh` transcript keyed by the distinguishing argument."""
 
-    def __init__(self, *, runs: str, artifacts: dict[str, str], root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        runs: str,
+        artifacts: dict[str, str],
+        root: Path,
+        schedule_runs: str | None = None,
+    ) -> None:
         self.runs = runs
+        self.schedule_runs = schedule_runs
         self.artifacts = artifacts
         self.root = root
+        self.run_queries: list[str] = []
         self.downloaded: list[str] = []
         self.download_names: list[tuple[str, tuple[str, ...]]] = []
         self.missing_documents: set[str] = set()
+        self.failed_scope_downloads: set[str] = set()
         self.scope_receipts: dict[str, str] = {}
 
     def __call__(self, command):
         if command[1] == "api" and "/runs?" in command[-1]:
+            self.run_queries.append(command[-1])
+            if "&event=schedule" in command[-1] and self.schedule_runs is not None:
+                return self.schedule_runs
             return self.runs
         if command[1] == "api" and "/artifacts" in command[-1]:
             run_id = command[-1].split("/runs/")[1].split("/")[0]
@@ -83,6 +96,8 @@ class FakeGh:
                 if item == "--name"
             )
             self.download_names.append((run_id, names))
+            if run_id in self.failed_scope_downloads and names == (SCOPE_ARTIFACT,):
+                raise ValueError("command failed (1): gh run download: artifact not found")
             destination = Path(command[command.index("--dir") + 1])
             for index, item in enumerate(command):
                 if item != "--name":
@@ -326,6 +341,8 @@ class BaselineSelectionTests(unittest.TestCase):
             scope_receipt("201", sha),
             scope_receipt("200", "c" * 40),
             scope_receipt("200", sha, scope="runtime-representation"),
+            scope_receipt("200", sha, scope="dtype-phase3"),
+            scope_receipt("200", sha, scope="runtime-extent"),
             json.dumps({"version": 1, "event": "schedule",
                         "scope": "all", "run_id": "200", "head_sha": sha}),
             json.dumps({"version": 2, "event": "workflow_dispatch",
@@ -395,6 +412,104 @@ class BaselineSelectionTests(unittest.TestCase):
             gh.missing_documents.add(SCOPE_ARTIFACT)
             with self.assertRaisesRegex(ValueError, "retains every baseline"):
                 self.prepare(gh, root / "out", artifacts=baseline.DEFAULT_ARTIFACTS)
+
+    def test_failed_scope_download_falls_back_to_complete_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = FakeGh(
+                runs=run_listing([
+                    run_row("200", "b" * 40, "2026-09-19T03:31:04Z",
+                            event="workflow_dispatch"),
+                    run_row("100", "a" * 40, "2026-09-18T03:31:45Z"),
+                ]),
+                artifacts={
+                    "200": artifact_listing(
+                        [*baseline.DEFAULT_ARTIFACTS, SCOPE_ARTIFACT]
+                    ),
+                    "100": artifact_listing(list(baseline.DEFAULT_ARTIFACTS)),
+                },
+                root=root,
+            )
+            gh.failed_scope_downloads.add("200")
+            manifest = self.prepare(gh, root / "out")
+        self.assertEqual(manifest["run_id"], "100")
+        self.assertEqual(
+            gh.download_names,
+            [
+                ("200", (SCOPE_ARTIFACT,)),
+                ("100", baseline.DEFAULT_ARTIFACTS),
+            ],
+        )
+
+    def test_custom_workflow_preserves_events_and_supplied_artifacts(self) -> None:
+        custom_artifacts = ("custom-junit-a", "custom-junit-b")
+        for event in ("push", "workflow_dispatch"):
+            with self.subTest(event=event), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                gh = FakeGh(
+                    runs=run_listing([
+                        run_row("200", "b" * 40, "2026-09-19T03:31:04Z",
+                                event=event)
+                    ]),
+                    artifacts={
+                        "200": artifact_listing(list(custom_artifacts))
+                    },
+                    root=root,
+                )
+                manifest = self.prepare(
+                    gh,
+                    root / "out",
+                    workflow="custom.yml",
+                    artifacts=custom_artifacts,
+                )
+                self.assertEqual(manifest["run_id"], "200")
+                self.assertEqual(
+                    gh.download_names,
+                    [("200", custom_artifacts)],
+                )
+                self.assertEqual(len(gh.run_queries), 1)
+
+    def test_ten_scoped_dispatches_do_not_crowd_out_last_complete_schedule(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scoped_ids = [str(300 - index) for index in range(10)]
+            gh = FakeGh(
+                runs=run_listing([
+                    run_row(identifier, "b" * 40, "2026-09-19T03:31:04Z",
+                            event="workflow_dispatch")
+                    for identifier in scoped_ids
+                ]),
+                schedule_runs=run_listing([
+                    run_row("100", "a" * 40, "2026-09-18T03:31:45Z")
+                ]),
+                artifacts={
+                    **{
+                        identifier: artifact_listing(
+                            [*baseline.DEFAULT_ARTIFACTS, SCOPE_ARTIFACT]
+                        )
+                        for identifier in scoped_ids
+                    },
+                    "100": artifact_listing(list(baseline.DEFAULT_ARTIFACTS)),
+                },
+                root=root,
+            )
+            gh.scope_receipts = {
+                identifier: scope_receipt(
+                    identifier, "b" * 40, scope="runtime-representation"
+                )
+                for identifier in scoped_ids
+            }
+            manifest = self.prepare(gh, root / "out", search_runs=10)
+        self.assertEqual(manifest["run_id"], "100")
+        self.assertEqual(len(gh.run_queries), 2)
+        self.assertIn("&per_page=10&event=schedule", gh.run_queries[1])
+        self.assertEqual(gh.download_names[-1], ("100", baseline.DEFAULT_ARTIFACTS))
+        self.assertFalse(any(
+            run_id in scoped_ids and names == baseline.DEFAULT_ARTIFACTS
+            for run_id, names in gh.download_names
+        ))
 
     def test_default_workflow_cannot_narrow_the_required_shards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
