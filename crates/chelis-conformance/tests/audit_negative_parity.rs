@@ -646,6 +646,148 @@ fn central_nightly_and_release_profiles_are_real_install_contracts() {
 }
 
 #[test]
+fn historical_non_ci_profiles_require_their_raw_reef_sources() {
+    for (package, profile, inputs, needs_package, needs_nautilus) in [
+        (
+            "coral",
+            "coral-release",
+            vec![format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+            true,
+            true,
+        ),
+        (
+            "nautilus",
+            "nautilus-release",
+            vec![format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+            true,
+            false,
+        ),
+        (
+            "nautilus",
+            "nautilus-nightly",
+            vec![
+                format!("chelis-tag: v{VER}"),
+                format!("chelis-version: {VER}"),
+                format!("chelis-linux-sha256: {ARCHIVE_DIGEST}"),
+            ],
+            false,
+            false,
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        std::fs::write(
+            root.join(".github/workflows/ci.yml"),
+            "name: inert\njobs:\n  no-install:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo no\n",
+        )
+        .unwrap();
+        std::fs::remove_file(root.join(".github/workflows/bump-pr.yml")).unwrap();
+        std::fs::write(
+            root.join(".github/workflows/central.yml"),
+            central_profile_wrapper(profile, &inputs),
+        )
+        .unwrap();
+        let manifest = root.join("reef.toml");
+        let valid = std::fs::read_to_string(&manifest).unwrap();
+        let mut mutations = vec![(
+            format!("compiler = \"={VER}\""),
+            format!(" compiler = \"={VER}\""),
+        )];
+        if needs_package {
+            mutations.push((
+                "version = \"0.1.0\"".to_string(),
+                " version = \"0.1.0\"".to_string(),
+            ));
+        }
+        if needs_nautilus {
+            mutations.push((
+                "nautilus = { version = \"4.5.6\" }".to_string(),
+                "[dependencies.nautilus]\nversion = \"4.5.6\"".to_string(),
+            ));
+        }
+        for (before, after) in mutations {
+            assert!(
+                valid.contains(&before),
+                "{profile}: missing fixture source {before}"
+            );
+            std::fs::write(&manifest, valid.replace(&before, &after)).unwrap();
+            let report = audit::audit(&root);
+            assert_eq!(
+                verdict_of(&report, "workflow-env-pins"),
+                Verdict::Fail,
+                "{profile}: unreadable {before} must fail the pin row"
+            );
+            assert_ne!(
+                verdict_of(&report, "toolchain-installer"),
+                Verdict::Pass,
+                "{profile}: unreadable {before} must not certify an installer"
+            );
+        }
+    }
+}
+
+#[test]
+fn historical_coral_inline_nautilus_source_accepts_grep_readable_suffixes() {
+    for profile in ["coral-ci", "coral-release"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "coral");
+        std::fs::remove_file(root.join(".github/workflows/bump-pr.yml")).unwrap();
+        let (workflow, caller) = if profile == "coral-ci" {
+            (
+                root.join(".github/workflows/ci.yml"),
+                central_ci_wrapper("coral", VER),
+            )
+        } else {
+            std::fs::write(
+                root.join(".github/workflows/ci.yml"),
+                "name: inert\njobs:\n  no-install:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo no\n",
+            )
+            .unwrap();
+            (
+                root.join(".github/workflows/central.yml"),
+                central_profile_wrapper(
+                    "coral-release",
+                    &[format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+                ),
+            )
+        };
+        std::fs::write(workflow, caller).unwrap();
+        let manifest = root.join("reef.toml");
+        let valid = std::fs::read_to_string(&manifest).unwrap();
+        let original = "nautilus = { version = \"4.5.6\" }";
+        for inline in [
+            "nautilus = { version = \"4.5.6\" } # pin",
+            "nautilus = { version = \"4.5.6\", features = [\"x\"] }",
+            "nautilus = { features = [\"x\"], version = \"4.5.6\" }",
+        ] {
+            std::fs::write(&manifest, valid.replace(original, inline)).unwrap();
+            let report = audit::audit(&root);
+            for row in ["workflow-env-pins", "toolchain-installer"] {
+                assert_eq!(
+                    verdict_of(&report, row),
+                    Verdict::Pass,
+                    "{profile}: {inline} must satisfy {row}"
+                );
+            }
+        }
+        for unreadable in [
+            "[dependencies.nautilus]\nversion = \"4.5.6\"",
+            "nautilus = { extra_version = \"9.9.9\", version = \"4.5.6\" }",
+            "nautilus = { version = \"4.5.6\"",
+        ] {
+            std::fs::write(&manifest, valid.replace(original, unreadable)).unwrap();
+            let report = audit::audit(&root);
+            assert_eq!(
+                verdict_of(&report, "workflow-env-pins"),
+                Verdict::Fail,
+                "{profile}: {unreadable} must not certify the historical raw source"
+            );
+            assert_ne!(verdict_of(&report, "toolchain-installer"), Verdict::Pass);
+        }
+    }
+}
+
+#[test]
 fn central_non_ci_profiles_require_the_committed_linux_digest() {
     let other_digest = format!("sha256:{}", "b".repeat(64));
     for (package, profile, inputs) in [

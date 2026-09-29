@@ -129,17 +129,22 @@ extra or missing `v` prefixes do not count. The historical Coral CI guard
 also requires `package-version` to equal `[package].version` and
 `nautilus-tag` to equal `v` plus `[dependencies].nautilus.version` in that
 same `reef.toml`; missing or non-numeric versions cannot establish the guard.
-For that exact historical revision, the audit also checks the raw `reef.toml`
-shape the 439 profile's grep-based guards can read, not merely equivalent TOML
-values: its compiler pin is an unindented `compiler = "=X.Y.Z"` line; Coral's
-package version is the unindented `version = "X.Y.Z"` source, and its Nautilus
-dependency is an unindented same-line `nautilus = { version = "X.Y.Z" }`.
-The auditor requires one unambiguous readable compiler and Nautilus source,
-and uses the first unindented package-version source like the historical guard;
-each value must agree with parsed TOML and caller inputs. Other valid TOML
-spellings, such as `[dependencies.nautilus]` with `version` on a following
-line, do not certify the *historical* central guard; this does not constrain
-newer central profiles or the shell's own TOML interpretation.
+For that exact historical revision, the auditor checks the raw `reef.toml`
+fields read by each 439 profile's grep-based jobs, not merely equivalent TOML.
+`coral-ci` and `coral-release` require readable compiler, package, and
+Nautilus sources; `nautilus-release` requires compiler and package;
+`nautilus-ci` and `nautilus-nightly` require compiler. Release callers have
+no `chelis-version` or `chelis-tag` inputs, but their asset jobs still grep
+the raw compiler line under pipefail. The compiler source is an unindented
+`compiler = "=X.Y.Z"` line, package is the first unindented
+`version = "X.Y.Z"` source, and Coral's Nautilus source is an unindented
+same-line `nautilus = { version = "X.Y.Z" }` declaration. That line may
+have other valid inline fields or a trailing comment when its first numeric
+`version` token is the parsed dependency version; a separate
+`[dependencies.nautilus]` table is not readable by the historical grep.
+Every required raw source must agree with parsed TOML and any caller input
+for that profile. This narrow 439 rule does not constrain newer central
+profiles or the shell's own TOML interpretation.
 For each recognized historical Coral/Nautilus profile, the supplied Linux
 digest (and Darwin digest when that profile supplies one) must equal the
 matching platform value under the compiler version in the committed

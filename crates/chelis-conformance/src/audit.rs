@@ -1418,6 +1418,25 @@ struct HistoricalGuardSources {
     nautilus_matches: bool,
 }
 
+#[derive(Clone, Copy)]
+enum HistoricalRawSource {
+    Compiler,
+    Package,
+    Nautilus,
+}
+
+/// The exact ci@439 jobs read these raw sources under `set -euo pipefail`.
+/// Release profiles derive versions from reef even without caller pin inputs.
+fn historical_profile_sources(profile: &str) -> Option<&'static [HistoricalRawSource]> {
+    use HistoricalRawSource::{Compiler, Nautilus, Package};
+    match profile {
+        "coral-ci" | "coral-release" => Some(&[Compiler, Package, Nautilus]),
+        "nautilus-ci" | "nautilus-nightly" => Some(&[Compiler]),
+        "nautilus-release" => Some(&[Compiler, Package]),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 struct CentralWorkflowCall {
     profile: String,
@@ -1447,16 +1466,53 @@ fn historical_quoted_version<'a>(line: &'a str, key: &str, compiler: bool) -> Op
         .then_some(version)
 }
 
+/// The pinned grep matches the first three numeric components even if a
+/// longer TOML string follows. The parsed value is checked independently.
+fn historical_numeric_prefix(value: &str) -> Option<&str> {
+    let bytes = value.as_bytes();
+    let mut end = 0;
+    for component in 0..3 {
+        let start = end;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+        if end == start {
+            return None;
+        }
+        if component < 2 {
+            if bytes.get(end) != Some(&b'.') {
+                return None;
+            }
+            end += 1;
+        }
+    }
+    Some(&value[..end])
+}
+
 fn historical_nautilus_version(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("nautilus")?;
     let inline = rest
         .trim_start_matches([' ', '\t'])
         .strip_prefix('=')?
         .trim_start_matches([' ', '\t'])
-        .strip_prefix('{')?
-        .trim_end();
-    let body = inline.strip_suffix('}')?.trim();
-    historical_quoted_version(body, "version", false)
+        .strip_prefix('{')?;
+    // The historical grep finds the first numeric `version = "X.Y.Z"` token
+    // anywhere on this same anchored line. Neither a closing brace nor a
+    // trailing comment/other inline field changes what it extracts. Parsed
+    // TOML independently owns the validity and meaning of the declaration.
+    for (index, _) in inline.match_indices("version") {
+        let Some(rest) = inline[index + "version".len()..]
+            .trim_start_matches([' ', '\t'])
+            .strip_prefix('=')
+            .and_then(|value| value.trim_start_matches([' ', '\t']).strip_prefix('"'))
+        else {
+            continue;
+        };
+        if let Some(candidate) = historical_numeric_prefix(rest) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn historical_guard_sources(
@@ -1609,42 +1665,54 @@ fn central_source_check(ctx: &Ctx, call: &CentralWorkflowCall) -> Result<(), Str
         return Err(format!("central chelis-tag={actual} != v{version}"));
     }
     let sources = ctx.central_sources().map_err(str::to_string)?;
-    if (call.chelis_version.is_some() || call.chelis_tag.is_some())
-        && !sources.historical.compiler_matches
+    for source in
+        historical_profile_sources(&call.profile).ok_or("unsupported historical central profile")?
     {
-        return Err("historical central guard cannot read the reef.toml compiler pin".to_string());
-    }
-    if call.profile == "coral-ci" {
-        let package = sources
-            .package_version
-            .as_deref()
-            .ok_or("reef.toml [package].version is missing or not numeric")?;
-        if call.package_version.as_deref() != Some(package) {
-            return Err(format!(
-                "central package-version != reef.toml [package].version {package}"
-            ));
-        }
-        if !sources.historical.package_matches {
-            return Err("historical Coral guard cannot read reef.toml package version".to_string());
-        }
-        let nautilus = sources
-            .nautilus_version
-            .as_deref()
-            .ok_or("reef.toml [dependencies].nautilus.version is missing or not numeric")?;
-        if call
-            .nautilus_tag
-            .as_deref()
-            .and_then(|tag| tag.strip_prefix('v'))
-            != Some(nautilus)
-        {
-            return Err(format!(
-                "central nautilus-tag != v{nautilus} from reef.toml"
-            ));
-        }
-        if !sources.historical.nautilus_matches {
-            return Err(
-                "historical Coral guard cannot read reef.toml nautilus inline version".to_string(),
-            );
+        match source {
+            HistoricalRawSource::Compiler if !sources.historical.compiler_matches => {
+                return Err(
+                    "historical central guard cannot read the reef.toml compiler pin".to_string(),
+                );
+            }
+            HistoricalRawSource::Package => {
+                let package = sources
+                    .package_version
+                    .as_deref()
+                    .ok_or("reef.toml [package].version is missing or not numeric")?;
+                if let Some(actual) = call.package_version.as_deref()
+                    && actual != package
+                {
+                    return Err(format!(
+                        "central package-version != reef.toml [package].version {package}"
+                    ));
+                }
+                if !sources.historical.package_matches {
+                    return Err(
+                        "historical central profile cannot read reef.toml package version"
+                            .to_string(),
+                    );
+                }
+            }
+            HistoricalRawSource::Nautilus => {
+                let nautilus = sources
+                    .nautilus_version
+                    .as_deref()
+                    .ok_or("reef.toml [dependencies].nautilus.version is missing or not numeric")?;
+                if let Some(actual) = call.nautilus_tag.as_deref()
+                    && actual.strip_prefix('v') != Some(nautilus)
+                {
+                    return Err(format!(
+                        "central nautilus-tag != v{nautilus} from reef.toml"
+                    ));
+                }
+                if !sources.historical.nautilus_matches {
+                    return Err(
+                        "historical Coral profile cannot read reef.toml nautilus inline version"
+                            .to_string(),
+                    );
+                }
+            }
+            HistoricalRawSource::Compiler => {}
         }
     }
     if call.linux_digest != sources.linux_digest {
