@@ -97,6 +97,79 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
   School exemplar: [`scripts/audit_workarounds.py`](https://github.com/Chelis-Lang/school/blob/main/scripts/audit_workarounds.py)
   `--pins-only`, wired as a `hard-rule-guard` step in
   [`ci.yml`](https://github.com/Chelis-Lang/school/blob/main/.github/workflows/ci.yml).
+
+For the historical Coral/Nautilus thin callers, the offline conformance audit
+recognizes only the exact legacy central implementation
+`Chelis-Lang/ci/.github/workflows/consumer.yml@4394706b569bdd7d557f6edc7b9818249decc330`
+and its closed, profile-specific inputs and secret. An audit `Pass` is a
+structural claim about those legacy profile jobs, **not** independent consumer
+acceptance of that SHA, private workflow access, or evidence of hosted
+execution. Coral and Nautilus must each review and accept their central
+revision independently and prove their own hosted suite before migration;
+Nautilus #32 remains a draft and does not authorize Coral. The newer
+`ci/main` capability selectors have different semantics and are not covered
+by this historical recognition rule. Audit of a new central SHA requires
+reviewing its job behavior and updating the auditor, not treating any
+40-character immutable reference as equivalent.
+An unknown central pointer in any workflow is a failed workflow-pin row,
+even if another workflow invokes the known legacy revision.
+Central workflow references use GitHub's case-insensitive owner/repository
+identity; the `.github/workflows/consumer.yml` path and accepted commit
+revision stay exact. A job-level `uses` pointing at the same central
+repository with any other workflow path, mutable ref, or different revision
+fails the workflow-pin row even if another job calls the known revision.
+Comments and run strings are not central callers.
+The offline auditor reads YAML jobs structurally, independent of indentation
+width or quoted keys, and resolves aliases before deciding whether a job
+calls that central workflow. Duplicate keys or malformed YAML fail closed.
+Nested step fields, comments, and run blocks cannot become job-level callers.
+For a legacy central CI profile, `chelis-tag` must equal `vX.Y.Z` and
+`chelis-version` must equal `X.Y.Z` for the exact `reef.toml` compiler pin;
+extra or missing `v` prefixes do not count. The historical Coral CI guard
+also requires `package-version` to equal `[package].version` and
+`nautilus-tag` to equal `v` plus `[dependencies].nautilus.version` in that
+same `reef.toml`; missing or non-numeric versions cannot establish the guard.
+For that exact historical revision, the auditor checks the raw `reef.toml`
+fields read by each 439 profile's grep-based jobs, not merely equivalent TOML.
+`coral-ci` and `coral-release` require readable compiler, package, and
+Nautilus sources; `nautilus-release` requires compiler and package;
+`nautilus-ci` and `nautilus-nightly` require compiler. Release callers have
+no `chelis-version` or `chelis-tag` inputs, but their asset jobs still grep
+the raw compiler line under pipefail. The compiler source is an unindented
+`compiler = "=X.Y.Z"` line, and package is the first unindented
+`version = "X.Y.Z"` source. Coral's Nautilus source is the first numeric
+`version = "X.Y.Z"` token on any unindented line beginning `nautilus`,
+including an adjacent dependency such as `nautilus-addons`: a later line
+cannot replace an earlier extractable token. That first raw token must match
+the parsed `[dependencies].nautilus.version` and any caller input. When its
+own line supplies the token, the valid inline `nautilus` dependency may
+include other fields or a trailing comment; a separate
+`[dependencies.nautilus]` table does not itself supply a raw grep match.
+Every required raw source must agree with parsed TOML and any caller input
+for that profile. This narrow 439 rule does not constrain newer central
+profiles or the shell's own TOML interpretation.
+For each recognized historical Coral/Nautilus profile, the supplied Linux
+digest (and Darwin digest when that profile supplies one) must equal the
+matching platform value under the compiler version in the committed
+`.github/chelis-toolchains.json` lock. That lock must be a regular non-symlink
+file of at most 65536 bytes, with schema `chelis-toolchain-digests/v1`, 1–32
+numeric-version entries, and exactly valid `linux-x86_64` and `darwin-arm64`
+SHA-256 digests per entry, as checked by the historical workflow. Source
+drift or an unsafe/missing lock fails the workflow-pin row and cannot make
+the central caller certify a blocking guard, installer or suite. This
+comparison is for the accepted historical revision only, not newer `ci/main`.
+To certify the CI pin guard and negative or blocked suites, the thin caller
+must also have explicit top-level `on` events covering both pull requests
+targeting `main` and pushes to `main`.
+The event policy reads the same structurally parsed YAML root as job `uses`,
+so quoted `on`, `push`, and `pull_request` keys have the same meaning as their
+unquoted spellings; duplicate keys and malformed YAML cannot certify a gate.
+The offline audit accepts unfiltered events or literal `main` branch filters
+without negations or other restricting filters; manual-only, absent, or
+inert source markers do not establish a blocking change gate. This is only
+minimum offline event viability: the central wrapper validator owns exact
+profile trigger and concurrency equality under ci#5 RWF-015.
+
 - Toolchain installs go through an installer that reads the reef pin. The
   first-party path (shipped; WS-B/WS-C of
   [`chelis_packaging_and_install.md`](chelis_packaging_and_install.md)) is

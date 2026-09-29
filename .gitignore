@@ -16,9 +16,11 @@ node_modules/
 .reef-write.lock
 .*.reef-tmp-*
 .*.reef-backup-*
-# Devenv generates local state from the tracked input files.
+# Devenv and opt-in direnv keep worktree-local activation state here.
 /.devenv/
 /.devenv.flake.nix
+/.envrc
+/.direnv/
 /.pre-commit-config.yaml
 # WI-13 Option B: the no-sudo local prefix where the dep-setup script builds
 # Sollya + fplll from source. A build artifact, never committed (the committed

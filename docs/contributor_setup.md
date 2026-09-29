@@ -128,6 +128,20 @@ Inside a persistent shell, use `cargo build -p chelis-cli` and
 [Nix source packages](book/src/install.md#nix-source-packages) are a separate
 source-build channel.
 
+For optional local direnv activation, install direnv and enable its hook in
+your shell after installing the pinned Devenv 2.2.3. Create an ignored `.envrc`
+in each worktree with:
+
+```sh
+eval "$(devenv direnvrc)"
+use devenv
+```
+
+Review the file before running `direnv allow`. For example,
+`direnv exec . chelis-gate --list` uses that worktree's environment.
+`/.envrc` and `/.direnv/` are ignored; hosted CI and downstream conformance
+audits do not depend on direnv. The native toolchain above remains available.
+
 Devenv also provides `chelis-reap-orphans` for stale build processes,
 `chelis-exec-preflight` for the macOS executable preflight,
 `chelis-z3-test` for the Linux solver gate, and `chelis-hip-test` for the

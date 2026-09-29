@@ -13,6 +13,7 @@
 //! downgrades a row to `Na` when the shell's pin predates the row, so the HEAD
 //! canary does not fail a stale shell for a requirement that postdates its pin.
 
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -142,6 +143,9 @@ struct Ctx {
     /// when the manifest does not parse, which §8 must report rather than read
     /// as an empty declaration.
     conform: Option<Result<conform::ConformDecl, String>>,
+    /// Parsed once, only when a known legacy central caller needs its reef and
+    /// committed digest-lock sources checked.
+    central_sources: OnceCell<Result<CentralProfileSources, String>>,
 }
 
 impl Ctx {
@@ -164,6 +168,7 @@ impl Ctx {
             cargo_toml,
             workflows,
             conform,
+            central_sources: OnceCell::new(),
         }
     }
 
@@ -194,6 +199,13 @@ impl Ctx {
 
     fn exists(&self, rel: &str) -> bool {
         self.root.join(rel).exists()
+    }
+
+    fn central_sources(&self) -> Result<&CentralProfileSources, &str> {
+        self.central_sources
+            .get_or_init(|| load_central_sources(self))
+            .as_ref()
+            .map_err(String::as_str)
     }
 }
 
@@ -376,6 +388,22 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
     let mut mismatches = Vec::new();
     let mut checked = 0;
     for (name, body) in &ctx.workflows {
+        match central_workflow_evidence(ctx, body) {
+            CentralWorkflowEvidence::Known(call) => {
+                checked += 1;
+                if let Err(why) = central_source_check(ctx, &call) {
+                    mismatches.push(format!("{name}: {why}"));
+                }
+                continue;
+            }
+            CentralWorkflowEvidence::Unrecognized => {
+                mismatches.push(format!(
+                    "{name}: unknown or malformed central workflow wrapper"
+                ));
+                continue;
+            }
+            CentralWorkflowEvidence::Absent => {}
+        }
         if !workflow_installs_toolchain(body) {
             continue;
         }
@@ -401,10 +429,10 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
     if !mismatches.is_empty() {
         return fail(
             format!(
-                "workflow pin(s) disagree with reef.toml (={bare}): {}",
+                "workflow pin(s) disagree with reef.toml (={bare}) or the committed toolchain digest lock: {}",
                 mismatches.join("; ")
             ),
-            "update every workflow CHELIS_TAG/CHELIS_VERSION to match the reef pin, or run `chelis reef conform bump`",
+            "match local workflow pins to reef.toml (or run `chelis reef conform bump`); for legacy central callers also match profile inputs to reef.toml and .github/chelis-toolchains.json",
         );
     }
     if checked == 0 {
@@ -431,22 +459,24 @@ fn check_pin_consistency_guard(ctx: &Ctx) -> Check {
             "add a CI workflow wiring the conformance guard",
         );
     };
-    if ci.contains("conform bump-check") || ci.contains("conform audit") {
+    let local_guard = workflow_runs_command(ci, "chelis reef conform bump-check")
+        || workflow_runs_command(ci, "chelis reef conform audit");
+    let central_guard = central_ci_workflow_call(ctx, ci).is_some();
+    if local_guard || central_guard {
         pass()
     } else {
         fail(
-            "ci.yml does not run the offline pin/conformance guard",
-            "add a step running `chelis reef conform bump-check --base origin/main` (and/or `conform audit`)",
+            "ci.yml lacks a blocking offline pin guard or known legacy central CI profile with matching reef/lock inputs and PR/main-push triggers",
+            "run `chelis reef conform bump-check --base origin/main` / `conform audit`, or wire the known legacy central CI revision with matching reef/lock inputs and PR/main-push triggers (consumer approval is separate)",
         )
     }
 }
 
 fn check_toolchain_installer(ctx: &Ctx) -> Check {
-    let uses_chelisup = ctx
-        .workflows
-        .iter()
-        .any(|(_, b)| b.contains("chelisup") || b.contains("install-chelis"));
-    if uses_chelisup {
+    let uses_pin_resolving_installer = ctx.workflows.iter().any(|(_, body)| {
+        workflow_installs_toolchain(body) || central_workflow_call(ctx, body).is_some()
+    });
+    if uses_pin_resolving_installer {
         pass()
     } else {
         (
@@ -907,11 +937,11 @@ fn check_tests_neg(ctx: &Ctx) -> Check {
             "add tests_neg/<area>/<name>.ch + .expect sidecars",
         );
     }
-    if !ctx
-        .workflows
-        .iter()
-        .any(|(_, b)| b.contains("--expect neg") || b.contains("--expect=neg"))
-    {
+    let suite_is_wired = ctx.workflows.iter().any(|(_, body)| {
+        workflow_runs_expected_suite(body, "tests_neg", "neg")
+            || central_ci_workflow_call(ctx, body).is_some()
+    });
+    if !suite_is_wired {
         return fail(
             "no CI step runs `chelis test tests_neg --expect neg`",
             "wire the negative suite into ci.yml",
@@ -937,11 +967,11 @@ fn check_tests_blocked(ctx: &Ctx) -> Check {
             "add tests_blocked/<area>/<name>.ch + .expect for each expressible blocker",
         );
     }
-    if !ctx
-        .workflows
-        .iter()
-        .any(|(_, b)| b.contains("--expect blocked") || b.contains("--expect=blocked"))
-    {
+    let suite_is_wired = ctx.workflows.iter().any(|(_, body)| {
+        workflow_runs_expected_suite(body, "tests_blocked", "blocked")
+            || central_ci_workflow_call(ctx, body).is_some_and(|call| call.profile == "nautilus-ci")
+    });
+    if !suite_is_wired {
         return fail(
             "no CI step runs `chelis test tests_blocked --expect blocked`",
             "wire the blocked-probe suite into ci.yml",
@@ -1360,11 +1390,794 @@ fn read_workflows(root: &Path) -> Vec<(String, String)> {
     out
 }
 
+const CENTRAL_WORKFLOW_PATH: &str = ".github/workflows/consumer.yml";
+// This known historical revision has the closed Coral/Nautilus jobs audited
+// below; Nautilus #32 pins it, but that PR is not an approval of a consumer
+// migration. Neither an audit Pass nor this constant approves the revision for
+// Coral or Nautilus: each consumer separately reviews its accepted SHA and
+// verifies hosted execution. Do not infer these jobs from arbitrary SHAs or
+// from the newer ci/main capability-selector workflow.
+const KNOWN_LEGACY_CENTRAL_WORKFLOW_SHA: &str = "4394706b569bdd7d557f6edc7b9818249decc330";
+const CENTRAL_SECRET_EXPRESSION: &str = "${{ secrets.CHELIS_RELEASE_TOKEN }}";
+
+/// Values checked by the exact historical 439 central profile before it
+/// installs a toolchain or claims to have run the shell's guards and suites.
+struct CentralProfileSources {
+    package_version: Option<String>,
+    nautilus_version: Option<String>,
+    linux_digest: String,
+    darwin_digest: String,
+    historical: HistoricalGuardSources,
+}
+
+/// The narrow raw-text source shapes the pinned 439 guard can actually read.
+/// TOML values alone cannot certify that guard: it greps lines, not tables.
+struct HistoricalGuardSources {
+    compiler_matches: bool,
+    package_matches: bool,
+    nautilus_matches: bool,
+}
+
+#[derive(Clone, Copy)]
+enum HistoricalRawSource {
+    Compiler,
+    Package,
+    Nautilus,
+}
+
+/// The exact ci@439 jobs read these raw sources under `set -euo pipefail`.
+/// Release profiles derive versions from reef even without caller pin inputs.
+fn historical_profile_sources(profile: &str) -> Option<&'static [HistoricalRawSource]> {
+    use HistoricalRawSource::{Compiler, Nautilus, Package};
+    match profile {
+        "coral-ci" | "coral-release" => Some(&[Compiler, Package, Nautilus]),
+        "nautilus-ci" | "nautilus-nightly" => Some(&[Compiler]),
+        "nautilus-release" => Some(&[Compiler, Package]),
+        _ => None,
+    }
+}
+
+#[derive(Debug)]
+struct CentralWorkflowCall {
+    profile: String,
+    chelis_version: Option<String>,
+    chelis_tag: Option<String>,
+    package_version: Option<String>,
+    nautilus_tag: Option<String>,
+    linux_digest: String,
+    darwin_digest: Option<String>,
+    change_triggers: bool,
+}
+
+fn historical_quoted_version<'a>(line: &'a str, key: &str, compiler: bool) -> Option<&'a str> {
+    let rest = line.strip_prefix(key)?;
+    let rest = rest
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix('=')?
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix('"')?;
+    let rest = if compiler {
+        rest.strip_prefix('=')?
+    } else {
+        rest
+    };
+    let (version, suffix) = rest.split_once('"')?;
+    (numeric_version(version) && (suffix.trim().is_empty() || suffix.trim_start().starts_with('#')))
+        .then_some(version)
+}
+
+/// The pinned grep matches the first three numeric components even if a
+/// longer TOML string follows. The parsed value is checked independently.
+fn historical_numeric_prefix(value: &str) -> Option<&str> {
+    let bytes = value.as_bytes();
+    let mut end = 0;
+    for component in 0..3 {
+        let start = end;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+        if end == start {
+            return None;
+        }
+        if component < 2 {
+            if bytes.get(end) != Some(&b'.') {
+                return None;
+            }
+            end += 1;
+        }
+    }
+    Some(&value[..end])
+}
+
+fn historical_nautilus_version(line: &str) -> Option<&str> {
+    let source = line.strip_prefix("nautilus")?;
+    // The historical pipeline selects the first numeric version token on
+    // any anchored `^nautilus` line, even an adjacent dependency name.
+    // Parsed TOML independently owns which dependency that value describes.
+    for (index, _) in source.match_indices("version") {
+        let Some(rest) = source[index + "version".len()..]
+            .trim_start_matches([' ', '\t'])
+            .strip_prefix('=')
+            .and_then(|value| value.trim_start_matches([' ', '\t']).strip_prefix('"'))
+        else {
+            continue;
+        };
+        if let Some(candidate) = historical_numeric_prefix(rest) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn historical_guard_sources(
+    reef: &str,
+    compiler: &str,
+    package: Option<&str>,
+    nautilus: Option<&str>,
+) -> HistoricalGuardSources {
+    // The pinned guard uses anchored raw grep lines, not TOML table lookups.
+    // A single compiler source is a safe readable subset; package and
+    // Nautilus sources use the first extractable grep match.
+    fn unique<'a>(
+        mut lines: impl Iterator<Item = &'a str>,
+        parse: impl Fn(&'a str) -> Option<&'a str>,
+    ) -> Option<&'a str> {
+        let line = lines.next()?;
+        if lines.next().is_some() {
+            return None;
+        }
+        parse(line)
+    }
+    HistoricalGuardSources {
+        compiler_matches: unique(
+            reef.lines().filter(|line| line.starts_with("compiler")),
+            |line| historical_quoted_version(line, "compiler", true),
+        ) == Some(compiler),
+        package_matches: reef
+            .lines()
+            .find(|line| line.starts_with("version"))
+            .and_then(|line| historical_quoted_version(line, "version", false))
+            == package,
+        nautilus_matches: reef
+            .lines()
+            .filter(|line| line.starts_with("nautilus"))
+            .find_map(historical_nautilus_version)
+            == nautilus,
+    }
+}
+
+fn numeric_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit()))
+    }) && parts.next().is_none()
+}
+
+fn load_central_sources(ctx: &Ctx) -> Result<CentralProfileSources, String> {
+    let reef = ctx
+        .reef_toml
+        .as_deref()
+        .ok_or("reef.toml is missing for central profile")?;
+    let manifest: toml::Value = toml::from_str(reef)
+        .map_err(|_| "reef.toml cannot be parsed for central profile".to_string())?;
+    let package_version = manifest
+        .get("package")
+        .and_then(|package| package.get("version"))
+        .and_then(toml::Value::as_str)
+        .filter(|version| numeric_version(version))
+        .map(str::to_string);
+    let nautilus_version = manifest
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("nautilus"))
+        .and_then(|nautilus| nautilus.get("version"))
+        .and_then(toml::Value::as_str)
+        .filter(|version| numeric_version(version))
+        .map(str::to_string);
+
+    let path = ctx.root.join(".github/chelis-toolchains.json");
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| ".github/chelis-toolchains.json is missing or unreadable".to_string())?;
+    if !metadata.file_type().is_file() || metadata.len() > 65_536 {
+        return Err(".github/chelis-toolchains.json must be a regular non-symlink file of at most 65536 bytes".to_string());
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| ".github/chelis-toolchains.json is unreadable".to_string())?;
+    let lock: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| ".github/chelis-toolchains.json is invalid JSON".to_string())?;
+    let object = lock
+        .as_object()
+        .filter(|object| {
+            object.len() == 2
+                && object.get("schema").and_then(serde_json::Value::as_str)
+                    == Some("chelis-toolchain-digests/v1")
+        })
+        .ok_or(".github/chelis-toolchains.json schema is invalid")?;
+    let versions = object
+        .get("versions")
+        .and_then(serde_json::Value::as_object)
+        .filter(|versions| (1..=32).contains(&versions.len()))
+        .ok_or(".github/chelis-toolchains.json versions are invalid")?;
+    for (version, entry) in versions {
+        let valid = entry.as_object().is_some_and(|record| {
+            record.len() == 2
+                && ["linux-x86_64", "darwin-arm64"].iter().all(|platform| {
+                    record
+                        .get(*platform)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(canonical_sha256)
+                })
+        });
+        if !numeric_version(version) || !valid {
+            return Err(format!(
+                ".github/chelis-toolchains.json entry {version} is invalid"
+            ));
+        }
+    }
+    let version = ctx
+        .reef_pin
+        .as_deref()
+        .and_then(|pin| pin.strip_prefix('='))
+        .ok_or("reef.toml has no exact compiler pin for central profile")?;
+    let selected = versions
+        .get(version)
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            format!(".github/chelis-toolchains.json has no compiler version {version}")
+        })?;
+    let historical = historical_guard_sources(
+        reef,
+        version,
+        package_version.as_deref(),
+        nautilus_version.as_deref(),
+    );
+    Ok(CentralProfileSources {
+        package_version,
+        nautilus_version,
+        linux_digest: selected["linux-x86_64"].as_str().unwrap().to_string(),
+        darwin_digest: selected["darwin-arm64"].as_str().unwrap().to_string(),
+        historical,
+    })
+}
+
+/// The same profile/source comparison decides both the pin row and whether a
+/// recognized central job may stand in for executed CI guards and suites.
+fn central_source_check(ctx: &Ctx, call: &CentralWorkflowCall) -> Result<(), String> {
+    let version = ctx
+        .reef_pin
+        .as_deref()
+        .and_then(|pin| pin.strip_prefix('='))
+        .ok_or("reef.toml has no exact compiler pin for central profile")?;
+    if let Some(actual) = &call.chelis_version
+        && actual != version
+    {
+        return Err(format!("central chelis-version={actual} != {version}"));
+    }
+    if let Some(actual) = &call.chelis_tag
+        && actual.strip_prefix('v') != Some(version)
+    {
+        return Err(format!("central chelis-tag={actual} != v{version}"));
+    }
+    let sources = ctx.central_sources().map_err(str::to_string)?;
+    for source in
+        historical_profile_sources(&call.profile).ok_or("unsupported historical central profile")?
+    {
+        match source {
+            HistoricalRawSource::Compiler if !sources.historical.compiler_matches => {
+                return Err(
+                    "historical central guard cannot read the reef.toml compiler pin".to_string(),
+                );
+            }
+            HistoricalRawSource::Package => {
+                let package = sources
+                    .package_version
+                    .as_deref()
+                    .ok_or("reef.toml [package].version is missing or not numeric")?;
+                if let Some(actual) = call.package_version.as_deref()
+                    && actual != package
+                {
+                    return Err(format!(
+                        "central package-version != reef.toml [package].version {package}"
+                    ));
+                }
+                if !sources.historical.package_matches {
+                    return Err(
+                        "historical central profile cannot read reef.toml package version"
+                            .to_string(),
+                    );
+                }
+            }
+            HistoricalRawSource::Nautilus => {
+                let nautilus = sources
+                    .nautilus_version
+                    .as_deref()
+                    .ok_or("reef.toml [dependencies].nautilus.version is missing or not numeric")?;
+                if let Some(actual) = call.nautilus_tag.as_deref()
+                    && actual.strip_prefix('v') != Some(nautilus)
+                {
+                    return Err(format!(
+                        "central nautilus-tag != v{nautilus} from reef.toml"
+                    ));
+                }
+                if !sources.historical.nautilus_matches {
+                    return Err(
+                        "historical Coral profile cannot read reef.toml nautilus inline version"
+                            .to_string(),
+                    );
+                }
+            }
+            HistoricalRawSource::Compiler => {}
+        }
+    }
+    if call.linux_digest != sources.linux_digest {
+        return Err("central chelis-linux-sha256 != committed Linux toolchain digest".to_string());
+    }
+    if let Some(actual) = &call.darwin_digest
+        && actual != &sources.darwin_digest
+    {
+        return Err(
+            "central chelis-darwin-sha256 != committed Darwin toolchain digest".to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CentralWorkflowReference {
+    Known,
+    Unrecognized,
+}
+
+enum CentralWorkflowEvidence {
+    Absent,
+    Known(CentralWorkflowCall),
+    Unrecognized,
+}
+
+/// GitHub repository owner and name are case-insensitive; the workflow path
+/// and accepted commit revision are not interchangeable with other values.
+fn classify_central_reference(uses: &str) -> Option<CentralWorkflowReference> {
+    let (owner, rest) = uses.split_once('/')?;
+    if !owner.eq_ignore_ascii_case("Chelis-Lang") {
+        return None;
+    }
+    let repository_end = rest.find(['/', '@']).unwrap_or(rest.len());
+    let (repository, suffix) = rest.split_at(repository_end);
+    if !repository.eq_ignore_ascii_case("ci") {
+        return None;
+    }
+    let workflow = suffix.strip_prefix('/').unwrap_or("");
+    let known = workflow.split_once('@').is_some_and(|(path, revision)| {
+        path == CENTRAL_WORKFLOW_PATH && revision == KNOWN_LEGACY_CENTRAL_WORKFLOW_SHA
+    });
+    Some(if known {
+        CentralWorkflowReference::Known
+    } else {
+        CentralWorkflowReference::Unrecognized
+    })
+}
+
+/// Both authority paths inspect the same parsed job-level `uses` field.
+/// YAML aliases and merge keys are resolved by the parser; comments, steps,
+/// run blocks, and nested fields never become callable jobs.
+fn central_reference_in_workflow(workflow: &serde_json::Value) -> Option<CentralWorkflowReference> {
+    let jobs = workflow.get("jobs")?.as_object()?;
+    let mut known = false;
+    for job in jobs.values() {
+        let Some(uses) = job.get("uses").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        match classify_central_reference(uses) {
+            Some(CentralWorkflowReference::Unrecognized) => {
+                return Some(CentralWorkflowReference::Unrecognized);
+            }
+            Some(CentralWorkflowReference::Known) if known => {
+                return Some(CentralWorkflowReference::Unrecognized);
+            }
+            Some(CentralWorkflowReference::Known) => known = true,
+            None => {}
+        }
+    }
+    known.then_some(CentralWorkflowReference::Known)
+}
+
+/// The same job-reference classification drives both recognized wrappers and
+/// unknown-pointer rejection. A known reference with malformed job shape or
+/// an unrelated shell profile cannot earn any audit authority.
+fn central_workflow_evidence(ctx: &Ctx, body: &str) -> CentralWorkflowEvidence {
+    // Reject malformed/ambiguous YAML (including duplicate keys) rather than
+    // deriving absence or authority from a lossy line scan.
+    let Ok(workflow) = serde_saphyr::from_str::<serde_json::Value>(body) else {
+        return CentralWorkflowEvidence::Unrecognized;
+    };
+    match central_reference_in_workflow(&workflow) {
+        None => return CentralWorkflowEvidence::Absent,
+        Some(CentralWorkflowReference::Unrecognized) => {
+            return CentralWorkflowEvidence::Unrecognized;
+        }
+        Some(CentralWorkflowReference::Known) => {}
+    }
+    let Some(call) = parse_central_workflow_call(&workflow) else {
+        return CentralWorkflowEvidence::Unrecognized;
+    };
+    let matches_shell = match ctx.shell_name.as_deref() {
+        Some("coral") => matches!(call.profile.as_str(), "coral-ci" | "coral-release"),
+        Some("nautilus") => matches!(
+            call.profile.as_str(),
+            "nautilus-ci" | "nautilus-nightly" | "nautilus-release"
+        ),
+        _ => false,
+    };
+    if matches_shell {
+        CentralWorkflowEvidence::Known(call)
+    } else {
+        CentralWorkflowEvidence::Unrecognized
+    }
+}
+
+/// Recognize one complete thin reusable-workflow calling job with closed
+/// profile inputs and secret mapping. YAML syntax may vary, but comments,
+/// run-string lookalikes, conditional jobs, mutable refs, unexpected inputs,
+/// and additional jobs cannot become audit authority.
+fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
+    match central_workflow_evidence(ctx, body) {
+        CentralWorkflowEvidence::Known(call) if central_source_check(ctx, &call).is_ok() => {
+            Some(call)
+        }
+        CentralWorkflowEvidence::Known(_)
+        | CentralWorkflowEvidence::Absent
+        | CentralWorkflowEvidence::Unrecognized => None,
+    }
+}
+
+/// A central CI profile certifies blocking guards and suites only when the
+/// caller runs for pull requests and main pushes with the exact reef inputs.
+/// Trigger/concurrency equality with the selected profile belongs to the
+/// central wrapper validator; this is the offline minimum for a running gate.
+fn central_ci_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
+    let call = central_workflow_call(ctx, body)?;
+    (matches!(call.profile.as_str(), "coral-ci" | "nautilus-ci") && call.change_triggers)
+        .then_some(call)
+}
+
+/// Only explicit top-level event mappings can establish change coverage.
+/// The accepted push/PR filters are unfiltered events or branch lists
+/// containing literal `main` with no negations or other restricting filters.
+fn ci_runs_on_changes(workflow: &serde_json::Value) -> bool {
+    // The same strict YAML parse already used for job `uses` owns event keys,
+    // including quoted keys, aliases, and duplicate-key rejection.
+    let Some(events) = workflow.get("on").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    ["push", "pull_request"]
+        .into_iter()
+        .all(|event| events.get(event).is_some_and(ci_event_includes_main))
+}
+
+fn ci_event_includes_main(value: &serde_json::Value) -> bool {
+    if value.is_null() {
+        return true;
+    }
+    let Some(filters) = value.as_object() else {
+        return false;
+    };
+    if filters.is_empty() {
+        return true;
+    }
+    // Paths, event types, exclusions and broad/mutable patterns cannot stand
+    // in for an ordinary main change gate.
+    let Some(branches) = filters
+        .get("branches")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    if filters.len() != 1 {
+        return false;
+    }
+    let mut main = false;
+    for entry in branches {
+        let Some(branch) = entry.as_str() else {
+            return false;
+        };
+        if branch.is_empty() || branch.starts_with('!') {
+            return false;
+        }
+        main |= branch == "main";
+    }
+    main
+}
+
+fn parse_central_workflow_call(workflow: &serde_json::Value) -> Option<CentralWorkflowCall> {
+    let jobs = workflow.get("jobs")?.as_object()?;
+    if jobs.len() != 1 {
+        return None;
+    }
+    let job = jobs.values().next()?.as_object()?;
+    if !["uses", "with", "secrets"]
+        .iter()
+        .all(|key| job.contains_key(*key))
+        || !job
+            .keys()
+            .all(|key| matches!(key.as_str(), "name" | "uses" | "with" | "secrets"))
+        || job.get("name").is_some_and(|name| !name.is_string())
+        || classify_central_reference(job.get("uses")?.as_str()?)
+            != Some(CentralWorkflowReference::Known)
+    {
+        return None;
+    }
+
+    let inputs = job.get("with")?.as_object()?;
+    let profile = inputs.get("profile")?.as_str()?.to_string();
+    let expected_inputs: &[&str] = match profile.as_str() {
+        "coral-ci" => &[
+            "profile",
+            "chelis-tag",
+            "chelis-version",
+            "chelis-linux-sha256",
+            "chelis-darwin-sha256",
+            "nautilus-tag",
+            "package-version",
+        ],
+        "coral-release" | "nautilus-release" => &["profile", "chelis-linux-sha256"],
+        "nautilus-ci" => &[
+            "profile",
+            "chelis-tag",
+            "chelis-version",
+            "chelis-linux-sha256",
+            "chelis-darwin-sha256",
+        ],
+        "nautilus-nightly" => &[
+            "profile",
+            "chelis-tag",
+            "chelis-version",
+            "chelis-linux-sha256",
+        ],
+        _ => return None,
+    };
+    if inputs.len() != expected_inputs.len()
+        || !expected_inputs.iter().all(|key| inputs.contains_key(*key))
+        || !inputs.values().all(serde_json::Value::is_string)
+        || !canonical_sha256(inputs.get("chelis-linux-sha256")?.as_str()?)
+        || inputs
+            .get("chelis-darwin-sha256")
+            .is_some_and(|digest| !digest.as_str().is_some_and(canonical_sha256))
+    {
+        return None;
+    }
+
+    let secrets = job.get("secrets")?.as_object()?;
+    if secrets.len() != 1
+        || secrets
+            .get("CHELIS_RELEASE_TOKEN")
+            .and_then(serde_json::Value::as_str)
+            != Some(CENTRAL_SECRET_EXPRESSION)
+    {
+        return None;
+    }
+
+    Some(CentralWorkflowCall {
+        profile,
+        chelis_version: inputs
+            .get("chelis-version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        chelis_tag: inputs
+            .get("chelis-tag")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        package_version: inputs
+            .get("package-version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        nautilus_tag: inputs
+            .get("nautilus-tag")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        linux_digest: inputs.get("chelis-linux-sha256")?.as_str()?.to_string(),
+        darwin_digest: inputs
+            .get("chelis-darwin-sha256")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        change_triggers: ci_runs_on_changes(workflow),
+    })
+}
+
+fn leading_spaces(line: &str) -> Option<usize> {
+    let prefix = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+    (!prefix.contains('\t')).then_some(prefix.len())
+}
+
+fn yaml_scalar(value: &str) -> String {
+    let mut value = value.trim();
+    if let Some((before, _)) = value.split_once(" #") {
+        value = before.trim_end();
+    }
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn mapping_at(line: &str, indent: usize) -> Option<(String, String)> {
+    if leading_spaces(line)? != indent {
+        return None;
+    }
+    let text = &line[indent..];
+    if text.starts_with(['#', '-']) {
+        return None;
+    }
+    let (key, value) = text.split_once(':')?;
+    let key = key.trim();
+    (!key.is_empty()).then(|| (key.to_string(), yaml_scalar(value)))
+}
+
+fn canonical_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
 fn workflow_installs_toolchain(body: &str) -> bool {
-    body.contains("CHELIS_VERSION")
-        || body.contains("CHELIS_TAG")
-        || body.contains("chelisup install")
-        || body.contains("install-chelis")
+    workflow_step_uses(body)
+        .iter()
+        .any(|uses| uses == "./.github/actions/install-chelis")
+        || workflow_run_blocks(body).iter().any(|block| {
+            let commands: Vec<&str> = block.lines().map(str::trim).collect();
+            commands
+                .iter()
+                .any(|command| command.starts_with("chelisup install "))
+                || (commands
+                    .iter()
+                    .any(|command| command.starts_with("gh release download"))
+                    && commands
+                        .iter()
+                        .any(|command| command.contains("--repo Chelis-Lang/chelis")))
+        })
+}
+
+fn workflow_runs_command(body: &str, command: &str) -> bool {
+    workflow_run_blocks(body).iter().any(|block| {
+        block
+            .lines()
+            .map(str::trim)
+            .any(|line| line == command || line.starts_with(&format!("{command} ")))
+    })
+}
+
+fn workflow_runs_expected_suite(body: &str, directory: &str, expected: &str) -> bool {
+    let command = format!("chelis test {directory}");
+    workflow_run_blocks(body).iter().any(|block| {
+        block.lines().map(str::trim).any(|line| {
+            line.strip_prefix(&command).is_some_and(|rest| {
+                (rest.starts_with(' ') || rest.starts_with("/ "))
+                    && (line.contains(&format!("--expect {expected}"))
+                        || line.contains(&format!("--expect={expected}")))
+            })
+        })
+    })
+}
+
+fn workflow_run_blocks(body: &str) -> Vec<String> {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut blocks = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let Some((indent, value)) = step_field(&lines, index, "run") else {
+            index += 1;
+            continue;
+        };
+        if !matches!(value.as_str(), "|" | ">" | "|-" | ">-" | "|+" | ">+") {
+            blocks.push(value);
+            index += 1;
+            continue;
+        }
+        let mut commands = Vec::new();
+        index += 1;
+        while index < lines.len() {
+            let line = lines[index];
+            if !line.trim().is_empty()
+                && leading_spaces(line).is_none_or(|child_indent| child_indent <= indent)
+            {
+                break;
+            }
+            if !line.trim().is_empty() && !line.trim_start().starts_with('#') {
+                commands.push(line.trim());
+            }
+            index += 1;
+        }
+        blocks.push(commands.join("\n"));
+    }
+    blocks
+}
+
+fn workflow_step_uses(body: &str) -> Vec<String> {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut uses = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if let Some((indent, value)) = step_field(&lines, index, "run")
+            && matches!(value.as_str(), "|" | ">" | "|-" | ">-" | "|+" | ">+")
+        {
+            index += 1;
+            while index < lines.len() {
+                let line = lines[index];
+                if !line.trim().is_empty()
+                    && leading_spaces(line).is_none_or(|child_indent| child_indent <= indent)
+                {
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        if let Some((_, value)) = step_field(&lines, index, "uses") {
+            uses.push(value);
+        }
+        index += 1;
+    }
+    uses
+}
+
+fn step_field(lines: &[&str], index: usize, key: &str) -> Option<(usize, String)> {
+    let line = lines[index];
+    if line.trim().is_empty() || line.trim_start().starts_with('#') {
+        return None;
+    }
+    let indent = leading_spaces(line)?;
+    if !matches!(indent, 6 | 8) {
+        return None;
+    }
+
+    // Restrict recognition to canonical GitHub jobs -> job -> steps -> step.
+    // An inert list under env or another arbitrary YAML field is not a step.
+    let root = lines[..index]
+        .iter()
+        .rev()
+        .find(|candidate| !candidate.trim().is_empty() && leading_spaces(candidate) == Some(0))?;
+    if root.trim() != "jobs:" {
+        return None;
+    }
+    let job = lines[..index]
+        .iter()
+        .rev()
+        .find(|candidate| !candidate.trim().is_empty() && leading_spaces(candidate) == Some(2))?;
+    if mapping_at(job, 2).is_none_or(|(_, value)| !value.is_empty()) {
+        return None;
+    }
+    let section = lines[..index]
+        .iter()
+        .rev()
+        .find(|candidate| !candidate.trim().is_empty() && leading_spaces(candidate) == Some(4))?;
+    if !matches!(
+        mapping_at(section, 4),
+        Some((ref section_key, ref value)) if section_key == "steps" && value.is_empty()
+    ) {
+        return None;
+    }
+
+    let mut text = &line[indent..];
+    if indent == 6 {
+        text = text.strip_prefix("- ")?.trim_start();
+    } else {
+        let parent = lines[..index].iter().rev().find(|candidate| {
+            !candidate.trim().is_empty()
+                && leading_spaces(candidate).is_some_and(|parent_indent| parent_indent < 8)
+        })?;
+        if leading_spaces(parent) != Some(6) || !parent.trim_start().starts_with("- ") {
+            return None;
+        }
+    }
+    let value = text.strip_prefix(key)?.strip_prefix(':')?;
+    Some((indent, yaml_scalar(value)))
 }
 
 /// Extract a `KEY: value` env value (first occurrence), tolerating quotes.
@@ -1383,19 +2196,26 @@ fn extract_env(body: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Extract the version argument of each `chelisup install <ver>` occurrence,
-/// tolerating surrounding quotes. Only tokens that look like a version (start
-/// with a digit or `v`) are returned, so flags like `--force` are ignored.
+/// Extract the version argument of each executed `chelisup install <ver>`.
 fn extract_chelisup_install_versions(body: &str) -> Vec<String> {
-    let needle = "chelisup install ";
-    body.match_indices(needle)
-        .filter_map(|(i, _)| {
-            let rest = body[i + needle.len()..].trim_start_matches(['"', '\'']);
-            let ver: String = rest
-                .chars()
-                .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '\'')
-                .collect();
-            (ver.chars().next()).and_then(|c| (c.is_ascii_digit() || c == 'v').then_some(ver))
+    workflow_run_blocks(body)
+        .iter()
+        .flat_map(|block| {
+            block
+                .lines()
+                .map(str::trim)
+                .filter_map(|line| line.strip_prefix("chelisup install "))
+                .filter_map(|rest| {
+                    let rest = rest.trim_start_matches(['"', '\'']);
+                    let version: String = rest
+                        .chars()
+                        .take_while(|char| !char.is_whitespace() && *char != '"' && *char != '\'')
+                        .collect();
+                    version.chars().next().and_then(|first| {
+                        (first.is_ascii_digit() || first == 'v').then_some(version)
+                    })
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -1978,12 +2798,17 @@ mod tests {
 
     #[test]
     fn chelisup_install_versions_extracted() {
-        let body = "run: chelisup install 0.13.0 --force\n  and chelisup install \"v0.14.0\"\n";
+        let body = "jobs:\n  test:\n    steps:\n      - run: |\n          chelisup install 0.13.0 --force\n          chelisup install \"v0.14.0\"\n";
         assert_eq!(
             extract_chelisup_install_versions(body),
             vec!["0.13.0".to_string(), "v0.14.0".to_string()]
         );
-        assert!(extract_chelisup_install_versions("chelisup install --help").is_empty());
+        let help = "jobs:\n  test:\n    steps:\n      - run: chelisup install --help\n";
+        assert!(extract_chelisup_install_versions(help).is_empty());
+        let inert = "jobs:\n  test:\n    steps:\n      - run: echo 'chelisup install 0.13.0'\n";
+        assert!(extract_chelisup_install_versions(inert).is_empty());
+        let non_step = "jobs:\n  test:\n    fake:\n      - uses: ./.github/actions/install-chelis\n      - run: chelisup install 0.13.0\n";
+        assert!(!workflow_installs_toolchain(non_step));
     }
 
     #[test]
