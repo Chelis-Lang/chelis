@@ -7138,6 +7138,32 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
     }
 }
 
+/// chelis#2371 / chelis#2383: why a direct `fail(...)`'s message cannot become
+/// an [05-OP-68] abort identity.
+///
+/// One variant per distinguishable REASON, not per spelling. A new spelling
+/// that cannot be guarded should map onto one of these, or add a variant
+/// because it is genuinely a new reason — not acquire its own rejection arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailMessageDefect {
+    /// `fail("")`. [05-OP-68] makes an empty message a type error and forbids
+    /// synthesizing or defaulting one.
+    Empty,
+    /// The message is not a string literal at the `fail` site: behind a `let`,
+    /// a parameter, a call, `string_concat(..)`, or any other computation.
+    /// [05-OP-68] takes no string value, so there is no operand to carry it.
+    NotALiteral,
+}
+
+/// The result of classifying a direct `fail(...)`'s message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FailMessage {
+    /// A literal message that can become the guard's identity.
+    Usable(String),
+    /// A direct `fail` that has no guarded form, and why.
+    Unusable(FailMessageDefect),
+}
+
 struct LowerCtx<'program> {
     host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
     host_sources: Vec<crate::host::staged::HostSource>,
@@ -7147,6 +7173,19 @@ struct LowerCtx<'program> {
         BTreeMap<crate::host::staged::HostValueId, (String, crate::host_type_state::HostTypeTerm)>,
     next_host_value: usize,
     host_stage_status: std::rc::Rc<Cell<crate::host::staged::StagingStatus>>,
+    /// chelis#2371: the first unguardable direct `fail(...)` this context
+    /// emitted a placeholder for, if any.
+    ///
+    /// The emit site knows the `fail` has no [05-OP-68] guard; it does NOT
+    /// know whether anything will consume the placeholder. A transform does
+    /// know, because it lowers its body into its own sub-context and then
+    /// reads the result. So the decision is recorded here and taken there.
+    ///
+    /// Rejecting at the emit site instead was measured and is wrong: it
+    /// breaks an untransformed `def boom(msg: string) -> tensor[2, f32] =
+    /// fail(msg)` whose abort the host lane still owns and still delivers at
+    /// run time with its dynamic message.
+    unguardable_fail: Option<(FailMessageDefect, Span)>,
     #[cfg(feature = "lowering-trace")]
     trace: Option<crate::lowering_trace::Collector>,
     dag: Dag,
@@ -7413,6 +7452,7 @@ impl<'program> LowerCtx<'program> {
             host_external_inputs: BTreeMap::new(),
             host_parameters: BTreeMap::new(),
             next_host_value: 0,
+            unguardable_fail: None,
             host_stage_status: std::rc::Rc::new(Cell::new(
                 crate::host::staged::StagingStatus::Searching,
             )),
@@ -11918,6 +11958,11 @@ impl<'program> LowerCtx<'program> {
             });
         }
         subctx.dag.add_root(output);
+        // chelis#2371: `grad` is about to differentiate this body, so a placeholder
+        // standing in for an unguardable `fail` would become part of the gradient.
+        // Checked before AD so the diagnostic names the `fail`, not whatever AD
+        // makes of a zero Const.
+        Self::reject_recorded_unguardable_fail(&subctx, "grad");
         // Issue #197: route through grad_dag_checked so a
         // non-differentiable op in the gradient body (argmax/argmin,
         // floor/ceil, scatter_replace) surfaces a structured
@@ -13166,6 +13211,9 @@ impl<'program> LowerCtx<'program> {
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
         }
+        // chelis#2371: `vmap` is about to batch these nodes, so a placeholder
+        // standing in for an unguardable `fail` would be batched as a value.
+        Self::reject_recorded_unguardable_fail(&subctx, "vmap");
         // Body lowering can resolve a top-level binding directly from the
         // program environment instead of the parent's already-materialized
         // binding map. Classify from the completed unbatched DAG: every Load
@@ -13525,6 +13573,9 @@ impl<'program> LowerCtx<'program> {
             return LoweredValue::Tuple(Vec::new());
         }
         subctx.dag.add_root(output);
+        // chelis#2371: same as the plain `grad` site -- `vmap(grad(..))` both
+        // differentiates and batches this body.
+        Self::reject_recorded_unguardable_fail(&subctx, "vmap(grad(...))");
         let mapped_formals = param_names.iter().cloned().collect::<UnordSet<_>>();
         let captured_loads = subctx
             .dag
@@ -15846,21 +15897,48 @@ impl<'program> LowerCtx<'program> {
                     fallback_ty.clone(),
                     self.current_span_id.clone(),
                 );
-                let literal_message = args.first().and_then(|arg| self.static_string_arg(arg));
-                if literal_message.as_deref() == Some("") {
-                    // Same rule and same diagnostic whichever position the
-                    // `fail` is written in. [05-OP-68] never synthesizes or
-                    // defaults a message, and `lower_if` already rejects the
-                    // branch spelling by name.
-                    return self.reject_empty_fail_message(Some(app_span));
-                }
-                let Some(message) = literal_message else {
-                    // A non-literal message has no compile-time identity, so
-                    // there is no guard to build. Outside a transform the host
-                    // lane still owns the abort; inside one this is
-                    // chelis#2371's residue, narrowed to the dynamic-message
-                    // case and tracked by chelis#2383.
-                    return fallback;
+                // Same rule and same diagnostic whichever position the
+                // `fail` is written in. [05-OP-68] never synthesizes or
+                // defaults a message, and `lower_if` already rejects the
+                // branch spellings by name.
+                //
+                // chelis#2371: the non-literal case used to `return fallback`
+                // here, which is the defect. Reaching this site at all means a
+                // transform is forcing DAG construction -- an untransformed
+                // `fail` is aborted by the host lane, which never builds this
+                // DAG -- so returning the placeholder handed a fabricated zero
+                // to the transform as an answer. Measured before the fix:
+                // `grad` over `sum(add(x, fail(string_concat("bad: ", tag()))),
+                // 0i32)` printed `1.0` at exit 0, and `vmap` printed the inputs
+                // unchanged with the abort gone entirely.
+                let message = match self.classify_fail_message(args.first()) {
+                    FailMessage::Usable(message) => message,
+                    FailMessage::Unusable(FailMessageDefect::Empty) => {
+                        return self.reject_empty_fail_message(Some(app_span));
+                    }
+                    FailMessage::Unusable(FailMessageDefect::NotALiteral) => {
+                        // RECORD, do not reject. This site cannot tell whether
+                        // the placeholder will be consumed, and rejecting here
+                        // was measured to break an untransformed
+                        // `def boom(msg: string) -> tensor[2, f32] = fail(msg)`
+                        // (the chelis#730 census canary): it reaches this site
+                        // with no transform anywhere, its placeholder is never
+                        // consumed, and the host lane still delivers the
+                        // dynamic message at run time. `host_program` does not
+                        // separate the two cases either -- it is `None` for
+                        // that canary too, which is why this is a recorded
+                        // fact rather than a local decision.
+                        //
+                        // A transform DOES know: it lowers its body into its
+                        // own `LowerCtx` and then consumes the result, so it
+                        // reads this field and rejects. See
+                        // `reject_recorded_unguardable_fail`.
+                        if self.unguardable_fail.is_none() {
+                            self.unguardable_fail =
+                                Some((FailMessageDefect::NotALiteral, app_span));
+                        }
+                        return fallback;
+                    }
                 };
                 let condition = self.dag.add_node(
                     self.owner(),
@@ -20430,9 +20508,88 @@ impl<'program> LowerCtx<'program> {
     /// about where it was written (chelis#2384 review, F1).
     fn reject_empty_fail_message(&self, span: Option<Span>) -> NodeId {
         raise_lowering_error(
-            "`fail(\"\")` has no message to report. A guarded abort carries its message \
-             as part of its identity and never synthesizes or defaults one ([05-OP-68]); \
-             give the `fail` a non-empty message.",
+            Self::fail_message_defect_sentence(FailMessageDefect::Empty),
+            span,
+            self.current_span_id.clone(),
+        )
+    }
+
+    /// The one sentence that describes a [`FailMessageDefect`].
+    ///
+    /// Shared so a single reason cannot acquire two wordings. It did, briefly:
+    /// the emit-site rejection said the message "must be a string literal"
+    /// while the transform-site rejection said it "is not a string literal",
+    /// and a test asserting one failed against the other. One reason, one
+    /// sentence (chelis#2383).
+    fn fail_message_defect_sentence(defect: FailMessageDefect) -> &'static str {
+        match defect {
+            FailMessageDefect::Empty => {
+                "`fail(\"\")` has no message to report. A guarded abort carries its message \
+                 as part of its identity and never synthesizes or defaults one ([05-OP-68]); \
+                 give the `fail` a non-empty message."
+            }
+            FailMessageDefect::NotALiteral => {
+                "`fail(...)`'s message must be a string literal written at the `fail` itself. \
+                 A guarded abort carries its message as part of its identity and takes no \
+                 string operand ([05-OP-68]), so a message that is computed -- \
+                 `string_concat(...)`, a call, a parameter, or a `let`-bound name -- has no \
+                 guarded form and the DAG cannot represent the abort. Inline the message as a \
+                 literal, or move the abort outside the transform."
+            }
+        }
+    }
+
+    /// chelis#2371: reject a transform whose body lowered an unguardable
+    /// direct `fail(...)` into a placeholder.
+    ///
+    /// Called by every transform after it lowers its body, because the
+    /// transform is the consumer: it is about to differentiate, batch, or
+    /// otherwise read a value that the placeholder has fabricated. Outside a
+    /// transform nothing calls this, the placeholder is never read, and the
+    /// host lane delivers the abort.
+    ///
+    /// Fatal, for the same reason the AD rejections here are: the host
+    /// fallback must not absorb it and emit a call to a symbol that does not
+    /// exist.
+    fn reject_recorded_unguardable_fail(subctx: &LowerCtx<'_>, transform: &str) {
+        if let Some((defect, span)) = subctx.unguardable_fail {
+            raise_fatal_lowering_error(
+                format!(
+                    "`{transform}(...)` cannot be lowered: its body reaches a `fail(...)` \
+                     whose abort the DAG would replace with a fabricated value. {}",
+                    Self::fail_message_defect_sentence(defect)
+                ),
+                Some(span),
+                None,
+            );
+        }
+    }
+
+    /// Route a [`FailMessageDefect`] to its diagnostic. One place, so a new
+    /// reason cannot acquire a second rejection site for the same defect.
+    fn reject_fail_message_defect(&self, defect: FailMessageDefect, span: Span) -> NodeId {
+        match defect {
+            FailMessageDefect::Empty => self.reject_empty_fail_message(Some(span)),
+            FailMessageDefect::NotALiteral => self.reject_non_literal_fail_message(Some(span)),
+        }
+    }
+
+    /// chelis#2371 / chelis#2383 / [05-OP-68]: a DIRECT `fail(...)` whose
+    /// message is not a literal at the `fail` site.
+    ///
+    /// The atom carries the message as part of the operation's identity and
+    /// "takes no string value", so there is no operand a runtime message
+    /// could travel in and no guard to build. Rejecting is the fence: the
+    /// alternative was a fabricated zero that became part of the answer
+    /// (`grad` over `sum(add(x, fail(string_concat(..))), 0i32)` returned
+    /// `1.0` with exit 0, and `vmap` dropped the abort entirely).
+    ///
+    /// Deliberately NOT the indirect-`fail` diagnostic. This `fail` IS the
+    /// branch or the body; telling its author to "write `fail(...)` directly"
+    /// names something they already did (chelis#2383).
+    fn reject_non_literal_fail_message(&self, span: Option<Span>) -> NodeId {
+        raise_lowering_error(
+            Self::fail_message_defect_sentence(FailMessageDefect::NotALiteral),
             span,
             self.current_span_id.clone(),
         )
@@ -20511,6 +20668,34 @@ impl<'program> LowerCtx<'program> {
     /// chelis#2371: the literal message of a `fail(...)` argument, if it is
     /// one. [05-OP-68] carries the message as part of the operation's
     /// identity, so only a compile-time literal can become a guard.
+    /// chelis#2371 / chelis#2383: the message of a DIRECT `fail(...)`,
+    /// classified totally.
+    ///
+    /// [05-OP-68] (`spec/05-risc-primitives.md`) states that the abort
+    /// message "is part of the operation's identity, not a runtime operand,
+    /// so the operation takes no string value". A guard therefore exists only
+    /// when the message is a string literal AT THE `fail` SITE. Every other
+    /// spelling of a direct `fail` is unguardable, and the whole point of
+    /// this enum is that "unguardable" carries a REASON.
+    ///
+    /// Before this existed, each unguardable spelling was discovered
+    /// separately and given its own arm — `fail("")` in one review round, a
+    /// statically-folded branch in another — while anything still
+    /// unrecognized fell through to a placeholder or to the indirect-`fail`
+    /// diagnostic, which told the author to write `fail` directly as the
+    /// branch when that is exactly what they had written. Classifying once,
+    /// here, is what stops the next spelling needing a fourth arm.
+    fn classify_fail_message(&self, arg: Option<&Expr>) -> FailMessage {
+        match arg.and_then(|arg| self.static_string_arg(arg)) {
+            Some(message) if message.is_empty() => FailMessage::Unusable(FailMessageDefect::Empty),
+            Some(message) => FailMessage::Usable(message),
+            // Includes a message behind a `let`, a call, a parameter, or any
+            // `string_concat(..)`: all are computed at a point the DAG has no
+            // vocabulary to name, so none can become an identity.
+            None => FailMessage::Unusable(FailMessageDefect::NotALiteral),
+        }
+    }
+
     fn static_string_arg(&self, expr: &Expr) -> Option<String> {
         let (tag, _, kids) = stamped_parts(expr)?;
         if tag != DeepTag::Lit {
@@ -20545,7 +20730,7 @@ impl<'program> LowerCtx<'program> {
     /// is NOT silently accepted here — it falls through to the placeholder
     /// arm in `lower_builtin_app`, which rejects at `if`-branch depth rather
     /// than substituting a value.
-    fn fail_message_of(&self, expr: &Expr) -> Option<String> {
+    fn fail_message_of(&self, expr: &Expr) -> Option<FailMessage> {
         let (tag, _, kids) = stamped_parts(expr)?;
         if tag != DeepTag::App {
             return None;
@@ -20558,23 +20743,14 @@ impl<'program> LowerCtx<'program> {
             Expr::Atom(Atom::Name(name), _) if name == "fail" => {}
             _ => return None,
         }
-        // `fail` takes exactly one argument, a string. A non-literal message
-        // (`fail(string_concat(..))`) has no compile-time identity, so it is
-        // not recognized here and reaches the rejecting arm instead.
-        let (message_tag, _, message_kids) = stamped_parts(kids.get(1)?)?;
-        if message_tag != DeepTag::Lit {
-            return None;
-        }
-        match message_kids.first()? {
-            // An empty message is returned, not filtered out: [05-OP-68]
-            // makes it a type error, and the caller rejects it by name.
-            // Filtering it here sent `fail("")` to the indirect-`fail`
-            // diagnostic instead, which told the user to "write `fail(...)`
-            // directly as the branch" — which is exactly what they had
-            // written (chelis#1464 review, F-3).
-            Expr::Atom(Atom::Str(message), _) => Some(message.clone()),
-            _ => None,
-        }
+        // `fail` takes exactly one argument, a string. Whether that argument
+        // yields a usable [05-OP-68] identity is a SEPARATE question from
+        // whether this is a direct `fail` application, and conflating the two
+        // is what made this recognizer's declines indistinguishable from a
+        // genuinely indirect `fail`. `Some(Unusable(..))` says "a direct
+        // `fail` I cannot guard, and here is why"; `None` says "not a direct
+        // `fail` at all".
+        Some(self.classify_fail_message(kids.get(1)))
     }
 
     fn lower_if(&mut self, meta: &Metadata, kids: &[Expr], span: Span) -> LoweredValue {
@@ -20628,8 +20804,18 @@ impl<'program> LowerCtx<'program> {
             // original chelis#1464 defect, surviving on the one path the
             // guard never covered. `grad` over it returned 0.0 with exit 0
             // in both lanes.
-            if let Some(message) = self.fail_message_of(selected) {
-                return LoweredValue::Node(self.reject_static_taken_fail(span, &message));
+            // chelis#2383: an unguardable direct `fail` here still aborts on
+            // every execution, so it must be rejected too -- and named by its
+            // own reason rather than being lowered at depth and picking up the
+            // indirect-`fail` diagnostic.
+            match self.fail_message_of(selected) {
+                Some(FailMessage::Usable(message)) => {
+                    return LoweredValue::Node(self.reject_static_taken_fail(span, &message));
+                }
+                Some(FailMessage::Unusable(defect)) => {
+                    return LoweredValue::Node(self.reject_fail_message_defect(defect, span));
+                }
+                None => {}
             }
             // The selected branch is still an `if` BRANCH, so it is lowered
             // at branch depth like every other arm. This path was the one
@@ -20658,9 +20844,44 @@ impl<'program> LowerCtx<'program> {
         // lowered the taken branch alone.
         let then_fail = self.fail_message_of(then_expr);
         let else_fail = self.fail_message_of(else_expr);
-        if then_fail.as_deref() == Some("") || else_fail.as_deref() == Some("") {
-            return LoweredValue::Node(self.reject_empty_fail_message(Some(span)));
+        // chelis#2383: a direct `fail` branch whose message is unusable is
+        // rejected HERE, by its own reason. Letting it fall through to the
+        // `Where` path below lowered it at branch depth, where it met
+        // `reject_indirect_branch_fail` and was told to write `fail(...)`
+        // directly as the branch -- which is what it already was. A
+        // genuinely indirect `fail` (`None` here) still reaches that
+        // diagnostic, and still deserves it.
+        for classified in [&then_fail, &else_fail] {
+            match classified {
+                // Empty is a type error in every lane, so it rejects wherever
+                // it is written -- the pre-existing behaviour.
+                Some(FailMessage::Unusable(FailMessageDefect::Empty)) => {
+                    return LoweredValue::Node(
+                        self.reject_fail_message_defect(FailMessageDefect::Empty, span),
+                    );
+                }
+                // A dynamic message is legal; it just has no guard. Fence it
+                // only when this DAG is being built for its value. Under the
+                // host lane an untransformed dynamic tensor branch keeps its
+                // own "retain host control flow" diagnostic below.
+                Some(FailMessage::Unusable(FailMessageDefect::NotALiteral))
+                    if self.host_program.is_none() =>
+                {
+                    return LoweredValue::Node(
+                        self.reject_fail_message_defect(FailMessageDefect::NotALiteral, span),
+                    );
+                }
+                _ => {}
+            }
         }
+        let then_fail = match then_fail {
+            Some(FailMessage::Usable(message)) => Some(message),
+            _ => None,
+        };
+        let else_fail = match else_fail {
+            Some(FailMessage::Usable(message)) => Some(message),
+            _ => None,
+        };
         match (&then_fail, &else_fail) {
             // The surviving branch is still an `if` branch, so it is lowered
             // at branch depth: an INDIRECT `fail` inside it has no guard of
