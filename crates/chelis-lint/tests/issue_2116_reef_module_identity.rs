@@ -129,10 +129,17 @@ fn reports_file_with_no_module_declaration() {
 fn defers_on_two_module_declarations_because_the_parser_rejects_them() {
     // Measured on the loader: two `module` lines are a PARSE error
     // ("expected module declaration only as the first declaration in a
-    // file"), not a module-identity error, and `chelis fmt --check` already
-    // exits 1 on it. So this shape is not part of chelis#2116's false-green
-    // class, and the rule deliberately reaches no verdict rather than
-    // inventing a second diagnosis for a file nothing can parse.
+    // file"), not a module-identity error, so the rule reaches no verdict
+    // rather than inventing a second diagnosis for a file nothing can parse.
+    //
+    // This deferral has a cost, and an earlier version of this comment denied
+    // it. `chelis fmt --check <file>` does exit 1 here, but there is NO
+    // directory form: `chelis fmt --check <dir>` fails with "Is a directory".
+    // So `chelis lint --check .`, the form this repository's own gate runs,
+    // exits 0 on this package while `reef build` exits 1. The shape IS in
+    // chelis#2116's false-green class for that invocation. Closing it needs
+    // `chelis lint` to surface parse failures, which is outside this rule's
+    // remit and tracked separately.
     let body = "module Ub10.Data\nmodule Ub10.Other\ndef value() -> i64 = cast(1, i64)\n";
     assert!(
         chelis_surf::parser::parse_str(body).is_err(),
