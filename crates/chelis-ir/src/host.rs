@@ -4011,6 +4011,29 @@ struct HostDefSignature {
     body_expr: Expr,
 }
 
+/// A tensor-only helper cannot carry this host entry obligation: its DAG
+/// drops List parameters that the body does not read, even though their
+/// elements may witness a named result axis.
+fn has_named_list_entry(signature: &HostDefSignature) -> bool {
+    fn named_tensor_in_list(ty: &HostTypeTerm) -> bool {
+        match ty {
+            HostTypeTerm::List(item) => match item.as_ref() {
+                HostTypeTerm::List(_) => named_tensor_in_list(item),
+                HostTypeTerm::Tensor(tensor) => tensor
+                    .dims
+                    .iter()
+                    .any(|dim| matches!(dim, DimInfo::Named(name, _) if name != "*")),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    signature
+        .params
+        .iter()
+        .any(|param| named_tensor_in_list(&param.ty))
+}
+
 /// The kernel-or-host decision for one def body, made before lowering.
 enum DefBodyDecision {
     Host,
@@ -4086,6 +4109,9 @@ pub fn host_def_kernel(
     let Some(signature) = host_def_signature(name, body, None, program) else {
         return Ok(None);
     };
+    if has_named_list_entry(&signature) {
+        return Ok(None);
+    }
     let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
     match staged_def_kernel(program, &signature)? {
         staged::StagingAttempt::Ready(kernel) => return Ok(Some(kernel)),
@@ -5191,6 +5217,9 @@ fn lower_def_body_kernel(
     signature: &HostDefSignature,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    if has_named_list_entry(signature) {
+        return Ok(None);
+    }
     // A returned/dynamically-computed callable has no C value ABI. Do not
     // let a staged or tensor helper erase its outer application; the host
     // lowering route emits the existing unspellable marker, and the C ABI

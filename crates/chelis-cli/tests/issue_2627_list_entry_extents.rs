@@ -88,6 +88,22 @@ fn list_only_witness_controls_a_declared_result_claim() {
 }
 
 #[test]
+fn list_only_witness_guards_a_helper_call_result() {
+    assert_both_trap(
+        "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+         def f[n](xs: List[tensor[n, f32]], y: tensor[*, f32]) -> tensor[n, f32] = hidden(y)\n\
+         out = f([hidden(to_tensor([1.0, 2.0]))], hidden(to_tensor([4.0, 5.0, 6.0])))\n",
+        "extent `n`: xs[0] axis 0 = 2, load axis 0 = 3",
+    );
+    assert_both_value(
+        "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+         def f[n](xs: List[tensor[n, f32]], y: tensor[*, f32]) -> tensor[n, f32] = hidden(y)\n\
+         out = f([hidden(to_tensor([1.0, 2.0]))], hidden(to_tensor([4.0, 5.0])))\n",
+        "out = tensor(shape=[2], data=[4.0, 5.0])",
+    );
+}
+
+#[test]
 fn a_later_list_uses_the_first_nonempty_list_as_witness() {
     assert_both_trap(
         "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
