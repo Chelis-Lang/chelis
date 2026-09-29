@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 pub mod exceptions;
 pub mod policy;
+pub mod reef_package;
 pub mod registry;
 pub mod rules;
 pub mod surface;

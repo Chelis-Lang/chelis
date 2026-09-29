@@ -29,59 +29,24 @@
 //! rather than silent (chelis#2765).
 
 use crate::policy::TraversalPolicy;
+use crate::reef_package::{PackageLayout, read_layout};
 use crate::walker::Entry;
 use crate::{Context, LintError, PreparedRuleState, Rule, Surface, Violation};
 use chelis_surf::ast::Decl;
 use chelis_surf::module_identity::validate_module_path;
-use serde::Deserialize;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// One reef package's contribution to the rule's verdict.
-#[derive(Debug, Clone)]
-struct PackageContext {
-    module_prefix: String,
-    /// Source roots, package-root-relative, `src` first.
-    source_roots: Vec<String>,
-}
-
 /// Every reef package the invocation may consult, keyed by package root.
-#[derive(Debug, Default)]
-pub struct ReefPackages(BTreeMap<PathBuf, PackageContext>);
-
-#[derive(Deserialize)]
-struct ManifestFile {
-    package: Option<ManifestPackage>,
-}
-
-#[derive(Deserialize)]
-struct ManifestPackage {
-    module_prefix: Option<String>,
-    #[serde(default)]
-    additional_sources: Vec<String>,
-}
-
-/// Read `module_prefix` and the declared source roots from a `reef.toml`.
 ///
-/// A manifest that does not parse, or that declares no `module_prefix`, yields
-/// `None`: reef itself rejects both, and this rule is not the surface that
-/// reports a malformed manifest.
-fn read_package_context(manifest: &Path) -> Option<PackageContext> {
-    let text = std::fs::read_to_string(manifest).ok()?;
-    let parsed: ManifestFile = toml::from_str(&text).ok()?;
-    let package = parsed.package?;
-    let module_prefix = package.module_prefix?;
-    if module_prefix.trim().is_empty() {
-        return None;
-    }
-    let mut source_roots = vec!["src".to_string()];
-    source_roots.extend(package.additional_sources);
-    Some(PackageContext {
-        module_prefix,
-        source_roots,
-    })
-}
+/// The layout is read by `crate::reef_package`, the same reader the traversal
+/// policy uses to decide what it may prune. One reader is the point: if the
+/// policy and this rule disagreed about a package's source roots, the policy
+/// would prune a directory the rule believes it is judging, and the rule
+/// would go silent on files that are compiled.
+#[derive(Debug, Default)]
+pub struct ReefPackages(BTreeMap<PathBuf, PackageLayout>);
 
 /// Index every `reef.toml` this invocation may consult.
 ///
@@ -93,7 +58,7 @@ fn read_package_context(manifest: &Path) -> Option<PackageContext> {
 /// no rule-local recursive filesystem discovery, per the same contract
 /// `doc-filename-convention` follows.
 fn prepare_reef_packages(root: &Path, entries: &[Entry], policy: &TraversalPolicy) -> ReefPackages {
-    let mut packages: BTreeMap<PathBuf, PackageContext> = BTreeMap::new();
+    let mut packages: BTreeMap<PathBuf, PackageLayout> = BTreeMap::new();
     let mut record = |manifest: &Path| {
         let Some(package_root) = manifest.parent() else {
             return;
@@ -101,7 +66,7 @@ fn prepare_reef_packages(root: &Path, entries: &[Entry], policy: &TraversalPolic
         if packages.contains_key(package_root) {
             return;
         }
-        if let Some(context) = read_package_context(manifest) {
+        if let Some(context) = read_layout(manifest) {
             packages.insert(package_root.to_path_buf(), context);
         }
     };
@@ -130,7 +95,7 @@ fn prepare_reef_packages(root: &Path, entries: &[Entry], policy: &TraversalPolic
 impl ReefPackages {
     /// The innermost package containing `path`, with `path` expressed relative
     /// to that package's root.
-    fn enclosing(&self, path: &Path) -> Option<(&PackageContext, PathBuf)> {
+    fn enclosing(&self, path: &Path) -> Option<(&PackageLayout, PathBuf)> {
         self.0
             .iter()
             .filter_map(|(root, context)| {
@@ -151,7 +116,7 @@ impl ReefPackages {
 /// validates as itself. A file under no declared source root is not a package
 /// module at all — the loader never reads it — so the rule declines to reach a
 /// verdict about it.
-fn path_for_validation(context: &PackageContext, relative: &Path) -> Option<PathBuf> {
+fn path_for_validation(context: &PackageLayout, relative: &Path) -> Option<PathBuf> {
     let first = relative.components().next()?.as_os_str().to_str()?;
     let root = context
         .source_roots

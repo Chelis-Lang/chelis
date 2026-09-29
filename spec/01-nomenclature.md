@@ -1356,6 +1356,18 @@ build output, dependencies, generated artifacts, or immutable inputs that
 should not be part of the editable lint corpus. They must not be added merely
 to hide current violations.
 
+A reef package's declared source roots are outside the shipped baseline's
+reach. The baseline names directories that are infrastructure, build output
+or vendored dependencies in a repository at large; beneath a package's `src`
+or an `additional_sources` root the same names are source, because the reef
+loader reads every `.ch` file there whatever the directory is called. Pruning
+one would make the lint disagree with the build about which files the package
+contains, and the disagreement is silent: no rule sees a file that is
+compiled. A repository `chelis-lint.toml` entry is a deliberate local
+declaration carrying its own cross-reference, so it continues to prune inside
+a source root — excluding generated `.ch` is exactly what that mechanism is
+for.
+
 `chelis-lint` composes its shipped baseline policy with the nearest ancestor
 `chelis-lint.toml`. Nearest-ancestor discovery resolves a relative lint
 target against the invocation working directory before walking ancestors, so
