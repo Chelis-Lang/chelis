@@ -126,7 +126,7 @@ def verify_wire_census(root: Path, target: Path) -> VerifiedWireCensus:
             # Consumer builds can replace shared dependency artifacts. Finish
             # those builds before binding the cache proof's exact artifacts;
             # invocation collection has its own retained Cargo namespace.
-            executions = execute_acceptance_controls(root, target)
+            executions = execute_acceptance_controls(root, target, schema)
             caches = verify_cache_publication(root, target)
             publication = verify_invocation_ownership(root, target, schema, caches)
         if source_identity(root) != before or schema.canonical.source_sha256 != before:

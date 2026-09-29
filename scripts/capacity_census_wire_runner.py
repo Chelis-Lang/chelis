@@ -26,6 +26,37 @@ class TestExecution:
     selected: tuple[str, ...]
     executed: tuple[str, ...]
     output_sha256: str
+    wire_probe_target: str | None = None
+    wire_probe_sha256: str | None = None
+
+
+WIRE_PROBE_TARGET_ENV = "CHELIS_WIRE_SELECTED_PROBE_TARGET"
+WIRE_PROBE_SHA256_ENV = "CHELIS_WIRE_SELECTED_PROBE_SHA256"
+
+
+def validate_wire_probe(root: Path, target: Path, expected_sha256: str) -> Path:
+    """Bind a selected probe to this worktree's existing Cargo target and bytes."""
+    root = root.resolve()
+    target = Path(target)
+    if (
+        not target.is_absolute()
+        or target.resolve() != target
+        or not target.is_dir()
+        or not target.is_relative_to(root / "target")
+    ):
+        raise GraphError("selected wire probe target is not owned by this worktree")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(byte not in "0123456789abcdef" for byte in expected_sha256)
+    ):
+        raise GraphError("selected wire probe lacks an exact binary digest")
+    probe = target / "debug/examples/wire_publication_probe"
+    if not probe.is_file() or probe.is_symlink() or probe.resolve() != probe:
+        raise GraphError("selected wire publication probe is missing or redirected")
+    if hashlib.sha256(probe.read_bytes()).hexdigest() != expected_sha256:
+        raise GraphError("selected wire publication probe differs from schema evidence")
+    return target
 
 
 def _selection(names):
@@ -161,8 +192,16 @@ def _tests(suite):
             raise GraphError("unsupported unittest selection item")
 
 
-def _supervise(root, receipt_path, names):
+def _supervise(root, receipt_path, names, wire_probe=None):
     names = _selection(names)
+    if wire_probe is not None:
+        target, digest = wire_probe
+        target = validate_wire_probe(root, target, digest)
+        os.environ[WIRE_PROBE_TARGET_ENV] = str(target)
+        os.environ[WIRE_PROBE_SHA256_ENV] = digest
+    else:
+        os.environ.pop(WIRE_PROBE_TARGET_ENV, None)
+        os.environ.pop(WIRE_PROBE_SHA256_ENV, None)
     # Open the framework's receipt before importing the suite. An early exit
     # leaves no complete JSON packet, even when it exits with status zero.
     with receipt_path.open("x") as output:
@@ -173,6 +212,8 @@ def _supervise(root, receipt_path, names):
             raise GraphError("unittest loader did not select every declared obligation")
         result = _OwnedResult()
         suite.run(result)
+        if wire_probe is not None:
+            validate_wire_probe(root, target, digest)
         packet = {
             "schema": 1,
             "selected": list(names),
@@ -181,6 +222,8 @@ def _supervise(root, receipt_path, names):
             "tests_run": result.testsRun,
             "outcomes": result.outcomes,
         }
+        if wire_probe is not None:
+            packet["wire_probe"] = {"target": str(target), "sha256": digest}
         json.dump(packet, output, sort_keys=True)
         output.write("\n")
         output.flush()
@@ -363,9 +406,18 @@ def build_and_run_rust_test(
     return run_libtest(root, binary, selected, log_prefix=log_prefix)
 
 
-def run_python_tests(root: Path, selected, *, log_prefix=None) -> TestExecution:
+def run_python_tests(
+    root: Path, selected, *, log_prefix=None,
+    wire_probe_target: Path | None = None, wire_probe_sha256: str | None = None,
+) -> TestExecution:
     selected = _selection(selected)
     root = root.resolve()
+    if (wire_probe_target is None) != (wire_probe_sha256 is None):
+        raise GraphError("selected wire probe requires both target and digest")
+    if wire_probe_target is not None:
+        wire_probe_target = validate_wire_probe(
+            root, wire_probe_target, wire_probe_sha256
+        )
     with tempfile.TemporaryDirectory(prefix="chelis-wire-execution-") as directory:
         path = Path(directory) / "execution.json"
         command = (
@@ -375,6 +427,13 @@ def run_python_tests(root: Path, selected, *, log_prefix=None) -> TestExecution:
             str(root),
             str(path),
             json.dumps(selected),
+            *(
+                (
+                    "--wire-probe-target", str(wire_probe_target),
+                    "--wire-probe-sha256", wire_probe_sha256,
+                )
+                if wire_probe_target is not None else ()
+            ),
         )
         result = subprocess.run(command, cwd=root, capture_output=True, check=False)
         if log_prefix is not None:
@@ -385,6 +444,8 @@ def run_python_tests(root: Path, selected, *, log_prefix=None) -> TestExecution:
                 "selected Python execution failed: "
                 + result.stderr.decode(errors="replace")[-4000:]
             )
+        if wire_probe_target is not None:
+            validate_wire_probe(root, wire_probe_target, wire_probe_sha256)
         try:
             raw = path.read_bytes()
             packet = json.loads(raw, object_pairs_hook=_unique_fields)
@@ -402,21 +463,37 @@ def run_python_tests(root: Path, selected, *, log_prefix=None) -> TestExecution:
         "tests_run": len(selected),
         "outcomes": {name: "passed" for name in selected},
     }
+    if wire_probe_target is not None:
+        expected["wire_probe"] = {
+            "target": str(wire_probe_target), "sha256": wire_probe_sha256,
+        }
     if packet != expected or type(packet.get("tests_run")) is not int:
         raise GraphError(
             "Python execution was missing, skipped, failed or not selected"
         )
-    return TestExecution(command, selected, selected, hashlib.sha256(raw).hexdigest())
+    return TestExecution(
+        command, selected, selected, hashlib.sha256(raw).hexdigest(),
+        str(wire_probe_target) if wire_probe_target is not None else None,
+        wire_probe_sha256,
+    )
 
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) != 5 or sys.argv[1] != "--supervise":
+        if sys.argv[1:2] != ["--supervise"] or len(sys.argv) not in (5, 9):
             raise GraphError("only the wire verifier may invoke the receipt supervisor")
+        wire_probe = None
+        if len(sys.argv) == 9:
+            if sys.argv[5] != "--wire-probe-target" or sys.argv[7] != "--wire-probe-sha256":
+                raise GraphError("invalid selected wire probe arguments")
+            wire_probe = (Path(sys.argv[6]), sys.argv[8])
         from ci_timing import subprocesses
         with subprocesses():
             raise SystemExit(
-                _supervise(Path(sys.argv[2]), Path(sys.argv[3]), json.loads(sys.argv[4]))
+                _supervise(
+                    Path(sys.argv[2]), Path(sys.argv[3]), json.loads(sys.argv[4]),
+                    wire_probe,
+                )
             )
     except (GraphError, OSError, ValueError) as error:
         print(f"wire execution failed: {error}", file=sys.stderr)

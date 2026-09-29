@@ -3306,12 +3306,30 @@ reason = "the dtype oracle executes the current wire graph, schema codecs and di
 tracking_issue = "chelis#2048"
 
 [[path_rule]]
+prefix = "scripts/capacity_census_wire_runner.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit executes the exact supervised selection and wire probe target rejection controls"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
 prefix = "scripts/capacity_census_wire_acceptance.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "dtype-phase3-oracle"
 cadence = "daily and workflow_dispatch"
 reason = "the dtype oracle executes the exact wire mutation and consumer selections through capacity_census_wire"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_verifier.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the current source-bound wire verifier through capacity_census_wire"
 tracking_issue = "chelis#2048"
 
 [[path_rule]]
@@ -3366,6 +3384,24 @@ workflow = "heavy-e2e.yml"
 job = "script-nightly"
 cadence = "daily and workflow_dispatch"
 reason = "the compiler-backed ActualSchemaCodec class executes in script-nightly; lightweight paired controls also execute in PR script-unit and the wire census"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_local.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "script-nightly"
+cadence = "daily and workflow_dispatch"
+reason = "the local publication compiler controls execute in script-nightly and the new probe routing unit controls execute in PR script-unit"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_runner.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit executes the selected probe routing, receipt and foreign or altered target controls"
 tracking_issue = "chelis#2048"
 
 [[path_rule]]

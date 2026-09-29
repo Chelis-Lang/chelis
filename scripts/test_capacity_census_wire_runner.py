@@ -1,6 +1,7 @@
 """C6 requires execution receipts, not successful commands or empty suites."""
 
 from pathlib import Path
+import hashlib
 import json
 import os
 import subprocess
@@ -9,6 +10,7 @@ import sysconfig
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from capacity_census_graph import GraphError
 
@@ -306,6 +308,104 @@ class SupervisedUnittest(unittest.TestCase):
                 root, ("fixture.Cases.test_accept", "fixture.Cases.test_reject")
             )
             self.assertEqual(len(receipt.executed), 2)
+
+
+class SelectedWireProbe(unittest.TestCase):
+    def test_supervised_selection_records_and_uses_the_current_probe(self):
+        from capacity_census_wire_runner import run_python_tests
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "target/agents/wire"
+            probe = target / "debug/examples/wire_publication_probe"
+            probe.parent.mkdir(parents=True)
+            probe.write_bytes(b"current probe")
+            digest = hashlib.sha256(probe.read_bytes()).hexdigest()
+            (root / "fixture.py").write_text(
+                "import os, unittest\n"
+                "class Cases(unittest.TestCase):\n"
+                " def test_accept(self):\n"
+                f"  self.assertEqual(os.environ['CHELIS_WIRE_SELECTED_PROBE_TARGET'], {str(target)!r})\n"
+                f"  self.assertEqual(os.environ['CHELIS_WIRE_SELECTED_PROBE_SHA256'], {digest!r})\n"
+            )
+            receipt = run_python_tests(
+                root, ("fixture.Cases.test_accept",),
+                wire_probe_target=target, wire_probe_sha256=digest,
+            )
+            self.assertEqual(receipt.selected, receipt.executed)
+            self.assertEqual(receipt.wire_probe_target, str(target))
+            self.assertEqual(receipt.wire_probe_sha256, digest)
+            self.assertIn(str(target), receipt.command)
+            self.assertIn(digest, receipt.command)
+
+    def test_foreign_missing_and_altered_probe_targets_reject(self):
+        from capacity_census_wire_runner import run_python_tests
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "target/agents/wire"
+            probe = target / "debug/examples/wire_publication_probe"
+            probe.parent.mkdir(parents=True)
+            probe.write_bytes(b"current probe")
+            digest = hashlib.sha256(probe.read_bytes()).hexdigest()
+            (root / "fixture.py").write_text(
+                "import unittest\nclass Cases(unittest.TestCase):\n"
+                " def test_accept(self): pass\n"
+            )
+            names = ("fixture.Cases.test_accept",)
+            for invalid in (root.parent, root / "other", root / "target/../other"):
+                with self.subTest(invalid=invalid), self.assertRaises(GraphError):
+                    run_python_tests(
+                        root, names, wire_probe_target=invalid,
+                        wire_probe_sha256=digest,
+                    )
+            probe.unlink()
+            with self.assertRaises(GraphError):
+                run_python_tests(
+                    root, names, wire_probe_target=target,
+                    wire_probe_sha256=digest,
+                )
+            probe.write_bytes(b"changed probe")
+            with self.assertRaises(GraphError):
+                run_python_tests(
+                    root, names, wire_probe_target=target,
+                    wire_probe_sha256=digest,
+                )
+            probe.write_bytes(b"current probe")
+            (root / "fixture.py").write_text(
+                "import unittest\nfrom pathlib import Path\n"
+                "class Cases(unittest.TestCase):\n"
+                " def test_accept(self):\n"
+                f"  Path({str(probe)!r}).write_bytes(b'changed during execution')\n"
+            )
+            with self.assertRaises(GraphError):
+                run_python_tests(
+                    root, names, wire_probe_target=target,
+                    wire_probe_sha256=digest,
+                )
+
+    def test_acceptance_passes_live_schema_probe_only_to_mutation_controls(self):
+        from capacity_census_wire_acceptance import (
+            HULL_CONSUMER_CONTROLS,
+            MUTATION_CONTROLS,
+            execute_acceptance_controls,
+        )
+
+        root = Path("/workspace")
+        target = root / "target/agents/wire"
+        schema = SimpleNamespace(local_probe_sha256="a" * 64)
+        with (
+            patch("capacity_census_wire_acceptance.run_python_tests") as python,
+            patch("capacity_census_wire_acceptance.build_and_run_rust_test"),
+        ):
+            execute_acceptance_controls(root, target, schema)
+        self.assertEqual(python.call_args_list[0].args, (root, MUTATION_CONTROLS))
+        self.assertEqual(
+            python.call_args_list[0].kwargs,
+            {"wire_probe_target": target, "wire_probe_sha256": schema.local_probe_sha256},
+        )
+        self.assertEqual(python.call_args_list[1].args, (root, HULL_CONSUMER_CONTROLS))
+        self.assertEqual(python.call_args_list[1].kwargs, {})
 
 
 if __name__ == "__main__":
