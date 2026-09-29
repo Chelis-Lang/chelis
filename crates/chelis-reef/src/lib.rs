@@ -12038,7 +12038,8 @@ mod tests {
     /// reach, and its failure mode is a loud red naming the remedy.
     ///
     /// The comparison is deliberately a **subset**, not an equality. A missing
-    /// entry is an over-aggressive prune and is the whole point. An *extra*
+    /// entry is the whole point: either the walk pruned it, or it stopped
+    /// parsing and discovery dropped it silently (chelis#2758). An *extra*
     /// discovered lock is not a defect: discovery walks the working tree, not
     /// the index, so an uncommitted scratch `reef.lock` - exactly what
     /// `chelis-reef` work creates in-tree, and that crate now triggers this
@@ -12211,11 +12212,13 @@ mod tests {
             .collect();
         assert!(
             missing.is_empty(),
-            "the discovery walk under {} did not reach {:?}. An over-aggressive \
-             prune has made this guard partly vacuous: the locks it no longer \
-             walks are never compared with the embedded bundle, and the \
-             `N of M` count below is computed from what it did walk. Found: \
-             {:?}",
+            "the discovery walk under {} did not reach {:?}, so this guard is \
+             partly vacuous: those locks are never compared with the embedded \
+             bundle, and the `N of M` count below is computed only from what it \
+             did walk. Either the walk pruned them, or they no longer parse - \
+             discovery drops an unreadable or unparseable `reef.lock` silently \
+             (chelis#2758), so check that they are valid TOML before assuming a \
+             prune. Found: {:?}",
             workspace_root.display(),
             missing,
             discovered,
