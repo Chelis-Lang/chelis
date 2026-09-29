@@ -10879,38 +10879,59 @@ fn static_list_spine_items(expr: &Expr) -> Option<Vec<Expr>> {
     }
 }
 
-/// Resolve only the finite recursive shape of a List actual. This uses the
-/// ordinary binder-aware call inliner and top-level definition lookup, so
-/// result reconstruction is independent of whether the caller wrote a
-/// literal, a named value, or one or more pure List-returning wrappers. The
-/// executable helper still receives the original argument expression; this
-/// walk is shape evidence, not argument evaluation.
+/// Resolve only the finite recursive shape of a List actual. A top-level
+/// value carries its resolved Load label; a raw name in lexical scope is a
+/// local value and cannot be replaced by a same-spelled declaration.
 fn resolve_list_grad_shape_expr(
     actual: &Expr,
     program: &HostLoweringSession<'_>,
     defs: &BTreeMap<String, Expr>,
-) -> Expr {
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> Result<Expr, crate::lower::LowerDiagnostic> {
     let mut resolved = actual.clone();
     for _ in 0..=MAX_DUAL_INLINE_DEPTH {
         if static_list_spine_items(&resolved).is_some() {
             break;
         }
-        if let Some(name) = direct_var_name(&resolved)
-            && let Some(body) = lookup_program_def(defs, name)
-        {
-            resolved = body.clone();
-            continue;
+        if let Some(name) = direct_var_name(&resolved) {
+            if LoadStoreName::top_level_source_for_label(name)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                if let Some(body) = lookup_program_def(defs, name) {
+                    resolved = qualify_top_level_value_reads(program, body);
+                    continue;
+                }
+            } else if matches!(scope.get(name), Some(HostTypeTerm::List(_))) {
+                let unsupported = chelis_types::unsupported::Unsupported::new(
+                    chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                        "List gradient actual `{name}`"
+                    )),
+                    format!("C List gradient cannot reconstruct the local List actual `{name}`"),
+                    chelis_types::unsupported::Stage::Lowering,
+                    chelis_types::unimplemented_rejection!(
+                        2740,
+                        "C List-gradient shape reconstruction does not carry lexical local List values"
+                    ),
+                );
+                return Err(crate::lower::LowerDiagnostic::new(
+                    unsupported.to_string(),
+                    Some(actual.span()),
+                    actual.span_id().map(str::to_string),
+                )
+                .fatal());
+            }
         }
         if let Some(inlined) = beta_reduce_inline_host_call(&resolved)
-            // Shape evidence only: the walk has no lexical scope of its own.
-            .or_else(|| inline_top_level_host_call(&resolved, program, &UnordMap::new()))
+            .or_else(|| inline_top_level_host_call(&resolved, program, scope))
         {
             resolved = inlined;
             continue;
         }
         break;
     }
-    resolved
+    Ok(resolved)
 }
 
 fn grad_pack_plan(
@@ -11281,14 +11302,18 @@ fn try_lower_general_list_grad_app(
         let mut rewritten_actual = actual.clone();
         if matches!(param_ty, HostTypeTerm::List(_))
             && let Some(name) = direct_var_name(actual)
+            && LoadStoreName::top_level_source_for_label(name)
+                .ok()
+                .flatten()
+                .is_some()
             && let Some(body) = lookup_program_def(&defs, name)
         {
-            rewritten_actual = body.clone();
+            rewritten_actual = qualify_top_level_value_reads(program, body);
             rewritten_children[actual_index] = rewritten_actual.clone();
         }
         if wrt_names.contains(&param_names[param_index]) {
             let shape_actual =
-                resolve_list_grad_shape_expr(&rewritten_actual, program, defs.as_ref());
+                resolve_list_grad_shape_expr(&rewritten_actual, program, defs.as_ref(), scope)?;
             let Some(plan) = grad_pack_plan(&param_ty, &shape_actual, program) else {
                 return Ok(None);
             };

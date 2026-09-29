@@ -292,7 +292,10 @@ Dict query argument; they do not consume that container (`spec/05` §1.3.1).
 The spec defines positional List cotangents for several forms. Eval/C tests
 cover selected list gradients, including
 `to_list`/`map`/`to_tensor` paths; other transforms and callback shapes
-may reject (`crates/chelis-cli/tests/ad_host_list_combinators.rs`).
+may reject (`crates/chelis-cli/tests/ad_host_list_combinators.rs`). The C
+build rejects a direct named List gradient when the List actual selected for
+differentiation is local and its recursive shape cannot be reconstructed;
+Eval handles the form. See [#2740](https://github.com/Chelis-Lang/chelis/issues/2740).
 
 ### 3.4 Collections, strings, conversions
 
