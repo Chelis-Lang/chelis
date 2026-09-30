@@ -686,6 +686,16 @@ fn parity_pure_helper_result_claims() {
 }
 
 #[test]
+fn parity_retained_callable_result_extent() {
+    let path = examples_root().join("retained_callable_result_extent.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"direct = tensor(shape=[2], data=[4.0, 5.0])\nretained = tensor(shape=[2], data=[4.0, 5.0])\n"
+    );
+}
+
+#[test]
 fn parity_literal_extent_claim() {
     drive_parity(&examples_root().join("literal_extent_claim.ch"), true);
 }
