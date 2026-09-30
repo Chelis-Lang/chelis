@@ -687,6 +687,9 @@ NON_GATE_WORKFLOWS = {
     "pr-package-expansion.yml",
     # Changelog policy uses Python only, including on docs PRs.
     "changelog.yml",
+    # Secret scanning downloads a pinned external detector and scans Git
+    # history in its own required hosted job, outside the compiler gate.
+    "secret-scan.yml",
     "smt-full-prove.yml",
     "heavy-e2e.yml",
     # The manual shared-runner cache probe requires the admitted EC2 host.

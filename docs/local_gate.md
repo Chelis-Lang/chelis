@@ -235,7 +235,9 @@ the head it covered, never the launch.
 The gate runs `cargo nextest run --no-fail-fast` (CI's actual runner), not
 `cargo test --workspace`, and includes `chelis lint --check .` (the §8.6 / §12
 naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship, docs,
-and smt-build CI jobs are out of scope for this script by design.
+and smt-build CI jobs are out of scope for this script by design. The separate
+Secret scan job downloads its pinned detector and checks Git history; the
+compiler gate does not run it.
 
 ### Doctests
 
