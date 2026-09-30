@@ -765,7 +765,10 @@ fn checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers() {
         ] {
             for (op, base_shape, output_shape, selected, map) in [
                 (
-                    RiscOp::Gather { axis: 1 },
+                    RiscOp::Gather {
+                        axis: 1,
+                        batch_rank: 0,
+                    },
                     vec![2, 3, 2],
                     vec![2, 2, 2, 2],
                     "2,0,1,2",
@@ -773,7 +776,10 @@ fn checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers() {
                 ),
                 // Negative map entries select unchanged base cells (-index-1).
                 (
-                    RiscOp::Scatter { axis: 1 },
+                    RiscOp::Scatter {
+                        axis: 1,
+                        batch_rank: 0,
+                    },
                     vec![2, 3, 2],
                     vec![2, 3, 2],
                     "2,0,2,0",
@@ -908,15 +914,202 @@ int case_{case_index}(void) {{
 }
 
 #[test]
+fn checked_c_nested_sparse_batches_use_each_index_row_under_sanitizers() {
+    let ty = |shape: &[usize], precision| TensorType {
+        dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    let mut cases = Vec::new();
+    for (case_index, (op, kind, invalid)) in [
+        (
+            RiscOp::Gather {
+                axis: 2,
+                batch_rank: 2,
+            },
+            0,
+            false,
+        ),
+        (
+            RiscOp::ScatterAdd {
+                axis: 2,
+                batch_rank: 2,
+            },
+            1,
+            false,
+        ),
+        (
+            RiscOp::Scatter {
+                axis: 2,
+                batch_rank: 2,
+            },
+            2,
+            false,
+        ),
+        (
+            RiscOp::Gather {
+                axis: 2,
+                batch_rank: 2,
+            },
+            0,
+            true,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut dag = Dag::new();
+        let decl = dag.declare("nested_sparse");
+        let base = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "base".into(),
+            },
+            vec![],
+            ty(&[2, 3, 4], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            ty(&[2, 3, 2], Prim::Int64),
+            None,
+        );
+        let mut inputs = vec![base, indices];
+        if kind != 0 {
+            inputs.push(dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "updates".into(),
+                },
+                vec![],
+                ty(&[2, 3, 2], Prim::F32),
+                None,
+            ));
+        }
+        let output_shape = if kind == 0 {
+            &[2, 3, 2][..]
+        } else {
+            &[2, 3, 4][..]
+        };
+        let output = dag.add_node(decl, op, inputs, ty(output_shape, Prim::F32), None);
+        dag.add_root(output);
+        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        let function = format!("nested_sparse_{case_index}");
+        let generated = codegen(&dag, &function).unwrap();
+        let selected = if invalid {
+            "0,3,1,2,2,0,3,1,1,3,0,4"
+        } else {
+            "0,3,1,2,2,0,3,1,1,3,0,2"
+        };
+        let check = if invalid {
+            "return 99;".to_string()
+        } else {
+            format!(
+                r#"
+    if (chelis_tensor_rank(out[0]) != 3 || chelis_tensor_shape(out[0],0) != 2 ||
+        chelis_tensor_shape(out[0],1) != 3 || chelis_tensor_shape(out[0],2) != {last_dim}) return 2;
+    chelis_read_view v = chelis_tensor_read_view(out[0]);
+    if (v.dtype != CHELIS_DTYPE_F32 || v.count != {count}) return 3;
+    for (int64_t i = 0; i < v.count; ++i) {{
+        int64_t row = i / {last_dim}, col = i % {last_dim};
+        float expected = (float)(4 * row + col + 1);
+        if ({kind} == 0) expected = (float)(4 * row + selected[i] + 1);
+        else for (int64_t s = 0; s < 2; ++s)
+            if (selected[2 * row + s] == col)
+                expected = {kind} == 1 ? expected + (float)(100 + 2 * row + s)
+                                       : (float)(100 + 2 * row + s);
+        if (((const float *)v.data)[i] != expected) return 4;
+    }}
+    puts("NESTED SPARSE PASS {case_index}"); return 0;"#,
+                last_dim = output_shape[2],
+                count = 2 * 3 * output_shape[2],
+            )
+        };
+        let harness = format!(
+            r#"
+#include "chelis_runtime.h"
+#include <string.h>
+#include <stdio.h>
+void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int case_{case_index}(void) {{
+    chelis_tensor *base = chelis_alloc(3, (int64_t[]){{2,3,4}}, CHELIS_DTYPE_F32);
+    chelis_tensor *indices = chelis_alloc(3, (int64_t[]){{2,3,2}}, CHELIS_DTYPE_I64);
+    chelis_tensor *updates = chelis_alloc(3, (int64_t[]){{2,3,2}}, CHELIS_DTYPE_F32);
+    chelis_tensor_write *g = chelis_tensor_begin_write(base);
+    chelis_write_view w = chelis_tensor_write_view(g);
+    for (int64_t i = 0; i < w.count; ++i) ((float *)w.data)[i] = (float)(i + 1);
+    chelis_tensor_end_write(g);
+    int64_t selected[] = {{{selected}}};
+    g = chelis_tensor_begin_write(indices); w = chelis_tensor_write_view(g);
+    memcpy(w.data, selected, sizeof selected); chelis_tensor_end_write(g);
+    g = chelis_tensor_begin_write(updates); w = chelis_tensor_write_view(g);
+    for (int64_t i = 0; i < w.count; ++i) ((float *)w.data)[i] = (float)(100 + i);
+    chelis_tensor_end_write(g);
+    chelis_tensor *in[] = {{base, indices, updates}}, *out[1] = {{0}};
+    {function}(in, {input_count}, out, 1);
+    {check}
+}}
+"#,
+            input_count = if kind == 0 { 2 } else { 3 },
+        );
+        cases.push((generated.c_source, harness));
+    }
+    for (case_index, result) in checked_indexing_run_batch(&cases).iter().enumerate() {
+        if case_index == 3 {
+            assert!(
+                !result.status.success(),
+                "invalid nested index was accepted"
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("domain in gather"),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        } else {
+            assert!(
+                result.status.success(),
+                "case {case_index}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(
+                result.stdout,
+                format!("NESTED SPARSE PASS {case_index}\n").as_bytes()
+            );
+        }
+    }
+}
+
+#[test]
 fn checked_c_sparse_empty_and_invalid_domains_execute_under_sanitizers() {
     let ty = |shape: &[usize], precision| TensorType {
         dims: shape.iter().copied().map(DimInfo::Lit).collect(),
         precision,
     };
     for (op, diagnostic) in [
-        (RiscOp::Gather { axis: 1 }, "gather"),
-        (RiscOp::ScatterAdd { axis: 1 }, "scatter"),
-        (RiscOp::Scatter { axis: 1 }, "scatter_replace"),
+        (
+            RiscOp::Gather {
+                axis: 1,
+                batch_rank: 0,
+            },
+            "gather",
+        ),
+        (
+            RiscOp::ScatterAdd {
+                axis: 1,
+                batch_rank: 0,
+            },
+            "scatter",
+        ),
+        (
+            RiscOp::Scatter {
+                axis: 1,
+                batch_rank: 0,
+            },
+            "scatter_replace",
+        ),
         (RiscOp::ScatterElements { axis: 1 }, "scatter_elements"),
     ] {
         for (empty, selected) in [(true, 0), (false, -1), (false, 3), (false, 2)] {

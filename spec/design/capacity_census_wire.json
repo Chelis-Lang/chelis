@@ -318,6 +318,15 @@
     },
     {
       "authority": "NumericOperation",
+      "contract": "[05-OP-66]",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Gather.batch_rank: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "NumericOperation",
       "contract": "[05-OP-12]",
       "flags": [
         "numeric-field"
@@ -367,7 +376,25 @@
       "flags": [
         "numeric-field"
       ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Scatter.batch_rank: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-66]",
+      "flags": [
+        "numeric-field"
+      ],
       "id": "chelis_compiler_api::schema::WireRiscOp::ScatterAdd.axis: i32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-66]",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::ScatterAdd.batch_rank: u32",
       "kind": "wire-schema-numeric-field"
     },
     {

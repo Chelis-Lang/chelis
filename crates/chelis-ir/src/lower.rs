@@ -14553,7 +14553,10 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
                     self.owner(),
-                    RiscOp::Gather { axis },
+                    RiscOp::Gather {
+                        axis,
+                        batch_rank: 0,
+                    },
                     vec![values, indices],
                     out_ty,
                     self.current_span_id.clone(),
@@ -14580,7 +14583,10 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
                     self.owner(),
-                    RiscOp::Scatter { axis },
+                    RiscOp::Scatter {
+                        axis,
+                        batch_rank: 0,
+                    },
                     vec![base, indices, updates],
                     out_ty,
                     self.current_span_id.clone(),
@@ -16467,7 +16473,10 @@ impl<'program> LowerCtx<'program> {
             let position = self.int64_constant(i64::try_from(position).ok()?);
             table = self.dag.add_node(
                 self.owner(),
-                RiscOp::ScatterAdd { axis: 0 },
+                RiscOp::ScatterAdd {
+                    axis: 0,
+                    batch_rank: 0,
+                },
                 vec![table, position, *item],
                 stacked_ty.clone(),
                 self.current_span_id.clone(),
@@ -16475,7 +16484,10 @@ impl<'program> LowerCtx<'program> {
         }
         Some(self.dag.add_node(
             self.owner(),
-            RiscOp::Gather { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![table, effective_index],
             out_ty,
             self.current_span_id.clone(),
@@ -24779,7 +24791,15 @@ mod tests {
         let gather = dag
             .nodes()
             .iter()
-            .find(|node| matches!(node.op, RiscOp::Gather { axis: 0 }))
+            .find(|node| {
+                matches!(
+                    node.op,
+                    RiscOp::Gather {
+                        axis: 0,
+                        batch_rank: 0
+                    }
+                )
+            })
             .expect("Surf gather should lower to first-class sparse IR");
         assert_eq!(
             gather.output_type,
@@ -24819,7 +24839,15 @@ mod tests {
         let scatter = dag
             .nodes()
             .iter()
-            .find(|node| matches!(node.op, RiscOp::Scatter { axis: 0 }))
+            .find(|node| {
+                matches!(
+                    node.op,
+                    RiscOp::Scatter {
+                        axis: 0,
+                        batch_rank: 0
+                    }
+                )
+            })
             .expect("Surf scatter_replace should lower to first-class sparse IR");
         assert_eq!(
             scatter.output_type,
@@ -26297,7 +26325,15 @@ mod tests {
         let g = dag
             .nodes()
             .iter()
-            .find(|n| matches!(n.op, RiscOp::Gather { axis: 0 }))
+            .find(|n| {
+                matches!(
+                    n.op,
+                    RiscOp::Gather {
+                        axis: 0,
+                        batch_rank: 0
+                    }
+                )
+            })
             .expect("gather must lower (issue #320)");
         let values = dag.get(g.inputs[0]).expect("values operand node");
         assert!(

@@ -197,6 +197,7 @@ RUST_CONSUMER_CONTROLS = (
             "shared_expand_ir_rejects_axes_outside_its_selected_layout",
             "window_and_onehot_extents_are_positive_int64",
             "standalone_dimension_carriers_reject_negative_extents_before_dag_admission",
+            "paired_sparse_batch_axes_are_explicit_and_match_index_prefix",
         ),
     ),
     (
@@ -268,6 +269,7 @@ def execute_acceptance_controls(root: Path, target: Path, schema):
         (
             "compiler::tests::native_wire_witness_projection_preserves_exact_claims_and_provenance",
             "compiler::tests::native_wire_witness_projection_rejects_invalid_requirements_and_edges",
+            "schema::tests::wire_dag_rejects_unknown_schema_version",
         ), kind="lib",
     ))
     return tuple(executions)

@@ -1213,14 +1213,26 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     ));
     nodes.push(add(
         &mut dag,
-        RiscOp::Gather { axis: 1 },
+        RiscOp::Gather {
+            axis: 1,
+            batch_rank: 0,
+        },
         vec![values, indices],
         ty(
             vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(7)],
             Prim::F32,
         ),
     ));
-    for op in [RiscOp::ScatterAdd { axis: 1 }, RiscOp::Scatter { axis: 1 }] {
+    for op in [
+        RiscOp::ScatterAdd {
+            axis: 1,
+            batch_rank: 0,
+        },
+        RiscOp::Scatter {
+            axis: 1,
+            batch_rank: 0,
+        },
+    ] {
         nodes.push(add(
             &mut dag,
             op,

@@ -23,11 +23,16 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 22 is explicitly
+WireDag JSON is an exact-version contract. Schema version 23 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 21, and every future version are decode errors before any IR
+versions 1 through 22, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
+
+Version 23 requires an explicit `batch_rank` on `Gather`, `ScatterAdd`, and
+`Scatter` wire operations. Its leading index dimensions must equal the
+corresponding data dimensions, and `batch_rank` cannot exceed the selected data
+axis or index rank.
 
 `WireRiscOp::Load.name` distinguishes a graph input from a resolved top-level
 value read. An ordinary name obeys `[A-Za-z_][A-Za-z0-9_.-]*`. A resolved read
@@ -194,7 +199,7 @@ axis range, and the exact input cardinality before IR construction.
 
 Version 20 adds the closed `Bitwise { bitwise }` operation with the five signed
 integer identities in [05-OP-47]. Every tagged variant must be known to the
-version 22 decoder. Version 21 adds `Iota` for the two exact scalar i64
+version 23 decoder. Version 21 adds `Iota` for the two exact scalar i64
 endpoints of `range` [05-OP-54], plus `ListMapCapture` and
 `OrderedAdjointSum` for the executed callback and cotangent order in
 [05-OP-55] and spec/06. Ordered contribution group counts use a tagged,

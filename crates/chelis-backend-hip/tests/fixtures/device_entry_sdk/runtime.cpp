@@ -16,11 +16,12 @@
 
 using Launch = void (*)(unsigned int, unsigned int, void **);
 extern "C" Launch fixture_kernel(const char *name);
+extern "C" hipDeviceptr_t fixture_symbol(const char *kernel, const char *symbol, size_t *bytes);
 struct Allocation { size_t bytes; int device; };
 static std::map<void *, Allocation> allocations;
 static int current_device = 0;
 static bool pending_launch[2] = {};
-struct Module { Launch launch; int device; };
+struct Module { Launch launch; int device; std::string kernel; };
 static std::map<void *, Module> modules;
 static const unsigned char guard = 0xa7;
 
@@ -109,12 +110,42 @@ extern "C" hipError_t hipModuleUnload(hipModule_t module) {
 extern "C" hipError_t hipModuleLoadData(hipModule_t *module, const void *code) {
     *module = malloc(1);
     REQUIRE(*module != nullptr);
-    REQUIRE(modules.emplace(*module, Module{fixture_kernel((const char *)code), current_device}).second);
+    REQUIRE(modules.emplace(*module, Module{fixture_kernel((const char *)code), current_device, (const char *)code}).second);
     return hipSuccess;
 }
 extern "C" hipError_t hipModuleGetFunction(hipFunction_t *function, hipModule_t module, const char *) {
     REQUIRE(modules.at(module).device == current_device);
     *function = module;
+    return hipSuccess;
+}
+extern "C" hipError_t hipModuleGetGlobal(hipDeviceptr_t *pointer, size_t *bytes,
+    hipModule_t module, const char *name) {
+    const auto &entry = modules.at(module);
+    REQUIRE(entry.device == current_device);
+    *pointer = fixture_symbol(entry.kernel.c_str(), name, bytes);
+    return *pointer ? hipSuccess : hipErrorInvalidValue;
+}
+static bool contains_global(hipDeviceptr_t pointer, size_t bytes) {
+    for (const auto &entry : modules) {
+        if (entry.second.device != current_device) continue;
+        for (const char *name : {"chelis_numeric_failure_flag",
+                                  "chelis_numeric_failure_index"}) {
+            size_t capacity = 0;
+            const hipDeviceptr_t start = fixture_symbol(entry.second.kernel.c_str(), name, &capacity);
+            if (start && pointer >= start && pointer - start <= capacity
+                && bytes <= capacity - (pointer - start)) return true;
+        }
+    }
+    return false;
+}
+extern "C" hipError_t hipMemcpyHtoD(hipDeviceptr_t destination, const void *source, size_t bytes) {
+    REQUIRE(contains_global(destination, bytes));
+    memcpy((void *)destination, source, bytes);
+    return hipSuccess;
+}
+extern "C" hipError_t hipMemcpyDtoH(void *destination, hipDeviceptr_t source, size_t bytes) {
+    REQUIRE(contains_global(source, bytes));
+    memcpy(destination, (const void *)source, bytes);
     return hipSuccess;
 }
 extern "C" hipError_t hipModuleLaunchKernel(hipFunction_t function,

@@ -405,12 +405,13 @@ fn unclaimed_dense_gather_region_still_specializes_and_executes() {
     let expected = eval_dense_gather_pattern(&dag, None).unwrap();
     let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
     assert!(verify(&specialized).is_empty());
-    assert!(
-        specialized
-            .nodes()
-            .iter()
-            .any(|node| matches!(node.op, RiscOp::Gather { axis: 0 }))
-    );
+    assert!(specialized.nodes().iter().any(|node| matches!(
+        node.op,
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0
+        }
+    )));
     assert_eq!(
         eval_dense_gather_pattern(&specialized, None).unwrap(),
         expected

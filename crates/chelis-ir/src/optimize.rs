@@ -1097,17 +1097,32 @@ mod tests {
             // SparseIndex: [05-OP-52] makes an out-of-bounds index fail
             // loudly, and the index is data, so every member seeds whatever
             // its dtype. Each row flips with its own sub-arm.
-            ("gather", RiscOp::Gather { axis: 0 }, 2, Prim::F32, true),
+            (
+                "gather",
+                RiscOp::Gather {
+                    axis: 0,
+                    batch_rank: 0,
+                },
+                2,
+                Prim::F32,
+                true,
+            ),
             (
                 "scatter add",
-                RiscOp::ScatterAdd { axis: 0 },
+                RiscOp::ScatterAdd {
+                    axis: 0,
+                    batch_rank: 0,
+                },
                 3,
                 Prim::F32,
                 true,
             ),
             (
                 "scatter replace",
-                RiscOp::Scatter { axis: 0 },
+                RiscOp::Scatter {
+                    axis: 0,
+                    batch_rank: 0,
+                },
                 3,
                 Prim::F32,
                 true,

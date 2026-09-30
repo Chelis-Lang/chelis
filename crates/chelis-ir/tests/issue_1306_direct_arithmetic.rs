@@ -279,7 +279,10 @@ fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
         let output = if indexed_op == "gather" {
             dag.add_node(
                 decl,
-                RiscOp::Gather { axis: 0 },
+                RiscOp::Gather {
+                    axis: 0,
+                    batch_rank: 0,
+                },
                 vec![values, index],
                 scalar_at(Prim::F32),
                 None,
@@ -296,7 +299,10 @@ fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
             );
             let scattered = dag.add_node(
                 decl,
-                RiscOp::ScatterAdd { axis: 0 },
+                RiscOp::ScatterAdd {
+                    axis: 0,
+                    batch_rank: 0,
+                },
                 vec![values, index, update],
                 values_ty,
                 None,

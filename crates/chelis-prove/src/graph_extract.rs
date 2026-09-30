@@ -600,7 +600,9 @@ const _: () = {
     // floating numeric payload or is a float-envelope transformer.
     // Version 22 distinguishes resolved-origin Load labels from graph inputs;
     // labels carry no numeric payload.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 22);
+    // Version 23 adds the paired sparse batch rank. It is index geometry,
+    // not a floating numeric payload or float-envelope transformer.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 23);
 };
 
 #[cfg(test)]

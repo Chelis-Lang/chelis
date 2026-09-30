@@ -219,7 +219,10 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
     );
     let gathered = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![table, indices],
         t(vec![3, 2]),
         None,
@@ -294,7 +297,10 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
     );
     let gathered = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 1 },
+        RiscOp::Gather {
+            axis: 1,
+            batch_rank: 0,
+        },
         vec![table, indices],
         t(vec![2, 4]),
         None,

@@ -178,7 +178,7 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "matmul_metadata_binds_matrix_spans_and_vendor_projection_without_storage",
         ),
         (
-            "linear / self.inner.get() % self.indices.elements().get()",
+            "linear / self.inner.get() % self.index_per_batch.get()",
             "0",
             "sparse_metadata_binds_indices_to_exact_hyperplane_and_elementwise_domains",
         ),

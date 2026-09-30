@@ -2836,7 +2836,7 @@ fn compute_adjoints(
         }
         RiscOp::Copy => Some(vec![(node.inputs[0], g)]),
         RiscOp::Drop => None,
-        RiscOp::Gather { axis } => {
+        RiscOp::Gather { axis, batch_rank } => {
             let values = node.inputs[0];
             let indices = node.inputs[1];
             let values_ty = forward.get(values).unwrap().output_type.clone();
@@ -2849,14 +2849,17 @@ fn compute_adjoints(
             );
             let dvalues = dag.add_node(
                 node.owner,
-                RiscOp::ScatterAdd { axis: *axis },
+                RiscOp::ScatterAdd {
+                    axis: *axis,
+                    batch_rank: *batch_rank,
+                },
                 vec![zero, indices, g],
                 values_ty,
                 None,
             );
             Some(vec![(values, dvalues)])
         }
-        RiscOp::ScatterAdd { axis } => {
+        RiscOp::ScatterAdd { axis, batch_rank } => {
             // Scatter-add is linear in both its target and updates. Indices
             // are discrete: the target cotangent is the upstream value
             // unchanged, while the updates cotangent gathers the upstream
@@ -2869,7 +2872,10 @@ fn compute_adjoints(
             let updates_ty = forward.get(updates).unwrap().output_type.clone();
             let dupdates = dag.add_node(
                 node.owner,
-                RiscOp::Gather { axis: *axis },
+                RiscOp::Gather {
+                    axis: *axis,
+                    batch_rank: *batch_rank,
+                },
                 vec![g, indices],
                 updates_ty,
                 None,
@@ -3430,7 +3436,10 @@ mod tests {
             vector(Prim::Int32),
         );
         let scattered = add(
-            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![target, indices, updates],
             vector(Prim::Int32),
         );
@@ -4797,7 +4806,10 @@ mod tests {
         );
         let scattered = dag.add_node(
             owner,
-            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![target, indices, updates],
             vec4_ty.clone(),
             None,

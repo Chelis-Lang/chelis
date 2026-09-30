@@ -3470,6 +3470,14 @@ pub unsafe extern "C" fn chelis_tensor_sparse_plan(
     axis: chelis_scalar,
     operation: chelis_sparse_op,
 ) -> *mut chelis_sparse_plan {
+    // The low two bits select the sparse operation; the remaining
+    // nonnegative bits give the number of paired leading batch axes.
+    // The four published zero-batch selectors retain their values.
+    if operation < 0 {
+        runtime_fail!("Domain: unknown sparse operation");
+    }
+    let batch_rank = (operation / 4) as usize;
+    let operation = operation % 4;
     let op = match operation {
         CHELIS_SPARSE_GATHER => "gather",
         CHELIS_SPARSE_ADD => "scatter",
@@ -3491,11 +3499,12 @@ pub unsafe extern "C" fn chelis_tensor_sparse_plan(
         );
     }
     let metadata = affine_result(
-        SparseMetadata::new(
+        SparseMetadata::new_paired(
             &(*base).metadata,
             &(*indices).metadata,
             affine_scalar(axis, op),
             operation == CHELIS_SPARSE_ELEMENTS,
+            batch_rank,
         ),
         op,
     );

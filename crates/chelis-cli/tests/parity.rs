@@ -605,6 +605,11 @@ fn parity_checked_sparse_axes() {
 }
 
 #[test]
+fn parity_vmap_sparse_axes() {
+    drive_parity(&examples_root().join("vmap_sparse_axes.ch"), true);
+}
+
+#[test]
 fn parity_count_bool_axes() {
     drive_parity(&examples_root().join("count_bool_axes.ch"), true);
 }

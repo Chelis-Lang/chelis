@@ -87,7 +87,10 @@ fn build_gather_scalar(
     );
     let gathered = dag.add_node(
         decl,
-        RiscOp::Gather { axis },
+        RiscOp::Gather {
+            axis,
+            batch_rank: 0,
+        },
         vec![table, indices],
         t(out_dims.clone()),
         None,
@@ -232,7 +235,10 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
     );
     let gathered = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 1 },
+        RiscOp::Gather {
+            axis: 1,
+            batch_rank: 0,
+        },
         vec![table, indices],
         t(vec![2, 4]),
         None,
@@ -312,7 +318,10 @@ fn gather_eval_out_of_bounds_index_panics_fail_closed() {
     );
     let _gathered = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![table, indices],
         t(vec![2, 2]),
         None,
@@ -357,7 +366,10 @@ fn gather_eval_negative_index_panics_fail_closed() {
     );
     let _gathered = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![table, indices],
         t(vec![2, 2]),
         None,
@@ -409,7 +421,10 @@ fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
     );
     let _sa = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         t(vec![3, 2]),
         None,
@@ -465,7 +480,10 @@ fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
     );
     let _sr = dag.add_node(
         decl,
-        RiscOp::Scatter { axis: 0 },
+        RiscOp::Scatter {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         t(vec![3, 2]),
         None,
@@ -522,7 +540,10 @@ fn scatter_ad_rejects_regardless_of_wrt_subset() {
     );
     let scatter = dag.add_node(
         decl,
-        RiscOp::Scatter { axis: 0 },
+        RiscOp::Scatter {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         t(vec![3, 2]),
         None,
@@ -638,7 +659,10 @@ fn scatter_add_backward_routes_target_and_updates_but_not_indices() {
     );
     let sa = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         t(vec![4]),
         None,

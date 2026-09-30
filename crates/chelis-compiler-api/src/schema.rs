@@ -2148,7 +2148,7 @@ pub struct WireRecordPatternField {
 /// - `22`: a Load of a resolved top-level value uses an unspellable encoded
 ///   origin label, distinct from every ordinary graph input. A version-21
 ///   reader has no such identity and cannot interpret that label.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 22;
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 23;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -4192,12 +4192,15 @@ pub enum WireRiscOp {
     },
     Gather {
         axis: i32,
+        batch_rank: u32,
     },
     ScatterAdd {
         axis: i32,
+        batch_rank: u32,
     },
     Scatter {
         axis: i32,
+        batch_rank: u32,
     },
     ScatterElements {
         axis: i32,
@@ -4548,24 +4551,39 @@ mod tests {
 
     #[test]
     fn sparse_wire_risc_ops_round_trip_as_additive_variants() {
-        let gather = serde_json::to_string(&WireRiscOp::Gather { axis: 1 }).unwrap();
-        assert_eq!(gather, r#"{"kind":"gather","axis":1}"#);
+        let gather = serde_json::to_string(&WireRiscOp::Gather {
+            axis: 1,
+            batch_rank: 0,
+        })
+        .unwrap();
+        assert_eq!(gather, r#"{"kind":"gather","axis":1,"batch_rank":0}"#);
         match serde_json::from_str::<WireRiscOp>(&gather).unwrap() {
-            WireRiscOp::Gather { axis } => assert_eq!(axis, 1),
+            WireRiscOp::Gather { axis, batch_rank } => assert_eq!((axis, batch_rank), (1, 0)),
             other => panic!("expected gather wire op, got {other:?}"),
         }
 
-        let scatter = serde_json::to_string(&WireRiscOp::ScatterAdd { axis: 0 }).unwrap();
-        assert_eq!(scatter, r#"{"kind":"scatter_add","axis":0}"#);
+        let scatter = serde_json::to_string(&WireRiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        })
+        .unwrap();
+        assert_eq!(scatter, r#"{"kind":"scatter_add","axis":0,"batch_rank":0}"#);
         match serde_json::from_str::<WireRiscOp>(&scatter).unwrap() {
-            WireRiscOp::ScatterAdd { axis } => assert_eq!(axis, 0),
+            WireRiscOp::ScatterAdd { axis, batch_rank } => assert_eq!((axis, batch_rank), (0, 0)),
             other => panic!("expected scatter_add wire op, got {other:?}"),
         }
 
-        let scatter_replace = serde_json::to_string(&WireRiscOp::Scatter { axis: 2 }).unwrap();
-        assert_eq!(scatter_replace, r#"{"kind":"scatter","axis":2}"#);
+        let scatter_replace = serde_json::to_string(&WireRiscOp::Scatter {
+            axis: 2,
+            batch_rank: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            scatter_replace,
+            r#"{"kind":"scatter","axis":2,"batch_rank":0}"#
+        );
         match serde_json::from_str::<WireRiscOp>(&scatter_replace).unwrap() {
-            WireRiscOp::Scatter { axis } => assert_eq!(axis, 2),
+            WireRiscOp::Scatter { axis, batch_rank } => assert_eq!((axis, batch_rank), (2, 0)),
             other => panic!("expected scatter wire op, got {other:?}"),
         }
 

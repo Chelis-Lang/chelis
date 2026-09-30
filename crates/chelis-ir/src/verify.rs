@@ -2664,7 +2664,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     }
                 }
             }
-            RiscOp::Gather { axis } => {
+            RiscOp::Gather { axis, batch_rank } => {
                 if arity != 2 {
                     errors.push(format!(
                         "gather at node {} has {} inputs (expected 2)",
@@ -2696,10 +2696,20 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                             axis,
                             values.output_type.dims.len()
                         ));
+                    } else if !verify_sparse_batch_prefix(
+                        &values.output_type.dims,
+                        &indices.output_type.dims,
+                        *axis,
+                        *batch_rank,
+                    ) {
+                        errors.push(format!(
+                            "gather at node {} has invalid paired batch prefix",
+                            node.id.0
+                        ));
                     } else {
                         let mut expected = Vec::new();
                         expected.extend_from_slice(&values.output_type.dims[..*axis]);
-                        expected.extend(indices.output_type.dims.iter().cloned());
+                        expected.extend(indices.output_type.dims[*batch_rank..].iter().cloned());
                         expected.extend_from_slice(&values.output_type.dims[*axis + 1..]);
                         if node.output_type.dims != expected {
                             errors.push(format!(
@@ -2710,16 +2720,23 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     }
                 }
             }
-            RiscOp::ScatterAdd { axis } => {
-                verify_scatter_like(node, dag, *axis, "scatter_add", &mut errors);
+            RiscOp::ScatterAdd { axis, batch_rank } => {
+                verify_scatter_like(node, dag, *axis, *batch_rank, "scatter_add", &mut errors);
             }
-            RiscOp::Scatter { axis } => {
+            RiscOp::Scatter { axis, batch_rank } => {
                 // Replace-scatter (last-write-wins) shares the input
                 // arity / index-precision / shape contract with
                 // scatter_add — only the duplicate-index semantics
                 // differ (replace vs accumulate), which is a runtime
                 // concern not a structural one.
-                verify_scatter_like(node, dag, *axis, "scatter_replace", &mut errors);
+                verify_scatter_like(
+                    node,
+                    dag,
+                    *axis,
+                    *batch_rank,
+                    "scatter_replace",
+                    &mut errors,
+                );
             }
             RiscOp::ScatterElements { axis } => {
                 // Element-wise scatter (ONNX `ScatterElements`,
@@ -4275,6 +4292,19 @@ pub fn verify_declaration_sharing(dag: &Dag, errors: &mut Vec<String>) {
     }
 }
 
+/// Each paired leading index axis names the same batch row as the
+/// corresponding base axis. The index suffix alone replaces `axis`.
+fn verify_sparse_batch_prefix(
+    base: &[DimInfo],
+    indices: &[DimInfo],
+    axis: usize,
+    batch_rank: usize,
+) -> bool {
+    batch_rank <= axis
+        && batch_rank <= indices.len()
+        && base.get(..batch_rank) == indices.get(..batch_rank)
+}
+
 /// Shared structural verification for replace-scatter and scatter-add.
 /// Inputs are `[target, indices, updates]`; output shape equals
 /// `target`; `updates` shape equals `target.dims[..axis] +
@@ -4283,6 +4313,7 @@ fn verify_scatter_like(
     node: &crate::dag::DagNode,
     dag: &Dag,
     axis: usize,
+    batch_rank: usize,
     label: &str,
     errors: &mut Vec<String>,
 ) {
@@ -4324,10 +4355,20 @@ fn verify_scatter_like(
                 axis,
                 target.output_type.dims.len()
             ));
+        } else if !verify_sparse_batch_prefix(
+            &target.output_type.dims,
+            &indices.output_type.dims,
+            axis,
+            batch_rank,
+        ) {
+            errors.push(format!(
+                "{label} at node {} has invalid paired batch prefix",
+                node.id.0
+            ));
         } else {
             let mut expected_updates = Vec::new();
             expected_updates.extend_from_slice(&target.output_type.dims[..axis]);
-            expected_updates.extend(indices.output_type.dims.iter().cloned());
+            expected_updates.extend(indices.output_type.dims[batch_rank..].iter().cloned());
             expected_updates.extend_from_slice(&target.output_type.dims[axis + 1..]);
             if updates.output_type.dims != expected_updates {
                 errors.push(format!(
@@ -6742,7 +6783,10 @@ mod tests {
         );
         dag.add_node(
             decl,
-            RiscOp::Gather { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![values, bad_indices],
             tensor_ty(&[3, 2], Prim::F32),
             None,
@@ -6788,7 +6832,10 @@ mod tests {
         );
         dag.add_node(
             decl,
-            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![target, bad_indices, bad_updates],
             tensor_ty(&[4, 2], Prim::F64),
             None,

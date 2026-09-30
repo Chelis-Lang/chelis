@@ -38,6 +38,35 @@ fn axis(dag: &WireDag, node: &WireDagNode, axis: i32) -> Result<()> {
     Ok(())
 }
 
+fn sparse_batch_prefix(
+    dag: &WireDag,
+    node: &WireDagNode,
+    axis: i32,
+    batch_rank: u32,
+) -> Result<()> {
+    let base = input(dag, node)?;
+    let indices = node
+        .inputs
+        .get(1)
+        .and_then(|id| usize::try_from(*id).ok())
+        .and_then(|id| dag.nodes.get(id))
+        .ok_or_else(|| reject("wire sparse operation requires an indices input"))?;
+    let axis = usize::try_from(axis).map_err(|_| reject("wire sparse axis is negative"))?;
+    let batch_rank = batch_rank as usize;
+    if batch_rank > axis
+        || batch_rank > indices.output_type.dims.len()
+        || !base.output_type.dims[..batch_rank]
+            .iter()
+            .zip(&indices.output_type.dims[..batch_rank])
+            .all(|(left, right)| wire_dim_info_equal(left, right))
+    {
+        return Err(reject(
+            "wire sparse operation has invalid paired batch prefix",
+        ));
+    }
+    Ok(())
+}
+
 fn extent(value: i64) -> Result<()> {
     if value < 0 {
         Err(reject("wire extent must be a nonnegative int64"))
@@ -541,6 +570,7 @@ fn literal_result_axis_is_supported(dag: &WireDag, node: &WireDagNode, axis: usi
         }
         WireRiscOp::Gather {
             axis: gathered_axis,
+            batch_rank,
         } => {
             let Some(values_rank) = input_rank(dag, node, 0) else {
                 return false;
@@ -552,9 +582,12 @@ fn literal_result_axis_is_supported(dag: &WireDag, node: &WireDagNode, axis: usi
                 .ok()
                 .is_some_and(|gathered_axis| {
                     gathered_axis < values_rank
+                        && (*batch_rank as usize) <= gathered_axis
+                        && (*batch_rank as usize) <= indices_rank
                         && values_rank
                             .checked_sub(1)
                             .and_then(|rank| rank.checked_add(indices_rank))
+                            .and_then(|rank| rank.checked_sub(*batch_rank as usize))
                             == Some(rank)
                 })
         }
@@ -704,10 +737,22 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
             | WireRiscOp::Argmax { axis: a }
             | WireRiscOp::Argmin { axis: a }
             | WireRiscOp::Shape { axis: a }
-            | WireRiscOp::Gather { axis: a }
-            | WireRiscOp::ScatterAdd { axis: a }
-            | WireRiscOp::Scatter { axis: a }
             | WireRiscOp::ScatterElements { axis: a } => axis(dag, node, *a)?,
+            WireRiscOp::Gather {
+                axis: a,
+                batch_rank,
+            }
+            | WireRiscOp::ScatterAdd {
+                axis: a,
+                batch_rank,
+            }
+            | WireRiscOp::Scatter {
+                axis: a,
+                batch_rank,
+            } => {
+                axis(dag, node, *a)?;
+                sparse_batch_prefix(dag, node, *a, *batch_rank)?;
+            }
             WireRiscOp::ExtentWitness {
                 site: WireExtentWitnessSite::LiteralResultClaim,
                 parameter,

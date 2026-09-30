@@ -271,7 +271,10 @@ fn issue_320_grad_gather_over_literal_shape_still_exact() {
     );
     let gathered = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![x, indices],
         lit_vec(2),
         None,

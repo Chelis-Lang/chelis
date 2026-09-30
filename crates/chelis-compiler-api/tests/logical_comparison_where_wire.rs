@@ -117,7 +117,7 @@ fn wire_dag_payload(nodes: Vec<serde_json::Value>, root: u64) -> serde_json::Val
 
 #[test]
 fn wire_v15_round_trips_direct_comparison_logical_and_where_vocabulary() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 22);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 23);
     for comparison in ["cmp_lt", "lt", "eq", "neq", "gt", "gte", "lte"] {
         let decoded = WireDag::from_validated_json(&payload(
             serde_json::json!({"kind": "compare", "comparison": comparison}),

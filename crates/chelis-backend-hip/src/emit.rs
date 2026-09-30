@@ -2866,15 +2866,30 @@ impl HipEmitter {
                     dag,
                 );
             }
-            RiscOp::Gather { axis } => {
-                self.emit_gather_launch(id, *axis, &node.inputs, &node.output_type, dag)?
-            }
-            RiscOp::ScatterAdd { axis } => {
-                self.emit_scatter_add_launch(id, *axis, &node.inputs, &node.output_type, dag)?
-            }
-            RiscOp::Scatter { axis } => {
-                self.emit_scatter_replace_launch(id, *axis, &node.inputs, &node.output_type, dag)
-            }
+            RiscOp::Gather { axis, batch_rank } => self.emit_gather_launch(
+                id,
+                *axis,
+                *batch_rank,
+                &node.inputs,
+                &node.output_type,
+                dag,
+            )?,
+            RiscOp::ScatterAdd { axis, batch_rank } => self.emit_scatter_add_launch(
+                id,
+                *axis,
+                *batch_rank,
+                &node.inputs,
+                &node.output_type,
+                dag,
+            )?,
+            RiscOp::Scatter { axis, batch_rank } => self.emit_scatter_replace_launch(
+                id,
+                *axis,
+                *batch_rank,
+                &node.inputs,
+                &node.output_type,
+                dag,
+            ),
             RiscOp::ScatterElements { axis } => {
                 self.emit_scatter_elements_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
@@ -3644,7 +3659,15 @@ impl HipEmitter {
         self.line("}");
     }
 
-    fn emit_sparse_geometry(&mut self, id: usize, axis: usize, ty: &TensorType) {
+    fn emit_sparse_geometry(
+        &mut self,
+        id: usize,
+        axis: usize,
+        batch_rank: usize,
+        indices: usize,
+        op: &str,
+        ty: &TensorType,
+    ) {
         let plan = format!("sparse_geometry{id}");
         self.emit_metadata_plan(&plan, ty, None, "0");
         self.line(&format!(
@@ -3657,13 +3680,27 @@ impl HipEmitter {
         // extent/stride; the bounds check rejects any attempted index into it.
         self.line(&format!("chelis_device_metadata t{id}_before = 0;"));
         self.line(&format!("if (chelis_metadata_plan_count({plan}) != 0) t{id}_before = chelis_metadata_plan_count({plan}) / t{id}_axis_size / t{id}_after;"));
+        self.line(&format!("chelis_device_metadata t{id}_batch_count = 1;"));
+        for batch_axis in 0..batch_rank {
+            self.line(&format!(
+                "if (chelis_metadata_plan_shape({plan})[{batch_axis}] != d_t{indices}->shape[{batch_axis}]) chelis_numeric_trap(\"numeric trap: domain in {op} at i64\");"
+            ));
+            self.line(&format!(
+                "t{id}_batch_count *= chelis_metadata_plan_shape({plan})[{batch_axis}];"
+            ));
+        }
         self.line(&format!("chelis_metadata_plan_release({plan});"));
+        // An empty source can still have a nonempty gather result whose
+        // first selected index must trap. Keep kernel division defined until
+        // its index guard observes the empty selected axis.
+        self.line(&format!("chelis_device_metadata t{id}_outer_per_batch = (t{id}_batch_count == 0 || t{id}_before == 0) ? 1 : t{id}_before / t{id}_batch_count;"));
     }
 
     fn emit_gather_launch(
         &mut self,
         id: usize,
         axis: usize,
+        batch_rank: usize,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
@@ -3698,24 +3735,23 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.emit_sparse_geometry(id, axis, values_ty);
-        self.line(&format!(
-            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
-        ));
+        self.emit_sparse_geometry(id, axis, batch_rank, indices, "gather", values_ty);
+        self.line(&format!("chelis_device_metadata t{id}_index_count = t{id}_batch_count == 0 ? 0 : d_t{indices}->count / t{id}_batch_count;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_total = d_t{id}->count;"
         ));
         let values_metadata = self.emit_logical_metadata_args(id, "values", values);
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
         self.line(&format!(
-            "void *args[] = {{ &p_t{values}, &p_t{indices}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {values_metadata}, {indices_metadata} }};"
+            "void *args[] = {{ &p_t{values}, &p_t{indices}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_outer_per_batch, &t{id}_total, {values_metadata}, {indices_metadata} }};"
         ));
-        self.emit_kernel_launch_expr(
+        self.emit_numeric_trap_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
             &format!("t{id}_total / 256 + (t{id}_total % 256 != 0)"),
             "256",
             "args",
+            NumericTrapReport::Static("numeric trap: domain in gather at i64"),
         );
         self.indent -= 1;
         self.line("}");
@@ -3726,6 +3762,7 @@ impl HipEmitter {
         &mut self,
         id: usize,
         axis: usize,
+        batch_rank: usize,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
@@ -3765,24 +3802,23 @@ impl HipEmitter {
         self.line("{");
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
-        self.emit_sparse_geometry(id, axis, target_ty);
-        self.line(&format!(
-            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
-        ));
+        self.emit_sparse_geometry(id, axis, batch_rank, indices, "scatter", target_ty);
+        self.line(&format!("chelis_device_metadata t{id}_index_count = t{id}_batch_count == 0 ? 0 : d_t{indices}->count / t{id}_batch_count;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_total = d_t{updates}->count;"
         ));
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
         let updates_metadata = self.emit_logical_metadata_args(id, "updates", updates);
         self.line(&format!(
-            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_outer_per_batch, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
         ));
-        self.emit_kernel_launch_expr(
+        self.emit_numeric_trap_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
             &format!("t{id}_total / 256 + (t{id}_total % 256 != 0)"),
             "256",
             "args",
+            NumericTrapReport::Static("numeric trap: domain in scatter at i64"),
         );
         self.indent -= 1;
         self.line("}");
@@ -3805,6 +3841,7 @@ impl HipEmitter {
         &mut self,
         id: usize,
         axis: usize,
+        batch_rank: usize,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
@@ -3837,20 +3874,25 @@ impl HipEmitter {
         self.line("{");
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
-        self.emit_sparse_geometry(id, axis, target_ty);
-        self.line(&format!(
-            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
-        ));
+        self.emit_sparse_geometry(id, axis, batch_rank, indices, "scatter_replace", target_ty);
+        self.line(&format!("chelis_device_metadata t{id}_index_count = t{id}_batch_count == 0 ? 0 : d_t{indices}->count / t{id}_batch_count;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_total = d_t{updates}->count;"
         ));
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
         let updates_metadata = self.emit_logical_metadata_args(id, "updates", updates);
         self.line(&format!(
-            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_outer_per_batch, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
-        self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
+        self.emit_numeric_trap_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            "1",
+            "1",
+            "args",
+            NumericTrapReport::Static("numeric trap: domain in scatter_replace at i64"),
+        );
         self.indent -= 1;
         self.line("}");
     }
@@ -3923,7 +3965,14 @@ impl HipEmitter {
             "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, {idx_sh_refs}, {out_sh_refs}, &t{id}_ndim, &t{id}_axis, &t{id}_axis_size, &t{id}_total, {idx_stride_refs}, {update_stride_refs}, {out_stride_refs} }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
-        self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
+        self.emit_numeric_trap_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            "1",
+            "1",
+            "args",
+            NumericTrapReport::Static("numeric trap: domain in scatter_elements at i64"),
+        );
         self.indent -= 1;
         self.line("}");
     }
@@ -6042,7 +6091,10 @@ mod tests {
         );
         let out = dag.add_node(
             decl,
-            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![target, indices, updates],
             mat_f32(3, 2),
             None,

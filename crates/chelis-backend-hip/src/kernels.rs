@@ -2545,6 +2545,7 @@ extern \"C\" __global__ void {kernel_name}(
     chelis_device_metadata axis_size,
     chelis_device_metadata after,
     chelis_device_metadata index_count,
+    chelis_device_metadata outer_per_batch,
     chelis_device_metadata total, {values_shape}, {values_strides}, chelis_device_metadata values_ndim, {idx_shape}, {idx_strides}, chelis_device_metadata idx_ndim) {{
 {build_values_sh}
 {build_values_s}
@@ -2554,11 +2555,12 @@ extern \"C\" __global__ void {kernel_name}(
   if (i >= total) return;
   chelis_device_metadata d = i % after;
   chelis_device_metadata tmp = i / after;
-  chelis_device_metadata index_pos = tmp % index_count;
+  chelis_device_metadata local_index = tmp % index_count;
   chelis_device_metadata b = tmp / index_count;
+  chelis_device_metadata index_pos = (b / outer_per_batch) * index_count + local_index;
   chelis_device_metadata g = (chelis_device_metadata)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
   if (g < 0 || g >= axis_size || b >= before) {{
-    CHELIS_GUARD_INDEX(g, axis_size, 2);
+    chelis_record_numeric_failure((unsigned long long)i);
     return;
   }}
   chelis_device_metadata src = ((b * axis_size + g) * after) + d;
@@ -2590,6 +2592,7 @@ extern \"C\" __global__ void {kernel_name}(
     chelis_device_metadata axis_size,
     chelis_device_metadata after,
     chelis_device_metadata index_count,
+    chelis_device_metadata outer_per_batch,
     chelis_device_metadata total, {idx_shape}, {idx_strides}, chelis_device_metadata idx_ndim, {updates_shape}, {updates_strides}, chelis_device_metadata updates_ndim) {{
 {build_idx_sh}
 {build_idx_s}
@@ -2599,11 +2602,12 @@ extern \"C\" __global__ void {kernel_name}(
   if (i >= total) return;
   chelis_device_metadata d = i % after;
   chelis_device_metadata tmp = i / after;
-  chelis_device_metadata index_pos = tmp % index_count;
+  chelis_device_metadata local_index = tmp % index_count;
   chelis_device_metadata b = tmp / index_count;
+  chelis_device_metadata index_pos = (b / outer_per_batch) * index_count + local_index;
   chelis_device_metadata g = (chelis_device_metadata)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
   if (g < 0 || g >= axis_size || b >= before) {{
-    CHELIS_GUARD_INDEX(g, axis_size, 3);
+    chelis_record_numeric_failure((unsigned long long)i);
     return;
   }}
   chelis_device_metadata dst = ((b * axis_size + g) * after) + d;
@@ -2646,6 +2650,7 @@ extern \"C\" __global__ void {kernel_name}(
     chelis_device_metadata axis_size,
     chelis_device_metadata after,
     chelis_device_metadata index_count,
+    chelis_device_metadata outer_per_batch,
     chelis_device_metadata total, {idx_shape}, {idx_strides}, chelis_device_metadata idx_ndim, {updates_shape}, {updates_strides}, chelis_device_metadata updates_ndim) {{
 {build_idx_sh}
 {build_idx_s}
@@ -2655,11 +2660,12 @@ extern \"C\" __global__ void {kernel_name}(
   for (chelis_device_metadata i = 0; i < total; i++) {{
     chelis_device_metadata d = i % after;
     chelis_device_metadata tmp = i / after;
-    chelis_device_metadata index_pos = tmp % index_count;
+    chelis_device_metadata local_index = tmp % index_count;
     chelis_device_metadata b = tmp / index_count;
+    chelis_device_metadata index_pos = (b / outer_per_batch) * index_count + local_index;
     chelis_device_metadata g = (chelis_device_metadata)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
     if (g < 0 || g >= axis_size || b >= before) {{
-      CHELIS_GUARD_INDEX(g, axis_size, 4);
+      chelis_record_numeric_failure((unsigned long long)i);
       return;
     }}
     chelis_device_metadata dst = ((b * axis_size + g) * after) + d;
@@ -2714,7 +2720,7 @@ extern \"C\" __global__ void {kernel_name}(
     chelis_device_metadata update_offset = chelis_indices_to_flat(coord, updates_s, ndim);
     chelis_device_metadata g = (chelis_device_metadata)indices[index_offset];
     if (g < 0 || g >= axis_size) {{
-      CHELIS_GUARD_INDEX(g, axis_size, 4);
+      chelis_record_numeric_failure((unsigned long long)i);
       return;
     }}
     coord[axis] = g;
