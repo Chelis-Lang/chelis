@@ -541,7 +541,7 @@ Runtime contents:
 
 - data loading utilities
 - basic I/O (tensor serialization, checkpoint save/load)
-- time/date helpers (`Std.Time`)
+- time/date helpers (`Std.Time`; callables fenced by #2779)
 - exact-decimal helpers (`Std.Decimal`)
 
 The neural-network building blocks (such as `School.Nn.Embedding`), optimizers beyond
