@@ -1,33 +1,18 @@
-# Reference Map
+# Further Reference
 
-The reference chapters in this book describe the language as it is. Use them for the syntax,
-types, transforms, backends, and runtime API. Use the numbered specs when you need the
-authoritative semantics behind a construct, and the repository agent docs only when you are
-changing Chelis itself.
+This guide explains how to write and run Chelis programs. The numbered language
+specifications define the rules in full. Use the guide to get started and the
+specifications when you need the exact contract for a construct.
 
-## Language reference in this book
+| Subject | Guide | Specification |
+|---|---|---|
+| Surf syntax and Deep representation | [Surf Syntax Reference](surf-reference.md) | [Surf](https://github.com/Chelis-Lang/chelis/blob/main/spec/02-surf-syntax.md), [Deep](https://github.com/Chelis-Lang/chelis/blob/main/spec/03-deep-syntax.md) |
+| Types, shapes, precision, effects, and ownership | [Type System Reference](type-reference.md) | [Type System](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md) |
+| Built-in operations and the standard library | [Runtime and Standard Library](stdlib.md) | [RISC Primitives](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md) |
+| Differentiation and vectorization | [Transforms](transforms.md) | [Transformations](https://github.com/Chelis-Lang/chelis/blob/main/spec/06-transformations.md) |
+| Generated code and targets | [Backends](backends.md) | [Backends](https://github.com/Chelis-Lang/chelis/blob/main/spec/08-backends.md) |
+| Source naming and packages | [Reef and Packages](reef.md) | [Nomenclature](https://github.com/Chelis-Lang/chelis/blob/main/spec/01-nomenclature.md) |
 
-- [Surf Syntax Reference](surf-reference.md): the constructs you write in Surf.
-- [Type System Reference](type-reference.md): primitives, tensor types, named dimensions,
-  precision, effects in types, and ownership.
-- [Transforms: grad and vmap](transforms.md): the compiler transforms.
-- [Backends](backends.md): the C, HIP, and Metal targets and what `chelis build` emits.
-- [Runtime and Standard Library](stdlib.md): tensor primitives and the `Std` modules.
-
-## Authoritative specs
-
-- `spec/02-surf-syntax.md`: Surf grammar and desugaring.
-- `spec/03-deep-syntax.md`: the canonical Deep node forms.
-- `spec/04-type-system.md`: types, dimensions, precision, effects, linearity.
-- `spec/05-risc-primitives.md`: the primitive operation set.
-- `spec/06-transformations.md`: grad and vmap semantics.
-- `spec/08-backends.md`: backend emission and the runtime ABI.
-- `spec/09-tide.md`: the Tide tooling surface.
-- `spec/01-nomenclature.md`: naming rules the linter enforces.
-
-## Writing Chelis and authoring packages
-
-- `packages/chelis-std/SKILL.md`: a skill for writing Chelis Surf and Deep and for
-  preparing Reef packages. Use it when writing Chelis, not when changing the compiler.
-- `AGENTS.md` and `agent-skills/`: repository governance and implementation workflows for
-  agents modifying Chelis itself.
+The [Examples](examples.md) chapter points to complete programs in the source
+repository. The [CLI Workflow](cli.md), [Testing](testing.md), and
+[Proving Properties](proving.md) chapters explain how to run and check them.

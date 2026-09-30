@@ -1,13 +1,15 @@
 # Summary
 
-- [Chelis Developer Book](README.md)
+- [Chelis Guide](README.md)
 - [Install](install.md)
 - [First Program](first-program.md)
 - [CLI Workflow](cli.md)
 - [Type System Basics](types.md)
-- [Effects And Handlers](effects.md)
+- [Effects and Handlers](effects.md)
 - [Transforms: grad and vmap](transforms.md)
 - [Reef and Packages](reef.md)
+- [Testing](testing.md)
+- [Proving Properties](proving.md)
 - [Opaque Types With Declared Invariants](opaque-invariants.md)
 - [Examples](examples.md)
 
