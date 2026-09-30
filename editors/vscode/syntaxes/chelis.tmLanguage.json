@@ -62,7 +62,11 @@
       "patterns": [
         {
           "name": "storage.type.chelis",
-          "match": "\\b(f32|f64|f16|bf16|i8|i16|i32|i64|bool|string|key|unit)\\b"
+          "match": "\\b(f32|f64|f16|bf16|i8|i16|i32|i64|bool|string|unit)\\b"
+        },
+        {
+          "name": "storage.type.chelis",
+          "match": "\\bkey\\b"
         },
         {
           "name": "support.type.chelis",

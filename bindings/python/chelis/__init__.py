@@ -246,7 +246,10 @@ def compile_and_load(
 
     The compiled library uses the runtime carried by this extension. An editable
     development build checks that the runtime sources in its checkout match the
-    extension and raises ``ChelisError`` when they differ.
+    extension and raises ``ChelisError`` when they differ. When runtime sources
+    differ, the error lists
+    the changed files; rebuild the extension to continue. A set ``CHELIS_RUNTIME_DIR``
+    is rejected; the extension uses its bundled runtime.
     """
 
     if project_root is True:
