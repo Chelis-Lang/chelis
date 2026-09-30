@@ -622,16 +622,21 @@ What is established, on both 0.18.11 and current `main`:
   `def f(s: f32, k: f32) -> f32 = cast(1.0, f32)` (the `wrt` parameter unused),
   and `div(mul(s, k), add(k, cast(1.0, f32)))`. `mul`, `add`, `div`, `sub`, `neg`,
   nesting depth, and `add(k, k)` are all innocent.
-- **Two propositions chelis#2379's text asserts are false.** Its body names
-  local binding structure as the discriminator and offers
-  `div(mul(s, k), add(k, cast(1.0, f32)))` as a control that builds on 0.18.11.
-  Measured here: `{ a = add(s, k)  mul(a, k) }` builds, and that control does
-  **not** build on 0.18.11 or on `main`. The refutation is of the propositions;
-  that #2379 asserts them is a reading of its issue text, recorded here as such
-  so a later reader can re-check the issue rather than this document.
+- **chelis#2379's issue body names local binding structure as the
+  discriminator, and that is already corrected on the issue itself.** Its
+  assignee re-probed on the released 0.18.11 toolchain on 2026-09-25, found the
+  body's own "passing control" rejected, showed a cast-free local-binding
+  function builds, and proposed a `cast(<literal>, f32)` constant as the
+  discriminator instead — explicitly as a hypothesis from black-box probes.
+  Independently measured here, that correction reproduces:
+  `{ a = add(s, k)  mul(a, k) }` builds, and
+  `div(mul(s, k), add(k, cast(1.0, f32)))` does not, on 0.18.11 or on `main`.
+  This document claims no credit for it and adds nothing to it.
 
-What is **not** established, and what this document previously claimed: that
-`cast` is *the* discriminator. It is not. `add(abs(s), k)`, `add(relu(s), k)`
+What is **not** established — and what this corpus adds to that thread, since the
+`cast` hypothesis was the assignee's open proposal rather than a settled answer:
+`cast` is sufficient but is **not** the discriminator either.
+`add(abs(s), k)`, `add(relu(s), k)`
 and `if (s >= 0.0) then add(s, k) else k` produce the same refusal with no
 `cast` present, and `greeks.ch` with every `cast(X, f32)` textually removed
 still evals and still refuses to build. Its `if` inside `normal_cdf` is the sole
