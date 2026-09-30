@@ -109,17 +109,21 @@ requirements/link-flag vocabulary, not the ambient resolver or the printed
 recipe. Supply the pinned compiler store path and native dependencies from
 PD1's Nix closure. For this first reference profile, use `-O2`,
 `-ffp-contract=off`, `-fno-fast-math`, no `-march=native`, and one thread.
-The runner assembles C compile/link argv arrays, removes ambient compiler,
-linker, and OpenMP overrides from both child processes, and records executed
-argv and resolved library identities in `proof_scope`.
+The runner assembles C compile/link argv arrays and removes caller-supplied
+compiler, linker, and OpenMP overrides from both child processes. Nix cc wrappers
+also consume `NIX_CFLAGS_COMPILE` and `NIX_LDFLAGS`: replace inherited values
+with derivation-authored closure flags, preserving the pinned sysroot and library
+paths. Record executed argv, effective profile, and resolved library identities
+in `proof_scope`.
 
 This choice leaves `chelis build`, `parity.rs`, and the e2e crates unchanged.
 Changing the product build's default profile is a separate change, not a
 precondition for [#763]. A constructor-only unit test is insufficient for N1:
-the runner and Nix check must also exercise the spawned compiler under hostile
-`CHELIS_CC`, `CC`, `CFLAGS`, `LDFLAGS`, and OpenMP settings. A compiler wrapper
-may inject its own flags, so the check must prove the executed reference profile,
-not merely inspect the vector before spawning it.
+the runner and Nix check must exercise the spawned compiler under hostile
+`CHELIS_CC`, `CC`, `CFLAGS`, `LDFLAGS`, `NIX_CFLAGS_COMPILE`, `NIX_LDFLAGS`,
+and OpenMP settings. A wrapper can inject fast-math and linker flags after the
+caller assembles argv; inspect the effective compiler/linker invocation, not
+merely the outer vector, to prove the executed reference profile.
 
 Jeff's measured `uniform_like` case explains why the contraction flag belongs
 in recorded argv: identical source produced different bytes under different
@@ -178,8 +182,9 @@ payloads are never compared through `f64`.
   `nix/checks.nix`; bind PD1's file to the evaluated closure, supply the
   exact-safe corpus as a derivation input, and retain the report as an output.
   Assert the queried compiler target against the declared platform and exercise
-  the **executed** compile/link profile under hostile ambient variables. Enroll
-  the check in `scripts/test_nix_flake_contract.py`; own N1, N2, and N4.
+  the **effective** compile/link profile under hostile ambient and Nix-wrapper
+  variables. Enroll the check in `scripts/test_nix_flake_contract.py`; own N1,
+  N2, and N4.
 
 S2 and S3 add integration targets. Enroll any that routine PR CI must execute
 in `.config/ci-test-targets.toml`.
@@ -194,10 +199,12 @@ stdout byte. Negative rows are fixtures owned by the runner's integration tests;
 they are never members of the all-green reference corpus. Corpus expansion to
 non-dyadic floats is follow-up work, not a ship blocker.
 
-Per [#732]'s exit census, P3's signed-zero row must state which route it
-exercises: the f32 direct-literal route preserves the sign and the f64
-cast-element route does not. Pin the route in the fixture rather than the value
-alone.
+Pin P3's signed-zero control to the f32 direct-literal route in the initial
+exact-safe corpus. Do not infer that other routes discard the sign from [#732]'s
+older exit census: a Darwin compile with `-O2`, `-ffp-contract=off`, and
+`-fno-fast-math` preserved `-0.0` through an f64 cast-to-tensor element in
+eval and C. Native Linux needs its own observation before that route joins the
+reference corpus.
 
 ## Acceptance oracle and the CI boundary
 
@@ -214,8 +221,8 @@ Neither a skipped job nor an unexecuted command counts as a pass.
 
 ## Boundaries
 
-- [#1351]'s independent semantic leg is a separate branch. This gate compares
-  two lanes; it does not stand in for an independent oracle.
+- [#1351]'s independent [05-OP-33] structural oracle has merged. This gate
+  compares two lanes; it cannot replace independent semantic evidence.
 - [#1286] may reuse this machinery but owns its own non-vacuous ownership
   oracle. Lane agreement cannot prove ownership balance.
 - [#750] is a required negative canary, not a prerequisite. The gate must report
