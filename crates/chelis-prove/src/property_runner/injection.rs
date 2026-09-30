@@ -212,7 +212,10 @@ pub(super) fn prove_with_injection(
                     match crate::opaque::generate_binder(
                         inv,
                         &consts,
-                        &module_source,
+                        crate::opaque::GenModule {
+                            exprs: &exprs,
+                            source: &module_source,
+                        },
                         &producers,
                         &mut grng,
                         options.invariant_min_rate,
@@ -555,15 +558,17 @@ fn resolve_constants(
                     continue;
                 };
                 let value = match &root.value {
-                    ExecutionValue::Scalar { value } => Some(value.get().as_f64_lossy()),
+                    ExecutionValue::Scalar { value } => {
+                        crate::opaque::finite_exact_constant(value.get())
+                    }
                     ExecutionValue::Tensor { value }
                         if value.shape.is_empty() && value.data.len() == 1 =>
                     {
-                        Some(value.data.element_f64_lossy(0))
+                        crate::opaque::finite_exact_constant(value.data.scalar_at(0))
                     }
                     _ => None,
                 };
-                if let Some(value) = value.filter(|value| value.is_finite()) {
+                if let Some(value) = value {
                     env.insert(name.clone(), value);
                     break;
                 }
@@ -882,6 +887,22 @@ def negative_inf() -> f32 = -1.0f32 / 0.0f32
                 "non-finite constant `{name}` is omitted: {constants:?}"
             );
         }
+    }
+
+    #[test]
+    fn integer_constant_without_exact_float_representation_is_omitted() {
+        let source = "module Stats.IntegerBound
+@opaque
+@invariant(p) p.value >= bound
+type LargeInt =
+  | LargeInt { value: i64 }
+def bound() -> i64 = 9007199254740993i64
+";
+        let constants = resolved_module_constants(source);
+        assert!(
+            !constants.contains_key("bound"),
+            "a rounded integer must not enter the float constant environment: {constants:?}"
+        );
     }
 
     fn parsed_module_property(

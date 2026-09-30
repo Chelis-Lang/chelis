@@ -184,7 +184,7 @@ With no cargo args the default is:
   cargo nextest run -p chelis-prove --features z3
 
 Everything after the flags is forwarded to Cargo. Example:
-  scripts/z3_test.py --features "smt z3" --test cross_engine_oracle
+  scripts/z3_test.py -p chelis-prove --features "smt z3" --test cross_engine_oracle
 """
 
 DEFAULT_ARGS = ["-p", "chelis-prove", "--features", "z3"]

@@ -246,8 +246,8 @@ def make_simplex(a: f32, b: f32, c: f32) -> Simplex =
 ```
 
 The matching source file is
-[`examples/opaque_invariants_simplex.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/opaque_invariants_simplex.ch)
-. It is an executable example: the invariant
+[`examples/opaque_invariants_simplex.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/opaque_invariants_simplex.ch).
+It is an executable example: the invariant
 predicate (including the `sum`-over-a-tensor-field form) is declaration
 metadata consumed only by `chelis prove`; it is never lowered to runtime IR,
 so it does not affect runtime evaluation or compilation. Its top-level `eps`

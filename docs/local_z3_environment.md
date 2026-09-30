@@ -11,8 +11,7 @@ and runtime search paths:
 
 ```sh
 scripts/z3_test.py
-scripts/z3_test.py -p chelis-prove --features z3 --test cross_engine_oracle
-scripts/z3_test.py --features "smt z3" --test cross_engine_oracle
+scripts/z3_test.py -p chelis-prove --features "smt z3" --test cross_engine_oracle
 ```
 
 The helper also works inside a Devenv shell as `chelis-z3-test`. To print the
@@ -42,7 +41,18 @@ checks the Homebrew Z3 prefix on both Apple Silicon and Intel Macs. If Z3 is
 installed elsewhere, set
 `Z3_LIBRARY_PATH_OVERRIDE` to the directory containing the link library. The
 helper adds that directory to the platform's runtime search path while
-preserving existing entries.
+preserving existing entries visible to its Python process.
+
+On macOS, invoke the helper through the active Python interpreter when an
+existing `DYLD_LIBRARY_PATH` must be retained:
+
+```sh
+.venv/bin/python scripts/z3_test.py -p chelis-prove --features "smt z3" --test cross_engine_oracle
+```
+
+The script's `/usr/bin/env` launcher does not pass `DYLD_LIBRARY_PATH` through
+to Python on protected macOS installations. Direct Python invocation makes
+the existing entries available to the helper.
 
 Linux package managers usually provide the link library through their Z3
 development package. On macOS, Homebrew installs both the command-line solver

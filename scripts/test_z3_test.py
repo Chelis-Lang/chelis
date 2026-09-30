@@ -2,6 +2,9 @@
 
 import importlib.util
 import os
+import shlex
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -132,6 +135,35 @@ class BuildEnvTests(unittest.TestCase):
 
     def test_none_needs_no_override(self):
         self.assertEqual(z3_test.build_env(None, "Darwin"), {})
+
+
+class LauncherTests(unittest.TestCase):
+    def test_python_invocation_preserves_existing_runtime_paths(self):
+        system = z3_test.platform.system()
+        if system not in z3_test.LOADER_PATHS:
+            self.skipTest(f"no runtime path contract for {system}")
+        variable, separator = z3_test.LOADER_PATHS[system]
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / z3_test.LINK_LIBRARIES[system][0]).touch()
+            environment = os.environ.copy()
+            environment["Z3_LIBRARY_PATH_OVERRIDE"] = directory
+            environment[variable] = "/pre/existing"
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).with_name("z3_test.py")), "--print-env"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            exports = dict(
+                line.removeprefix("export ").split("=", 1)
+                for line in result.stdout.splitlines()
+            )
+            self.assertEqual(
+                shlex.split(exports[variable]),
+                [f"{directory}{separator}/pre/existing"],
+            )
 
 
 class DefaultArgsTests(unittest.TestCase):

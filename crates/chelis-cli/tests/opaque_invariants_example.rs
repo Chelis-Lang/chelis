@@ -146,6 +146,36 @@ fn both_examples_build_clean() {
 mod prove_oracle {
     use super::*;
 
+    #[test]
+    fn integer_module_constant_arithmetic_generates_property_samples() {
+        let directory = tempdir().expect("temporary source directory");
+        let path = directory.path().join("integer_bound.ch");
+        std::fs::write(
+            &path,
+            "module Stats.IntegerBound
+export (make)
+@opaque
+@invariant(p) p.value >= bound - 2i64
+type LargeInt =
+  | LargeInt { value: i64 }
+def bound() -> i64 = 3i64
+def make(x: i64) -> Option[LargeInt] =
+  if x >= 1i64 then Some(LargeInt { value: x }) else None
+@property generated forall(p: LargeInt):
+  p.value >= 1i64
+",
+        )
+        .expect("write source");
+
+        let (code, records) = prove_json(&path);
+        assert_eq!(code, 0, "integer invariant proves: {records:#?}");
+        assert_eq!(
+            obligation(&records, "invariant:LargeInt:make")["status"],
+            "passed"
+        );
+        assert_eq!(property(&records, "generated")["status"], "passed");
+    }
+
     /// Run `chelis prove --json` on `path`, returning (exit, records).
     fn prove_json(path: &PathBuf) -> (i32, Vec<Value>) {
         let output = Command::cargo_bin("chelis")
