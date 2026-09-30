@@ -501,6 +501,12 @@ helpers, while device kernels have their own supported operation sets.
 strategy; rejection gates are in
 `chelis-compiler-api/src/compiler.rs`.
 
+Build checks type, effect, and linearity over its selected source or linked
+Reef target before removing unreachable definitions for emission. A dormant
+semantic error in selected code fails the build; files outside that target do
+not enter the check. Well-typed unreachable eval-only definitions can still be
+removed before the retained program reaches backend capability checks.
+
 | Target | Emits | Status |
 |---|---|---|
 | `c` (default) | C source, header, carried runtime and flags; OpenMP and BLAS paths where selected | broad host and tensor path with explicit feature gates |
