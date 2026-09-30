@@ -22,6 +22,16 @@ reason = "script-unit executes the positive and negative Pyright source-scope te
 tracking_issue = "chelis#1430"
 
 [[path_rule]]
+prefix = "scripts/z3_test.py"
+disposition = "packages"
+packages = ["chelis-prove"]
+
+[[path_rule]]
+prefix = "scripts/test_z3_test.py"
+disposition = "packages"
+packages = ["chelis-prove"]
+
+[[path_rule]]
 prefix = "py/src/chelis_tools/loc_report.py"
 disposition = "owner"
 workflow = "ci.yml"
