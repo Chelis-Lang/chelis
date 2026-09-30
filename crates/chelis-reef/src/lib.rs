@@ -6977,6 +6977,13 @@ fn reconstruct_graph_from_lockfile(
 
     // Load each dependency.
     for dep in &lock.dependencies {
+        // The runtime's own lock records the bundled runtime for audit, but
+        // its root package must come from the source tree being built. Loading
+        // that self-entry would replace the root with the older embedded copy
+        // during a compiler version bump.
+        if root_name == CHELIS_STD_PACKAGE_NAME && dep.name == CHELIS_STD_PACKAGE_NAME {
+            continue;
+        }
         // Migration: an old lockfile may record `chelis-std` as
         // `LocalRegistry`. Per Phase A § Architectural Decision 8,
         // log a one-line warning; the next call to `build_lockfile`
@@ -11928,6 +11935,21 @@ mod tests {
              bump both together",
             BUNDLED_CHELIS_STD_VERSION, manifest.package.version,
         );
+    }
+
+    #[test]
+    fn chelis_std_root_resolves_from_current_sources() {
+        let package_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std");
+        let (graph, _) = load_package_graph_with_lock_preference(
+            &package_root,
+            LoadOptions { auto_fetch: false },
+            remote_discovery::LockPublication::InMemory,
+        )
+        .expect("resolve chelis-std root");
+        assert!(matches!(
+            graph.packages[CHELIS_STD_PACKAGE_NAME].source,
+            LoadedSourceKind::Root { .. }
+        ));
     }
 
     /// SHA-256 of the on-disk `crates/chelis-std-bundle/dist/` bundle bytes,

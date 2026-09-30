@@ -5,7 +5,5 @@ the program exited successfully with `0.0` in both the evaluator and the
 generated C binary. The new [05-OP-68] guarded-abort identity keeps the trap
 in the graph, so its occurrence survives differentiation, batching and code
 generation, while an untaken guard still computes and differentiates
-unchanged. A `fail`
-in a statically-selected `match` arm is unchanged
-([#2369](https://github.com/Chelis-Lang/chelis/issues/2369)). Part of
+unchanged. Part of
 [#1464](https://github.com/Chelis-Lang/chelis/issues/1464).
