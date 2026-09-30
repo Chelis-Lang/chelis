@@ -821,7 +821,7 @@ type binder is governed by [04-INF-6] and is checked at every admissible
 instantiation.
 
 An operation restriction on an inferred scalar-or-tensor operand constrains
-its numeric dtype; it does not turn a dtype-family bound into a family of
+its numeric dtype; it does not turn a dtype bound into a family of
 tensor types. An authored `p: Float`, for example, still admits only float
 primitive types, never `tensor[..., f32]`. Restrictions transported by
 function values retain that distinction. A failing transported restriction
@@ -944,7 +944,7 @@ differently.
 > same signature, or with a type or shape containing either is a type error
 > reported at the declaration, and the declaration's scheme is its declared
 > signature, never a narrowing of it. A wildcard slot that the body resolves
-> to an authored binder takes that binder's type. A dtype-family bound
+> to an authored binder takes that binder's type. A dtype bound
 > ([04-DTYPE-2]) restricts the admissible instantiations without making the
 > binder concrete.
 >
@@ -1007,7 +1007,7 @@ an argument instead of reading the top-level binding.
 
 An operation's static admission requirements determine which operand types it
 accepts and any required relationship between its operand and result types.
-They include dtype-family restrictions and collection-constructor requirements.
+They include dtype-bound restrictions and collection-constructor requirements.
 They are distinct from value-dependent conditions for which the operation's
 specification requires a runtime check.
 
@@ -1049,7 +1049,7 @@ to a list at its first application within the enclosing declaration under
 [04-INF-1]. The identity function needs no operation-admission restriction
 and may generalize without an annotation.
 
-Insufficient dtype-family admission is a `PrecisionMismatch`. Other
+Insufficient dtype-bound admission is a `PrecisionMismatch`. Other
 insufficient static operation-admission contracts retain the diagnostic kind
 required by the operation's specification, or use `TypeMismatch` when that
 specification assigns no more specific kind.
@@ -1701,7 +1701,7 @@ An optional `[..]` list after the property name is the declaration's complete
 explicit type, dimension, and rank binder list under [04-INF-6] and §5.8.1.
 Those binders are rigid and scope the property quantifier types, preconditions,
 predicate body, and expression-valued options. Duplicate, forbidden, unlisted,
-and dtype-family-bounded names follow the same rules as a function
+and dtype-bounded names follow the same rules as a function
 declaration. That same binder scope applies to tensor precision slots
 throughout those property positions.
 
@@ -2146,7 +2146,7 @@ exactly:
 3. the body expression of a function with a declared return type that is a
    tensor type, when the body is a tensor literal
 4. the first argument of a `cast(literal, p)` expression, where `p` is a
-   precision type literal or a dtype-family-bounded type binder
+   precision type literal or a dtype-bounded type binder
    ([04-DTYPE-2]) — the literal body adopts `p`
 
 Position 4 applies to a **bare scalar numeric literal** as well as to a
@@ -2372,7 +2372,7 @@ rejects name no type variable in any type position: a binder list does
 not rebind one, and the same rejection applies on Surf and Deep.
 An unbounded name may be listed without occurring in the signature; it is a
 vacuous universal quantifier and canonical round-tripping preserves it. A
-dtype-family-bounded binder must occur in the declared type (§5.9), so bounds
+dtype-bounded binder must occur in the declared type (§5.9), so bounds
 cannot be used as inert metadata.
 
 The internal type representation carries this through `TensorPrec`:
@@ -2399,15 +2399,18 @@ is a monomorphization bug, not user error.
 Every polymorphic call supplies a concrete precision before the backend
 boundary. The restrictions in §5.4 and §5.7.2 apply both to direct primitive
 calls and to generic definitions under [04-INF-9]. A polymorphic call's
-instantiation satisfies the checked contract, including its dtype-family
+instantiation satisfies the checked contract, including its dtype
 bounds under [04-DTYPE-2]. An inadmissible instantiation is a
 `PrecisionMismatch` at the call site with a citation to the governing section.
 
-### 5.9 Dtype-Family Bounds
+### 5.9 Dtype Bounds
 
-A declaration's type-binder list may constrain a binder to one **dtype
-family**: a named subset of the active primitive set of §1.1. There are three
-families.
+A declaration's type-binder list may constrain a binder to a **dtype bound**.
+A bound is written in one of two forms: a **family name**, or an **explicit
+dtype set**.
+
+A **dtype family** is a named subset of the active primitive set of §1.1.
+There are three families.
 
 | family | members |
 |---|---|
@@ -2420,20 +2423,44 @@ so a dtype §1.1 admits into a family is admitted by every bound naming that
 family. The reserved spellings of §1.1.1 belong to no family. `bool` and
 `string` belong to no family.
 
-> **[04-DTYPE-2]** A type binder that declares a dtype-family bound SHALL
-> occupy type positions only and SHALL be instantiated only at an active
-> primitive of §1.1 belonging to that family. The bound is part of the
+An **explicit dtype set** is written `{d1, d2, ...}` and admits exactly the
+dtypes it lists, in any order.
+
+```
+def widen[p: {f32, f64}](x: p) -> p = ...
+def approx[p: {f32, f64, bf16}](x: p) -> p = ...
+def scale[p: Float](x: p) -> p = ...
+```
+
+The two forms differ in how membership is decided, and that difference is
+normative. A family denotes whatever §1.1 admits into it, so activating a
+dtype widens every family that admits it without amending this section. An
+explicit set denotes its listed members and nothing else, so activating a
+dtype never widens one. A declaration that must exclude a dtype states the
+set it admits; a declaration that tracks a family names the family. Neither
+form is an abbreviation of the other, and a set that happens to enumerate a
+family's current members is not that family.
+
+> **[04-DTYPE-2]** A type binder that declares a dtype bound SHALL occupy type
+> positions only and SHALL be instantiated only at an active primitive of §1.1
+> the bound admits. The bound is part of the
 > declaration's scheme rather than a property of one call: instantiation
 > installs it on each fresh variable, unification propagates it through every
 > variable the bounded variable is identified with, and generalization
 > re-quantifies it, so the bound survives aliases, wrappers, higher-order
 > values, imports, and recursive calls. Unifying two bounded variables SHALL
-> yield the intersection of their families. An instantiation outside the bound
-> SHALL be a `PrecisionMismatch` naming the required family and the offending
+> yield the intersection of the dtypes their bounds admit: two families
+> intersect as families, a family and an explicit set intersect as the set's
+> members the family admits, and two explicit sets intersect as their common
+> members. An intersection that no longer denotes a family is an explicit set.
+> An instantiation outside the bound
+> SHALL be a `PrecisionMismatch` naming the required bound and the offending
 > type; an empty intersection SHALL be a `PrecisionMismatch` naming both
-> families. A binder that declares no bound
+> bounds. A binder that declares no bound
 > remains an unconstrained type variable admitting every type, not only a
-> dtype. A bound naming anything but a family of this section, a bounded
+> dtype. A bound that is neither a family of this section nor an explicit set,
+> an explicit set that is empty, repeats a dtype, or names anything but an
+> active primitive of §1.1, a bounded
 > binder used in a dimension slot or as a rank spread, and a bounded binder
 > that does not occur in the type it is declared for are each declaration
 > errors.
@@ -2444,7 +2471,7 @@ that declaration, and a bound written in the same declaration's `def` binder
 list is a declaration error. A `def` with no standalone signature carries its
 bounds in its own binder list.
 
-[04-INF-9] requires a generic body's necessary dtype-family restriction to
+[04-INF-9] requires a generic body's necessary dtype restriction to
 follow from this declared contract. Applying a float-only operation does not
 infer a `Float` bound on an otherwise unbounded or more broadly bounded
 authored binder, nor publish such a bound from an unannotated abstraction.
@@ -3191,7 +3218,7 @@ lexical binding, change which callable is selected, or memoize function results.
 > unless it belongs solely to an already-checked key-derivation builtin's
 > closed operation relation ([04-INF-9], [05-OP-69]..[05-OP-72]). This
 > includes an authored type binder, even one
-> that names a tensor element dtype with or without a dtype-family bound, and
+> that names a tensor element dtype with or without a dtype bound, and
 > a variable that inference leaves free in the binding's type, whatever the
 > bound value is, since a tuple or a data value can hold a closure over it.
 > A closed relation variable is selected by that operation's contract, with
