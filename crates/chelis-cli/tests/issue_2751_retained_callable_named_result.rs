@@ -276,15 +276,15 @@ def broad(xs: List[tensor[*, f32]], witness: tensor[*, f32], y: tensor[*, f32]) 
 def invoke(f: List[tensor[seq, f32]] -> tensor[seq, f32] -> tensor[*, f32] -> tensor[seq, f32], xs: List[tensor[*, f32]], witness: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, f32] = f(xs, witness, y)
 ";
     let empty = "skip([to_tensor([9.0f32])], 1i64)";
-    assert_result_value(
-        &format!(
-            "{prefix}out = invoke(broad, {empty}, to_tensor([1.0f32, 2.0f32]), to_tensor([4.0f32, 5.0f32]))\n"
-        ),
-        "2], data=[4.0, 5.0]",
+    let matching = format!(
+        "{prefix}out = invoke(broad, {empty}, to_tensor([1.0f32, 2.0f32]), to_tensor([4.0f32, 5.0f32]))\n"
     );
+    assert_check_accepts(&matching);
+    assert_result_value(&matching, "2], data=[4.0, 5.0]");
     let mismatch = format!(
         "{prefix}out = invoke(broad, {empty}, to_tensor([1.0f32, 2.0f32]), to_tensor([4.0f32, 5.0f32, 6.0f32]))\n"
     );
+    assert_check_accepts(&mismatch);
     assert_result_trap(&mismatch, 2, 3);
     for native in [false, true] {
         let (_, output) = result_claims::run(&mismatch, native);
