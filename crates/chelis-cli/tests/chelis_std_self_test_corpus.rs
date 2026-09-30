@@ -1,13 +1,15 @@
 //! chelis-std self-test corpus integration test.
 //!
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
-//! exercise chelis-std's own available modules (Std.Tensor, Std.Io, Std.Time,
-//! Std.Sort, Std.Scan, Std.Process, Std.Test). Std.Decimal is fenced under
-//! #2778; School provides
+//! exercise chelis-std's own available modules (Std.Tensor, Std.Io,
+//! Std.Sort, Std.Scan, Std.Process, Std.Test). Std.Time and Std.Decimal
+//! are fenced under #2779 and #2778; School provides
 //! the neural-network, loss, optimizer, and scheduling libraries. The corpus
 //! runs via `chelis test packages/chelis-std/tests/`; the default
 //! `cargo test --workspace` gate does not exercise it, so regressions here
 //! otherwise surface only when somebody invokes the CLI manually.
+//! The Std.Time and Std.Decimal success tests were removed with their fences;
+//! `std_package_acceptance` checks the errors.
 //!
 //! This test wires the corpus into the default workspace gate. It stages
 //! chelis-std into a tempdir, points CHELIS_REEF_HOME at a tempdir reef home
@@ -24,8 +26,9 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 /// Floor on the retained chelis-std self-test corpus, set below the measured
-/// current count while still catching an accidental loss of core tests.
-const MIN_PASSED: u32 = 120;
+/// 117 passing tests after the Time and Decimal suites moved to explicit
+/// rejection checks in std_package_acceptance.
+const MIN_PASSED: u32 = 110;
 
 fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -613,6 +613,9 @@ with KV caching, optimizer variants, and learning rate scheduling.
 ### Std.Time
 
 Pure Chelis standard library module for dates and durations.
+Its public callables currently raise an explicit #2779 error until the
+exact [05-OP-35] calendar and duration behavior is implemented. The surface
+below is the intended contract, not a current acceptance claim.
 
 - `Date` type: year, month, day. Constructed via
   `date(cast(2024, i64), cast(1, i64), cast(15, i64))`.
@@ -775,8 +778,8 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 
 `cargo test -p chelis-cli --test std_package_acceptance -- --ignored --nocapture`
 
-This is the owning executable oracle for the 3i-shipped `Std.Time`,
-`Std.Decimal`, `Std.Schedule`, `Std.Optim`, and `Std.Nn.Generate` surface (the ML
+This is the owning executable oracle for the `Std.Decimal` package surface and
+the #2779 `Std.Time` rejection (the ML
 modules — `Schedule`, `Optim`, `Nn.Generate` — since moved to `School.*` in chelis-std
 0.4.0). A later
 phase-completion claim still requires a fresh-context red team and any documented manual
