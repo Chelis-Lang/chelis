@@ -89,7 +89,7 @@ type Refusal = (&'static str, fn(&mut ReleaseRuntime), &'static str);
 
 #[test]
 fn install_refuses_runtime_files_its_export_does_not_report() {
-    let cases: [Refusal; 18] = [
+    let cases: [Refusal; 20] = [
         (
             "swapped archive",
             |runtime| runtime.shipped_archive = b"another runtime".to_vec(),
@@ -175,6 +175,23 @@ fn install_refuses_runtime_files_its_export_does_not_report() {
             "lists no headers",
         ),
         (
+            "missing receipt header while file remains present",
+            |runtime| {
+                runtime.receipt["headers"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("chelis_math.h");
+            },
+            "does not list exactly the six public headers",
+        ),
+        (
+            "additional receipt header",
+            |runtime| {
+                runtime.receipt["headers"]["chelis_unknown.h"] = sha256(b"/* extra */\n").into();
+            },
+            "does not list exactly the six public headers",
+        ),
+        (
             "header outside include",
             |runtime| {
                 runtime.receipt["headers"] =
@@ -204,6 +221,28 @@ fn install_refuses_runtime_files_its_export_does_not_report() {
         assert!(
             stderr(&out).contains(expected),
             "{case}: stderr: {}",
+            stderr(&out)
+        );
+        assert_store_untouched(home.path(), CHECKED);
+    }
+}
+
+#[test]
+fn install_refuses_each_crossed_public_header_before_store_placement() {
+    // Index zero is covered by the swapped-header case above.
+    for index in 1..6 {
+        let home = tempfile::tempdir().unwrap();
+        let release = tempfile::tempdir().unwrap();
+        let mut runtime = ReleaseRuntime::matching(CHECKED);
+        let name = runtime.shipped_headers[index].0.clone();
+        runtime.shipped_headers[index].1 = b"/* header from another compiler */\n".to_vec();
+        build_release_tarball(release.path(), CHECKED, &build(CHECKED), &runtime);
+
+        let out = install(home.path(), release.path(), CHECKED);
+        assert!(
+            !out.status.success() && stderr(&out).contains(&format!("ships include/{name} with SHA-256")),
+            "{name}: stdout: {}; stderr: {}",
+            stdout(&out),
             stderr(&out)
         );
         assert_store_untouched(home.path(), CHECKED);

@@ -7,8 +7,8 @@
 //! runs the unpacked `chelis runtime export` into a scratch directory and
 //! requires the shipped files to be what that export reports. Its staging
 //! receipt must describe a sealed build of the version being installed, and
-//! the shipped archive and every header the receipt lists must have the
-//! SHA-256 it records (chelis#1354).
+//! the shipped archive and exactly the six public headers must have the
+//! SHA-256 digests that export records (chelis#1354).
 //!
 //! Releases up to [`LAST_RELEASE_WITHOUT_EXPORT`] predate
 //! `chelis runtime export`, so nothing can be checked; they install as
@@ -43,6 +43,14 @@ const CHELISUP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RECEIPT: &str = "chelis_runtime.receipt.json";
 const RECEIPT_SCHEMA: &str = "chelis-runtime-staging/1";
 const ARCHIVE: &str = "libchelis_runtime.a";
+const PUBLIC_HEADERS: [&str; 6] = [
+    "chelis_runtime.h",
+    "chelis_runtime_views.h",
+    "chelis_runtime_dtype.h",
+    "chelis_blas.h",
+    "chelis_simd.h",
+    "chelis_math.h",
+];
 
 /// What the runtime check established about a newly unpacked release.
 #[derive(Debug, PartialEq, Eq)]
@@ -162,13 +170,22 @@ fn verify(
         .and_then(Value::as_object)
         .filter(|headers| !headers.is_empty())
         .ok_or_else(|| format!("the chelis {version} release's runtime export lists no headers"))?;
-    for (name, digest) in headers {
+    for name in headers.keys() {
         if !is_safe_path_component(name) {
             return Err(format!(
                 "the chelis {version} release's runtime export lists the header {name:?}, \
                  which is not a file name"
             ));
         }
+    }
+    if headers.len() != PUBLIC_HEADERS.len()
+        || PUBLIC_HEADERS.iter().any(|name| !headers.contains_key(*name))
+    {
+        return Err(format!(
+            "the chelis {version} release's runtime export does not list exactly the six public headers"
+        ));
+    }
+    for (name, digest) in headers {
         let digest = digest
             .as_str()
             .filter(|digest| is_sha256_hex(digest))

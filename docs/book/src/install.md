@@ -54,12 +54,21 @@ chelis --version
 The GitHub tag starts with `v`; `chelisup install` accepts only bare `X.Y.Z`.
 The first install also records that version as the default and installs the
 `chelis` shim, so `chelis --version` works from anywhere. Before placing a
-toolchain, chelisup checks that the runtime files it ships under `lib/` and
-`include/` are the ones its `chelis runtime export` reports, and refuses the
-release otherwise. Older releases that predate that export install with a
-warning that their runtime files are unchecked. If chelisup refuses a newer
-release because it cannot read its format, re-run the bootstrap to update
-chelisup and try again.
+toolchain, chelisup checks that the sealed compiler's exported archive and all
+six public runtime headers match the files shipped under `lib/` and `include/`;
+a missing or crossed file refuses installation before store placement. Older
+releases that predate `chelis runtime export` install with a warning that their
+runtime files are unchecked. If chelisup refuses a newer release because it
+cannot read its format, re-run the bootstrap to update chelisup and try again.
+
+Rebuild the compiler and its carried runtime together, then publish and install
+their **matching** archive and headers as one versioned toolchain. Do not
+replace just `lib/libchelis_runtime.a` or an `include/` header in an installed
+version. If installing a new release fails validation, the previously installed
+toolchain remains available. To roll back, select a previously installed
+complete version with `chelisup default <previous>` outside a project; an
+explicit `+<version>`, `CHELIS_TOOLCHAIN`, `chelis-toolchain` file or `reef.toml`
+compiler pin takes precedence and must be switched separately.
 
 ### 3. Provision a project in one command
 
@@ -164,6 +173,18 @@ nix flake check --print-build-logs
 ```
 
 Nix is a source-build channel. It does not replace the release store or the version router.
+
+The `chelis` and `chelis-runtime` derivations verify the copied archive and all
+six public headers against the sealed compiler's export. `nix flake check`
+rechecks both outputs against the combined package's own compiler; it does not
+substitute for an executed check on each hosted platform.
+
+Rebuild both Nix outputs from the same compiler revision when changing the
+carried runtime; do not copy a `chelis-runtime` archive/header set from a
+different compiler into `chelis`. For a release-store rollback, reinstall or
+select a previously verified complete toolchain, not an archive from an older
+derivation. A failed Nix-wrapper installation leaves its previous stable GC
+root and selected installed toolchain untouched.
 
 Before an install, the Nix wrapper creates `$CHELIS_HOME/nix-gcroots/chelisup.next`. After success, it promotes `$CHELIS_HOME/nix-gcroots/chelisup`.
 

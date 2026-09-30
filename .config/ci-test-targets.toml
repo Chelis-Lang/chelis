@@ -2489,6 +2489,15 @@ reason = "script-unit requires every release staging block to ship the exported 
 tracking_issue = "chelis#1354"
 
 [[path_rule]]
+prefix = "scripts/verify_runtime_package.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the installed-canary script-unit tests cross each copied public header and the archive against a compiler export; release and Nix derivations invoke the same verifier"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
 prefix = "scripts/installed_artifact_canary.py"
 disposition = "owner"
 workflow = "release.yml"

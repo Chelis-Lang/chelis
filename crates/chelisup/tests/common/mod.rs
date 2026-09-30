@@ -106,6 +106,10 @@ impl ReleaseRuntime {
         let archive = b"carried runtime archive".to_vec();
         let headers = vec![
             ("chelis_runtime.h".to_owned(), b"/* runtime */\n".to_vec()),
+            ("chelis_runtime_views.h".to_owned(), b"/* views */\n".to_vec()),
+            ("chelis_runtime_dtype.h".to_owned(), b"/* dtype */\n".to_vec()),
+            ("chelis_blas.h".to_owned(), b"/* blas */\n".to_vec()),
+            ("chelis_simd.h".to_owned(), b"/* simd */\n".to_vec()),
             ("chelis_math.h".to_owned(), b"/* math */\n".to_vec()),
         ];
         let digests: serde_json::Map<String, serde_json::Value> = headers

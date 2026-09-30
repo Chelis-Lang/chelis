@@ -184,6 +184,19 @@ let
         touch "$out"
       '';
 
+  runtimeCorrespondence =
+    pkgs.runCommand "chelis-runtime-export-correspondence"
+      {
+        nativeBuildInputs = [ pkgs.python311 ];
+      }
+      ''
+        export_dir="$TMPDIR/compiler-export"
+        ${packages.chelis}/bin/chelis runtime export "$export_dir"
+        python3 ${root}/scripts/verify_runtime_package.py "$export_dir" ${packages.chelis}
+        python3 ${root}/scripts/verify_runtime_package.py "$export_dir" ${packages.chelis-runtime}
+        touch "$out"
+      '';
+
   chelisupBehavior = pkgs.runCommand "chelisup-behavior" { } ''
     ${packages.chelisup}/bin/chelisup --help >/dev/null
     touch "$out"
@@ -238,6 +251,7 @@ let
     lockParity
     nixFormat
     runtimeConsumer
+    runtimeCorrespondence
     runtimeShape
   ];
   native = pkgs.runCommand "chelis-native-contracts" { } ''
@@ -262,6 +276,7 @@ in
     native
     nixFormat
     runtimeConsumer
+    runtimeCorrespondence
     runtimeShape
     ;
   chelis = packages.chelis;

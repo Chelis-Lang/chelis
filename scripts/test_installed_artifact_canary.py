@@ -15,6 +15,7 @@ import unittest
 import yaml
 
 from scripts import installed_artifact_canary as canary
+from scripts.verify_runtime_package import verify_runtime_package
 
 
 class ArtifactTests(unittest.TestCase):
@@ -76,6 +77,59 @@ class ArtifactTests(unittest.TestCase):
                     canary.verify_installed(installed, inventory)
                 path.write_bytes(name.encode())
 
+    def test_package_bytes_match_the_compilers_export_for_all_six_headers(self) -> None:
+        exported = self.root / "export"
+        packaged = self.root / "package"
+        headers = [Path(name).name for name in canary.HEADERS]
+        for root in (exported, packaged):
+            (root / "include").mkdir(parents=True)
+            (root / "lib").mkdir()
+        archive = b"!<arch>\n"
+        (exported / "libchelis_runtime.a").write_bytes(archive)
+        (packaged / "lib/libchelis_runtime.a").write_bytes(archive)
+        header_digests = {}
+        for name in headers:
+            data = f"/* {name} exported */\n".encode()
+            (exported / name).write_bytes(data)
+            (packaged / "include" / name).write_bytes(data)
+            header_digests[name] = canary.digest(exported / name)
+        receipt = {
+            "schema": "chelis-runtime-staging/1",
+            "archive": "libchelis_runtime.a",
+            "archive_sha256": canary.digest(exported / "libchelis_runtime.a"),
+            "headers": header_digests,
+            "mode": "sealed",
+            "chelis_version": "0.19.0",
+        }
+        (exported / "chelis_runtime.receipt.json").write_text(json.dumps(receipt))
+        verify_runtime_package(exported, packaged)
+
+        for name in headers:
+            path = packaged / "include" / name
+            original = path.read_bytes()
+            with self.subTest(crossed_header=name):
+                path.write_bytes(b"/* valid but from a different compiler */\n")
+                with self.assertRaisesRegex(ValueError, name):
+                    verify_runtime_package(exported, packaged)
+            path.write_bytes(original)
+        (packaged / "lib/libchelis_runtime.a").write_bytes(b"!<arch>\nwrong")
+        with self.assertRaisesRegex(ValueError, "libchelis_runtime.a"):
+            verify_runtime_package(exported, packaged)
+        (packaged / "lib/libchelis_runtime.a").write_bytes(archive)
+        missing = {**receipt, "headers": {key: value for key, value in header_digests.items()
+                                         if key != "chelis_math.h"}}
+        (exported / "chelis_runtime.receipt.json").write_text(json.dumps(missing))
+        with self.assertRaisesRegex(ValueError, "six public headers"):
+            verify_runtime_package(exported, packaged)
+        (exported / "chelis_runtime.receipt.json").write_text(json.dumps(receipt))
+        (exported / "chelis_math.h").write_bytes(b"/* export altered after receipt */\n")
+        with self.assertRaisesRegex(ValueError, "export chelis_math.h"):
+            verify_runtime_package(exported, packaged)
+        (exported / "chelis_math.h").write_bytes(b"/* chelis_math.h exported */\n")
+        (exported / "chelis_runtime.receipt.json").write_text(json.dumps({**receipt, "mode": "development"}))
+        with self.assertRaisesRegex(ValueError, "not sealed"):
+            verify_runtime_package(exported, packaged)
+
     def test_missing_runtime_is_not_an_installable_inventory(self) -> None:
         inventory = canary.archive_inventory(self.archive([("stage/bin/chelis", b"x")]))
         with self.assertRaises(ValueError):
@@ -89,9 +143,10 @@ class ArtifactTests(unittest.TestCase):
         for name in ("lib/libchelis_runtime.a", *canary.HEADERS):
             (output / Path(name).name).write_bytes(name.encode())
         receipt = output / "chelis_runtime.receipt.json"
+        header_digests = {Path(header).name: inventory[header] for header in canary.HEADERS}
         sealed = {"schema": "chelis-runtime-staging/1", "archive": "libchelis_runtime.a",
                   "archive_sha256": inventory["lib/libchelis_runtime.a"], "mode": "sealed",
-                  "headers": {}, "chelis_version": "0.18.6"}
+                  "headers": header_digests, "chelis_version": "0.18.6"}
         receipt.write_text(json.dumps(sealed))
         canary.require_staged_runtime(output, inventory)
         for name, change in (
@@ -102,6 +157,16 @@ class ArtifactTests(unittest.TestCase):
             with self.subTest(case=name):
                 receipt.write_text(json.dumps({**sealed, **change}))
                 with self.assertRaisesRegex(ValueError, "sealed runtime"):
+                    canary.require_staged_runtime(output, inventory)
+        for name, changed_headers in (
+            ("missing receipt header", {key: digest for key, digest in header_digests.items()
+                                        if key != "chelis_math.h"}),
+            ("extra receipt header", {**header_digests, "chelis_surprise.h": "0" * 64}),
+            ("wrong receipt header digest", {**header_digests, "chelis_math.h": "0" * 64}),
+        ):
+            with self.subTest(case=name):
+                receipt.write_text(json.dumps({**sealed, "headers": changed_headers}))
+                with self.assertRaisesRegex(ValueError, "staging receipt headers"):
                     canary.require_staged_runtime(output, inventory)
         for name, text in (("malformed", "{"), ("not an object", "[]")):
             with self.subTest(case=name):
