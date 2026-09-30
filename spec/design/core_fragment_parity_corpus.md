@@ -592,8 +592,10 @@ harness debt and migration debt respectively, not language defects:
 
   This figure was 24 and was wrong. Twelve of those rows own no root under
   `[05-OBS-7]` — ten are `@property` declarations beside an `import` and nothing
-  else, two declare only parameterised `def`s — so resolving the import would
-  not admit them as cases at all. They now carry their operative reason
+  else; of the other two, one declares only parameterised `def`s and the other
+  adds a **nullary** `def` that carries the `Test` effect and returns `unit`,
+  which `[05-OBS-7]` excludes from owed roots. So resolving the import would
+  not admit any of them as cases. They now carry their operative reason
   (`prove-only`, `library-only`). Their `UnboundVariable` was real and was the
   first thing to go wrong, which is exactly why it was recorded: §6.3's
   counterfactual test is what distinguishes the proximate symptom from the
@@ -680,7 +682,7 @@ Named, so a reader does not mistake this document for more than it is:
   does not generate them. Until those rows land, #2782's `demo-path`
   justification rests on measurement recorded in that issue rather than on a row
   in this manifest (§9).
-- **Package-aware materialization is unbuilt**, which is what makes the 24
+- **Package-aware materialization is unbuilt**, which is what makes the 12
   `unmeasurable-by-probe` rows unmeasurable (§9). Admitting them needs the
   receipt to materialize a case together with the package it imports from.
 - **No structured observation channel for the compiled lane.** §2.2's argument
