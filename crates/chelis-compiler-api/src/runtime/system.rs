@@ -209,10 +209,19 @@ impl EvalSystemBoundary {
         }
     }
 
+    // The shipped adapter is concrete: besides avoiding dynamic dispatch on
+    // every host operation, this keeps compiled String/Vec results attributable
+    // to their actual implementation in the wire publication census.
+    #[cfg(not(test))]
+    fn adapter_mut(&mut self) -> &mut super::system_adapter::DefaultEvalSystem {
+        let Adapter::Default(adapter) = &mut self.adapter;
+        adapter
+    }
+
+    #[cfg(test)]
     fn adapter_mut(&mut self) -> &mut dyn EvalSystem {
         match &mut self.adapter {
             Adapter::Default(adapter) => adapter,
-            #[cfg(test)]
             Adapter::Injected(adapter) => adapter.as_mut(),
         }
     }
