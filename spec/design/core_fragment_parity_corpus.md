@@ -66,9 +66,11 @@ harness accumulates its own defects rather than the compiler's.
 This is measured, not predicted. The existing Voyage probe
 (`Chelis-Lang/Voyage`, `probes/qcb-compiled/driver.py`, `_qx_to_eval_json`) takes
 exactly that route, and its hand-written converter fails on lists of tuples and
-on tensor printing for roughly eight programs — failures attributable to the
+on tensor printing for about eight programs — failures attributable to the
 converter, not to either lane. Comparing stdout to stdout removes the converter
-from the system entirely.
+from the system entirely, and a re-measurement over 44 of those captures,
+including all four the converter had failed on, found the two lanes' stdout
+byte-identical in 44 of 44.
 
 The two channels are also not equivalent in fidelity, which is the deeper reason:
 
@@ -200,9 +202,11 @@ the check firing.
 The mode is not bookkeeping. An unsealed development build re-checks its source
 checkout for runtime-bundle freshness on every `build` invocation, so a
 concurrent writer to that checkout can change the binary's behaviour mid-run
-while its hash stays constant. voyage-84 lost 68 programs of a fixed-arm run to
-exactly that. A hash alone does not pin an unsealed build, so the receipt fails
-on a development-mode compiler rather than merely noting it.
+while its hash stays constant. This is observed, not hypothetical: a pinned
+before/after comparison over the Voyage corpus lost 68 programs mid-run to a
+validation gate mutating the checkout, with both binaries' hashes unchanged
+throughout. A hash alone does not pin an unsealed build, so the receipt fails on
+a development-mode compiler rather than merely noting it.
 
 The resolution path is recorded because the failure it guards against is silent:
 the bare `chelis` shim resolves through the pin order in `AGENTS.md`
@@ -262,10 +266,20 @@ counted as parity evidence — the exact vacuous pass this receipt exists to
 prevent. Under §6.2 such a file is either a required trap case with a declared
 expected trap, or an excluded row with a reason. It cannot be neither.
 
-Rule 5 makes voyage-84's positive control executable. That control — a census run
-reproducing a pinned revision's exact build/accept/reject counts — was manual,
-with no golden assert. Here the expected counts live in the manifest and a
-mismatch fails the receipt.
+Rule 5 is narrower than it looks, and it is worth saying which check it is not.
+It compares the manifest's declared `expected_case_count` against the manifest's
+own case rows, so it catches a hand-edited or regenerated row drifting from the
+declared count. It does **not** compare either number against a measured
+outcome, so it is not the count-level golden assert that the existing manual
+Voyage census — which reproduces a pinned revision's exact build/accept/reject
+totals — would become if it were wired.
+
+What pins expected outcomes here is stronger than a count and weaker in a
+different way: `expected` and `known_divergence` are recorded **per case**
+(§6.2), so a case that changes verdict is named rather than absorbed into a
+total that still adds up. A count-level assert remains owed for the derived
+Voyage third, where cases are generated rather than committed and a changed
+generator can alter the population itself.
 
 ### 5.2 Observation non-vacuity, and the 32-element bound
 
