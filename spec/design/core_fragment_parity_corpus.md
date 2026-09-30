@@ -689,12 +689,25 @@ Named, so a reader does not mistake this document for more than it is:
      `inputs/` directory that has to be staged there for the program to run.
      The receipt's isolation model — materialize into a private temporary
      directory and run there — cannot express that: `materialize_case` copies
-     `inputs/` beside the program, where the program will not look. Admitting
-     Voyage therefore requires the receipt to write outside its own workdir, to
-     a fixed global location shared with any concurrent run, or requires the
-     capture format to change so inputs are addressed relatively. That is a
-     contract decision about isolation, not an implementation detail, and it is
-     unmade.
+     `inputs/` beside the program, where the program will not look.
+
+     **Decided: Voyage captures address their inputs relatively, and the
+     receipt's isolation model does not change.** The alternative — staging each
+     case's inputs at its recorded absolute path — would require the receipt to
+     write outside its own working directory into a fixed global location shared
+     with every concurrent run, which is the one thing §5's per-case isolation
+     exists to avoid. Relative addressing needs no change here at all: the runner
+     already sets each lane's working directory to the isolated per-case
+     directory, and `materialize_case` already stages `inputs/` there. The work
+     is on the capture side, in `probes/qcb-compiled/driver.py`, not in this
+     receipt.
+
+     That decision rests on behaviour the language does not yet specify.
+     `[05-OP-60]` defines the path-taking primitives but states no resolution
+     rule; measured on both lanes, a relative path resolves against the process
+     working directory, and the two lanes agree on the value and on the failure.
+     chelis#2814 asks for the rule to be authored. Until it is, the Voyage third
+     rests on an agreement that nothing pins.
 
   Until those rows land, #2782's `demo-path` justification rests on measurement
   recorded in that issue rather than on a row in this manifest (§9).
