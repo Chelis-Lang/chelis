@@ -525,7 +525,7 @@ rechecked.
 ## Import Syntax
 
 ```chelis-surf-fragment
-import Std.Init.Kaiming(..)
+import Std.Time(..)
 import Nautilus.LinAlg(matmul_wrap, transpose)
 ```
 

@@ -121,7 +121,7 @@ PINNED_REAL_TOML_FILES: list[Path] = [
     REPO_ROOT / "packages/chelis-std/reef.toml",
     REPO_ROOT / "crates/chelis-cli/tests/fixtures/pseudo_nautilus/reef.toml",
     REPO_ROOT / "crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.toml",
-    REPO_ROOT / "examples/illustrative/phase3g_text_pipeline/reef.toml",
+    REPO_ROOT / "examples/illustrative/io_pipeline/reef.toml",
     REPO_ROOT / "examples/nautilus_quantile_contract/reef.toml",
     REPO_ROOT / "examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml",
 ]

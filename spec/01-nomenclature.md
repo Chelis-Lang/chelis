@@ -313,7 +313,7 @@ five ecosystem repos.
 **Rule:** PascalCase. Forced by Surf's case-split (§1.1).
 
 Examples: `Frame`, `Column`, `GroupedFrame`, `Hamt`, `KeyValue`,
-`YieldCurve`, `OrderBook`, `Decimal`, `Tokenizer`, `Json`, `JsonInt`,
+`YieldCurve`, `OrderBook`, `Decimal`, `Vocabulary`, `Json`, `JsonInt`,
 `JsonObject`, `AggSum`, `RoundHalfEven`, `Activation`, `Relu`,
 `Sigmoid`.
 

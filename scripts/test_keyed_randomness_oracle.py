@@ -251,6 +251,26 @@ class ReceiptTests(unittest.TestCase):
         ):
             self.assertIn(f"chelis-types::key_linearity::{name}", identities)
 
+    def test_catalog_keeps_core_random_primitive_cli_coverage(self):
+        identities = oracle.expected_tests(oracle.SUITES)
+        self.assertEqual(
+            {
+                identity
+                for identity in identities
+                if identity.startswith("chelis-cli::key_random_primitives_cli::")
+            },
+            {
+                "chelis-cli::key_random_primitives_cli::uniform_like_draws_from_its_key_in_eval_and_c",
+                "chelis-cli::key_random_primitives_cli::uniform_like_rejects_invalid_bounds_before_later_work_in_eval_and_c",
+                "chelis-cli::key_random_primitives_cli::uniform_like_rejects_invalid_bounds_before_later_work_under_grad_in_eval_and_c",
+                "chelis-cli::key_random_primitives_cli::uniform_like_valid_bounds_run_in_eval_c_and_grad",
+            },
+        )
+        self.assertNotIn(
+            "chelis-cli::stdlib_removed_modules_cli::removed_shell_modules_cannot_be_imported_from_chelis_std",
+            identities,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,9 +33,9 @@ use tempfile::{TempDir, tempdir};
 
 fn stdlib_file() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/chelis-std/src/init/kaiming.ch")
+        .join("../../packages/chelis-std/src/decimal.ch")
         .canonicalize()
-        .expect("chelis-std init/kaiming.ch must exist")
+        .expect("chelis-std decimal.ch must exist")
 }
 
 fn fresh_cache_home() -> (TempDir, PathBuf) {

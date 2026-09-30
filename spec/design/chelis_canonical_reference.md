@@ -210,7 +210,7 @@ LaTeX document ingestion, Octant Phase 4).
 
 | Package | Kind | Depends On | Status | Contents |
 |---|---|---|---|---|
-| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active | `Std.Init` (Kaiming, Xavier, trunc_normal), `Std.Io` (files, mmap, safetensors, CSV, JSON), `Std.Tensor` (including `Std.Tensor.Mask`), `Std.Index`, `Std.Scan`, `Std.Sort`, `Std.Process`, `Std.Tokenizer`, `Std.Time`, `Std.Decimal`, `Std.Test` (assertion functions for Chelis-native tests). The ML modules moved to the `school` library as of chelis-std 0.4.0: `Std.Nn.*` → `School.Nn.*`, `Std.Loss.*` → `School.Loss.*`, `Std.Optim` → `School.Optim`, `Std.Schedule` → `School.Schedule`. |
+| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active | `Std.Io` (files, mmap, safetensors, CSV, JSON), `Std.Tensor` (including `Std.Tensor.Mask`), `Std.Index`, `Std.Scan`, `Std.Sort`, `Std.Process`, `Std.Time`, `Std.Decimal`, `Std.Test` (assertion functions for Chelis-native tests). |
 | `nautilus` | Shell | `chelis-std` | Active (`v0.5.0` released) | Numerical methods — stats, distributions, linear algebra (nalgebra-backed with hand-written AD adjoints), convex optimization, ODE/SDE solvers, roots, integration, interpolation, special functions (`erf`, `log_gamma`, …), distances. The scipy competitor. `Nautilus.Signal` stubbed until complex numbers (Phase 5f). |
 | `coral` | Shell | `chelis-std` | Phase 3k | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, rolling windows, NaN handling built into `Coral.Frame`, Parquet I/O via `parquet2`, DataFrame-aware CSV/JSON. The pandas competitor. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
 | `shoals` | Shell | `chelis-std` + `nautilus` + `coral` | Phase 3l | Options pricing, risk measures, yield curves, stochastic processes, order books |
@@ -537,11 +537,9 @@ Ships with Chelis but is implemented in Chelis itself.
 The compiler does not know these names.
 They ship as Shells (Chelis packages) in the `Std` namespace.
 
-Expected contents:
+Runtime contents:
 
-- common initializers (Xavier, Kaiming, normal, uniform)
 - data loading utilities
-- tokenizer utilities
 - basic I/O (tensor serialization, checkpoint save/load)
 - time/date helpers (`Std.Time`)
 - exact-decimal helpers (`Std.Decimal`)

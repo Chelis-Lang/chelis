@@ -10005,8 +10005,8 @@ type Jsonish =
   | JsonArray(List[Jsonish])
   | JsonObject(Dict[string, Jsonish])
 
-type Tokenizer =
-  | BpeTokenizer(Dict[string, i64], Dict[string, i64], Dict[i64, string], i64)
+type IndexBundle =
+  | IndexBundle(Dict[string, i64], Dict[string, i64], Dict[i64, string], i64)
 
 def parse_line(line: string) -> Option[List[string]] =
   Some([])
@@ -10021,8 +10021,8 @@ def json_string(value: Option[Jsonish]) -> Option[string] =
     | None => None
   }
 
-def load_tokenizer(path: string) -> Option[Tokenizer] =
-  Some(BpeTokenizer(dict_of([]), dict_of([]), dict_of([]), cast(0, i64)))
+def load_index_bundle(path: string) -> Option[IndexBundle] =
+  Some(IndexBundle(dict_of([]), dict_of([]), dict_of([]), cast(0, i64)))
 "#,
         )
         .expect("compile");
@@ -10071,10 +10071,10 @@ def load_tokenizer(path: string) -> Option[Tokenizer] =
             "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
         );
         assert_eq!(
-            find_ret("load_tokenizer"),
+            find_ret("load_index_bundle"),
             Some(chelis_ir::host_type_state::ConcreteHostType::Option(
                 Box::new(chelis_ir::host_type_state::ConcreteHostType::Adt(
-                    "Tokenizer".to_string(),
+                    "IndexBundle".to_string(),
                     Vec::new()
                 ))
             )),

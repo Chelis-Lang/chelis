@@ -227,7 +227,7 @@ fn stub_sig_conv_shapes_accept_all_dtypes_at_sig_level() {
     }
 }
 
-/// Std.Init.Xavier.sample: stub sig taking its key first (chelis#2413); the
+/// Synthetic.Init.Xavier.sample: stub sig taking its key first (chelis#2413); the
 /// precision tvar appears in both the tensor slot and the scalar gain
 /// argument.
 #[test]

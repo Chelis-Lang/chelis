@@ -2836,9 +2836,8 @@ Inference and checking obey these rules:
   type checker
 - a function's inferred effect set is the union of the effects of compiler-known
   operations in its body
-- random primitives, the key operations [05-OP-69] through [05-OP-72], and
-  stdlib random helpers such as `normal_like` and the Kaiming/Xavier
-  initializers contribute no effect; [04-LIN-9] makes each key single-use
+- random primitives and the key operations [05-OP-69] through [05-OP-72]
+  contribute no effect; [04-LIN-9] makes each key single-use
 - `print(x)` and `debug(x)` are `IO` sources, alongside
   the file builtins (`read_file`, `write_file`, `read_lines`, `read_bytes`,
   `file_exists`, `list_dir`, `mmap_file`) and `process_run` (subprocess exec).

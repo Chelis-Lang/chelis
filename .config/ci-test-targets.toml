@@ -280,6 +280,15 @@ cadence = "pull_request and push"
 reason = "script-unit runs the keyed randomness acceptance runner contract tests without compiling its manual corpus"
 tracking_issue = "chelis#2413"
 
+[[path_rule]]
+prefix = "scripts/bump_compiler_pins.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the compiler-pin updater's consistency, argument, and mutation tests"
+tracking_issue = "chelis#1824"
+
 # The completion runner consumes these exact runtime-extent corpus inputs.
 [[path_rule]]
 prefix = "scripts/runtime_extent_oracle.py"
@@ -999,9 +1008,16 @@ tracking_issue = "chelis#1824"
 [[manual_gate_target]]
 package = "chelis-cli"
 name = "std_io_pipeline"
-manual_gates = ["phase3g_text_pipeline_acceptance_oracle", "std_io_pipeline std IO suite"]
-reason = "the entirely ignored Phase 3g Std.Io acceptance suite exceeds the default inner-loop budget"
+manual_gates = ["io_pipeline_acceptance_oracle", "std_io_pipeline std IO suite"]
+reason = "the ignored standard IO package acceptance suite exceeds the default inner-loop budget"
 tracking_issue = "chelis#1354"
+
+[[manual_gate_target]]
+package = "chelis-cli"
+name = "chelis_std_self_test_corpus"
+manual_gates = ["chelis_std_self_test_corpus"]
+reason = "the ignored in-language standard-library corpus exceeds the default integration-test budget"
+tracking_issue = "chelis#1824"
 
 [[manual_gate_target]]
 package = "chelis-cli"
@@ -1422,7 +1438,17 @@ disposition = "packages"
 packages = ["chelis-cli"]
 
 [[path_rule]]
-prefix = "examples/illustrative/phase3g_text_pipeline/src/main.ch"
+prefix = "examples/illustrative/io_pipeline/src/main.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/io_pipeline/config.json"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/io_pipeline/train.csv"
 disposition = "packages"
 packages = ["chelis-cli"]
 
@@ -3227,7 +3253,7 @@ packages = [
 # Exact release inputs; neighboring example and corpus sources stay unclassified.
 
 [[path_rule]]
-prefix = "examples/illustrative/phase3g_text_pipeline/reef.toml"
+prefix = "examples/illustrative/io_pipeline/reef.toml"
 disposition = "owner"
 workflow = "ci.yml"
 job = "ci-fast"
