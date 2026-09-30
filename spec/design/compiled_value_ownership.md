@@ -299,6 +299,15 @@ predicate is lowered one scope deeper than the item: no use of the item there
 is its last, and a consuming use, such as a by-value call to a named
 definition, receives its own copy (chelis#2577).
 
+A loop's exit-block parameter carries the loop result into the *enclosing*
+scope, which is where binding it registers it, so that is its home scope even
+though it is minted while the body scope is still open. Recording the body's
+depth instead makes a later loop body at the same depth read the result as
+body-local and consume it by move; the moved owner then reaches that loop's
+header live on the entry path and dead on the back edge, and the join is
+rejected (chelis#2781). A move inside a body that may run more than once is
+never correct for an owner the body did not create.
+
 ### Manifested roots
 
 After [#912]'s root manifest exists, ownership lowering appends one terminal
