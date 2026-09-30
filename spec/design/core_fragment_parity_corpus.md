@@ -377,13 +377,20 @@ Location: `tests/corpus/core_fragment_parity/manifest.json`.
 ### 6.1 Versioning
 
 The manifest carries `manifest_version`, an integer incremented by any change to
-the required-case set, to a pinned corpus revision, or to an expected outcome. A
-receipt records the manifest version it ran. `demo-path` assignments cite the
+**what the receipt is asked to prove**: the required-case set, a pinned corpus
+revision, an expected outcome, a case's declared roots, or the **row set** of
+the exclusion ledger. Editing an exclusion row's `notes` does not bump it —
+notes are recorded evidence about a row, not part of the obligation — and
+neither does a `known_divergence` issue number changing, which tracks a defect
+rather than the case.
+
+A receipt records the manifest version it ran. `demo-path` assignments cite the
 manifest version that justifies them (§7).
 
 Version 2 added the two Sonar `.dp` exclusion rows that discovery began finding
-when it stopped globbing `.ch` alone (§5.1 rule 3); the required-case set is
-unchanged from version 1.
+when it stopped globbing `.ch` alone (§5.1 rule 3) — a row-set change, hence the
+bump — and corrected four exclusion notes, which on its own would not have
+warranted one. The required-case set is unchanged from version 1.
 
 ### 6.2 Case rows
 
@@ -395,15 +402,32 @@ Every row is one case. Required fields:
 | `corpus` | `c-note`, `sonar`, or `voyage` |
 | `source` | `{kind: "committed", repo, rev, path}` or `{kind: "derived", repo, rev, generator, task, index}`. A committed case keeps its suffix when materialized, so a `.dp` program is handed to the compiler as Deep rather than parsed as Surf |
 | `expected` | `value` or `trap` — see below |
-| `roots` | the root names the case owes, in manifest entry order. Required and non-empty when `expected` is `value`: §5.2's blackout guard reads this field, so an empty list disarms it, and a value case owing no observation is a `library-only` exclusion. A declared root is satisfied by its own `name = ` label **or** by any `name.`-prefixed label, because `[05-OBS-8]` expands a tuple-valued root into dotted positional names and a fixed-product ADT root into its field names — and the same atom makes the correct spelling unknowable in advance, since an ADT whose constructor is not statically fixed "remains one bare root" |
+| `roots` | the root names the case owes, in manifest entry order. Required and non-empty when `expected` is `value`: §5.2's blackout guard reads this field, so an empty list disarms it, and a value case owing no observation is a `library-only` exclusion. `roots` declares the **base** root name — the identity `[05-OBS-7]` gives the root — and that is the canonical spelling. A declared root is satisfied by its own `name = ` label **or** by any `name.`-prefixed label, because `[05-OBS-8]` expands a tuple-valued root into dotted positional names and a fixed-product ADT root into its field names. The dotted spelling is *accepted* in `roots` but is not canonical and should not be used: the same atom says an ADT whose constructor is not statically fixed "remains one bare root", so a dotted declaration turns red the moment that fixedness changes, while a base declaration survives either rendering |
 | `truncating_roots` | root names whose rendering is expected to carry `, ...` |
 | `notes` | free text; may cite issues |
 
 `expected` is required and has no default. A case whose expected outcome is
 unknown is not a case yet: it is an exclusion with reason `outcome-undetermined`
-until someone determines it. This is what keeps a deliberately-failing probe from
-counting as parity evidence — it is admitted as `expected: "trap"`, and then
-*both* lanes have to trap, identically, for it to pass.
+until someone determines it.
+
+**Two named limits of the root-presence check**, because the guarantee in §5 is
+weaker than it first reads and should not have to be rediscovered:
+
+- **A passing `trap` case carries no observation.** Trap admission is sometimes
+  described as what stops a deliberately-failing probe counting as parity
+  evidence; that is not what it does. A trap case renders nothing, declares no
+  roots, and passes on agreeing diagnostics alone — which is §5's third failure
+  mode, "compares only cases that cannot distinguish the lanes", by
+  construction. §5's non-vacuity figures therefore describe **value cases
+  only**, and a manifest consisting entirely of trap cases would pass while
+  comparing zero observations. Nothing prevents that today beyond the fact that
+  no trap case exists (§10).
+- **A tuple or ADT root is checked at arity one.** Because a declared base root
+  is satisfied by any one `name.`-prefixed label (above), a regression that
+  silences `result.1` while `result.0` still renders is invisible to the
+  presence check. Closing it would require declaring the full dotted expansion,
+  which `[05-OBS-8]` makes unknowable in advance for a non-fixed constructor.
+  This is the price of the widening, recorded rather than hidden.
 
 A row may carry `known_divergence: {issue: N}`. Such a case is still run and
 still compared, and **a tracked divergence still fails the receipt**. #1362's
@@ -456,10 +480,13 @@ corpus case and gates launch regardless of priority."* This manifest is its only
 authority. The procedure:
 
 1. The receipt runs and reports a divergence or trap-parity failure on a required
-   case. **First check that the failures are not all at the `compile` stage:** a
-   local C toolchain that cannot build anything makes every case lane-split, and
-   this procedure followed literally would then file one issue per case. The
-   receipt prints a note when that shape occurs.
+   case. **Read the failing-stage distribution the receipt prints before filing
+   anything:** a local C toolchain that cannot build anything makes every case
+   lane-split at the `compile` stage, and this procedure followed literally
+   would then file one issue per case. The receipt reports the counts and draws
+   no conclusion from them — failures concentrated at `compile` suggest the
+   toolchain, one `compile` failure beside agreeing cases suggests a genuine
+   invalid-C defect, and that judgement is this step's, not the runner's.
 2. The defect is filed, or an existing issue is identified. The receipt links it
    rather than re-deriving it.
 3. That issue receives `demo-path`, with a comment naming the `case_id`, the
@@ -665,4 +692,16 @@ Named, so a reader does not mistake this document for more than it is:
   *comparable* pipeline positions, rather than merely with identical diagnostic
   bytes, is a question the first real trap case should settle. Deciding it now,
   with no case to test against, would be inventing a taxonomy.
+- **The manifest declares root *identities*, not expected *observations*, and
+  that choice is why §5's non-vacuity guarantee is a presence test rather than a
+  comparison.** A golden-stdout-per-case representation would dissolve both
+  named limits in §6.2 at once — a partial blackout inside a tuple root would
+  fail on bytes, a trap case would carry a recorded observation, no spelling
+  decision would arise because the golden records whatever `[05-OBS-8]` renders,
+  and the check would reuse §3.1's byte comparator instead of a second
+  label-parsing model of how rendering works. It would also stop the guarantee
+  depending on a hand-maintained field. It is **not** proposed here: it changes
+  what a manifest is, and adopting it belongs to a change that decides that
+  deliberately rather than to a repair. It is recorded so the next reader
+  evaluates the representation instead of hardening the presence test again.
 - **Cross-platform verdict comparison is #754's**, not this receipt's.

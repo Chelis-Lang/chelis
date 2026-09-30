@@ -332,7 +332,7 @@ def parse_manifest(data: object) -> Manifest:
         # nothing to be missing. A value case owing no root is incoherent
         # anyway -- that is what the `library-only` exclusion is for.
         _require(
-            expected != "value" or bool(roots),
+            expected != "value" or bool([r for r in roots if r.strip()]),
             f"case {case_id}: an `expected: \"value\"` case must declare at "
             f"least one root; a case that owes no observation belongs in "
             f"`exclusions` with reason 'library-only'",
@@ -620,6 +620,10 @@ def missing_roots(case: CaseRow, stdout: bytes) -> list[str]:
             label.startswith(f"{root}.") for label in labels
         )
 
+    # Named limit (§6.2): a base root is satisfied by ANY ONE dotted
+    # descendant, so a regression silencing `result.1` while `result.0` still
+    # renders passes this check. Closing it needs the full expansion declared,
+    # which [05-OBS-8] makes unknowable in advance for a non-fixed constructor.
     return [root for root in case.roots if not observed(root)]
 
 
@@ -1192,7 +1196,7 @@ def build_receipt(
         "observation_coverage": observation_coverage(verdicts),
         "non_vacuity_failures": list(non_vacuity),
         "pin_failures": list(pin_problems),
-        "all_failures_at_compile_stage": all_failures_at_compile_stage(verdicts),
+        "failing_stage_counts": failing_stage_counts(verdicts),
         "exclusions": [
             {
                 "corpus": exclusion.corpus,
@@ -1220,16 +1224,26 @@ def build_receipt(
     }
 
 
-def all_failures_at_compile_stage(verdicts: Sequence[CaseVerdict]) -> bool:
-    """Whether every failing case failed at the compiled lane's compile stage.
+def failing_stage_counts(verdicts: Sequence[CaseVerdict]) -> dict:
+    """How many failing cases failed at each compiled-lane stage.
 
-    Derived from stages the verdicts already carry; it changes no verdict. It
-    exists because §7 files a defect per divergence, and a broken local C
-    toolchain produces one lane split per case -- a shape worth naming before
-    anyone files N issues for it.
+    §7 files a defect per reported divergence, and a broken local C toolchain
+    produces one lane split per case, so a reader needs to see where the
+    failures sit before filing anything. This reports the distribution the
+    verdicts already carry and draws no conclusion from it: an earlier version
+    asserted "every failure is at the compile stage" as a boolean and was wrong
+    in both directions -- inert on the shipped manifest, whose tracked rows fail
+    at `build`, and affirmative on a single genuine invalid-C defect beside
+    twelve agreeing cases, where blaming the toolchain is exactly the wrong
+    advice.
     """
-    failing = [v for v in verdicts if v.verdict in FAILING_VERDICTS]
-    return bool(failing) and all(v.compiled_stage == "compile" for v in failing)
+    counts: dict[str, int] = {}
+    for verdict in verdicts:
+        if verdict.verdict not in FAILING_VERDICTS:
+            continue
+        stage = verdict.compiled_stage or "unreached"
+        counts[stage] = counts.get(stage, 0) + 1
+    return counts
 
 
 def receipt_passes(receipt: dict) -> bool:
@@ -1291,18 +1305,14 @@ def _summarize(receipt: dict, stream) -> None:
                 f"  FAIL {case['case_id']}: {case['verdict']}: {case['detail']}",
                 file=stream,
             )
-    if receipt.get("all_failures_at_compile_stage"):
-        # §7 step 2 files a defect per reported divergence. A local C toolchain
-        # that cannot compile anything makes every case lane-split at the
-        # compile stage, and §7 followed literally would turn that into one
-        # `demo-path` issue per case. This is a disclosure, not a gate: the
-        # verdicts stand, and the receipt says what its own stages show.
-        print(
-            "  NOTE: every failing case failed at the `compile` stage. Before "
-            "filing anything under §7, check the C toolchain: a compiler that "
-            "cannot build any case produces exactly this shape.",
-            file=stream,
-        )
+    stages = receipt.get("failing_stage_counts") or {}
+    if stages:
+        # Data, not a conclusion (§7 step 1 does the reasoning). A run whose
+        # failures are concentrated at `compile` may be a broken local C
+        # toolchain rather than N divergences; one `compile` failure beside
+        # agreeing cases is more likely a real invalid-C defect.
+        rendered = ", ".join(f"{stage}={count}" for stage, count in sorted(stages.items()))
+        print(f"  failing cases by compiled-lane stage: {rendered}", file=stream)
     print("", file=stream)
 
 

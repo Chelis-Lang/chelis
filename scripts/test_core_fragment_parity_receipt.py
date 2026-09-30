@@ -405,6 +405,14 @@ class ManifestValidation(unittest.TestCase):
             "must declare at least one root",
         )
 
+    def test_a_whitespace_only_root_name_is_rejected(self):
+        # Round 3: `bool([""])` is True, so the requirement as written was
+        # "non-empty list" rather than "declares a root".
+        self.assert_rejects(
+            lambda d: d["cases"][0].__setitem__("roots", ["   "]),
+            "must declare at least one root",
+        )
+
     def test_a_trap_case_with_no_roots_is_accepted(self):
         # The negative partner: only a value case owes a rendered observation.
         data = minimal_manifest()
@@ -1537,8 +1545,15 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(verdict.truncated)
 
 
-class CompileStageDisclosure(unittest.TestCase):
-    """§7 files a defect per divergence; a broken `cc` produces one per case."""
+class FailingStageDistribution(unittest.TestCase):
+    """§7 files a defect per divergence; the reader needs the stage spread.
+
+    Round 3: this was a boolean ("every failure is at `compile`") and was wrong
+    in both directions. On the shipped manifest the two tracked rows fail at
+    `build`, so the boolean was False and the disclosure never fired on the only
+    invocation that counts as acceptance evidence; and with twelve agreeing
+    cases beside one genuine invalid-C defect it fired and blamed the toolchain.
+    """
 
     def verdicts(self, *stages):
         return [
@@ -1548,28 +1563,44 @@ class CompileStageDisclosure(unittest.TestCase):
             for i, stage in enumerate(stages)
         ]
 
-    def test_all_failures_at_compile_stage_is_flagged(self):
-        self.assertTrue(
-            receipt.all_failures_at_compile_stage(self.verdicts("compile", "compile"))
+    def test_counts_each_stage_over_failing_cases(self):
+        self.assertEqual(
+            receipt.failing_stage_counts(self.verdicts("compile", "compile", "run")),
+            {"compile": 2, "run": 1},
         )
 
-    def test_a_mixture_is_not_flagged(self):
-        self.assertFalse(
-            receipt.all_failures_at_compile_stage(self.verdicts("compile", "run"))
+    def test_the_shipped_shape_is_reported_not_suppressed(self):
+        # The regression that matters: a broken toolchain beside tracked
+        # `build`-stage rows must still surface its 11 compile failures.
+        mixed = self.verdicts(*(["compile"] * 11))
+        mixed += [
+            receipt.CaseVerdict(
+                "t", "c-note", receipt.VERDICT_EXPECTED_FAILING, compiled_stage="build"
+            )
+            for _ in range(2)
+        ]
+        self.assertEqual(
+            receipt.failing_stage_counts(mixed), {"compile": 11, "build": 2}
         )
 
-    def test_no_failures_is_not_flagged(self):
-        # The negative that matters: a clean run must not carry the note.
+    def test_passing_cases_are_not_counted(self):
         passing = [
             receipt.CaseVerdict("a", "c-note", receipt.VERDICT_AGREE, compiled_stage="run")
         ]
-        self.assertFalse(receipt.all_failures_at_compile_stage(passing))
+        self.assertEqual(receipt.failing_stage_counts(passing), {})
+
+    def test_a_failure_with_no_stage_is_reported_as_unreached(self):
+        # A harness failure never reached the compiled lane; it must not be
+        # silently dropped from the distribution.
+        unstaged = [
+            receipt.CaseVerdict("a", "c-note", receipt.VERDICT_HARNESS_FAILURE)
+        ]
+        self.assertEqual(receipt.failing_stage_counts(unstaged), {"unreached": 1})
 
     def test_it_changes_no_verdict(self):
-        # It is a disclosure derived from existing stages, not a gate.
-        flagged = self.verdicts("compile")
-        self.assertTrue(receipt.all_failures_at_compile_stage(flagged))
-        self.assertEqual(flagged[0].verdict, receipt.VERDICT_LANE_SPLIT)
+        counted = self.verdicts("compile")
+        receipt.failing_stage_counts(counted)
+        self.assertEqual(counted[0].verdict, receipt.VERDICT_LANE_SPLIT)
 
 
 class Materialization(unittest.TestCase):
