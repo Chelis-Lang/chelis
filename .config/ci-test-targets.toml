@@ -3804,3 +3804,57 @@ packages = ["chelis-cli"]
 prefix = "examples/grad_host_selectors.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = ".github/workflows/secret-scan.yml"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan executes validated history scanning and its positive and negative Python contract tests"
+tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = ".github/scripts/secret_scan.py"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan executes validated history scanning and its positive and negative Python contract tests"
+tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = ".github/scripts/test_secret_scan.py"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan executes validated history scanning and its positive and negative Python contract tests"
+tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = ".github/security/gitleaks.toml"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan executes validated history scanning and its positive and negative Python contract tests"
+tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = ".github/scripts/test_secret_scan_integration.py"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan runs real-binary suppression and exact exception boundary regressions before candidate scanning"
+tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = ".github/scripts/test_secret_scan_exceptions.py"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan runs real-binary suppression and exact exception boundary regressions before candidate scanning"
+tracking_issue = "chelis#2815"
