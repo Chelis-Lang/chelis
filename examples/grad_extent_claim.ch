@@ -1,6 +1,6 @@
-def filled_like[n, m](reference: tensor[n, f32], source: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(source, 0i32))
+def filled_like[n, m](reference: tensor[n, f32], source: tensor[m, f32]) -> tensor[n, f32] = 7.0f32 |> scalar_to_tensor |> insert(0i32, shape(source, 0i32))
 def loss(x: tensor[3, f32], z: tensor[3, f32]) -> tensor[f32] = sum(mul(filled_like(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), z), 0i32)
 out = grad(loss, wrt=(x, z))(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([4.0f32, 5.0f32, 6.0f32]))
-def computed_like[n, m](reference: tensor[n, f32], source: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, add(shape(source, 0i32), 0i64))
+def computed_like[n, m](reference: tensor[n, f32], source: tensor[m, f32]) -> tensor[n, f32] = 7.0f32 |> scalar_to_tensor |> insert(0i32, source |> shape(0i32) |> add(0i64))
 def independent_loss(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[f32] = add(sum(mul(computed_like(copy(a), to_tensor([1.0f32, 2.0f32])), a), 0i32), sum(mul(computed_like(copy(b), to_tensor([1.0f32, 2.0f32, 3.0f32])), b), 0i32))
 independent = grad(independent_loss, wrt=(b, a))(to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32, 5.0f32]))

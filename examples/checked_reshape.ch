@@ -18,12 +18,12 @@ sampled_ids = stride(trimmed_ids, 1i64, 2i64)
 -- A locally computed tensor extent keeps insert's own runtime guard identity.
 sig repeat_local[n]: tensor[1, i64] -> tensor[n, i64] -> tensor[3, 1, i64]
 def repeat_local(value, lengths) = {
-  shorter = shrink(lengths, [[0i64, sub(shape(lengths, 0i32), 1i64)]])
+  shorter = shrink(lengths, [[0i64, lengths |> shape(0i32) |> sub(1i64)]])
   insert(value, 0i32, shape(shorter, 0i32))
 }
 local_insert = repeat_local(to_tensor([9007199254740993i64]), to_tensor([1i64, 2i64, 3i64, 4i64]))
 -- Separate signatures retain dtype evidence for computed empty Lists.
 sig empty_like[n, p: Numeric]: p -> tensor[n, p]
-def empty_like(x) = to_tensor(skip([x], 1i64))
+def empty_like(x) = [x] |> skip(1i64) |> to_tensor
 constructed_empty_f64 = empty_like(0.0f64)
 constructed_empty_int64 = empty_like(0i64)

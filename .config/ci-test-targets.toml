@@ -1372,6 +1372,65 @@ prefix = "examples/tensor_structural_ops.ch"
 disposition = "packages"
 packages = ["chelis-e2e"]
 
+# Surf corpus changes are owned by the CLI parity/executable-example checks
+# and the Surf formatter's whole-repository corpus test. Illustrative inputs
+# are covered by the CLI formatting/parseability corpus and Surf corpus test.
+# Keep these entries exact so future files establish their own test owners.
+[[path_rule]]
+prefix = "examples/annotated_concat_softmax.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/beacon_scalar_range.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/generic_explicit_shape.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/generic_value_roots.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/grad_wrt_order.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/transformer_block.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/wildcard_extents.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/copy_elision_probe.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/mha_single_head.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/mha_slice_combined_qkv.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/mha_two_heads_unrolled.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-surf"]
+
 # Exact explicit-binder migration examples and their direct executable owners.
 # Keep these file-specific: a new example must establish its own evidence.
 [[path_rule]]

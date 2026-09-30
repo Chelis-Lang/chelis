@@ -9,5 +9,5 @@ def three_items[n](x: tensor[n, f32]) -> tensor[3, f32] ! { IO } = {
   _ = print("three items ready")
   result
 }
-pair = two_items(to_tensor([1.0f32, 2.0f32, 3.0f32]))
-triple = three_items(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))
+pair = [1.0f32, 2.0f32, 3.0f32] |> to_tensor |> two_items
+triple = [1.0f32, 2.0f32, 3.0f32, 4.0f32] |> to_tensor |> three_items
