@@ -115,8 +115,8 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 - Integers: canonical decimal such as `42` and `1000000`. Default type `i32`.
 - Floats: finite shortest round-trippable spellings such as `1.0`, `1e-5`, and
   `31400000000.0`. Default type `f32`. You may write a longer body that decodes
-  to the same value — a constant transcribed from a reference at published
-  precision, say `0.319381530f64` — and `chelis fmt` prints the shortest
+  to the same value. For example, you can transcribe a constant at published
+  precision as `0.319381530f64`. `chelis fmt` prints the shortest
   spelling for it. A float literal must be finite at the type it binds at:
   `70000.0f16` and an unsuffixed `1e40` (an `f32`) are rejected because they
   round to infinity there. A cast of a finite wider value,
