@@ -32,7 +32,8 @@
         "path": "docs/qa_evidence/ground_truth/greeks.ch",
         "repo": "Chelis-Lang/c-note",
         "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
-      }
+      },
+      "truncating_roots": []
     },
     {
       "case_id": "c-note/docs/qa_evidence/ground_truth/square.ch",
@@ -83,7 +84,8 @@
         "path": "fixtures/black_scholes/call.ch",
         "repo": "Chelis-Lang/c-note",
         "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
-      }
+      },
+      "truncating_roots": []
     },
     {
       "case_id": "c-note/fixtures/exemplars/black_scholes/source.ch",
