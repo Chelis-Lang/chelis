@@ -832,8 +832,17 @@ mod tests {
     /// kind, and each is caught elsewhere — verified by mutation, `Random`
     /// and `ExtentClaims` within `chelis-ir`, `EmptyAxis` and
     /// `MovementBounds` in `chelis-backend-c::exec_compile`. No row here
-    /// belongs to those classes. The two non-seeding controls below are
-    /// float `Div` (`MeanDivisor`) and `Reshape` (`Ungated`).
+    /// belongs to those classes. The three non-seeding controls below are
+    /// float `Div` (`MeanDivisor`) and `Reshape` and `Expand` (`Ungated`).
+    ///
+    /// [`RuntimeCheck::SparseIndex`] is enumerated in full (chelis#2440):
+    /// its seed turns on neither a dtype nor a kind, so no member would be
+    /// singled out by a row that varied either, and a reclassification of
+    /// any one of them would otherwise be silent. It does turn on a
+    /// per-node fact -- the node must carry no activation -- which every row
+    /// here satisfies, because `Dag::add_node` gives each node an
+    /// unconditional owner. The false-activation half is pinned at the CLI
+    /// surface instead, in `issue_2440_discarded_sparse_index_traps`.
     ///
     /// This comment deliberately does not claim which arms nothing else
     /// catches. Two review rounds each refuted such a claim by running a
@@ -1085,11 +1094,65 @@ mod tests {
                 Prim::F32,
                 false,
             ),
-            // Ungated: an out-of-range index is not a seeded class.
+            // SparseIndex: [05-OP-52] makes an out-of-bounds index fail
+            // loudly, and the index is data, so every member seeds whatever
+            // its dtype. Each row flips with its own sub-arm.
+            (
+                "gather",
+                RiscOp::Gather {
+                    axis: 0,
+                    batch_rank: 0,
+                },
+                2,
+                Prim::F32,
+                true,
+            ),
+            (
+                "scatter add",
+                RiscOp::ScatterAdd {
+                    axis: 0,
+                    batch_rank: 0,
+                },
+                3,
+                Prim::F32,
+                true,
+            ),
+            (
+                "scatter replace",
+                RiscOp::Scatter {
+                    axis: 0,
+                    batch_rank: 0,
+                },
+                3,
+                Prim::F32,
+                true,
+            ),
+            (
+                "scatter_elements",
+                RiscOp::ScatterElements { axis: 0 },
+                3,
+                Prim::F32,
+                true,
+            ),
+            ("one_hot", RiscOp::OneHot { vocab: 2 }, 1, Prim::Int32, true),
+            // Ungated: still not a seeded class. A reshape DOES carry a
+            // runtime element-count check of its own, distinct from the
+            // `CheckedReshapeExtent` extent claim (`ExtentClaims`); it is
+            // simply not seeded, which chelis#2440 lists as residual.
             (
                 "reshape is Ungated",
                 RiscOp::Reshape {
                     new_shape: vec![RtDim::Lit(2)],
+                },
+                1,
+                Prim::Int32,
+                false,
+            ),
+            (
+                "expand is Ungated",
+                RiscOp::Expand {
+                    axis: 0,
+                    size: RtDim::Lit(2),
                 },
                 1,
                 Prim::Int32,

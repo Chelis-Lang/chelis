@@ -95,8 +95,8 @@ clipped = clamp(running, floor15, ceil30)
 `dropout(k, x, rate)` and `uniform_like(k, x, low, high)` draw from the key `k` they are
 given and consume it; they carry no effect. `key_from_seed(seed)` makes a root key from an
 `i64`, `split_key(k)` returns two keys, `split_keys(k, n)` returns a `tensor[n, key]`, and
-`fold_in(k, n)` derives the key of an integer. The `Std.Init` modules build their
-initializers on these.
+`fold_in(k, n)` derives the key of an integer. Shell libraries can build
+initializers from these operations.
 
 ## Standard library modules
 
@@ -120,37 +120,6 @@ do not yet actualize the helpers' generic cast targets
 `Std.Tensor.Mask`:
 
 - `where_indices(mask)` returns the `i64` indices where a `bool` mask is true.
-
-### Initializers
-
-`Std.Init.Random`:
-
-- `normal_like(k, template, mean, std)` draws a normal tensor shaped like the template. It
-  splits `k` and draws its two Box-Muller uniforms from the halves.
-
-`Std.Init.Kaiming`:
-
-- `kaiming_uniform(k, template, fan_in)`, `kaiming_normal(k, template, fan_in)`.
-
-`Std.Init.XavierExt`:
-
-- `xavier_uniform(k, template, fan_in, fan_out)`, `xavier_normal(k, template, fan_in, fan_out)`.
-- `trunc_normal(k, template, mean, std, a, b)` draws a normal tensor clipped to `[a, b]`.
-
-Every initializer takes its key first, consumes it, and carries no effect. The same key
-gives the same tensor, so `kaiming_uniform(key_from_seed(7i64), w, 4.0)` is reproducible;
-initialising two tensors takes two keys, for example the halves of one `split_key`. A draw
-in a conditional branch that does not run is not evaluated.
-
-`normal_like`, `kaiming_uniform`, `xavier_uniform` and `trunc_normal` are each written in
-two layers inside their module: a draw from the key, and a pure layer that turns the draws
-into the result. `normal_like(k, template, mean, std)` is
-`normal_like_given(units, template, mean, std)` applied to `normal_like_sample(k, template)`;
-the two uniform initializers apply `kaiming_uniform_given` and `xavier_uniform_given` to a
-unit `uniform_like` draw, and `trunc_normal` applies `trunc_normal_given` to a
-`normal_like` draw. `kaiming_normal` and `xavier_normal` call `normal_like` directly. The
-layers are private to their modules; the exported function taking the key first is the
-public surface.
 
 ### Sorting and scanning
 
@@ -178,17 +147,15 @@ public surface.
 
 ### Decimal and time
 
-`Std.Decimal` is fixed-point decimal, a coefficient and a scale. Construction with
-`decimal(text)` or `decimal_from_int(value)`; arithmetic with `decimal_add`, `decimal_sub`,
-`decimal_mul`, and `decimal_div(lhs, rhs, result_scale, mode)`; comparison with
-`decimal_eq`, `decimal_lt`, and the rest; conversion with `decimal_to_float` and
-`decimal_to_string`. Rounding modes are `round_half_up`, `round_half_even`, `round_down`,
-and `round_up`.
+`Std.Decimal` exposes `Decimal` and `RoundingMode`, but its callables currently fail
+with an explicit `#2778` error. Its exact-rational arithmetic and conversion contract
+remains specified in [05-OP-35](../../../spec/05-risc-primitives.md).
 
-`Std.Time` is calendar dates on the proleptic Gregorian calendar. Construction with
-`date(year, month, day)`; arithmetic with `add_days`, `sub_days`, `days_between`; comparison
-with `date_lt` and friends; `day_of_week`, `day_of_year`, `is_leap_year`; and
-`date_to_string` and `parse_date` for ISO `YYYY-MM-DD` text.
+`Std.Time` callables currently raise an error citing #2779. Their intended
+proleptic Gregorian API includes `date(year, month, day)`, `add_days`,
+`sub_days`, `days_between`, date comparisons, `day_of_week`, `day_of_year`,
+`is_leap_year`, `date_to_string`, and `parse_date`. Use of these operations
+requires an exact implementation of [05-OP-35].
 
 ### Input and output
 
@@ -241,14 +208,6 @@ These IO modules carry the `IO` effect and run in **both lanes**: under
 from the eval-only prelude CSV builtins (`parse_csv`/`to_csv`, chelis#903),
 which `chelis build` rejects whole-program; reef package name-rewriting keeps
 the shared CSV names apart in both lanes.
-
-### Tokenization
-
-`Std.Tokenizer` is a byte-pair tokenizer that loads a Hugging-Face-style `tokenizer.json`:
-
-- `load_tokenizer(path)` and `try_load_tokenizer(path)`.
-- `encode(tokenizer, text)`, `decode(tokenizer, ids)`.
-- `batch_encode(tokenizer, texts, max_length, pad_value)` returns a padded `i64` tensor.
 
 ### Testing
 

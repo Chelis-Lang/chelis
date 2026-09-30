@@ -5,7 +5,7 @@ use std::path::Path;
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::host::{HostDefKernel, host_def_kernel};
+use chelis_ir::host::{EntryPattern, HostDefKernel, host_def_kernel};
 use chelis_ir::tier2;
 use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
@@ -461,6 +461,19 @@ fn checked_list_element(actual: &Expr) -> Option<&Expr> {
     }
 }
 
+/// The compiler and evaluator read one authored-alias normalization rule.
+/// The session-less invariant predicate evaluator has no checked program or
+/// declaration registry; its already-typed formals are used directly.
+fn normalize_authored_entry_type(
+    authored: &Expr,
+    session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
+) -> Result<Expr, String> {
+    match session {
+        Some(session) => session.normalized_authored_entry_type(authored),
+        None => Ok(authored.clone()),
+    }
+}
+
 fn checked_function_children(actual: &Expr) -> Option<&[Expr]> {
     let (tag, children) = tagged_expr_children(actual)?;
     match tag {
@@ -474,17 +487,8 @@ fn check_signature_entry_plan(
     entry_plan: &chelis_ir::host::SignatureEntryPlan,
     entry_shapes: &[&[usize]],
 ) -> Result<(), String> {
-    let read = |(node, axis): (NodeId, usize)| {
-        let RiscOp::Load { name } = &entry_plan
-            .observations()
-            .get(node)
-            .expect("entry observation")
-            .op
-        else {
-            unreachable!("signature observation")
-        };
-        (name.as_str(), axis, entry_shapes[node.0][axis])
-    };
+    let read =
+        |(node, axis): (NodeId, usize)| (entry_plan.label(node), axis, entry_shapes[node.0][axis]);
     for guard in entry_plan.guards() {
         use chelis_ir::axis_sources::EntryExtentGuard;
         let (left, right, context) = match guard {
@@ -526,31 +530,45 @@ fn check_signature_entry_plan(
 fn check_callable_invocation_contract(
     contract: &Expr,
     args: &[RuntimeValue],
-) -> Result<(), String> {
+    session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
+    present: Option<&[bool]>,
+) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
     let Some((_, params)) = checked_function_children(contract).and_then(<[Expr]>::split_last)
     else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let authored = params.iter().cloned().map(Some).collect::<Vec<_>>();
-    let actualized = actualize_tensor_entry_parameters(Some(params), &authored, args)?;
+    let names = (0..args.len())
+        .map(|index| format!("arg{index}"))
+        .collect::<Vec<_>>();
+    let actualized =
+        actualize_tensor_entry_parameters(Some(params), &authored, args, &names, session, present)?;
     let mut entry_inputs = Vec::with_capacity(actualized.len());
-    let mut entry_shapes: Vec<&[usize]> = Vec::with_capacity(actualized.len());
-    for (index, ty) in actualized {
-        let RuntimeValue::Tensor(tensor) = &args[index] else {
-            unreachable!("entry actualization returns tensor arguments only");
-        };
-        let parameter = format!("arg{index}");
+    let mut entry_shapes: Vec<Vec<usize>> = Vec::with_capacity(actualized.len());
+    for (parameter, ty, shape) in &actualized {
         entry_inputs.push(chelis_ir::host::HostTensorInput {
-            name: parameter,
-            ty,
+            name: parameter.clone(),
+            ty: ty.clone(),
         });
-        entry_shapes.push(&tensor.value.shape);
+        entry_shapes.push(shape.clone());
     }
     let entry_plan = chelis_ir::host::SignatureEntryPlan::new(entry_inputs);
-    check_signature_entry_plan(&entry_plan, &entry_shapes)
+    check_signature_entry_plan(
+        &entry_plan,
+        &entry_shapes.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+    )?;
+    Ok(actualized)
 }
 
-/// Rebuild tensor parameter declarations at one concrete invocation.
+struct EntryActual {
+    checked: Expr,
+    authored: Expr,
+    actual_type: TensorType,
+    path: String,
+    shape: Vec<usize>,
+}
+
+/// Rebuild tensor declarations, including List elements, at one invocation.
 ///
 /// Runtime shapes determine rank-spread widths and dtypes, but their extents
 /// are observations rather than declarations: explicit literals and shared
@@ -562,57 +580,136 @@ fn actualize_tensor_entry_parameters(
     checked_params: Option<&[Expr]>,
     authored_params: &[Option<Expr>],
     args: &[RuntimeValue],
-) -> Result<Vec<(usize, TensorType)>, String> {
-    let mut indices = Vec::new();
-    let mut actualization_formals = Vec::new();
-    let mut declaration_formals = Vec::new();
-    let mut actual_types = Vec::new();
-    for (index, arg) in args.iter().enumerate() {
-        let RuntimeValue::Tensor(tensor) = arg else {
+    names: &[String],
+    session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
+    present: Option<&[bool]>,
+) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
+    fn collect(
+        pattern: &EntryPattern<Expr>,
+        checked: Option<&Expr>,
+        value: &RuntimeValue,
+        path: String,
+        out: &mut Vec<EntryActual>,
+    ) -> Result<(), String> {
+        match pattern {
+            EntryPattern::Tensor(authored) => {
+                let RuntimeValue::Tensor(tensor) = value else {
+                    return Err(format!(
+                        "input `{path}` does not match its declared tensor type"
+                    ));
+                };
+                out.push(EntryActual {
+                    checked: checked
+                        .filter(|checked| tensor_type_dim_exprs(checked).is_some())
+                        .unwrap_or(authored)
+                        .clone(),
+                    authored: authored.clone(),
+                    actual_type: TensorType {
+                        dims: tensor
+                            .value
+                            .shape
+                            .iter()
+                            .copied()
+                            .map(DimInfo::Lit)
+                            .collect(),
+                        precision: tensor.precision,
+                    },
+                    path,
+                    shape: tensor.value.shape.clone(),
+                });
+            }
+            EntryPattern::List(inner) => {
+                let RuntimeValue::List(items) = value else {
+                    return Err(format!(
+                        "input `{path}` does not match its declared tensor type"
+                    ));
+                };
+                let checked_item = checked.and_then(checked_list_element);
+                for (index, item) in items.iter().enumerate() {
+                    collect(inner, checked_item, item, format!("{path}[{index}]"), out)?;
+                }
+            }
+            EntryPattern::Other => {}
+        }
+        Ok(())
+    }
+
+    let normalized_authored = authored_params
+        .iter()
+        .map(|formal| {
+            formal
+                .as_ref()
+                .map(|formal| normalize_authored_entry_type(formal, session))
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let contract = chelis_ir::host::EntryContract::from_normalized_types(
+        &normalized_authored,
+        checked_params,
+        names,
+    )?
+    .try_map_tensor(|index, _tensor| {
+        fn tensor_leaf(expr: &Expr) -> Option<&Expr> {
+            if tensor_type_dim_exprs(expr).is_some() {
+                return Some(expr);
+            }
+            checked_list_element(expr).and_then(tensor_leaf)
+        }
+        normalized_authored[index]
+            .as_ref()
+            .and_then(tensor_leaf)
+            .or_else(|| checked_params.and_then(|items| items.get(index)))
+            .and_then(tensor_leaf)
+            .cloned()
+            .ok_or_else(|| "host runtime: could not retain entry tensor syntax".to_string())
+    })?;
+    let mut actuals = Vec::new();
+    if args.len() != contract.formals().len() {
+        return Err("host runtime: entry contract lost argument alignment".into());
+    }
+    if present.is_some_and(|present| present.len() != args.len()) {
+        return Err("host runtime: selected-root entry lost argument presence".into());
+    }
+    for (index, (formal, arg)) in contract.formals().iter().zip(args).enumerate() {
+        if present.is_some_and(|present| !present[index]) {
             continue;
-        };
-        let authored = authored_params
-            .get(index)
-            .and_then(Option::as_ref)
-            .filter(|formal| tensor_type_dim_exprs(formal).is_some());
-        let checked = checked_params
-            .and_then(|params| params.get(index))
-            .filter(|formal| tensor_type_dim_exprs(formal).is_some())
-            .or(authored);
-        let authored = authored.or(checked);
-        let (Some(checked), Some(authored)) = (checked, authored) else {
-            continue;
-        };
-        indices.push(index);
-        actualization_formals.push(Some(checked.clone()));
-        declaration_formals.push(Some(authored.clone()));
-        actual_types.push(TensorType {
-            dims: tensor
-                .value
-                .shape
-                .iter()
-                .copied()
-                .map(DimInfo::Lit)
-                .collect(),
-            precision: tensor.precision,
-        });
+        }
+        collect(
+            formal.pattern(),
+            checked_params
+                .and_then(|params| params.get(index))
+                .or_else(|| normalized_authored.get(index).and_then(Option::as_ref)),
+            arg,
+            formal.name().to_string(),
+            &mut actuals,
+        )?;
     }
     let types = chelis_ir::lower::actualize_authored_tensor_parameters(
-        &actualization_formals,
-        &declaration_formals,
-        &actual_types,
+        &actuals
+            .iter()
+            .map(|actual| Some(actual.checked.clone()))
+            .collect::<Vec<_>>(),
+        &actuals
+            .iter()
+            .map(|actual| Some(actual.authored.clone()))
+            .collect::<Vec<_>>(),
+        &actuals
+            .iter()
+            .map(|actual| actual.actual_type.clone())
+            .collect::<Vec<_>>(),
     )
     .map_err(|error| format!("host runtime: could not actualize entry contract: {error}"))?;
-    let actualized = indices.into_iter().zip(types).collect::<Vec<_>>();
-    for (index, ty) in &actualized {
-        let RuntimeValue::Tensor(tensor) = &args[*index] else {
-            unreachable!("entry actualization returns tensor arguments only");
-        };
-        if ty.dims.len() != tensor.value.shape.len() {
+    let actualized = actuals
+        .into_iter()
+        .zip(types)
+        .map(|(actual, ty)| (actual.path, ty, actual.shape))
+        .collect::<Vec<_>>();
+    for (path, ty, shape) in &actualized {
+        if ty.dims.len() != shape.len() {
             return Err(format!(
-                "input argument {index} expected rank {}, got {}",
+                "input `{path}` expected rank {}, got {}",
                 ty.dims.len(),
-                tensor.value.shape.len()
+                shape.len()
             ));
         }
     }
@@ -1885,6 +1982,7 @@ impl<'a> EvalContext<'a> {
             &arg_type_exprs,
             result_type_expr.as_ref(),
             claims,
+            None,
         )
     }
 
@@ -2558,6 +2656,25 @@ impl<'a> EvalContext<'a> {
         self.apply_resolved_callable_with_arg_types(callable, args, &[], None)
     }
 
+    /// A selected Host root may have dead authored tensor parameters. Its
+    /// admission records which positional actuals exist; the Unit values in
+    /// absent slots supply closure arity and must never become tensor claims.
+    pub(super) fn apply_selected_root_callable(
+        &mut self,
+        callable: RuntimeValue,
+        args: Vec<RuntimeValue>,
+        present: &[bool],
+    ) -> Result<RuntimeValue, String> {
+        self.apply_resolved_callable_under_result_claim(
+            callable,
+            args,
+            &[],
+            None,
+            &[],
+            Some(present),
+        )
+    }
+
     /// Like [`Self::apply_resolved_callable`], but additionally records a
     /// static Deep type expression per argument into the callee frame's
     /// `binding_types` (chelis#338 named-axis routing). The closure's own
@@ -2576,6 +2693,7 @@ impl<'a> EvalContext<'a> {
             arg_type_exprs,
             result_type_expr,
             &[],
+            None,
         )
     }
 
@@ -2586,18 +2704,60 @@ impl<'a> EvalContext<'a> {
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
         claims: &[DeclaredResultClaim],
+        present: Option<&[bool]>,
     ) -> Result<RuntimeValue, String> {
+        let mut formal_claims = Vec::new();
         if let Some(contracts) = callable.invocation_contracts() {
             for contract in contracts {
-                check_callable_invocation_contract(contract, &args)?;
+                let actualized = check_callable_invocation_contract(
+                    contract,
+                    &args,
+                    self.session.as_ref(),
+                    present,
+                )?;
+                let Some((result, params)) =
+                    checked_function_children(contract).and_then(<[Expr]>::split_last)
+                else {
+                    continue;
+                };
+                let mut witnesses = Vec::new();
+                for (path, ty, shape) in &actualized {
+                    for (axis, (dim, size)) in ty.dims.iter().zip(shape).enumerate() {
+                        if let DimInfo::Named(name, _) = dim
+                            && name != "*"
+                            && !witnesses.iter().any(|(seen, _, _)| seen == name)
+                        {
+                            witnesses.push((
+                                name.clone(),
+                                NamedResultSource {
+                                    claim: chelis_ir::lower::extent_binder_label(name),
+                                    parameter: path.clone(),
+                                    axis,
+                                },
+                                *size,
+                            ));
+                        }
+                    }
+                }
+                let authored = params.iter().cloned().map(Some).collect::<Vec<_>>();
+                let claim = Self::declared_result_claim_at_callsite(
+                    Some(result),
+                    Some(params),
+                    &authored,
+                    &args,
+                )?;
+                let claim = Self::with_named_result_axes(claim, Some(result), &witnesses)?;
+                formal_claims.extend(claim);
             }
         }
+        formal_claims.extend_from_slice(claims);
         self.apply_resolved_callable_with_arg_types_impl(
             callable,
             args,
             arg_type_exprs,
             result_type_expr,
-            claims,
+            &formal_claims,
+            present,
         )
     }
 
@@ -2608,6 +2768,7 @@ impl<'a> EvalContext<'a> {
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
         inherited_claims: &[DeclaredResultClaim],
+        present: Option<&[bool]>,
     ) -> Result<RuntimeValue, String> {
         match callable {
             RuntimeValue::Closure {
@@ -2675,19 +2836,19 @@ impl<'a> EvalContext<'a> {
                         .and_then(checked_function_children)
                         .and_then(|children| children.split_last())
                         .map(|(_, params)| params);
-                    let actualized_entries =
-                        actualize_tensor_entry_parameters(checked_params, &param_types, &args)?;
+                    let actualized_entries = actualize_tensor_entry_parameters(
+                        checked_params,
+                        &param_types,
+                        &args,
+                        &params,
+                        self.session.as_ref(),
+                        present,
+                    )?;
                     let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
-                    let mut entry_shapes: Vec<&[usize]> =
+                    let mut entry_shapes: Vec<Vec<usize>> =
                         Vec::with_capacity(actualized_entries.len());
-                    for (index, ty) in actualized_entries {
-                        let RuntimeValue::Tensor(tensor) = &args[index] else {
-                            unreachable!("entry actualization returns tensor arguments only");
-                        };
-                        let parameter = params[index].clone();
-                        for (axis, (dim, size)) in
-                            ty.dims.iter().zip(&tensor.value.shape).enumerate()
-                        {
+                    for (parameter, ty, shape) in actualized_entries {
+                        for (axis, (dim, size)) in ty.dims.iter().zip(&shape).enumerate() {
                             if let DimInfo::Named(name, _) = dim
                                 && name != "*"
                             {
@@ -2712,10 +2873,13 @@ impl<'a> EvalContext<'a> {
                             name: parameter,
                             ty,
                         });
-                        entry_shapes.push(&tensor.value.shape);
+                        entry_shapes.push(shape);
                     }
                     let entry_plan = chelis_ir::host::SignatureEntryPlan::new(entry_inputs);
-                    check_signature_entry_plan(&entry_plan, &entry_shapes)?;
+                    check_signature_entry_plan(
+                        &entry_plan,
+                        &entry_shapes.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+                    )?;
                     let caller_precisions = saved_precisions.clone();
                     let mut call_precisions = UnordMap::new();
                     for (declared, actual) in param_types.iter().zip(arg_type_exprs) {
@@ -2773,15 +2937,16 @@ impl<'a> EvalContext<'a> {
                         .as_ref()
                         .and_then(checked_function_children)
                         .and_then(<[Expr]>::last);
-                    // A direct authored tensor retains its literal axes and
-                    // rank-spread identities. A named alias needs the checked
-                    // expansion, as in the established fixed-rank path.
-                    let declared_result = return_type.as_ref().and_then(|authored| {
-                        tensor_type_dim_exprs(authored)
-                            .is_some()
-                            .then_some(authored)
-                            .or(checked_result)
-                    });
+                    // Alias substitution retains the authored dimension names
+                    // through the result, just as through List parameters.
+                    let authored_result = return_type
+                        .as_ref()
+                        .map(|ty| normalize_authored_entry_type(ty, self.session.as_ref()))
+                        .transpose()?;
+                    let declared_result = authored_result
+                        .as_ref()
+                        .filter(|ty| tensor_type_dim_exprs(ty).is_some())
+                        .or(checked_result);
                     let declaration_claim = Self::declared_result_claim_at_callsite(
                         declared_result,
                         checked_params,
@@ -2819,13 +2984,17 @@ impl<'a> EvalContext<'a> {
                             }
                             (_, arg) => arg,
                         };
-                        let callable_contract = checked_params
-                            .and_then(|params| params.get(index))
-                            .or(declared.as_ref());
-                        if callable_contract.is_some_and(|contract| {
-                            tagged_expr_children(contract)
-                                .is_some_and(|(tag, _)| tag == DeepTag::TFn)
-                        }) && let Some(invocation_contracts) = arg.invocation_contracts_mut()
+                        let authored_callable = declared
+                            .as_ref()
+                            .map(|ty| normalize_authored_entry_type(ty, self.session.as_ref()))
+                            .transpose()?;
+                        let callable_contract = authored_callable
+                            .as_ref()
+                            .filter(|ty| checked_function_children(ty).is_some())
+                            .or_else(|| checked_params.and_then(|params| params.get(index)));
+                        if callable_contract
+                            .is_some_and(|ty| checked_function_children(ty).is_some())
+                            && let Some(invocation_contracts) = arg.invocation_contracts_mut()
                         {
                             // This parameter is a new adapter around any
                             // contracts the supplied callable already carries,
@@ -5257,7 +5426,7 @@ mod tensor_entry_actualization_tests {
             type_expr("(t-prim {} i64)"),
         ];
         let authored = checked.iter().cloned().map(Some).collect::<Vec<_>>();
-
+        let names = ["arg0".into(), "arg1".into(), "arg2".into()];
         let actualized = actualize_tensor_entry_parameters(
             Some(&checked),
             &authored,
@@ -5266,16 +5435,20 @@ mod tensor_entry_actualization_tests {
                 tensor(Vec::new(), vec![2.0]),
                 RuntimeValue::int64(3),
             ],
+            &names,
+            None,
+            None,
         )
         .expect("scalar neighbors do not contaminate the rank-zero tensor formal");
         assert_eq!(
             actualized,
             vec![(
-                1,
+                "arg1".into(),
                 TensorType {
                     dims: Vec::new(),
                     precision: Prim::F32,
                 },
+                Vec::new(),
             )]
         );
 
@@ -5287,9 +5460,12 @@ mod tensor_entry_actualization_tests {
                 tensor(vec![1], vec![2.0]),
                 RuntimeValue::int64(3),
             ],
+            &names,
+            None,
+            None,
         )
         .expect_err("the rank mismatch remains owned by the tensor at position one");
-        assert_eq!(error, "input argument 1 expected rank 0, got 1");
+        assert_eq!(error, "input `arg1` expected rank 0, got 1");
     }
 }
 

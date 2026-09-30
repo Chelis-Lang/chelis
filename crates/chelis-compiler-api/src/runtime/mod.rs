@@ -783,7 +783,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
             // Admission and required-input filtering already selected this
             // call. Deliver its supplied tensor actuals independently of the
             // body's execution profile, retaining evaluated-root precedence.
-            let args = match &closure {
+            let args: Vec<Option<RuntimeValue>> = match &closure {
                 RuntimeValue::Closure { params, .. } => params
                     .iter()
                     .map(|param| {
@@ -798,12 +798,16 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
                                     .map(RuntimeTensorValue::new)
                                     .map(RuntimeValue::Tensor)
                             })
-                            .unwrap_or(RuntimeValue::Unit)
                     })
                     .collect(),
                 _ => Vec::new(),
             };
-            ctx.apply_resolved_callable(closure, args)
+            let present = args.iter().map(Option::is_some).collect::<Vec<_>>();
+            let args = args
+                .into_iter()
+                .map(|arg| arg.unwrap_or(RuntimeValue::Unit))
+                .collect();
+            ctx.apply_selected_root_callable(closure, args, &present)
         });
         match applied {
             Ok(value) => {

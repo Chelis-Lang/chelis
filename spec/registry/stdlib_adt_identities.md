@@ -12,4 +12,3 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `decimal::Decimal` | `Decimal { coefficient: i64, scale: i64 }` |
 | `time::Date` | `Date { year: i64, month: i64, day: i64 }` |
 | `time::Duration` | `Duration { days: i64, hours: i64, minutes: i64, seconds: i64 }` |
-| `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,i64], Dict[string,i64], Dict[i64,string], i64)` |

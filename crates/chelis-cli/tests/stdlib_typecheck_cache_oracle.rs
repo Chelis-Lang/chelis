@@ -63,9 +63,9 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let std_root = manifest.join("../../packages/chelis-std");
     let mut paths: Vec<PathBuf> = [
-        "src/init/kaiming.ch",
-        "src/init/random.ch",
-        "src/init/xavierext.ch",
+        "src/decimal.ch",
+        "src/time.ch",
+        "src/process.ch",
         "src/tensor/construct.ch",
         "src/test.ch",
     ]
@@ -81,23 +81,26 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// The `build`-oracle corpus: [`stdlib_corpus`] minus the Std.Test module
-/// (`src/test.ch`). That module defines the `Test`-effect assertion wrappers
-/// (`def assert_* ... = test_assert*`), and the `test_*` builtins are
-/// host-only: they have no compiled-lane emission arm, so `chelis build`
-/// loudly rejects them (chelis#796; spec/05-risc-primitives.md §3.6.1).
-/// Checking the module is valid, so it stays in [`stdlib_corpus`] for the
-/// check oracles; only the `build` oracles use this filtered list. Excluded
-/// by exact canonical path, not a `test.ch` filename match, so an unrelated
-/// future `.../test.ch` is never silently dropped.
+/// The `build`-oracle corpus excludes Std.Test and Std.Process. Their
+/// `test_*` and `process_run` builtins are host-only, so `chelis build`
+/// loudly rejects those modules (chelis#796; spec/05-risc-primitives.md
+/// §§2.6, 3.6.1, 3.7). Both remain in [`stdlib_corpus`] for the check
+/// oracles. Exclude exact canonical paths so an unrelated future module
+/// with the same filename is never silently dropped.
 fn stdlib_build_corpus(scratch: &Path) -> Vec<PathBuf> {
-    let std_test = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/chelis-std/src/test.ch")
-        .canonicalize()
-        .expect("std test.ch must exist");
+    let std_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std");
+    let host_only_modules: Vec<PathBuf> = ["src/test.ch", "src/process.ch"]
+        .iter()
+        .map(|rel| {
+            std_root
+                .join(rel)
+                .canonicalize()
+                .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
+        })
+        .collect();
     stdlib_corpus(scratch)
         .into_iter()
-        .filter(|p| *p != std_test)
+        .filter(|p| !host_only_modules.contains(p))
         .collect()
 }
 
@@ -113,32 +116,48 @@ fn stdlib_build_corpus(scratch: &Path) -> Vec<PathBuf> {
 /// nothing on the build lane asserting that the stub stays gone.
 #[test]
 fn std_test_module_build_is_host_only_rejected() {
+    assert_std_module_build_is_host_only_rejected("test.ch", "test_assert", "host emission");
+}
+
+/// `Std.Process` stays in the check corpus but cannot be built because
+/// `process_run` is host-only under [05-HOST-2].
+#[test]
+fn std_process_module_build_is_host_only_rejected() {
+    assert_std_module_build_is_host_only_rejected("process.ch", "process_run", "compiled targets");
+}
+
+fn assert_std_module_build_is_host_only_rejected(
+    module: &str,
+    builtin: &str,
+    rejection_detail: &str,
+) {
     let (_guard, cache_home) = fresh_cache_home();
-    let test_ch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/chelis-std/src/test.ch")
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/chelis-std/src")
+        .join(module)
         .canonicalize()
-        .expect("std test.ch must exist");
+        .unwrap_or_else(|e| panic!("canonicalize {module}: {e}"));
     let out_dir = tempdir().expect("out dir");
     let output = Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &cache_home)
         .arg("build")
-        .arg(&test_ch)
+        .arg(source)
         .arg("-o")
         .arg(out_dir.path())
         .output()
         .expect("run chelis build");
     assert!(
         !output.status.success(),
-        "`chelis build` of the Std.Test module must be rejected (host-only `test_*`)"
+        "`chelis build` of {module} must reject host-only builtin {builtin}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("test_assert")
+        stderr.contains(builtin)
             && stderr.contains("unsupported")
-            && stderr.contains("host emission"),
-        "expected the host-only `test_*` emitter rejection; got stderr:\n{stderr}"
+            && stderr.contains(rejection_detail),
+        "expected the host-only rejection for {builtin}; got stderr:\n{stderr}"
     );
 }
 
@@ -359,7 +378,7 @@ fn stale_stdlib_byte_mutation_misses_not_stale_hit() {
     publish(&local_std, &cache_home_b);
     let mutated_out = run_capture(
         "check",
-        &local_std.join("src/init/kaiming.ch"),
+        &local_std.join("src/decimal.ch"),
         &cache_home_b,
         &[],
         None,
@@ -389,7 +408,7 @@ fn stale_stdlib_byte_mutation_misses_not_stale_hit() {
     // monolithic recompute over the mutated stdlib.
     let mutated_monolithic = run_capture(
         "check",
-        &local_std.join("src/init/kaiming.ch"),
+        &local_std.join("src/decimal.ch"),
         &cache_home_b,
         &[("CHELIS_STDLIB_CACHE_DISABLE", "1")],
         None,

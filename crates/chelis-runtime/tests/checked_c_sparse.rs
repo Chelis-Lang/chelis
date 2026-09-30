@@ -62,6 +62,52 @@ fn sparse_plans_preserve_exact_slots_shapes_and_input_lifetimes() {
 }
 
 #[test]
+fn paired_sparse_plan_reads_indices_from_the_matching_batch_row() {
+    unsafe {
+        let base = chelis_alloc(3, [2, 3, 4].as_ptr(), CHELIS_DTYPE_F32);
+        let indices = chelis_alloc(2, [2, 2].as_ptr(), CHELIS_DTYPE_I64);
+        let updates = chelis_alloc(3, [2, 3, 2].as_ptr(), CHELIS_DTYPE_F32);
+        for operation in [
+            CHELIS_SPARSE_GATHER,
+            CHELIS_SPARSE_ADD,
+            CHELIS_SPARSE_REPLACE,
+        ] {
+            let plan = chelis_tensor_sparse_plan(
+                base,
+                indices,
+                if operation == CHELIS_SPARSE_GATHER {
+                    ptr::null()
+                } else {
+                    updates
+                },
+                int(2),
+                operation + 4,
+            );
+            assert_eq!(chelis_sparse_count(plan), 12);
+            assert_eq!(chelis_sparse_extent(plan, int(0)), 2);
+            assert_eq!(chelis_sparse_extent(plan, int(1)), 3);
+            assert_eq!(
+                chelis_sparse_extent(plan, int(2)),
+                if operation == CHELIS_SPARSE_GATHER {
+                    2
+                } else {
+                    4
+                }
+            );
+            assert_eq!(chelis_sparse_index_slot(plan, int(0)), 0);
+            assert_eq!(chelis_sparse_index_slot(plan, int(5)), 1);
+            assert_eq!(chelis_sparse_index_slot(plan, int(6)), 2);
+            assert_eq!(chelis_sparse_index_slot(plan, int(11)), 3);
+            assert_eq!(chelis_sparse_data_index(plan, int(6), int(2)), 14);
+            chelis_sparse_plan_release(plan);
+        }
+        chelis_tensor_release(base);
+        chelis_tensor_release(indices);
+        chelis_tensor_release(updates);
+    }
+}
+
+#[test]
 fn sparse_empty_domains_keep_exact_shapes() {
     unsafe {
         let base = chelis_alloc(3, [0, 3, 2].as_ptr(), CHELIS_DTYPE_I8);

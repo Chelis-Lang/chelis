@@ -605,6 +605,11 @@ fn parity_checked_sparse_axes() {
 }
 
 #[test]
+fn parity_vmap_sparse_axes() {
+    drive_parity(&examples_root().join("vmap_sparse_axes.ch"), true);
+}
+
+#[test]
 fn parity_count_bool_axes() {
     drive_parity(&examples_root().join("count_bool_axes.ch"), true);
 }
@@ -643,6 +648,16 @@ fn parity_list_foundation() {
 }
 
 #[test]
+fn parity_list_shared_extent() {
+    let path = examples_root().join("list_shared_extent.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"main = tensor(shape=[2], data=[4.0, 6.0])\n"
+    );
+}
+
+#[test]
 fn parity_checked_host_local_ascription() {
     drive_parity(
         &examples_root().join("checked_host_local_ascription.ch"),
@@ -668,6 +683,16 @@ fn parity_ordered_extent_claims() {
 #[test]
 fn parity_pure_helper_result_claims() {
     drive_parity(&examples_root().join("pure_helper_result_claims.ch"), true);
+}
+
+#[test]
+fn parity_retained_callable_result_extent() {
+    let path = examples_root().join("retained_callable_result_extent.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"direct = tensor(shape=[2], data=[4.0, 5.0])\nretained = tensor(shape=[2], data=[4.0, 5.0])\n"
+    );
 }
 
 #[test]

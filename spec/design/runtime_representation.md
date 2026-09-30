@@ -1163,6 +1163,21 @@ direct-arithmetic command.
 Another owner, spelling, or template remains unclassified; Metal remains the
 separate chelis#2338 capability gap rather than inheriting these HIP forms.
 
+The [05-OP-47] bitwise device cutover registers `binary_bitwise_typed` on HIP,
+`bitwise_body` on Metal, and `Emitter::emit_bitwise` on Metal as exact
+`backend-element-spelling` final forms. The last owner also supplies the
+`load-store-template` final form for its typed host/device transfer.
+Both select only i8/i16/i32/i64, perform operations on width-matched unsigned
+words, and restore signed result storage without float conversion. Each shift
+records the first negative logical index and the host reports that input's
+exact signed count before exposing output. The default HIP generated-kernel
+CPU projection checks all 20 kind/width cases; the real HIP manual gate in
+`logical_comparison_where_gpu` owns hardware execution. The Metal manual
+`gpu_correctness` gate executes the 20-case matrix and first-negative trap on
+Apple Silicon. Metal rejects activated shifts until it has a checked
+activation gate. Empty elementwise tensors allocate but do not dispatch.
+No raw dtype id or public numeric carrier is introduced.
+
 ## C4. Validated typed tensor access
 
 The runtime moves the raw descriptor into a `tensor_storage` module. Its fields,
@@ -1604,6 +1619,24 @@ active-debt rows therefore do not
 grow, and their reviewed digest stays fixed; only the code-derived final-form
 and execution manifest changes.
 
+Named List entry checks add three exact private metadata final forms for
+chelis#2627: `HostResultClaim::frame_lines` counts the axes witnessed by this
+invocation, `EntryWalkers::render` records the first observed shape and walks
+typed Lists, and `retained_list_pass::walk` walks an invoked callable's List
+formal. Their integer spellings serve shape comparison and bounded List
+indexing; they do not read tensor element storage or add a public carrier.
+The C emitter may pass a private entry receipt across a direct call when
+both bodies have the same positional contract and every observed argument
+has the verified owner admitted by the caller. A callee copies the named
+witness state into its own frame before executing its body. An exported
+wrapper may pass the receipt after its complete ordered entry check. Other
+calls run the direct/claimed-List entry walk. This keeps carried-List
+recursion from repeating the walk while preserving checks for new values.
+The exact path, kind, and owner identities have wrong-path, wrong-kind, and
+wrong-owner negatives. The Phase 0 execution leg runs the named List entry
+and retained callable tests on Eval and C. The frozen foundation and active
+debt do not grow.
+
 The captured activation-claim comparison adds the private
 `load-store-template` owner, `CEmitter::emit_runtime_dim_sites` in
 `chelis-backend-c/src/emit.rs`. It reads the captured int64 witness before the
@@ -1770,6 +1803,11 @@ identity requires a reviewed manifest amendment. A test newly selected by an
 existing command is an addition: it executes and is reported without changing
 the required floor. Neither a previous receipt nor a regenerated selection is an
 acceptance input.
+
+The named List entry and result-witness leg is also inherited from Phase 0.
+It pairs the `issue_2627_list_entry_extents` and `issue_1788_entry_obligations`
+execution targets; the Phase 1 manifest now freezes their 46 selected test
+identities and the exact inherited command.
 
 The integer-unary typed-lane amendment retains two inherited Phase 0 execution
 legs in the Phase 1 manifest: integer-to-float finalization freezes two native

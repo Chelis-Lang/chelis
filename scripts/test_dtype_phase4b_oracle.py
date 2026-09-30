@@ -80,8 +80,9 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
         cases = (
-            ("spec/10-serialization.md", "Schema version 22 is explicitly\npresent", "wire v22 presence"),
-            ("spec/10-serialization.md", "versions 1 through 21", "wire old-version rejection"),
+            ("spec/10-serialization.md", "Schema version 23 is explicitly\npresent", "wire v23 presence"),
+            ("spec/10-serialization.md", "versions 1 through 22", "wire old-version rejection"),
+            ("spec/10-serialization.md", "Version 23 requires an explicit `batch_rank` on `Gather`, `ScatterAdd`, and\n`Scatter` wire operations", "wire paired sparse batch rank"),
             ("spec/10-serialization.md", "and every future version are decode errors before any IR\nnode is consumed", "wire future-version rejection"),
             ("spec/10-serialization.md", "`schema_version: 4`", "execution v4 exactness"),
             ("spec/10-serialization.md", "f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
@@ -2066,15 +2067,14 @@ class ContractValidationTests(unittest.TestCase):
             REPO_ROOT / "spec/registry/stdlib_numeric_manifest.md"
         ).read_text(encoding="utf-8")
         rows = re.findall(r"^\| `([^`]+)` \|", registry, re.MULTILINE)
-        self.assertEqual(len(rows), 84)
-        self.assertEqual(len(set(rows)), 84)
+        self.assertEqual(len(rows), 73)
+        self.assertEqual(len(set(rows)), 73)
         identities = set(rows)
         for identity in (
             "decimal::decimal_add",
             "io/json::json_bigint",
             "io/json::load_json",
             "time::date_lt",
-            "tokenizer::load_tokenizer",
         ):
             with self.subTest(identity=identity):
                 self.assertIn(identity, identities)
@@ -2876,10 +2876,6 @@ class ContractValidationTests(unittest.TestCase):
             "A precision type variable in a tensor element or linked scalar position is numeric",
             self.repository_atom("05-OP-34"),
         )
-        self.assertIn(
-            "`init/xavier::sample` is not a language operation and must not be exported",
-            self.repository_atom("05-OP-35"),
-        )
 
     def test_assert_close_tensor_cannot_restore_f64_comparison(self) -> None:
         self.replace(
@@ -2988,34 +2984,6 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assertIn("`run_chelis` invokes exactly that path", normalized)
 
-    def test_stdlib_random_graph_is_exact(self) -> None:
-        block = oracle.atom_blocks(
-            (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")
-        )["05-OP-35"]
-        self.assertIn("`two_pi = round_p(2*pi)`", block)
-        self.assertIn("`cos_term = cos(mul(two_pi, u2))`", block)
-        self.assertIn("`mul(sub(mul(2p, u), 1p), bound)`", block)
-
-    def test_stdlib_random_graphs_keep_pathwise_adjoints(self) -> None:
-        path = self.root / "spec/05-risc-primitives.md"
-        mutations = (
-            (
-                "every random\n"
-                "> stdlib callable has the pathwise adjoint of its exact graph above",
-                "random stdlib callables structurally reject grad",
-                "OP-35.*pathwise adjoint",
-            ),
-        )
-        for old, new, message in mutations:
-            with self.subTest(message=message):
-                original = path.read_text(encoding="utf-8")
-                self.assertIn(old, original)
-                path.write_text(original.replace(old, new, 1), encoding="utf-8")
-                try:
-                    self.assert_contract_fails(message)
-                finally:
-                    path.write_text(original, encoding="utf-8")
-
     def test_rng_stream_cannot_vary_by_compiler_version(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
@@ -3024,27 +2992,10 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("05-RNG-1.*compiler version")
 
-    def test_random_rounded_high_endpoint_rule_is_frozen(self) -> None:
-        self.replace(
-            Path("spec/05-risc-primitives.md"),
-            "rounded result equals the stored upper endpoint",
-            "rounded result may equal the stored upper endpoint",
-        )
-        self.assert_contract_fails("OP-35.*upper endpoint")
-
-    def test_xavier_computed_denominator_must_be_finite_positive(self) -> None:
-        self.replace(
-            Path("spec/05-risc-primitives.md"),
-            "computed\n> denominator must be finite and strictly positive",
-            "computed denominator may be non-finite or nonpositive",
-        )
-        self.assert_contract_fails("OP-35.*denominator")
-
     def test_stdlib_tensor_signatures_are_precision_generalized(self) -> None:
         block = self.repository_atom("05-OP-35")
         for signature in (
             "`contracts::normal_cdf` | `(p_float)->p_float`",
-            "`init/random::normal_like` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]`",
             "`tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]`",
             "`tensor/construct::stack` | `(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "`test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`",
@@ -3057,10 +3008,6 @@ class ContractValidationTests(unittest.TestCase):
     def test_stdlib_tensor_manifest_cannot_restore_fixed_current_ranks(self) -> None:
         path = self.root / "spec/registry/stdlib_numeric_manifest.md"
         mutations = (
-            (
-                "(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]",
-                "(key,&tensor[n,p_float],p_float)->tensor[n,p_float]",
-            ),
             (
                 "(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]",
                 "(&tensor[a,1,b,p],i32)->tensor[a,b,p]",
@@ -3197,40 +3144,6 @@ class ContractValidationTests(unittest.TestCase):
             "A negative year uses an implementation-defined number of digits",
         )
         self.assert_contract_fails("OP-35.*negative year")
-
-    def test_tokenizer_merge_pairs_are_unique_across_ranks(self) -> None:
-        self.replace(
-            Path("spec/05-risc-primitives.md"),
-            "no token\n> pair occurs at more than one merge rank",
-            "a token pair may occur at multiple merge ranks",
-        )
-        self.assert_contract_fails("OP-35.*token pair")
-
-    def test_tokenizer_merge_encode_decode_rules_are_frozen(self) -> None:
-        path = self.root / "spec/05-risc-primitives.md"
-        mutations = (
-            (
-                "repeatedly selects the lowest merge\n> rank and then the leftmost pair",
-                "repeatedly selects an implementation-defined merge pair",
-            ),
-            (
-                "`encode` maps each final token through `vocab`",
-                "`encode` may assign an implementation-defined ID",
-            ),
-            (
-                "`decode` maps each ID through the\n> inverse vocabulary",
-                "`decode` may drop unknown IDs",
-            ),
-        )
-        for old, new in mutations:
-            with self.subTest(old=old):
-                original = path.read_text(encoding="utf-8")
-                self.assertIn(old, original)
-                path.write_text(original.replace(old, new, 1), encoding="utf-8")
-                try:
-                    self.assert_contract_fails("OP-35")
-                finally:
-                    path.write_text(original, encoding="utf-8")
 
     def test_bool_counting_has_no_explicit_cast_compatibility_idiom(self) -> None:
         self.replace(

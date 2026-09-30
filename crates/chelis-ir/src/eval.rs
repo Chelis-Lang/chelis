@@ -1526,21 +1526,50 @@ fn index_at(indices: &TensorValue, linear: usize) -> isize {
     }
 }
 
-fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> Result<TensorValue, String> {
+fn sparse_domain_shape(
+    base: &[usize],
+    indices: &[usize],
+    axis: usize,
+    batch_rank: usize,
+) -> Vec<usize> {
+    assert!(batch_rank <= axis && batch_rank <= indices.len());
+    assert_eq!(&base[..batch_rank], &indices[..batch_rank]);
+    base[..axis]
+        .iter()
+        .chain(&indices[batch_rank..])
+        .chain(&base[axis + 1..])
+        .copied()
+        .collect()
+}
+
+fn sparse_index_coordinate(
+    domain_index: &[usize],
+    axis: usize,
+    batch_rank: usize,
+    index_rank: usize,
+) -> Vec<usize> {
+    domain_index[..batch_rank]
+        .iter()
+        .chain(&domain_index[axis..axis + index_rank - batch_rank])
+        .copied()
+        .collect()
+}
+
+fn gather(
+    values: &TensorValue,
+    indices: &TensorValue,
+    axis: usize,
+    batch_rank: usize,
+) -> Result<TensorValue, String> {
     assert!(axis < values.shape.len());
     let index_rank = indices.shape.len();
-    let mut out_shape = Vec::with_capacity(values.shape.len() - 1 + index_rank);
-    out_shape.extend_from_slice(&values.shape[..axis]);
-    out_shape.extend_from_slice(&indices.shape);
-    out_shape.extend_from_slice(&values.shape[axis + 1..]);
+    let index_suffix_rank = index_rank - batch_rank;
+    let out_shape = sparse_domain_shape(&values.shape, &indices.shape, axis, batch_rank);
     let out_len = admit_result("gather", &out_shape, values.prim())?;
     let mut picks = Vec::with_capacity(out_len);
     for out_linear in 0..out_len {
         let out_index = linear_to_index(out_linear, &out_shape);
-        let mut idx_index = Vec::with_capacity(index_rank);
-        for pos in 0..index_rank {
-            idx_index.push(out_index[axis + pos]);
-        }
+        let idx_index = sparse_index_coordinate(&out_index, axis, batch_rank, index_rank);
         let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
         assert!(
             gathered >= 0 && (gathered as usize) < values.shape[axis],
@@ -1549,7 +1578,7 @@ fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> Result<Te
         let mut value_index = Vec::with_capacity(values.shape.len());
         value_index.extend_from_slice(&out_index[..axis]);
         value_index.push(gathered as usize);
-        value_index.extend_from_slice(&out_index[axis + index_rank..]);
+        value_index.extend_from_slice(&out_index[axis + index_suffix_rank..]);
         picks.push(index_to_linear(&value_index, &values.shape));
     }
     // reuse_* contract: gather is element-preserving (section C3).
@@ -1564,24 +1593,20 @@ fn scatter_add(
     indices: &TensorValue,
     updates: &TensorValue,
     axis: usize,
+    batch_rank: usize,
     prim: Prim,
 ) -> Result<TensorValue, String> {
     assert!(axis < target.shape.len());
     let index_rank = indices.shape.len();
-    let mut expected_updates = Vec::with_capacity(target.shape.len() - 1 + index_rank);
-    expected_updates.extend_from_slice(&target.shape[..axis]);
-    expected_updates.extend_from_slice(&indices.shape);
-    expected_updates.extend_from_slice(&target.shape[axis + 1..]);
+    let index_suffix_rank = index_rank - batch_rank;
+    let expected_updates = sparse_domain_shape(&target.shape, &indices.shape, axis, batch_rank);
     assert_eq!(updates.shape, expected_updates);
 
     let mut out = target.to_f64_lossy_vec();
     let upd = updates.to_f64_lossy_vec();
     for (update_linear, update) in upd.iter().enumerate() {
         let update_index = linear_to_index(update_linear, &updates.shape);
-        let mut idx_index = Vec::with_capacity(index_rank);
-        for pos in 0..index_rank {
-            idx_index.push(update_index[axis + pos]);
-        }
+        let idx_index = sparse_index_coordinate(&update_index, axis, batch_rank, index_rank);
         let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
         assert!(
             gathered >= 0 && (gathered as usize) < target.shape[axis],
@@ -1590,7 +1615,7 @@ fn scatter_add(
         let mut target_index = Vec::with_capacity(target.shape.len());
         target_index.extend_from_slice(&update_index[..axis]);
         target_index.push(gathered as usize);
-        target_index.extend_from_slice(&update_index[axis + index_rank..]);
+        target_index.extend_from_slice(&update_index[axis + index_suffix_rank..]);
         let target_linear = index_to_linear(&target_index, &target.shape);
         out[target_linear] += update;
     }
@@ -1612,22 +1637,18 @@ fn scatter_replace(
     indices: &TensorValue,
     updates: &TensorValue,
     axis: usize,
+    batch_rank: usize,
 ) -> TensorValue {
     assert!(axis < target.shape.len());
     let index_rank = indices.shape.len();
-    let mut expected_updates = Vec::with_capacity(target.shape.len() - 1 + index_rank);
-    expected_updates.extend_from_slice(&target.shape[..axis]);
-    expected_updates.extend_from_slice(&indices.shape);
-    expected_updates.extend_from_slice(&target.shape[axis + 1..]);
+    let index_suffix_rank = index_rank - batch_rank;
+    let expected_updates = sparse_domain_shape(&target.shape, &indices.shape, axis, batch_rank);
     assert_eq!(updates.shape, expected_updates);
 
     let mut writes = Vec::with_capacity(updates.len());
     for update_linear in 0..updates.len() {
         let update_index = linear_to_index(update_linear, &updates.shape);
-        let mut idx_index = Vec::with_capacity(index_rank);
-        for pos in 0..index_rank {
-            idx_index.push(update_index[axis + pos]);
-        }
+        let idx_index = sparse_index_coordinate(&update_index, axis, batch_rank, index_rank);
         let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
         assert!(
             gathered >= 0 && (gathered as usize) < target.shape[axis],
@@ -1636,7 +1657,7 @@ fn scatter_replace(
         let mut target_index = Vec::with_capacity(target.shape.len());
         target_index.extend_from_slice(&update_index[..axis]);
         target_index.push(gathered as usize);
-        target_index.extend_from_slice(&update_index[axis + index_rank..]);
+        target_index.extend_from_slice(&update_index[axis + index_suffix_rank..]);
         // Last-write-wins: deterministic-order overwrite.
         writes.push((index_to_linear(&target_index, &target.shape), update_linear));
     }
@@ -4745,21 +4766,26 @@ where
                     batched_matmul(lhs, rhs, out_prim)?
                 }
             }
-            RiscOp::Gather { axis } => {
-                gather(&values[&node.inputs[0]], &values[&node.inputs[1]], *axis)?
-            }
-            RiscOp::ScatterAdd { axis } => scatter_add(
+            RiscOp::Gather { axis, batch_rank } => gather(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                *axis,
+                *batch_rank,
+            )?,
+            RiscOp::ScatterAdd { axis, batch_rank } => scatter_add(
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
                 &values[&node.inputs[2]],
                 *axis,
+                *batch_rank,
                 out_prim,
             )?,
-            RiscOp::Scatter { axis } => scatter_replace(
+            RiscOp::Scatter { axis, batch_rank } => scatter_replace(
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
                 &values[&node.inputs[2]],
                 *axis,
+                *batch_rank,
             ),
             RiscOp::ScatterElements { axis } => scatter_elements(
                 &values[&node.inputs[0]],
@@ -5075,6 +5101,7 @@ fn inactive_unchecked_value(
         | RuntimeCheck::MeanDivisor
         | RuntimeCheck::Random
         | RuntimeCheck::Abort
+        | RuntimeCheck::SparseIndex
         | RuntimeCheck::Ungated => Ok(None),
     }
 }
@@ -6327,7 +6354,10 @@ mod tests {
         );
         let out = dag.add_node(
             decl,
-            RiscOp::Gather { axis: 1 },
+            RiscOp::Gather {
+                axis: 1,
+                batch_rank: 0,
+            },
             vec![values, indices],
             tensor_ty(&[2, 3, 2], Prim::F32),
             None,
@@ -6389,7 +6419,10 @@ mod tests {
         );
         let out = dag.add_node(
             decl,
-            RiscOp::ScatterAdd { axis: 1 },
+            RiscOp::ScatterAdd {
+                axis: 1,
+                batch_rank: 0,
+            },
             vec![target, indices, updates],
             tensor_ty(&[2, 3, 2], Prim::F32),
             None,

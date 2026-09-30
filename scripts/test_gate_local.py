@@ -187,6 +187,7 @@ class WorkspaceMemberPackagesTests(unittest.TestCase):
 
 class LocalCommandListTests(unittest.TestCase):
 
+
     def test_appends_one_nextest_run_per_changed_crate(self):
         commands = gate.local_command_list(["chelis-cli", "chelis-surf"])
         self.assertEqual(commands[: len(gate.LOCAL_STATIC_COMMANDS)],

@@ -12,6 +12,13 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      validation_scope:
+        description: Extended validation scope
+        required: true
+        default: all
+        type: choice
+        options: [all, runtime-representation, dtype-phase3, runtime-extent]
 
 permissions:
   contents: read
@@ -24,14 +31,61 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  dispatch-scope:
+    name: Record dispatch scope
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Write dispatch scope receipt
+        env:
+          VALIDATION_SCOPE: ${{ inputs.validation_scope }}
+          RECEIPT_RUN_ID: ${{ github.run_id }}
+          RECEIPT_HEAD_SHA: ${{ github.sha }}
+        run: |
+          .venv/bin/python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          scope = os.environ["VALIDATION_SCOPE"]
+          if scope not in {
+              "all", "runtime-representation", "dtype-phase3", "runtime-extent",
+          }:
+              raise SystemExit(f"invalid validation scope: {scope!r}")
+          receipt = {
+              "version": 1,
+              "event": "workflow_dispatch",
+              "scope": scope,
+              "run_id": os.environ["RECEIPT_RUN_ID"],
+              "head_sha": os.environ["RECEIPT_HEAD_SHA"],
+          }
+          destination = Path("target/dispatch-scope/scope.json")
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          destination.write_text(json.dumps(receipt, sort_keys=True) + "\n")
+          PY
+
+      - name: Upload dispatch scope receipt
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-extended-dispatch-scope
+          path: target/dispatch-scope/scope.json
+          if-no-files-found: error
+          retention-days: 14
+
   # Devenv-backed jobs retain their execution budget plus 25 minutes for cold setup.
   #
-  # Runs on main (the nightly schedule and dispatches on main) execute every job
-  # except test-telemetry on the self-hosted warm runners, which substitute from
-  # the private Nix/Kache caches instead of rebuilding from source. The warm
-  # broker admits each of these jobs only from refs/heads/main, so a dispatch on
-  # any other branch (candidate validation) stays GitHub-hosted. test-telemetry
-  # keeps the hosted uv-managed interpreter.
+  # Execution jobs selected on main use the self-hosted warm runners, which
+  # substitute from the private Nix/Kache caches instead of rebuilding from
+  # source. The warm broker admits them only from refs/heads/main, so candidate
+  # dispatches stay GitHub-hosted. test-telemetry and the scope receipt use
+  # GitHub-hosted runners.
   #
   # On main those warm jobs also share the linux-extended-warm-x64 concurrency
   # group, so a run holds at most one runner of the two-runner pool and leaves
@@ -40,6 +94,7 @@ jobs:
   # order; the default queue would cancel all but one of them. Off main each
   # job has its own group, so hosted candidate validation stays parallel.
   full-workspace:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Full Workspace (Linux, shard ${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
@@ -102,6 +157,7 @@ jobs:
         run: cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
 
   script-nightly:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Script Integration Tests (Linux)
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:
@@ -175,6 +231,7 @@ jobs:
           retention-days: 14
 
   dtype-phase3-oracle:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.validation_scope == 'all' || inputs.validation_scope == 'dtype-phase3')) }}
     name: Dtype Phase 0-3 Oracle
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:
@@ -279,6 +336,7 @@ jobs:
           retention-days: 14
 
   faithful-observation-phase2-oracle:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Faithful Observation Phase 2 Oracle
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:
@@ -316,6 +374,7 @@ jobs:
         run: python scripts/faithful_observation_phase2_oracle.py
 
   compiled-value-ownership-phase0-oracle:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Compiled Value Ownership Phase 2 Oracle
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:
@@ -354,6 +413,7 @@ jobs:
         run: python scripts/compiled_value_ownership_oracle.py --phase launch
 
   runtime-representation-phase0-oracle:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.validation_scope == 'all' || inputs.validation_scope == 'runtime-representation')) }}
     name: Runtime Representation Phase 2 Oracle
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:
@@ -407,6 +467,7 @@ jobs:
           retention-days: 14
 
   runtime-extent-oracle:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.validation_scope == 'all' || inputs.validation_scope == 'runtime-extent')) }}
     name: Runtime Extent Oracle (chelis#1277)
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:
@@ -419,6 +480,7 @@ jobs:
     permissions:
       contents: read
     env:
+      CHELIS_CI_TIMING_DIR: ${{ github.workspace }}/target/runtime-extent-timings
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
@@ -452,7 +514,17 @@ jobs:
       - name: Runtime extent oracle (completion)
         run: python scripts/runtime_extent_oracle.py --phase final
 
+      - name: Upload runtime extent target and case timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-extent-timings
+          path: target/runtime-extent-timings
+          if-no-files-found: warn
+          retention-days: 14
+
   generalize-sweep-oracle-shard:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
@@ -516,6 +588,7 @@ jobs:
           retention-days: 14
 
   generalize-sweep-oracle:
+    if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all')) }}
     name: Typecheck Level Generalization Oracle
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:
@@ -524,7 +597,6 @@ jobs:
     permissions:
       contents: read
     needs: [generalize-sweep-oracle-shard]
-    if: always()
     steps:
       - uses: actions/checkout@v6
 
@@ -532,6 +604,7 @@ jobs:
         run: python3 scripts/ci_require_success.py generalize-sweep-oracle-shard=${{ needs.generalize-sweep-oracle-shard.result }}
 
   integration-support:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Integration Support (Linux, ${{ matrix.slice }})
     strategy:
       fail-fast: false
@@ -575,6 +648,7 @@ jobs:
         run: chelis-gate integration --support-only --support-slice ${{ matrix.slice }}
 
   backend-sanitizers-full:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Backend Sanitizers (Full)
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:
@@ -614,7 +688,7 @@ jobs:
     permissions:
       contents: read
     needs: [full-workspace, dtype-phase3-oracle, generalize-sweep-oracle-shard]
-    if: ${{ !cancelled() && needs.full-workspace.result == 'success' && needs.dtype-phase3-oracle.result == 'success' && needs.generalize-sweep-oracle-shard.result == 'success' }}
+    if: ${{ !cancelled() && needs.full-workspace.result == 'success' && needs.dtype-phase3-oracle.result == 'success' && needs.generalize-sweep-oracle-shard.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all')) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -702,8 +776,8 @@ jobs:
 
   report:
     name: Surface nightly status
-    needs: [script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, runtime-extent-oracle, generalize-sweep-oracle-shard, full-workspace, integration-support, backend-sanitizers-full]
-    if: always() && github.ref == 'refs/heads/main'
+    needs: [dispatch-scope, script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, runtime-extent-oracle, generalize-sweep-oracle-shard, full-workspace, integration-support, backend-sanitizers-full]
+    if: always() && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all'))
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     concurrency:
       group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-report', github.run_id) }}
@@ -718,7 +792,12 @@ jobs:
         with:
           script: |
             const title = 'Nightly failing: Linux Extended Validation';
-            const passed = Object.values(JSON.parse(process.env.RESULTS)).every(job => job.result === 'success');
+            const results = JSON.parse(process.env.RESULTS);
+            const passed = Object.entries(results).every(([name, job]) =>
+              name === 'dispatch-scope' && context.eventName === 'schedule'
+                ? job.result === 'skipped'
+                : job.result === 'success'
+            );
             const { owner, repo } = context.repo;
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const q = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;

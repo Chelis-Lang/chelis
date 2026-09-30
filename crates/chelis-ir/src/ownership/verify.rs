@@ -714,9 +714,14 @@ fn census_host_expr<'a>(
         | ConcreteHostExprKind::Tuple(items, _)
         | ConcreteHostExprKind::AdtConstruct { fields: items, .. }
         | ConcreteHostExprKind::Call { args: items, .. }
-        | ConcreteHostExprKind::SignatureEntry { args: items, .. }
         | ConcreteHostExprKind::Builtin { args: items, .. } => {
             for item in items {
+                sites.push(expected_site(unit, HostSiteKind::Argument));
+                census_host_expr(item, helpers, unit, sites)?;
+            }
+        }
+        ConcreteHostExprKind::SignatureEntry { args, lists, .. } => {
+            for item in args.iter().chain(lists.iter().map(|entry| &entry.value)) {
                 sites.push(expected_site(unit, HostSiteKind::Argument));
                 census_host_expr(item, helpers, unit, sites)?;
             }

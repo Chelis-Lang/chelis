@@ -1,0 +1,955 @@
+{
+  "cases": [
+    {
+      "case_id": "c-note/docs/qa_evidence/ground_truth/bs_pricing.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "price"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "docs/qa_evidence/ground_truth/bs_pricing.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "c-note/docs/qa_evidence/ground_truth/greeks.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "known_divergence": {
+        "issue": 2379
+      },
+      "notes": "eval returns a value; `build --target c` refuses. Verified discriminator: a `cast` node in the scalar-`wrt` differentiated body. Identical on 0.18.11 and main",
+      "roots": [
+        "delta"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "docs/qa_evidence/ground_truth/greeks.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "c-note/docs/qa_evidence/ground_truth/square.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "result"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "docs/qa_evidence/ground_truth/square.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "c-note/docs/qa_evidence/ground_truth/upper.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "S"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "docs/qa_evidence/ground_truth/upper.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "c-note/fixtures/black_scholes/call.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "known_divergence": {
+        "issue": 2379
+      },
+      "notes": "eval returns a value; `build --target c` refuses. Verified discriminator: a `cast` node in the scalar-`wrt` differentiated body. Identical on 0.18.11 and main",
+      "roots": [
+        "price",
+        "delta"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "fixtures/black_scholes/call.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "c-note/fixtures/exemplars/black_scholes/source.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "price"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "fixtures/exemplars/black_scholes/source.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "c-note/fixtures/templates/sources/black_scholes_greeks.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "call_price",
+        "call_delta",
+        "call_gamma",
+        "call_vega"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "fixtures/templates/sources/black_scholes_greeks.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "c-note/fixtures/templates/sources/two_period_bond.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "coupon",
+        "yield_rate",
+        "price"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "fixtures/templates/sources/two_period_bond.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "c-note/fixtures/tensor/grad_output.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "grad_at_3"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "fixtures/tensor/grad_output.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "c-note/fixtures/tensor/vector_output.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "make_vec",
+        "result"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "fixtures/tensor/vector_output.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "c-note/src/lib.ch",
+      "corpus": "c-note",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "version"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "src/lib.ch",
+        "repo": "Chelis-Lang/c-note",
+        "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "sonar/landing/fixtures/builtin_parameter.ch",
+      "corpus": "sonar",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "answer"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "landing/fixtures/builtin_parameter.ch",
+        "repo": "Chelis-Lang/sonar",
+        "rev": "9b26133f66988ef6643ff0d2fdab1ce90d104714"
+      },
+      "truncating_roots": []
+    },
+    {
+      "case_id": "sonar/landing/review/economoist-release/tensor-source.ch",
+      "corpus": "sonar",
+      "expected": "value",
+      "notes": "",
+      "roots": [
+        "result"
+      ],
+      "source": {
+        "kind": "committed",
+        "path": "landing/review/economoist-release/tensor-source.ch",
+        "repo": "Chelis-Lang/sonar",
+        "rev": "9b26133f66988ef6643ff0d2fdab1ce90d104714"
+      },
+      "truncating_roots": []
+    }
+  ],
+  "corpora": {
+    "c-note": {
+      "expected_case_count": 11,
+      "repo": "Chelis-Lang/c-note",
+      "rev": "960a9beb458fc794086a2a36ecc93c8979ece1d0"
+    },
+    "sonar": {
+      "expected_case_count": 2,
+      "repo": "Chelis-Lang/sonar",
+      "rev": "9b26133f66988ef6643ff0d2fdab1ce90d104714"
+    }
+  },
+  "exclusions": [
+    {
+      "corpus": "c-note",
+      "notes": "error: expected property precondition without redundant outer grouping, found parenthesized property precondition at byte 387",
+      "path": "docs/qa_evidence/ground_truth/bellman.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "error: expected property precondition without redundant outer grouping, found parenthesized property precondition at byte 760",
+      "path": "docs/qa_evidence/ground_truth/bs_property.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "error: expected property precondition without redundant outer grouping, found parenthesized property precondition at byte 332",
+      "path": "docs/qa_evidence/ground_truth/gordon.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "error: expected property precondition without redundant outer grouping, found parenthesized property precondition at byte 406",
+      "path": "docs/qa_evidence/ground_truth/gordon_ad.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "error: expected property precondition without redundant outer grouping, found parenthesized property precondition at byte 351",
+      "path": "docs/qa_evidence/ground_truth/gordon_brokenmodel.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "error: expected property precondition without redundant outer grouping, found parenthesized property precondition at byte 303",
+      "path": "docs/qa_evidence/ground_truth/gordon_wrong.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "error: expected property precondition without redundant outer grouping, found parenthesized property precondition at byte 308",
+      "path": "docs/qa_evidence/ground_truth/markov.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/black_scholes/put_call_parity.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/dischargeability/probes/p01_gordon_div_positive.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/dischargeability/probes/p02_gordon_two_point_r.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/dischargeability/probes/p03_gordon_two_point_d.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/dischargeability/probes/p04_ite_two_call.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`, so the case owns no root; `build --target c` separately exits nonzero with the generic grad-lowering refusal (chelis#2755). The exit asymmetry hides no observation divergence: there is no observation",
+      "path": "fixtures/dischargeability/probes/p05_grad_fuzz.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`, so the case owns no root; `build --target c` separately exits nonzero with the generic grad-lowering refusal (chelis#2755). The exit asymmetry hides no observation divergence: there is no observation",
+      "path": "fixtures/dischargeability/probes/p06_nested_grad.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/dischargeability/probes/p07_depth_inline.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/dischargeability/probes/p08_pkg_bs_positive.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/dischargeability/probes/p09_preconditions_shape.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/dischargeability/probes/p10_pkg_eval_roots.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/dischargeability/probes/p11_fuzz_box.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "BuiltinShadowing: `def relu` shadows the builtin function `relu`: user `def`/`sig` declarations may not reuse builtin names (spec/04-type-system.md \u00a78.6). Top-level builtin names i",
+      "path": "fixtures/dischargeability/probes/p14_crr_two_step.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/dischargeability/probes/p15_nested_fmax3.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/bellman/corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/bellman/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/crr_no_arbitrage/corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/crr_no_arbitrage/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/crr_nodisc_arbitrage/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/discount_factor/corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/discount_factor/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/exemplars/economoist_markov_mass/corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/exemplars/economoist_markov_mass/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/future_value/corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/future_value/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/gordon_pv/corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/gordon_pv/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`, so the case owns no root; `build --target c` separately exits nonzero with the generic grad-lowering refusal (chelis#2755). The exit asymmetry hides no observation divergence: there is no observation",
+      "path": "fixtures/exemplars/gordon_sensitivity/corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`, so the case owns no root; `build --target c` separately exits nonzero with the generic grad-lowering refusal (chelis#2755). The exit asymmetry hides no observation divergence: there is no observation",
+      "path": "fixtures/exemplars/gordon_sensitivity/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/markov/corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars/markov/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/exemplars/shoals_put_call_parity/corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/exemplars/shoals_put_call_parity/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars_forge/vacuous_guard/corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/exemplars_forge/vacuous_guard/source.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/notebook_dependency_graph/src/a.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (parameterised `def`s only; no top-level binding and no effect-free nullary `def` with a value result), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/notebook_dependency_graph/src/b.ch",
+      "reason": "library-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/properties/fuzz_validated.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/properties/gordon_corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/properties/gordon_honest.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/properties/known_false.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/properties/smt_provable.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/properties/square_nonneg.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/properties/unsupported_smt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/properties/unsupported_smt_only.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/shoals_catalog/src/catalog.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/templates/sources/black_scholes_exploration.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/templates/sources/black_scholes_properties.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/templates/sources/black_scholes_provider.ch",
+      "reason": "library-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/templates/sources/bond_exploration.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/templates/sources/bond_properties.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/templates/sources/bond_provider.ch",
+      "reason": "library-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/templates/sources/crr_exploration.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/templates/sources/crr_greek_signs.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/templates/sources/crr_greek_signs_corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/templates/sources/crr_properties.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/templates/sources/crr_provider.ch",
+      "reason": "library-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/templates/sources/historical_risk_corrupt.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/templates/sources/historical_risk_exploration.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/templates/sources/historical_risk_properties.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/templates/sources/historical_risk_provider.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/templates/sources/parametric_risk_corrupt.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/templates/sources/parametric_risk_exploration.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "fixtures/templates/sources/parametric_risk_properties.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "path": "fixtures/templates/sources/parametric_risk_provider.ch",
+      "reason": "unmeasurable-by-probe"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "fixtures/templates/sources/two_period_bond_corrupt.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "c-note",
+      "notes": "owns no root under [05-OBS-7] (parameterised `def`s only; no top-level binding and no effect-free nullary `def` with a value result), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
+      "path": "tests_neg/nn/input_rank.ch",
+      "reason": "library-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/identity-root-probe.ch",
+      "reason": "library-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "error: expected `,` or `:` in property where clause, found Ident(\"and\") at byte 78",
+      "path": "landing/review/g3/conjunction.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "carries `chelis_role: \"property\"` declarations and owns no root; after canonical formatting eval reports `input contains only def declarations; nothing to evaluate`",
+      "path": "landing/review/g3/deep-fallback-canonical.dp",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "Deep ingress rejects it: `stamp error: metadata `property_quantifiers` requires the required property metadata field at byte 19; see spec/03 \u00a71.1 [03-META-1/2]`",
+      "path": "landing/review/g3/deep-fallback.dp",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/duplicate-box.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/equality.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/expired-wall.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "PrecisionMismatch: precision mismatch: expected f64, got f32 at byte 113 [surf:113..142] (suggestion: Insert explicit cast)",
+      "path": "landing/review/g3/f32-bound.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/identity.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/import.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/inverted-box.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/refute.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/relu.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/reverse.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/rounding.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "BuiltinShadowing: `def tensor_to_scalar` shadows the builtin function `tensor_to_scalar`: user `def`/`sig` declarations may not reuse builtin names (spec/04-type-system.md \u00a78.6). T",
+      "path": "landing/review/g3/shadow-bridge.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/strict-box.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/strict-goal.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/unused-param.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "path": "landing/review/g3/zero-budget.ch",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "error: cyclic top-level runtime definition `x`",
+      "path": "landing/scalar-root-probe.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "error: cyclic top-level runtime definition `x`",
+      "path": "landing/tensor-root-probe.ch",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1a-weight-bit-exactness/pkg/src/tinymlp.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1a-weight-bit-exactness/tiny_mlp.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1b-end-to-end-differential/iris_classifier.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1b-end-to-end-differential/iris_probe_0184.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1b-end-to-end-differential/tiny_mlp.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1b-end-to-end-differential/work_iris/probe_module.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1b-end-to-end-differential/work_tiny/probe_module.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1c-unsupported-op/gelu_std.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1d-dynamic-batch/dyn_probe.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1d-dynamic-batch/tiny_mlp_dyn.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1e-shape-chain-folding/A_static_nofold.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1e-shape-chain-folding/C_static_fold.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1e-shape-chain-folding/D_static_handchain.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1f-reshape-allowzero/P2_az1_pos_same.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1f-reshape-allowzero/P4_az0_copy_control.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1g-acasxu-ir3/acasxu_fmt_main.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1g-acasxu-ir3/acasxu_opset11.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R1g-acasxu-ir3/acasxu_opset11_ir8_stripped.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R3a-imported-network-composition/composed.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R3a-imported-network-composition/composed463.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R3a-imported-network-composition/iris_emitted.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R3a-imported-network-composition/mlp463.ch",
+      "reason": "retired-syntax"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "pre-0.19 integer dtype spelling; the diagnostic names `chelis migrate surf --from 0.18` as the migration",
+      "path": "recon/probes/R3a-imported-network-composition/mlp463_fmt.ch",
+      "reason": "retired-syntax"
+    }
+  ],
+  "manifest_version": 3,
+  "owning_issue": 2102
+}

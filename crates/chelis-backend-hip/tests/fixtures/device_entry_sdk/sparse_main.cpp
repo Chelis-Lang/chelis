@@ -30,6 +30,7 @@ static chelis_device_tensor_owner *input(const void *host, size_t bytes, chelis_
 
 int main(int argc, char **argv) {
     const bool wrong_device = argc > 1 && !strcmp(argv[1], "wrong-second-device");
+    const bool wrong_index = argc > 1 && !strcmp(argv[1], "wrong-index");
     std::vector<void *> storage;
     std::vector<chelis_device_tensor_owner *> inputs;
     float target[] = {1, 3, 5, 2, 4, 6};
@@ -44,9 +45,11 @@ int main(int argc, char **argv) {
 #endif
 #if TEST_SPARSE == 3
     Index indices[] = {2, 2, 0, 1};
+    if (wrong_index) indices[0] = 3;
     inputs.push_back(input(indices, sizeof(indices), index_dtype, {2, 2}, {1, 2}, 4, storage));
 #else
     Index indices[] = {2, 777, 0, 777, 2, 777, 1};
+    if (wrong_index) indices[0] = 3;
     inputs.push_back(input(indices, sizeof(indices), index_dtype, {4}, {2}, 4, storage));
 #endif
     if (wrong_device) REQUIRE(hipSetDevice(0) == hipSuccess);

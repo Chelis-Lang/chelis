@@ -1,34 +1,24 @@
-//! W6 acceptance oracle for the worked opaque-invariants examples.
-//!
-//! Two executable files (Example Corpus Policy):
+//! Acceptance tests for the executable opaque-invariant examples.
 //!
 //! - `examples/opaque_invariants.ch` (executable): the `Probability`
-//!   unit-interval type. Every part runs clean -- `fmt --check`, `check`
+//!   unit-interval type. It passes `fmt --check`, `check`
 //!   (score 1), `eval`/`build` (no owed roots), and `prove` (three SMT-tier
-//!   producer obligations plus an injected property).
+//!   producer obligations plus a property checked over invariant-valid
+//!   generated values).
 //! - `examples/opaque_invariants_simplex.ch` (executable): the `Simplex`
 //!   tolerance-band type with a `sum`-over-a-tensor-field invariant. The
 //!   invariant predicate is declaration metadata consumed only by `chelis
-//!   prove`; it is never lowered to runtime IR, so the runtime IR audit skips
-//!   it and the file now `eval`/`build`s cleanly. Its top-level `eps` value is
-//!   an automatic owed root under [05-OBS-7]. Its producer obligation
-//!   discharges at Tier C (fuzz) and a
-//!   `Simplex` binder is served by constructor-based generation without
-//!   starving (the D-STARVE acceptance probe). Promoted from
-//!   `examples/illustrative/` once that audit stopped rejecting the
-//!   declaration metadata.
+//!   prove`; it is never lowered to runtime IR. Its top-level `eps` value is
+//!   evaluated by `eval`. Its producer obligation discharges through fuzz
+//!   sampling, and constructor-based generation supplies invariant-valid
+//!   `Simplex` binders.
 //!
-//! This pins both files on the RFC surface (`opaque_invariants_rfc.md`
-//! D-PRODUCER, D-OBLIG, D-TIERB, D-INJECT, D-STARVE): the exact obligation
-//! names, statuses, and proof tiers the docs page transcribes.
+//! These tests check that the documented obligation names, statuses, and
+//! proof tiers match the command output.
 //!
-//! The obligation surface compiles only under the `smt` feature (the Tier B
-//! lowering lives in the optional `chelis-prove` dependency), so the prove
-//! assertions are `#[cfg(feature = "smt")]`; the `check`-clean assertions run
-//! unconditionally. Run the full oracle with:
-//!   `cargo nextest run -p chelis-cli --features smt
-//!     --test opaque_invariants_example`
-//! with `LD_LIBRARY_PATH` set to the uv python lib (see AGENTS.md).
+//! The prove assertions require the `smt` feature. Run them with
+//! `scripts/z3_test.py --cargo-subcommand "nextest run -p chelis-cli"
+//! --features smt --test opaque_invariants_example`.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -98,11 +88,9 @@ fn both_examples_check_clean_with_score_one() {
 
 /// `eval --file` succeeds on both examples. `Probability` has no owed roots,
 /// so it emits the def-only warning and produces no value. `Simplex` has the
-/// top-level `eps` binding, which [05-OBS-7] requires it to realize.
-/// This is the regression guard for the runtime IR audit fix: before it, the
-/// `Simplex` tensor-field invariant tripped `assert_ir_typed`
-/// ("shape-sensitive IR app nodes must carry explicit type metadata before
-/// lowering") because the audit walked the declaration metadata.
+/// top-level `eps` binding, which the evaluator realizes as a root.
+/// The invariant remains declaration metadata for `chelis prove`; it does
+/// not enter the runtime IR when `eval` realizes the top-level `eps` value.
 fn assert_eval_without_roots(path: &PathBuf) {
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -157,6 +145,36 @@ fn both_examples_build_clean() {
 #[cfg(feature = "smt")]
 mod prove_oracle {
     use super::*;
+
+    #[test]
+    fn integer_module_constant_arithmetic_generates_property_samples() {
+        let directory = tempdir().expect("temporary source directory");
+        let path = directory.path().join("integer_bound.ch");
+        std::fs::write(
+            &path,
+            "module Stats.IntegerBound
+export (make)
+@opaque
+@invariant(p) p.value >= bound - 2i64
+type LargeInt =
+  | LargeInt { value: i64 }
+def bound() -> i64 = 3i64
+def make(x: i64) -> Option[LargeInt] =
+  if x >= 1i64 then Some(LargeInt { value: x }) else None
+@property generated forall(p: LargeInt):
+  p.value >= 1i64
+",
+        )
+        .expect("write source");
+
+        let (code, records) = prove_json(&path);
+        assert_eq!(code, 0, "integer invariant proves: {records:#?}");
+        assert_eq!(
+            obligation(&records, "invariant:LargeInt:make")["status"],
+            "passed"
+        );
+        assert_eq!(property(&records, "generated")["status"], "passed");
+    }
 
     /// Run `chelis prove --json` on `path`, returning (exit, records).
     fn prove_json(path: &PathBuf) -> (i32, Vec<Value>) {
@@ -219,7 +237,7 @@ mod prove_oracle {
         assert_eq!(obligation_count(&records), 3, "three producer obligations");
 
         // The guard-then-Option base constructor plus two update-shaped
-        // producers (the D-SOUND inductive step). All discharge at SMT tier.
+        // producers (the inductive step). All discharge at SMT tier.
         for (name, producer) in [
             ("invariant:Probability:probability", "probability"),
             ("invariant:Probability:scale", "scale"),
@@ -234,8 +252,7 @@ mod prove_oracle {
             assert_eq!(ob["arith_model"], "real", "SMT proofs are over the reals");
         }
 
-        // The injected property relies on assumption injection (D-INJECT) of
-        // the Probability invariant on its binder.
+        // The property receives the Probability invariant on its binder.
         assert_eq!(
             property(&records, "prob_value_in_unit_interval")["status"],
             "passed"
@@ -250,27 +267,30 @@ mod prove_oracle {
         assert_eq!(s["unsupported"], 0);
     }
 
-    /// The oracle for the illustrative Simplex example: the producer
-    /// obligation discharges at Tier C (fuzz, no arith_model), and the
+    /// The executable Simplex example: the producer obligation discharges
+    /// through fuzz sampling (without `arith_model`), and the
     /// Simplex-binder property is served by constructor-based generation
-    /// without starving (the D-STARVE acceptance probe).
+    /// without starvation.
     #[test]
     fn simplex_example_prove_discharges_obligation_and_generates_binder() {
         let (code, records) = prove_json(&simplex_example());
-        assert_eq!(code, 0, "prove succeeds (exit 0)");
+        assert_eq!(code, 0, "prove succeeds (exit 0): {records:#?}");
         assert_eq!(obligation_count(&records), 1, "one producer obligation");
 
         let ob = obligation(&records, "invariant:Simplex:make_simplex");
         assert_eq!(ob["status"], "passed");
-        assert_eq!(ob["proof_tier"], "fuzz", "Tier C (sum-over-tensor body)");
+        assert_eq!(
+            ob["proof_tier"], "fuzz",
+            "sum-over-tensor body uses sampling"
+        );
         assert_eq!(ob["source_type"], "Simplex");
         assert_eq!(ob["producer"], "make_simplex");
         assert!(
             ob.get("arith_model").is_none(),
-            "Tier C obligation carries no arith_model"
+            "sampling obligation carries no arith_model"
         );
 
-        // The D-STARVE probe: the tolerance band is measure-near-zero under
+        // The tolerance band is measure-near-zero under
         // independent component sampling, so a `Simplex` binder is served by
         // constructor-based generation. Generation succeeding (a "passed"
         // property, not "unsupported"/starvation) is the assertion.

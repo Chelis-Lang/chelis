@@ -32,9 +32,8 @@
 //! `assert_close(9007199254740992.0, 9007199254740993.0, tol)` passes
 //! trivially. An exact integer lane did not exist. This file supplies one.
 //!
-//! `packages/chelis-std/tests/decimal.ch` is likewise entirely in-range, and
-//! runs under `chelis test` (the lossy lane), so `Std.Decimal` reports green
-//! while silently returning wrong money answers.
+//! The original `Std.Decimal` corpus covered only small values. Its callables
+//! are now fenced under #2778 until the exact-arithmetic contract is met.
 //!
 //! ## This is the third local fix of one systemic bug
 //!
@@ -482,18 +481,10 @@ fn int64_tensor_survives_to_tensor_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// Group 6: Std.Decimal, the user-visible victim (chelis#680, chelis#681).
-//
-// Std.Decimal stores its coefficient as i64 and scales via repeated
-// `mul(coefficient, 10)`, so it inherits the f64 arithmetic bug directly.
-// These run through the staged-std harness rather than a bare file because
-// they need the Std.Decimal import to resolve.
+// Group 6: Std.Decimal now rejects calls until #2778 is resolved.
 // ---------------------------------------------------------------------------
 
-/// Verified: returns `922337203685477.5807` instead of `1219326320073159.3435`.
-/// These are ordinary 8-digit dollar amounts with cents, so routine money math
-/// reaches this. Under the #680 trap contract this must now fail loudly rather
-/// than return a wrong number.
+/// A product with an unrepresentable coefficient must never silently saturate.
 #[test]
 #[ignore = "chelis#680: needs the staged chelis-std reef fixture; exceeds the \
             inner-loop budget. Run with `cargo test -p chelis-cli --test \
@@ -521,21 +512,13 @@ fn decimal_mul_does_not_silently_saturate() {
         .expect("chelis eval should run");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
+    let rendered = format!("{stdout}{stderr}");
     assert!(
-        !stdout.contains("922337203685477.5807"),
-        "decimal_mul silently saturated to i64::MAX: {stdout}"
+        !out.status.success()
+            && rendered.contains("Std.Decimal is unavailable")
+            && rendered.contains("#2778"),
+        "Decimal must reject this product: {rendered}"
     );
-    if out.status.success() {
-        assert!(
-            stdout.contains("1219326320073159.3435"),
-            "decimal_mul returned an unexpected value: {stdout}"
-        );
-    } else {
-        assert!(
-            format!("{stdout}{stderr}").contains("overflow"),
-            "decimal_mul failed without a branded overflow diagnostic: {stderr}"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------

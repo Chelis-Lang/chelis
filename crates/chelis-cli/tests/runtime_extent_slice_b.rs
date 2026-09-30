@@ -915,37 +915,36 @@ fn no_environment_variable_disables_the_named_claim_guard() {
     );
 }
 
-/// A repeated binder is checked when BOTH occurrences are tensor parameters.
-/// One inside a container type is not, and this row measures that rather than
-/// leaving it implied.
-///
-/// `prepare_parameter_witnesses` walks `&[TensorType]`, so a binder reached
-/// only through `List[tensor[extent, f32]]` mints no witness and nothing
-/// compares it. The claim sentence in this pull request is qualified to
-/// tensor-typed parameters for that reason. Extending the walk into container
-/// types is a mechanism this change does not carry; chelis#1266 owns the
-/// record-projection half of the same shape.
-///
-/// EVIDENTIARY STATUS: disposition lock naming a gap, NOT a regression test.
-/// The `_pending` suffix says the recorded behaviour is the one to change.
+/// A List element contributes the first witness for a named extent, and a
+/// later direct tensor parameter must agree with it at entry.
 #[test]
-fn a_container_nested_binder_is_unchecked_pending_the_container_walk() {
+fn a_container_nested_binder_checks_the_later_tensor_on_both_lanes() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, output) = c_run_result(
-        &dir,
-        "container_binder",
-        "def f(xs: List[tensor[extent, f32]], p: tensor[extent, f32]) -> tensor[f32] = sum(&p, 0i32)\n\
-         out = f([to_tensor([1.0f32, 2.0f32])], to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+    let prefix = "def f(xs: List[tensor[extent, f32]], p: tensor[extent, f32]) -> tensor[f32] = sum(&p, 0i32)\n";
+    let mismatch = format!(
+        "{prefix}out = f([to_tensor([1.0f32, 2.0f32])], to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
     );
-    assert!(ok, "the program runs to completion today: {output}");
-    assert!(
-        !output.contains("extent `extent`"),
-        "and nothing compares the list element's extent with `p`'s: {output}"
-    );
-    assert!(
-        output.contains("out = 6"),
-        "the sum of `p` is what it returns: {output}"
-    );
+    for (lane, (ok, output)) in [
+        (
+            "eval",
+            eval_result(&dir, "container_binder_eval.ch", &mismatch),
+        ),
+        ("c", c_run_result(&dir, "container_binder_c", &mismatch)),
+    ] {
+        assert!(!ok, "{lane}: {output}");
+        assert!(
+            output.contains("extent `extent`: xs[0] axis 0 = 2, p axis 0 = 3"),
+            "{lane}: {output}"
+        );
+        assert!(
+            output.contains("numeric trap: domain in load at i64"),
+            "{lane}: {output}"
+        );
+        assert!(!output.contains("out ="), "{lane}: {output}");
+    }
+    let matching =
+        format!("{prefix}out = f([to_tensor([1.0f32, 2.0f32])], to_tensor([1.0f32, 2.0f32]))\n");
+    both_lanes_execute(&dir, "container_binder_matching", &matching, "out = 3");
 }
 
 /// A synthesized multi-root kernel takes its parameters from captured root

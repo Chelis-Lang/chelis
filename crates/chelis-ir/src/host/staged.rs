@@ -503,12 +503,19 @@ pub(super) fn resolve_callable_aliases(
             }
         }
         HostExprKind::Builtin { args, .. }
-        | HostExprKind::SignatureEntry { args, .. }
         | HostExprKind::TensorCall { args, .. }
         | HostExprKind::AdtConstruct { fields: args, .. }
         | HostExprKind::List(args, _)
         | HostExprKind::Tuple(args, _) => {
             for arg in args {
+                resolve_callable_aliases(arg, aliases);
+            }
+        }
+        HostExprKind::SignatureEntry { args, lists, .. } => {
+            for arg in args
+                .iter_mut()
+                .chain(lists.iter_mut().map(|entry| &mut entry.value))
+            {
                 resolve_callable_aliases(arg, aliases);
             }
         }

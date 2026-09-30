@@ -1450,13 +1450,6 @@
       ]
     },
     {
-      "kind": "std-adt-numeric",
-      "id": "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} i64)) (t-adt {} Dict (t-prim {} string) (t-prim {} i64)) (t-adt {} Dict (t-prim {} i64) (t-prim {} string)) (t-prim {} i64))",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
       "kind": "std-def-numeric",
       "id": "contracts::normal_cdf: [p: Float] (t-fn {} (t-var {} p) (t-var {} p))",
       "flags": []
@@ -1578,36 +1571,6 @@
       "flags": [
         "numeric-op"
       ]
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "init/kaiming::kaiming_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "init/kaiming::kaiming_uniform: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "init/random::normal_like: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "init/xavierext::trunc_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "init/xavierext::xavier_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "init/xavierext::xavier_uniform: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-      "flags": []
     },
     {
       "kind": "std-def-numeric",
@@ -1904,33 +1867,6 @@
       "flags": [
         "numeric-op"
       ]
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} i64) (t-prim {} i64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} i64)))",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} i64)) (t-prim {} string))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} i64)))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "tokenizer::load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Tokenizer))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "tokenizer::try_load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Tokenizer)))",
-      "flags": []
     }
   ]
 }

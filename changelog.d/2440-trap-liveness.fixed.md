@@ -58,12 +58,16 @@ activation. A dead `let` of an overflowing integer sum or product, an
 empty-axis `max_reduce` or `argmax_reduce`, or an out-of-range runtime `shrink`, `stride` or `pad` bound now
 traps in every lane.
 
-Not yet covered: an unused float `mean` over an empty axis, and an unused
-runtime `reshape` or `expand` target or `gather`, `scatter`, `scatter_add`,
-`scatter_elements` or `one_hot` index, may still be removed, and those
-index and target checks still run in an untaken arm. A host-only scalar
-operation (such as a shift) discarded inside a `grad` or `vmap` body does
-not run, so its trap does not occur in any lane; [05-OP-68] and
+Not yet covered: an unused float `mean` over a run-time-zero axis
+([#2780](https://github.com/Chelis-Lang/chelis/issues/2780)) and an unused
+run-time `reshape` or `expand` target
+([#2783](https://github.com/Chelis-Lang/chelis/issues/2783)) may still be
+removed, and those target checks still run in an untaken arm. A `gather`,
+`scatter`, `scatter_add`, `scatter_elements` or `one_hot` index check is no
+longer removed where its node carries no activation, under a separate entry for
+the same issue; under an activation it is still removed whether or not the arm
+is taken, while a consumed one still runs even in an untaken arm.
+[05-OP-68] and
 spec/03 §4.4 keep a note that their rule is not fully implemented for every
 trapping operation. This carries and supersedes
 [#2466](https://github.com/Chelis-Lang/chelis/pull/2466). See

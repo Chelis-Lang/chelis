@@ -1,11 +1,17 @@
 """Obligation-validator controls; only the actual execution factory issues authority."""
 import copy
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
+from types import SimpleNamespace
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from capacity_census_compiler_json import (
-    API, INPUT_ROLES, MODULE, NATIVE_CASES, OUTPUTS, SOURCE, VerifiedCompilerJsonBindings,
-    adapter_for_slot, adapter_payload, require_parameter_slots, validate_conversion_calls,
+    API, INPUT_ROLES, MODULE, NATIVE_CASES, OUTPUTS, SOURCE, _CompilerJsonWork,
+    VerifiedCompilerJsonBindings,
+    adapter_for_slot, adapter_payload, collect_compiler_json_bindings,
+    finalize_compiler_json_bindings, require_parameter_slots, validate_conversion_calls,
 )
 from capacity_census_graph import GraphError, RustdocGraph
 from capacity_census_wire_runner import validate_libtest_execution
@@ -65,6 +71,76 @@ def graph_fixture():
 
 
 class CompilerJsonAuthority(unittest.TestCase):
+    def test_collection_executes_binding_scopes_without_wire_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "target/agents/binding"
+            process_dir = target / "compiler-json-processes"
+            process_dir.mkdir(parents=True)
+            for name in ("native-tests-build", "native-tests", "verifier-controls"):
+                (process_dir / f"{name}.json").write_text("{}")
+            binary = target / "current-probe"
+            binary.write_bytes(b"current binary")
+            driver = target / "current-driver"
+            evidence = {"evidence": conversion_fixture()}
+            with ExitStack() as stack:
+                stack.enter_context(patch("capacity_census_compiler_json.source_identity",
+                                          return_value="current"))
+                stack.enter_context(patch("capacity_census_compiler_json._target_lease",
+                                          side_effect=lambda path: nullcontext()))
+                stack.enter_context(patch("capacity_census_compiler_json.run_python_tests",
+                                          return_value=SimpleNamespace(output_sha256="packet")))
+                rust_test = stack.enter_context(patch(
+                    "capacity_census_compiler_json.build_and_run_rust_test",
+                    return_value=SimpleNamespace(command=(str(binary),)),
+                ))
+                stack.enter_context(patch("capacity_census_compiler_json._native_registration",
+                                          return_value=({}, (str(binary), "digest"), ())))
+                build_driver = stack.enter_context(patch(
+                    "capacity_census_wire_calls.build_binding_driver", return_value=driver
+                ))
+                collect_library = stack.enter_context(patch(
+                    "capacity_census_wire_calls.collect_library", return_value=evidence
+                ))
+                construction = stack.enter_context(patch(
+                    "capacity_census_compiler_json_construction.compile_construction_controls",
+                    return_value=(),
+                ))
+                mir = stack.enter_context(patch(
+                    "capacity_census_compiler_json_controls.verify_mir_controls",
+                    return_value=(),
+                ))
+                wire = stack.enter_context(patch(
+                    "capacity_census_wire_verifier.verify_wire_census",
+                    side_effect=AssertionError("collection read wire"),
+                ))
+                work = collect_compiler_json_bindings(root, target)
+            self.assertEqual(work.source_sha256, "current")
+            self.assertEqual(len(work.ownership), 5)
+            rust_test.assert_called_once()
+            self.assertEqual(rust_test.call_args.args[:2], (root, target))
+            build_driver.assert_called_once_with(root, target)
+            collect_library.assert_called_once_with(root, target, driver, scope="compiler-json")
+            construction.assert_called_once_with(root, target, evidence)
+            mir.assert_called_once_with(root, target, driver, evidence)
+            wire.assert_not_called()
+
+    def test_finalizer_rejects_saved_wire_or_binding_receipt(self):
+        root = Path(__file__).resolve().parent.parent
+        target = root / "target/agents/binding"
+        receipt = {"source_sha256": "current", "report": "saved"}
+        with self.assertRaises(TypeError):
+            _CompilerJsonWork(**receipt)
+        with self.assertRaisesRegex(GraphError, "live wire"):
+            finalize_compiler_json_bindings(root, target, receipt, receipt)
+
+        class LiveWire:
+            source_sha256 = "current"
+
+        with patch("capacity_census_wire_verifier.VerifiedWireCensus", LiveWire):
+            with self.assertRaisesRegex(GraphError, "binding collection"):
+                finalize_compiler_json_bindings(root, target, receipt, LiveWire())
+
     def test_construction_controls_require_exact_compiler_success_or_failure(self):
         from capacity_census_compiler_json_construction import check_construction_outcome, construction_sources
         cases = construction_sources(Path(__file__).resolve().parent.parent)

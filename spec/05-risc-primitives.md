@@ -1315,8 +1315,10 @@ first-class unary primitive `RiscOp::Cos` (see §2.2), alongside `tan`,
 | `where(cond, a, b)` | Element-wise selection of `a` where `cond` is true and `b` where it is false; the boolean condition is not converted to or combined through a numeric dtype |
 
 The sparse operations lower to the first-class
-IR nodes `RiscOp::Gather { axis }`, `RiscOp::ScatterAdd { axis }`,
-`RiscOp::Scatter { axis }`, and `RiscOp::ScatterElements { axis }` (the
+IR nodes `RiscOp::Gather { axis, batch_rank }`,
+`RiscOp::ScatterAdd { axis, batch_rank }`,
+`RiscOp::Scatter { axis, batch_rank }`, and
+`RiscOp::ScatterElements { axis }` (the
 element-wise ONNX `ScatterElements`, §3.5.1). Tensor-lane Surf
 `gather(values, indices, axis)` lowers directly to `RiscOp::Gather`, not to a
 host-runtime call or dense one-hot materialization. The tensor-lane Surf
@@ -1325,7 +1327,9 @@ builtin `scatter_replace(base, indices, updates, axis)` lowers directly to
 also recognizes the internal `RiscOp::OneHot { vocab } + Expand + Mul + Sum`
 gather tree and collapses it before DCE/codegen. Arbitrary const/eq
 one-hot encodings are not recognized because they do not preserve the original
-index operand.
+index operand. The authored forms have `batch_rank = 0`. Batching pairs each
+leading data and index axis through `batch_rank` and inserts only the remaining
+index axes at `axis`; each paired axis occurs once in the result or update shape.
 
 #### Replace-scatter vs scatter-add
 
@@ -1340,8 +1344,8 @@ index operand.
 
 `Scatter` and `ScatterAdd` are intentionally distinct primitives. Both
 take inputs `(target, indices, updates)` with the same shape contract
-(updates shape equals `target.dims[..axis] ++ indices.dims ++
-target.dims[axis+1..]`) and the same precision constraints
+(updates shape equals `target.dims[..axis] ++
+indices.dims[batch_rank..] ++ target.dims[axis+1..]`) and the same precision constraints
 (any one active signed-integer index dtype; target/updates/output precision
 identical).
 They differ only in how duplicate target indices are resolved and in
@@ -1355,8 +1359,8 @@ their AD policies:
 
 | Op | Duplicate-index semantics | AD adjoint |
 |---|---|---|
-| `ScatterAdd { axis }` | commutative accumulation (`+=`) | `Gather { axis }` — duplicate indices fan-out correctly |
-| `Scatter { axis }` | last-write-wins (deterministic order rule below) | **no_grad** — fail-closed with `AdError::NotSupported` |
+| `ScatterAdd { axis, batch_rank }` | commutative accumulation (`+=`) | `Gather { axis, batch_rank }` — duplicate indices fan-out correctly |
+| `Scatter { axis, batch_rank }` | last-write-wins (deterministic order rule below) | **no_grad** — fail-closed with `AdError::NotSupported` |
 
 **Deterministic-order rule for `Scatter`:** updates-tensor row-major
 (C order) flat iteration. For each `i ∈ 0..updates.size` in
@@ -1473,7 +1477,9 @@ The tensor-lane Surf builtin
 > routes update cotangents through `Gather`. Index and axis arguments have
 > zero cotangent. Integer and bool payloads are forward-only; `Scatter` and
 > `ScatterElements` retain §3.5's structural AD rejection. Wire axis parameters
-> preserve these exact operation identities; serialization supplies no
+> preserve these exact operation identities. Wire `batch_rank` counts the paired
+> leading data and index axes; it cannot exceed the data target axis or index
+> rank, and every paired extent must match. Serialization supplies no
 > alternative operation, dtype, or accumulator rule.
 
 ### 3.6 Host-Runtime Operations
@@ -2337,13 +2343,18 @@ exact ADT identity by [05-OP-34].
 >
 > `chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)
 > update metadata before output allocation or reuse. Its exact tagged i64 axis
-> normalizes once against the base rank. The closed `chelis_sparse_op` identifies
-> gather, scatter-add, replace-scatter, or element-wise scatter; canonical numeric
+> normalizes once against the base rank. The nonnegative `chelis_sparse_op`
+> value has one of four operation kinds in its low two bits and a paired
+> leading batch-axis count in its remaining bits. The unbatched forms have
+> count zero. Element-wise scatter requires count zero because it already
+> pairs every non-scattered coordinate. Canonical numeric
 > failure identities are respectively `gather`, `scatter`, `scatter_replace`, and
 > `scatter_elements`. Index tensors have an active signed-integer dtype. Scatter
 > updates have the base dtype and the exact section 3.5 shape, including every
 > dimension of an empty tensor. Gather supplies no update tensor. Hyperplane
-> iteration replaces the base axis with the complete index shape; element-wise
+> iteration replaces the base axis with the index shape after its paired
+> batch prefix; the batch prefix of the base and index shapes is equal
+> and occurs once in the iteration shape. Element-wise
 > iteration has the index shape and validates every non-scattered bound.
 > Counts, strides, representation bytes, and target projection are checked before
 > the independently owned opaque plan is returned.
@@ -2775,9 +2786,8 @@ exact ADT identity by [05-OP-34].
 > integer/float source distinction. `JsonBigInt` carries the exact decimal
 > spelling of an integer-form source token outside i64 range ([05-OP-2]);
 > it is source-faithful text, never a float funnel, and its string field
-> compares and renders byte-exactly. Decimal, date, duration, vocabulary,
-> merge-rank, inverse-vocabulary, and unknown-token invariants are checked by
-> the named [05-OP-35] operations before use. There is no second prelude JSON
+> compares and renders byte-exactly. Decimal, date, and duration invariants
+> are checked by the named [05-OP-35] operations before use. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
 > ordinary constructor and the executed matching arm preserve the recursive
 > cotangent shape: differentiable float fields receive their corresponding
@@ -2787,16 +2797,12 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the eighty-four final exported stdlib numeric definitions enumerated in the
+> the seventy-three final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
 > identities exist: no effectless, wildcard-result, or otherwise weakened alias
 > is part of the language.
->
-> `init/xavier::sample` is not a language operation and must not be exported.
-> It has no semantics, registration, alias, or stub disposition; a final
-> stdlib containing that identity violates this exact manifest.
 >
 > Every primitive-width intermediate in a graph whose contract names a dtype
 > executes and finalizes at [04-NUM-8]'s declared width; integer primitive
@@ -2923,58 +2929,7 @@ exact ADT identity by [05-OP-34].
 > integers, `p_float` over all four active floats, and `Q` over one static type
 > in [05-OP-36]'s scalar or recursive equality domain (direct tensor arguments
 > use `assert_eq_tensor`). Every repeated variable denotes one
-> common static type. Each random callable takes a key as its first
-> parameter and consumes it. All random parameters
-> are finite and are validated before any element is drawn.
-> Kaiming requires finite `fan_in > 0`. Xavier computes
-> `add(fan_in, fan_out)` at `p_float` before drawing; that computed
-> denominator must be finite and strictly positive. An overflowed infinite sum
-> is a `Domain` failure, not a zero scale. `normal_like(k, ...)` requires
-> `std >= 0`, splits `k` by [05-OP-70] into `(k1, k2)`, and invokes [05-OP-8]
-> twice, keyed by `k1` with the direct `p_float` images of decimal bounds
-> `1e-7, 1.0` to obtain `u1` and keyed by `k2` with the direct `p_float`
-> images of `0.0, 1.0` to obtain `u2`; [05-OP-8] owns their exact values. The internal 53-bit unit in [05-OP-8] is half-open, but ordinary
-> final rounding can make either stored result equal its stored high bound;
-> a rounded result equals the stored upper endpoint for some source words.
-> No stricter range is assumed by this graph. Its
-> exact graph is `two_pi = round_p(2*pi)`,
-> `cos_term = cos(mul(two_pi, u2))`,
-> `radius = sqrt(mul(-2p, log(u1)))`, `z = mul(radius, cos_term)`, then
-> `add(mean, mul(std, z))`. Every named assignment and primitive finalizes to
-> `p_float` before its consumer under [04-NUM-8]; a sine phase-shift
-> substitution is not conforming. `round_p(2*pi)` is the correctly rounded
-> image of the mathematical constant at `p_float`. The `log` and `cos` inside
-> this compound graph are correctly rounded at `p_float`'s arithmetic width
-> before ordinary finalization to `p_float`; they do not inherit the
-> standalone primitive tolerance. Together with [05-RNG-1], the complete
-> random callable has zero-ULP cross-lane difference for a supported dtype.
-> `trunc_normal` additionally requires `a <= b` and clips that normal result
-> to inclusive `[a,b]`; it is not rejection sampling. Kaiming, Xavier, and
-> `trunc_normal` pass their key unchanged to their one [05-OP-8] draw or
-> `normal_like` call. Kaiming and Xavier use
-> respectively `sqrt(div(2p, fan_in))` or
-> `sqrt(div(2p, add(fan_in, fan_out)))` as normal scale. Their uniform
-> bounds replace `2p` with `6p` under the same divisions; a uniform
-> `u` maps by the exact `p_float` graph
-> `mul(sub(mul(2p, u), 1p), bound)`. Here `Np` means the exact integer `N`
-> represented at `p_float`. Violations trap `Domain`.
->
-> With the key fixed to the forward execution's, every random
-> stdlib callable has the pathwise adjoint of its exact graph above; the key,
-> source units, and mask comparisons contribute zero cotangent. Template element values
-> are unobserved and receive a same-shaped zero cotangent. `normal_like`
-> combines per-element `g_i` contributions to `mean` and `g_i * z_i`
-> contributions to `std` in increasing row-major order through separate
-> canonical adjacent-pair balanced trees. `trunc_normal` uses the executed
-> clipping branch: `raw < a` routes the whole cotangent to `a`, `raw > b`
-> routes it to `b`, and the inclusive `a <= raw <= b` branch differentiates
-> the exact normal graph; equality therefore stays on the raw branch.
-> Kaiming and Xavier differentiate their exact authored scale/bound graphs into
-> `fan_in` and `fan_out`. Uniform bounds differentiate through their exact
-> [05-OP-8] affine graph. Every broadcast scalar contribution is enumerated in
-> increasing row-major output order and combined by the canonical balanced
-> tree. Each named primitive and adjoint primitive finalizes at `p_float`
-> before its consumer.
+> common static type.
 >
 > `scalar::abs` follows the unary abs rule at its active signed-integer or
 > float dtype, including zero derivative at float zero and checked overflow at
@@ -3082,29 +3037,6 @@ exact ADT identity by [05-OP-34].
 > and returns `None` for a syntax error, an i64-unrepresentable year, or an
 > invalid calendar date.
 >
-> A tokenizer operation first validates that vocabulary IDs are injective,
-> the inverse is exact, `unk_id` exists, merge ranks are unique nonnegative
-> integers, every merge key denotes one unambiguous token pair, and no token
-> pair occurs at more than one merge rank. Encoding
-> starts from Unicode scalar-value tokens, repeatedly selects the lowest merge
-> rank and then the leftmost pair, and replaces every nonoverlapping selected
-> pair from left to right with the concatenation of its two token strings.
-> When no merge remains, `encode` maps each final token through `vocab`, using
-> `unk_id` exactly when the token is absent. `decode` maps each ID through the
-> inverse vocabulary, using the unknown-token string exactly when the ID is
-> absent, and concatenates the resulting token strings with no separator.
-> `batch_encode` requires `max_length >= 0`, truncates on the
-> right, and right-pads with the exact i64 `pad_value`.
-> `try_load_tokenizer` accepts a JSON object whose `model` is an object with
-> exact string `type: "BPE"`, a `vocab` object of unique string keys to unique
-> `JsonInt` IDs, a `merges` array of strings each containing exactly two
-> nonempty space-free tokens separated by one ASCII space, and an `unk_token`
-> string present in `vocab`. Merge array position is the unique nonnegative
-> rank. Missing files, malformed JSON, schema mismatch, or an invariant
-> violation return `None`; other read failures trap `IO`. `load_tokenizer`
-> uses the same schema and traps `Domain` instead of returning `None` after a
-> successful read.
->
 > IO and process functions introduce their registry-declared `IO` effect.
 > Process calls
 > pass the executable and argument vector directly without invoking a shell,
@@ -3120,12 +3052,12 @@ exact ADT identity by [05-OP-34].
 > `run_chelis: no valid Chelis executable configured`. Both
 > inherit the current working directory and environment. They are `IO`
 > operations under [05-HOST-2] in every language execution mode. IO and process
-> operations are outside AD. Pure constructors, tokenizers, time values, and
-> decimal values have no cotangent unless their governing atom explicitly
+> operations are outside AD. Pure constructors, time values, and decimal
+> values have no cotangent unless their governing atom explicitly
 > defines one. Comparison predicates and assertions contribute zero cotangent
 > to differentiable leaves; an assertion's `Test` effect is preserved.
-> Collection operations, random initializers, shape constructors, and sort
-> wrappers use their explicit adjoint or forward-only rule above; no blanket
+> Collection operations, shape constructors, and sort wrappers use their
+> explicit adjoint or forward-only rule above; no blanket
 > host-family rule overrides a float adjoint. No callable derives authority
 > from its implementation body or age.
 

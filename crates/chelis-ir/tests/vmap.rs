@@ -154,6 +154,382 @@ fn eval_root(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> TensorValue {
     values[&root].clone()
 }
 
+fn sparse_type(dims: &[usize], precision: Prim) -> TensorType {
+    TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    }
+}
+
+#[test]
+fn vmap_gather_reduces_each_row_and_preserves_result_rank() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let values = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "values".into(),
+        },
+        vec![],
+        sparse_type(&[4], Prim::F32),
+        None,
+    );
+    let indices = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        sparse_type(&[2], Prim::Int64),
+        None,
+    );
+    let gather = dag.add_node(
+        decl,
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
+        vec![values, indices],
+        sparse_type(&[2], Prim::F32),
+        None,
+    );
+    let sum = dag.add_node(
+        decl,
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![gather],
+        sparse_type(&[], Prim::F32),
+        None,
+    );
+    dag.add_root(sum);
+    let mapped = vectorize_axis0(&dag, DimInfo::Lit(3)).unwrap();
+    assert!(matches!(
+        mapped.get(gather).unwrap().op,
+        RiscOp::Gather {
+            axis: 1,
+            batch_rank: 1
+        }
+    ));
+    let errors = chelis_ir::verify::verify(&mapped);
+    assert!(errors.is_empty(), "{errors:?}");
+    let value = eval_root(
+        &mapped,
+        &UnordMap::from([
+            (
+                "values".into(),
+                TensorValue::from_vec(
+                    vec![3, 4],
+                    vec![
+                        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+                    ],
+                ),
+            ),
+            (
+                "indices".into(),
+                TensorValue::from_vec(vec![3, 2], vec![0.0, 2.0, 0.0, 2.0, 0.0, 2.0]),
+            ),
+        ]),
+    );
+    assert_eq!(value.shape, vec![3]);
+    assert_eq!(value.to_f64_lossy_vec(), vec![4.0, 12.0, 20.0]);
+}
+
+#[test]
+fn vmap_sparse_indices_check_the_row_extent() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let values = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "values".into(),
+        },
+        vec![],
+        sparse_type(&[4], Prim::F32),
+        None,
+    );
+    let indices = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        sparse_type(&[1], Prim::Int64),
+        None,
+    );
+    let gather = dag.add_node(
+        decl,
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
+        vec![values, indices],
+        sparse_type(&[1], Prim::F32),
+        None,
+    );
+    dag.add_root(gather);
+    let mapped = vectorize_axis0(&dag, DimInfo::Lit(5)).unwrap();
+    let inputs = UnordMap::from([
+        (
+            "values".into(),
+            TensorValue::from_vec(vec![5, 4], vec![1.0; 20]),
+        ),
+        (
+            "indices".into(),
+            TensorValue::from_vec(vec![5, 1], vec![4.0; 5]),
+        ),
+    ]);
+    // chelis#1636 still renders this as a panic. The check must nevertheless
+    // reject index 4 against each size-4 row, not accept it against batch 5.
+    assert!(std::panic::catch_unwind(|| eval_root(&mapped, &inputs)).is_err());
+}
+
+#[test]
+fn vmap_scatter_family_shifts_the_target_axis() {
+    for op in [
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
+        RiscOp::Scatter {
+            axis: 0,
+            batch_rank: 0,
+        },
+        RiscOp::ScatterElements { axis: 0 },
+    ] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let base = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "base".into(),
+            },
+            vec![],
+            sparse_type(&[4], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            sparse_type(&[2], Prim::Int64),
+            None,
+        );
+        let updates = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            sparse_type(&[2], Prim::F32),
+            None,
+        );
+        let scatter = dag.add_node(
+            decl,
+            op.clone(),
+            vec![base, indices, updates],
+            sparse_type(&[4], Prim::F32),
+            None,
+        );
+        dag.add_root(scatter);
+        let mapped = vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+        assert!(
+            matches!(
+                mapped.get(scatter).unwrap().op,
+                RiscOp::ScatterAdd {
+                    axis: 1,
+                    batch_rank: 1
+                } | RiscOp::Scatter {
+                    axis: 1,
+                    batch_rank: 1
+                } | RiscOp::ScatterElements { axis: 1 }
+            ),
+            "{op:?}"
+        );
+        let errors = chelis_ir::verify::verify(&mapped);
+        assert!(errors.is_empty(), "{op:?}: {errors:?}");
+        let value = eval_root(
+            &mapped,
+            &UnordMap::from([
+                (
+                    "base".into(),
+                    TensorValue::from_vec(vec![2, 4], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+                ),
+                (
+                    "indices".into(),
+                    TensorValue::from_vec(vec![2, 2], vec![0.0, 2.0, 0.0, 2.0]),
+                ),
+                (
+                    "updates".into(),
+                    TensorValue::from_vec(vec![2, 2], vec![9.0, 7.0, 11.0, 13.0]),
+                ),
+            ]),
+        );
+        let expected = if matches!(op, RiscOp::ScatterAdd { .. }) {
+            vec![10.0, 2.0, 10.0, 4.0, 16.0, 6.0, 20.0, 8.0]
+        } else {
+            vec![9.0, 2.0, 7.0, 4.0, 11.0, 6.0, 13.0, 8.0]
+        };
+        assert_eq!(value.shape, vec![2, 4], "{op:?}");
+        assert_eq!(value.to_f64_lossy_vec(), expected, "{op:?}");
+    }
+}
+
+#[test]
+fn vmap_one_hot_keeps_the_vocabulary_axis_last() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let indices = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        sparse_type(&[2], Prim::Int64),
+        None,
+    );
+    let one_hot = dag.add_node(
+        decl,
+        RiscOp::OneHot { vocab: 4 },
+        vec![indices],
+        sparse_type(&[2, 4], Prim::F32),
+        None,
+    );
+    dag.add_root(one_hot);
+    let mapped = vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+    assert!(chelis_ir::verify::verify(&mapped).is_empty());
+    let value = eval_root(
+        &mapped,
+        &UnordMap::from([(
+            "indices".into(),
+            TensorValue::from_vec(vec![2, 2], vec![0.0, 2.0, 1.0, 3.0]),
+        )]),
+    );
+    assert_eq!(value.shape, vec![2, 2, 4]);
+    assert_eq!(
+        value.to_f64_lossy_vec(),
+        vec![
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0
+        ]
+    );
+}
+
+#[test]
+fn nested_vmap_pairs_each_sparse_batch_axis_once() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let values = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "values".into(),
+        },
+        vec![],
+        sparse_type(&[4], Prim::F32),
+        None,
+    );
+    let indices = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        sparse_type(&[2], Prim::Int64),
+        None,
+    );
+    let gather = dag.add_node(
+        decl,
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
+        vec![values, indices],
+        sparse_type(&[2], Prim::F32),
+        None,
+    );
+    dag.add_root(gather);
+    let inner = vectorize_axis0(&dag, DimInfo::Lit(3)).unwrap();
+    let outer = vectorize_axis0(&inner, DimInfo::Lit(2)).unwrap();
+    let sparse = outer
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::Gather { .. }))
+        .unwrap();
+    assert!(matches!(
+        sparse.op,
+        RiscOp::Gather {
+            axis: 2,
+            batch_rank: 2
+        }
+    ));
+    let errors = chelis_ir::verify::verify(&outer);
+    assert!(errors.is_empty(), "{errors:?}");
+    let value = eval_root(
+        &outer,
+        &UnordMap::from([
+            (
+                "values".into(),
+                TensorValue::from_vec(vec![2, 3, 4], (1..=24).map(f64::from).collect()),
+            ),
+            (
+                "indices".into(),
+                TensorValue::from_vec(vec![2, 3, 2], [0.0, 2.0].repeat(6)),
+            ),
+        ]),
+    );
+    assert_eq!(value.shape, vec![2, 3, 2]);
+    assert_eq!(
+        value.to_f64_lossy_vec(),
+        vec![
+            1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0, 21.0, 23.0
+        ]
+    );
+}
+
+#[test]
+fn sparse_paired_prefix_must_match_in_verifier() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let values = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "values".into(),
+        },
+        vec![],
+        sparse_type(&[3, 4], Prim::F32),
+        None,
+    );
+    let indices = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        sparse_type(&[2, 2], Prim::Int64),
+        None,
+    );
+    let gather = dag.add_node(
+        decl,
+        RiscOp::Gather {
+            axis: 1,
+            batch_rank: 1,
+        },
+        vec![values, indices],
+        sparse_type(&[3, 2], Prim::F32),
+        None,
+    );
+    dag.add_root(gather);
+    let errors = chelis_ir::verify::verify(&dag);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("invalid paired batch prefix")),
+        "{errors:?}"
+    );
+}
+
 #[test]
 fn vmap_elementwise_vectorizes_axis_zero() {
     let mut dag = Dag::new();

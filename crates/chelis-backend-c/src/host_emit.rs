@@ -377,6 +377,14 @@ pub(crate) fn emit_host_abi_program(
         .map(|function| entry_walkers.entry_work(function))
         .collect::<Result<Vec<_>, _>>()?;
     entry_walkers.render(&mut body);
+    let entry_groups = entry_receipt_groups(program);
+    for (index, function) in program.functions.iter().enumerate() {
+        if entry_groups.get(&function.name) == Some(&index) {
+            body.push(format!(
+                "static const char __chelis_entry_contract_token_{index} = 0;"
+            ));
+        }
+    }
 
     let mut stubbed_functions: UnordSet<String> = UnordSet::new();
     let mut function_bodies: Vec<String> = Vec::new();
@@ -414,6 +422,7 @@ pub(crate) fn emit_host_abi_program(
             external_helpers,
             &captured_globals,
             &entry_work[function_index],
+            &entry_groups,
         ) {
             Ok(()) => {
                 function_bodies.extend(fn_buf);
@@ -2114,8 +2123,9 @@ fn join_params(params: &str, rest: &str) -> String {
     }
 }
 
-fn append_private_host_context_args(args: &mut Vec<String>) {
+fn append_private_host_context_args(args: &mut Vec<String>, entry_receipt: &str) {
     args.push("__chelis_origin_arena".to_string());
+    args.push(entry_receipt.to_string());
 }
 
 fn append_invocation_origin_context(out: &mut Vec<String>) {
@@ -2242,23 +2252,45 @@ enum HostResultRequirement {
     Named {
         claim: String,
         parameter: String,
+        prepared: String,
         axis: usize,
+    },
+    /// The first available witness may be a List element or a later direct
+    /// parameter. An empty List does not bind the result axis.
+    NamedList {
+        state: usize,
     },
 }
 
 impl HostResultClaim {
-    fn from_tensor_type(ty: &TensorType) -> Self {
+    fn from_plan(plan: &chelis_ir::host::HostResultClaimPlan) -> Self {
+        use chelis_ir::host::HostResultRequirementPlan;
         Self {
-            rank: ty.dims.len(),
-            axes: ty
-                .dims
+            rank: plan.result().dims.len(),
+            axes: plan
+                .axes()
                 .iter()
-                .enumerate()
-                .filter_map(|(axis, dim)| match dim {
-                    DimInfo::Lit(required) => {
-                        Some((axis, HostResultRequirement::Literal(*required)))
-                    }
-                    DimInfo::Named(_, _) => None,
+                .map(|(axis, requirement)| {
+                    let requirement = match requirement {
+                        HostResultRequirementPlan::Literal(required) => {
+                            HostResultRequirement::Literal(*required)
+                        }
+                        HostResultRequirementPlan::NamedDirect {
+                            claim,
+                            source,
+                            prepared,
+                            axis,
+                        } => HostResultRequirement::Named {
+                            claim: claim.clone(),
+                            parameter: source.clone(),
+                            prepared: prepared.clone(),
+                            axis: *axis,
+                        },
+                        HostResultRequirementPlan::NamedList { state } => {
+                            HostResultRequirement::NamedList { state: *state }
+                        }
+                    };
+                    (*axis, requirement)
                 })
                 .collect(),
         }
@@ -2271,6 +2303,7 @@ impl HostResultClaim {
         let HostAbiType::Tensor(ty) = &function.ret_ty else {
             return None;
         };
+        let named_lists = function.entry_contract.named_list_binders().to_vec();
         let witness = |binder: &str| {
             function.params.iter().find_map(|param| {
                 let HostAbiType::Tensor(param_ty) = &param.ty else {
@@ -2297,11 +2330,15 @@ impl HostResultClaim {
             .filter_map(|(axis, dim)| match dim {
                 DimInfo::Lit(required) => Some((axis, HostResultRequirement::Literal(*required))),
                 DimInfo::Named(binder, _) if binder != "*" => {
+                    if let Some(state) = named_lists.iter().position(|name| name == binder) {
+                        return Some((axis, HostResultRequirement::NamedList { state }));
+                    }
                     let (parameter, source_axis) = witness(binder)?;
                     Some((
                         axis,
                         HostResultRequirement::Named {
                             claim: chelis_ir::lower::extent_binder_label(binder),
+                            prepared: parameter.clone(),
                             parameter,
                             axis: source_axis,
                         },
@@ -2325,6 +2362,57 @@ impl HostResultClaim {
         claims_name: Option<&str>,
         outer_claims_first: bool,
     ) -> Vec<String> {
+        if self
+            .axes
+            .iter()
+            .any(|(_, requirement)| matches!(requirement, HostResultRequirement::NamedList { .. }))
+        {
+            let count = format!("{axes_name}_count");
+            let mut lines = vec![
+                format!(
+                    "{indent}__chelis_host_result_axis {axes_name}[{}];",
+                    self.axes.len()
+                ),
+                format!("{indent}int64_t {count} = 0;"),
+            ];
+            for (axis, requirement) in &self.axes {
+                match requirement {
+                    HostResultRequirement::Literal(required) => lines.push(format!(
+                        "{indent}{axes_name}[{count}++] = (__chelis_host_result_axis){{ {axis}, {required}, NULL, NULL, 0 }};"
+                    )),
+                    HostResultRequirement::Named {
+                        claim,
+                        parameter,
+                        prepared,
+                        axis: source_axis,
+                    } => lines.push(format!(
+                        "{indent}{axes_name}[{count}++] = (__chelis_host_result_axis){{ {axis}, chelis_tensor_shape({}, {source_axis}), {}, {}, {source_axis} }};",
+                        c_ident(prepared),
+                        c_string_literal(claim),
+                        c_string_literal(parameter),
+                    )),
+                    HostResultRequirement::NamedList { state } => {
+                        let source = format!("__chelis_entry_named_states[{state}]");
+                        lines.push(format!("{indent}if ({source}.seen) {{"));
+                        lines.push(format!(
+                            "{indent}    {axes_name}[{count}++] = (__chelis_host_result_axis){{ {axis}, {source}.value, {source}.claim, {source}.path, {source}.axis }};"
+                        ));
+                        lines.push(format!("{indent}}}"));
+                    }
+                }
+            }
+            lines.push(format!(
+                "{indent}const __chelis_host_result_claim {frame_name} = {{ {parent}, {}, {count}, {axes_name}, {} }};",
+                self.rank,
+                i32::from(outer_claims_first),
+            ));
+            if let Some(claims_name) = claims_name {
+                lines.push(format!(
+                    "{indent}const __chelis_host_result_claim *{claims_name} = &{frame_name};"
+                ));
+            }
+            return lines;
+        }
         let mut lines = vec![format!(
             "{indent}const __chelis_host_result_axis {axes_name}[] = {{"
         )];
@@ -2336,13 +2424,15 @@ impl HostResultClaim {
                 HostResultRequirement::Named {
                     claim,
                     parameter,
+                    prepared,
                     axis: source_axis,
                 } => format!(
                     "{indent}    {{ {axis}, chelis_tensor_shape({}, {source_axis}), {}, {}, {source_axis} }},",
-                    c_ident(parameter),
+                    c_ident(prepared),
                     c_string_literal(claim),
                     c_string_literal(parameter),
                 ),
+                HostResultRequirement::NamedList { .. } => unreachable!("dynamic frame handled above"),
             });
         }
         lines.push(format!("{indent}}};"));
@@ -2396,7 +2486,7 @@ fn private_host_function_params(params: &str) -> String {
     join_params(
         params,
         &format!(
-            "__chelis_host_result_origin_arena *__chelis_origin_arena, const __chelis_host_result_claim *__chelis_caller_result_claims, const __chelis_host_result_origin **{PRIVATE_RESULT_ORIGIN_RETURN_SLOT}"
+            "__chelis_host_result_origin_arena *__chelis_origin_arena, const __chelis_entry_receipt *__chelis_caller_entry_receipt, const __chelis_host_result_claim *__chelis_caller_result_claims, const __chelis_host_result_origin **{PRIVATE_RESULT_ORIGIN_RETURN_SLOT}"
         ),
     )
 }
@@ -2438,6 +2528,15 @@ typedef struct __chelis_host_result_origin_arena {
     __chelis_host_result_origin *head;
     __chelis_host_result_origin *leaf_head;
 } __chelis_host_result_origin_arena;
+
+/* Private proof of one complete, successful entry contract. Only a verified
+   direct call may forward it. The state bytes belong to the caller's stack
+   frame and are copied at the callee entry before any body operation. */
+typedef struct __chelis_entry_receipt {
+    const void *contract;
+    const void *named_states;
+    size_t named_state_bytes;
+} __chelis_entry_receipt;
 
 static void __chelis_host_result_origin_arena_destroy(__chelis_host_result_origin_arena *arena) {
     __chelis_host_result_origin *node = arena->head;
@@ -2626,14 +2725,104 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
 /// that fetch them run with their parameter's metadata checks, a walked
 /// value's metadata pass runs after its parameter's observations, and its
 /// literal-extent pass runs before the first comparison a later parameter
-/// owes. An inlined invocation's entry has no `work`; each observation is its
-/// own parameter.
+/// owes. A retained invocation supplies work when its formal carries a named
+/// List.
+fn entry_named_state_lines(names: &[String]) -> Vec<String> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["__chelis_entry_named_state __chelis_entry_named_states[] = {".into()];
+    for name in names {
+        lines.push(format!(
+            "    {{ {}, {}, 0, 0, 0, {{0}} }},",
+            c_string_literal(name),
+            c_string_literal(&chelis_ir::lower::extent_binder_label(name))
+        ));
+    }
+    lines.push("};".into());
+    lines
+}
+
+fn validate_retained_entry_contract(
+    contract: &chelis_ir::host::EntryContract<HostType>,
+    plan: &chelis_ir::host::SignatureEntryPlan,
+    positions: &[usize],
+    lists: &[chelis_ir::host::HostListEntry<HostType>],
+) -> Result<(), Unsupported> {
+    use chelis_ir::host::EntryPattern;
+    let mut represented = vec![false; contract.formals().len()];
+    if positions.len() != plan.observations().nodes().len() {
+        return Err(invalid_abi_shape(
+            "retained entry lost a fixed tensor observation".into(),
+            "signature entry",
+        ));
+    }
+    for (node, position) in plan.observations().nodes().iter().zip(positions) {
+        let Some(formal) = contract.formals().get(*position) else {
+            return Err(invalid_abi_shape(
+                "retained entry has an invalid tensor position".into(),
+                "signature entry",
+            ));
+        };
+        if represented[*position]
+            || formal.name() != plan.label(node.id)
+            || !entry_walk::entry_pattern_matches_type(
+                formal.pattern(),
+                &HostType::Tensor(node.output_type.clone()),
+            )
+        {
+            return Err(invalid_abi_shape(
+                "retained entry changed a tensor formal".into(),
+                "signature entry",
+            ));
+        }
+        represented[*position] = true;
+    }
+    let mut projected_binders = Vec::new();
+    for entry in lists {
+        let Some(formal) = contract.formals().get(entry.position) else {
+            return Err(invalid_abi_shape(
+                "retained entry has an invalid List position".into(),
+                "signature entry",
+            ));
+        };
+        if represented[entry.position]
+            || formal.name() != entry.name
+            || !matches!(formal.pattern(), EntryPattern::List(_))
+            || !entry_walk::entry_pattern_matches_type(formal.pattern(), &entry.ty)
+        {
+            return Err(invalid_abi_shape(
+                "retained entry changed a List formal".into(),
+                "signature entry",
+            ));
+        }
+        entry_walk::list_named_dims(&entry.ty, &mut projected_binders);
+        represented[entry.position] = true;
+    }
+    if projected_binders != contract.named_list_binders() {
+        return Err(invalid_abi_shape(
+            "retained entry lost a List binder".into(),
+            "signature entry",
+        ));
+    }
+    for (formal, represented) in contract.formals().iter().zip(represented) {
+        if entry_walk::entry_pattern_has_extent_claim(formal.pattern()) && !represented {
+            return Err(invalid_abi_shape(
+                "retained entry omitted a declared extent formal".into(),
+                "signature entry",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn signature_entry_lines(
     plan: &chelis_ir::host::SignatureEntryPlan,
     args: &[String],
     indent: &str,
     delegated: &[chelis_ir::axis_sources::EntryExtentGuard],
     work: Option<&entry_walk::FunctionEntryWork>,
+    declare_named_states: bool,
 ) -> Result<Vec<String>, Unsupported> {
     use chelis_ir::axis_sources::EntryExtentGuard;
     if args.len() != plan.observations().nodes().len()
@@ -2650,6 +2839,29 @@ fn signature_entry_lines(
     let owners = work.map_or_else(|| (0..args.len()).collect(), |work| work.owners.clone());
     let params = work.map_or(&[][..], |work| work.params.as_slice());
     let param_count = work.map_or(args.len(), |work| work.params.len());
+    if let Some(work) = work {
+        let mut fixed_seen = vec![false; args.len()];
+        for (owner, param) in work.params.iter().enumerate() {
+            for step in &param.ordered_extents {
+                let entry_walk::ExtentStep::Fixed(index) = step else {
+                    continue;
+                };
+                if owners.get(*index) != Some(&owner) || fixed_seen[*index] {
+                    return Err(invalid_abi_shape(
+                        "signature entry changed an ordered tensor observation".into(),
+                        "signature entry",
+                    ));
+                }
+                fixed_seen[*index] = true;
+            }
+        }
+        if fixed_seen.iter().any(|seen| !seen) {
+            return Err(invalid_abi_shape(
+                "signature entry omitted an ordered tensor observation".into(),
+                "signature entry",
+            ));
+        }
+    }
     let label_of = |node: &chelis_ir::dag::DagNode| {
         let RiscOp::Load { name } = &node.op else {
             unreachable!("signature observation")
@@ -2657,6 +2869,10 @@ fn signature_entry_lines(
         entry_walk::TensorLabel::fixed(name.as_str())
     };
     let mut lines = Vec::new();
+    let named_list_binders = work.map_or(&[][..], |work| work.named_list_binders.as_slice());
+    if declare_named_states {
+        lines.extend(entry_named_state_lines(named_list_binders));
+    }
     // No extent read may obscure a malformed external input's null, dtype or
     // rank diagnostic. These metadata checks dominate the ordered comparisons.
     for param in 0..param_count {
@@ -2693,18 +2909,7 @@ fn signature_entry_lines(
             axis,
         )
     };
-    let mut walked = 0;
-    for guard in plan
-        .guards()
-        .iter()
-        .filter(|guard| !delegated.contains(guard))
-    {
-        let (EntryExtentGuard::Named { observed, .. } | EntryExtentGuard::Literal { observed, .. }) =
-            guard;
-        while walked < owners[observed.0.0].min(params.len()) {
-            lines.extend(params[walked].extents.iter().cloned());
-            walked += 1;
-        }
+    let guard_lines = |guard: &EntryExtentGuard| -> Vec<String> {
         match guard {
             EntryExtentGuard::Named {
                 claim,
@@ -2714,31 +2919,90 @@ fn signature_entry_lines(
                 let (left, first, first_axis) = read(*canonical);
                 let (right, later, later_axis) = read(*observed);
                 let claim = chelis_ir::span_sanitize::sanitize_for_format_string(claim);
-                lines.push(format!("if ({right} != {left}) {{"));
-                lines.push(format!(
-                    "    fprintf(stderr, \"extent `{claim}`: {first} axis {first_axis} = %lld, {later} axis {later_axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
-                ));
-                lines.push(
+                vec![
+                    format!("if ({right} != {left}) {{"),
+                    format!(
+                        "    fprintf(stderr, \"extent `{claim}`: {first} axis {first_axis} = %lld, {later} axis {later_axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
+                    ),
                     "    chelis_numeric_trap(\"numeric trap: domain in load at i64\");".into(),
-                );
-                lines.push("}".into());
+                    "}".into(),
+                ]
             }
             EntryExtentGuard::Literal { required, observed } => {
                 let node = plan
                     .observations()
                     .get(observed.0)
                     .expect("signature witness");
-                lines.extend(entry_walk::literal_extent_check(
+                entry_walk::literal_extent_check(
                     &args[observed.0.0],
                     &label_of(node),
                     observed.1,
                     *required,
-                ));
+                )
             }
         }
-    }
-    for work in &params[walked..] {
-        lines.extend(work.extents.iter().cloned());
+    };
+    if work.is_some() {
+        // The ordered work interleaves fixed tuple positions and aggregate
+        // walks even when a List has only literal claims. An observation-only
+        // pass would move a later tuple field ahead of an earlier List walk.
+        for param in params {
+            for step in &param.ordered_extents {
+                match step {
+                    entry_walk::ExtentStep::Walk(call) => lines.push(call.clone()),
+                    entry_walk::ExtentStep::Fixed(index) => {
+                        let node = &plan.observations().nodes()[*index];
+                        let actual = &args[*index];
+                        let label = plan.label(node.id);
+                        for (axis, dim) in node.output_type.dims.iter().enumerate() {
+                            if let DimInfo::Named(name, _) = dim
+                                && named_list_binders.contains(name)
+                            {
+                                lines.push(format!(
+                                    "__chelis_entry_named_observe(__chelis_entry_named_states, {}, {}, {}, {axis}, chelis_tensor_shape({actual}, {axis}));",
+                                    named_list_binders.len(),
+                                    c_string_literal(name),
+                                    c_string_literal(label),
+                                ));
+                            }
+                            for guard in plan.guards() {
+                                let observed = match guard {
+                                    EntryExtentGuard::Named { observed, .. }
+                                    | EntryExtentGuard::Literal { observed, .. } => observed,
+                                };
+                                if *observed != (node.id, axis) || delegated.contains(guard) {
+                                    continue;
+                                }
+                                if matches!(dim, DimInfo::Named(name, _) if named_list_binders.contains(name))
+                                    && matches!(guard, EntryExtentGuard::Named { .. })
+                                {
+                                    continue;
+                                }
+                                lines.extend(guard_lines(guard));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        let mut walked = 0;
+        for guard in plan
+            .guards()
+            .iter()
+            .filter(|guard| !delegated.contains(guard))
+        {
+            let (EntryExtentGuard::Named { observed, .. }
+            | EntryExtentGuard::Literal { observed, .. }) = guard;
+            while walked < owners[observed.0.0].min(params.len()) {
+                lines.extend(params[walked].extents.iter().cloned());
+                walked += 1;
+            }
+            lines.extend(guard_lines(guard));
+        }
+        for work in &params[walked..] {
+            lines.extend(work.extents.iter().cloned());
+        }
     }
     if let Some(work) = work {
         lines.extend(work.release.iter().cloned());
@@ -2747,6 +3011,29 @@ fn signature_entry_lines(
         .into_iter()
         .map(|line| format!("{indent}{line}"))
         .collect())
+}
+
+/// A receipt crosses a direct call only when both owned bodies check the
+/// identical positional contract and ABI types. Display paths are part of
+/// that equality, so replaying the first named witness keeps its label.
+fn entry_receipt_groups(program: &HostProgram) -> UnordMap<String, usize> {
+    let mut groups = UnordMap::new();
+    for (index, function) in program.functions.iter().enumerate() {
+        let representative = program.functions[..index]
+            .iter()
+            .position(|prior| {
+                prior.entry_contract == function.entry_contract
+                    && prior.params.len() == function.params.len()
+                    && prior
+                        .params
+                        .iter()
+                        .zip(&function.params)
+                        .all(|(left, right)| left.name == right.name && left.ty == right.ty)
+            })
+            .unwrap_or(index);
+        groups.insert(function.name.clone(), representative);
+    }
+    groups
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2764,6 +3051,7 @@ fn emit_function(
     external_helpers: &UnordSet<String>,
     captured_globals: &[String],
     entry_work: &entry_walk::EntryWork,
+    entry_groups: &UnordMap<String, usize>,
 ) -> Result<(), Unsupported> {
     let params = function
         .params
@@ -2802,6 +3090,32 @@ fn emit_function(
         },
         ownership_sites,
     );
+    emitter.entry_group = entry_groups.get(&function.name).copied();
+    emitter.entry_groups = entry_groups.clone();
+    if entry_work.extent_at_body {
+        emitter.entry_proof_owners = entry_work
+            .body
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, work)| {
+                !work.fetch.is_empty()
+                    || !work.metadata.is_empty()
+                    || !work.ordered_extents.is_empty()
+            })
+            .map(|(index, _)| {
+                owner_bindings
+                    .get(index)
+                    .map(|(owner, _)| (index, *owner))
+                    .ok_or_else(|| {
+                        invalid_abi_shape(
+                            "entry receipt lost a verified formal owner".into(),
+                            "signature entry",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+    }
     emitter.entry_projection = entry::helper_coverage_with_verified(function, verified_helpers);
     emitter.external_helpers = external_helpers.clone();
     emitter.interface_reload_names = captured_globals.iter().cloned().collect();
@@ -2848,13 +3162,63 @@ fn emit_function(
         })?;
     let entry_plan = function_entry_plan(function);
     let delegated_entry_guards = entry::delegated_function_guards(function, verified_helpers);
-    emitter.lines.extend(signature_entry_lines(
-        &entry_plan,
-        &entry_work.body.args,
-        &emitter.indent,
-        &delegated_entry_guards,
-        Some(&entry_work.body),
-    )?);
+    if entry_work.extent_at_body {
+        let group = emitter
+            .entry_group
+            .expect("every emitted function has an entry group");
+        let token = format!("&__chelis_entry_contract_token_{group}");
+        emitter.lines.extend(
+            entry_named_state_lines(&entry_work.body.named_list_binders)
+                .into_iter()
+                .map(|line| format!("{}{}", emitter.indent, line)),
+        );
+        let (states, bytes) = if entry_work.body.named_list_binders.is_empty() {
+            ("NULL", "0")
+        } else {
+            (
+                "__chelis_entry_named_states",
+                "sizeof __chelis_entry_named_states",
+            )
+        };
+        emitter.lines.push(format!(
+            "{}if (__chelis_caller_entry_receipt != NULL && \
+             __chelis_caller_entry_receipt->contract == {token} && \
+             __chelis_caller_entry_receipt->named_state_bytes == {bytes} && \
+             ({bytes} == 0 || __chelis_caller_entry_receipt->named_states != NULL)) {{",
+            emitter.indent
+        ));
+        if !entry_work.body.named_list_binders.is_empty() {
+            emitter.lines.push(format!(
+                "{}    memcpy(__chelis_entry_named_states, \
+                 __chelis_caller_entry_receipt->named_states, {bytes});",
+                emitter.indent
+            ));
+        }
+        emitter.lines.push(format!("{}}} else {{", emitter.indent));
+        emitter.lines.extend(signature_entry_lines(
+            &entry_plan,
+            &entry_work.body.args,
+            &format!("{}    ", emitter.indent),
+            &delegated_entry_guards,
+            Some(&entry_work.body),
+            false,
+        )?);
+        emitter.lines.push(format!("{}}}", emitter.indent));
+        emitter.lines.push(format!(
+            "{}const __chelis_entry_receipt __chelis_entry_receipt_current = \
+             {{ {token}, {states}, {bytes} }};",
+            emitter.indent
+        ));
+    } else {
+        emitter.lines.extend(signature_entry_lines(
+            &entry_plan,
+            &entry_work.body.args,
+            &emitter.indent,
+            &delegated_entry_guards,
+            Some(&entry_work.body),
+            true,
+        )?);
+    }
     // A frame belongs to this invocation, not to a selected callee name.
     // The expression spine forwards the frame; branch arms share its immutable
     // contents and arguments/sibling bindings never inherit it. A named axis
@@ -2898,11 +3262,8 @@ fn emit_function(
 
     if authored {
         let entry_uses = authored_entry_uses(ownership_sites, function.params.len())?;
-        // chelis#2506: a walk costs the size of the value, so it runs here,
-        // once per exported call, and never on the body's recursive or
-        // internal calls. The whole signature entry runs with it, so every
-        // metadata check still dominates every extent read; the body then
-        // repeats only its constant-cost checks.
+        // A public call admits every aggregate extent in signature order.
+        // Internal calls retain their List-only entry boundary.
         let exported_work = entry_work.exported.as_ref().ok_or_else(|| {
             invalid_abi_shape(
                 "authored function has no exported entry work".into(),
@@ -2916,6 +3277,7 @@ fn emit_function(
                 "    ",
                 &delegated_entry_guards,
                 Some(exported_work),
+                true,
             )?
         } else {
             Vec::new()
@@ -2938,6 +3300,27 @@ fn emit_function(
         ));
         out.push(format!("{} {{", declaration.trim_end_matches(';')));
         out.extend(exported_entry.iter().cloned());
+        let wrapper_receipt = if entry_work.extent_at_body && delegated_entry_guards.is_empty() {
+            let group = entry_groups
+                .get(&function.name)
+                .copied()
+                .expect("every emitted function has an entry group");
+            let (states, bytes) = if exported_work.named_list_binders.is_empty() {
+                ("NULL", "0")
+            } else {
+                (
+                    "__chelis_entry_named_states",
+                    "sizeof __chelis_entry_named_states",
+                )
+            };
+            out.push(format!(
+                "    const __chelis_entry_receipt __chelis_exported_entry_receipt = \
+                 {{ &__chelis_entry_contract_token_{group}, {states}, {bytes} }};"
+            ));
+            "&__chelis_exported_entry_receipt"
+        } else {
+            "NULL"
+        };
         append_invocation_origin_context(out);
         let mut args = Vec::with_capacity(function.params.len());
         for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
@@ -2958,7 +3341,7 @@ fn emit_function(
                 args.push(c_ident(&param.name).into_owned());
             }
         }
-        append_private_host_context_args(&mut args);
+        append_private_host_context_args(&mut args, wrapper_receipt);
         args.push("NULL".to_string());
         args.push("NULL".to_string());
         out.push(format!(
@@ -3298,10 +3681,14 @@ fn collect_var_names(expr: &HostExpr, out: &mut UnordSet<String>) {
             }
         }
         HostExprKind::Call { args, .. }
-        | HostExprKind::SignatureEntry { args, .. }
         | HostExprKind::Builtin { args, .. }
         | HostExprKind::TensorCall { args, .. } => {
             for arg in args {
+                collect_var_names(arg, out);
+            }
+        }
+        HostExprKind::SignatureEntry { args, lists, .. } => {
+            for arg in args.iter().chain(lists.iter().map(|entry| &entry.value)) {
                 collect_var_names(arg, out);
             }
         }
@@ -3402,10 +3789,13 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
                     walk(arg, out);
                 }
             }
-            HostExprKind::Builtin { args, .. }
-            | HostExprKind::TensorCall { args, .. }
-            | HostExprKind::SignatureEntry { args, .. } => {
+            HostExprKind::Builtin { args, .. } | HostExprKind::TensorCall { args, .. } => {
                 for arg in args {
+                    walk(arg, out);
+                }
+            }
+            HostExprKind::SignatureEntry { args, lists, .. } => {
+                for arg in args.iter().chain(lists.iter().map(|entry| &entry.value)) {
                     walk(arg, out);
                 }
             }
@@ -3584,6 +3974,9 @@ struct HostEmitter<'a> {
     pre_emitted_clone_sites: UnordSet<HostSiteId>,
     pre_emitted_terminals: UnordSet<(HostSiteId, VerifiedOperationId)>,
     owner_vars: UnordMap<VerifiedOwnerId, String>,
+    entry_group: Option<usize>,
+    entry_groups: UnordMap<String, usize>,
+    entry_proof_owners: Vec<(usize, VerifiedOwnerId)>,
     temp_counter: usize,
     /// Immutable invocation context. Only the expression on the returned-value
     /// spine receives it; nested arguments and sibling bindings get no context.
@@ -3596,6 +3989,51 @@ struct HostTensorHelpers<'a> {
     helpers: &'a [HostTensorHelper],
     output_types: &'a [Vec<TensorType>],
     result_origins: Vec<Option<String>>,
+}
+
+/// The verified direct-call operands identify logical owners, independent of
+/// source variable spellings or emitted C temporaries. A receipt crosses an
+/// edge only when every value observed by the entry contract is the same
+/// positional owner that the caller admitted.
+fn call_forwards_entry_owners(
+    site: &ProjectedHostSite<'_>,
+    owners: &[(usize, VerifiedOwnerId)],
+) -> bool {
+    let clones = site
+        .directives
+        .iter()
+        .filter_map(|action| match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                dest, source, ..
+            }) => Some((dest.id(), source.owner().id())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let original_owner = |mut owner| {
+        for _ in 0..clones.len() {
+            let Some((_, source)) = clones.iter().find(|(dest, _)| *dest == owner) else {
+                break;
+            };
+            owner = *source;
+        }
+        owner
+    };
+    let mut calls = site.directives.iter().filter_map(|action| match action {
+        VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+            kind: VerifiedApplyKind::DirectCall { .. },
+            args,
+            ..
+        }) => Some(args),
+        _ => None,
+    });
+    let Some(args) = calls.next() else {
+        return false;
+    };
+    calls.next().is_none()
+        && owners.iter().all(|(position, owner)| {
+            args.get(*position)
+                .is_some_and(|arg| original_owner(arg.owner().id()) == *owner)
+        })
 }
 
 /// Whether the verified intrinsic application labelled `label` at this site
@@ -3753,6 +4191,9 @@ impl<'a> HostEmitter<'a> {
             pre_emitted_clone_sites: UnordSet::new(),
             pre_emitted_terminals: UnordSet::new(),
             owner_vars: UnordMap::new(),
+            entry_group: None,
+            entry_groups: UnordMap::new(),
+            entry_proof_owners: Vec::new(),
             temp_counter: 0,
             result_claims: None,
             claim_on_spine: false,
@@ -5025,12 +5466,11 @@ impl<'a> HostEmitter<'a> {
                 ty: scope_ty,
             } => {
                 require_same_abi_type(ty, scope_ty, "result-claim scope")?;
-                let result = plan.result();
                 let axes = self.next_temp("result_claim_axes");
                 let frame = self.next_temp("result_claim_frame");
                 let parent = result_claims.as_deref().unwrap_or("NULL");
                 self.lines
-                    .extend(HostResultClaim::from_tensor_type(result).frame_lines(
+                    .extend(HostResultClaim::from_plan(plan).frame_lines(
                         &self.indent,
                         &axes,
                         &frame,
@@ -5557,21 +5997,88 @@ impl<'a> HostEmitter<'a> {
                     result_claims.as_deref(),
                 )?;
             }
-            HostExprKind::SignatureEntry { plan, args } => {
+            HostExprKind::SignatureEntry {
+                contract,
+                plan,
+                args,
+                positions,
+                lists,
+            } => {
                 require_same_abi_type(ty, &HostType::Unit, "signature entry")?;
+                validate_retained_entry_contract(contract, plan, positions, lists)?;
                 let mut actuals = Vec::with_capacity(args.len());
                 for arg in args {
                     let temp = self.next_temp("entry_arg");
                     self.emit_expr_to_var(arg, &temp, &host_type(arg))?;
                     actuals.push(temp);
                 }
-                self.lines.extend(signature_entry_lines(
-                    plan,
-                    &actuals,
-                    &self.indent,
-                    &[],
-                    None,
-                )?);
+                if lists.is_empty() {
+                    self.lines.extend(signature_entry_lines(
+                        plan,
+                        &actuals,
+                        &self.indent,
+                        &[],
+                        None,
+                        true,
+                    )?);
+                } else {
+                    let count = contract.formals().len();
+                    let mut work = entry_walk::FunctionEntryWork {
+                        args: actuals.clone(),
+                        owners: positions.clone(),
+                        params: (0..count)
+                            .map(|_| entry_walk::ParamEntryWork::default())
+                            .collect(),
+                        named_list_binders: contract.named_list_binders().to_vec(),
+                        release: Vec::new(),
+                    };
+                    if positions.len() != args.len() {
+                        return Err(invalid_abi_shape(
+                            "retained List entry lost its fixed tensor observations".into(),
+                            "signature entry",
+                        ));
+                    }
+                    for (index, position) in positions.iter().enumerate() {
+                        work.params[*position]
+                            .ordered_extents
+                            .push(entry_walk::ExtentStep::Fixed(index));
+                    }
+                    for entry in lists {
+                        let temp = self.next_temp("entry_list");
+                        self.emit_expr_to_var(&entry.value, &temp, &host_type(&entry.value))?;
+                        work.params[entry.position].metadata.extend(
+                            entry_walk::retained_list_pass(
+                                &entry.ty,
+                                &temp,
+                                &entry.name,
+                                false,
+                                work.named_list_binders.len(),
+                            ),
+                        );
+                        let extent_lines = entry_walk::retained_list_pass(
+                            &entry.ty,
+                            &temp,
+                            &entry.name,
+                            true,
+                            work.named_list_binders.len(),
+                        );
+                        let extent_call = extent_lines.join("\n");
+                        work.params[entry.position]
+                            .extents
+                            .push(extent_call.clone());
+                        work.params[entry.position]
+                            .ordered_extents
+                            .push(entry_walk::ExtentStep::Walk(extent_call));
+                    }
+                    self.lines.extend(signature_entry_lines(
+                        plan,
+                        &actuals,
+                        &self.indent,
+                        &[],
+                        Some(&work),
+                        true,
+                    )?);
+                }
                 self.lines.push(format!("{}{target} = 0;", self.indent));
             }
             HostExprKind::Unit => {
@@ -8592,7 +9099,19 @@ impl<'a> HostEmitter<'a> {
         // Calls to declared functions use private bodies and inherit this
         // invocation. Callback parameters retain their authored C signature.
         if self.emitted_names.contains_key(function) {
-            append_private_host_context_args(&mut arg_vars);
+            let forwards_receipt = self
+                .entry_group
+                .is_some_and(|group| self.entry_groups.get(function) == Some(&group))
+                && !self.entry_proof_owners.is_empty()
+                && call_forwards_entry_owners(site, &self.entry_proof_owners);
+            append_private_host_context_args(
+                &mut arg_vars,
+                if forwards_receipt {
+                    "&__chelis_entry_receipt_current"
+                } else {
+                    "NULL"
+                },
+            );
             arg_vars.push(result_claims.unwrap_or("NULL").to_string());
             arg_vars.push(format!("&{}", result_origin_name(target)));
         }
@@ -9557,7 +10076,7 @@ impl<'a> HostEmitter<'a> {
             HostCallbackKind::Named { function, .. } => {
                 let mut arg_vars = arg_vars.to_vec();
                 if self.emitted_names.contains_key(function) {
-                    append_private_host_context_args(&mut arg_vars);
+                    append_private_host_context_args(&mut arg_vars, "NULL");
                     arg_vars.push("NULL".to_string());
                     arg_vars.push(format!("&{}", result_origin_name(target)));
                 }

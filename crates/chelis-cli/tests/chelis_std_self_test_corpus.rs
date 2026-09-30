@@ -1,22 +1,22 @@
-//! Phase 3t — chelis-std self-test corpus integration test.
+//! chelis-std self-test corpus integration test.
 //!
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
-//! exercise chelis-std's own modules (Std.Tensor, Std.Init, Std.Io, Std.Time,
-//! Std.Tokenizer, Std.Decimal, Std.Sort, Std.Scan, Std.Process, Std.Test). The
-//! ML modules (Std.Nn/Loss/Optim/Schedule) moved to School in 0.4.0). It
-//! is run via `chelis test packages/chelis-std/tests/`, but until now nothing
-//! in the default `cargo test --workspace` gate exercised it — a regression
-//! that broke a chelis-std test would only surface when somebody manually
-//! invoked the CLI.
+//! exercise chelis-std's own available modules (Std.Tensor, Std.Io,
+//! Std.Sort, Std.Scan, Std.Process, Std.Test). Std.Time and Std.Decimal
+//! are fenced under #2779 and #2778; School provides
+//! the neural-network, loss, optimizer, and scheduling libraries. The corpus
+//! runs via `chelis test packages/chelis-std/tests/`; the default
+//! `cargo test --workspace` gate does not exercise it, so regressions here
+//! otherwise surface only when somebody invokes the CLI manually.
+//! The Std.Time and Std.Decimal success tests were removed with their fences;
+//! `std_package_acceptance` checks the errors.
 //!
 //! This test wires the corpus into the default workspace gate. It stages
 //! chelis-std into a tempdir, points CHELIS_REEF_HOME at a tempdir reef home
 //! for isolation from any developer-local reef state, and runs
 //! `chelis test tests/` from inside the staged package. The summary line
-//! `N passed, 0 failed` is parsed and N is asserted >= 120 so we leave
-//! headroom for new self-tests but catch a silent regression that drops the
-//! corpus below its current floor (~137 across 24 files after the 0.4.0 ML cut
-//! to School; host-runtime primitive tests under tests/runtime/ remain).
+//! `N passed, 0 failed` is parsed and checked against the retained core corpus
+//! floor; host-runtime primitive tests under tests/runtime/ remain.
 //!
 //! Pattern mirrors `pseudo_nautilus_fixture.rs`.
 
@@ -25,10 +25,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
-/// Floor on the chelis-std self-test count. Current corpus is ~141 passing
-/// tests across 23 files (ML modules moved to School in 0.4.0); the floor is
-/// set below current to leave headroom while still catching a silent drop.
-const MIN_PASSED: u32 = 120;
+/// Floor on the retained chelis-std self-test corpus, set below the measured
+/// 117 passing tests after the Time and Decimal suites moved to explicit
+/// rejection checks in std_package_acceptance.
+const MIN_PASSED: u32 = 110;
 
 fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -52,7 +52,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 #[test]
-#[ignore = "manual gate: ~170s runtime; runs the ~141-test chelis-std self-test corpus under chelis test. Invoke via `cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture`. CI/manual gate; not on the inner-loop budget per CLAUDE.md."]
+#[ignore = "manual gate: runs the chelis-std self-test corpus under chelis test; runtime exceeds the default inner-loop budget. Invoke via `cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture`."]
 fn chelis_std_self_test_corpus_passes_under_chelis_test() {
     // Stage chelis-std into a tempdir so the test does not touch the
     // checked-in package on disk and is isolated from any developer-local

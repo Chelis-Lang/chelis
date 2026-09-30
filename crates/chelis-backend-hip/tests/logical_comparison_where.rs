@@ -6,6 +6,125 @@ use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, RtDim, T
 use chelis_types::types::Prim;
 use support::codegen_hip;
 
+#[test]
+fn generated_hip_bitwise_math_matches_exact_width_reference_on_cpu() {
+    use chelis_types::{BitwiseKind, bitwise_scalar, scalar_from_i64};
+    use std::process::Command;
+
+    for (prim, signed, width, minimum, min_literal) in [
+        (Prim::Int8, "int8_t", 8, i8::MIN as i64, "-128LL"),
+        (Prim::Int16, "int16_t", 16, i16::MIN as i64, "-32768LL"),
+        (Prim::Int32, "int32_t", 32, i32::MIN as i64, "-2147483648LL"),
+        (Prim::Int64, "int64_t", 64, i64::MIN, "INT64_MIN"),
+    ] {
+        let lhs = [-1, 1, minimum, 8];
+        let rhs = [1, width - 1, width, width + 1];
+        for kind in [
+            BitwiseKind::And,
+            BitwiseKind::Or,
+            BitwiseKind::Xor,
+            BitwiseKind::ShiftLeft,
+            BitwiseKind::ShiftRight,
+        ] {
+            let kernel = chelis_backend_hip::kernels::binary_bitwise_typed(
+                1,
+                "bitwise_cpu",
+                kind,
+                prim,
+                None,
+            );
+            let expected = lhs
+                .into_iter()
+                .zip(rhs)
+                .map(|(a, b)| {
+                    bitwise_scalar(
+                        kind,
+                        scalar_from_i64("bitwise", prim, a).unwrap(),
+                        scalar_from_i64("bitwise", prim, b).unwrap(),
+                    )
+                    .unwrap()
+                    .as_i64_exact()
+                    .unwrap()
+                    .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let rhs_init = rhs
+                .iter()
+                .map(|value| format!("{value}LL"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = format!(
+                r#"#include <cstdint>
+#include <cstdio>
+#define __device__
+#define __global__
+#define CHELIS_DEBUG_BOUNDS 0
+struct Dim {{ long x; }};
+Dim blockIdx{{0}}, blockDim{{4}}, threadIdx{{0}};
+unsigned long long atomicCAS(unsigned long long* p, unsigned long long old, unsigned long long value) {{ auto prior=*p; if (prior==old) *p=value; return prior; }}
+unsigned int atomicExch(unsigned int* p, unsigned int value) {{ auto prior=*p; *p=value; return prior; }}
+{kernel}
+int main() {{
+    {signed} lhs[4] = {{-1, 1, ({signed}){min_literal}, 8}};
+    {signed} rhs[4] = {{{rhs_init}}};
+    {signed} out[4] = {{0}};
+    for (int i=0; i<4; ++i) {{ threadIdx.x=i; bitwise_cpu(lhs, 1, 1, 4, rhs, 1, 1, 4, out, 4, 1, 4); }}
+    for (int i=0; i<4; ++i) printf("%s%lld", i ? " " : "", (long long)out[i]);
+    printf("\n");
+    if ({shift}) {{
+        chelis_numeric_failure_flag=0;
+        chelis_numeric_failure_index=~0ULL;
+        rhs[0]=-3; rhs[1]=-7;
+        for (int i=0; i<4; ++i) {{ threadIdx.x=i; bitwise_cpu(lhs, 1, 1, 4, rhs, 1, 1, 4, out, 4, 1, 4); }}
+        printf("TRAP %llu %lld\n", chelis_numeric_failure_index, (long long)out[0]);
+    }}
+    return 0;
+}}
+"#,
+                shift = i32::from(kind.is_shift()),
+            );
+            let temporary = tempfile::tempdir().expect("tempdir");
+            let source_file = temporary.path().join("bitwise.cpp");
+            let binary = temporary.path().join("bitwise");
+            std::fs::write(&source_file, &source).expect("write HIP CPU projection");
+            let compile = Command::new("c++")
+                .args(["-std=c++17", "-O2"])
+                .arg(&source_file)
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .expect("C++ compiler");
+            assert!(
+                compile.status.success(),
+                "{kind:?} {prim:?}: {}\n{source}",
+                String::from_utf8_lossy(&compile.stderr)
+            );
+            let run = Command::new(&binary)
+                .output()
+                .expect("run HIP CPU projection");
+            assert!(
+                run.status.success(),
+                "{kind:?} {prim:?}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            let stdout = String::from_utf8(run.stdout).expect("utf8");
+            assert_eq!(
+                stdout.lines().next(),
+                Some(expected.as_str()),
+                "{kind:?} {prim:?}"
+            );
+            if kind.is_shift() {
+                assert_eq!(
+                    stdout.lines().nth(1),
+                    Some("TRAP 0 -3"),
+                    "{kind:?} {prim:?}"
+                );
+            }
+        }
+    }
+}
+
 fn vector(precision: Prim) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(8)],
@@ -14,7 +133,7 @@ fn vector(precision: Prim) -> TensorType {
 }
 
 #[test]
-fn hip_bitwise_kernels_have_exact_typed_rejections() {
+fn hip_bitwise_kernels_preserve_exact_integer_width_and_shift_traps() {
     for kind in [
         chelis_types::BitwiseKind::And,
         chelis_types::BitwiseKind::Or,
@@ -47,19 +166,19 @@ fn hip_bitwise_kernels_have_exact_typed_rejections() {
                 None,
             );
             dag.add_root(out);
-            let Err(error) = codegen_hip(&dag, "bitwise") else {
-                panic!("device kernel gap must reject")
-            };
-            assert_eq!(
-                error.stage,
-                chelis_types::unsupported::Stage::Codegen("hip")
+            let source = codegen_hip(&dag, "bitwise")
+                .expect("[05-OP-47] typed HIP kernel")
+                .c_source;
+            assert!(source.contains(&format!("kernel_{}_{}", kind.name(), prim.name())));
+            assert!(
+                source.contains("unsigned"),
+                "bitwise kernels must use unsigned bits"
             );
-            assert_eq!(
-                error.authority.kind(),
-                chelis_types::unsupported::RejectionAuthorityKind::Unimplemented
-            );
-            assert_eq!(error.authority.issue().unwrap().number(), 2702);
-            assert!(error.to_string().contains(kind.name()));
+            if kind.is_shift() {
+                assert!(source.contains("chelis_record_numeric_failure"));
+                assert!(source.contains("shift amount must be non-negative, got"));
+                assert!(source.contains("chelis_numeric_failure_index"));
+            }
         }
     }
 }

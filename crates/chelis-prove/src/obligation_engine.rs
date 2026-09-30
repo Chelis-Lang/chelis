@@ -841,7 +841,10 @@ fn run_tier_c(
                     match crate::opaque::generate_binder(
                         input_inv,
                         consts,
-                        &module_source,
+                        crate::opaque::GenModule {
+                            exprs,
+                            source: &module_source,
+                        },
                         &producers,
                         &mut grng,
                         options.invariant_min_rate,
@@ -1592,12 +1595,21 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
         ) else {
             continue;
         };
-        if let [root] = result.roots.as_slice()
-            && let ExecutionValue::Tensor { value } = &root.value
-            && value.shape.is_empty()
-            && value.data.len() == 1
-        {
-            return Some(value.data.element_f64_lossy(0));
+        if let [root] = result.roots.as_slice() {
+            let constant = match &root.value {
+                ExecutionValue::Scalar { value } => {
+                    crate::opaque::finite_exact_constant(value.get())
+                }
+                ExecutionValue::Tensor { value }
+                    if value.shape.is_empty() && value.data.len() == 1 =>
+                {
+                    crate::opaque::finite_exact_constant(value.data.scalar_at(0))
+                }
+                _ => None,
+            };
+            if constant.is_some() {
+                return constant;
+            }
         }
     }
     None
@@ -1611,13 +1623,15 @@ fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
     fn lit_number(expr: &Expr) -> Option<f64> {
         // A bare atom or a `(lit {} <num>)` node.
         match expr {
-            Expr::Atom(Atom::Float(v), _) => Some(*v),
-            Expr::Atom(Atom::Int(v), _) => Some(*v as f64),
+            Expr::Atom(Atom::Float(v), _) => v.is_finite().then_some(*v),
+            Expr::Atom(Atom::Int(v), _) => crate::opaque::exact_integer_constant_as_f64(*v),
             _ => {
                 if list_tag(expr) == Some(DeepTag::Lit) {
                     match node_children(expr).first() {
-                        Some(Expr::Atom(Atom::Float(v), _)) => Some(*v),
-                        Some(Expr::Atom(Atom::Int(v), _)) => Some(*v as f64),
+                        Some(Expr::Atom(Atom::Float(v), _)) => v.is_finite().then_some(*v),
+                        Some(Expr::Atom(Atom::Int(v), _)) => {
+                            crate::opaque::exact_integer_constant_as_f64(*v)
+                        }
                         _ => None,
                     }
                 } else {
@@ -2295,6 +2309,25 @@ mod finding_tests {
     use crate::opaque::FieldType;
     use chelis_compiler_api::schema::TensorValue;
     use chelis_pred::PredAmenability;
+
+    #[test]
+    fn nonexact_integer_constant_is_omitted_from_producer_environment() {
+        let source = "module Stats.IntegerBound
+@opaque
+@invariant(p) p.value >= bound
+type LargeInt =
+  | LargeInt { value: i64 }
+def bound() -> i64 = 9007199254740993i64
+";
+        let declarations = chelis_surf::parser::parse_str(source).expect("parse module");
+        let exprs = chelis_surf::desugar::desugar_program(&declarations).expect("desugar module");
+        let invariants = crate::opaque::collect_opaque_invariants(&exprs);
+        let constants = resolve_module_constants(&exprs, &invariants);
+        assert!(
+            !constants.contains_key("bound"),
+            "a rounded integer must not enter the producer constant environment: {constants:?}"
+        );
+    }
 
     #[test]
     fn scalar_flattening_moves_exact_bits_and_rejects_dtype_substitution() {

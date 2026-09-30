@@ -15,11 +15,11 @@ in its body.
 
 ## Randomness is not an effect
 
-A random draw is a pure function of the key it is given. `dropout`, `uniform_like` and the
-`Std.Init` initializers take a `key` as their first argument and contribute no effect, so a
-function that draws takes a `key` parameter and needs no annotation. `key_from_seed(42i64)`
-makes a root key; `split_key`, `split_keys` and `fold_in` derive fresh keys from one. A key
-is used at most once on every path, so two draws need two keys:
+A random draw is a pure function of the key it is given. `dropout` and `uniform_like` take
+a `key` as their first argument and contribute no effect, so a function that draws takes a
+`key` parameter and needs no annotation. `key_from_seed(42i64)` makes a root key;
+`split_key`, `split_keys` and `fold_in` derive fresh keys from one. A key is used at most
+once on every path, so two draws need two keys:
 
 ```chelis-surf-fragment
 (k1, k2) = split_key(key_from_seed(42i64))

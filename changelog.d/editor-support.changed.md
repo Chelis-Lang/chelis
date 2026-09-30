@@ -1,0 +1,1 @@
+The VS Code extension highlights current Surf and Deep syntax, including block comments, numeric forms, and operators. The Python binding guide describes source checking, evaluation, and compiled tensor model use.

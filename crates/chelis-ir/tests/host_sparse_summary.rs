@@ -87,7 +87,10 @@ fn gather_helper_with_load_operands_is_summarized() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
@@ -148,7 +151,10 @@ fn scatter_add_helper_with_load_operands_is_summarized() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         output_ty.clone(),
         None,
@@ -206,7 +212,10 @@ fn scatter_replace_helper_with_load_operands_is_summarized() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::Scatter { axis: 0 },
+        RiscOp::Scatter {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         output_ty.clone(),
         None,
@@ -253,7 +262,10 @@ fn literal_result_claim_owner_copy_preserves_sparse_summary() {
     );
     let gathered = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
@@ -312,7 +324,10 @@ fn ordinary_copy_after_sparse_op_remains_post_processing() {
     );
     let gathered = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
@@ -387,7 +402,10 @@ fn helper_with_post_processing_add_after_scatter_add_is_rejected() {
     );
     let scattered = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         target_ty.clone(),
         None,
@@ -460,7 +478,10 @@ fn helper_with_non_load_operand_for_scatter_add_is_rejected() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, doubled],
         output_ty.clone(),
         None,
@@ -507,7 +528,10 @@ fn helper_with_mismatched_indices_precision_is_rejected() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
@@ -562,7 +586,10 @@ fn helper_with_mismatched_payload_precision_is_rejected() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         output_ty.clone(),
         None,
@@ -619,7 +646,10 @@ fn helper_with_wildcard_dim_is_rejected() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
@@ -662,14 +692,20 @@ fn helper_with_multiple_roots_is_rejected() {
     );
     let root_a = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
     );
     let root_b = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,

@@ -16,15 +16,16 @@ it still could not:
 - store variable-length sequences and maps
 - iterate over non-tensor data
 - read text/config/data files directly
-- tokenize text and batch it into model inputs
+- prepare structured model inputs and batch them
 
 Those gaps drove the compiler/runtime and standard-library foundations that have since
 shipped through `3j`. The remaining Phase 3 work is now the shell ecosystem, native
 testing surface, and final teaching refresh.
 
 **Phase 3 deliverable:** a researcher can write, in pure Chelis, a program that reads
-text, tokenizes it, batches and pads it, runs a model, computes loss and gradients, and
-prints results, without dropping to Python for preprocessing or orchestration.
+structured data, prepares and batches model inputs, runs a model, computes loss and
+gradients, and prints results without relying on Python for data loading or
+orchestration.
 
 **Phase 3 does NOT deliver:** sparse tensors, complex numbers, research type
 extensions, or Lean formalization. Those move to Phase `5e`, `5f`, `5g`, and `5h`.
@@ -45,7 +46,7 @@ Shipped foundations
 3d: Collections & Iteration
 3h: Core Numeric Primitives
 3m: Rust Runtime Rewrite
-3g: Data Loading & Tokenization
+3g: File I/O, CSV, and JSON
 3i: Standard Library Expansion
 3j-pre: Release Infra + Std Surface Expansion
 3j: Nautilus
@@ -115,7 +116,7 @@ this style.
 **Status:** shipped.
 
 The package system remains in scope as infrastructure, not as remaining work. New
-Phase 3 library surfaces such as tokenizer helpers or text/data modules should be
+Phase 3 library surfaces for file access and structured data should be
 documented as package-friendly APIs that fit the existing Reef / `.chb` model.
 
 ### 3b: Python FFI
@@ -123,8 +124,8 @@ documented as package-friendly APIs that fit the existing Reef / `.chb` model.
 **Status:** shipped.
 
 Python interop remains a supporting boundary, not the solution to Chelis's remaining
-language gaps. Phase 3 is successful only when preprocessing and tokenization no
-longer require Python for ordinary use.
+language gaps. Phase 3 supports structured-data loading and preprocessing in Chelis
+programs without requiring Python for ordinary use.
 
 ### 3b-ii: Direct Python Execution + NumPy Guarantee
 
@@ -151,7 +152,7 @@ Without first-class scalars and strings, Chelis cannot naturally express:
 - loss-threshold checks and training decisions
 - file paths and config keys
 - labels, tokens, and log messages
-- tokenizer state and text-derived metadata
+- text-processing state and text-derived metadata
 
 ### Required Surface
 
@@ -238,7 +239,7 @@ Tensors alone cannot express that variable-length host-side structure.
   `dict_values`, `dict_entries`, plus compiled higher-order iteration (`map`,
   `filter`, `fold`, `scan`, `partition`, `flat_map`)
 - this now covers the practical compiled collection surface needed to hand off cleanly
-  to `3g` tokenization/data-loading work rather than leaving obvious batching or
+  to `3g` data-loading work rather than leaving obvious batching or
   nested-list gaps behind
 
 **Iteration primitives:**
@@ -388,7 +389,7 @@ scalars, strings, lists, dicts, tuples, `Option`, and print/debug through the ge
 host program path. The old `chelis_runtime.c` implementation is now the wrong substrate
 for what comes next:
 
-- `3g` adds file I/O, CSV/JSON, tokenizer loading, and batching helpers
+- `3g` adds file I/O, CSV/JSON parsing, and data-loading examples
 - `3i` adds time/date and exact-decimal runtime support
 - later shells depend on a stable host runtime rather than ad hoc C helpers
 
@@ -455,22 +456,20 @@ Manual HIP mirror gate:
 
 ---
 
-## 3g: Data Loading and Tokenization
+## 3g: File I/O, CSV, and JSON
 
 **Status:** shipped.
 
-**Goal:** Chelis can load data from files and tokenize text, making it self-sufficient
-for the complete AI training pipeline.
+**Goal:** Chelis can read files and parse CSV and JSON data for AI research programs.
 
 ### Why This Matters
 
-This is the capstone of Phase 3. With scalars (3c), strings (3c), and collections (3d),
-Chelis has the data types needed for preprocessing. But without file I/O and
-tokenization, the data still has to come from Python. This phase makes Chelis's
-preprocessing story complete.
+Scalars (3c), strings (3c), and collections (3d) provide the values used in
+preprocessing. File I/O and CSV/JSON parsing let Chelis programs read structured
+research data directly.
 
-The test: can you write a complete training pipeline — from raw text file to trained
-model — in pure Chelis? After 3g, the answer is yes.
+The acceptance example reads CSV data and JSON configuration, then produces matching
+evaluator and compiled output.
 
 ### Design
 
@@ -559,54 +558,11 @@ type Json =
   | JsonObject(Dict[String, Json])
 ```
 
-**Tokenizer:**
+**Data loading example:**
 
-The critical capability. A BPE tokenizer that can load HuggingFace tokenizer
-vocabularies.
-
-```chelis
-import Std.Tokenizer
-
-tok = load_tokenizer("tokenizer.json")
-
-tokens = encode(tok, "Hello, world!")
-
-inputs = batch_encode(tok, ["Hello, world!"], cast(512, i64), cast(0, i64))
-```
-
-Implementation: the tokenizer is a Chelis program, not a C library wrapper. BPE merge
-rules are stored as a `Dict[String, Int]` (merge priority). Encoding walks the input
-string, applies merges greedily, and returns a `List[Int]`. This is slower than
-HuggingFace's Rust tokenizer but it's pure Chelis — the model can learn to write and
-modify tokenizer code.
-
-`load_tokenizer` reads the HuggingFace `tokenizer.json` format (using the JSON parser
-from this phase) and constructs the internal merge table and vocabulary dict.
-`try_load_tokenizer` remains available when the caller wants recovery instead of a
-fail-loud load.
-
-`batch_encode` is the bridge function: encode N strings, pad to an exact width, and call
-`pad_sequences_to` from 3d to produce a model-ready tensor.
-
-**Data loading pipeline:**
-
-Compose the above into a training data loader:
-
-```chelis
-import Std.Tokenizer
-
-def load_training_data(data_path: string, tok_path: string,
-                       max_len: i64, batch_size: i64) -> List[tensor[batch, max_len, i64]] = {
-  tok = load_tokenizer(tok_path)
-  lines = read_lines(data_path)
-  encoded = map(fn (line: string) -> encode(tok, line), lines)
-  batches = chunk(encoded, batch_size)
-  map(
-    fn (batch: List[List[i64]]) -> pad_sequences_to(batch, max_len, cast(0, i64)),
-    batches
-  )
-}
-```
+`examples/illustrative/io_pipeline/` reads CSV rows and JSON configuration through
+`Std.Io.Csv` and `Std.Io.Json`. Its acceptance oracle checks, evaluates, builds, and
+compares compiled output with `chelis eval`.
 
 ### Implementation Plan
 
@@ -616,11 +572,8 @@ def load_training_data(data_path: string, tok_path: string,
    memmap2
 3. Implement `Std.Io.Csv` as a pure Chelis package module
 4. Add Json ADT and implement `Std.Io.Json` as a pure Chelis parser
-5. Implement `Std.Tokenizer` with BPE encode/decode in pure Chelis
-6. Add `load_tokenizer` for HuggingFace tokenizer.json format
-7. Implement `batch_encode` bridging to pad_sequences from 3d
-8. Add `chunk` utility for batching lists
-9. Write a complete training data loader example using mmap for large datasets
+5. Exercise CSV and JSON file loading in a Reef package with evaluator and compiled
+   output parity
 
 ### Test Plan
 
@@ -630,28 +583,21 @@ def load_training_data(data_path: string, tok_path: string,
   offset, mmap_len matches file size, IO effect on mmap_file only (reads are pure)
 - CSV: parse a simple CSV, handle quoted fields, handle headers
 - JSON: parse all JSON value types, nested objects/arrays, malformed JSON returns error
-- Tokenizer: BPE encode matches HuggingFace reference output for a small vocabulary
-- Tokenizer: decode(encode(text)) round-trips for ASCII text
-- Tokenizer: batch_encode produces correctly padded tensor
-- Tokenizer: load_tokenizer parses HuggingFace tokenizer.json correctly
-- Data loader: `examples/illustrative/phase3g_text_pipeline/` checks, evaluates, builds,
-  and compiled output matches `chelis eval`
+- Data loading: `examples/illustrative/io_pipeline/` reads CSV and JSON, checks,
+  evaluates, builds, and matches compiled output to `chelis eval`
 
 ### Acceptance Oracle
 
 Authoritative oracle:
 
 ```sh
-cargo test -p chelis-cli --test std_io_pipeline phase3g_text_pipeline_acceptance_oracle -- --ignored --exact --nocapture
+cargo test -p chelis-cli --test std_io_pipeline io_pipeline_acceptance_oracle -- --ignored --exact --nocapture
 ```
 
 The checked-in illustrative Reef package at
-`examples/illustrative/phase3g_text_pipeline/` must:
+`examples/illustrative/io_pipeline/` must:
 
 - read CSV and JSON files
-- load a HuggingFace-format tokenizer
-- encode text into integer sequences
-- batch and pad those sequences into tensors
 - produce matching `chelis eval` and compiled C output without Python preprocessing
 
 ---
@@ -667,6 +613,9 @@ with KV caching, optimizer variants, and learning rate scheduling.
 ### Std.Time
 
 Pure Chelis standard library module for dates and durations.
+Its public callables currently raise an explicit #2779 error until the
+exact [05-OP-35] calendar and duration behavior is implemented. The surface
+below is the intended contract, not a current acceptance claim.
 
 - `Date` type: year, month, day. Constructed via
   `date(cast(2024, i64), cast(1, i64), cast(15, i64))`.
@@ -829,8 +778,8 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 
 `cargo test -p chelis-cli --test std_package_acceptance -- --ignored --nocapture`
 
-This is the owning executable oracle for the 3i-shipped `Std.Time`,
-`Std.Decimal`, `Std.Schedule`, `Std.Optim`, and `Std.Nn.Generate` surface (the ML
+This is the owning executable oracle for the `Std.Decimal` package surface and
+the #2779 `Std.Time` rejection (the ML
 modules — `Schedule`, `Optim`, `Nn.Generate` — since moved to `School.*` in chelis-std
 0.4.0). A later
 phase-completion claim still requires a fresh-context red team and any documented manual
@@ -1686,7 +1635,6 @@ The refreshed skill should teach:
 - list/tensor bridge (`pad_sequences`, `stack`, `to_tensor`)
 - file I/O and `IO` effect
 - CSV/JSON parsing
-- tokenizer usage
 - `Std.Time` and `Std.Decimal` host-program idioms
 - package imports (`Std.*`, `Nautilus.*`, `Coral.*`, `Shoals.*`)
 - dataframe operations (`coral`), including NaN handling and Parquet I/O
@@ -1818,13 +1766,12 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
   `CHELIS_RUNTIME_DIR` (`spec/08-backends.md` §2.1)
 - mixed-program compiled execution matches `chelis eval` on both C and HIP paths
 
-**Data loading/tokenization (`3g`):**
+**Data loading (`3g`):**
 
 - text/CSV/JSON loading returns the documented structures
 - read_bytes returns correct values for binary files
 - memory-mapped I/O: mmap_file opens, mmap_read returns correct bytes at offset,
   mmap_len matches file size, IO effect on mmap_file only (reads are pure)
-- tokenizer encode/decode is deterministic against the documented assets
 - batching/padding produces the expected tensor shapes and values
 
 **Standard library expansion (`3i`):**
@@ -1914,7 +1861,7 @@ since moved to `School.*` in chelis-std 0.4.0; `Std.Time` / `Std.Decimal` stayed
 | `3d`: Collections and iteration | shipped | `3c` | Engineering |
 | `3h`: Core numeric primitives | shipped | `3d` | Engineering (RISC ops + AD + backends) |
 | `3m`: Rust runtime rewrite | shipped | `3h`, `3d` | Engineering (runtime ABI + codegen + CLI/build) |
-| `3g`: Data loading and tokenization | shipped | `3h`, `3m` | Engineering (I/O + pure Chelis libraries) |
+| `3g`: File I/O, CSV, and JSON | shipped | `3h`, `3m` | Engineering (I/O + data packages) |
 | `3i`: Std library expansion | shipped | `3h`, `3g` | Pure Chelis library (Time, Decimal, Generate, AdamW, Schedule) |
 | `3j-pre`: Release infra + Std surface expansion | shipped | `3i` | Engineering (CI release, GitHub org, Std.Nn/Std.Loss/Std.Init additions) |
 | `3j`: Nautilus | shipped | `3h`, `3i`, `3j-pre` | Downstream Reef shell with nalgebra-backed LinAlg and numerical methods |
@@ -1949,7 +1896,7 @@ Before calling Phase 3 complete:
 - `3h` provides the expanded tensor-language surface needed for real model code
 - `3m` provides a Rust-owned compiled runtime so later host-language/library work does
   not keep expanding the old C runtime
-- `3g` provides text/config/data loading plus tokenizer and batching support
+- `3g` provides text/config/data loading and collection batching support
 - `3i` provides `Std.Time`, `Std.Decimal`, `Std.Nn.Generate` (KV cache), AdamW/LAMB
   optimizers, and `Std.Schedule` as practical standard-library modules
 - `3j-pre` provides the `chelis-lang` GitHub org, a compiler release binary, and the
@@ -1968,7 +1915,7 @@ Before calling Phase 3 complete:
 - `3f` reflects the full post-shell language in `SKILL.md` and examples, including
   `Nautilus.*`, `Coral.*`, and `Shoals.*` package imports and mentions of the `school`
   (classical ML) and `darwin` (evolutionary algorithms) stubs
-- a pure Chelis program can read text, tokenize it, batch/pad it, run a model, compute
+- a pure Chelis program can read structured data, batch inputs, run a model, compute
   loss and gradients, and print results without Python
 - domain shells compose correctly: `shoals` depends on `nautilus` + `coral`, all build
   and import through the Reef pipeline

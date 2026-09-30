@@ -64,21 +64,6 @@ fn assert_stdlib_clean(rel: &str) {
     );
 }
 
-#[test]
-fn production_stdlib_init_random_typechecks() {
-    assert_stdlib_clean("src/init/random.ch");
-}
-
-#[test]
-fn production_stdlib_init_kaiming_typechecks() {
-    assert_stdlib_clean("src/init/kaiming.ch");
-}
-
-#[test]
-fn production_stdlib_init_xavierext_typechecks() {
-    assert_stdlib_clean("src/init/xavierext.ch");
-}
-
 // chelis#333: src/tensor/reduce.ch (Std.Tensor.Reduce.{min,prod,argmax,
 // argmin}) was removed — the four bodyless sigs took a runtime i32 axis
 // but the *_reduce builtins they would forward to require a compile-time

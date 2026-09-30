@@ -233,7 +233,10 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
             let indices = id_map[&info.indices];
             let new_id = out.add_node(
                 node.owner.remap(&id_map),
-                RiscOp::Gather { axis: 0 },
+                RiscOp::Gather {
+                    axis: 0,
+                    batch_rank: 0,
+                },
                 vec![values, indices],
                 node.output_type.clone(),
                 node.span_id.clone(),
@@ -1575,8 +1578,13 @@ mod tests {
 
         let specialized = specialize_for_blas(&dag);
         assert!(specialized.nodes().iter().any(|node| {
-            matches!(node.op, RiscOp::Gather { axis: 0 })
-                && node.output_type.dims == vec![DimInfo::Lit(4), DimInfo::Lit(3)]
+            matches!(
+                node.op,
+                RiscOp::Gather {
+                    axis: 0,
+                    batch_rank: 0
+                }
+            ) && node.output_type.dims == vec![DimInfo::Lit(4), DimInfo::Lit(3)]
         }));
         assert!(
             !specialized

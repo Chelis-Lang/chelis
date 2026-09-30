@@ -46,7 +46,7 @@
         },
         {
           "name": "constant.other.keyword.chelis-deep",
-          "match": ":[A-Za-z0-9_-]+"
+          "match": ":[A-Za-z_][A-Za-z0-9_]*"
         }
       ]
     },
@@ -54,11 +54,11 @@
       "patterns": [
         {
           "name": "constant.numeric.float.chelis-deep",
-          "match": "\\b\\d+\\.\\d+(?:[eE][+-]?\\d+)?\\b"
+          "match": "(?<![A-Za-z0-9_.-])-?(?:(?:[0-9]+\\.[0-9]+(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)(?:bf16|f32|f64|f16)?|[0-9]+(?:bf16|f32|f64|f16))(?![A-Za-z0-9_.-])"
         },
         {
           "name": "constant.numeric.integer.chelis-deep",
-          "match": "\\b\\d+\\b"
+          "match": "(?<![A-Za-z0-9_.-])-?(?:0[xX][0-9A-Fa-f]+(?:i8|i16|i32|i64)?|0[bB][01]+(?:i8|i16|i32|i64)?|[0-9]+(?:i8|i16|i32|i64)?)(?![A-Za-z0-9_.-])"
         }
       ]
     },

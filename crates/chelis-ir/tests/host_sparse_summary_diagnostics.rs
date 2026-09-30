@@ -108,14 +108,20 @@ fn multiple_roots_synthetic_helper_emits_structured_rejection() {
     );
     let root_a = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
     );
     let root_b = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
@@ -170,7 +176,10 @@ fn indices_dtype_mismatch_gather_emits_structured_rejection() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
@@ -234,7 +243,10 @@ fn indices_dtype_mismatch_scatter_add_emits_structured_rejection() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         output_ty.clone(),
         None,
@@ -307,7 +319,10 @@ fn payload_dtype_mismatch_scatter_add_updates_emits_structured_rejection() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         output_ty.clone(),
         None,
@@ -375,7 +390,10 @@ fn payload_dtype_mismatch_gather_values_emits_structured_rejection() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
@@ -445,7 +463,10 @@ fn non_load_operand_synthetic_helper_gather_locks_operand_index() {
     let doubled = dag.add_node(decl, RiscOp::Add, vec![idx, idx], indices_ty.clone(), None);
     let root = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, doubled],
         output_ty.clone(),
         None,
@@ -516,7 +537,10 @@ fn post_processing_after_sparse_op_synthetic_helper_locks_tail_op_name() {
     );
     let scattered = dag.add_node(
         decl,
-        RiscOp::ScatterAdd { axis: 0 },
+        RiscOp::ScatterAdd {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         target_ty.clone(),
         None,
@@ -583,7 +607,10 @@ fn wildcard_dim_synthetic_helper_locks_output_location() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
@@ -639,7 +666,10 @@ fn wildcard_dim_synthetic_helper_locks_input_location() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,
@@ -739,7 +769,10 @@ fn rejection_helper_body_span_is_threaded_through_when_present() {
     );
     let root = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         Some("surf:42..99".to_string()),
@@ -750,7 +783,10 @@ fn rejection_helper_body_span_is_threaded_through_when_present() {
     // span_id (the Gather's `surf:42..99`).
     let root_b = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![values, indices],
         output_ty.clone(),
         None,

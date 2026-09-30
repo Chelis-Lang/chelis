@@ -3,15 +3,43 @@ fn method<'a>(source: &'a str, name: &str) -> &'a str {
     let rest = &source[source.find(&format!("    fn {name}(")).expect(name)..];
     &rest[..rest.find("\n    }\n").unwrap() + 7]
 }
+fn sparse_arm<'a>(source: &'a str, name: &str) -> &'a str {
+    let emit_node = method(source, "emit_node");
+    let start = &emit_node[emit_node
+        .find(&format!("            RiscOp::{name} {{"))
+        .expect(name)..];
+    let end = "\n            }\n";
+    &start[..start.find(end).expect(name) + end.len()]
+}
 fn validate(source: &str) -> Result<(), String> {
-    for (name, op) in [
-        ("emit_sparse_gather", "SparseEmission::Gather"),
-        ("emit_sparse_scatter_add", "SparseEmission::Add"),
-        ("emit_sparse_scatter_replace", "SparseEmission::Replace"),
-        ("emit_sparse_scatter_elements", "SparseEmission::Elements"),
+    for (name, op, batch) in [
+        (
+            "Gather",
+            "SparseEmission::Gather",
+            "batch_rank: *batch_rank",
+        ),
+        (
+            "ScatterAdd",
+            "SparseEmission::Add",
+            "batch_rank: *batch_rank",
+        ),
+        (
+            "Scatter",
+            "SparseEmission::Replace",
+            "batch_rank: *batch_rank",
+        ),
+        (
+            "ScatterElements",
+            "SparseEmission::Elements",
+            "batch_rank: 0",
+        ),
     ] {
-        let body = method(source, name);
-        if !body.contains("self.emit_sparse_checked(") || !body.contains(op) {
+        let body = sparse_arm(source, name);
+        if !body.contains("self.emit_sparse_checked(")
+            || !body.contains("axis: *axis")
+            || !body.contains(batch)
+            || !body.contains(op)
+        {
             return Err(format!("{name}: missing exact checked delegation"));
         }
     }
@@ -54,6 +82,29 @@ fn validate(source: &str) -> Result<(), String> {
 #[test]
 fn sparse_dag_consumers_delegate_to_one_checked_domain() {
     validate(include_str!("../src/emit.rs")).unwrap();
+}
+
+#[test]
+fn sparse_dag_dispatch_mutations_are_rejected() {
+    let source = include_str!("../src/emit.rs");
+    validate(source).unwrap();
+    for name in ["Gather", "ScatterAdd", "Scatter", "ScatterElements"] {
+        let arm = sparse_arm(source, name);
+        for (from, to) in [
+            ("self.emit_sparse_checked(", "self.emit_sparse_unchecked("),
+            ("axis: *axis", "axis: 0"),
+            ("batch_rank: *batch_rank", "batch_rank: 0"),
+        ] {
+            if !arm.contains(from) {
+                continue;
+            }
+            let changed = arm.replacen(from, to, 1);
+            assert!(
+                validate(&source.replacen(arm, &changed, 1)).is_err(),
+                "{name}: {from}"
+            );
+        }
+    }
 }
 
 fn validate_host(source: &str) -> Result<(), String> {

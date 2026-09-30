@@ -170,9 +170,7 @@ const COMMON_VERB_PREFIXES: &[&str] = &[
     "list", "key", "hash", "enum", "char", "ints", "agg", "melt", "csv", "json",
     // Join / set-relation idioms (Coral.GroupBy / Coral.Join):
     // `left_*`, `right_*`, `inner_*`, `outer_*`, `full_*`, `join_*`.
-    "left", "right", "inner", "outer", "full", "join",
-    // RNG seed accessor verbs in Std.Tokenizer.
-    "seed",
+    "left", "right", "inner", "outer", "full", "join", "seed",
     // Example-module-only fixture-helper prefixes (Nautilus.ExampleODEDemo,
     // Nautilus.ExampleOptim): `eo_*` and `eop_*` build per-example
     // problem fixtures.

@@ -17,8 +17,8 @@ fn package_std() -> PathBuf {
     example_path("../../packages/chelis-std")
 }
 
-fn phase3g_text_pipeline_example() -> PathBuf {
-    example_path("../../examples/illustrative/phase3g_text_pipeline")
+fn io_pipeline_example() -> PathBuf {
+    example_path("../../examples/illustrative/io_pipeline")
 }
 
 fn write_file(path: &Path, contents: &str) {
@@ -90,7 +90,7 @@ fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
 }
 
 #[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+#[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_io_module_checks_and_builds() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -160,7 +160,7 @@ size_view = print(size)
 }
 
 #[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+#[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_io_module_rejects_missing_export() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -195,20 +195,20 @@ x = missing_symbol("foo")
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("missing_symbol"))
-        .stderr(predicate::str::contains("does not export"));
+        .stdout(predicate::str::contains("missing_symbol"))
+        .stdout(predicate::str::contains("does not export"));
 }
 
 #[test]
-#[ignore = "manual gate: Phase 3g text-pipeline acceptance builds, links, and runs generated C"]
-fn phase3g_text_pipeline_acceptance_oracle() {
+#[ignore = "manual gate: CSV and JSON example acceptance builds, links, and runs generated C"]
+fn io_pipeline_acceptance_oracle() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
     let std_pkg = dir.path().join("chelis-std");
-    let app_pkg = dir.path().join("phase3g-text-pipeline");
+    let app_pkg = dir.path().join("io-pipeline");
     let out_dir = dir.path().join("out");
     copy_dir_recursive(&package_std(), &std_pkg);
-    copy_dir_recursive(&phase3g_text_pipeline_example(), &app_pkg);
+    copy_dir_recursive(&io_pipeline_example(), &app_pkg);
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -276,7 +276,7 @@ fn phase3g_text_pipeline_acceptance_oracle() {
 }
 
 #[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+#[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_json_module_fails_loudly_on_malformed_input() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -326,7 +326,7 @@ view = print(cfg)
 }
 
 #[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+#[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_json_try_module_reports_none_on_malformed_input() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -384,7 +384,7 @@ view = print(ok)
 }
 
 #[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+#[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_csv_module_fails_loudly_on_unclosed_quote_rows() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -434,7 +434,7 @@ view = print(rows)
 }
 
 #[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+#[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_csv_try_module_reports_none_on_unclosed_quote_rows() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -492,7 +492,7 @@ view = print(ok)
 }
 
 #[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+#[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_parquet_module_rejects_missing_export() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -527,8 +527,8 @@ x = nonexistent_parquet_fn("foo")
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("nonexistent_parquet_fn"))
-        .stderr(predicate::str::contains("does not export"));
+        .stdout(predicate::str::contains("nonexistent_parquet_fn"))
+        .stdout(predicate::str::contains("does not export"));
 }
 
 /// PR #1213 review finding: the malformed-CSV None contract was only
@@ -540,7 +540,7 @@ x = nonexistent_parquet_fn("foo")
 /// unterminated quote) and asserts the compiled verdicts byte-match the
 /// eval lane's.
 #[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+#[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_csv_compiled_lane_matches_eval_on_malformed_rows() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -671,7 +671,7 @@ v4 = print(ok_quote)
 /// row position would still crash the compiled lane — that is
 /// chelis#1225's parser wall, not a row-control-flow defect.
 #[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+#[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_csv_compiled_lane_short_circuits_before_long_line() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -755,7 +755,7 @@ v1 = print(ok_longline)
 /// subsumes the narrower read-only and write-only resolves/type-checks
 /// cases, which were strict subsets of this test's check assertion.
 #[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+#[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_parquet_module_builds_cleanly() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");

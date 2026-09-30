@@ -1133,6 +1133,12 @@ impl<'a> VerifiedHostFunctionView<'a> {
         &self.function().helper_result_claim_axes
     }
 
+    pub fn entry_contract(
+        self,
+    ) -> &'a crate::host::EntryContract<crate::host_type_state::ConcreteHostType> {
+        &self.function().entry_contract
+    }
+
     pub fn params(self) -> &'a [ConcreteHostParam] {
         &self.function().params
     }

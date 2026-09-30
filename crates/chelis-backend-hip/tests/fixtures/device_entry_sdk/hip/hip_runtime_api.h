@@ -39,6 +39,9 @@ hipError_t hipGetDeviceProperties(hipDeviceProp_t *properties, int device);
 hipError_t hipModuleUnload(hipModule_t module);
 hipError_t hipModuleLoadData(hipModule_t *module, const void *code);
 hipError_t hipModuleGetFunction(hipFunction_t *function, hipModule_t module, const char *name);
+hipError_t hipModuleGetGlobal(hipDeviceptr_t *pointer, size_t *bytes, hipModule_t module, const char *name);
+hipError_t hipMemcpyHtoD(hipDeviceptr_t destination, const void *source, size_t bytes);
+hipError_t hipMemcpyDtoH(void *destination, hipDeviceptr_t source, size_t bytes);
 hipError_t hipModuleLaunchKernel(hipFunction_t function, unsigned int gx, unsigned int gy,
     unsigned int gz, unsigned int bx, unsigned int by, unsigned int bz,
     unsigned int shared, void *stream, void **arguments, void **extra);

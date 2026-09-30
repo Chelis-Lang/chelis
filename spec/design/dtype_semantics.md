@@ -598,15 +598,16 @@ classification, configuration-invariant declarations, and exact semantic
 registrations for numeric callables and stdlib constructors. Its 313 rows have
 final authority; none uses an exception disposition. The stdlib closure resolves
 imported and generic nominal types to a finite fixed point and rejects unresolved
-names. Its execution controls preserve the 84 exact [05-OP-35] identities.
+names. Its execution controls preserve the 73 exact [05-OP-35] identities.
 
 The wire census verifies the compiler/Python publication graph, exact carrier
 shapes, codec and admission execution, and the default compiler-api library's
-compiled serialization obligations. The executed baseline's 97 numeric leaves
-have final authority: 80 verified transports and 17 exact numeric-operation
-registrations. WireDag v16 includes the u64 shape-dependency reference, the
-opaque u64 local-ascription identity, and the fixed-int64 extent carrier's
-literal-witness requirement role. The wire
+compiled serialization obligations. The executed baseline's 100 numeric leaves
+have final authority: 82 verified transports and 18 exact numeric-operation
+registrations. WireDag v23 includes the u64 shape-dependency reference, the
+opaque u64 local-ascription identity, the fixed-int64 extent carrier's
+literal-witness requirement role, and the three indexed-tensor `batch_rank`
+operations. The wire
 baseline has no frozen cohort or static-descriptor admission path. Every new or
 changed covered identity must independently be `Nonnumeric`, `TaggedTransport`,
 or `NumericOperation(atom)`; a citation or maintainer override cannot supply
@@ -958,10 +959,10 @@ Deliverables, with phase homes:
    carriers/transports, and 223 exact numeric-operation registrations. It has
    zero grandfather, permanent-disposition, successor-override,
    integer-plumbing, or other transition rows. The wire baseline likewise has
-   97 final rows (80 verified transports and 17 numeric operations), with no
-   legacy cohort. Fresh actual verification includes WireDag v16's u64
-   shape-dependency and local-ascription-identity transports plus the
-   fixed-extent literal-witness role.
+   100 final rows (82 verified transports and 18 numeric operations), with no
+   legacy cohort. Fresh actual verification includes WireDag v23's u64
+   shape-dependency and local-ascription-identity transports, the fixed-extent
+   literal-witness role, and the three indexed-tensor `batch_rank` operations.
    Nine binding rows have final nonnumeric authority, seven rows have final
    tagged-transport authority, and `NativeTensor.shape` has exact
    numeric-operation authority under [05-OP-45]. No binding row remains legacy.
@@ -1163,7 +1164,7 @@ Deliverables, with phase homes:
      dtype bounds and the existing precision-name backstop remain capacity;
      an ordinary unbounded `p -> p` stays nonnumeric. The stdlib closure cases
      in `capacity_census_tripwire` exercise these boundaries and preserve the
-     existing 84 definition and five ADT identities. This is declared-surface
+     existing 73 definitions and four ADT identities. This is declared-surface
      evidence, not body inference, backend acceptance or completion of [#1288].
    - **Matched rows freeze enforcement metadata.** Equality is not
      merely `(kind, id)`: the tripwire compares the complete
@@ -1185,8 +1186,8 @@ Deliverables, with phase homes:
      exports and exported stdlib numeric defs are exhaustively
      discovered and keyed by exact canonical callable identity. Stdlib
      discovery follows nominal ADT/container fields recursively to a fixed
-     point, so a callable accepting `Decimal`, `Date`, `Duration`, `Json`,
-     `Tokenizer`, or a container that reaches one of them cannot disappear
+     point, so a callable accepting `Decimal`, `Date`, `Duration`, `Json`, or
+     a container that reaches one of them cannot disappear
      merely because its signature has no directly spelled primitive. A
      tensor precision variable and every linked scalar occurrence are numeric
      for the same reason. Their
@@ -1665,10 +1666,10 @@ contract; it does not complete binding or runtime obligations.
 
 #### Final wire and binding contract handoff
 
-**Current integration state.** Execution version 4 and WireDag version 22 are
-the source contract for spec/10 §§3.2–3.5. Measured at WireDag version 16, the
-executed wire baseline contains 97 distinct numeric leaves: 80 verified
-transports and 17 numeric operations, with zero exception rows. It includes the shape-dependency and opaque
+**Current integration state.** Execution version 4 and WireDag version 23 are
+the source contract for spec/10 §§3.2–3.5. The executed wire baseline contains
+100 distinct numeric leaves: 82 verified transports and 18 numeric operations,
+with zero exception rows. It includes the shape-dependency and opaque
 local-ascription-identity transports plus the fixed literal-witness extent
 role, replaces the original 84-row legacy cohort and incorporates
 previously missed private codec/report leaves. The former execution scalar and
@@ -2025,7 +2026,7 @@ generated rejection registry at byte agreement. The named consumers of the
 pre-4C composite are this document and `capability_table.md`; both are amended
 here, and the release ledger in `remediation_roadmap.md` records the same
 narrowing. The same change corrects the stale eighty-three-definition stdlib
-count to the eighty-four the `[05-OP-35]` registry and the census already
+count to the seventy-three the `[05-OP-35]` registry and the census now
 carry, and settles the `capability_table.md` seed row that still cited the
 closed [#691] as an `Unimplemented` owner.
 
@@ -2559,7 +2560,7 @@ callable from bypassing review while the capability tables are built.
    tensor carriers; byte-exact recursive runtime List/tuple/Dict/ADT
    observation; every active signed-integer sparse-index width across IR and
    public C; canonical gradient consumer-edge order by forward node ordinal
-   and input slot; the 84-definition stdlib manifest; legal compiled host
+   and input slot; the 73-definition stdlib manifest; legal compiled host
    effects with the exact language spelling `IO`; and target-independent
    runtime reduction windows, the [05-OP-42] `stop_gradient` transformation
    barrier, and [05-OP-43]'s dedicated ReLU identity and zero-boundary

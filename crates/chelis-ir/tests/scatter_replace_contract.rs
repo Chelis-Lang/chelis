@@ -94,7 +94,10 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
     );
     let scatter = dag.add_node(
         decl,
-        RiscOp::Scatter { axis: 0 },
+        RiscOp::Scatter {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         t(vec![3, 2]),
         None,
@@ -181,7 +184,10 @@ fn scatter_replace_forward_distinct_indices_writes_each_cell_once() {
     );
     let scatter = dag.add_node(
         decl,
-        RiscOp::Scatter { axis: 0 },
+        RiscOp::Scatter {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         t(vec![3, 2]),
         None,
@@ -252,7 +258,10 @@ fn scatter_replace_ad_returns_structured_not_supported_error() {
     );
     let scatter = dag.add_node(
         decl,
-        RiscOp::Scatter { axis: 0 },
+        RiscOp::Scatter {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         t(vec![3, 2]),
         None,
@@ -353,7 +362,10 @@ fn scatter_replace_unchecked_grad_dag_returns_none_not_silent_zero() {
     );
     let scatter = dag.add_node(
         decl,
-        RiscOp::Scatter { axis: 0 },
+        RiscOp::Scatter {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         t(vec![3, 2]),
         None,
@@ -419,7 +431,10 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
     );
     let gathered = dag.add_node(
         decl,
-        RiscOp::Gather { axis: 0 },
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
         vec![table, indices],
         t(vec![3, 2]),
         None,
@@ -537,7 +552,10 @@ fn scatter_replace_verifier_rejects_out_of_bounds_axis() {
     // shape; we want the axis error to fire and not get masked).
     let _scatter = dag.add_node(
         decl,
-        RiscOp::Scatter { axis: 7 },
+        RiscOp::Scatter {
+            axis: 7,
+            batch_rank: 0,
+        },
         vec![target, indices, updates],
         t(vec![3, 2]),
         None,

@@ -1212,12 +1212,16 @@ pub enum RiscOp {
     /// AD has run. Inputs are `values, indices`.
     Gather {
         axis: usize,
+        /// Leading axes paired positionwise between values and indices.
+        /// They occur once in the result, never once per operand.
+        batch_rank: usize,
     },
 
     /// Sparse scatter-add used by gather's adjoint. Inputs are
     /// `target, indices, updates`; duplicate indices accumulate.
     ScatterAdd {
         axis: usize,
+        batch_rank: usize,
     },
 
     /// Sparse replace-scatter (last-write-wins). Inputs are
@@ -1237,6 +1241,7 @@ pub enum RiscOp {
     /// `ScatterAdd` (whose adjoint is well-defined as `Gather`).
     Scatter {
         axis: usize,
+        batch_rank: usize,
     },
 
     /// Element-wise replace-scatter with ONNX `ScatterElements`
@@ -2253,6 +2258,7 @@ impl DagNode {
             | RuntimeCheck::MovementBounds
             | RuntimeCheck::ExtentClaims
             | RuntimeCheck::Random
+            | RuntimeCheck::SparseIndex
             | RuntimeCheck::Ungated => None,
         }
     }
@@ -2280,7 +2286,7 @@ impl DagNode {
     /// | `Random` | `Dropout` `DropoutReplay` `UniformLike` `UniformBoundAdjoint` `SplitN` `FoldIn` `KeySelect` | controls, key extents, a negative count |
     /// | `Abort` | `GuardedFail` | its authored condition |
     /// | `Ungated` | `Reshape` `Expand` | a runtime target extent |
-    /// | | `Gather` `ScatterAdd` `Scatter` `ScatterElements` `OneHot` | an index out of range |
+    /// | `SparseIndex` | `Gather` `ScatterAdd` `Scatter` `ScatterElements` `OneHot` | an index out of range |
     /// | `Nothing` | every other operation, and float arithmetic and reductions | |
     ///
     /// Three checks are not an operation kind's and are listed here for
@@ -2357,13 +2363,17 @@ impl DagNode {
             | RiscOp::FoldIn
             | RiscOp::KeySelect => RuntimeCheck::Random,
             RiscOp::GuardedFail { .. } => RuntimeCheck::Abort,
-            RiscOp::Reshape { .. }
-            | RiscOp::Expand { .. }
-            | RiscOp::Gather { .. }
+            // [05-OP-52]: "out-of-bounds indices fail loudly". The index
+            // is data, so no static fact rules the failure out. The checker
+            // rejects an out-of-range LITERAL index only where the base is
+            // also a literal, so this class does not try to prove a literal
+            // index safe: it may fail is the conservative answer.
+            RiscOp::Gather { .. }
             | RiscOp::ScatterAdd { .. }
             | RiscOp::Scatter { .. }
             | RiscOp::ScatterElements { .. }
-            | RiscOp::OneHot { .. } => RuntimeCheck::Ungated,
+            | RiscOp::OneHot { .. } => RuntimeCheck::SparseIndex,
+            RiscOp::Reshape { .. } | RiscOp::Expand { .. } => RuntimeCheck::Ungated,
             RiscOp::Compare(_)
             | RiscOp::Logical(_)
             | RiscOp::Where
@@ -2446,6 +2456,19 @@ pub enum RuntimeCheck {
     /// An authored abort ([05-OP-68]): gated like [`Self::OperandValues`],
     /// its condition reading the value that does not fire. Always a seed.
     Abort,
+    /// Checks a sparse index against its base axis: gather and every
+    /// scatter mode ([05-OP-52]), and the internal `one_hot` marker
+    /// ([05-SPARSE-2]). The index is data, so the check can always fail.
+    ///
+    /// A seed only where the node has no activation (chelis#2440). It is
+    /// the only SEEDED class the lanes do not gate -- [`Self::Ungated`] is
+    /// ungated too, but never seeds -- so its emitters read no activation
+    /// and a node of it checks even where its activation is false. Seeding one that has an activation would
+    /// therefore trap where spec/06 5.2 says it "checks nothing", so an
+    /// activated sparse node is left to ordinary value reachability. Gating
+    /// the class needs an inactive-value contract in the evaluator and the
+    /// C emitter, which chelis#2440 tracks.
+    SparseIndex,
     /// Can trap, and neither checks nothing under a false activation nor
     /// is a seed (chelis#2440's remaining kinds).
     Ungated,
@@ -2478,7 +2501,9 @@ impl TrapSeeds<'_> {
     /// roots; purity alone does not make a possible trap dead."
     ///
     /// The members: an unconditional effect (chelis#2368, [05-OP-68]); a
-    /// numeric node that can trap (chelis#2440); and a random node that can
+    /// numeric node that can trap (chelis#2440); an UNACTIVATED sparse
+    /// operation whose index the base axis can reject
+    /// ([`RuntimeCheck::SparseIndex`], chelis#2440); and a random node that can
     /// trap by itself ([`Dag::random_node_may_trap`], chelis#2413). A
     /// backward-synthesized adjoint is not a numeric member: its trap
     /// obligation belongs to the forward node it was derived from, and it is
@@ -2501,6 +2526,15 @@ impl TrapSeeds<'_> {
             | RuntimeCheck::MovementBounds
             | RuntimeCheck::ExtentClaims => !synthesized_adjoint && self.check_may_fail(node),
             RuntimeCheck::Random => self.check_may_fail(node),
+            // Unlike every other seeded class, this one has no activation
+            // gate in any lane, so a seeded node under a false activation
+            // would check and trap where 5.2 says it "checks nothing". Seed
+            // only an unconditional one until the class is gated
+            // (chelis#2440); a discarded sparse node under an activation is
+            // therefore still eliminated, trap and all.
+            RuntimeCheck::SparseIndex => {
+                !synthesized_adjoint && node.owner.activation.is_none() && self.check_may_fail(node)
+            }
             RuntimeCheck::Nothing | RuntimeCheck::MeanDivisor | RuntimeCheck::Ungated => false,
         }
     }
@@ -2520,6 +2554,7 @@ impl TrapSeeds<'_> {
             RuntimeCheck::OperandValues
             | RuntimeCheck::MeanDivisor
             | RuntimeCheck::Abort
+            | RuntimeCheck::SparseIndex
             | RuntimeCheck::Ungated => true,
             RuntimeCheck::ExtentClaims => self.extent_claims_may_fail(node),
             RuntimeCheck::EmptyAxis => self.dag.reduced_axis_may_be_empty(node),
@@ -2592,7 +2627,10 @@ impl TrapSeeds<'_> {
                     | RuntimeCheck::MovementBounds
                     | RuntimeCheck::ExtentClaims
                     | RuntimeCheck::Abort => true,
-                    RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
+                    RuntimeCheck::Nothing
+                    | RuntimeCheck::Random
+                    | RuntimeCheck::SparseIndex
+                    | RuntimeCheck::Ungated => false,
                 })
                 || self.is_claim_sized(node))
     }
@@ -4811,9 +4849,18 @@ mod tests {
                 k: DimExpr::Concrete(2),
                 accumulator: Prim::F32,
             },
-            RiscOp::Gather { axis: 0 },
-            RiscOp::ScatterAdd { axis: 0 },
-            RiscOp::Scatter { axis: 0 },
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
+            RiscOp::Scatter {
+                axis: 0,
+                batch_rank: 0,
+            },
             RiscOp::ScatterElements { axis: 0 },
             RiscOp::Relu,
             RiscOp::ReluAdjoint,

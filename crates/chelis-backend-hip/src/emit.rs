@@ -95,6 +95,11 @@ use crate::fusion::{FusedReuseMechanics, HipFusedReuse};
 use crate::kernels;
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
+enum NumericTrapReport<'a> {
+    Static(&'a str),
+    NegativeShift { result: usize, c_type: &'static str },
+}
+
 pub(crate) struct PeakDeviceBytesBreakdown {
     pub formula: String,
     pub estimate: Option<usize>,
@@ -1561,7 +1566,9 @@ impl HipEmitter {
                 Self::dtype_kernel_suffix(operand_prec())
             )),
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
-            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
+            RiscOp::Bitwise(kind) => {
+                Some(format!("kernel_{}_{}", kind.name(), operand_prec().name()))
+            }
             RiscOp::TruncDiv => Some(format!(
                 "kernel_trunc_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -1971,7 +1978,13 @@ impl HipEmitter {
             // operands only — native `/` is exactly the C truncating
             // quotient, so it reuses the typed binary template.
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
-            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
+            RiscOp::Bitwise(kind) => kernels::binary_bitwise_typed(
+                self.kernel_rank,
+                name,
+                *kind,
+                operand_prec(),
+                take_gate(),
+            ),
             RiscOp::TruncDiv => {
                 let prec = operand_prec();
                 debug_assert!(
@@ -2442,7 +2455,7 @@ impl HipEmitter {
                     &resolved_kernel_name()?,
                     &node.inputs,
                     &node.output_type,
-                    trap.as_deref(),
+                    trap.as_deref().map(NumericTrapReport::Static),
                 )
             }
             RiscOp::Mul => self.emit_binary_launch(
@@ -2462,7 +2475,16 @@ impl HipEmitter {
             // chelis#178: floor / truncating integer division launch like
             // any other binary elementwise kernel.
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
-            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
+            RiscOp::Bitwise(kind) => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+                kind.is_shift().then_some(NumericTrapReport::NegativeShift {
+                    result: id,
+                    c_type: Self::dtype_c_type(node.output_type.precision),
+                }),
+            ),
             RiscOp::FloorDiv | RiscOp::TruncDiv => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -2844,15 +2866,30 @@ impl HipEmitter {
                     dag,
                 );
             }
-            RiscOp::Gather { axis } => {
-                self.emit_gather_launch(id, *axis, &node.inputs, &node.output_type, dag)?
-            }
-            RiscOp::ScatterAdd { axis } => {
-                self.emit_scatter_add_launch(id, *axis, &node.inputs, &node.output_type, dag)?
-            }
-            RiscOp::Scatter { axis } => {
-                self.emit_scatter_replace_launch(id, *axis, &node.inputs, &node.output_type, dag)
-            }
+            RiscOp::Gather { axis, batch_rank } => self.emit_gather_launch(
+                id,
+                *axis,
+                *batch_rank,
+                &node.inputs,
+                &node.output_type,
+                dag,
+            )?,
+            RiscOp::ScatterAdd { axis, batch_rank } => self.emit_scatter_add_launch(
+                id,
+                *axis,
+                *batch_rank,
+                &node.inputs,
+                &node.output_type,
+                dag,
+            )?,
+            RiscOp::Scatter { axis, batch_rank } => self.emit_scatter_replace_launch(
+                id,
+                *axis,
+                *batch_rank,
+                &node.inputs,
+                &node.output_type,
+                dag,
+            ),
             RiscOp::ScatterElements { axis } => {
                 self.emit_scatter_elements_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
@@ -3195,7 +3232,7 @@ impl HipEmitter {
         kernel_name: &str,
         inputs: &[NodeId],
         ty: &TensorType,
-        numeric_trap: Option<&str>,
+        numeric_trap: Option<NumericTrapReport<'_>>,
     ) {
         let a = inputs[0].0;
         let b = inputs[1].0;
@@ -3238,14 +3275,14 @@ impl HipEmitter {
         ));
         let module = format!("mod_{kernel_name}");
         let grid = format!("t{id}_size / 256 + (t{id}_size % 256 != 0)");
-        if let Some(message) = numeric_trap {
+        if let Some(report) = numeric_trap {
             self.emit_numeric_trap_kernel_launch_expr(
                 &module,
                 kernel_name,
                 &grid,
                 "256",
                 "args",
-                message,
+                report,
             );
         } else {
             self.emit_kernel_launch_expr(&module, kernel_name, &grid, "256", "args");
@@ -3364,7 +3401,7 @@ impl HipEmitter {
                 &grid,
                 "256",
                 "args",
-                message,
+                NumericTrapReport::Static(message),
             );
         } else {
             self.emit_kernel_launch_expr(&module, kernel_name, &grid, "256", "args");
@@ -3622,7 +3659,15 @@ impl HipEmitter {
         self.line("}");
     }
 
-    fn emit_sparse_geometry(&mut self, id: usize, axis: usize, ty: &TensorType) {
+    fn emit_sparse_geometry(
+        &mut self,
+        id: usize,
+        axis: usize,
+        batch_rank: usize,
+        indices: usize,
+        op: &str,
+        ty: &TensorType,
+    ) {
         let plan = format!("sparse_geometry{id}");
         self.emit_metadata_plan(&plan, ty, None, "0");
         self.line(&format!(
@@ -3635,13 +3680,27 @@ impl HipEmitter {
         // extent/stride; the bounds check rejects any attempted index into it.
         self.line(&format!("chelis_device_metadata t{id}_before = 0;"));
         self.line(&format!("if (chelis_metadata_plan_count({plan}) != 0) t{id}_before = chelis_metadata_plan_count({plan}) / t{id}_axis_size / t{id}_after;"));
+        self.line(&format!("chelis_device_metadata t{id}_batch_count = 1;"));
+        for batch_axis in 0..batch_rank {
+            self.line(&format!(
+                "if (chelis_metadata_plan_shape({plan})[{batch_axis}] != d_t{indices}->shape[{batch_axis}]) chelis_numeric_trap(\"numeric trap: domain in {op} at i64\");"
+            ));
+            self.line(&format!(
+                "t{id}_batch_count *= chelis_metadata_plan_shape({plan})[{batch_axis}];"
+            ));
+        }
         self.line(&format!("chelis_metadata_plan_release({plan});"));
+        // An empty source can still have a nonempty gather result whose
+        // first selected index must trap. Keep kernel division defined until
+        // its index guard observes the empty selected axis.
+        self.line(&format!("chelis_device_metadata t{id}_outer_per_batch = (t{id}_batch_count == 0 || t{id}_before == 0) ? 1 : t{id}_before / t{id}_batch_count;"));
     }
 
     fn emit_gather_launch(
         &mut self,
         id: usize,
         axis: usize,
+        batch_rank: usize,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
@@ -3676,24 +3735,23 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.emit_sparse_geometry(id, axis, values_ty);
-        self.line(&format!(
-            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
-        ));
+        self.emit_sparse_geometry(id, axis, batch_rank, indices, "gather", values_ty);
+        self.line(&format!("chelis_device_metadata t{id}_index_count = t{id}_batch_count == 0 ? 0 : d_t{indices}->count / t{id}_batch_count;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_total = d_t{id}->count;"
         ));
         let values_metadata = self.emit_logical_metadata_args(id, "values", values);
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
         self.line(&format!(
-            "void *args[] = {{ &p_t{values}, &p_t{indices}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {values_metadata}, {indices_metadata} }};"
+            "void *args[] = {{ &p_t{values}, &p_t{indices}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_outer_per_batch, &t{id}_total, {values_metadata}, {indices_metadata} }};"
         ));
-        self.emit_kernel_launch_expr(
+        self.emit_numeric_trap_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
             &format!("t{id}_total / 256 + (t{id}_total % 256 != 0)"),
             "256",
             "args",
+            NumericTrapReport::Static("numeric trap: domain in gather at i64"),
         );
         self.indent -= 1;
         self.line("}");
@@ -3704,6 +3762,7 @@ impl HipEmitter {
         &mut self,
         id: usize,
         axis: usize,
+        batch_rank: usize,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
@@ -3743,24 +3802,23 @@ impl HipEmitter {
         self.line("{");
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
-        self.emit_sparse_geometry(id, axis, target_ty);
-        self.line(&format!(
-            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
-        ));
+        self.emit_sparse_geometry(id, axis, batch_rank, indices, "scatter", target_ty);
+        self.line(&format!("chelis_device_metadata t{id}_index_count = t{id}_batch_count == 0 ? 0 : d_t{indices}->count / t{id}_batch_count;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_total = d_t{updates}->count;"
         ));
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
         let updates_metadata = self.emit_logical_metadata_args(id, "updates", updates);
         self.line(&format!(
-            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_outer_per_batch, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
         ));
-        self.emit_kernel_launch_expr(
+        self.emit_numeric_trap_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
             &format!("t{id}_total / 256 + (t{id}_total % 256 != 0)"),
             "256",
             "args",
+            NumericTrapReport::Static("numeric trap: domain in scatter at i64"),
         );
         self.indent -= 1;
         self.line("}");
@@ -3783,6 +3841,7 @@ impl HipEmitter {
         &mut self,
         id: usize,
         axis: usize,
+        batch_rank: usize,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
@@ -3815,20 +3874,25 @@ impl HipEmitter {
         self.line("{");
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
-        self.emit_sparse_geometry(id, axis, target_ty);
-        self.line(&format!(
-            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
-        ));
+        self.emit_sparse_geometry(id, axis, batch_rank, indices, "scatter_replace", target_ty);
+        self.line(&format!("chelis_device_metadata t{id}_index_count = t{id}_batch_count == 0 ? 0 : d_t{indices}->count / t{id}_batch_count;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_total = d_t{updates}->count;"
         ));
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
         let updates_metadata = self.emit_logical_metadata_args(id, "updates", updates);
         self.line(&format!(
-            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_outer_per_batch, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
-        self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
+        self.emit_numeric_trap_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            "1",
+            "1",
+            "args",
+            NumericTrapReport::Static("numeric trap: domain in scatter_replace at i64"),
+        );
         self.indent -= 1;
         self.line("}");
     }
@@ -3901,7 +3965,14 @@ impl HipEmitter {
             "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, {idx_sh_refs}, {out_sh_refs}, &t{id}_ndim, &t{id}_axis, &t{id}_axis_size, &t{id}_total, {idx_stride_refs}, {update_stride_refs}, {out_stride_refs} }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
-        self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
+        self.emit_numeric_trap_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            "1",
+            "1",
+            "args",
+            NumericTrapReport::Static("numeric trap: domain in scatter_elements at i64"),
+        );
         self.indent -= 1;
         self.line("}");
     }
@@ -4898,7 +4969,7 @@ impl HipEmitter {
         grid_expr: &str,
         block_expr: &str,
         args_var: &str,
-        trap_message: &str,
+        report: NumericTrapReport<'_>,
     ) {
         self.line("{");
         self.indent += 1;
@@ -4922,9 +4993,26 @@ impl HipEmitter {
         self.line("CHELIS_HIP_CHECK(hipMemcpyDtoH(&chelis_numeric_flag, chelis_numeric_flag_symbol, sizeof(chelis_numeric_flag)));");
         self.line("CHELIS_HIP_CHECK(hipMemcpyDtoH(&chelis_numeric_index, chelis_numeric_index_symbol, sizeof(chelis_numeric_index)));");
         self.line("if ((chelis_numeric_flag == 0) != (chelis_numeric_index == ~0ULL)) { fprintf(stderr, \"HIP error: inconsistent numeric trap record\\n\"); abort(); }");
-        self.line(&format!(
-            "if (chelis_numeric_flag != 0) chelis_numeric_trap(\"{trap_message}\");"
-        ));
+        match report {
+            NumericTrapReport::Static(trap_message) => self.line(&format!(
+                "if (chelis_numeric_flag != 0) chelis_numeric_trap(\"{trap_message}\");"
+            )),
+            NumericTrapReport::NegativeShift { result, c_type } => {
+                self.line("if (chelis_numeric_flag != 0) {");
+                self.indent += 1;
+                self.line(&format!("{c_type} chelis_shift_count = 0;"));
+                self.line(&format!(
+                    "CHELIS_HIP_CHECK(hipMemcpyDtoH(&chelis_shift_count, \
+                     (hipDeviceptr_t)((char*)p_t{result} + chelis_numeric_index * sizeof({c_type})), \
+                     sizeof(chelis_shift_count)));"
+                ));
+                self.line("char chelis_shift_message[128];");
+                self.line("snprintf(chelis_shift_message, sizeof(chelis_shift_message), \"shift amount must be non-negative, got %lld\", (long long)chelis_shift_count);");
+                self.line("chelis_numeric_trap(chelis_shift_message);");
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -5108,18 +5196,6 @@ impl HipEmitter {
             chelis_types::unimplemented_rejection!(
                 2360,
                 "a guarded abort reaching device kernel selection has no device form; it is emitted host-side"
-            ),
-        )
-    }
-
-    fn bitwise_unsupported(node: &DagNode, kind: chelis_types::BitwiseKind) -> Unsupported {
-        Unsupported::new(
-            UnsupportedKind::Op(kind.name().to_string()),
-            format!("the HIP kernel set (node {})", node.id.0),
-            Stage::Codegen("hip"),
-            chelis_types::unimplemented_rejection!(
-                2702,
-                "exact signed-width bitwise tensor kernels have no HIP implementation; select the C target"
             ),
         )
     }
@@ -6015,7 +6091,10 @@ mod tests {
         );
         let out = dag.add_node(
             decl,
-            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
             vec![target, indices, updates],
             mat_f32(3, 2),
             None,

@@ -165,7 +165,7 @@ pub fn anonymous_axis_names(dag: &Dag, id: NodeId) -> Option<Vec<AnonymousAxisNa
         // identity and stay untouched.
         return Some(by_source(false));
     }
-    if let RiscOp::Gather { axis } = &node.op
+    if let RiscOp::Gather { axis, batch_rank } = &node.op
         && let &[values, indices] = node.inputs.as_slice()
         && let (Some(values_node), Some(indices_node)) = (dag.get(values), dag.get(indices))
         && *axis < values_node.output_type.dims.len()
@@ -175,7 +175,10 @@ pub fn anonymous_axis_names(dag: &Dag, id: NodeId) -> Option<Vec<AnonymousAxisNa
         };
         return Some(
             of(values, 0..*axis)
-                .chain(of(indices, 0..indices_node.output_type.dims.len()))
+                .chain(of(
+                    indices,
+                    *batch_rank..indices_node.output_type.dims.len(),
+                ))
                 .chain(of(values, *axis + 1..values_node.output_type.dims.len()))
                 .collect(),
         );

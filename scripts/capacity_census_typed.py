@@ -10,6 +10,7 @@ for binding infrastructure; it never grants wire authority.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import subprocess
@@ -17,24 +18,11 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable
 
-# One cargo target directory for BOTH legs, workspace-relative.
-#
-# A target directory is cargo's unit of compiled-artifact reuse. The wire leg
-# documents `chelis-compiler-api` and the binding leg documents
-# `chelis-python`; those two crates share nearly all of the chelis dependency
-# graph, so giving each leg its own directory made each one compile that graph
-# from scratch. Both were consequently the only tests in the repository above
-# nextest's 60s SLOW threshold. Sharing one directory lets whichever leg runs
-# second reuse the first's dependencies.
-#
-# It deliberately is NOT the ambient `target/`: these enumerators run from
-# inside a `cargo nextest` test process, and a nested cargo pointed at the
-# outer build's target directory would contend with that build's lock.
-#
-# The callers do not choose this path. Both legs resolving to the same
-# directory is the entire point, so the constant lives here rather than in two
-# separate Rust test files that could silently drift apart again.
-SHARED_RUSTDOC_TARGET_DIR = Path("target/agents/729-capacity-rustdoc")
+# Nested Cargo work must avoid nextest's ambient target. The wire verifier
+# cleans and seals artifacts in its target; the concurrent binding worker has
+# a sibling target for every Cargo, rustdoc and compiled-probe invocation.
+WIRE_RUSTDOC_TARGET_DIR = Path("target/agents/729-capacity-rustdoc")
+BINDING_RUSTDOC_TARGET_DIR = Path("target/agents/729-capacity-binding-proof")
 
 NUMERIC_PRIMITIVES = {
     "f32",
@@ -292,10 +280,8 @@ def build_parser() -> argparse.ArgumentParser:
     # guard in test_capacity_census_typed.py cannot see.
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("mode", choices=("wire", "bindings", "bindings-discovery"))
-    # Optional, and no caller in the repository passes it: see
-    # SHARED_RUSTDOC_TARGET_DIR. It stays accepted for ad-hoc local runs that
-    # need an isolated directory (the `target/agents/<name>` convention for
-    # concurrent agents), which must not disturb the shared one.
+    # No checked-in caller supplies a target. An ad-hoc binding target stays
+    # separate from the wire target, and neither target supplies authority.
     parser.add_argument("--target-dir", type=Path, default=None)
     parser.add_argument("--registered", action="append", default=[])
     parser.add_argument("--registered-method", action="append", default=[])
@@ -309,15 +295,80 @@ def parse_args() -> argparse.Namespace:
     return build_parser().parse_args()
 
 
-def resolve_target_dir(root: Path, requested: Path | None) -> Path:
-    """Absolute cargo target directory for the rustdoc build.
-
-    `None` -- the case for every caller in this repository -- resolves to the
-    shared directory, so both legs reuse one compiled dependency graph.
-    """
+def resolve_target_dir(root: Path, requested: Path | None, mode: str) -> Path:
+    """Select a worktree-local nested Cargo target for one census mode."""
     if requested is None:
-        return root / SHARED_RUSTDOC_TARGET_DIR
+        return root / (WIRE_RUSTDOC_TARGET_DIR if mode == "wire" else BINDING_RUSTDOC_TARGET_DIR)
     return requested if requested.is_absolute() else root / requested
+
+
+def _binding_worker(root: Path, target: Path):
+    from capacity_census_compiler_json import collect_compiler_json_bindings
+    from capacity_census_native_authority import verify_native_bindings
+    from ci_timing import span
+
+    # These phases share binding Cargo artifacts and remain serial with each
+    # other. Neither phase reads wire classifications.
+    with span("binding.compiler_json", "census-stage"):
+        work = collect_compiler_json_bindings(root, target)
+    with span("binding.native", "census-stage"):
+        native = verify_native_bindings(root, target)
+    return work, native
+
+
+def verify_binding_proofs(root: Path, wire_target: Path, binding_target: Path):
+    """Join live wire and binding execution before issuing compiler JSON authority."""
+    from capacity_census_compiler_json import _CompilerJsonWork, finalize_compiler_json_bindings
+    from capacity_census_native_authority import VerifiedNativeBindings
+    from capacity_census_wire_adapters import source_identity
+    from capacity_census_wire_verifier import VerifiedWireCensus, verify_wire_census
+
+    root = root.resolve()
+    wire_target, binding_target = wire_target.resolve(), binding_target.resolve()
+    target_root = root / "target"
+    if (
+        not wire_target.is_relative_to(target_root)
+        or not binding_target.is_relative_to(target_root)
+        or wire_target.is_relative_to(binding_target)
+        or binding_target.is_relative_to(wire_target)
+    ):
+        raise CensusError("wire and binding proof require disjoint worktree-local targets")
+    before = source_identity(root)
+    wire_error = binding_error = None
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="binding-proof") as pool:
+        binding = pool.submit(_binding_worker, root, binding_target)
+        try:
+            wire = verify_wire_census(root, wire_target)
+        except Exception as error:
+            wire_error = error
+        try:
+            work, native = binding.result()
+        except Exception as error:
+            binding_error = error
+    if wire_error is not None and binding_error is not None:
+        raise CensusError(
+            f"wire verification failed: {wire_error}; binding verification failed: {binding_error}"
+        ) from wire_error
+    if wire_error is not None:
+        raise wire_error
+    if binding_error is not None:
+        raise binding_error
+    if type(wire) is not VerifiedWireCensus:
+        raise CensusError("binding join requires live wire verification")
+    if type(native) is not VerifiedNativeBindings:
+        raise CensusError("binding join requires live native verification")
+    if type(work) is not _CompilerJsonWork:
+        raise CensusError("binding join requires current compiler JSON collection")
+    if not (
+        wire.source_sha256 == work.source_sha256 == native.source_sha256
+        == before == source_identity(root)
+    ):
+        raise CensusError("source changed between binding and wire proof")
+    wire.validate()
+    native.validate()
+    compiler_json = finalize_compiler_json_bindings(root, binding_target, work, wire)
+    compiler_json.validate()
+    return compiler_json, native
 
 
 def main() -> int:
@@ -325,7 +376,7 @@ def main() -> int:
 
     args = parse_args()
     root = Path(__file__).resolve().parent.parent
-    target_dir = resolve_target_dir(root, args.target_dir)
+    target_dir = resolve_target_dir(root, args.target_dir, args.mode)
     try:
         if args.mode == "wire":
             if args.rustdoc_json or args.registered or args.registered_method or args.registered_class or args.registered_provenance:
@@ -351,12 +402,9 @@ def main() -> int:
             for name in args.registered:
                 if name not in declared:
                     raise CensusError(f"{name}: missing registration provenance")
-            from capacity_census_compiler_json import verify_compiler_json_bindings
-
-            compiler_json = verify_compiler_json_bindings(root, target_dir)
-            from capacity_census_native_authority import verify_native_bindings
-
-            native = verify_native_bindings(root, target_dir)
+            compiler_json, native = verify_binding_proofs(
+                root, resolve_target_dir(root, None, "wire"), target_dir
+            )
         if compiler_json is not None:
             document = compiler_json.graph.documents["chelis_python"]
         elif args.rustdoc_json:
