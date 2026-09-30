@@ -4,10 +4,8 @@
   past the depth where it used to overflow its stack (a `fold`-built chain of a
   few thousand links). Copying a value, stamping a value that crosses a
   function interface, printing it and converting a root for output now walk it
-  from a worklist. Each read of a fold accumulator still copies the whole
-  value, so such a fold stays quadratic in its length
-  ([#2567](https://github.com/Chelis-Lang/chelis/issues/2567); the copy is
-  [#2592](https://github.com/Chelis-Lang/chelis/issues/2592)).
+  from a worklist
+  ([#2567](https://github.com/Chelis-Lang/chelis/issues/2567)).
 - `chelis eval` accepts a tensor definition whose body reaches `fold` other
   than as its head: in a block tail, through a block binding or through a
   callee. The shared kernel decision now keeps such a definition on the host
