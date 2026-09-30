@@ -1,10 +1,10 @@
 # Cross-Lane Agreement Gate
 
-**Status:** Prerequisite design for [#763], the exact-only, Nix-hermetic first
-slice of [#754]. No `chelis lane-check` implementation exists. This document
-records the four decisions that must be made before the command is written, the
-slice order that follows from them, and the acceptance boundary the gate is not
-allowed to soften. It does not claim any executed acceptance evidence.
+**Status:** Design decisions for [#763], the exact-only, Nix-hermetic first
+slice of [#754]. No `chelis lane-check` implementation or sandboxed acceptance
+result exists yet. This document chooses the provenance and compile/link
+boundaries, orders their implementation, and leaves language semantics to the
+owning specs.
 
 **Owning specs:** `spec/05-risc-primitives.md` [05-OBS] owns the rendered
 observation grammar both lanes must produce.
@@ -23,30 +23,27 @@ timeout, and toolchain-contradiction case failing loudly rather than passing.
 [#763] is not blocked on semantics. For its exact-safe corpus, byte identity
 already holds: [#732] Phase 2 made both lanes render through one frozen [05-OBS]
 grammar, and [#729] Phase 3 returned the former [#751]/[#761] curated gaps to
-ordinary regression rows. The comparator exists and is already shared
-(`chelis_types::agreement::compare_exact_observations`, consumed by
-`crates/chelis-cli/tests/parity.rs`).
+ordinary regression rows. The production exact comparator is
+`chelis_types::agreement::compare_exact_observations`.
 
-This draft proposes two implementation contracts for review:
-
-1. how the command learns its Nix identity, and
-2. which compile/link profile it uses, given that the one shared toolchain
-   resolver contradicts the issue's strict profile.
-
-PD1 and PD2 describe those contracts. PD3 and PD4 describe maintenance and report stability. This draft delivers no command implementation.
+The missing decisions are how the command receives its pinned Nix identity and
+how it compiles C without inheriting the product build's native/ambient
+toolchain profile. PD1 and PD2 choose those boundaries; PD3 assigns lock
+maintenance, and PD4 fixes report stability. None of these choices is evidence
+that the unimplemented command or Nix acceptance check passes.
 
 ## What already exists, and must be reused rather than duplicated
 
 | Need | Existing artifact | Note |
 |---|---|---|
-| Exact comparator | `chelis_types::agreement::compare_exact_observations` | Already the parity suite's comparator. No `f64` reparse, no tolerant fallback. Reuse verbatim. |
-| Eval lane | `chelis eval --file <program>` | Existing CLI surface. |
-| C emit lane | `chelis build <program> --target c --output <dir>` | Existing CLI surface. |
-| Build/link/run pattern | `crates/chelis-cli/tests/parity.rs` | Working reference for emit, link against `-L. -lchelis_runtime`, run, compare. Test-local today. |
+| Exact comparator | `chelis_types::agreement::compare_exact_observations` | Accepts UTF-8 text; compare complete stdout without the lossy decoding and line splitting in `parity.rs`. |
+| Eval lane | `chelis eval --file <program> --target c` | `--target c` selects the same target-aware root manifest as the C build. |
+| C emit lane | `chelis build <program> --target c --output <dir>` | Emits C, headers, and a staged runtime; its printed `Compile:` recipe uses the non-reference product profile. |
+| Build/link/run patterns | `crates/chelis-cli/tests/parity.rs`; `scripts/core_fragment_parity_receipt.py` | The former uses the shared resolver; the latter runs the emitted recipe through a shell. Neither is a hermetic runner to copy unchanged. |
 | Locked flake | `flake.nix`, `flake.lock` | Already present and locked. |
-| Check scaffolding | `nix/checks.nix`, `nix/contracts.nix` | `supportedSystems` already includes `x86_64-linux`; `runtimeConsumers.x86_64-linux = "OpenBLAS"`. |
+| Check scaffolding | `nix/checks.nix`, `nix/contracts.nix` | `supportedSystems` includes `x86_64-linux`; `runtimeConsumers.x86_64-linux = "OpenBLAS"`. |
 | Nix CI entry | `.github/workflows/nix-packages.yml` | `nix flake check --print-build-logs`, on `workflow_dispatch` and published release only. |
-| Flake contract test | `scripts/test_nix_flake_contract.py` | Asserts against `nix/checks.nix` text; a new check enrolls here. |
+| Flake contract test | `scripts/test_nix_flake_contract.py` | Enroll a new check here. |
 
 The issue body says it "introduces a locked flake." That is stale: the flake,
 the lock, the check set, and the `x86_64-linux` system entry all landed before
@@ -56,111 +53,90 @@ the slice is not re-scoped upward by its own prose.
 
 ## Prerequisite decisions
 
-### PD1. How `chelis lane-check` ingests Nix identity (blocking)
+### PD1. Nix identity is an explicit, versioned input
 
-**Question.** The report's `proof_scope` must carry the `flake.lock`/nixpkgs
-revision, Nix derivation and store identities, the resolved compiler store path,
-the pinned libc/libm identity, and the math-provider identity. A process cannot
-derive any of that about itself. Nothing in the repository supplies it today:
-`proof_scope` appears in no source file, and `chelis-image-id` is a single
-`lib.rs`.
+The CLI cannot discover `flake.lock`, store paths, libc/libm, or the derivation
+that invoked it merely by examining its executable. It must not invoke `nix`
+inside the sandbox, guess provenance, or silently accept a partial set of
+ambient environment variables.
 
-**Why it blocks.** Every unresolved answer here is a fabrication risk. An
-implementer who guesses will either shell out to `nix` from inside the CLI
-(forbidden: the sandbox has no network and no `nix`), read ambient environment
-variables of the implementer's choosing (unversioned, and silently absent
-outside the derivation), or emit placeholder strings (inventing provenance). The
-ingestion surface is a versioned public contract and belongs to the issue owner.
+**Decision:** the Nix derivation supplies a version-1 JSON document through
+`--proof-scope-input <FILE>`. Parsing rejects missing, malformed, or contradictory
+required fields before a verdict. Its required categories are the source and
+corpus hashes; lock hash and nixpkgs revision; relevant input derivation and
+store paths (including Chelis and the compiler); executable/compiler digests,
+versions, and host/target triples; libc/libm and any linked math-provider
+identities; complete compile/link argv; Nix and execution platform/CPU identity;
+and floating-point/thread-affecting environment. The implementation owns
+concrete field names, but it may not omit an issue-required category.
 
-**Options.**
+The derivation constructs this input from its locked closure and checks that
+the recorded compiler and libraries are those actually selected. The runner
+records the executed argv, queries the compiler target, and rejects an absent
+or contradictory target. A different toolchain, flags, library closure, or
+corpus changes the recorded scope; comparing reports from distinct scopes is
+not an agreement claim.
 
-- **A — typed environment file.** The derivation writes one JSON document
-  describing its own closure; the command takes `--proof-scope-input <FILE>`,
-  parses it into a typed validated value at the boundary, and refuses to emit a
-  verdict if a required field is missing or unparsable. Outside Nix the flag is
-  absent and the command reports `proof_scope.kind = "unpinned-host"`, which is
-  a diagnosis mode and never acceptance.
-- **B — environment variables.** The derivation exports `CHELIS_LANE_CHECK_*`.
-  Cheaper, but unversioned, silently partial, and collides with N1's rule that
-  ambient variables must not steer the run.
-- **C — build-time constants.** Baked into the binary. Makes the executable
-  non-reusable across closures and defeats N4's distinct-`proof_scope` rule.
+An input file is data, **not an attestation**. Anyone can pass a forged file to
+the CLI outside Nix; even a complete typed document cannot establish that the
+caller was sandboxed. Without the flag, reports say
+`proof_scope.kind = "unpinned-host"`. With it, the CLI reports supplied and
+queried identities but never claims acceptance by itself. Only the report
+produced and checked by `nix build .#checks.x86_64-linux.lane-check` is the
+authoritative pinned verdict. The derivation, not a user-controlled report
+field, binds the input document to its closure. This also avoids baking
+closure-specific constants into a reusable CLI.
 
-**Recommendation: A.** It is explicit, versionable, absent-by-default off Nix,
-and it keeps the "pinned" and "recorded" halves of the proof separable, which is
-what the issue's proof-scope section actually asks for. It also makes N4
-mechanical: a different closure produces a different input document, therefore a
-different `proof_scope`, therefore no silent verdict sharing.
+### PD2. The gate needs a separate strict compile/link profile
 
-**Decision owner:** brittonr (issue owner). Needs a schema version number and
-the required-field list before implementation.
+`chelis_backend_c::toolchain::runtime_toolchain` currently inserts
+`-march=native` and honors `CHELIS_CC`; `chelis build` prints that resolver's
+recipe. The reference gate cannot execute or copy this printed shell command:
+the portable profile forbids `-march=native`, and a hostile `CHELIS_CC` changes
+the printed compiler without changing the generated C. The narrower
+`scripts/core_fragment_parity_receipt.py` intentionally executes a printed
+recipe with `shell=True`; its receipt is not the strict Nix acceptance gate.
 
-### PD2. Which compile/link profile the gate uses (blocking)
+**Decision:** add an explicit strict-reference constructor beside
+`runtime_toolchain` in `chelis-backend-c`. Reuse `NativeToolchain` and its
+requirements/link-flag vocabulary, not the ambient resolver or the printed
+recipe. Supply the pinned compiler store path and native dependencies from
+PD1's Nix closure. For this first reference profile, use `-O2`,
+`-ffp-contract=off`, `-fno-fast-math`, no `-march=native`, and one thread.
+The runner assembles C compile/link argv arrays, removes ambient compiler,
+linker, and OpenMP overrides from both child processes, and records executed
+argv and resolved library identities in `proof_scope`.
 
-**Question.** The brief requires reusing real build/link code rather than
-duplicating it. The one shared resolver is
-`chelis_backend_c::toolchain::runtime_toolchain`. It conflicts with the issue's
-strict reference profile in two concrete ways:
+This choice leaves `chelis build`, `parity.rs`, and the e2e crates unchanged.
+Changing the product build's default profile is a separate change, not a
+precondition for [#763]. A constructor-only unit test is insufficient for N1:
+the runner and Nix check must also exercise the spawned compiler under hostile
+`CHELIS_CC`, `CC`, `CFLAGS`, `LDFLAGS`, and OpenMP settings. A compiler wrapper
+may inject its own flags, so the check must prove the executed reference profile,
+not merely inspect the vector before spawning it.
 
-- `crates/chelis-backend-c/src/toolchain.rs:52` unconditionally pushes
-  `-march=native`. The portable reference derivation forbids `-march=native`.
-- `crates/chelis-backend-c/src/toolchain.rs:96` honors an ambient compiler
-  override variable. N1 requires that hostile ambient `CC`/`CFLAGS`/`LDFLAGS`
-  and OpenMP settings never enter argv or the report.
+Jeff's measured `uniform_like` case explains why the contraction flag belongs
+in recorded argv: identical source produced different bytes under different
+compiler contraction settings. PR [#779] repaired one source sensitivity, not
+the class.
 
-**Why it blocks.** Reusing the resolver as-is produces a verdict under a profile
-the issue explicitly rules out, and quietly fails N1. The two ways out have
-different blast radii and neither is the implementer's call.
+### PD3. `flake.lock` has a maintenance owner
 
-**Options.**
+**Decision:** brittonr, the [#763] assignee, owns a four-week review of the
+lock and an on-demand review for security advisories. A bump to shared inputs
+also keeps `flake.lock` and `devenv.lock` in parity. Before merging a bump,
+dispatch `.github/workflows/nix-packages.yml` on its candidate and inspect the
+native Linux checks; once the lane check exists, rerun its sandboxed acceptance
+command too. This answers rlronan's lock-ownership question without treating a
+fresh lock as proof that any program agreed.
 
-- **A — add a strict reference profile beside the existing resolver.** A new
-  public constructor in `chelis-backend-c` returns a `NativeToolchain` built
-  from an explicit profile: no ambient inheritance, no `-march=native`, pinned
-  optimization level, explicit `-ffp-contract`, explicit absence of fast-math,
-  fixed thread count. `runtime_toolchain` keeps its current behavior for every
-  existing consumer. Shares the `NativeToolchain` type and the link-flag
-  vocabulary, so it is reuse rather than duplication.
-- **B — change `runtime_toolchain` itself.** Correct in the long run, but it
-  moves the build profile for `chelis build`, `parity.rs`, and the e2e crates in
-  the same change. That is a separable slice with its own regression surface and
-  its own red-team pass.
+### PD4. Stable reports exclude run-local fields
 
-**Recommendation: A now, B tracked separately.** A keeps [#763] to one coherent
-slice. B — asking whether `-march=native` should ever be the default for a
-product build command — deserves its own issue and is not a lane-check question.
-
-**Decision owner:** brittonr, with backend review.
-
-Jeff's measured `uniform_like` case is the standing argument for why the
-`-ffp-contract` value must be in the recorded argv and not merely in the
-profile: same source, different bytes, entirely from the flag. The fix in
-PR [#779] removed that one sensitivity at the source; it did not remove the
-class.
-
-### PD3. `flake.lock` bump owner and cadence (blocking for acceptance, not for code)
-
-rlronan asked for this in review and it was never answered. The gate's entire
-claim rests on the lock. An unowned lock rots, and a rotted lock produces a
-`proof_scope` that names a closure nobody maintains. Name an owner and a bump
-cadence, and state what re-validation a bump requires. Recommended: same owner
-as the gate, bump on a fixed cadence plus on demand for a security advisory,
-with a dispatched `nix-packages.yml` run required before any bump merges.
-
-**Decision owner:** brittonr and rlronan.
-
-### PD4. Report stability rules for N2 (small, but must be written down first)
-
-N2 requires a byte-identical report from the same locked source on the same
-hardware tuple. That forces explicit exclusions before the writer exists: no
-wall-clock timestamps, no durations, no temp directory paths in any field, no
-hash-map iteration order, records emitted in deterministic relative-path order,
-and a fixed key order in every NDJSON object. Decide whether elapsed time is
-excluded entirely or emitted only under a flag that the acceptance derivation
-never passes. Recommended: excluded entirely from the report; timing belongs in
-human-readable output.
-
-**Decision owner:** brittonr.
+**Decision:** versioned NDJSON contains no wall-clock time, duration, or temp
+directory path. Program records use deterministic relative-path order, and
+fields have fixed key order. Timing, if useful, belongs only in human output.
+Two uncached runs of the same locked source and declared hardware tuple must
+produce byte-identical report files; a cached Nix result does not test N2.
 
 ## Already decided — do not reopen
 
@@ -172,27 +148,31 @@ a C-unsupported program is an error and never an inferred skip; an empty corpus,
 a library-only input, and zero observable output all exit 2; integer and bool
 payloads are never compared through `f64`.
 
-## Slice order once PD1 and PD2 land
+## Slice order
 
-- **S1 — strict profile.** PD2's chosen constructor plus unit coverage that the
-  emitted argv contains no ambient value and no `-march=native`. Independently
-  reviewable.
-- **S2 — the runner.** A library module owning discovery, the four stages, the
-  comparator call, and the typed verdict. Timeouts kill and reap the child, and
-  argv is passed as an array so program arguments keep their boundaries. Owns
-  E1–E5 and D1–D3 as integration tests with focused fixtures.
-- **S3 — the CLI surface and report writer.** `lane-check` wired into
-  `crates/chelis-cli/src/main.rs`, PD1's typed input parsed at the boundary,
-  PD4's stability rules enforced by a test that renders the same verdict twice.
-  Owns P1–P4, E6, N3.
-- **S4 — the Nix check.** `checks.x86_64-linux.lane-check` in `nix/checks.nix`,
-  the exact-safe corpus in the derivation input, the report as a derivation
-  output, and the assertion that the queried compiler target matches the flake's
-  intended target platform. Enroll the new check name in
-  `scripts/test_nix_flake_contract.py`. Owns N1, N2, N4.
+- **S1 — strict profile.** Implement PD2's constructor and verify its arguments
+  exclude `-march=native` and ambient overrides. This does not by itself prove
+  the compiler that the runner executes.
+- **S2 — the runner.** Own discovery, eval, C emission, native link, execution,
+  complete-output comparison, and typed verdicts. Call eval with `--target c`;
+  ignore `build`'s printed compile recipe. Pass argv as arrays and kill/reap
+  timed-out children. Validate complete stdout as UTF-8 without replacement,
+  then use the single production comparator on the **whole** strings, including
+  trailing newlines. Invalid rendering is an output-contract error, never a
+  lossy-equal pass. Test differing final newlines and distinct invalid bytes
+  as well as E1–E5 and D1–D3.
+- **S3 — CLI and report.** Wire `lane-check` into
+  `crates/chelis-cli/src/main.rs`; parse PD1's typed input, and enforce PD4 by
+  rendering the same verdict twice. Own P1–P4, E6, and N3.
+- **S4 — Nix acceptance.** Add `checks.x86_64-linux.lane-check` to
+  `nix/checks.nix`; bind PD1's file to the evaluated closure, supply the
+  exact-safe corpus as a derivation input, and retain the report as an output.
+  Assert the queried compiler target against the declared platform and exercise
+  the **executed** compile/link profile under hostile ambient variables. Enroll
+  the check in `scripts/test_nix_flake_contract.py`; own N1, N2, and N4.
 
-S2 and S3 add integration targets. Any of them that routine PR CI must execute
-needs enrollment in `.config/ci-test-targets.toml`.
+S2 and S3 add integration targets. Enroll any that routine PR CI must execute
+in `.config/ci-test-targets.toml`.
 
 ## Corpus contract
 
@@ -234,13 +214,20 @@ Neither a skipped job nor an unexecuted command counts as a pass.
   anything.
 - Float tolerance, capability-aware skips, GPU lanes, and cross-platform verdict
   comparison stay out. Each has its own owner.
+- [#2102]'s core-fragment parity receipt is a narrower, executable
+  observation/trap corpus. It supplies fixtures and a build/run example, but
+  neither the public command nor a sandboxed proof scope. Its shell-executed
+  product recipe is not the strict profile specified here.
+- Exact agreement is not an independent oracle: if both lanes omit the same
+  owed root, nonempty identical output can still pass. [#1351] and the
+  core-fragment receipt's declared-root witnesses remain separate evidence.
 
 ## Issue map
 
 [#754] parent gate proposal; [#763] this slice; [#732] the one-comparator rule
-and the Phase 2 rendering that makes exact comparison viable; [#729] Phase 3,
-which returned the [#751]/[#761] curated gaps to ordinary regression rows;
-[#750] negative canary; [#738] downstream shell wiring; [#1286] and [#1351]
+and Phase 2 rendering; [#729] Phase 3's ordinary regression rows for the former
+[#751]/[#761] gaps; [#2102] the narrower executable parity receipt; [#750]
+negative canary; [#738] downstream shell wiring; [#1286] and [#1351]
 adjacent oracles with their own scope.
 
 [#729]: https://github.com/Chelis-Lang/chelis/issues/729
@@ -254,3 +241,4 @@ adjacent oracles with their own scope.
 [#779]: https://github.com/Chelis-Lang/chelis/pull/779
 [#1286]: https://github.com/Chelis-Lang/chelis/issues/1286
 [#1351]: https://github.com/Chelis-Lang/chelis/issues/1351
+[#2102]: https://github.com/Chelis-Lang/chelis/issues/2102
