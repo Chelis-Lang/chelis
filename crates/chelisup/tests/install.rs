@@ -308,6 +308,76 @@ fn missing_shipped_archive_or_export_receipt_preserves_previous_install() {
     }
 }
 
+fn assert_duplicate_live_receipt_refused(case: &str, runtime: &ReleaseRuntime) {
+    let home = tempfile::tempdir().unwrap();
+    let release = tempfile::tempdir().unwrap();
+    let previous = "0.18.11";
+    build_release_tarball(
+        release.path(),
+        previous,
+        &build(previous),
+        &ReleaseRuntime::matching(previous),
+    );
+    let old = install(home.path(), release.path(), previous);
+    assert!(old.status.success(), "{case}: {}", stderr(&old));
+    let old_binary = home.path().join("toolchains/0.18.11/bin/chelis");
+    let old_bytes = std::fs::read(&old_binary).unwrap();
+    let old_default = std::fs::read(home.path().join("default")).unwrap();
+    assert_eq!(old_default, b"0.18.11\n");
+
+    build_release_tarball(release.path(), CHECKED, &build(CHECKED), runtime);
+    let refused = install(home.path(), release.path(), CHECKED);
+    assert!(
+        !refused.status.success(),
+        "{case}: installed; stdout: {}; stderr: {}",
+        stdout(&refused),
+        stderr(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("duplicate key"),
+        "{case}: stderr: {}",
+        stderr(&refused)
+    );
+    assert_eq!(std::fs::read(&old_binary).unwrap(), old_bytes, "{case}");
+    assert_eq!(
+        std::fs::read(home.path().join("default")).unwrap(),
+        old_default,
+        "{case}"
+    );
+    assert!(
+        !home.path().join("toolchains").join(CHECKED).exists(),
+        "{case}"
+    );
+}
+
+#[test]
+fn duplicate_live_receipt_mode_preserves_previous_install() {
+    let mut runtime = ReleaseRuntime::matching(CHECKED);
+    let raw = runtime.receipt.to_string();
+    let entry = "\"mode\":\"sealed\"";
+    assert_eq!(raw.matches(entry).count(), 1);
+    runtime.raw_receipt =
+        Some(raw.replacen(entry, "\"mode\":\"development\",\"mode\":\"sealed\"", 1));
+    assert_duplicate_live_receipt_refused("duplicate root mode", &runtime);
+}
+
+#[test]
+fn duplicate_live_receipt_header_preserves_previous_install() {
+    let mut runtime = ReleaseRuntime::matching(CHECKED);
+    let good = runtime.receipt["headers"]["chelis_runtime.h"]
+        .as_str()
+        .unwrap();
+    let entry = format!("\"chelis_runtime.h\":\"{good}\"");
+    let raw = runtime.receipt.to_string();
+    assert_eq!(raw.matches(&entry).count(), 1);
+    runtime.raw_receipt = Some(raw.replacen(
+        &entry,
+        &format!("\"chelis_runtime.h\":\"{}\",{entry}", "0".repeat(64)),
+        1,
+    ));
+    assert_duplicate_live_receipt_refused("duplicate nested header", &runtime);
+}
+
 #[test]
 fn releases_before_the_export_install_unchecked_with_a_warning() {
     // A release up to 0.18.11 has no export to run, so a failing one is never

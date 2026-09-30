@@ -56,10 +56,13 @@ The first install also records that version as the default and installs the
 `chelis` shim, so `chelis --version` works from anywhere. Before placing a
 toolchain, chelisup checks that the sealed compiler's exported archive and all
 six public runtime headers match the files shipped under `lib/` and `include/`;
-a missing or crossed file refuses installation before store placement. Older
-releases that predate `chelis runtime export` install with a warning that their
-runtime files are unchecked. If chelisup refuses a newer release because it
-cannot read its format, re-run the bootstrap to update chelisup and try again.
+a missing or crossed file refuses installation before store placement. The
+receipt comes from the unpacked compiler's live export, not from the tarball.
+`chelisup` also refuses a malformed or ambiguous receipt (including duplicate
+JSON keys in nested objects) before placing the new toolchain. Older releases
+that predate `chelis runtime export` install with a warning that their runtime
+files are unchecked. If chelisup refuses a newer release because it cannot
+read its format, re-run the bootstrap to update chelisup and try again.
 
 Rebuild the compiler and its carried runtime together, then publish and install
 their **matching** archive and headers as one versioned toolchain. Do not

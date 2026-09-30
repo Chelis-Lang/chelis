@@ -94,6 +94,9 @@ pub struct ReleaseRuntime {
     pub exported_headers: Vec<(String, Vec<u8>)>,
     /// The staging receipt the fake export writes.
     pub receipt: serde_json::Value,
+    /// Override the live export's receipt text, including ambiguous JSON
+    /// that cannot be represented by `receipt`'s parsed Value.
+    pub raw_receipt: Option<String>,
     /// Omit the fake compiler's export receipt when false.
     pub export_receipt: bool,
     /// The fake export's exit status; a failed export writes nothing.
@@ -145,6 +148,7 @@ impl ReleaseRuntime {
             exported_archive_is_symlink: false,
             exported_headers: headers,
             receipt,
+            raw_receipt: None,
             export_receipt: true,
             export_status: 0,
             chelis_interpreter: "/bin/sh",
@@ -177,6 +181,13 @@ pub fn build_release_tarball(
         fs::create_dir_all(root.join(directory)).unwrap();
     }
     let chelis = root.join("bin/chelis");
+    let serialized_receipt;
+    let receipt = if let Some(raw) = runtime.raw_receipt.as_deref() {
+        raw
+    } else {
+        serialized_receipt = runtime.receipt.to_string();
+        &serialized_receipt
+    };
     fs::write(
         &chelis,
         format!(
@@ -198,7 +209,7 @@ pub fn build_release_tarball(
              printf 'FAKE-CHELIS %s' \"$*\"\n",
             interpreter = runtime.chelis_interpreter,
             status = runtime.export_status,
-            receipt = runtime.receipt,
+            receipt = receipt,
             export_receipt = runtime.export_receipt,
         ),
     )
