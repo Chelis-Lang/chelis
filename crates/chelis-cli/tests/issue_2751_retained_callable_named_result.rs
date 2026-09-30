@@ -270,6 +270,32 @@ fn file_supplied_list_formal_requires_runtime_result_guard() {
 }
 
 #[test]
+fn empty_earlier_list_uses_later_direct_result_witness() {
+    let prefix = "\
+def broad(xs: List[tensor[*, f32]], witness: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, f32] = y
+def invoke(f: List[tensor[seq, f32]] -> tensor[seq, f32] -> tensor[*, f32] -> tensor[seq, f32], xs: List[tensor[*, f32]], witness: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, f32] = f(xs, witness, y)
+";
+    let empty = "skip([to_tensor([9.0f32])], 1i64)";
+    assert_result_value(
+        &format!(
+            "{prefix}out = invoke(broad, {empty}, to_tensor([1.0f32, 2.0f32]), to_tensor([4.0f32, 5.0f32]))\n"
+        ),
+        "2], data=[4.0, 5.0]",
+    );
+    let mismatch = format!(
+        "{prefix}out = invoke(broad, {empty}, to_tensor([1.0f32, 2.0f32]), to_tensor([4.0f32, 5.0f32, 6.0f32]))\n"
+    );
+    assert_result_trap(&mismatch, 2, 3);
+    for native in [false, true] {
+        let (_, output) = result_claims::run(&mismatch, native);
+        assert!(
+            output.contains("arg1 axis 0 = 2"),
+            "native={native}: {output}"
+        );
+    }
+}
+
+#[test]
 fn later_list_element_fails_at_entry_before_body_or_result() {
     let prefix = "\
 def broad(xs: List[tensor[*, f32]], y: tensor[*, f32]) -> tensor[*, f32] ! { IO } = {

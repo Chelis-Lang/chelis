@@ -771,19 +771,15 @@ unbound binder needs a separate `spec/04-type-system.md` decision; this exit
 makes no claim about an only-empty-List invocation.
 
 The formal result obligation travels through the checked adapter around the
-supplied callable, inline beta reduction, local callable aliases, nested
-retained calls, helper lowering, and Eval/C invocation frames. It must not
-leak to a sibling call. The supplied callable's own result obligation remains
-independent, with each guard consumed once. An `if` or `match` sends the
-formal claim only to its selected result producer; an unselected arm does not
-run or trap. A later selector keeps the selected value's producer provenance
-until the guard operands are ready. The producer consumes the claim after
-earlier independent effects and before later effects, allocation, or element
-access dependent on the returned extent. Both lanes use the same ordered
-formal-result contract, witness paths and producer provenance; they may represent
-them differently but must not reconstruct them from a rendered name or
-backend result type. A missing referenced witness or selected producer is a
-typed lowering failure, not a successful Eval/C artifact.
+supplied callable, nested retained calls, alias-expanded formal types, and
+Eval/C invocation frames. It must not leak to a sibling call. The supplied
+callable's own result obligation remains independent. A selected `if` arm
+receives the claim; an unselected arm does not run or trap. The producer
+consumes the claim after earlier independent effects and before later effects.
+Both lanes use the same ordered formal-result contract and witness paths,
+without reconstructing them from a rendered name or backend result type.
+Other callable aliases, inline beta reduction, helper forwarding, `match`,
+and late selectors remain under C2/C6 rather than this exit.
 
 Implement this as a bounded #2751 exit, keeping #2627's List entry
 obligations and #1771/#1945's host declaration/inherited literal obligations
@@ -795,22 +791,21 @@ them with:
 cargo nextest run -p chelis-cli --test issue_2751_retained_callable_named_result
 ```
 
-Use runtime-supplied tensors for the dynamic mismatch rows, so Check cannot
-prove their widths; test the issue's literal-source program separately for
-static proof under §4.7. Each runtime row needs the complete
+The issue's top-level literal tensors are host runtime constructors; file-backed
+inputs separately prove the guard works with values unavailable at lowering.
+This matrix does not establish §4.7's graph-fixed contradiction rejection.
+Each runtime row needs the complete
 `numeric trap: domain in <op> at i64` line and separate source names, axis
 and observed values under spec/04 §4.7, or the expected result value on
 success; compiled C must be compiled, linked and run.
 
 | fixture | required Check / Eval / compiled-C observation |
 |---|---|
-| Issue's `broad`/`invoke` direct formal, result width 3 against `x` width 2; matching `y` width 2 | Check admits the runtime-dependent pair and rejects a contradiction proven from the lowered graph; a dynamic mismatch traps at the returned tensor's producing `load`, with `seq` witnessed at 2 and result axis at 3; match returns width 2 |
-| Same pair with the witnessing first formal nested in a nonempty `List`, including a later mismatching element and a nested-List path | Entry rejects a disagreeing later element at its `load`; after entry succeeds, wrong returned width traps at the selected producer; matching return succeeds. These are separate failures |
-| Empty List in one witness position with a later direct or nonempty-List `seq` witness | No empty-element read or zero witness; the later witness determines the formal result guard, with mismatching and matching returns |
-| Two calls of one callable with different `seq` widths, plus an equal-sized unrelated argument and an alias of the callable | Each call compares against its own declared formal witness; one may pass while the other traps. Neither alias spelling nor equal size supplies a substitute witness |
-| Formal adapter wrapping a supplied callable with its own result claim, then an outer retained call; inline callback and local callable alias variants | Formal entry, supplied-callable result and outer formal result retain distinct ownership and order; one failing and one matching control for each boundary, including a forwarded result through a tensor helper |
-| Selected `if`/`match` result, including selection known only after the candidate producers, with an invalid unselected arm | Only the selected result is checked once against the formal witness; report its producing primitive, not `if`, `match`, the enclosing function, or a neighboring operand |
-| Eager actual effect or trap, formal entry mismatch, body effect before the selected producer, formal result mismatch, and body effect after it | Actuals run once in caller order; entry wins before body; an earlier independent body effect is observed; a failed formal result suppresses the later effect on both lanes |
+| Issue's `broad`/`invoke` direct formal and file-backed width | A witnessed width 2 accepts a width-2 result and traps at `load` for width 3 |
+| Nonempty List formal and later disagreeing List element | A result mismatch traps at its producer; a disagreeing later element traps first at entry |
+| Empty first List with a later direct `seq` formal | The direct width 2 witnesses the result; width 2 succeeds and width 3 traps at `load` |
+| Nested retained call, repeated calls, and aliased formal type | Each invocation keeps its own witness; the supplied callable's literal result claim remains separate |
+| Selected `if` producer and surrounding effects | Only the selected result is checked at its producer; an earlier effect occurs, and a failed claim suppresses the later effect |
 
 The only-empty-List result-binder case stays outside this matrix pending the
 normative decision above. These receipts prove retained formal tensor
