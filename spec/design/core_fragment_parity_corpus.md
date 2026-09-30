@@ -674,14 +674,30 @@ the Voyage third is not in manifest version 3 (§10).
 
 Named, so a reader does not mistake this document for more than it is:
 
-- **The Voyage third is not in manifest version 3.** The schema carries the
-  `derived` source kind that pins `(repo, rev, generator, task, index)` for it,
-  and the runner materializes such a case, but no Voyage rows are declared yet:
-  its cases are captured at run time by `probes/qcb-compiled/driver.py`'s
-  `interp` phase, which has to run first. This receipt consumes captures and
-  does not generate them. Until those rows land, #2782's `demo-path`
-  justification rests on measurement recorded in that issue rather than on a row
-  in this manifest (§9).
+- **The Voyage third is not in manifest version 3, and admitting it needs a
+  decision this document has not made.** The schema carries the `derived` source
+  kind that pins `(repo, rev, generator, task, index)`, and the runner
+  materializes such a case, but no Voyage rows are declared. Two things stand in
+  the way, and only the first was previously recorded:
+
+  1. Its cases are captured at run time by `probes/qcb-compiled/driver.py`'s
+     `interp` phase, which has to run first. This receipt consumes captures and
+     does not generate them.
+  2. **Every captured program reads its inputs from an absolute path baked into
+     its own source.** Measured over all 413 captures on this workstation: 413
+     of 413 embed a `/tmp/qcbx/<task>_<n>` path, and 413 of 413 ship an
+     `inputs/` directory that has to be staged there for the program to run.
+     The receipt's isolation model — materialize into a private temporary
+     directory and run there — cannot express that: `materialize_case` copies
+     `inputs/` beside the program, where the program will not look. Admitting
+     Voyage therefore requires the receipt to write outside its own workdir, to
+     a fixed global location shared with any concurrent run, or requires the
+     capture format to change so inputs are addressed relatively. That is a
+     contract decision about isolation, not an implementation detail, and it is
+     unmade.
+
+  Until those rows land, #2782's `demo-path` justification rests on measurement
+  recorded in that issue rather than on a row in this manifest (§9).
 - **Package-aware materialization is unbuilt**, which is what makes the 12
   `unmeasurable-by-probe` rows unmeasurable (§9). Admitting them needs the
   receipt to materialize a case together with the package it imports from.
