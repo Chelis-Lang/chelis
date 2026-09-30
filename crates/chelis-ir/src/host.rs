@@ -17071,14 +17071,29 @@ fn actualize_tensor_helper_types(
         // Record which minted `dN` alias each output axis resolved to,
         // so op-internal references to the same alias can be renamed in
         // lockstep below.
-        for (old_dim, new_dim) in node.output_type.dims.iter().zip(actual.dims.iter()) {
+        let mut actual = actual.clone();
+        for (axis, (old_dim, new_dim)) in node
+            .output_type
+            .dims
+            .iter()
+            .zip(actual.dims.clone())
+            .enumerate()
+        {
             if let crate::dag::DimInfo::Named(name, None) = old_dim
                 && synthetic_dim(old_dim)
-                && old_dim != new_dim
+                && old_dim != &new_dim
             {
+                if matches!(&new_dim, crate::dag::DimInfo::Named(unknown, None) if unknown.is_empty() || unknown == "*")
+                {
+                    // An unknown axis carries no competing extent. Keep
+                    // the checker's shared dim until a witnessed use
+                    // supplies its invocation-local replacement.
+                    actual.dims[axis] = old_dim.clone();
+                    continue;
+                }
                 match synthetic_renames.entry(name.clone()) {
                     chelis_unord::Entry::Vacant(slot) => {
-                        slot.insert(new_dim.clone());
+                        slot.insert(new_dim);
                     }
                     chelis_unord::Entry::Occupied(existing) => {
                         // A single checker dim-var has a single extent in
@@ -17088,14 +17103,14 @@ fn actualize_tensor_helper_types(
                         // fields with the wrong extent (review #363 N1).
                         debug_assert_eq!(
                             existing.get(),
-                            new_dim,
+                            &new_dim,
                             "synthetic dim `{name}` resolved to conflicting actuals"
                         );
                     }
                 }
             }
         }
-        actualized.replace_node(id, node.op, node.inputs, actual.clone());
+        actualized.replace_node(id, node.op, node.inputs, actual);
         if let Some(reusable_input) = node.reusable_input {
             actualized.set_reusable_input(id, reusable_input);
         }
