@@ -10,12 +10,12 @@
 -- requires literal int bounds in shrink -- symbolic-axis windowing is
 -- out of scope for issue Chelis-Lang/chelis 187.
 def block(x: tensor[8, 256, f32], wqkv: tensor[256, 192, f32], wo: tensor[64, 256, f32]) -> tensor[8, 256, f32] = {
-  qkv = matmul(copy(x), wqkv)
+  qkv = matmul(x, wqkv)
   q = shrink(&qkv, [[0i64, 8i64], [0i64, 64i64]])
   k = shrink(&qkv, [[0i64, 8i64], [64i64, 128i64]])
   v = shrink(&qkv, [[0i64, 8i64], [128i64, 192i64]])
   scores = matmul(q, permute(k, 1, 0))
   probs = softmax(scores, 1)
-  attn_out = matmul(matmul(probs, v), wo)
+  attn_out = probs |> matmul(v) |> matmul(wo)
   add(x, attn_out)
 }

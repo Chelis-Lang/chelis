@@ -1,5 +1,5 @@
 def mapped_length(path: string) -> i64 ! { IO } = {
-  value: Option[MappedFile] = Some(mmap_file(path))
+  value: Option[MappedFile] = path |> mmap_file |> Some
   match value with {
     | None => 0i64
     | Some(mapped) => mmap_len(mapped)

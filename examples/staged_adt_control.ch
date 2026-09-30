@@ -6,7 +6,7 @@ def wrapped(x: tensor[2, 1, f32], state: State) -> (tensor[2, 1, f32], State) =
     | State { seed } => (x, State { seed })
   }
 def main() -> tensor[2, 1, f32] = {
-  x = reshape(to_tensor([1.0f32, 2.0f32]), [2i64, 1i64])
+  x = [1.0f32, 2.0f32] |> to_tensor |> reshape([2i64, 1i64])
   pair = wrapped(x, init(0i64))
   pair.0
 }

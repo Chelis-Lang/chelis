@@ -24,8 +24,8 @@ merged_beta_id = match dict_get(merged, "beta") with {
 }
 pairs_view = print(pairs)
 enumerated_view = print(enumerated)
-keys_view = print(dict_keys(vocab))
-values_view = print(dict_values(vocab))
+keys_view = vocab |> dict_keys |> print
+values_view = vocab |> dict_values |> print
 entries_view = print(entries)
 merged_entries_view = print(merged_entries)
 trimmed_entries_view = print(trimmed_entries)

@@ -157,6 +157,11 @@ operand expressions are observed in authored order. (`&&` and `||` are
 eager like every other application; there is no short-circuit special
 case.)
 
+In a pipe stage, `x |> cast(p)` and `x |> cast_trunc(p)` insert `x` as
+the value argument of the corresponding two-argument cast. The
+one-argument spelling is valid only after `|>`; `cast(p)` and
+`cast_trunc(p)` are not standalone expressions.
+
 No operator overloading. No infix bitwise operators. Host-side integer bitwise work uses
 named built-ins such as `bitand`, `bitor`, `bitxor`, `shl`, and `shr`. No exponentiation
 operator — use `pow(x, n)` from `Std.Math`.
@@ -1379,7 +1384,8 @@ FnExpr        <- 'fn' S Params S '->' S Expr
 
 # ── Operator expressions ──
 
-PipeExpr      <- UpdateExpr (S '|>' S UpdateExpr)*
+PipeExpr      <- UpdateExpr (S '|>' S (CastPipeStage / UpdateExpr))*
+CastPipeStage <- ('cast' / 'cast_trunc') S '(' S Ident S ')'
 UpdateExpr    <- OrExpr (S 'with' S UpdateRecordBody)?
 OrExpr        <- AndExpr (S '||' S AndExpr)*
 AndExpr       <- CmpExpr (S '&&' S CmpExpr)*
