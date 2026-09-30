@@ -879,6 +879,10 @@ class SchemaTests(unittest.TestCase):
         )
 
         cli_paths = (
+            (
+                "crates/chelis-cli/tests/chelis_std_self_test_corpus.rs",
+                "chelis_std_self_test_corpus",
+            ),
             ("crates/chelis-cli/tests/std_io_pipeline.rs", "std_io_pipeline"),
             (
                 "crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs",

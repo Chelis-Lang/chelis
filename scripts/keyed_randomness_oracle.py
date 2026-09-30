@@ -162,9 +162,12 @@ SUITES = (
         "an_unselected_split_keys_does_not_trap_on_its_count",
         "a_selected_split_keys_still_traps_on_a_negative_count",
     ), ("cli", "eval", "c", "reference")),
-    Suite("chelis-cli", "stdlib_removed_modules_cli", (
-        "removed_shell_modules_cannot_be_imported_from_chelis_std",
-    ), ("stdlib-boundary", "cli")),
+    Suite("chelis-cli", "key_random_primitives_cli", (
+        "uniform_like_draws_from_its_key_in_eval_and_c",
+        "uniform_like_rejects_invalid_bounds_before_later_work_in_eval_and_c",
+        "uniform_like_rejects_invalid_bounds_before_later_work_under_grad_in_eval_and_c",
+        "uniform_like_valid_bounds_run_in_eval_c_and_grad",
+    ), ("cli", "eval", "c", "reference")),
     Suite("chelis-cli", "jit_par_runtime_gap", (
         "eval_par_scalar_is_fenced_before_execution",
         "eval_par_tensor_is_fenced_before_execution",
