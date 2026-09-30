@@ -1,24 +1,5 @@
-//! Phase 3t.A1 follow-up — Std.Decimal panic-path coverage (RT-A1W1 MEDIUM).
-//!
-//! `Std.Decimal` exposes two panic paths that cannot be covered from inside
-//! `chelis test` because `fail` aborts the worker before any subsequent
-//! assertion can run:
-//!
-//!   * `decimal("garbage")` — `decimal/1` calls `fail` for malformed input
-//!     because the Option-returning variant is `try_decimal/1`. The non-try
-//!     entry is the panicking convenience.
-//!   * `decimal_div(_, decimal_from_int(0), _, _)` — `decimal_div/4` calls
-//!     `fail("decimal_div: division by zero")` for a zero denominator.
-//!     There is intentionally no `try_decimal_div`.
-//!
-//! Both paths are exercised here through `chelis eval --file`. Each test
-//! stages chelis-std into a tempdir reef home, writes a `main.ch` whose
-//! module-load triggers the panic path, and asserts:
-//!
-//!   * exit code != 0
-//!   * stderr contains the branded fail message
-//!
-//! The pattern mirrors `std_test_module.rs::assert_eval_fails_with`.
+//! Retained invalid-input probes for the temporary Std.Decimal fence (#2778).
+//! The complete callable matrix lives in `std_package_acceptance`.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -48,7 +29,7 @@ fn assert_eval_fails_with(reef_home: &Path, app_pkg: &Path, stderr_contains: &[&
 
 #[test]
 #[ignore = "manual gate: Std.Decimal failure-path CLI acceptance exceeds the default inner-loop budget"]
-fn decimal_of_garbage_string_calls_fail_with_branded_message() {
+fn decimal_of_garbage_string_reports_fence() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-decimal-panic-garbage");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -59,19 +40,16 @@ import Std.Decimal (decimal)
 bad = decimal("not a number")
 "#,
     );
-    // The fail in Std.Decimal.decimal/1 reads:
-    //   string_concat("decimal: invalid literal ", text)
-    // so the branded prefix and the offending text both appear on stderr.
     assert_eval_fails_with(
         &reef_home,
         &app_pkg,
-        &["decimal: invalid literal", "not a number"],
+        &["Std.Decimal is unavailable", "#2778"],
     );
 }
 
 #[test]
 #[ignore = "manual gate: Std.Decimal failure-path CLI acceptance exceeds the default inner-loop budget"]
-fn decimal_div_by_zero_calls_fail_with_branded_message() {
+fn decimal_div_by_zero_reports_fence() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-decimal-panic-divzero");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -82,7 +60,9 @@ import Std.Decimal (decimal_div, decimal_from_int, round_half_even)
 quotient = decimal_div(decimal_from_int(cast(1, i64)), decimal_from_int(cast(0, i64)), cast(0, i64), round_half_even())
 "#,
     );
-    // Std.Decimal.decimal_div/4 fails with the literal:
-    //   "decimal_div: division by zero"
-    assert_eval_fails_with(&reef_home, &app_pkg, &["decimal_div: division by zero"]);
+    assert_eval_fails_with(
+        &reef_home,
+        &app_pkg,
+        &["Std.Decimal is unavailable", "#2778"],
+    );
 }

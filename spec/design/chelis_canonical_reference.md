@@ -210,7 +210,7 @@ LaTeX document ingestion, Octant Phase 4).
 
 | Package | Kind | Depends On | Status | Contents |
 |---|---|---|---|---|
-| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active | `Std.Io` (files, mmap, safetensors, CSV, JSON), `Std.Tensor` (including `Std.Tensor.Mask`), `Std.Index`, `Std.Scan`, `Std.Sort`, `Std.Process`, `Std.Time`, `Std.Decimal`, `Std.Test` (assertion functions for Chelis-native tests). |
+| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active | `Std.Io` (files, mmap, safetensors, CSV, JSON), `Std.Tensor` (including `Std.Tensor.Mask`), `Std.Index`, `Std.Scan`, `Std.Sort`, `Std.Process`, `Std.Time`, `Std.Decimal` (callables fenced; #2778), `Std.Test` (assertion functions for Chelis-native tests). |
 | `nautilus` | Shell | `chelis-std` | Active (`v0.5.0` released) | Numerical methods — stats, distributions, linear algebra (nalgebra-backed with hand-written AD adjoints), convex optimization, ODE/SDE solvers, roots, integration, interpolation, special functions (`erf`, `log_gamma`, …), distances. The scipy competitor. `Nautilus.Signal` stubbed until complex numbers (Phase 5f). |
 | `coral` | Shell | `chelis-std` | Phase 3k | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, rolling windows, NaN handling built into `Coral.Frame`, Parquet I/O via `parquet2`, DataFrame-aware CSV/JSON. The pandas competitor. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
 | `shoals` | Shell | `chelis-std` + `nautilus` + `coral` | Phase 3l | Options pricing, risk measures, yield curves, stochastic processes, order books |
@@ -542,7 +542,7 @@ Runtime contents:
 - data loading utilities
 - basic I/O (tensor serialization, checkpoint save/load)
 - time/date helpers (`Std.Time`)
-- exact-decimal helpers (`Std.Decimal`)
+- `Std.Decimal` types; its callables currently fail with #2778
 
 The neural-network building blocks (such as `School.Nn.Embedding`), optimizers beyond
 SGD (Adam, AdamW, LAMB), learning rate schedulers, metric computation (accuracy, F1,

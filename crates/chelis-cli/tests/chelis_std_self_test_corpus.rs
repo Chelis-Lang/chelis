@@ -1,8 +1,9 @@
 //! chelis-std self-test corpus integration test.
 //!
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
-//! exercise chelis-std's own modules (Std.Tensor, Std.Io, Std.Time,
-//! Std.Decimal, Std.Sort, Std.Scan, Std.Process, Std.Test). School provides
+//! exercise chelis-std's own available modules (Std.Tensor, Std.Io, Std.Time,
+//! Std.Sort, Std.Scan, Std.Process, Std.Test). Std.Decimal is fenced under
+//! #2778; School provides
 //! the neural-network, loss, optimizer, and scheduling libraries. The corpus
 //! runs via `chelis test packages/chelis-std/tests/`; the default
 //! `cargo test --workspace` gate does not exercise it, so regressions here

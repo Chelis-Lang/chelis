@@ -147,12 +147,9 @@ do not yet actualize the helpers' generic cast targets
 
 ### Decimal and time
 
-`Std.Decimal` is fixed-point decimal, a coefficient and a scale. Construction with
-`decimal(text)` or `decimal_from_int(value)`; arithmetic with `decimal_add`, `decimal_sub`,
-`decimal_mul`, and `decimal_div(lhs, rhs, result_scale, mode)`; comparison with
-`decimal_eq`, `decimal_lt`, and the rest; conversion with `decimal_to_float` and
-`decimal_to_string`. Rounding modes are `round_half_up`, `round_half_even`, `round_down`,
-and `round_up`.
+`Std.Decimal` exposes `Decimal` and `RoundingMode`, but its callables currently fail
+with an explicit `#2778` error. Its exact-rational arithmetic and conversion contract
+remains specified in [05-OP-35](../../../spec/05-risc-primitives.md).
 
 `Std.Time` is calendar dates on the proleptic Gregorian calendar. Construction with
 `date(year, month, day)`; arithmetic with `add_days`, `sub_days`, `days_between`; comparison
