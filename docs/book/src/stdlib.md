@@ -185,10 +185,11 @@ public surface.
 `decimal_to_string`. Rounding modes are `round_half_up`, `round_half_even`, `round_down`,
 and `round_up`.
 
-`Std.Time` is calendar dates on the proleptic Gregorian calendar. Construction with
-`date(year, month, day)`; arithmetic with `add_days`, `sub_days`, `days_between`; comparison
-with `date_lt` and friends; `day_of_week`, `day_of_year`, `is_leap_year`; and
-`date_to_string` and `parse_date` for ISO `YYYY-MM-DD` text.
+`Std.Time` callables currently raise an error citing #2779. Their intended
+proleptic Gregorian API includes `date(year, month, day)`, `add_days`,
+`sub_days`, `days_between`, date comparisons, `day_of_week`, `day_of_year`,
+`is_leap_year`, `date_to_string`, and `parse_date`. Use of these operations
+requires an exact implementation of [05-OP-35].
 
 ### Input and output
 
