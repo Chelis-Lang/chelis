@@ -789,11 +789,11 @@ typed lowering failure, not a successful Eval/C artifact.
 Implement this as a bounded #2751 exit, keeping #2627's List entry
 obligations and #1771/#1945's host declaration/inherited literal obligations
 as independent controls. Add paired Check, Eval and compiled-C fixtures to
-`crates/chelis-cli/tests/issue_2751_retained_formal_result.rs` and execute
+`crates/chelis-cli/tests/issue_2751_retained_callable_named_result.rs` and execute
 them with:
 
 ```sh
-cargo nextest run -p chelis-cli --test issue_2751_retained_formal_result
+cargo nextest run -p chelis-cli --test issue_2751_retained_callable_named_result
 ```
 
 Use runtime-supplied tensors for the dynamic mismatch rows, so Check cannot
