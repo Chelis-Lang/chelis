@@ -1020,11 +1020,11 @@ REVIEWED: tuple[Row, ...] = (
         "nix/checks.nix",
         "archive-name",
         lines=(
-            "${packages.chelis-runtime}/lib/libchelis_runtime.a \\",
+            '"$package/lib/libchelis_runtime.a" \\',
         ),
         disposition="not-lookup",
         reason=(
-            "links the archive in the Nix runtime package, which that package's `chelis runtime export` wrote"
+            "links the exact installed archive in each of the `chelis-runtime` and `chelis` Nix packages, both verified against their compiler's export; the selected package path is not a runtime archive search"
         ),
     ),
     Row(
