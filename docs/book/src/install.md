@@ -38,17 +38,17 @@ with `chelisup show`, or set another installed default with
 ## Use a project
 
 A Reef project's `reef.toml` declares its toolchain under `[package]`, for
-example `compiler = "=0.18.11"`. Install that version **before** invoking
+example `compiler = "=0.18.12"`. Install that version **before** invoking
 `chelis` inside the project:
 
 ```sh
 cd path/to/project
-chelisup install 0.18.11
+chelisup install 0.18.12
 chelis reef setup
 chelis reef build
 ```
 
-Replace `0.18.11` with the `X.Y.Z` in your project's compiler pin. The shim
+Replace `0.18.12` with the `X.Y.Z` in your project's compiler pin. The shim
 checks the pin before starting `chelis reef setup`, so setup cannot install a
 missing pinned toolchain when invoked this way. Setup installs dependencies
 recorded in `reef.lock`, if the file exists; it also syncs declared Chelis
@@ -59,7 +59,7 @@ its outputs and dependency workflow.
 The shim chooses an installed toolchain in this order: a leading `+X.Y.Z`
 argument, `CHELIS_TOOLCHAIN`, the nearest `chelis-toolchain` file, the nearest
 `reef.toml` compiler pin, then the recorded default. For example,
-`chelis +0.18.11 --version` selects that installed version for one command.
+`chelis +0.18.12 --version` selects that installed version for one command.
 A missing selected version produces an error naming `chelisup install X.Y.Z`;
 there is no automatic fallback. `+latest` is unsupported.
 

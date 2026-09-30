@@ -2,6 +2,6 @@ schema = "3"
 [package]
 name = "nautilus"
 version = "0.7.36"
-compiler = "=0.18.11"
+compiler = "=0.18.12"
 module_prefix = "Nautilus"
 resolver = "2"

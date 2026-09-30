@@ -1,1 +1,0 @@
-Retired the historical Phase 1e fixed-workload benchmark runner and PyTorch scripts. Its dated results remain in the docs archive; executable model examples and backend correctness gates remain available.
