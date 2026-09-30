@@ -370,8 +370,26 @@ module.exports = grammar({
         PREC.pipe,
         seq(
           "|>",
-          field("value", choice($.canonical_pipe_lambda_expression, $._pipe_operand)),
+          field(
+            "value",
+            choice(
+              $.canonical_pipe_lambda_expression,
+              $.cast_pipe_stage,
+              $._pipe_operand,
+            ),
+          ),
         ),
+      ),
+    // The Rust parser admits `x |> cast(f32)` and `x |> cast_trunc(f32)` as
+    // call-stage sugar for `cast(x, f32)` / `cast_trunc(x, f32)`. Keep this
+    // syntax scoped to pipe stages; ordinary cast expressions still require
+    // both the value and precision arguments below.
+    cast_pipe_stage: ($) =>
+      seq(
+        field("mode", choice("cast", "cast_trunc")),
+        "(",
+        field("precision", $.identifier),
+        ")",
       ),
     canonical_pipe_lambda_expression: ($) =>
       seq(

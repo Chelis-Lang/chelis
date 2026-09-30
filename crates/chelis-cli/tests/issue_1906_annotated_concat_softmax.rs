@@ -42,7 +42,12 @@ fn annotated_example_checks_and_evaluates_all_values() {
 fn invalid_axis_rejects_before_evaluation() {
     let temp = tempfile::tempdir().unwrap();
     let file = temp.path().join("bad_axis.ch");
-    fs::write(&file, SOURCE.replace(", -1)", ", 2)")).unwrap();
+    let bad_source = SOURCE.replace("softmax(-1)", "softmax(2)");
+    assert_ne!(
+        bad_source, SOURCE,
+        "negative fixture must mutate its source"
+    );
+    fs::write(&file, bad_source).unwrap();
     let output = Command::cargo_bin("chelis")
         .unwrap()
         .current_dir(temp.path())
