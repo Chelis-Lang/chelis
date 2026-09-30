@@ -88,6 +88,33 @@ reason = "script-unit exercises positive and negative shared-skill link contract
 tracking_issue = "chelis#845"
 
 [[path_rule]]
+prefix = "scripts/core_fragment_parity_receipt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the receipt's decision-logic tests; the receipt itself is a manual gate"
+tracking_issue = "chelis#2102"
+
+[[path_rule]]
+prefix = "scripts/test_core_fragment_parity_receipt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes this module's positive and negative parity-receipt rows"
+tracking_issue = "chelis#2102"
+
+[[path_rule]]
+prefix = "tests/corpus/core_fragment_parity/"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates the shipped parity manifest's schema and declared case counts"
+tracking_issue = "chelis#2102"
+
+[[path_rule]]
 prefix = "scripts/regenerate_conformance_assets.py"
 disposition = "owner"
 workflow = "ci.yml"
