@@ -109,11 +109,12 @@ cannot inspect produces an error instead of being silently skipped.
 
 ## Use the type from another module
 
-Place the defining module and this consumer in separate Surf files of a
-[Reef package](reef.md). Import both the public type and the functions:
+In a [Reef package](reef.md) with `module_prefix = "Stats"`, put the defining
+module in `src/opaque.ch` and this consumer in `src/pricing.ch`. Import both
+the public type and the functions:
 
 ```chelis-surf-fragment
-module App.Pricing
+module Stats.Pricing
 import Stats.Opaque (Probability, probability, scale, prob_value)
 
 def adjusted(x: f32, factor: Probability) -> f32 =
@@ -127,11 +128,11 @@ Exporting `Probability` allows the annotation. It does not allow a caller to
 construct `Probability { value: x }`, read `p.value`, update the record, or
 match its constructor. `chelis check` reports `OpaqueTypeViolation` for those
 operations outside `Stats.Opaque`; the diagnostic names the type, its defining
-module, and exported producer signatures. For example, the following
+module, and exported producer signatures. The following `src/forge.ch`
 consumer is rejected:
 
 ```chelis-surf-fragment
-module App.Forge
+module Stats.Forge
 import Stats.Opaque (Probability)
 
 def forge(x: f32) -> Probability = Probability { value: x }
