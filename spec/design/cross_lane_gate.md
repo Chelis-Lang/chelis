@@ -62,30 +62,36 @@ ambient environment variables.
 
 **Decision:** the Nix derivation supplies a version-1 JSON document through
 `--proof-scope-input <FILE>`. Parsing rejects missing, malformed, or contradictory
-required fields before a verdict. Its required categories are the source and
-corpus hashes; lock hash and nixpkgs revision; relevant input derivation and
-store paths (including Chelis and the compiler); executable/compiler digests,
-versions, and host/target triples; libc/libm and any linked math-provider
-identities; complete compile/link argv; Nix and execution platform/CPU identity;
-and floating-point/thread-affecting environment. The implementation owns
-concrete field names, but it may not omit an issue-required category.
+pre-run fields. Its required categories are the source and corpus hashes; lock
+hash and nixpkgs revision; relevant input derivation and store paths (including
+Chelis and the compiler); executable/compiler digests, versions, and host/target
+triples; libc/libm and any linked math-provider identities; the required
+compile/link profile; Nix and execution platform/CPU identity; and
+floating-point/thread-affecting environment. The implementation owns concrete
+field names, but it may not omit an issue-required category from the final report.
 
-The derivation constructs this input from its locked closure and checks that
-the recorded compiler and libraries are those actually selected. The runner
-records the executed argv, queries the compiler target, and rejects an absent
-or contradictory target. A different toolchain, flags, library closure, or
-corpus changes the recorded scope; comparing reports from distinct scopes is
-not an agreement claim.
+The derivation constructs this input from its locked closure. The runner queries
+the compiler target and, when an input is supplied, verifies the selected
+compiler, libraries, and profile against it before claiming pinned provenance.
+An absent or contradictory target is an error. The runner then records
+the **executed** compile/link argv arrays in `proof_scope`. Those arrays depend on
+staged filenames and cannot be known to the derivation before the runner stages
+each program; they are report fields, not claims supplied in the input. A
+different toolchain, flags, library closure, or corpus changes the recorded scope;
+comparing reports from distinct scopes is not an agreement claim.
 
 An input file is data, **not an attestation**. Anyone can pass a forged file to
 the CLI outside Nix; even a complete typed document cannot establish that the
-caller was sandboxed. Without the flag, reports say
-`proof_scope.kind = "unpinned-host"`. With it, the CLI reports supplied and
-queried identities but never claims acceptance by itself. Only the report
-produced and checked by `nix build .#checks.x86_64-linux.lane-check` is the
-authoritative pinned verdict. The derivation, not a user-controlled report
-field, binds the input document to its closure. This also avoids baking
-closure-specific constants into a reusable CLI.
+caller was sandboxed. Without the flag, the CLI may reuse `runtime_toolchain`
+for **host compiler and dependency discovery only**, passing those identities
+to the strict-profile constructor rather than copying its ambient flags or
+printed recipe; reports say `proof_scope.kind = "unpinned-host"`. With the flag,
+the CLI reports supplied and queried identities but never claims acceptance by
+itself. Only the report produced and checked by
+`nix build .#checks.x86_64-linux.lane-check` is the authoritative pinned verdict.
+The derivation, not a user-controlled report field, binds the input document
+to its closure. This also avoids baking closure-specific constants into a
+reusable CLI.
 
 ### PD2. The gate needs a separate strict compile/link profile
 
@@ -133,10 +139,13 @@ fresh lock as proof that any program agreed.
 ### PD4. Stable reports exclude run-local fields
 
 **Decision:** versioned NDJSON contains no wall-clock time, duration, or temp
-directory path. Program records use deterministic relative-path order, and
-fields have fixed key order. Timing, if useful, belongs only in human output.
-Two uncached runs of the same locked source and declared hardware tuple must
-produce byte-identical report files; a cached Nix result does not test N2.
+directory path. Run each case from its own scratch working directory with stable
+relative staged filenames in the compile/link argv. The report records the
+complete executed argv without leaking the random working directory. Program
+records use deterministic relative-path order, and fields have fixed key order.
+Timing, if useful, belongs only in human output. Two uncached runs of the same
+locked source and declared hardware tuple must produce byte-identical report
+files; a cached Nix result does not test N2.
 
 ## Already decided — do not reopen
 
@@ -155,12 +164,13 @@ payloads are never compared through `f64`.
   the compiler that the runner executes.
 - **S2 — the runner.** Own discovery, eval, C emission, native link, execution,
   complete-output comparison, and typed verdicts. Call eval with `--target c`;
-  ignore `build`'s printed compile recipe. Pass argv as arrays and kill/reap
-  timed-out children. Validate complete stdout as UTF-8 without replacement,
-  then use the single production comparator on the **whole** strings, including
-  trailing newlines. Invalid rendering is an output-contract error, never a
-  lossy-equal pass. Test differing final newlines and distinct invalid bytes
-  as well as E1–E5 and D1–D3.
+  ignore `build`'s printed compile recipe. Pass argv as arrays, stage relative
+  filenames under each scratch cwd, and kill/reap timed-out children. Record the
+  complete executed argv, not the random scratch path. Validate complete stdout
+  as UTF-8 without replacement, then use the single production comparator on
+  the **whole** strings, including trailing newlines. Invalid rendering is an
+  output-contract error, never a lossy-equal pass. Test differing final newlines
+  and distinct invalid bytes as well as E1–E5 and D1–D3.
 - **S3 — CLI and report.** Wire `lane-check` into
   `crates/chelis-cli/src/main.rs`; parse PD1's typed input, and enforce PD4 by
   rendering the same verdict twice. Own P1–P4, E6, and N3.
