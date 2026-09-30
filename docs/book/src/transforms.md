@@ -1,117 +1,49 @@
 # Transforms: grad and vmap
 
-Transforms are compiler features, not library functions or macros. They are DAG-to-DAG
-rewrites: the compiler takes a function, rewrites its RISC DAG, and produces a new function.
-After expansion the program contains only RISC primitives. A transform must always be
-applied; a bare `grad` with no function is a parse error. Transforms compose. The
-authoritative source is `spec/06-transformations.md`.
+`grad` differentiates a function, and `vmap` applies a function across a batch.
+Both are compiler transforms written as calls: supply a function to `grad` or
+`vmap`, then call the resulting function with its inputs. A bare `grad` or
+`vmap` is not a function value. The
+[transformation specification](../../../spec/06-transformations.md) defines
+their language semantics.
 
-## Chelis 0.19 core-transform fence
+## Differentiate with `grad`
 
-For the remaining 0.19 core-transform fence, write `vmap` targets and
-`grad` targets without an explicit `wrt` selector against a direct,
-unshadowed top-level function declaration, such as `grad(loss)` or
-`vmap(process)`. Those forms reject aliases of a top-level function at either
-module or local scope, and a local binding that shadows a top-level target,
-rather than silently selecting a different callable. The normative named
-`grad(..., wrt=...)` selector follows the callable-origin contract described
-below, but the current core fence still rejects an alias target before selector
-processing; named selectors are currently admitted on direct, unshadowed
-declarations and the other supported target forms. An inline or locally bound
-`vmap` lambda can infer its row parameter from a call on a mapped tensor:
-`vmap(fn (row) -> sum(row, 0i32))(batch)` checks the body using one slice of
-`batch`. A mapped result claim cannot supply a missing row result type. If the
-row type remains unknown by the declaration boundary, checking reports a type
-error. This also applies when the mapped callable passes through a local
-alias, tuple projection, or match result. Fixed-rank tensor dimension and
-precision variables remain supported; named type and rank variables follow
-their ordinary binder rules. Surf uses `*` for a dynamic tensor extent and
-rejects `_` in tensor dimension, precision, or rank-spread slots.
+`grad(f)` computes derivatives of a scalar floating result. A floating scalar
+such as `f32`, or a tensor with no dimensions such as `tensor[f32]`, can be
+that result. Reduce a larger tensor to a scalar before differentiating.
+`grad` returns the gradients, without the forward value.
 
-These are current supported-fragment fences, not changes to the language
-semantics in the numbered specification. The remaining alias and shadowing
-rows are [#1952](https://github.com/Chelis-Lang/chelis/issues/1952) and
-[#1954](https://github.com/Chelis-Lang/chelis/issues/1954).
+By default, `grad(f)` selects every differentiable parameter. A single selected
+parameter produces one gradient directly; multiple parameters produce a flat
+tuple in parameter order. Use `wrt` to select named parameters in the order
+you write them: `grad(loss, wrt=(weight, bias))` returns the gradient for
+`weight` followed by the gradient for `bias`. Parameters left out of `wrt`
+still supply values when you call the gradient function, but receive no
+gradient in its result.
 
-For a direct named `grad` with a List argument selected as a gradient target,
-the C build currently requires a recursive List shape it can reconstruct from
-a literal or a resolved top-level value. A selected local List actual is
-rejected during lowering, including when it shadows a top-level value; Eval
-can differentiate it. See [#2740](https://github.com/Chelis-Lang/chelis/issues/2740).
+```chelis-surf
+def squared(x: tensor[features, f32]) -> tensor[f32] =
+  sum(mul(copy(x), x), 0i32)
 
-## grad
-
-`grad(f)` is reverse-mode differentiation. It produces a new function from `f`'s arguments to
-their gradients. The output of `f` must be a scalar floating result; reduce to a scalar
-first if it is not. The gradient of a single tensor parameter has the same type as that
-parameter, and a multi-parameter function yields a flat tuple of gradients.
-
-```chelis-surf-fragment
-grad(loss_fn)
+def squared_grad(x: tensor[features, f32]) -> tensor[features, f32] =
+  grad(squared)(x)
 ```
 
-```chelis-deep-fragment
-(grad {} (var {} loss_fn))
-```
+The gradient of a tensor parameter has the parameter's shape and precision.
+A differentiable input that does not affect the result receives a zero
+gradient of the same shape. `grad` can also be applied again to a suitable
+scalar gradient function for a second derivative. For an ordered `wrt` example,
+see [`examples/grad_wrt_order.ch`](../../../examples/grad_wrt_order.ch).
 
-By default `grad(f)` differentiates with respect to every differentiable parameter. The
-`wrt` argument restricts it to named parameters, and the result holds one entry per listed
-parameter in the order listed. Apply the gradient function to get the values:
+## Map across a batch with `vmap`
 
-```chelis-surf-fragment
-(dw, db) = grad(loss_fn, wrt=(w, b))(w, b)
-```
-
-Named selectors follow the callable's immutable origin through aliases and
-through tuple, ADT constructor, and record patterns. The executable
-`examples/illustrative/grad_selector_provenance.ch` demonstrates nested constructor and
-record payloads while checking both direct calls and `grad(..., wrt=w)`.
-
-`grad` returns gradients only, not the forward value alongside them. It composes with
-itself for higher derivatives: `grad(grad(f))` is the second derivative.
-
-Three control-flow/ADT slices extend the differentiated surface beyond flat
-tensors (`spec/06-transformations.md` §2.10.1 has the full contract and
-limits):
-
-- A `match` whose scrutinee is a compile-time-known constructor value (a
-  constructor literal, a record construction, or an ADT-typed parameter of the
-  differentiated function) resolves to its taken arm at lowering time, so such
-  bodies differentiate in both the eval and compiled lanes. A runtime scrutinee
-  or a guarded arm is still rejected with a diagnostic naming the construct.
-- `grad(f)` over an ADT argument whose fields are all float tensors returns a
-  gradient with the same constructor shape, one gradient per field (eval lane).
-  The ADT argument may sit alongside plain tensor arguments —
-  `grad(model_forward, wrt=params)(x, params)` returns the field-wise gradient
-  struct for `params`, and the default (all-argument) form returns the
-  per-target tuple whose ADT slot is that struct and whose tensor slots are
-  bare gradients. An argument that does not influence the output gets a shaped
-  zero in its slot (a zero tensor, or a zero-filled gradient struct), so the
-  tuple keeps full arity and every gradient stays in its own `out.0..out.N`
-  position. Mixed types (a non-float field in any variant, even a variant
-  other than the constructed one), pure enums with no fields, and compiled-lane
-  ADT-param gradient exports are rejected with named diagnostics.
-- An `if` whose condition const-folds at lowering time prunes to the taken
-  branch, whatever its type (chelis#620) — so the eps fail-guard idiom
-  (`if eps <= 0.0 then fail(...) else body`) and constructor- or list-valued
-  branches differentiate when the guard's inputs are literal-rooted. A
-  recursive builder whose base case prunes statically
-  (`if k >= n then [] else concat([row], recurse)`) unrolls under grad, with
-  a loud diagnostic at the depth cap (512 per callee, 1024 total) for chains
-  static pruning cannot bound; the unrolled list value flows through list
-  append and tensor `concat`. Linearity copies over params ADTs lower
-  field-wise, which is what makes the curried single-argument closure
-  `grad(fn (p) -> loss(p, x, y))(params)` work.
-
-A runtime-scrutinee `match` in a differentiated body stays rejected, and so
-does an ADT- or tuple-valued `if` branch under a genuinely runtime condition
-— both pend the `RiscOp::Select` blend primitive (tracked in chelis#618).
-
-## vmap
-
-`vmap` vectorizes a per-example function over a batch dimension. It is a DAG rewrite, not a
-loop: every operation is lifted to run over the added axis. The `axis` argument names the
-integer position where the batch dimension is inserted, defaulting to `0`.
+`vmap(f)` adds a batch axis at position zero. To insert it elsewhere, write a
+named axis such as `vmap(f, axis=1)`. Each tensor parameter of `f` gains that
+axis. Ordinary non-tensor parameters are shared across the batch, as are
+values captured by `f`. A scalar `key` parameter is different: it takes a
+`tensor[batch, key]` with one key per row. A scalar key shared across rows is
+rejected.
 
 ```chelis-surf
 def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)
@@ -120,24 +52,48 @@ def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f
   xs |> vmap(process)
 ```
 
-```chelis-deep-fragment
-(vmap {} (var {} process) (lit {type: (t-prim {} i32)} 0))
+A reduction inside `process` would reduce its row's data axis, leaving the
+new batch axis intact. The runnable source is
+[`examples/vmap_relu.ch`](../../../examples/vmap_relu.ch).
+
+## Per-example gradients
+
+Apply `vmap` to a gradient function to get one gradient per batch row:
+
+```chelis-surf
+def loss(x: tensor[features, f32]) -> tensor[f32] =
+  sum(mul(copy(x), x), 0i32)
+
+def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] =
+  vmap(grad(loss))(xs)
 ```
 
-Each tensor argument of the wrapped function gains the batch dimension; non-tensor arguments
-are shared across the batch. Reductions inside the wrapped function still reduce over their
-original named axis, so the batch dimension passes through untouched.
+This form has an evaluator test against separate row-by-row gradients. A bare
+`grad(vmap(f))` does not sum the batch: if the mapped function returns a
+tensor, its output must be reduced all the way to a scalar before `grad` can
+differentiate it.
 
-## Composing transforms
+## Current execution limits
 
-`vmap(grad(f))` computes per-example gradients: each example in the batch gets its own
-gradient vector, which is what per-example gradient clipping needs. This is not the same as
-`grad(vmap(f))`, which would be the gradient of the sum over the batch. To differentiate a
-vmapped function, reduce its result to a scalar first:
+- A direct, unshadowed top-level function is a reliable named target for
+  `grad` and `vmap`. A direct alias of a top-level function, or a local
+  binding that shadows one, is rejected as a transform target even when
+  `grad` has a `wrt` selector. Inline and locally bound functions have
+  supported paths; this restriction does not make every local function an
+  error.
+- In the evaluator, gradients of ADT arguments keep the executed constructor
+  and its fields. A discrete field remains in place as `unit`; a float field
+  receives its gradient. A selected parameter with no differentiable float
+  field is rejected. C builds currently reject an exported gradient function
+  whose parameter is an ADT.
+- Differentiation through a `match` works when its selected constructor is
+  known during lowering. A runtime-dependent scrutinee or a guarded arm is
+  rejected. Scalar `if` conditions can select a branch at runtime; a
+  runtime-dependent `if` returning an ADT or tuple is still rejected.
+- The evaluator can differentiate a selected local `List` argument. A C build
+  currently rejects that form when it cannot reconstruct the List shape; a
+  literal or resolved top-level List has a supported path.
 
-```chelis-surf-fragment
-grad(fn (xs) -> sum(vmap(process)(xs), 0))
-```
-
-When you are unsure whether a particular composition is supported, write a small program and
-let the compiler tell you. The supported surface is defined by the compiler and its tests.
+These limits describe the current evaluator and C build. The numbered
+[transformation specification](../../../spec/06-transformations.md) defines
+the broader language rule.
