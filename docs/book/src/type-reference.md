@@ -1,14 +1,14 @@
 # Type System Reference
 
-Chelis keeps tensor shape and numeric precision explicit in types. There is no implicit
-broadcasting and no implicit precision promotion. Named dimensions are nominal: two
-dimensions match only when their names match, so the type checker catches transposition
-and shape bugs before any code runs. This page is the reference for the type surface. The
-authoritative source is `spec/04-type-system.md`.
+Chelis records tensor shape and element dtype in types. It does not implicitly
+broadcast tensors or promote numeric operands. Dimension names preserve axis
+identity: distinct names do not unify, while a literal extent can satisfy a
+named dimension at a call site. This page covers the type surface and its
+checking rules. `spec/04-type-system.md` defines the full semantics.
 
 ## Primitive types
 
-The numeric primitives are:
+The numeric primitive types are:
 
 | Type | Meaning |
 |---|---|
@@ -20,10 +20,10 @@ The numeric primitives are:
 | `i16` | 16-bit signed integer |
 | `i32` | 32-bit signed integer |
 | `i64` | 64-bit signed integer |
-| `bool` | boolean |
 
-There are no unsigned integer types. `string` exists as a type for parsing and host work,
-and `()` is the unit type.
+There are no unsigned integer types. The other primitive types are `bool`,
+`string`, and `key`; `unit` is the unit type and `()` its value. Strings support
+host work and cannot be tensor elements.
 
 `key` is the non-numeric type of a random key: `key_from_seed(42i64)` makes one, and
 `tensor[n, key]` holds `n` of them. A key has no arithmetic and no cast, and each key is used
@@ -31,31 +31,33 @@ at most once on every path; see [Effects and Handlers](effects.md#randomness-is-
 
 ## Tensor types
 
-A tensor type is written `tensor[dims..., elemtype]`. The element type is the last entry;
-everything before it is a dimension. A tensor with no dimensions is a scalar on the device,
-written `tensor[f32]`.
+A tensor type is written `tensor[dimensions..., element_type]`: the last entry
+is the element type and each earlier entry is a dimension. Supported elements
+include numeric types, `bool`, and `key`, but each operation has its own element
+type rules. A tensor with no dimensions is a rank-zero tensor, such as
+`tensor[f32]`.
 
 ```chelis-surf-fragment
 tensor[f32]                 -- scalar
 tensor[n, f32]              -- one named dimension
 tensor[batch, seq, f32]     -- two named dimensions
 tensor[64, 64, f32]         -- two literal dimensions
+tensor[batch, bool]         -- boolean elements
+tensor[batch, key]          -- random keys
 ```
 
-The canonical Deep form spells out each dimension and the precision:
-
-```chelis-deep-fragment
-(t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))
-```
-
-Dimensions come in three forms: a named dimension `(d-name {} batch)`, a variable
-`(d-var {} a)` introduced by a function's `[...]` clause, and a literal `(d-lit {} 512)`.
+Dimension positions can hold a declared name such as `batch`, a variable
+introduced in `[...]`, a nonnegative literal such as `512`, or the wildcard
+`*` for an unknown extent. A `..r` spread stands for a run of dimensions
+in a rank-polymorphic signature. See `spec/03-deep-syntax.md` for their Deep forms.
 
 ## Named dimensions and polymorphism
 
-Dimension matching is strict and element-wise. A named dimension unifies only with the same
-name; `batch` does not unify with `seq`. A literal unifies only with the same literal. A
-dimension variable unifies with anything and binds.
+Dimension lists match in order. `batch` does not unify with `seq`, and two
+different literal extents do not unify. A named dimension can unify with a
+literal extent at a call site; the literal supplies a concrete size, while the
+name remains available in the function's type. A dimension variable unifies
+with a compatible dimension and binds.
 
 A function generic over shape uses dimension variables. There are no explicit dimension
 arguments; call sites instantiate the variables by unification.
@@ -64,24 +66,15 @@ arguments; call sites instantiate the variables by unification.
 def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)
 ```
 
-In a Deep signature this reads:
-
-```chelis-deep-fragment
-(defsig {}
-  transpose
-  (a b)
-  (t-fn {}
-    (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
-    (t-tensor {} (d-var {} b) (d-var {} a) (t-prim {} f32))))
-```
-
 Declared dimension parameters are rigid inside the function body: the body must type-check
 for every instantiation, so it cannot couple a result dimension to an unrelated input
 dimension.
 
-A wildcard dimension `*` marks a size that is not statically known, for example the axis
-produced by a `concat` whose length depends on runtime data. It unifies with anything but
-is never generalized. Add an explicit annotation to restore named checking.
+A wildcard dimension `*` marks a size that is not statically known, for example
+an axis produced by a `concat` whose length depends on runtime data. It can
+unify with another dimension but is never generalized. A declared result
+dimension can restore a named shape claim, with a runtime equality check when
+the size cannot be proved statically.
 
 ### Dtype-family bounds
 
@@ -90,20 +83,23 @@ can be instantiated at. The families are `Float` (the four active floats), `Int`
 active signed integers), and `Numeric` (their union). `bool` and `string` belong to no
 family.
 
-```chelis-surf-fragment
-sig arange[n, p: Int]: p -> p -> tensor[n, p]
-sig linspace[n, p: Float]: p -> p -> i64 -> tensor[n, p]
+```chelis-surf
+def add_ints[p: Int](x: p, y: p) -> p = add(x, y)
+def add_floats[p: Float](x: p, y: p) -> p = add(x, y)
 ```
 
-Calling `arange` at `f32`, or `linspace` at `i32`, is a `PrecisionMismatch` naming the
+Calling `add_ints` at `f32`, or `add_floats` at `i32`, is a `PrecisionMismatch` naming the
 required family. The bound is part of the function's type, not a check on the callee name,
 so it survives aliases, wrappers, higher-order values, and imports. Two bounded variables
 that unify keep the intersection of their families; `Float` and `Int` share nothing, so
 identifying one with the other is an error.
 
-A binder with no bound is still an ordinary type variable that admits any type, not only a
-dtype. A bound goes on the declaration's `sig` when it has one, and on its `def` otherwise
-- never on both.
+A binder with no dtype-family bound can stand for a general type, subject to
+the other type rules. In particular, a function's generic type parameter
+cannot be instantiated with a key-carrying type: pass `key` or
+`tensor[n, key]` through an explicitly typed parameter instead. Put a
+dtype-family bound on a declaration's `sig` when it has one, or on its `def`
+otherwise, never both.
 
 ### Rank polymorphism
 
@@ -115,19 +111,19 @@ binder list; a spread name may not repeat in a single shape.
 def relu_any_rank[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
 ```
 
-Spreads can interleave with named anchors, which lets a definition reduce or insert one
-named axis while preserving the rest. Reducing over a named axis:
+Spreads can surround named axes, letting a definition reduce or insert an axis
+while preserving the others. To reduce a named `seq` axis:
 
-```chelis-surf-fragment
-def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] =
-  sum(x, seq)
+```chelis-surf
+dim seq
+def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 ```
 
-The body of a rank-polymorphic definition is restricted to operations whose effect on the
-shape can be tracked by name: elementwise and shape-identity operations, named-axis
-reductions (`sum`, `mean`, `max_reduce`, `min_reduce`, `prod_reduce`), and named-axis
-`insert`. Positional rewriters such as `permute`, `reshape`, and `matmul` are rejected
-inside a `..r` body, which is what preserves the named-dimension safety guarantee.
+Rank-polymorphic bodies admit operations whose shape effect can be tracked by
+name, including elementwise operations, named-axis reductions such as `sum`
+and `count`, and named-axis `insert`. The current named-axis `insert` form
+requires a compile-time constant `i64` size. Positional rewriters such as
+`permute`, `reshape`, and `matmul` are rejected inside a `..r` body.
 
 ## No broadcasting
 
@@ -135,13 +131,13 @@ Chelis does not broadcast. Operands of an elementwise operation must have identi
 dimension lists. Use `insert` to add a dimension explicitly before combining tensors of
 different rank, and `expand` to broadcast an existing size-1 axis.
 
-```chelis-surf-fragment
--- tensor[batch, hidden, f32] + tensor[hidden, f32] is a type error.
-biased = add(linear, insert(b, 0, batch))
+```chelis-surf
+def add_bias(x: tensor[2, 3, f32], bias: tensor[3, f32]) -> tensor[2, 3, f32] = add(x, insert(bias, 0i32, 2i64))
 ```
 
-`insert`, `expand`, `reshape`, and `permute` are the explicit tools for changing rank and
-shape.
+Calling `add(x, bias)` directly is a dimension mismatch. `insert` adds the
+leading axis explicitly; `expand`, `reshape`, and `permute` provide other
+explicit shape changes.
 
 ## Precision rules
 
@@ -150,48 +146,59 @@ same precision; the compiler never inserts a cast for you.
 
 ```chelis-surf-fragment
 -- add(tensor[d, f32], tensor[d, bf16]) is a type error.
-sum = add(x, cast(y, f32))
+result = add(x, cast(y, f32))
 ```
 
-`cast(e, p)` is the explicit precision change; it preserves dimensions and changes only the
-element type. Integer literals default to `i32` and float literals default to `f32`.
-Three things override a default: a literal suffix, a surrounding known element type, or an
-explicit `cast`.
+`cast(e, p)` explicitly converts a scalar or tensor to the named dtype; a
+tensor keeps its dimensions. Casts can cross numeric kinds and can target
+`bool`. An integer-to-float cast may round, and a float-to-integer cast
+requires a finite, integral value in range. Integer literals default to
+`i32` and float literals to `f32`, subject to these exact adoption rules:
+
+1. A suffix binds a literal to its stated dtype.
+2. Unsuffixed elements of a tensor literal adopt the element type of a
+   tensor-typed binding, a declared tensor parameter, or a declared tensor
+   return body.
+3. An unsuffixed literal passed directly to `cast` adopts its numeric target
+   dtype, including a bare scalar literal.
+
+A list literal and a bare scalar passed to an ordinary function do not adopt
+a callee's dtype. Structural lists such as reshape sizes therefore spell
+their `i64` elements explicitly.
 
 ```chelis-surf-fragment
-a = cast(x, bf16)        -- precision change
-b = 1.0f64               -- suffix binds f64
-c = cast(3000000000, i64)  -- escape hatch for out-of-i32-range literals
+a = cast(x, bf16)           -- explicit tensor conversion
+b = 1.0f64                  -- suffix binds f64
+c = cast(3000000000, i64)   -- literal binds directly at i64
+d = cast(1.1, f64)          -- literal binds directly at f64
 ```
 
-The compatibility rules: arithmetic (`add`, `mul`, `sub`, `div`) needs equal numeric
-precision; comparison (`cmplt`, `eq`) takes equal numeric precision and yields `bool`;
-logical operations (`and`, `or`, `not`) take `bool`; transcendental operations (`exp`,
-`log`, `sin`, `cos`, `tan`, `atan`, `sqrt`) take float types only.
+Arithmetic operands must have the same numeric dtype and dimensions, with
+each operation's own dtype domain. Ordered comparisons such as `cmplt` take
+equal numeric types; `eq` and `neq` also compare booleans, strings, unit, and
+supported structured values. Tensor comparisons produce a boolean tensor.
+Logical operations (`and`, `or`, `not`) take `bool`; transcendental operations
+such as `exp`, `log`, and `sqrt` take float types.
 
-`matmul` and `sum` accept an optional accumulator precision, the one place mixed precision
-appears. The default accumulator widens `bf16` and `f16` inputs to `f32` for numerical
-stability and widens `i8` and `i16` to `i32` for overflow safety; a requested
-accumulator must be at least as wide as the operands and the default.
+`matmul`, `sum`, and `einsum` accept an optional `accumulator=p` argument.
+The compiler resolves the default from the operand dtype. For `bf16` and
+`f16`, the default accumulator is `f32`; their result returns to the
+operand dtype. `sum` and `einsum` default to `i32` accumulation and an `i32`
+result for `i8` and `i16` inputs; integer `matmul` is rejected. For `f32`
+and signed integer reductions, an explicitly wider permitted accumulator
+also widens the result. The requested accumulator must have the same numeric
+kind and be no narrower than either the operands or their default.
 
 ## Function types
 
-A function type is the arrow chain `A -> B -> C`, where the last entry is the return and
-the rest are arguments. The arrow is right associative; parenthesize a function-typed
-argument.
+A function type can be written `A -> B -> C`: `A` and `B` are the two
+argument types, and `C` is the return type. Calls still supply both arguments
+together as `f(a, b)`; the arrow chain does not make a function implicitly
+curried. Parenthesize an argument that is itself a function type.
 
 ```chelis-surf-fragment
 tensor[n, f32] -> tensor[n, f32] -> tensor[f32]   -- two args, scalar result
 (tensor[n, f32] -> tensor[f32]) -> tensor[f32]    -- a function-typed argument
-```
-
-In Deep this is a flat `t-fn` whose last child is the return:
-
-```chelis-deep-fragment
-(t-fn {}
-  (t-tensor {} (d-name {} n) (t-prim {} f32))
-  (t-tensor {} (d-name {} n) (t-prim {} f32))
-  (t-tensor {} (t-prim {} f32)))
 ```
 
 ## Aggregate types
@@ -207,32 +214,27 @@ In Deep this is a flat `t-fn` whose last child is the return:
 
 ## Effects in types
 
-A function type can carry an effect set in `eff` metadata. In Surf the effect set is the
-`! { ... }` suffix on a signature or `def`.
+A function type can declare an effect set. In Surf, write it as `! { ... }`
+on a `sig` or `def`; an omitted clause leaves effects inferred, while
+`! {}` declares a pure upper bound.
 
 ```chelis-surf-fragment
 sig report[n]: tensor[n, f32] -> unit ! { IO }
 ```
 
-```chelis-deep-fragment
-(t-fn {eff: (effects {} io)}
-  (t-tensor {} (d-var {} n) (t-prim {} f32))
-  (t-unit {}))
-```
-
-Effect inference runs after type inference. A function's effect set is the union of the
-effects of the operations in its body. Randomness is not an effect: `dropout`,
-`uniform_like` and the initializers take a `key` and contribute none. `IO` is inferred
-from host operations such as `print` and file reads. `Resource("device")` marks a region
-validated against the build target through `with device(...)`. See
-[Effects and Handlers](effects.md).
+Effect inference runs after type inference. Host operations such as `print`
+and file reads contribute `IO`. Random draws take a `key` and contribute no
+effect. `with device(...)` introduces a resource region checked against the
+build target. See [Effects and Handlers](effects.md) for the effect vocabulary
+and handler rules.
 
 ## Linearity and borrowing
 
-Tensor values are owned by default, with lightweight uniqueness rather than full ownership
-and lifetimes. A consuming use makes the binding dead; the compiler inserts copies where a
-value fans out and drops where an owned value goes out of scope, so you usually do not write
-either by hand.
+Tensor values are owned by default. A consuming use ends access through that
+binding; read-only uses can borrow it. The compiler inserts needed copies and
+drops an unused owner after its last use when it can establish that point.
+Keys are different: a key-carrying value can be used at most once on a path
+and cannot be copied or borrowed.
 
 A read-only borrow is a reference type, written `&T` in a signature and `&x` at a use site.
 A borrow leaves the owned binding live and is the idiomatic way to pass a tensor to a
@@ -242,25 +244,19 @@ read-only operation.
 def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
 ```
 
-```chelis-deep-fragment
-(t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))
-```
-
 Passing an owned value where a borrow is expected auto-borrows. Passing a borrow where an
-owned value is expected is an error unless you write `copy(x)`, which produces a fresh owned
-value from an owned or borrowed input. Borrows cannot be stored in aggregates, returned, or
-captured by closures. The borrow target must be a tensor or a tensor-carrying value, where a
-type is tensor-carrying when one of its fields contains a tensor, transitively through
-tuples, ADTs, and references.
+owned value is expected is an error unless you write `copy(x)` for a
+copyable value. Borrows cannot be stored in aggregates, returned, or captured
+by closures. The borrow target must be a tensor or a tensor-carrying value,
+including tuples or data types with tensor fields.
 
 ## Inference
 
-Type checking is Hindley-Milner inference with tensor and dimension extensions. Annotations
-are optional; the checker infers literal types, dimension variables at call sites, and
-effect sets, and verifies any annotation you do supply. What you must still state: the
-precision argument to `cast`, the dimension and precision parameters in a `[...]` clause, an
-annotation to pin a wildcard dimension back to a name, and a suffix or cast for a literal
-outside the default precision range.
+The checker infers many types and checks annotations you supply. A generic
+declaration must still list its type, dimension, dtype, or rank binders in
+`[...]`. A `cast` names its target dtype; a literal outside its default dtype
+range needs a suffix or direct cast; and a claimed dimension may need an
+annotation and a runtime equality check.
 
 The pipeline order is parse, desugar, type inference and checking, effect inference and
 checking, linearity checking, then lowering.
