@@ -327,9 +327,9 @@
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/dischargeability/probes/p08_pkg_bs_positive.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "prove-only"
     },
     {
       "corpus": "c-note",
@@ -405,15 +405,15 @@
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/exemplars/economoist_markov_mass/corrupt.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "prove-only"
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/exemplars/economoist_markov_mass/source.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "prove-only"
     },
     {
       "corpus": "c-note",
@@ -465,15 +465,15 @@
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/exemplars/shoals_put_call_parity/corrupt.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "prove-only"
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/exemplars/shoals_put_call_parity/source.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "prove-only"
     },
     {
       "corpus": "c-note",
@@ -489,15 +489,15 @@
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/notebook_dependency_graph/src/a.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "prove-only"
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (parameterised `def`s only; no top-level binding and no effect-free nullary `def` with a value result), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/notebook_dependency_graph/src/b.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "library-only"
     },
     {
       "corpus": "c-note",
@@ -579,9 +579,9 @@
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/templates/sources/bond_properties.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "prove-only"
     },
     {
       "corpus": "c-note",
@@ -609,9 +609,9 @@
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/templates/sources/crr_properties.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "prove-only"
     },
     {
       "corpus": "c-note",
@@ -633,9 +633,9 @@
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/templates/sources/historical_risk_properties.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "prove-only"
     },
     {
       "corpus": "c-note",
@@ -657,9 +657,9 @@
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (`@property` declarations only), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "fixtures/templates/sources/parametric_risk_properties.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "prove-only"
     },
     {
       "corpus": "c-note",
@@ -675,9 +675,9 @@
     },
     {
       "corpus": "c-note",
-      "notes": "package member: the receipt materializes one file, so its `import` cannot resolve. Needs package-aware materialization",
+      "notes": "owns no root under [05-OBS-7] (parameterised `def`s only; no top-level binding and no effect-free nullary `def` with a value result), so package-aware materialization would not admit it as a case: resolving its `import` changes nothing about whether it is an eval/C case. It also fails at ingress today with an `UnboundVariable` from single-file materialization, which is true but incidental -- the proximate symptom, not the disqualifying property (\u00a76.3)",
       "path": "tests_neg/nn/input_rank.ch",
-      "reason": "unmeasurable-by-probe"
+      "reason": "library-only"
     },
     {
       "corpus": "sonar",
@@ -950,6 +950,6 @@
       "reason": "retired-syntax"
     }
   ],
-  "manifest_version": 2,
+  "manifest_version": 3,
   "owning_issue": 2102
 }

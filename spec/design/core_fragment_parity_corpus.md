@@ -139,7 +139,7 @@ build: error: Check errors: Type errors:\n  UnboundVariable: ...
 — the same rejection for the same reason, differing by one prefix. Under the
 criterion above that is a `trap-reason-mismatch` on a spec-conforming pair.
 
-Nothing is mis-verdicted today because manifest version 2 declares no trap case
+Nothing is mis-verdicted today because manifest version 3 declares no trap case
 (§10). What the receipt does claim, and what does rest on #1362 guarantee 2
 rather than on a formatting choice, is the asymmetric case: **a case where one
 lane traps and the other returns a value is a divergence**, and it is the most
@@ -378,8 +378,10 @@ Location: `tests/corpus/core_fragment_parity/manifest.json`.
 
 The manifest carries `manifest_version`, an integer incremented by any change to
 **what the receipt is asked to prove**: the required-case set, a pinned corpus
-revision, an expected outcome, a case's declared roots, or the **row set** of
-the exclusion ledger. Editing an exclusion row's `notes` does not bump it —
+revision, an expected outcome, a case's declared roots, the **row set** of
+the exclusion ledger, or an exclusion row's **reason** — a reason is an
+assertion about the corpus, not evidence about a row. Editing an exclusion row's
+`notes` does not bump it —
 notes are recorded evidence about a row, not part of the obligation — and
 neither does a `known_divergence` issue number changing, which tracks a defect
 rather than the case.
@@ -390,7 +392,9 @@ manifest version that justifies them (§7).
 Version 2 added the two Sonar `.dp` exclusion rows that discovery began finding
 when it stopped globbing `.ch` alone (§5.1 rule 3) — a row-set change, hence the
 bump — and corrected four exclusion notes, which on its own would not have
-warranted one. The required-case set is unchanged from version 1.
+warranted one. Version 3 moved twelve rows from `unmeasurable-by-probe` to their
+operative reason (§9), a reason change with the row set unchanged. The
+required-case set is unchanged from version 1 throughout.
 
 ### 6.2 Case rows
 
@@ -469,6 +473,16 @@ exclusion row with `path` and a `reason` from this closed set:
 property of the program, the second of the pin, and conflating them hides
 migration debt behind an apparent corpus defect.
 
+**When a file satisfies more than one reason, record the reason that would still
+exclude it if every other named limitation were removed.** Closing the
+vocabulary does not close the choice within it, and the corpus contains such
+files in numbers: a `@property`-only file behind an unresolvable `import` is both
+`unmeasurable-by-probe` and `prove-only`, and only the second survives the
+counterfactual. Recording the proximate symptom instead is the one classification
+error a mechanical audit cannot find, because the symptom is something the
+compiler really does — twelve rows were recorded that way and passed two
+mechanical audits before a root-ownership predicate caught them (§9).
+
 An unrecognised reason is a receipt failure, not a warning. The set is closed for
 the same reason the C census's non-numeric type list is closed: an open list
 silently absorbs the case nobody classified.
@@ -539,7 +553,7 @@ running it.
 
 ## 9. First receipt, and what it measured
 
-Manifest version 2, run on macOS `arm64` with a sealed-runtime `chelis` built
+Manifest version 3, run on macOS `arm64` with a sealed-runtime `chelis` built
 from this branch, staging receipt `mode: sealed`, runtime archive `de658fb0…`,
 over `Chelis-Lang/c-note` at `960a9beb` and `Chelis-Lang/sonar` at `9b26133f`:
 
@@ -560,21 +574,31 @@ Cases: 11 from C Note, 2 from Sonar. Exclusions by corpus and reason:
 
 | reason | c-note | sonar |
 |---|---:|---:|
-| `prove-only` | 39 | 15 |
-| `unmeasurable-by-probe` | 24 | 0 |
+| `prove-only` | 49 | 15 |
+| `unmeasurable-by-probe` | 12 | 0 |
 | `retired-syntax` | 0 | 23 |
 | `parse-rejected` | 8 | 6 |
-| `library-only` | 3 | 1 |
+| `library-only` | 5 | 1 |
 
 Two rows in that table are the near-term levers on the case count, and they are
 harness debt and migration debt respectively, not language defects:
 
-- **`unmeasurable-by-probe` is 24 of 24 mine.** Every one is a package member
-  carrying an `import` (`import CnoteEval.BlackScholes (bs_call, …)`,
-  `import Economoist.Markov (next_mass)`). The receipt materializes one file, so
-  the import cannot resolve, and the resulting `UnboundVariable` is a property of
-  the harness rather than of the program. Package-aware materialization would
-  admit all 24 as candidate cases. Recorded rather than blamed on the compiler.
+- **`unmeasurable-by-probe` is 12 of 12 mine**, and only those 12 are a lever.
+  Each is a package member carrying an `import`
+  (`import CnoteEval.BlackScholes (bs_call, …)`); the receipt materializes one
+  file, so the import cannot resolve, and the resulting `UnboundVariable` is a
+  property of the harness rather than of the program. Package-aware
+  materialization would admit these 12 as candidate cases.
+
+  This figure was 24 and was wrong. Twelve of those rows own no root under
+  `[05-OBS-7]` — ten are `@property` declarations beside an `import` and nothing
+  else, two declare only parameterised `def`s — so resolving the import would
+  not admit them as cases at all. They now carry their operative reason
+  (`prove-only`, `library-only`). Their `UnboundVariable` was real and was the
+  first thing to go wrong, which is exactly why it was recorded: §6.3's
+  counterfactual test is what distinguishes the proximate symptom from the
+  disqualifying property, and it was applied after the fact rather than at
+  classification time.
 - **`retired-syntax` is 23 of 23 Sonar's**, all on the pre-0.19 integer dtype
   spelling; the diagnostic names its own migration
   (`chelis migrate surf --from 0.18`). Sonar contributes 2 cases out of 47 files
@@ -637,13 +661,13 @@ contraction-insensitive. That does not contradict chelis#2782, whose
 91-of-190 measurement was gcc on Linux aarch64 over recursive EMA/RSI/ATR/MACD
 series; c-note's closed-form pricing has no such recursion. It does mean **#2782
 earns `demo-path` from the Voyage third of the corpus, not from these two**, and
-the Voyage third is not in manifest version 2 (§10).
+the Voyage third is not in manifest version 3 (§10).
 
 ## 10. Residual scope
 
 Named, so a reader does not mistake this document for more than it is:
 
-- **The Voyage third is not in manifest version 2.** The schema carries the
+- **The Voyage third is not in manifest version 3.** The schema carries the
   `derived` source kind that pins `(repo, rev, generator, task, index)` for it,
   and the runner materializes such a case, but no Voyage rows are declared yet:
   its cases are captured at run time by `probes/qcb-compiled/driver.py`'s
@@ -669,7 +693,7 @@ Named, so a reader does not mistake this document for more than it is:
   Choosing the real criterion — comparable pipeline positions, a normalised
   diagnostic identity, or a typed error code — is owed before the first trap case
   is admitted.
-- **Manifest version 2 declares no `trap` case, so the trap channel of §2.3 is
+- **Manifest version 3 declares no `trap` case, so the trap channel of §2.3 is
   exercised only by unit tests.** Every one of the 13 required cases is
   `expected: "value"`. The trap comparison is implemented and its decision logic
   is covered positively and negatively in
