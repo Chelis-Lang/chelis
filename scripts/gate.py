@@ -552,6 +552,7 @@ OWNERSHIP_LEDGER_API_TESTS: list[str] = [
     "--test", "issue_2522_data_type_c_lane",
     "--test", "issue_2576_option_items_render",
     "--test", "issue_2577_filter_named_predicate",
+    "--test", "issue_2781_loop_result_captured_by_a_loop",
     "--test", "key_admission_lanes",
     "--test", "key_affinity_lanes",
     "--test", "key_alias_lowering",
