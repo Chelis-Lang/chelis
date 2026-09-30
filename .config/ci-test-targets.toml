@@ -1177,6 +1177,30 @@ cadence = "pull_request and push"
 reason = "the issue 1592 script-unit boundary test checks canonical integer spelling in the maintained VS Code grammar"
 tracking_issue = "chelis#1592"
 
+# The CLI editor smoke test loads the language configuration and both grammars.
+[[path_rule]]
+prefix = "editors/vscode/language-configuration.json"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "editors/vscode/syntaxes/chelis-deep.tmLanguage.json"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the editor grammar numeric-scope boundary checks run in script-unit"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_vscode_numeric_grammar.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks Surf and Deep numeric scopes and Surf property keywords"
+tracking_issue = "chelis#1592"
+
 # Exact executable-corpus source exercised by both
 # chelis-cli::parity::parity_kinded_nominal_dimensions and
 # chelis-e2e::spec_all_executable_examples_parse_and_check.
