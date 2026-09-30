@@ -88,6 +88,33 @@ reason = "script-unit exercises positive and negative shared-skill link contract
 tracking_issue = "chelis#845"
 
 [[path_rule]]
+prefix = "scripts/core_fragment_parity_receipt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the receipt's decision-logic tests; the receipt itself is a manual gate"
+tracking_issue = "chelis#2102"
+
+[[path_rule]]
+prefix = "scripts/test_core_fragment_parity_receipt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes this module's positive and negative parity-receipt rows"
+tracking_issue = "chelis#2102"
+
+[[path_rule]]
+prefix = "tests/corpus/core_fragment_parity/"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates the shipped parity manifest's schema and declared case counts"
+tracking_issue = "chelis#2102"
+
+[[path_rule]]
 prefix = "scripts/regenerate_conformance_assets.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -1243,6 +1270,13 @@ prefix = "examples/nested_tuple_projection.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e"]
 
+# Exercised by chelis-cli::parity::parity_retained_callable_result_extent
+# and chelis-e2e::spec_all_executable_examples_parse_and_check.
+[[path_rule]]
+prefix = "examples/retained_callable_result_extent.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
 # Exact executable-corpus source exercised by both
 # chelis-cli::parity::parity_unicode_string_foundation and
 # chelis-e2e::spec_all_executable_examples_parse_and_check.
@@ -1337,6 +1371,65 @@ packages = ["chelis-e2e"]
 prefix = "examples/tensor_structural_ops.ch"
 disposition = "packages"
 packages = ["chelis-e2e"]
+
+# Surf corpus changes are owned by the CLI parity/executable-example checks
+# and the Surf formatter's whole-repository corpus test. Illustrative inputs
+# are covered by the CLI formatting/parseability corpus and Surf corpus test.
+# Keep these entries exact so future files establish their own test owners.
+[[path_rule]]
+prefix = "examples/annotated_concat_softmax.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/beacon_scalar_range.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/generic_explicit_shape.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/generic_value_roots.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/grad_wrt_order.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/transformer_block.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/wildcard_extents.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/copy_elision_probe.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/mha_single_head.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/mha_slice_combined_qkv.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/mha_two_heads_unrolled.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-surf"]
 
 # Exact explicit-binder migration examples and their direct executable owners.
 # Keep these file-specific: a new example must establish its own evidence.
@@ -3227,6 +3320,33 @@ reason = "the Rust policy job's lint-and-unit gate stage runs the pipeline-core 
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/eval_system_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust-policy lint-and-unit stage scans evaluator modules for direct host access outside the single adapter"
+tracking_issue = "chelis#1323"
+
+[[path_rule]]
+prefix = "scripts/test_eval_system_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the PR script-unit job discovers the boundary guard's legitimate and bypass-case tests"
+tracking_issue = "chelis#1323"
+
+[[path_rule]]
+prefix = "scripts/eval_system_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "the integration-support gate stage executes the focused evaluator boundary, CLI process, and strict directory parity oracle"
+tracking_issue = "chelis#1323"
+
+[[path_rule]]
 prefix = "scripts/regenerate_chelis_std_bundle.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -3752,3 +3872,57 @@ packages = ["chelis-cli"]
 prefix = "examples/grad_host_selectors.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = ".github/workflows/secret-scan.yml"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan executes validated history scanning and its positive and negative Python contract tests"
+tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = ".github/scripts/secret_scan.py"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan executes validated history scanning and its positive and negative Python contract tests"
+tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = ".github/scripts/test_secret_scan.py"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan executes validated history scanning and its positive and negative Python contract tests"
+tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = ".github/security/gitleaks.toml"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan executes validated history scanning and its positive and negative Python contract tests"
+tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = ".github/scripts/test_secret_scan_integration.py"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan runs real-binary suppression and exact exception boundary regressions before candidate scanning"
+tracking_issue = "chelis#2815"
+
+[[path_rule]]
+prefix = ".github/scripts/test_secret_scan_exceptions.py"
+disposition = "owner"
+workflow = "secret-scan.yml"
+job = "secret-scan"
+cadence = "pull_request and push"
+reason = "secret-scan runs real-binary suppression and exact exception boundary regressions before candidate scanning"
+tracking_issue = "chelis#2815"

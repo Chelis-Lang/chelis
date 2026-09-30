@@ -5,4 +5,4 @@ def step(state: tensor[4, f32], index: i64) -> tensor[4, f32] =
     scaled = mul(shifted, offset)
     step(scaled, add(index, 1i64))
   }
-out = step(to_tensor([0.0, 0.0, 0.0, 0.0]), 0i64)
+out = [0.0, 0.0, 0.0, 0.0] |> to_tensor |> step(0i64)

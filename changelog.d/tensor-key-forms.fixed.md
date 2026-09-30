@@ -1,1 +1,0 @@
-Implement tensor forms of `key_from_seed`, `split_key`, `split_keys`, and `fold_in` in checking, evaluation, and compiled C. Tensor keys preserve their shape; `split_keys` appends its count axis and `fold_in` requires exactly matching shapes.

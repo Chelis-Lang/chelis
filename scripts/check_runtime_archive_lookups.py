@@ -1259,6 +1259,19 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "scripts/test_core_fragment_parity_receipt.py",
+        "archive-name",
+        lines=(
+            '"Compile: clang -O2 -march=native out/k.c out/libchelis_runtime.a "',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "a fixture string reproducing the `Compile:` line `chelis build` prints, "
+            "used to test the parity receipt's compile-line extraction; the receipt "
+            "runs whatever command the build emits and never names the archive itself"
+        ),
+    ),
+    Row(
         "scripts/test_runtime_bundle_oracle.py",
         "bundle-constant",
         lines=(

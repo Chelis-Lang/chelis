@@ -24,6 +24,10 @@ mod named_axis;
 mod numeric_text;
 mod program_scope;
 mod shared_values;
+mod system;
+mod system_adapter;
+#[cfg(test)]
+mod system_tests;
 use program_scope::ProgramScope;
 pub use shared_values::{Entries, Values};
 #[cfg(test)]
@@ -517,6 +521,28 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
 ) -> Result<RuntimeOutcome, RuntimeFailure> {
+    evaluate_host_program_with_library_and_types_and_system(
+        program,
+        library,
+        library_lowered_names,
+        inputs,
+        selected_roots,
+        manifested_lowered_names,
+        system::EvalSystemBoundary::permissive(),
+    )
+}
+
+/// Keep the checked-program, transcript and failure-kind path identical for
+/// default and injected evaluators; only the system port differs.
+pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
+    program: &CheckedProgram,
+    library: Option<&CheckedProgram>,
+    library_lowered_names: Option<&BTreeMap<String, bool>>,
+    inputs: HostEvaluationInputs<'_>,
+    selected_roots: Option<&[String]>,
+    manifested_lowered_names: Option<&BTreeMap<String, bool>>,
+    system_boundary: system::EvalSystemBoundary,
+) -> Result<RuntimeOutcome, RuntimeFailure> {
     let HostEvaluationInputs {
         roots: tensor_bindings,
         bindings: bound_evaluation_inputs,
@@ -653,6 +679,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         transcript_capture: crate::transcript_capture::current_transcript_capture(),
         resolving_top_levels: Vec::new(),
         cancel: chelis_types::current_cancel_token(),
+        system: system_boundary,
         failure_kind: RuntimeFailureKind::Ordinary,
     };
 
@@ -1165,6 +1192,8 @@ struct EvalContext<'a> {
     /// TLS lookup. `None` — the default when no caller installed a token —
     /// makes the check a single `Option` discriminant test.
     cancel: Option<chelis_types::CancelToken>,
+    /// Mandatory policy-checked system port for one evaluation lifetime.
+    system: system::EvalSystemBoundary,
     /// Origin of the error currently unwinding through the string-based host
     /// evaluator. Only a trusted numeric producer may set `NumericTrap`.
     failure_kind: RuntimeFailureKind,

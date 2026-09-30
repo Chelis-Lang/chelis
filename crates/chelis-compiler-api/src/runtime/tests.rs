@@ -158,6 +158,7 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         cancel: None,
+        system: system::EvalSystemBoundary::permissive(),
         failure_kind: RuntimeFailureKind::Ordinary,
     };
     ctx.eval_expr(expr)
@@ -207,6 +208,7 @@ fn issue_1125_eval_checked_root(
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         cancel: None,
+        system: system::EvalSystemBoundary::permissive(),
         failure_kind: RuntimeFailureKind::Ordinary,
     };
     ctx.resolve_top_level(root)
@@ -1834,6 +1836,7 @@ fn eval_deep_with_bindings(
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         cancel: None,
+        system: system::EvalSystemBoundary::permissive(),
         failure_kind: RuntimeFailureKind::Ordinary,
     };
     for (name, value) in args {

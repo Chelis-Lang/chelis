@@ -1,1 +1,0 @@
-`chelis reef conform sync` now materializes the pinned root `AGENTS.md` contract, honors shell-owned heading exclusions, and points `.claude/skills` and `.codex/skills` at the one synchronized `agent-skills/` tree.

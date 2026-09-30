@@ -2538,6 +2538,10 @@
                 },
                 {
                   "type": "SYMBOL",
+                  "name": "cast_pipe_stage"
+                },
+                {
+                  "type": "SYMBOL",
                   "name": "_pipe_operand"
                 }
               ]
@@ -2545,6 +2549,44 @@
           }
         ]
       }
+    },
+    "cast_pipe_stage": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "mode",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "cast"
+              },
+              {
+                "type": "STRING",
+                "value": "cast_trunc"
+              }
+            ]
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "FIELD",
+          "name": "precision",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
     },
     "canonical_pipe_lambda_expression": {
       "type": "SEQ",

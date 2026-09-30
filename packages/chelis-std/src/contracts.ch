@@ -4,9 +4,9 @@ def abs_float[p: Float](x: p) -> p = if lt(x, cast(0.0, p)) then neg(x) else x
 def erf_approx[p: Float](x: p) -> p = {
   ax = abs_float(x)
   if lt(ax, cast(0.00001, p)) then mul(x, cast(1.1283791670955126, p)) else {
-    t = div(cast(1.0, p), add(cast(1.0, p), mul(cast(0.3275911, p), ax)))
+    t = 1.0 |> cast(p) |> div(add(cast(1.0, p), mul(cast(0.3275911, p), ax)))
     poly = mul(t, add(cast(0.254829592, p), mul(t, add(cast(-0.284496736, p), mul(t, add(cast(1.421413741, p), mul(t, add(cast(-1.453152027, p), mul(t, cast(1.061405429, p))))))))))
-    y = sub(cast(1.0, p), mul(poly, exp(neg(mul(ax, ax)))))
+    y = 1.0 |> cast(p) |> sub(mul(poly, exp(neg(mul(ax, ax)))))
     if lt(x, cast(0.0, p)) then neg(y) else y
   }
 }

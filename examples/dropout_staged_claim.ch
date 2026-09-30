@@ -7,5 +7,5 @@ def checked[m, n](k: key, source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2
 def main() = {
   source = to_tensor([1.0f32, 1.0f32])
   x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])
-  checked(key_from_seed(42i64), source, x)
+  42i64 |> key_from_seed |> checked(source, x)
 }

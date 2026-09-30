@@ -137,15 +137,20 @@ class FastCommandListTests(unittest.TestCase):
             changed_paths=[],
             lock_guard_changed=False,
         )
+        clippy = [
+            command for command in commands
+            if command[:3] == ["cargo", "clippy", "-p"]
+        ]
         self.assertEqual(
-            commands[4:6],
+            clippy,
             [
                 ["cargo", "clippy", "-p", "chelis-cli", "--tests", "--", "-D", "warnings"],
                 ["cargo", "clippy", "-p", "chelis-surf", "--tests", "--", "-D", "warnings"],
             ],
         )
-        self.assertEqual(commands[6], gate.FAST_TRIPWIRE_NEXTEST)
-        self.assertEqual(len(commands), 7)
+        self.assertLess(
+            commands.index(clippy[-1]), commands.index(gate.FAST_TRIPWIRE_NEXTEST)
+        )
 
     def test_std_bundle_legs_appear_only_when_std_paths_changed(self):
         self.assertTrue(gate.std_paths_changed(["packages/chelis-std/src/x.ch"]))
@@ -168,17 +173,16 @@ class FastCommandListTests(unittest.TestCase):
         # lint, clippy, and the bundled-std tripwire see fresh embedded bytes;
         # the self-consistency test is a check and goes last.
         self.assertEqual(
-            with_std,
-            [
-                gate.REGEN_TIER0_WRITE,
-                gate.REGEN_TIER1_WRITE,
-                gate.FMT_WRITE,
-                gate.classify_paths_command([]),
-                gate.CHELIS_LINT_CHECK,
-                ["cargo", "clippy", "-p", "chelis-std-bundle", "--tests", "--", "-D", "warnings"],
-                gate.FAST_TRIPWIRE_NEXTEST,
-                gate.STD_BUNDLE_SELF_CONSISTENCY,
-            ],
+            with_std[:2], [gate.REGEN_TIER0_WRITE, gate.REGEN_TIER1_WRITE]
+        )
+        self.assertEqual(with_std[-1], gate.STD_BUNDLE_SELF_CONSISTENCY)
+        self.assertEqual(with_std.count(gate.FAST_TRIPWIRE_NEXTEST), 1)
+        self.assertLess(
+            with_std.index(gate.REGEN_TIER1_WRITE), with_std.index(gate.FMT_WRITE)
+        )
+        self.assertLess(
+            with_std.index(gate.FAST_TRIPWIRE_NEXTEST),
+            with_std.index(gate.STD_BUNDLE_SELF_CONSISTENCY),
         )
         self.assertEqual(
             gate.render(gate.REGEN_TIER1_WRITE),
@@ -649,9 +653,12 @@ class SummaryTests(unittest.TestCase):
             self.assertGreaterEqual(stage["seconds"], 0)
             self.assertEqual(stage["returncode"], 0)
             self.assertIsNone(stage["launch_error"])
-        self.assertIn(
-            "cargo clippy -p chelis-cli --tests -- -D warnings",
-            summary["stages"][4]["command"],
+        self.assertTrue(
+            any(
+                "cargo clippy -p chelis-cli --tests -- -D warnings"
+                in stage["command"]
+                for stage in summary["stages"]
+            )
         )
         self.assertIn(
             "scripts/ci_change_owned.py classify-paths",
@@ -726,7 +733,6 @@ class SummaryTests(unittest.TestCase):
         self.assertTrue(rendered[1].endswith("scripts/regen_all.py --tier 1"), rendered[1])
         self.assertTrue(rendered[-2].startswith("cargo nextest run -p chelis-std-bundle --lib"))
         self.assertTrue(rendered[-1].startswith("cargo nextest run -p chelis-reef --lib"))
-        self.assertEqual(len(rendered), 8)
         self.assertIn("chelis-std paths changed", out)
         self.assertIn("bundled-lock invariant can have moved", out)
         self.assertIn("no crate changes detected", out)

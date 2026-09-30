@@ -420,6 +420,36 @@
     }
   },
   {
+    "type": "cast_pipe_stage",
+    "named": true,
+    "fields": {
+      "mode": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "cast",
+            "named": false
+          },
+          {
+            "type": "cast_trunc",
+            "named": false
+          }
+        ]
+      },
+      "precision": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "comparison_expression",
     "named": true,
     "fields": {
@@ -2007,6 +2037,10 @@
           },
           {
             "type": "canonical_pipe_lambda_expression",
+            "named": true
+          },
+          {
+            "type": "cast_pipe_stage",
             "named": true
           },
           {

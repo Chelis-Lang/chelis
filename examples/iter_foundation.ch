@@ -1,6 +1,6 @@
 xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64), cast(4, i64)]
 mapped = map(fn (x: i64) -> add(x, cast(1, i64)), xs)
-filtered = filter(fn (x: i64) -> eq(mod(x, cast(2, i64)), cast(0, i64)), mapped)
+filtered = filter(fn (x: i64) -> x |> mod(cast(2, i64)) |> eq(cast(0, i64)), mapped)
 total = fold(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), filtered)
 scanned = scan(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), xs)
 buckets = partition(fn (x: i64) -> gt(x, cast(2, i64)), xs)
@@ -12,4 +12,4 @@ scanned_view = print(scanned)
 buckets_view = print(buckets)
 exploded_view = print(exploded)
 exploded_batches_view = print(exploded_batches)
-summary = print(string_concat("total=", to_string(total)))
+summary = "total=" |> string_concat(to_string(total)) |> print

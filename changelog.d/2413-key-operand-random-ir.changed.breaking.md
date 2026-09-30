@@ -1,8 +1,0 @@
-Random draws take their controls and their key as operands ([#2413](https://github.com/Chelis-Lang/chelis/issues/2413)). `chelis eval` and compiled C evaluate the same key-operand graph, and these behaviors change:
-- a runtime `dropout` rate and runtime `uniform_like` bounds are accepted in `chelis eval` and compiled C; the static-rate requirement and its diagnostics are gone ([#2411](https://github.com/Chelis-Lang/chelis/issues/2411));
-- compiled C validates `uniform_like` bounds under [05-OP-8] and traps an invalid bound before the draw; an invalid literal `dropout` rate in compiled C now builds and traps at the draw, as eval does, where the entry lane used to refuse it at code generation;
-- a draw in the unselected arm of a runtime `if` no longer changes any other draw, where compiled C used to shift every later draw ([#2410](https://github.com/Chelis-Lang/chelis/issues/2410));
-- `chelis eval` traps on invalid literal `uniform_like` bounds before the draw, where it used to return values: reversed bounds gave `1 - u`, and a span that overflows f32 gave inf;
-- `grad` through a `dropout` rate that a differentiated parameter reaches through differentiable operations is rejected with `RandomSelectionParameter`, and any other rate receives a zero cotangent ([#2421](https://github.com/Chelis-Lang/chelis/issues/2421)). The previous pathwise rate cotangent was a biased estimate of the derivative of the expected result; compute such a rate from values that are not differentiated.
-
-BREAKING: WireDag random nodes carry no fields, and `DropoutReplay` and `UniformBoundAdjoint` are new.

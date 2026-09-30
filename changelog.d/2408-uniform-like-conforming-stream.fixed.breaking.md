@@ -1,3 +1,0 @@
-`uniform_like` no longer mixes the draw and the element index symmetrically. Under 0.18.11's `with seed` stream, element `i` of the draw with call ordinal `c` equalled element `c` of draw `i`, and element `c` of draw `c` was the same value for every `c`. Element `i` of a draw now comes from the draw's key and `i` alone ([05-RNG-1]).
-
-Every `uniform_like`-derived value changes, including `normal_like`, `trunc_normal`, the Kaiming and Xavier initialisers, and library distributions built on them; regenerate any pinned random outputs. In the Rust API, `chelis_types::dtype_semantics::uniform_sample` is removed; `PreparedUniformLike::apply` draws with a `RandomKey`. See [#2408](https://github.com/Chelis-Lang/chelis/issues/2408).

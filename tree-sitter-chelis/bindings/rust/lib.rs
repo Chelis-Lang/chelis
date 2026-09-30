@@ -234,6 +234,25 @@ mod tests {
     }
 
     #[test]
+    fn surf_v019_tree_sitter_accepts_cast_pipe_stages() {
+        for source in [
+            "result = value |> cast(f32)\n",
+            "result = value |> cast_trunc(f64)\n",
+            "result = value |> cast(p)\n",
+        ] {
+            assert_surf_parser_parity(source, true);
+        }
+        for source in [
+            "result = value |> cast()\n",
+            "result = value |> cast_trunc()\n",
+            "result = cast(f32)\n",
+            "result = cast_trunc(f64)\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+    }
+
+    #[test]
     fn surf_v019_tree_sitter_accepts_multiline_pipeline_chains() {
         for source in [
             "result = seed |> f |> g |> h\n",

@@ -456,6 +456,70 @@ fn heap_value_reused_in_tail_call_slots_is_still_rejected() {
     );
 }
 
+/// chelis#2781: a loop mints its exit-block parameter while the loop BODY
+/// scope is open, so the lowering recorded the body's depth as that owner's
+/// home scope. The owner's home is the enclosing scope - that is where `bind`
+/// registers it - and a later loop body at the same depth then read the
+/// recorded depth as "local to this body" and moved the value on a by-value
+/// call. [04-LIN-5] requires the copy instead ("a path that preserves another
+/// live use first creates a copy"), and a move inside a body that runs N times
+/// could never have been right. Regressed in 0.18.7; before the fix this failed
+/// with `block b4 in `roots` is reached with inconsistent live owners`.
+#[test]
+fn a_loop_result_is_copied_for_a_call_inside_a_later_loop_body() {
+    // The core oracle: the whole program lowers AND verifies.
+    let program = verified_source(
+        "hs = map(fn (x) -> x, [1.0f64, 2.0f64])\n\
+         def at2(xs: List[f64], j: i64) -> f64 = index(xs, j)\n\
+         p = map(fn (j) -> at2(hs, j), range(0i64, 2i64))\n",
+    );
+    let roots = unit_text(&program, "roots");
+    // The owner the call consumes is minted by a `copy clone` in the same
+    // block, not the loop result itself, so `hs` is still live on the back edge
+    // into the second loop's header and at the root manifest that follows.
+    // Read the operand out of the rendered call rather than naming an owner
+    // number, which renumbers whenever neighbouring lowering changes.
+    let call = roots
+        .lines()
+        .find(|line| line.contains("call:at2(move %"))
+        .unwrap_or_else(|| panic!("the call must still receive an owned argument:\n{roots}"));
+    let consumed = call
+        .split("call:at2(move %")
+        .nth(1)
+        .and_then(|rest| rest.split([',', ')']).next())
+        .expect("rendered call names its first operand");
+    assert!(
+        roots.contains(&format!("%{consumed} = copy clone %")),
+        "the call must consume a copy, not the loop result itself:\n{roots}"
+    );
+    assert!(
+        roots.contains("root hs move %"),
+        "`hs` must still reach the root manifest:\n{roots}"
+    );
+}
+
+/// chelis#2781 soundness guard: re-homing a loop result to its enclosing scope
+/// does not make a genuine double-move legal. Two owned slots of one call still
+/// need a copy the user did not write, so the second slot reads a dead owner
+/// and the program stays rejected.
+#[test]
+fn a_loop_result_moved_into_two_owned_slots_is_still_rejected() {
+    let source = "def joins(a: List[string], b: List[string]) -> List[string] = concat(a, b)\n\
+                  def go(src: List[string]) -> List[string] = {\n\
+                    hs = map(fn (x) -> x, src)\n\
+                    joins(hs, hs)\n\
+                  }\n\
+                  p = go([\"a\", \"b\"])\n";
+    let error = match lower_source(source) {
+        Ok(lowered) => verify_ownership(lowered).expect_err("double-move must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, OwnershipError::OwnerNotLive { .. }),
+        "a genuine use-after-move of a loop result must stay rejected, got: {error}"
+    );
+}
+
 #[test]
 fn debug_observes_the_existing_owner_and_is_not_source_copy() {
     let roots = unit_text(

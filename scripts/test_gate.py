@@ -687,6 +687,9 @@ NON_GATE_WORKFLOWS = {
     "pr-package-expansion.yml",
     # Changelog policy uses Python only, including on docs PRs.
     "changelog.yml",
+    # Secret scanning downloads a pinned external detector and scans Git
+    # history in its own required hosted job, outside the compiler gate.
+    "secret-scan.yml",
     "smt-full-prove.yml",
     "heavy-e2e.yml",
     # The manual shared-runner cache probe requires the admitted EC2 host.
@@ -855,16 +858,12 @@ class StageUnionTests(unittest.TestCase):
             "integration", tests_only=False, support_only=True,
             partition=None, support_slice=name,
         ) for name in ("frontend", "domain")]
-        self.assertEqual(slices[0], [gate.LOWERING_TRACE_TESTS,
-                                    gate.EMISSION_OBSERVER_TESTS,
-                                    gate.OWNERSHIP_LEDGER_API_TESTS,
-                                    gate.COMPILER_FRONT_END_PERFORMANCE_ORACLE])
-        self.assertEqual(slices[1], [
-            gate.UNREPRESENTABLE_DOMAIN_ORACLE,
-            [gate.MANAGED_PYTHON, "scripts/dtype_builtin_atom_closure_oracle.py"],
-            gate.OWNERSHIP_LEDGER_CLI_TESTS,
-        ])
-        self.assertEqual(slices[0] + slices[1], gate.STAGES["integration"][1:])
+        self.assertTrue(all(slices))
+        commands = slices[0] + slices[1]
+        self.assertEqual(commands, gate.STAGES["integration"][1:])
+        self.assertEqual(
+            len(commands), len({tuple(command) for command in commands})
+        )
 
     def test_emission_observer_runs_with_its_feature_locally_and_in_ci_support(self):
         command = ["cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",

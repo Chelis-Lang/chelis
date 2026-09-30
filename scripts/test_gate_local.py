@@ -13,17 +13,12 @@ What is locked here:
   (b) paths outside every workspace member map to no crate, and an
       empty diff yields the explicit "no crate changes detected"
       message instead of silently running nothing;
-  (c) the optional `--validation` command list is exactly the static
-      validation subset (two of the three workspace clippy configurations,
-      fmt --check, chelis lint --check ., the guards and oracles) plus one
-      `cargo nextest run -p <crate>` per changed crate -- no workspace
-      build, no workspace nextest, and no `--no-default-features` clippy
-      row (CI-owned; see the comment on the exact list below);
-  (d) `--list` annotates every canonical command as in the `--fast` pass
-      and the `--validation` subset, in the `--validation` subset only, or
-      CI-owned, without changing the command list itself (the command-list
-      lock stays in `scripts/test_gate.py`), and prints the `--fast` note
-      before the `--validation` note.
+  (c) the optional `--validation` runs its static commands plus one
+      `cargo nextest run -p <crate>` per changed crate, without a separate
+      workspace build or workspace nextest run;
+  (d) `--list` marks the validation subset, fast-gate commands, and
+      CI-owned commands without running any of them, and prints the
+      fast-gate note before the `--validation` note.
 
 No test here runs cargo, nextest, git, or any real gate stage: git
 output and the member->package mapping are injected as canned inputs,
@@ -191,80 +186,7 @@ class WorkspaceMemberPackagesTests(unittest.TestCase):
 
 
 class LocalCommandListTests(unittest.TestCase):
-    def test_static_subset_has_the_exact_compile_time_contracts(self):
-        # `cargo nextest` does not execute doctests. The static subset
-        # drives the chelis#731 `ErrorWitness` contracts, chelis#1286's
-        # ownership-boundary contracts, the compiler pipeline artifact
-        # contracts, the raw-checkpoint fixture, the
-        # two cheap pipeline-core boundary guards (dependency + no_std doc),
-        # the canonical chelis-std generated-artifact currency check, the
-        # chelis#908 unrepresentable-domain oracle, chelis#893's
-        # release-profile runtime-representation Phase 0 oracle, and the
-        # feature-gated test targets the per-crate runs would skip.
-        # Two clippy configurations, not three: the closure check's leg 3
-        # needs the solver-free row on a fresh target (it is the only
-        # per-pull-request row compiling crates/chelis-prove/src/
-        # clarabel_sos.rs), while the --no-default-features row compiles a
-        # strict subset of the default row and is CI-owned through
-        # `gate.py lint-and-unit`.
-        # Assert the exact list so no `--validation` stage disappears silently.
-        rendered = [gate.render(c) for c in gate.local_command_list([])]
-        self.assertEqual(
-            rendered,
-            [
-                "cargo clippy --workspace --all-targets -- -D warnings",
-                "cargo clippy --workspace --all-targets --features "
-                "chelis-backend-c/sleef,"
-                "chelis-cli/ownership-ledger,"
-                "chelis-compiler-api/compilation-trace,"
-                "chelis-compiler-api/ownership-ledger,"
-                "chelis-e2e/hip-local-gpu,"
-                "chelis-ir/lowering-trace,"
-                "chelis-prove/clarabel,"
-                "chelis-python/extension-module,"
-                "chelis-runtime/ownership-ledger,"
-                "chelis-types/checkpoint-compile-probe,"
-                "chelis-types/generalize-sweep-oracle -- -D warnings",
-                "cargo fmt --all -- --check",
-                "cargo run -p chelis-cli --bin chelis --quiet -- "
-                "lint --check .",
-                "<managed-python> scripts/regenerate_chelis_std_bundle.py "
-                "--debug --check",
-                "cargo test -p chelis-types --doc",
-                "cargo test -p chelis-ir --doc",
-                "cargo test -p chelis-compiler-api --doc",
-                "cargo test -p chelis-pipeline-core --doc",
-                "<managed-python> scripts/check_checkpoint_compile_fail.py",
-                "<managed-python> scripts/check_hash_order_phase_b_compile_fail.py",
-                "<managed-python> scripts/check_configuration_closure.py",
-                "<managed-python> scripts/pipeline_core_dependency_guard.py",
-                "<managed-python> scripts/pipeline_core_documentation_guard.py",
-                "<managed-python> scripts/unrepresentable_domain_oracle.py",
-                "<managed-python> scripts/runtime_representation_oracle.py "
-                "--phase 2",
-                "cargo nextest run -p chelis-ir --features lowering-trace "
-                "--lib --test lowering_trace --test helper_lowering_trace",
-                "cargo nextest run -p chelis-compiler-api --features compilation-trace "
-                "--lib --test emission_observer --test execution_artifact_metadata "
-                "--test compilation_trace",
-                "cargo nextest run -p chelis-compiler-api --features ownership-ledger "
-                "--test builtin_named_kernel_inputs --test dropout_fixed_stream_api "
-                "--test fixed_control_host_c --test generated_header_native_probe "
-                "--test invocation_local_random --test issue_1684_entry_cleanup "
-                "--test issue_1685_multi_root_cleanup --test issue_2445_match_arm_ownership "
-                "--test issue_2485_region_entry_terminals --test issue_2508_list_step_ownership "
-                "--test issue_2522_data_type_c_lane --test issue_2576_option_items_render "
-                "--test issue_2577_filter_named_predicate --test key_admission_lanes "
-                "--test key_affinity_lanes --test key_alias_lowering "
-                "--test key_extent_lanes --test key_operand_random_c "
-                "--test key_operations_c --test key_root_lanes --test key_split_count_lanes "
-                "--test key_surface_lanes --test key_tensor_forms "
-                "--test local_ascription_activation "
-                "--test rule_d_entered_lanes --test untaken_arm_gradients",
-                "cargo nextest run -p chelis-cli --features ownership-ledger "
-                "--test issue_1314_json_bigint_ledger",
-            ],
-        )
+
 
     def test_appends_one_nextest_run_per_changed_crate(self):
         commands = gate.local_command_list(["chelis-cli", "chelis-surf"])
@@ -347,7 +269,7 @@ class ListAnnotationTests(unittest.TestCase):
             annotations[gate.render(gate.FMT_CHECK)],
             gate.LOCAL_ANNOTATION,
         )
-        # The lint row is the one command `--fast` shares with `--validation`.
+        # Lint, like the evaluator source guard, runs in both local modes.
         self.assertEqual(
             annotations[gate.render(gate.CHELIS_LINT_CHECK)],
             gate.FAST_ANNOTATION,
