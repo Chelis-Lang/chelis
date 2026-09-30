@@ -1722,12 +1722,29 @@ pub fn produces_its_result(name: &str) -> bool {
     !BUILTIN_PROJECTIONS.contains(&name) && chelis_types::builtin_decl(name).is_some()
 }
 
-/// One invocation-local literal result obligation retained when host
-/// specialization inlines away the authored function boundary.
+/// One invocation-local result obligation retained when host specialization
+/// inlines away the authored function boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostResultClaimPlan {
     result: TensorType,
+    axes: Vec<(usize, HostResultRequirementPlan)>,
+    unwitnessed: Vec<String>,
     outer_claims_first: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostResultRequirementPlan {
+    Literal(usize),
+    NamedDirect {
+        claim: String,
+        source: String,
+        prepared: String,
+        axis: usize,
+    },
+    NamedList {
+        state: usize,
+        claim: String,
+    },
 }
 
 impl HostResultClaimPlan {
@@ -1739,6 +1756,14 @@ impl HostResultClaimPlan {
     /// The authored result is the tagged numeric carrier for this plan.
     pub fn result(&self) -> &TensorType {
         &self.result
+    }
+
+    pub fn axes(&self) -> &[(usize, HostResultRequirementPlan)] {
+        &self.axes
+    }
+
+    pub fn unwitnessed(&self) -> &[String] {
+        &self.unwitnessed
     }
 }
 
@@ -12677,28 +12702,104 @@ fn retain_actualized_result_claim_with_order(
     let Some(result) = result else {
         return body;
     };
-    let axes = result
+    let literal_axes = result
         .dims
         .iter()
         .enumerate()
         .filter_map(|(axis, dim)| match dim {
-            DimInfo::Lit(required) => Some((axis, *required)),
+            DimInfo::Lit(required) => Some((axis, HostResultRequirementPlan::Literal(*required))),
             DimInfo::Named(_, _) => None,
         })
         .collect::<Vec<_>>();
-    if axes.is_empty() {
-        return body;
-    }
-    let plan = HostResultClaimPlan {
-        result: result.clone(),
-        outer_claims_first,
-    };
     let HostExpr {
         kind,
         span_id,
         merged_spans,
     } = body;
     if let HostExprKind::RetainedInvocation { bindings, body, ty } = kind {
+        let mut axes = literal_axes;
+        if let Some((contract, observations, positions)) = bindings.iter().find_map(|binding| {
+            let HostExprKind::SignatureEntry {
+                contract,
+                args,
+                positions,
+                ..
+            } = &binding.value.kind
+            else {
+                return None;
+            };
+            Some((contract, args, positions))
+        }) {
+            for (axis, dim) in result.dims.iter().enumerate() {
+                let DimInfo::Named(binder, _) = dim else {
+                    continue;
+                };
+                if binder == "*" {
+                    continue;
+                }
+                let claim = crate::lower::extent_binder_label(binder);
+                let requirement = if let Some(state) = contract
+                    .named_list_binders()
+                    .iter()
+                    .position(|name| name == binder)
+                {
+                    Some(HostResultRequirementPlan::NamedList { state, claim })
+                } else {
+                    observations
+                        .iter()
+                        .zip(positions)
+                        .find_map(|(observation, position)| {
+                            let formal = contract.formals().get(*position)?;
+                            let EntryPattern::Tensor(HostTypeTerm::Tensor(tensor)) =
+                                formal.pattern()
+                            else {
+                                return None;
+                            };
+                            let source_axis = tensor.dims.iter().position(
+                                |dim| matches!(dim, DimInfo::Named(name, _) if name == binder),
+                            )?;
+                            let HostExprKind::Var(prepared, _) = &observation.kind else {
+                                return None;
+                            };
+                            Some(HostResultRequirementPlan::NamedDirect {
+                                claim: claim.clone(),
+                                source: formal.name().to_owned(),
+                                prepared: prepared.clone(),
+                                axis: source_axis,
+                            })
+                        })
+                };
+                if let Some(requirement) = requirement {
+                    axes.push((axis, requirement));
+                }
+            }
+        }
+        let unwitnessed = result
+            .dims
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, dim)| {
+                let DimInfo::Named(name, _) = dim else {
+                    return None;
+                };
+                (name != "*" && !axes.iter().any(|(covered, _)| *covered == axis))
+                    .then(|| crate::lower::extent_binder_label(name))
+            })
+            .collect::<Vec<_>>();
+        if axes.is_empty() && unwitnessed.is_empty() {
+            return HostExpr {
+                kind: HostExprKind::RetainedInvocation { bindings, body, ty },
+                span_id,
+                merged_spans,
+            };
+        }
+        axes.sort_by_key(|(axis, _)| *axis);
+        let plan = HostResultClaimPlan {
+            result: result.clone(),
+            axes,
+            unwitnessed,
+            outer_claims_first,
+        };
         // Actual preparation and signature entry are outside the result
         // obligation. Only the callee body is on its result spine.
         let scoped = HostExpr::new(HostExprKind::ResultClaimScope {
@@ -12720,6 +12821,15 @@ fn retain_actualized_result_claim_with_order(
         kind,
         span_id,
         merged_spans,
+    };
+    if literal_axes.is_empty() {
+        return body;
+    }
+    let plan = HostResultClaimPlan {
+        result: result.clone(),
+        axes: literal_axes,
+        unwitnessed: Vec::new(),
+        outer_claims_first,
     };
     let ty = host_expr_type(&body);
     HostExpr::new(HostExprKind::ResultClaimScope {
@@ -13097,7 +13207,7 @@ impl<'a> RetainedHostInvocation<'a> {
         let callable_entries = params
             .iter()
             .map(|param| {
-                let HostTypeTerm::Fn(param_tys, _) = &param.ty else {
+                let HostTypeTerm::Fn(param_tys, result) = &param.ty else {
                     return false;
                 };
                 let formals = param_tys
@@ -13120,10 +13230,18 @@ impl<'a> RetainedHostInvocation<'a> {
                         })
                     },
                 ));
-                contract.formals().iter().any(|formal| {
-                    matches!(formal.pattern(), EntryPattern::List(_))
-                        && formal.pattern().has_extent_claim()
-                }) || !entry.guards().is_empty()
+                let named_result = match result.as_ref() {
+                    HostTypeTerm::Tensor(tensor) => tensor.dims.iter().any(|dim| {
+                        matches!(dim, DimInfo::Named(name, _) if contract.binders().contains(name))
+                    }),
+                    _ => false,
+                };
+                named_result
+                    || contract.formals().iter().any(|formal| {
+                        matches!(formal.pattern(), EntryPattern::List(_))
+                            && formal.pattern().has_extent_claim()
+                    })
+                    || !entry.guards().is_empty()
             })
             .collect();
         Self {
@@ -13444,6 +13562,8 @@ fn lower_inline_host_invocation(
             .unwrap_or_else(fresh_host_inference);
         params.push(HostParam { name, ty });
     }
+    let signature =
+        expr_fn_type(callee).map(|signature| expand_host_fn_type_aliases(program, signature));
     lower_retained_host_invocation(
         expr,
         RetainedHostInvocation::new(&params, body),
@@ -13453,6 +13573,7 @@ fn lower_inline_host_invocation(
         tensor_helpers,
         RetainedHostPreparation::default(),
     )
+    .map(|body| retain_inlined_result_claim(body, signature.as_ref()))
     .map(Some)
 }
 
@@ -13693,7 +13814,10 @@ fn lower_retained_host_invocation(
         &substitutions,
         &UnordSet::new(),
     ));
-    if !invocation.entry.guards().is_empty() || !list_observations.is_empty() {
+    if !invocation.entry.guards().is_empty()
+        || !invocation.contract.binders().is_empty()
+        || !list_observations.is_empty()
+    {
         let mut serial = bindings.len();
         let guard_name = loop {
             let candidate = format!("__chelis_entry_check_{serial}");

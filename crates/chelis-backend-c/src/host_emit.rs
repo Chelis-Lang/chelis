@@ -2252,28 +2252,49 @@ enum HostResultRequirement {
     Named {
         claim: String,
         parameter: String,
+        prepared: String,
         axis: usize,
     },
     /// The first available witness may be a List element or a later direct
     /// parameter. An empty List does not bind the result axis.
     NamedList {
         state: usize,
+        claim: String,
     },
 }
 
 impl HostResultClaim {
-    fn from_tensor_type(ty: &TensorType) -> Self {
+    fn from_plan(plan: &chelis_ir::host::HostResultClaimPlan) -> Self {
+        use chelis_ir::host::HostResultRequirementPlan;
         Self {
-            rank: ty.dims.len(),
-            axes: ty
-                .dims
+            rank: plan.result().dims.len(),
+            axes: plan
+                .axes()
                 .iter()
-                .enumerate()
-                .filter_map(|(axis, dim)| match dim {
-                    DimInfo::Lit(required) => {
-                        Some((axis, HostResultRequirement::Literal(*required)))
-                    }
-                    DimInfo::Named(_, _) => None,
+                .map(|(axis, requirement)| {
+                    let requirement = match requirement {
+                        HostResultRequirementPlan::Literal(required) => {
+                            HostResultRequirement::Literal(*required)
+                        }
+                        HostResultRequirementPlan::NamedDirect {
+                            claim,
+                            source,
+                            prepared,
+                            axis,
+                        } => HostResultRequirement::Named {
+                            claim: claim.clone(),
+                            parameter: source.clone(),
+                            prepared: prepared.clone(),
+                            axis: *axis,
+                        },
+                        HostResultRequirementPlan::NamedList { state, claim } => {
+                            HostResultRequirement::NamedList {
+                                state: *state,
+                                claim: claim.clone(),
+                            }
+                        }
+                    };
+                    (*axis, requirement)
                 })
                 .collect(),
         }
@@ -2314,13 +2335,20 @@ impl HostResultClaim {
                 DimInfo::Lit(required) => Some((axis, HostResultRequirement::Literal(*required))),
                 DimInfo::Named(binder, _) if binder != "*" => {
                     if let Some(state) = named_lists.iter().position(|name| name == binder) {
-                        return Some((axis, HostResultRequirement::NamedList { state }));
+                        return Some((
+                            axis,
+                            HostResultRequirement::NamedList {
+                                state,
+                                claim: chelis_ir::lower::extent_binder_label(binder),
+                            },
+                        ));
                     }
                     let (parameter, source_axis) = witness(binder)?;
                     Some((
                         axis,
                         HostResultRequirement::Named {
                             claim: chelis_ir::lower::extent_binder_label(binder),
+                            prepared: parameter.clone(),
                             parameter,
                             axis: source_axis,
                         },
@@ -2365,18 +2393,28 @@ impl HostResultClaim {
                     HostResultRequirement::Named {
                         claim,
                         parameter,
+                        prepared,
                         axis: source_axis,
                     } => lines.push(format!(
                         "{indent}{axes_name}[{count}++] = (__chelis_host_result_axis){{ {axis}, chelis_tensor_shape({}, {source_axis}), {}, {}, {source_axis} }};",
-                        c_ident(parameter),
+                        c_ident(prepared),
                         c_string_literal(claim),
                         c_string_literal(parameter),
                     )),
-                    HostResultRequirement::NamedList { state } => {
+                    HostResultRequirement::NamedList { state, claim } => {
                         let source = format!("__chelis_entry_named_states[{state}]");
                         lines.push(format!("{indent}if ({source}.seen) {{"));
                         lines.push(format!(
                             "{indent}    {axes_name}[{count}++] = (__chelis_host_result_axis){{ {axis}, {source}.value, {source}.claim, {source}.path, {source}.axis }};"
+                        ));
+                        lines.push(format!("{indent}}}"));
+                        lines.push(format!("{indent}else {{"));
+                        lines.push(format!(
+                            "{indent}    fprintf(stderr, \"extent `%s`: no runtime witness\\n\", {});",
+                            c_string_literal(claim)
+                        ));
+                        lines.push(format!(
+                            "{indent}    chelis_numeric_trap(\"numeric trap: domain in load at i64\");"
                         ));
                         lines.push(format!("{indent}}}"));
                     }
@@ -2405,10 +2443,11 @@ impl HostResultClaim {
                 HostResultRequirement::Named {
                     claim,
                     parameter,
+                    prepared,
                     axis: source_axis,
                 } => format!(
                     "{indent}    {{ {axis}, chelis_tensor_shape({}, {source_axis}), {}, {}, {source_axis} }},",
-                    c_ident(parameter),
+                    c_ident(prepared),
                     c_string_literal(claim),
                     c_string_literal(parameter),
                 ),
@@ -5446,12 +5485,20 @@ impl<'a> HostEmitter<'a> {
                 ty: scope_ty,
             } => {
                 require_same_abi_type(ty, scope_ty, "result-claim scope")?;
-                let result = plan.result();
+                if !plan.unwitnessed().is_empty() {
+                    return Err(invalid_abi_shape(
+                        format!(
+                            "retained result extent `{}` has no declaring runtime witness",
+                            plan.unwitnessed().join("`, `")
+                        ),
+                        "result-claim scope",
+                    ));
+                }
                 let axes = self.next_temp("result_claim_axes");
                 let frame = self.next_temp("result_claim_frame");
                 let parent = result_claims.as_deref().unwrap_or("NULL");
                 self.lines
-                    .extend(HostResultClaim::from_tensor_type(result).frame_lines(
+                    .extend(HostResultClaim::from_plan(plan).frame_lines(
                         &self.indent,
                         &axes,
                         &frame,
