@@ -1,85 +1,70 @@
 # Backends
 
-Chelis lowers a typed program to a RISC DAG and then emits source for one of three
-backends. The build step is a code generator: it writes source and runtime artifacts, and
-you compile that source with your own platform toolchain. Chelis does not call `gcc`,
-`hipcc`, or `clang++` for you. The authoritative source is `spec/08-backends.md`.
-
-## The pipeline
-
-```text
-Surf  ->  Deep  ->  IR (RISC DAG)  ->  backend source
-```
-
-Parsing, type checking, and lowering are decoupled from backend emission. Shared IR passes
-(elementwise fusion, autodiff expansion, memory planning) run once over the DAG, and each
-backend is a string emitter over the result. The three emitters mirror each other in
-structure and differ only in the kernel language they print.
-
-## Targets
-
-| Target | Hardware | Emits |
-|---|---|---|
-| `c` | CPU | Portable C source |
-| `hip` | AMD GPU | HIP host source with embedded kernel strings |
-| `metal` | Apple GPU | Objective-C++ `.mm` host files with Metal Shading Language kernel strings |
-
-Select a target with `--target`. The C backend is the default and the reference path: every
-other backend is checked for numerical agreement against it on the shared test suite.
+`chelis build` generates native source and the files needed to compile it. It does not
+run a C, HIP, or Objective-C++ compiler. Choose a target with `--target`; `c` is the
+default:
 
 ```sh
 chelis build app.ch --target c --output out/
-chelis build app.ch --target hip --output out/
-chelis build app.ch --target metal --output out/
 ```
 
-## What build emits
+For a program supported by a GPU target, use `--target hip` or `--target metal`
+instead. The selected target determines which operations and dtypes can be built;
+a successful `chelis check` alone does not guarantee that every target admits the
+program. See [Backend selection and requirements](../../../spec/08-backends.md)
+and the [dtype support matrix](../../../spec/04-type-system.md).
 
-For each target, `chelis build` writes the generated source plus the runtime support it
-needs:
+## From source to artifacts
 
-- The C backend writes portable C and ships `chelis_runtime.h` alongside a static runtime
-  library. Elementwise and reduction loops emit with OpenMP parallel pragmas, and
-  matmul-shaped subgraphs are pattern-matched to a BLAS fast path.
-- The HIP backend writes `*_hip.cpp` host code with HIP kernel source compiled at runtime by
-  `hiprtc`. Contiguous f32 matmul of rank two or higher specializes to hipBLAS, and the
-  build surfaces the `-lhipblas` link flag you need.
-- The Metal backend writes `.mm` host code and Metal Shading Language kernel strings, with a
-  `chelis_metal_runtime.h` header. Kernels compile at runtime through
-  `newLibraryWithSource`. You compile the `.mm` output with `clang++ -fobjc-arc -framework
-  Metal -framework Foundation`.
+Chelis parses Surf or Deep, checks types and effects, and lowers tensor work to a
+RISC graph. Programs using host values or effects also have a host execution plan.
+Each target prepares that checked work for its own emitter: the CPU target emits
+loops and host calls, while the GPU targets emit host code that launches device
+kernels. Fusion, storage planning, and supported operations depend on the target.
 
-All three backends share one runtime ABI: a generated function takes input and output
-`chelis_tensor` arrays. Tuple-returning exports use a stable tuple ABI with `chelis_tuple`
-helpers documented in the runtime header. The build reports a peak-memory formula so you can
-size allocations, and the emitted source is what you hand to your compiler.
+| Target | Main generated source | Native toolchain |
+|---|---|---|
+| `c` | `<stem>.c` | A C compiler on the host CPU |
+| `hip` | `<stem>_hip.cpp` with embedded HIP kernel source | `hipcc` and an AMD GPU |
+| `metal` | `<stem>_metal.mm` with embedded Metal Shading Language source | `clang++` with Apple's Metal frameworks and an Apple GPU |
 
-## Numerics and determinism
+The output also includes a generated header, the bundled native runtime archive
+`libchelis_runtime.a`, `chelis_runtime.h`, a runtime receipt, and target-specific
+support files such as `chelis_hip_runtime.h` or `chelis_metal_runtime.h`.
+The build prints the files it wrote and a `Compile:`, `Compile object:`, or
+`Compile objects:` command. Use that command for the generated program:
+required flags and extra sources vary by target and by the operations selected.
+For example, eligible HIP
+matrix multiplication uses hipBLAS and adds `-lhipblas`; Metal matrix
+multiplication may need `MetalPerformanceShaders`. HIP kernels compile at runtime
+through `hiprtc`, and Metal kernels through `newLibraryWithSource`.
 
-The C backend is the numerical oracle. Every backend must preserve numerical correctness
-within documented tolerances, preserve the named-dimension and precision semantics
-established before lowering, and agree with the C backend on the shared test suite.
+For C, the generated header declares each authored export using its actual C
+parameter and result types. Tensor-only entries can use the four-argument
+`chelis_tensor` input/output ABI; a host export returning a scalar or tuple has a
+different declaration. Read the generated header before calling an export from
+C. Tuple values use the `chelis_tuple` helpers in `chelis_runtime.h`.
 
-A few platform constraints are worth knowing:
+HIP and Metal tensor-graph builds print a peak *device* memory formula, with a
+concrete estimate when sizes are known. The C build and GPU builds that emit
+host wrappers do not promise that report.
 
-- `f64` is not available on the Metal target, because Apple Silicon GPUs have no
-  double-precision ALUs. Run f64 workloads on the C or HIP target.
-- `bf16` on Metal requires an Apple7 or later GPU; pipeline creation reports a clean
-  diagnostic on earlier devices.
-- Metal kernels heavy in `exp`, `log`, and `sqrt` may need a wider f32 tolerance than HIP
-  because of Metal Shading Language fast-math semantics.
+## Numerical behavior and availability
 
-## Validating the front end
+The [numeric rules](../../../spec/04-type-system.md) define results for every
+target. The C backend is a practical reference for comparing implementations;
+agreement tests cover selected programs, with GPU execution checks requiring
+suitable hardware. A successful build is not a claim that every operation has
+been compared across targets.
 
-`chelis validate` runs the conformance grammar over Surf, Deep, or desugared output before
-any backend work:
+- Metal rejects `f64` before kernel emission. Use `c` for an `f64` program, or
+  confirm that its operations are supported on HIP.
+- Metal `bf16` kernels require an Apple7 GPU family device (M3 or later).
+- HIP support for `bf16` and `f16` depends on the operation. A target limit
+  produces a diagnostic rather than silently changing the calculation.
+- Floating-point comparisons across platforms use operation-appropriate
+  tolerances; Metal transcendental kernels can require wider `f32` tolerance.
 
-```sh
-chelis validate --surf app.ch
-chelis validate --deep app.dp
-chelis validate --desugar app.ch
-```
-
-Interactive execution through `chelis eval` and the Tide tooling surface uses the IR
-evaluator directly rather than a compiled backend, so you can run a program without
-generating and compiling source.
+Use `chelis eval --file app.ch` to execute locally without generating native
+source. It evaluates host code and tensor operations through the compiler's
+evaluation paths. For syntax validation, see the [CLI workflow](cli.md).

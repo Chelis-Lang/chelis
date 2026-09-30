@@ -1,228 +1,161 @@
 # Runtime and Standard Library
 
-This page is a reference for the operations you call when writing Chelis: the tensor
-primitives that are built into the language, and the `chelis-std` library that ships with
-the compiler under the `Std` module prefix. The primitives are documented in
-`spec/05-risc-primitives.md`; the library source lives under `packages/chelis-std/src/`.
+Chelis has compiler built-ins for tensor, scalar, collection, and host operations.
+The compiler also bundles `chelis-std`, whose modules use the `Std` prefix. In a
+Reef package, import the names you need, for example `import Std.Sort (sort)`;
+there is no separate standard-library install. The `Std` source modules and the
+native runtime archive emitted by `chelis build` are different parts of the
+runtime.
 
-`chelis-std` is the runtime. It is bundled with the compiler the way `core` is bundled with
-Rust, so every program can use it without a Reef install. Each file is its own
-`module Std.<...>` with its own export list.
+This page covers commonly used names and current availability. The
+[operation specification](../../../spec/05-risc-primitives.md) defines the full
+signatures, failure rules, and differentiation behavior. The module sources
+are in `packages/chelis-std/src/`.
 
-## Tensor primitives
+## Built-in operations
 
-These are built into the compiler and called as plain names. They take and return tensors,
-respect named dimensions exactly, and never broadcast or promote precision implicitly.
+Built-ins are called by name without an import. Tensor operations preserve the
+dimension and dtype rules of their signatures: there is no implicit
+broadcasting or precision promotion. These operations also have scalar,
+`List`, or `key` forms where stated below.
 
-### Elementwise
-
-Binary, operating on two tensors with identical dimensions and precision:
-
-- `add`, `mul`, `sub`, `div` arithmetic.
-- `max_elem`, `min_elem` element-wise maximum and minimum.
-- `cmplt`, `eq`, `neq`, `gt`, `gte`, `lte` comparisons, returning a `bool` tensor.
-- `and`, `or`, `not` on `bool` tensors.
-
-Unary, operating on float tensors and preserving the shape:
-
-- `neg`, `recip`, `abs`.
-- `exp`, `log`, `sqrt`.
-- `sin`, `cos`, `tan`, `atan`.
-- `floor`, `ceil` (these are not differentiable; `grad` rejects them).
-- `relu`, `sigmoid` activations.
-
-### Reductions
-
-Reductions take an explicit integer axis and remove that axis from the result.
-
-- `sum(x, axis)` with an optional accumulator precision, `mean(x, axis)`.
-- `max_reduce(x, axis)`, `min_reduce(x, axis)`, `prod_reduce(x, axis)`.
-- `argmax_reduce(x, axis)`, `argmin_reduce(x, axis)` returning index tensors.
-- `softmax(x, axis)` numerically stable softmax.
-
-Windowed reductions slide a window over the tensor:
-
-- `reduce_window_max`, `reduce_window_min`, `reduce_window_sum`, `reduce_window_mean`, each
-  taking the input, a window shape, and strides. The C target is the supported codegen path
-  for these.
-
-```chelis-surf-fragment
-windowed_max = reduce_window_max(pool_grid, [2i64, 2i64], [1i64, 1i64])
-windowed_mean = reduce_window_mean(pool_grid, [2i64, 2i64], [2i64, 2i64])
+```chelis-surf
+module TensorSummary
+values = to_tensor([1.0f32, 2.0f32, 3.0f32])
+total = sum(values, 0i32)
 ```
 
-### Structural and shape operations
+Save this as `summary.ch` and run `chelis eval --file summary.ch` to see the
+tensor and its sum.
 
-- `reshape(x, shape)` reinterprets the layout; the product of dimensions must match.
-- `permute(x, axes)` reorders dimensions by a permutation.
-- `insert(x, axis, size)` adds a dimension explicitly, raising the rank by one.
-  This is the tool that replaces broadcasting.
-- `expand(x, axis, size)` broadcasts an existing size-1 dimension to `size`,
-  leaving the rank alone.
-- `pad(x, padding, fill)`, `shrink(x, bounds)` add or slice boundary elements.
-- `concat(tensors, axis)`, `split(x, axis, sizes)` join and divide along an axis.
-- `gather(table, indices, axis)`, `scatter(base, indices, updates, axis, mode)` index and
-  update. `scatter` modes are `"replace"` (last write wins) and `"add"` (differentiable
-  accumulation).
-- `where(mask, a, b)` selects by a `bool` mask, `clamp(x, low, high)` clips to bounds.
-- `cumsum(x, axis)` cumulative sum.
-- `einsum("ij,jk->ik", a, b)` contraction by subscript, covering matmul, batched matmul,
-  transpose, trace, and outer products.
-- `sort(x, axis)` returns a `(values, indices)` tuple.
-- `diagonal(x, axis1, axis2)`, `trace(x, axis1, axis2)`.
-- `matmul(a, b)` matrix multiply with an optional accumulator precision, for rank two and
-  above.
+### Arithmetic and comparison
 
-```chelis-surf-fragment
-contracted = einsum("ij,jk->ik", lhs, rhs)
-packed = concat([lhs, rhs], 1)
-embed = gather(table, token_ids, 0)
-selected = where(mask, embed, zeros)
-clipped = clamp(running, floor15, ceil30)
-```
+- `add`, `sub`, and `mul` accept matching signed-integer or float scalars, or
+  same-shaped tensors of one dtype. `div` accepts floats only. `floor_div`
+  accepts numeric values; `trunc_div` and `mod` accept signed integers.
+- `max_elem` and `min_elem` select element-wise extrema. `cmplt` or `lt`,
+  `eq`, `neq`, `gt`, `gte`, and `lte` compare values and return `bool` values
+  or tensors. `and`, `or`, and `not` operate on booleans.
+- `neg` and `abs` accept signed integers and floats. `recip`, `exp`, `log`,
+  `sqrt`, `sin`, `cos`, `tan`, and `atan` accept floats. `floor`, `ceil`, and
+  `round` also accept integers, for which they are identities.
+- `relu`, `sigmoid`, `tanh`, `silu`, and `gelu` are float activations.
 
-### Construction, precision, and ownership
+### Reductions and windows
 
-- `to_tensor(list)`, `to_list(tensor)` bridge lists and tensors. `pad_sequences(list, fill)`
-  builds a rectangular tensor from ragged rows.
-- `cast(x, precision)` changes precision.
-- `shape(t, axis)` returns a runtime `i64` scalar for an axis length; the
-  axis argument itself is `i32`.
-- `copy(x)` produces a fresh owned value; `realize(x)` materializes an intermediate.
+`sum`, `mean`, `max_reduce`, `min_reduce`, and `prod_reduce` remove one or more
+selected axes. An axis must resolve from a constant or a named dimension when
+the program is checked; an arbitrary runtime integer axis is not accepted.
+`mean` requires floats. `sum` has an optional accumulator dtype, which can
+affect its result dtype. `count` counts true `bool` elements and returns
+an `i64` tensor; `argmax_reduce` and `argmin_reduce` each take one axis
+and return `i64` index tensors. `softmax` takes a float tensor and
+preserves its shape.
 
-### Randomness
+`reduce_window_sum`, `reduce_window_mean`, `reduce_window_max`, and
+`reduce_window_min` take a tensor, a window shape, and strides. `mean` requires
+floats. The evaluator supports these operations; generated C supports selected
+window shapes and dtypes. HIP and Metal builds reject unsupported window
+operations rather than running them on the CPU without notice.
 
-`dropout(k, x, rate)` and `uniform_like(k, x, low, high)` draw from the key `k` they are
-given and consume it; they carry no effect. `key_from_seed(seed)` makes a root key from an
-`i64`, `split_key(k)` returns two keys, `split_keys(k, n)` returns a `tensor[n, key]`, and
-`fold_in(k, n)` derives the key of an integer. Shell libraries can build
-initializers from these operations.
+### Shapes, indexing, and construction
 
-## Standard library modules
+- `reshape` preserves the element sequence while changing shape; `permute`
+  reorders axes. `insert` adds a dimension, while `expand` repeats an existing
+  dimension of size one without changing rank. Use them to align shapes
+  explicitly. `pad` adds boundary elements; `shrink` slices a region.
+- `concat` joins tensors along an axis; `split` divides one tensor. `gather`
+  selects indexed values; `scatter` updates them. `scatter` supports
+  `"replace"` (the last write wins for a repeated index) and `"add"`.
+- `where` selects between same-dtype tensor branches using a boolean mask;
+  `clamp` bounds values; `cumsum` computes cumulative sums. `einsum` uses an
+  equation and two tensors for contractions. `matmul` multiplies matrices,
+  including supported batched forms.
+- `sort` returns values and `i64` indices. `diagonal` selects paired axes;
+  `trace` reduces a diagonal.
+- `to_tensor` converts a rectangular nested list to a tensor; `to_list`
+  converts a tensor to a list. `pad_sequences` makes a rectangular tensor from
+  ragged rows. `cast` changes a numeric dtype explicitly. `shape(t, axis)`
+  returns an `i64` extent for an `i32` axis; `rank` and `numel` report rank
+  and element count. `copy` creates an owned value, and `realize`
+  materializes an intermediate.
 
-### Tensor helpers
+### Explicit randomness
 
-`Std.Tensor.Construct` builds and reshapes tensors:
+`key_from_seed(i64)` creates a key. `split_key`, `split_keys`, and `fold_in`
+derive keys. `dropout(k, x, rate)` and `uniform_like(k, x, low, high)` consume
+the given key and contribute no effect. Split a key before making two draws;
+the same key cannot be consumed twice.
 
-- `linspace(start, stop, count)` uses float endpoints and an `i64` count;
-  `arange(start, stop)` uses signed-integer endpoints.
-- `stack(xs, axis)` concatenates tensors along a new axis.
-- `squeeze(x, axis)` removes a size-1 dimension; `unsqueeze(x, axis)` inserts
-  one.
+## `Std` modules
 
-The three rank-changing exports are specified but their public signatures do
-not yet type-check for concrete tensor callers; see [chelis#1416](https://github.com/Chelis-Lang/chelis/issues/1416).
-The checker does not yet enforce the endpoint dtype families
-([chelis#1417](https://github.com/Chelis-Lang/chelis/issues/1417)), and C builds
-do not yet actualize the helpers' generic cast targets
-([chelis#1418](https://github.com/Chelis-Lang/chelis/issues/1418)).
+### Tensor and general helpers
 
-`Std.Tensor.Mask`:
+- `Std.Tensor.Construct` provides `arange(start, stop)` for signed-integer
+  endpoints and `linspace(start, stop, count)` for float endpoints and an
+  `i64` count. These functions run for supported inputs in evaluation and
+  generated C. Imported calls do not enforce every endpoint dtype family
+  restriction, so use the stated types. Its `stack`, `squeeze`, and
+  `unsqueeze` names are exported, but concrete tensor calls do not currently
+  type-check; do not depend on them in a runnable program.
+- `Std.Tensor.Mask.where_indices(mask)` returns the increasing flat `i64`
+  indices of true elements. `Std.Sort.sort` exposes the built-in tensor sort
+  through a module import.
+- `Std.Scan.scan_list(step, initial, values)` returns running accumulator
+  values. `Std.Index` provides `list_index`, `take_list`, and `skip_list`;
+  negative indices or counts fail, while take/skip counts beyond the list
+  length truncate. Differentiation follows the
+  [standard-library operation rules](../../../spec/05-risc-primitives.md).
+- `Std.Scalar` exports numeric `max`, `min`, and `abs` for scalars.
+  `Std.Text.join(parts, sep)` joins strings. `Std.Contracts` provides
+  `normal_cdf`, contract names, and settings for numerical tests.
 
-- `where_indices(mask)` returns the `i64` indices where a `bool` mask is true.
+### Files, CSV, and JSON
 
-### Sorting and scanning
+`Std.Io` provides `read_text`, `write_text`, `read_trimmed_lines`,
+`read_head_bytes`, `exists`, `list`, and `mmap_size`. These file operations
+carry the `IO` effect.
 
-`Std.Sort`:
+`Std.Io.Csv` reads header-keyed `List[Dict[string, string]]` rows with
+`read_csv(path)` or `try_read_csv(path)`. `to_csv(rows)` and
+`try_to_csv(rows)` render text; `write_csv(path, rows)` and
+`try_write_csv(path, rows)` write it. The `try_` forms return `None` for
+parsing or serialization failures. CSV fields remain strings. Its reader is
+line-based, so CR or LF inside a header or field cannot round-trip; its writer
+rejects those values rather than emitting unreadable CSV.
 
-- `sort(values, axis)` accepts a numeric tensor of any rank and returns
-  `(sorted_values, indices)`, with both tensors preserving the input shape and
-  the indices using `i64`.
+`Std.Io.Json` exports `Json` and its constructors, including `JsonInt(i64)`,
+`JsonBigInt(string)` for integer text outside `i64`, and `JsonFloat(f64)`.
+Use `parse_json(text)` or `try_parse_json(text)` for text,
+`load_json(path)` or `try_load_json(path)` for files, and `json_get` and the
+`json_*` accessors to inspect values. `json_int` returns only a stored
+`JsonInt`; `json_float` also accepts a `JsonInt` through an explicit
+`i64`-to-`f64` conversion and does not accept `JsonBigInt`. `to_json` and
+`try_to_json` render text; `write_json` and `try_write_json` write files.
+Non-finite `JsonFloat` values and invalid `JsonBigInt` text cannot be
+serialized.
 
-`Std.Scan`:
+Parsing, accessors, and text rendering in the CSV and JSON modules are pure.
+Their file operations carry `IO`. The file operations above run
+under `chelis eval` and in supported generated C host programs.
 
-- `scan_list(step, initial, values)` returns the running accumulator at each step.
+### Tests and processes
 
-`Std.Index`:
+`Std.Test` provides `assert_true`, `assert_false`, `assert_eq`,
+`assert_close`, `assert_close_tensor`, `assert_eq_tensor`, `assert_shape`,
+and `fail` for `def test_*()` functions run by `chelis test`. Assertions carry
+the `Test` effect. Generated builds currently reject these assertion calls.
 
-- `list_index(values, idx)`, `take_list(values, count)`, `skip_list(values, count)`.
-  Their adjoints preserve the input List's runtime length and positions: index
-  routes the cotangent to the selected element, while take/skip fill excluded
-  positions with zeros. Negative indices/counts fail; take/skip counts beyond
-  the length retain their ordinary truncation behavior. Scalar, tensor, empty,
-  nested, and multiple-List targets use the same rule, including runtime
-  selectors/counts reused elsewhere in the differentiated body and selection
-  composed through wrappers. These public `grad(...)` calls run in both the
-  evaluator and generated-C programs.
+`Std.Process.run(cmd, args)` passes an argument list to an external program
+and returns `(exit_code, stdout, stderr)`. `run_chelis(args)` invokes the
+`chelis` command. Both carry `IO` and run during evaluation and
+testing. The language specifies compiled host process execution too, but the
+current build path rejects these calls.
 
-### Decimal and time
+### Exported but unavailable
 
-`Std.Decimal` exposes `Decimal` and `RoundingMode`, but its callables currently fail
-with an explicit `#2778` error. Its exact-rational arithmetic and conversion contract
-remains specified in [05-OP-35](../../../spec/05-risc-primitives.md).
-
-`Std.Time` callables currently raise an error citing #2779. Their intended
-proleptic Gregorian API includes `date(year, month, day)`, `add_days`,
-`sub_days`, `days_between`, date comparisons, `day_of_week`, `day_of_year`,
-`is_leap_year`, `date_to_string`, and `parse_date`. Use of these operations
-requires an exact implementation of [05-OP-35].
-
-### Input and output
-
-`Std.Io` wraps the host file operations:
-
-- `read_text(path)`, `write_text(path, contents)`, `read_trimmed_lines(path)`,
-  `read_head_bytes(path, width)`, `exists(path)`, `list(path)`, `mmap_size(path)`.
-
-`Std.Io.Csv`:
-
-- `read_csv(path)` returns a list of header-keyed dictionaries, `try_read_csv(path)` returns
-  the optional form.
-- `to_csv(rows)` renders that same shape back to CSV text (header from the first
-  row's key order, minimal quoting with doubled embedded quotes, LF line endings,
-  trailing newline; zero rows render as the empty string; a record that would
-  render as a blank line — a single empty value or header — renders as a quoted
-  empty field `""` so `read_csv`'s blank-line filter cannot drop it). Fields or
-  headers containing CR or LF are **rejected** — the line-based reader cannot
-  round-trip them (chelis#954 tracks the whole-file reader that lifts this), so
-  the writer refuses rather than emit output its own reader mangles. `try_to_csv` returns `None` instead of failing (mismatched row key
-  sets, CR/LF content); `write_csv(path, rows)` writes the rendered text and
-  names the path and first offending row on failure; `try_write_csv` is its
-  `Option` twin.
-
-`Std.Io.Json` parses JSON into a `Json` value (`JsonNull`, `JsonBool`, `JsonInt`,
-`JsonBigInt`, `JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; the constructors
-are exported, so documents can be built directly). Integer-form tokens outside
-the `i64` range retain their exact spelling as `JsonBigInt`; float-form tokens whose f64
-image is non-finite are rejected:
-
-- `load_json(path)`, `parse_json(text)` and their `try_` variants.
-- `json_get`, and the typed accessors `json_string`, `json_int`, `json_bigint`,
-  `json_float`, `json_bool`, `json_array`, `json_object`, plus `json_is_null`.
-- `to_json(value)` renders a `Json` value compactly (object keys recursively
-  sorted by increasing Unicode scalar-value sequence before escaping, f64 via
-  `to_string`'s shortest-round-trip form — a claim made for **f64
-  specifically**, the dtype `JsonFloat` carries — and RFC 8259 escaping for
-  quotes, backslashes, and every control character). Equal object mappings
-  therefore produce the same bytes regardless of insertion history.
-  Non-finite numbers have no JSON representation: `to_json`
-  fails on them and `try_to_json` returns `None`. `write_json(path, value)`
-  writes the rendered text and names the path on failure; `try_write_json` is
-  its `Option` twin. The parser decodes all four-hex-digit `\uXXXX` escapes,
-  combines valid UTF-16 surrogate pairs into one Unicode scalar, and rejects
-  malformed or unpaired surrogate sequences.
-
-These IO modules carry the `IO` effect and run in **both lanes**: under
-`chelis eval`/`chelis test` and inside compiled `chelis build` programs alike.
-`Std.Io.Json` is the sole public JSON value surface. `Std.Io.Csv` is distinct
-from the eval-only prelude CSV builtins (`parse_csv`/`to_csv`, chelis#903),
-which `chelis build` rejects whole-program; reef package name-rewriting keeps
-the shared CSV names apart in both lanes.
-
-### Testing
-
-`Std.Test` provides assertion helpers for `def test_*()` functions discovered by
-`chelis test`. They carry the `Test` effect:
-
-- `assert_true`, `assert_false`, generic `assert_eq`, and `assert_close`.
-- `assert_close_tensor`, generic `assert_eq_tensor`, and `assert_shape` for tensors.
-- `fail(msg)`.
-
-## Process execution
-
-`Std.Process` runs external programs through the host:
-
-- `run(cmd, args)` returns `(exit_code, stdout, stderr)`.
-- `run_chelis(args)` runs the Chelis binary itself.
-
-These run on the evaluator and test paths.
+`Std.Decimal` and `Std.Time` export types and callable names, but calling
+their arithmetic and calendar functions currently fails. `Std.Io.Parquet`
+and `Std.Io.Safetensors` also export names whose calls fail. Use the modules
+above for runnable programs; the [operation specification](../../../spec/05-risc-primitives.md)
+records the intended contracts for Decimal and Time.
