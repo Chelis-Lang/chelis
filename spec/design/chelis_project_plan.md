@@ -516,7 +516,8 @@ since moved to `School.Nn.Generate` / `School.Optim` / `School.Schedule` in chel
 0.4.0; `Std.Time` and `Std.Decimal` stayed in `chelis-std`.)
 
 - **`Std.Time`:** Date and duration types. Date arithmetic, comparison,
-  formatting/parsing (ISO 8601). UTC only in v1.
+  formatting/parsing (ISO 8601). UTC only in v1. The callables are currently
+  fenced by #2779 pending exact [05-OP-35] behavior.
 - **`Std.Decimal`:** Fixed-point exact arithmetic. Configurable precision, banker's
   rounding. Host-value type, not tensor dtype.
 - **`Std.Nn.Generate`:** Autoregressive generation with KV cache management. Greedy and
@@ -554,7 +555,7 @@ Prerequisite gate for both `nautilus` and `coral`. Not itself a shell.
   `cargo test -p chelis-cli --test std_package_acceptance` (the original
   `std_nn_build_acceptance` suite was removed when the `Std.Nn`/`Std.Loss`/`Std.Optim` ML
   surface moved to the downstream School library in chelis-std 0.4.0, #331; the in-repo
-  oracle now covers the std surface that stayed — `Std.Init`/`Std.Time`/`Std.Decimal`)
+  oracle now covers `Std.Init`/`Std.Decimal` and verifies the `Std.Time` #2779 rejection)
 
 ### 3j: Nautilus — Numerical Methods, Statistics, and Optimization
 

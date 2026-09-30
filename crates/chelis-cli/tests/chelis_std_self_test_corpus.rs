@@ -1,7 +1,7 @@
 //! Phase 3t — chelis-std self-test corpus integration test.
 //!
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
-//! exercise chelis-std's own modules (Std.Tensor, Std.Init, Std.Io, Std.Time,
+//! exercise chelis-std's own modules (Std.Tensor, Std.Init, Std.Io,
 //! Std.Tokenizer, Std.Decimal, Std.Sort, Std.Scan, Std.Process, Std.Test). The
 //! ML modules (Std.Nn/Loss/Optim/Schedule) moved to School in 0.4.0). It
 //! is run via `chelis test packages/chelis-std/tests/`, but until now nothing
@@ -15,8 +15,9 @@
 //! `chelis test tests/` from inside the staged package. The summary line
 //! `N passed, 0 failed` is parsed and N is asserted >= 120 so we leave
 //! headroom for new self-tests but catch a silent regression that drops the
-//! corpus below its current floor (~137 across 24 files after the 0.4.0 ML cut
-//! to School; host-runtime primitive tests under tests/runtime/ remain).
+//! corpus below its current floor (host-runtime primitive tests under
+//! tests/runtime/ remain). The Std.Time success tests were removed with the
+//! #2779 fence; std_package_acceptance checks the error.
 //!
 //! Pattern mirrors `pseudo_nautilus_fixture.rs`.
 
@@ -25,9 +26,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
-/// Floor on the chelis-std self-test count. Current corpus is ~141 passing
-/// tests across 23 files (ML modules moved to School in 0.4.0); the floor is
-/// set below current to leave headroom while still catching a silent drop.
+/// Floor on the chelis-std self-test count. The floor leaves headroom for
+/// corpus changes while still catching a silent drop.
 const MIN_PASSED: u32 = 120;
 
 fn package_std() -> PathBuf {
