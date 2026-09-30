@@ -7,6 +7,30 @@ mod common;
 #[path = "common/result_claims.rs"]
 mod result_claims;
 
+use std::fs;
+
+fn assert_check_accepts(source: &str) {
+    let dir = tempfile::tempdir().expect("source dir");
+    let path = dir.path().join("completion.ch");
+    fs::write(&path, source).expect("source");
+    let checked = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", "--allow-style-violations"])
+        .arg(&path)
+        .output()
+        .expect("check");
+    let report: serde_json::Value =
+        serde_json::from_slice(&checked.stdout).expect("check JSON report");
+    assert!(
+        checked.status.success()
+            && report["score"].as_f64() == Some(1.0)
+            && report["errors"].as_array().is_some_and(Vec::is_empty),
+        "{source}\n{report}\n{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
 fn assert_result_trap(source: &str, witness: usize, actual: usize) {
     let observations = [false, true].map(|native| (native, result_claims::run(source, native)));
     let both = format!(
@@ -55,6 +79,12 @@ def invoke(f: tensor[seq, f32] -> tensor[*, f32] -> tensor[seq, f32], x: tensor[
 
 #[test]
 fn direct_witness_guards_retained_result_on_eval_and_linked_c() {
+    // This exact host-main literal program is not a graph-fixed contradiction:
+    // C constructs both tensors with chelis_tensor_from_values at execution.
+    // The callable's received axes are runtime observations on both lanes.
+    assert_check_accepts(&format!(
+        "{DIRECT}out = invoke(broad, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n"
+    ));
     assert_result_value(
         &format!("{DIRECT}out = invoke(broad, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0]))\n"),
         "2], data=[4.0, 5.0]",
@@ -199,6 +229,48 @@ fn earlier_matching_invocation_cannot_supply_later_result_witness() {
         );
         assert!(!output.contains("out ="), "native={native}: {output}");
     }
+}
+
+fn check_file_supplied_runtime_result_guard(list_formal: bool) {
+    let dir = tempfile::tempdir().expect("runtime inputs");
+    let witness = dir.path().join("witness.txt");
+    let result = dir.path().join("result.txt");
+    fs::write(&witness, "ab").expect("witness input");
+    fs::write(&result, "cd").expect("matching result input");
+    let file_tensor = "\
+def from_file(path: string) -> tensor[*, f32] ! { IO } =
+  to_tensor(map(fn (i: i64) -> 1.0f32, range(0i64, string_len(read_file(path)))))
+";
+    let source = if list_formal {
+        format!(
+            "{file_tensor}{LIST}out = invoke(broad, [from_file(\"{}\")], from_file(\"{}\"))\n",
+            witness.display(),
+            result.display()
+        )
+    } else {
+        format!(
+            "{file_tensor}{DIRECT}out = invoke(broad, from_file(\"{}\"), from_file(\"{}\"))\n",
+            witness.display(),
+            result.display()
+        )
+    };
+    assert_check_accepts(&source);
+    assert_result_value(&source, "2], data=[1.0, 1.0]");
+
+    // The same checked and built source now observes a different result
+    // extent. File contents cannot become graph-fixed at lowering.
+    fs::write(&result, "cde").expect("mismatching result input");
+    assert_result_trap(&source, 2, 3);
+}
+
+#[test]
+fn file_supplied_direct_formal_requires_runtime_result_guard() {
+    check_file_supplied_runtime_result_guard(false);
+}
+
+#[test]
+fn file_supplied_list_formal_requires_runtime_result_guard() {
+    check_file_supplied_runtime_result_guard(true);
 }
 
 #[test]
