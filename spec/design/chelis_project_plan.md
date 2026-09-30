@@ -548,7 +548,7 @@ Prerequisite gate for both `nautilus` and `coral`. Not itself a shell.
   `cargo test -p chelis-cli --test std_package_acceptance` (the original
   `std_nn_build_acceptance` suite was removed when the `Std.Nn`/`Std.Loss`/`Std.Optim` ML
   surface moved to the downstream School library in chelis-std 0.4.0, #331; the in-repo
-  oracle now covers `Std.Init`/`Std.Decimal` and verifies the `Std.Time` #2779 rejection)
+  oracle now covers `Std.Decimal` and verifies the `Std.Time` #2779 rejection)
 
 ### 3j: Nautilus — Numerical Methods, Statistics, and Optimization
 
