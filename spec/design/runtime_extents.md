@@ -764,12 +764,11 @@ A nonempty List contributes its element axes in the entry contract's
 signature, element, then axis order, including recursive List paths. An empty
 List contributes no observation; it never denotes extent zero. If another
 direct or List formal supplies the same binder, that witness still guards the
-result. If a result binder occurs only under empty Lists, §4.7 and the
-current List-entry design do not specify a runtime value for the required
-result comparison. This is a normative spec gap: settle that case in
-`spec/04-type-system.md` before claiming an acceptance verdict for it. Until
-then, implementation must not manufacture a witness, silently drop the
-claim, or report that the complete #2751 contract is satisfied.
+result. If a result binder occurs only under empty Lists, no runtime value
+supplies the comparison. This slice adds no guard for that axis, matching the
+existing ordinary-function result path. The type-level meaning of that
+unbound binder needs a separate `spec/04-type-system.md` decision; this exit
+makes no claim about an only-empty-List invocation.
 
 The formal result obligation travels through the checked adapter around the
 supplied callable, inline beta reduction, local callable aliases, nested
@@ -781,9 +780,9 @@ run or trap. A later selector keeps the selected value's producer provenance
 until the guard operands are ready. The producer consumes the claim after
 earlier independent effects and before later effects, allocation, or element
 access dependent on the returned extent. Both lanes use the same ordered
-formal-result plan, witness paths and producer provenance; they may represent
+formal-result contract, witness paths and producer provenance; they may represent
 them differently but must not reconstruct them from a rendered name or
-backend result type. A missing required witness or selected producer is a
+backend result type. A missing referenced witness or selected producer is a
 typed lowering failure, not a successful Eval/C artifact.
 
 Implement this as a bounded #2751 exit, keeping #2627's List entry

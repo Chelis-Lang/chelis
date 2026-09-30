@@ -1728,7 +1728,6 @@ pub fn produces_its_result(name: &str) -> bool {
 pub struct HostResultClaimPlan {
     result: TensorType,
     axes: Vec<(usize, HostResultRequirementPlan)>,
-    unwitnessed: Vec<String>,
     outer_claims_first: bool,
 }
 
@@ -1743,7 +1742,6 @@ pub enum HostResultRequirementPlan {
     },
     NamedList {
         state: usize,
-        claim: String,
     },
 }
 
@@ -1760,10 +1758,6 @@ impl HostResultClaimPlan {
 
     pub fn axes(&self) -> &[(usize, HostResultRequirementPlan)] {
         &self.axes
-    }
-
-    pub fn unwitnessed(&self) -> &[String] {
-        &self.unwitnessed
     }
 }
 
@@ -12794,7 +12788,7 @@ fn retain_actualized_result_claim_with_order(
                         .named_list_binders()
                         .iter()
                         .position(|name| name == binder)
-                        .map(|state| HostResultRequirementPlan::NamedList { state, claim })
+                        .map(|state| HostResultRequirementPlan::NamedList { state })
                 } else {
                     first_direct.map(|(_, requirement)| requirement)
                 };
@@ -12803,19 +12797,7 @@ fn retain_actualized_result_claim_with_order(
                 }
             }
         }
-        let unwitnessed = result
-            .dims
-            .iter()
-            .enumerate()
-            .filter_map(|(axis, dim)| {
-                let DimInfo::Named(name, _) = dim else {
-                    return None;
-                };
-                (name != "*" && !axes.iter().any(|(covered, _)| *covered == axis))
-                    .then(|| crate::lower::extent_binder_label(name))
-            })
-            .collect::<Vec<_>>();
-        if axes.is_empty() && unwitnessed.is_empty() {
+        if axes.is_empty() {
             return HostExpr {
                 kind: HostExprKind::RetainedInvocation { bindings, body, ty },
                 span_id,
@@ -12826,7 +12808,6 @@ fn retain_actualized_result_claim_with_order(
         let plan = HostResultClaimPlan {
             result: result.clone(),
             axes,
-            unwitnessed,
             outer_claims_first,
         };
         // Actual preparation and signature entry are outside the result
@@ -12857,7 +12838,6 @@ fn retain_actualized_result_claim_with_order(
     let plan = HostResultClaimPlan {
         result: result.clone(),
         axes: literal_axes,
-        unwitnessed: Vec::new(),
         outer_claims_first,
     };
     let ty = host_expr_type(&body);

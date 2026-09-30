@@ -2766,24 +2766,6 @@ impl<'a> EvalContext<'a> {
                     &args,
                 )?;
                 let claim = Self::with_named_result_axes(claim, Some(result), &witnesses)?;
-                if let Some((_, dims)) = tensor_type_dim_exprs(result) {
-                    for dim in dims {
-                        let Some((DeepTag::DName | DeepTag::DVar, children)) =
-                            tagged_expr_children(dim)
-                        else {
-                            continue;
-                        };
-                        let Some(name) = children.first().and_then(symbol_name) else {
-                            continue;
-                        };
-                        if name != "*" && !witnesses.iter().any(|(seen, _, _)| seen == name) {
-                            return self.mark_numeric_trap_from_trusted_result(Err(format!(
-                                "extent `{}`: no runtime witness\nnumeric trap: domain in load at i64",
-                                chelis_ir::lower::extent_binder_label(name)
-                            )));
-                        }
-                    }
-                }
                 formal_claims.extend(claim);
             }
         }
