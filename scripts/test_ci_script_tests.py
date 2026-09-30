@@ -69,6 +69,14 @@ class SelectionTests(unittest.TestCase):
 
 
 class TimingTests(unittest.TestCase):
+    def test_unwritable_diagnostic_destination_does_not_fail_a_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocked = Path(directory) / "not-a-directory"
+            blocked.write_text("occupied")
+            with patch.dict(os.environ, {"CHELIS_CI_TIMING_DIR": str(blocked)}):
+                with ci_timing.span("selected-case", "runtime-extent-target"):
+                    pass
+
     def test_subprocess_timing_retains_success_failure_and_exception_semantics(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"CHELIS_CI_TIMING_DIR": tmp}):
             original = subprocess.run

@@ -14,10 +14,12 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
+import time
 import tomllib
 import unittest
 
 from capacity_census_graph import GraphError
+import ci_timing
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,7 @@ class _OwnedResult(unittest.TestResult):
         self.started = set()
         self.stopped = set()
         self.outcomes = {}
+        self.started_at = {}
 
     def startTest(self, test):
         name = test.id()
@@ -135,12 +138,21 @@ class _OwnedResult(unittest.TestResult):
             raise GraphError("duplicate unittest start")
         self.started.add(name)
         super().startTest(test)
+        self.started_at[name] = time.monotonic()
+        ci_timing.record({"event": "start", "name": name, "kind": "census-control"})
 
     def stopTest(self, test):
         name = test.id()
         if name not in self.started or name in self.stopped:
             raise GraphError("unmatched unittest stop")
         self.stopped.add(name)
+        ci_timing.record({
+            "event": "finish",
+            "name": name,
+            "kind": "census-control",
+            "seconds": time.monotonic() - self.started_at.pop(name),
+            "outcome": self.outcomes.get(name, "unreported"),
+        })
         super().stopTest(test)
 
     def _record(self, test, outcome):

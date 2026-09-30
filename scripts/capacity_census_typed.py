@@ -305,11 +305,14 @@ def resolve_target_dir(root: Path, requested: Path | None, mode: str) -> Path:
 def _binding_worker(root: Path, target: Path):
     from capacity_census_compiler_json import collect_compiler_json_bindings
     from capacity_census_native_authority import verify_native_bindings
+    from ci_timing import span
 
     # These phases share binding Cargo artifacts and remain serial with each
     # other. Neither phase reads wire classifications.
-    work = collect_compiler_json_bindings(root, target)
-    native = verify_native_bindings(root, target)
+    with span("binding.compiler_json", "census-stage"):
+        work = collect_compiler_json_bindings(root, target)
+    with span("binding.native", "census-stage"):
+        native = verify_native_bindings(root, target)
     return work, native
 
 

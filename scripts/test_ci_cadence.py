@@ -249,6 +249,20 @@ def assert_extended(test, pr, nightly):
     test.assertEqual(extents.get("if"), EXTENT_SCOPE_IF)
     test.assertFalse(extents.get("continue-on-error", False))
     test.assertEqual(extents["timeout-minutes"], 115)
+    test.assertEqual(
+        extents["env"]["CHELIS_CI_TIMING_DIR"],
+        "${{ github.workspace }}/target/runtime-extent-timings",
+    )
+    timing_uploads = [
+        step for step in extents["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+        and step.get("with", {}).get("name") == "runtime-extent-timings"
+    ]
+    test.assertEqual(len(timing_uploads), 1)
+    test.assertEqual(timing_uploads[0].get("if"), "always()")
+    test.assertEqual(
+        timing_uploads[0]["with"]["path"], "target/runtime-extent-timings"
+    )
     extent_commands = [step.get("run") or "" for step in extents["steps"]]
     test.assertEqual(
         [
@@ -607,12 +621,16 @@ class ExtendedCadenceTests(unittest.TestCase):
         ):
             nightly = copy.deepcopy(self.nightly)
             job = nightly["jobs"]["runtime-extent-oracle"]
+            oracle_step = next(
+                step for step in job["steps"]
+                if step.get("name") == "Runtime extent oracle (completion)"
+            )
             if mutation == "remove":
                 del nightly["jobs"]["runtime-extent-oracle"]
             elif mutation == "skip":
                 job["if"] = "false"
             elif mutation == "ignore":
-                job["steps"][-1]["continue-on-error"] = True
+                oracle_step["continue-on-error"] = True
             elif mutation == "steps":
                 job["steps"] = []
             elif mutation == "needs":
@@ -625,7 +643,7 @@ class ExtendedCadenceTests(unittest.TestCase):
                 # The completion oracle swapped for a phase whose row
                 # shortfall can be excused: the job would still be green,
                 # still be named, and no longer enforce the exit.
-                job["steps"][-1]["run"] = job["steps"][-1]["run"].replace(
+                oracle_step["run"] = oracle_step["run"].replace(
                     "--phase final", "--phase b --allow-shortfall"
                 )
             elif mutation == "timeout":
@@ -637,10 +655,24 @@ class ExtendedCadenceTests(unittest.TestCase):
                 # excuse anything, but a guard that let it through would also
                 # let through the phase spelling that does excuse a
                 # shortfall. Rejecting it here keeps both out.
-                job["steps"][-1]["run"] += " --allow-shortfall"
+                oracle_step["run"] += " --allow-shortfall"
             with self.subTest(mutation=mutation):
                 with self.assertRaises((AssertionError, KeyError)):
                     assert_extended(self, self.pr, nightly)
+
+    def test_runtime_extent_timing_upload_is_kept_diagnostic(self):
+        for mutation in ("environment", "upload"):
+            nightly = copy.deepcopy(self.nightly)
+            job = nightly["jobs"]["runtime-extent-oracle"]
+            if mutation == "environment":
+                del job["env"]["CHELIS_CI_TIMING_DIR"]
+            else:
+                job["steps"] = [
+                    step for step in job["steps"]
+                    if step.get("name") != "Upload runtime extent target and case timings"
+                ]
+            with self.subTest(mutation=mutation), self.assertRaises((AssertionError, KeyError)):
+                assert_extended(self, self.pr, nightly)
 
     def test_skipped_full_or_support_or_sanitizer_execution_is_rejected(self):
         for name in ("full-workspace", "script-nightly", "integration-support", "backend-sanitizers-full"):

@@ -15,8 +15,10 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
+    time::Instant,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -1036,6 +1038,20 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
     failures
 }
 
+fn record_case_timing(row: &Value) {
+    let Some(directory) = std::env::var_os("CHELIS_CI_TIMING_DIR") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    if fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let path = directory.join(format!("rust-{}.jsonl", std::process::id()));
+    if let Ok(mut output) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(output, "{row}");
+    }
+}
+
 fn collect() -> (Value, Vec<String>, usize) {
     assert!(
         gcc_available(),
@@ -1045,8 +1061,24 @@ fn collect() -> (Value, Vec<String>, usize) {
     let mut failures = Vec::new();
     let mut cache = ExportBinaryCache::new();
     for case in cases() {
+        record_case_timing(&json!({
+            "pid": std::process::id(),
+            "event": "start",
+            "kind": "extent-case",
+            "name": case.id.as_str(),
+        }));
+        let started = Instant::now();
         let result = observe_with_export_cache(&case, &mut cache);
-        failures.extend(contract_failures(&case, &result));
+        let case_failures = contract_failures(&case, &result);
+        record_case_timing(&json!({
+            "pid": std::process::id(),
+            "event": "finish",
+            "kind": "extent-case",
+            "name": case.id.as_str(),
+            "seconds": started.elapsed().as_secs_f64(),
+            "outcome": if case_failures.is_empty() { "success" } else { "failure" },
+        }));
+        failures.extend(case_failures);
         assert!(
             observed.insert(case.id, result).is_none(),
             "duplicate fixture id"
