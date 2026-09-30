@@ -11,8 +11,8 @@ chelis build app.ch --target c --output out/
 For a program supported by a GPU target, use `--target hip` or `--target metal`
 instead. The selected target determines which operations and dtypes can be built;
 a successful `chelis check` alone does not guarantee that every target admits the
-program. See [Backend selection and requirements](../../../spec/08-backends.md)
-and the [dtype support matrix](../../../spec/04-type-system.md).
+program. See [Backend selection and requirements](https://github.com/Chelis-Lang/chelis/blob/main/spec/08-backends.md)
+and the [dtype support matrix](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md).
 
 ## From source to artifacts
 
@@ -51,7 +51,7 @@ host wrappers do not promise that report.
 
 ## Numerical behavior and availability
 
-The [numeric rules](../../../spec/04-type-system.md) define results for every
+The [numeric rules](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md) define results for every
 target. The C backend is a practical reference for comparing implementations;
 agreement tests cover selected programs, with GPU execution checks requiring
 suitable hardware. A successful build is not a claim that every operation has
@@ -59,7 +59,7 @@ been compared across targets.
 
 - Metal rejects `f64` before kernel emission. Use `c` for an `f64` program, or
   confirm that its operations are supported on HIP.
-- Metal `bf16` kernels require an Apple7 GPU family device (M3 or later).
+- Metal `bf16` kernels require an Apple7 GPU family device.
 - HIP support for `bf16` and `f16` depends on the operation. A target limit
   produces a diagnostic rather than silently changing the calculation.
 - Floating-point comparisons across platforms use operation-appropriate

@@ -15,4 +15,4 @@ specifications when you need the exact contract for a construct.
 
 The [Examples](examples.md) chapter points to complete programs in the source
 repository. The [CLI Workflow](cli.md), [Testing](testing.md), and
-[Proving Properties](proving.md) chapters explain how to run and check them.
+[Checking Properties](proving.md) chapters explain how to run and check them.

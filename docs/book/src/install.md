@@ -10,7 +10,7 @@ Packages](reef.md) covers package creation and dependencies.
 The Chelis GitHub releases are private. You need access to
 `Chelis-Lang/chelis` and an authenticated [GitHub CLI](https://cli.github.com).
 Prebuilt release assets are available for macOS arm64 and Linux x86-64. For
-source-build workflows, see [Contributor setup](../../contributor_setup.md).
+source-build workflows, see [Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md).
 
 Run these commands in a terminal outside a Chelis project:
 
@@ -70,7 +70,7 @@ It does not check whether source-package dependencies are installed.
 
 ## Build from a checkout
 
-[Contributor setup](../../contributor_setup.md) covers the Rust, C, and Python
+[Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md) covers the Rust, C, and Python
 tools needed to build Chelis from source. A checkout build is separate from a
 release installed by `chelisup`.
 
@@ -86,7 +86,7 @@ nix run .#chelis -- --version
 
 ### Build the Python distribution wheel
 
-With the [contributor prerequisites](../../contributor_setup.md) installed, run
+With the [contributor prerequisites](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md) installed, run
 this from the compiler checkout root:
 
 ```sh
@@ -95,4 +95,4 @@ uv build --wheel --out-dir target/python-wheel/wheels bindings/python
 
 This builds a wheel from the checkout. The Chelis GitHub toolchain release does
 not include a Python wheel. For editable Python bindings during development,
-see [Contributor setup](../../contributor_setup.md#python-311).
+see [Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md#python-311).

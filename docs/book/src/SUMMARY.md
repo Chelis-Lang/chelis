@@ -9,7 +9,7 @@
 - [Transforms: grad and vmap](transforms.md)
 - [Reef and Packages](reef.md)
 - [Testing](testing.md)
-- [Proving Properties](proving.md)
+- [Checking Properties](proving.md)
 - [Opaque Types With Declared Invariants](opaque-invariants.md)
 - [Examples](examples.md)
 

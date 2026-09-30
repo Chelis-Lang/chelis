@@ -4,7 +4,7 @@
 Both are compiler transforms written as calls: supply a function to `grad` or
 `vmap`, then call the resulting function with its inputs. A bare `grad` or
 `vmap` is not a function value. The
-[transformation specification](../../../spec/06-transformations.md) defines
+[transformation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/06-transformations.md) defines
 their language semantics.
 
 ## Differentiate with `grad`
@@ -34,7 +34,7 @@ The gradient of a tensor parameter has the parameter's shape and precision.
 A differentiable input that does not affect the result receives a zero
 gradient of the same shape. `grad` can also be applied again to a suitable
 scalar gradient function for a second derivative. For an ordered `wrt` example,
-see [`examples/grad_wrt_order.ch`](../../../examples/grad_wrt_order.ch).
+see [`examples/grad_wrt_order.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/grad_wrt_order.ch).
 
 ## Map across a batch with `vmap`
 
@@ -54,7 +54,7 @@ def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f
 
 A reduction inside `process` would reduce its row's data axis, leaving the
 new batch axis intact. The runnable source is
-[`examples/vmap_relu.ch`](../../../examples/vmap_relu.ch).
+[`examples/vmap_relu.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/vmap_relu.ch).
 
 ## Per-example gradients
 
@@ -95,5 +95,5 @@ differentiate it.
   literal or resolved top-level List has a supported path.
 
 These limits describe the current evaluator and C build. The numbered
-[transformation specification](../../../spec/06-transformations.md) defines
+[transformation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/06-transformations.md) defines
 the broader language rule.

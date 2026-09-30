@@ -28,7 +28,7 @@ def prob_value(p: Probability) -> f32 = p.value
   ((prob_value(p) >= 0.0) && (prob_value(p) <= 1.0))
 ```
 
-The standalone runnable file, [`examples/opaque_invariants.ch`](../../../examples/opaque_invariants.ch),
+The standalone runnable file, [`examples/opaque_invariants.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/opaque_invariants.ch),
 contains these definitions but does not export `Probability`, since it has no
 consumer module. Use the export list above when callers need to write the type
 in their signatures.
@@ -39,7 +39,7 @@ use field projections, literals, arithmetic, comparisons, boolean operators
 such as `&&`, `if`, selected math functions, `sum` over a fixed-shape tensor
 field, and in-module zero-argument constant definitions. General function
 calls, `match`, lambdas, and effects are not allowed in the predicate. The
-[type-system specification](../../../spec/04-type-system.md) gives the full
+[type-system specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md) gives the full
 value and predicate rules.
 
 `probability` returns `Some` only for accepted inputs. `scale` and `combine`
@@ -139,7 +139,7 @@ def forge(x: f32) -> Probability = Probability { value: x }
 
 ## Tensor fields and proof boundaries
 
-[`examples/opaque_invariants_simplex.ch`](../../../examples/opaque_invariants_simplex.ch)
+[`examples/opaque_invariants_simplex.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/opaque_invariants_simplex.ch)
 defines a fixed-size weight vector whose sum lies within a tolerance of one.
 Its `make_simplex` producer passes by validated sampling even in an
 SMT-enabled build: the record has `"proof_tier":"fuzz"` and no

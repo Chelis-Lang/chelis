@@ -8,7 +8,7 @@ native runtime archive emitted by `chelis build` are different parts of the
 runtime.
 
 This page covers commonly used names and current availability. The
-[operation specification](../../../spec/05-risc-primitives.md) defines the full
+[operation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md) defines the full
 signatures, failure rules, and differentiation behavior. The module sources
 are in `packages/chelis-std/src/`.
 
@@ -105,7 +105,7 @@ the same key cannot be consumed twice.
   values. `Std.Index` provides `list_index`, `take_list`, and `skip_list`;
   negative indices or counts fail, while take/skip counts beyond the list
   length truncate. Differentiation follows the
-  [standard-library operation rules](../../../spec/05-risc-primitives.md).
+  [standard-library operation rules](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md).
 - `Std.Scalar` exports numeric `max`, `min`, and `abs` for scalars.
   `Std.Text.join(parts, sep)` joins strings. `Std.Contracts` provides
   `normal_cdf`, contract names, and settings for numerical tests.
@@ -157,5 +157,5 @@ current build path rejects these calls.
 `Std.Decimal` and `Std.Time` export types and callable names, but calling
 their arithmetic and calendar functions currently fails. `Std.Io.Parquet`
 and `Std.Io.Safetensors` also export names whose calls fail. Use the modules
-above for runnable programs; the [operation specification](../../../spec/05-risc-primitives.md)
+above for runnable programs; the [operation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md)
 records the intended contracts for Decimal and Time.
