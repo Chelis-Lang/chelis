@@ -46,16 +46,15 @@
 //!    same with an unused macro-minting dependency def: expansion advances the
 //!    shared hygiene counter over the full program before pruning drops the
 //!    def, so the entry's binders survive the split identically.
-//! 9. `eval_only_wrapper_build_accept_reject_parity` — a well-typed package
-//!    with an unreachable eval-only def AND an unreachable wrapper of it builds
-//!    identically (accept) in both cache regimes: the transitive eval-only drop
-//!    leaves no dangling reference for the monolithic check to spuriously
-//!    reject. Negative parity — the C-bytes oracles assert success on both arms
-//!    and are blind to an accept/reject flip.
-//! 10. `unreachable_dep_type_error_rejected_in_both_cache_regimes` — the
-//!     rejection direction: a violation in an unreachable dependency def is
-//!     rejected byte-identically in both cache regimes (layered `Ok(None)` →
-//!     monolithic fallback).
+//! 9. `eval_only_wrapper_build_accept_reject_parity` — a well-typed,
+//!    unreachable eval-only chain builds successfully in both cache modes.
+//! 10. `unreachable_dep_type_error_rejected_in_both_cache_regimes` — an
+//!     unreachable ordinary type error rejects identically with or without
+//!     a clean layered cache.
+//! 11. Selected eval-only-tainted type, effect, and linearity errors reject
+//!     with identical diagnostics in cache-disabled, cold, and warm builds.
+//! 12. An invalid file outside the selected Reef target does not block build.
+//! 13. The separate tensor_scan build gate still sees selected definitions.
 
 use assert_cmd::Command;
 use std::fs;
@@ -397,16 +396,13 @@ fn pruning_fires_macro_hygiene_monolithic_vs_layered_c_identical() {
     );
 }
 
-// ── Accept/reject parity under the eval-only transitive drop (chelis#1168) ──
+// ── Semantic parity before the eval-only transitive drop (chelis#1184) ──
 //
-// `cmd_build` drops UNREACHABLE defs that (transitively) reference an eval-only
-// host builtin BEFORE the monolithic full-program check, but the layered cache
-// path checks the intact pre-drop decls. If the drop were non-transitive, an
-// unreachable wrapper of a dropped def would keep a DANGLING reference: the
-// monolithic path manufactures an unbound-variable error the layered path never
-// sees, so build accept/reject would flip on cache state. The existing C-bytes
-// oracles all assert success on both arms, so they are structurally blind to
-// this — hence a dedicated negative parity oracle (chelis#1168 fable-verify).
+// `cmd_build` checks the complete selected program before removing unreachable
+// eval-only-tainted definitions. The drop still needs its transitive closure
+// so the rechecked emission program never contains a dangling caller. Tests
+// below cover both a well-typed removable chain and errors the drop must not
+// conceal, across cold, warm, and cache-disabled builds.
 
 /// Build `entry` and capture `(success, stderr)` WITHOUT asserting the outcome,
 /// so the monolithic and cache-warm paths can be compared for accept/reject
@@ -425,6 +421,77 @@ fn build_capture(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) ->
         output.status.success(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+fn check_capture(entry: &Path) -> (bool, String) {
+    let mut cmd = Command::cargo_bin("chelis").expect("chelis binary");
+    cmd.env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("check")
+        .arg(entry);
+    let output = cmd.output().expect("run chelis check");
+    let mut report = String::from_utf8_lossy(&output.stdout).into_owned();
+    report.push_str(&String::from_utf8_lossy(&output.stderr));
+    (output.status.success(), report)
+}
+
+fn surf_spans(report: &str) -> Vec<&str> {
+    report
+        .match_indices("surf:")
+        .filter_map(|(start, _)| {
+            let digits = report[start + "surf:".len()..]
+                .bytes()
+                .take_while(|byte| byte.is_ascii_digit() || *byte == b'.')
+                .count();
+            (digits > 0).then(|| &report[start..start + "surf:".len() + digits])
+        })
+        .collect()
+}
+
+fn assert_selected_semantic_error_in_all_build_modes(
+    dependency: &str,
+    expected_fragments: &[&str],
+    require_shared_span: bool,
+) {
+    let (scratch, cache_home) = fresh_cache_home();
+    let (_, entry_body) = plain_bodies();
+    let entry = stage_dep_fixture(scratch.path(), dependency, entry_body);
+
+    let (check_ok, check_report) = check_capture(&entry);
+    assert!(
+        !check_ok,
+        "check must reject the selected error: {check_report}"
+    );
+
+    let (disabled_ok, disabled_error) =
+        build_capture(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let (cold_ok, cold_error) = build_capture(&entry, &cache_home, &[]);
+    let (warm_ok, warm_error) = build_capture(&entry, &cache_home, &[]);
+    assert!(
+        !disabled_ok && !cold_ok && !warm_ok,
+        "build hid the selected error: disabled={disabled_ok} cold={cold_ok} warm={warm_ok}"
+    );
+    assert_eq!(disabled_error, cold_error);
+    assert_eq!(cold_error, warm_error);
+    for fragment in expected_fragments {
+        assert!(
+            disabled_error.contains(fragment),
+            "build did not report {fragment:?}: {disabled_error}"
+        );
+        assert!(
+            check_report.contains(fragment),
+            "check did not report {fragment:?}: {check_report}"
+        );
+    }
+    if require_shared_span {
+        let build_spans = surf_spans(&disabled_error);
+        let check_spans = surf_spans(&check_report);
+        assert!(
+            build_spans
+                .iter()
+                .any(|span| check_spans.iter().any(|check_span| check_span == span)),
+            "check and build must name the same source location: build={build_spans:?} check={check_spans:?}"
+        );
+    }
 }
 
 /// The dependency has an unreachable eval-only CHAIN: `dep_runner` uses the
@@ -507,11 +574,79 @@ fn unreachable_dep_type_error_rejected_in_both_cache_regimes() {
     );
 }
 
+#[test]
+fn unreachable_eval_only_type_error_rejected_in_all_build_cache_modes() {
+    let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_broken(x: f64) -> f64 = add(round_to(x, cast(2, i32)), cast(1, i32))\ndef dep_wrapper(x: f64) -> f64 = dep_broken(x)\ndef dep_outer(x: f64) -> f64 = dep_wrapper(x)\n";
+    assert_selected_semantic_error_in_all_build_modes(dependency, &["precision mismatch"], true);
+}
+
+#[test]
+fn transitive_eval_only_effect_error_rejected_in_all_build_cache_modes() {
+    let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, i32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64) -> f64 ! {} = {\n  seen: unit = print(x)\n  dep_wrapper(x)\n}\n";
+    assert_selected_semantic_error_in_all_build_modes(
+        dependency,
+        &["body performs effects", "not declared"],
+        false,
+    );
+}
+
+#[test]
+fn transitive_eval_only_linearity_error_rejected_in_all_build_cache_modes() {
+    let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, i32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64, t: tensor[4, f32]) -> tensor[4, f32] = {\n  rounded: f64 = dep_wrapper(x)\n  y: tensor[4, f32] = realize(t)\n  add(t, y)\n}\n";
+    assert_selected_semantic_error_in_all_build_modes(dependency, &["already consumed"], true);
+}
+
+#[test]
+fn unselected_reef_file_does_not_enter_build_semantic_gate() {
+    let (scratch, cache_home) = fresh_cache_home();
+    let (dependency, entry_body) = plain_bodies();
+    let entry = stage_dep_fixture(scratch.path(), dependency, entry_body);
+    let package_root = entry.parent().and_then(Path::parent).expect("package root");
+    write(
+        &package_root.join("tests/unselected.ch"),
+        "def broken(x: f64) -> f64 = add(x, cast(1, i32))\n",
+    );
+
+    let disabled = build_probe(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let cold = build_probe(&entry, &cache_home, &[]);
+    let warm = build_probe(&entry, &cache_home, &[]);
+    assert!(disabled.0 && cold.0 && warm.0);
+    assert_eq!(disabled.1, cold.1);
+    assert_eq!(cold.1, warm.1);
+    assert_eq!(disabled.2, cold.2);
+    assert_eq!(cold.2, warm.2);
+}
+
+#[test]
+fn unreachable_tensor_scan_keeps_its_separate_build_gate() {
+    let (scratch, cache_home) = fresh_cache_home();
+    let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_scan(x: i64) -> tensor[*, i64] = tensor_scan(\n  x,\n  fn (previous: i64, _index: i64) -> add(previous, cast(1, i64)),\n  cast(3, i64)\n)\n";
+    let (_, entry_body) = plain_bodies();
+    let entry = stage_dep_fixture(scratch.path(), dependency, entry_body);
+
+    let (check_ok, check_report) = check_capture(&entry);
+    assert!(
+        check_ok,
+        "front-end check must accept tensor_scan: {check_report}"
+    );
+    let (disabled_ok, disabled_error) =
+        build_capture(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let (cold_ok, cold_error) = build_capture(&entry, &cache_home, &[]);
+    let (warm_ok, warm_error) = build_capture(&entry, &cache_home, &[]);
+    assert!(!disabled_ok && !cold_ok && !warm_ok);
+    assert_eq!(disabled_error, cold_error);
+    assert_eq!(cold_error, warm_error);
+    assert!(
+        disabled_error.contains("tensor_scan"),
+        "the separate backend gate must identify tensor_scan: {disabled_error}"
+    );
+}
+
 // ── Differential cache-parity sweep (chelis#1176) ───────────────────
 //
-// The removed monolithic full-program check only ran on reef packages, so the
-// property "layered-clean ⟹ monolithic-clean" (and byte-identical emitted C)
-// must hold across many entry shapes. A sweep over the loose `examples/` corpus
+// A clean layered result substitutes for the monolithic selected-program
+// check only in Reef packages; this sweep tests parity across entry shapes.
+// A sweep over the loose `examples/` corpus
 // would NOT exercise this: those files are not in a reef package, so the layered
 // cache never engages and `CHELIS_STDLIB_CACHE_DISABLE` is a no-op. Instead this
 // sweeps varied shapes staged as reef packages (dep sorts before the root, an

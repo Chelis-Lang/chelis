@@ -703,6 +703,12 @@ structural Deep/Surf well-formedness validator and does not run the type
 or opacity checker, so it does not gate on these semantic declaration
 errors; use `check`/`build`/`eval` for that.
 
+Before build-specific eval-only removal or reachability pruning, `chelis build`
+SHALL finish type, effect, and linearity checks for every definition in its
+selected source or complete linked Reef package target. A semantic error in
+an unreachable selected definition SHALL fail the build. Files outside the
+selected source or linked target SHALL remain outside this semantic gate.
+
 #### 2.5.1 Invariant Declaration Well-Formedness
 
 An opaque type may carry one declared invariant (Surf:
