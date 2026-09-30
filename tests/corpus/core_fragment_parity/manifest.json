@@ -693,6 +693,18 @@
     },
     {
       "corpus": "sonar",
+      "notes": "carries `chelis_role: \"property\"` declarations and owns no root; after canonical formatting eval reports `input contains only def declarations; nothing to evaluate`",
+      "path": "landing/review/g3/deep-fallback-canonical.dp",
+      "reason": "prove-only"
+    },
+    {
+      "corpus": "sonar",
+      "notes": "Deep ingress rejects it: `stamp error: metadata `property_quantifiers` requires the required property metadata field at byte 19; see spec/03 \u00a71.1 [03-META-1/2]`",
+      "path": "landing/review/g3/deep-fallback.dp",
+      "reason": "parse-rejected"
+    },
+    {
+      "corpus": "sonar",
       "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
       "path": "landing/review/g3/duplicate-box.ch",
       "reason": "prove-only"
@@ -938,6 +950,6 @@
       "reason": "retired-syntax"
     }
   ],
-  "manifest_version": 1,
+  "manifest_version": 2,
   "owning_issue": 2102
 }

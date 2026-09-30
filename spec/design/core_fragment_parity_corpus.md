@@ -5,10 +5,13 @@ Owning issue: [chelis#2102](https://github.com/Chelis-Lang/chelis/issues/2102)
 launch ledger.
 
 This is a design document. It decides how the parity corpus is selected, pinned,
-executed, and reported. It decides nothing about language semantics: every
-observation and trap rule it consumes is already normative in
-`spec/05-risc-primitives.md` §8 and is cited at each use. Where this document and
-a numbered chapter disagree, the chapter wins and this document has a bug.
+executed, and reported. It decides nothing about language semantics.
+
+Every **observation** rule it consumes is normative in
+`spec/05-risc-primitives.md` §8 and is cited at each use. The **trap** criterion
+is not: it is harness policy with no authority in §8, and §2.3 says so rather
+than borrowing an atom that does not govern it. Where this document and a
+numbered chapter disagree, the chapter wins and this document has a bug.
 
 ## 1. What this deliverable is, and what it is not
 
@@ -37,8 +40,14 @@ difference between this receipt and a hermetic gate:
 
 ### 2.1 The decision: stdout against stdout
 
-The receipt compares **the complete stdout of `chelis eval --file P` against the
-complete stdout of the compiled binary built from `P`, byte for byte.**
+The receipt compares **the complete stdout of
+`chelis eval --file P --target c` against the complete stdout of the compiled
+binary built from `P`, byte for byte.**
+
+`--target c` is load-bearing and not an implementation detail: it manifests the
+eval lane under C backend constraints, which is what makes the two lanes'
+root sets comparable at all (`[05-OBS-7]` scopes roots to a selected target and
+`[05-OBS-10]`'s lane assignment is target-aware).
 
 This is not a convenience choice. It is the channel the normative observation
 rules already bind on both sides:
@@ -49,12 +58,26 @@ rules already bind on both sides:
   `bool` spelling, `key` spelling, and NaN class-level round-tripping are
   identical across lanes.
 - `[05-OBS-4]`: a scalar-typed value renders bare at every exit in both lanes.
-- `spec/05-risc-primitives.md` §"A rank-`r > 0` tensor …": *"Every lane produces
-  byte-identical text for the same admitted stored value."*
 
-So byte equality of stdout is the contract, stated in the chapter, for exactly
-the two lanes this receipt runs. A receipt that compared anything else would be
-measuring a channel the spec does not bind.
+Byte equality of stdout is therefore **entailed by** those four atoms together
+with §8.1. No single sentence in the chapter states it, and this document does
+not claim one does. In particular the sentence *"Every lane produces
+byte-identical text for the same admitted stored value"* is **`[05-OP-25]`**
+(`to_string`, `spec/05-risc-primitives.md:1670`) and is scoped to that
+callable's admitted stored values, not to the stdout observation channel; it is
+consistent with the conclusion here but is not its authority.
+
+Two qualifications belong with the claim rather than further down:
+
+- `[05-OBS-3]` **permits** a cross-lane value difference of 1 ULP for `atan`,
+  `cos`, `exp`, `log`, `sin` and `tan` — that is, permits different bytes. Byte
+  equality is the operative contract only because that atom's arithmetic-width
+  precondition is currently unmet; §3.2 states why. The corpus uses `exp`,
+  `log` and `sqrt` throughout, so when chelis#897 lands this section needs
+  revisiting in the same change set, and the receipt becomes over-strict for
+  those six until it is.
+- A receipt that compared any other channel would be measuring something the
+  spec does not bind across these two lanes (§2.2).
 
 ### 2.2 Why not `eval --json` against scraped binary stdout
 
@@ -88,23 +111,48 @@ away.
 
 ### 2.3 The trap channel
 
-`[05-OBS-6]` also governs the failing case: *"A lane that cannot produce a root
-it owes SHALL emit [05-UNS-1] naming that root, the lane, and the reason."* A
-trap is therefore an observation with its own required content, and the receipt
-compares it as one:
+The one part of this receipt that is **harness policy rather than a normative
+contract**, and it is labelled as such because the distinction was previously
+blurred here.
 
-- the process exit status of each lane, exactly; and
-- the complete stderr of each lane, byte for byte.
+The criterion the receipt applies: two lanes agree on a trap when their process
+exit statuses are equal and their complete stderr is byte-identical.
 
-A case whose two lanes both fail, with the same status and the same diagnostic
-bytes, is a **passing** case and real evidence. A case where one lane traps and
-the other returns a value is the divergence #1362 guarantee 2 exists to forbid,
-and is the most severe verdict this receipt can produce.
+**That criterion has no authority in `spec/05` §8.** `[05-OBS-6]`'s
+*"A lane that cannot produce a root it owes SHALL emit [05-UNS-1] naming that
+root, the lane, and the reason"* does not supply it: "lane" there is the
+Tensor/Host lane (`[05-OBS-9]`: *"assign each entry its Tensor or Host lane"*),
+not eval-versus-compiled. Read as this document previously read it, the atom's
+requirement to name *the lane* would make byte-identical stderr impossible
+rather than mandatory. Nothing in §8 requires the eval process's and the
+compiled binary's diagnostic bytes to match.
 
-Nothing in the repository compares trap reasons across lanes today. The Voyage
-probe records exit status only and compares values solely for cases where eval
-succeeded and the binary exited 0. Trap parity is new coverage, not a
-reimplementation.
+The criterion is also already known to be too strong for the obvious candidate
+cases. Measured at the pinned revisions, a program both lanes reject on the same
+unbound variable produces:
+
+```text
+eval : error: Type errors:\n  UnboundVariable: ...
+build: error: Check errors: Type errors:\n  UnboundVariable: ...
+```
+
+— the same rejection for the same reason, differing by one prefix. Under the
+criterion above that is a `trap-reason-mismatch` on a spec-conforming pair.
+
+Nothing is mis-verdicted today because manifest version 2 declares no trap case
+(§10). What the receipt does claim, and what does rest on #1362 guarantee 2
+rather than on a formatting choice, is the asymmetric case: **a case where one
+lane traps and the other returns a value is a divergence**, and it is the most
+severe verdict the receipt produces. That judgement needs no byte comparison.
+
+Deciding the trap criterion properly — whether it should require comparable
+pipeline positions, a normalised diagnostic identity, or a typed error code
+rather than raw bytes — is owed before the first trap case is admitted, and §10
+records it as residual rather than this section pretending it is settled.
+
+Nothing in the repository compares trap reasons across lanes today; the Voyage
+probe records exit status only. So this is new coverage, but coverage of a
+criterion that is not yet the right one.
 
 ## 3. The comparison predicate
 
@@ -303,8 +351,11 @@ which cases do.
 
 ### 5.3 Exclusions are recorded per case, with a reason
 
-Every file discovered in a pinned corpus that is not a required case carries an
-exclusion reason from a closed set (§6.3). A count is not a reason.
+Every Chelis source discovered in a pinned corpus that is not a required case
+carries an exclusion reason from a closed set (§6.3). A count is not a reason.
+Discovery walks `.ch` and `.dp`, the two forms `chelis eval --file` accepts; it
+previously globbed `.ch` alone, which made this sentence false for the two Deep
+programs Sonar carries at its pinned revision.
 
 The corpus already demonstrates why. Of the Voyage captures, six programs are
 rejected by `eval` itself, and **four of those six are rejected on the `sig`
@@ -329,6 +380,10 @@ The manifest carries `manifest_version`, an integer incremented by any change to
 the required-case set, to a pinned corpus revision, or to an expected outcome. A
 receipt records the manifest version it ran. `demo-path` assignments cite the
 manifest version that justifies them (§7).
+
+Version 2 added the two Sonar `.dp` exclusion rows that discovery began finding
+when it stopped globbing `.ch` alone (§5.1 rule 3); the required-case set is
+unchanged from version 1.
 
 ### 6.2 Case rows
 
@@ -362,7 +417,7 @@ exit status carries that distinction.
 |---:|---|
 | 0 | `RECEIPT: PASS`. The only acceptance. |
 | 1 | at least one untracked failure: a new divergence, a vacuous run, or a pin mismatch |
-| 2 | the manifest is malformed; no verdict was produced |
+| 2 | the run could not start — an unusable invocation or a malformed manifest — so no verdict exists. `argparse` shares this code for a usage error, and the table is stated at that granularity rather than pretending to distinguish them |
 | 3 | every failure is a tracked known divergence |
 
 A row may not carry `known_divergence` without an issue number. A case that
@@ -372,8 +427,8 @@ something to swallow.
 
 ### 6.3 Exclusion rows
 
-Every non-case file in a pinned corpus is an exclusion row with `path` and a
-`reason` from this closed set:
+Every non-case Chelis source in a pinned corpus — `.ch` or `.dp` — is an
+exclusion row with `path` and a `reason` from this closed set:
 
 | reason | meaning |
 |---|---|
@@ -422,10 +477,20 @@ stated condition.
 One command, per `AGENTS.md` §"One Acceptance Oracle Per Phase":
 
 ```sh
-python3 scripts/core_fragment_parity_receipt.py \
-    --manifest tests/corpus/core_fragment_parity/manifest.json \
+.venv/bin/python scripts/core_fragment_parity_receipt.py \
+    --chelis <a sealed-runtime chelis binary> \
+    --corpus c-note=<pinned c-note checkout> \
+    --corpus sonar=<pinned sonar checkout> \
     --out target/parity-receipt
 ```
+
+`--chelis` and at least one `--corpus` are required; the manifest defaults to
+`tests/corpus/core_fragment_parity/manifest.json`. Build the compiler under test
+with `cargo build -p chelis-cli --bin chelis --features sealed-runtime`, and to a
+target directory a default-feature build will not overwrite — §4.2's pin check
+fails a development-mode binary, and an ordinary `cargo run -p chelis-cli`
+elsewhere in the repository silently replaces `target/debug/chelis` with an
+unsealed one.
 
 Acceptance is **exit 0 with a final `RECEIPT: PASS` line**. The receipt artifact
 is written to `--out` and records the pins of §4, the per-case verdicts, the
@@ -444,29 +509,31 @@ running it.
 
 ## 9. First receipt, and what it measured
 
-Manifest version 1, run on macOS `arm64` with a sealed-runtime `chelis` at repo
-revision `35a2b7101`, staging receipt `mode: sealed`, runtime archive
-`89f32a31…`, over `Chelis-Lang/c-note` at `960a9beb` and `Chelis-Lang/sonar` at
-`9b26133f`:
+Manifest version 2, run on macOS `arm64` with a sealed-runtime `chelis` built
+from this branch, staging receipt `mode: sealed`, runtime archive `de658fb0…`,
+over `Chelis-Lang/c-note` at `960a9beb` and `Chelis-Lang/sonar` at `9b26133f`:
 
 | | |
 |---|---:|
-| `.ch` files discovered across both corpora | 130 |
+| Chelis sources discovered across both corpora | 132 |
 | required cases | 13 |
-| exclusions, each with a recorded reason | 117 |
+| exclusions, each with a recorded reason | 119 |
 | unclassified files | 0 |
 | cases agreeing byte-exactly | 11 |
 | cases agreeing with no truncated root | 11 |
 | lane splits | 2 |
 
+Exit 3: both failures are tracked known divergences, and #1362's ship rule still
+blocks while they are open.
+
 Cases: 11 from C Note, 2 from Sonar. Exclusions by corpus and reason:
 
 | reason | c-note | sonar |
 |---|---:|---:|
-| `prove-only` | 39 | 14 |
+| `prove-only` | 39 | 15 |
 | `unmeasurable-by-probe` | 24 | 0 |
 | `retired-syntax` | 0 | 23 |
-| `parse-rejected` | 8 | 5 |
+| `parse-rejected` | 8 | 6 |
 | `library-only` | 3 | 1 |
 
 Two rows in that table are the near-term levers on the case count, and they are
@@ -480,55 +547,60 @@ harness debt and migration debt respectively, not language defects:
   admit all 24 as candidate cases. Recorded rather than blamed on the compiler.
 - **`retired-syntax` is 23 of 23 Sonar's**, all on the pre-0.19 integer dtype
   spelling; the diagnostic names its own migration
-  (`chelis migrate surf --from 0.18`). Sonar contributes 2 cases out of 45 files
+  (`chelis migrate surf --from 0.18`). Sonar contributes 2 cases out of 47 files
   almost entirely for this reason, so migrating it is the single largest
   available increase in the corpus.
 
-Two results are worth recording because they are not what the trackers predict.
+### 9.1 What the two lane splits are, and what they are not
 
-**The two lane splits are not the mechanism chelis#2379 records, and both
-corpora are untouched by chelis#2782's FMA divergence on this platform.**
+`greeks.ch` and `black_scholes/call.ch` both take a scalar-`wrt` gradient of a
+named top-level `def` — the form #1362's direct-transform table lists as
+"Supported; exact on both lanes" — and `build --target c` refuses while `eval`
+returns a value. All six c-note build refusals emit the same text, because
+chelis#2755 records that the refusal message is generic; they are not one
+mechanism.
 
-For the first: `greeks.ch` and `black_scholes/call.ch` both take a scalar-`wrt`
-gradient of a named top-level `def` — the form #1362's direct-transform table
-lists as "Supported; exact on both lanes" — and `build --target c` refuses while
-`eval` returns a value. chelis#2755 records that the refusal message is generic,
-so the six c-note refusals look identical; they are not. Narrowed against
-controls on both 0.18.11 and current `main`, with identical results:
+What is established, on both 0.18.11 and current `main`:
 
-```chelis
-def f(s: f32, k: f32) -> f32 = add(s, 1.0)              -- builds
-def f(s: f32, k: f32) -> f32 = add(s, cast(1.0, f32))   -- refused
-```
+- **A `cast` node in the differentiated body is sufficient to cause the
+  refusal.** `add(s, 1.0)` builds; `add(s, cast(1.0, f32))` does not. So do
+  `add(cast(s, f32), k)`, `add(s, cast(1, f32))`, `f = cast(1.0, f32)`, and
+  `div(mul(s, k), add(k, cast(1.0, f32)))`. `mul`, `add`, `div`, `sub`, `neg`,
+  nesting depth, and `add(k, k)` are all innocent.
+- **chelis#2379's stated discriminator is wrong.** It names "local binding
+  structure"; `{ a = add(s, k)  mul(a, k) }` builds. And #2379's own documented
+  *passing* control, `div(mul(s, k), add(k, cast(1.0, f32)))`, does not build on
+  the release it names.
 
-with `def df(s: f32, k: f32) -> f32 = grad(f, wrt=s)(s, k)` and `out = df(…)`
-unchanged. `mul`, `add`, `div` and nesting depth are all innocent: `add(k, k)`
-builds and `add(k, cast(1.0, f32))` does not, in numerator, denominator and
-operand position alike, and `f = cast(1.0, f32)` alone is refused. So the
-discriminator is **a `cast` node anywhere in the scalar-`wrt` differentiated
-body**, not #2379's stated "local binding structure" — and #2379's own documented
-*passing* control, `div(mul(s, k), add(k, cast(1.0, f32)))`, does not build on the
-release it names. The manifest cites #2379 because it is the open issue on that
-surface; correcting its discriminator is #2379's business, not this document's.
-This also explains why c-note is hit so hard and Voyage's corpus is not: c-note's
-financial fixtures spell every constant `cast(0.5, f32)`.
+What is **not** established, and what this document previously claimed: that
+`cast` is *the* discriminator. It is not. `add(abs(s), k)`, `add(relu(s), k)`
+and `if (s >= 0.0) then add(s, k) else k` produce the same refusal with no
+`cast` present, and `greeks.ch` with every `cast(X, f32)` textually removed
+still evals and still refuses to build — its `if` inside `normal_cdf` refuses
+independently. Only `call.ch`'s refusal is cast-attributable: with casts removed
+it builds and prints `price = 19.98864 | delta = 0.11209473`.
 
-For the second: every one of the 13 cases produces identical verdicts under the
-`emitted` and `no-fp-contract` profiles, so on clang/arm64 these cases are
-contraction-insensitive. That does not contradict chelis#2782, whose 91-of-190
-measurement was gcc on Linux aarch64 over recursive EMA/RSI/ATR/MACD series;
-c-note's closed-form pricing has no such recursion. It does mean **#2782 earns
-`demo-path` from the Voyage third of the corpus, not from these two**, which is a
-sharper claim than the one §4.3 would support on its own.
+The refusal message itself points at the real shape — *"make sure that function
+uses only pure tensor ops (sum, add, mul, einsum, etc.)"* — so this is an
+op/form allowlist in the C lane's grad lowering. This document does **not** state
+that allowlist: the probes above are a handful of data points, not a sweep, and
+asserting a complete list from them would repeat the error it is correcting.
 
-The receipt exits 3: both failures are tracked, and #1362's ship rule still
-blocks while they are open.
+### 9.2 chelis#2782 does not earn `demo-path` from these corpora
+
+Every one of the 13 cases produces identical verdicts under the `emitted` and
+`no-fp-contract` profiles, so on clang/arm64 these cases are
+contraction-insensitive. That does not contradict chelis#2782, whose
+91-of-190 measurement was gcc on Linux aarch64 over recursive EMA/RSI/ATR/MACD
+series; c-note's closed-form pricing has no such recursion. It does mean **#2782
+earns `demo-path` from the Voyage third of the corpus, not from these two**, and
+the Voyage third is not in manifest version 2 (§10).
 
 ## 10. Residual scope
 
 Named, so a reader does not mistake this document for more than it is:
 
-- **The Voyage third is not in manifest version 1.** The schema carries the
+- **The Voyage third is not in manifest version 2.** The schema carries the
   `derived` source kind that pins `(repo, rev, generator, task, index)` for it,
   and the runner materializes such a case, but no Voyage rows are declared yet:
   its cases are captured at run time by `probes/qcb-compiled/driver.py`'s
@@ -547,7 +619,14 @@ Named, so a reader does not mistake this document for more than it is:
   records the measured burden at the pinned revisions. Until it is done, those
   files are `retired-syntax` exclusions rather than cases, and the required-case
   counts are correspondingly smaller than the file counts.
-- **Manifest version 1 declares no `trap` case, so the trap channel of §2.3 is
+- **The trap criterion itself is undecided, not merely untested.** §2.3 records
+  that byte-identical stderr has no authority in `spec/05` §8 and is already
+  known to be too strong for the obvious candidate cases: two lanes rejecting the
+  same program for the same reason differ by an `error: Check errors: ` prefix.
+  Choosing the real criterion — comparable pipeline positions, a normalised
+  diagnostic identity, or a typed error code — is owed before the first trap case
+  is admitted.
+- **Manifest version 2 declares no `trap` case, so the trap channel of §2.3 is
   exercised only by unit tests.** Every one of the 13 required cases is
   `expected: "value"`. The trap comparison is implemented and its decision logic
   is covered positively and negatively in
@@ -558,6 +637,11 @@ Named, so a reader does not mistake this document for more than it is:
   `prove-only` exclusions because they own no root to observe. Admitting a trap
   case needs someone to decide the expected trap per probe, which is §6.2's
   `outcome-undetermined` boundary doing its job rather than a gap in it.
+- **A default-feature `cargo` invocation anywhere in the repository overwrites
+  `target/debug/chelis` with an unsealed binary**, which silently invalidates a
+  recorded receipt's pins. §8 says to build the compiler under test to a target
+  directory such a rebuild will not reach. Nothing enforces that; the pin check
+  catches the consequence on the next run rather than preventing it.
 - **A compiled-lane refusal at `build` and a trap at `run` are recorded as
   distinct stages but classified alike.** The verdict carries
   `compiled_stage` (`build`, `compile`, or `run`) so a reader can tell them

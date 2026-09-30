@@ -110,6 +110,7 @@ VERDICT_LANE_SPLIT = "lane-split"
 VERDICT_TRAP_REASON_MISMATCH = "trap-reason-mismatch"
 VERDICT_TRAP_STATUS_MISMATCH = "trap-status-mismatch"
 VERDICT_OBSERVATION_MISMATCH = "observation-mismatch"
+VERDICT_MISSING_DECLARED_ROOT = "missing-declared-root"
 VERDICT_WRONG_OUTCOME = "wrong-outcome"
 VERDICT_HARNESS_FAILURE = "harness-failure"
 VERDICT_EXPECTED_FAILING = "expected-failing"
@@ -121,6 +122,7 @@ UNTRACKED_FAILING_VERDICTS = (
     VERDICT_TRAP_REASON_MISMATCH,
     VERDICT_TRAP_STATUS_MISMATCH,
     VERDICT_OBSERVATION_MISMATCH,
+    VERDICT_MISSING_DECLARED_ROOT,
     VERDICT_WRONG_OUTCOME,
     VERDICT_HARNESS_FAILURE,
 )
@@ -133,9 +135,14 @@ UNTRACKED_FAILING_VERDICTS = (
 FAILING_VERDICTS = UNTRACKED_FAILING_VERDICTS + (VERDICT_EXPECTED_FAILING,)
 
 # Exit codes. 0 is the only acceptance.
+#
+# 2 means "the run could not start, so no verdict exists". A malformed manifest
+# and an unusable invocation are the same thing to a reader, and argparse also
+# exits 2 on a usage error, so the code is documented at that granularity
+# rather than pretending to distinguish them.
 EXIT_PASS = 0
 EXIT_UNTRACKED_FAILURE = 1
-EXIT_MANIFEST_ERROR = 2
+EXIT_COULD_NOT_START = 2
 EXIT_TRACKED_FAILURE_ONLY = 3
 
 
@@ -473,12 +480,27 @@ def classify_case(
                 f"(eval exit {eval_result.returncode}, "
                 f"compiled exit {compiled_result.returncode})",
             )
-        if streams_agree(eval_result.stdout, compiled_result.stdout):
-            return (VERDICT_AGREE, "")
-        return (
-            VERDICT_OBSERVATION_MISMATCH,
-            _first_difference(eval_result.stdout, compiled_result.stdout),
-        )
+        if not streams_agree(eval_result.stdout, compiled_result.stdout):
+            return (
+                VERDICT_OBSERVATION_MISMATCH,
+                _first_difference(eval_result.stdout, compiled_result.stdout),
+            )
+        # Two agreeing streams are not evidence unless they carry the
+        # observation the manifest says the case owes. Without this, a
+        # regression that silences root rendering in BOTH lanes reports whole-
+        # corpus agreement and exits 0 -- and flips every `known_divergence`
+        # row to `unexpected-pass`, which §6.2 reads as "drop the `demo-path`
+        # tag". That is the vacuous pass §5 exists to make impossible, and
+        # `roots` was already declared per case and never read.
+        missing = missing_roots(case, eval_result.stdout)
+        if missing:
+            return (
+                VERDICT_MISSING_DECLARED_ROOT,
+                f"both lanes agree, but the case declares root(s) "
+                f"{missing} that appear in neither lane's observation; "
+                f"agreement over an absent observation is not evidence",
+            )
+        return (VERDICT_AGREE, "")
 
     # case.expected == "trap"
     if not eval_trapped:
@@ -511,6 +533,12 @@ def apply_known_divergence(case: CaseRow, verdict: str, detail: str) -> tuple[st
     if case.known_divergence is None:
         return (verdict, detail)
     issue = case.known_divergence["issue"]
+    if verdict == VERDICT_MISSING_DECLARED_ROOT:
+        # A silenced observation channel is never a tracked divergence. Without
+        # this, a blackout on a `known_divergence` row is relabelled
+        # `expected-failing` and the row that was supposed to stay visible is
+        # the one that hides the blackout.
+        return (verdict, detail)
     if verdict in UNTRACKED_FAILING_VERDICTS:
         return (
             VERDICT_EXPECTED_FAILING,
@@ -555,6 +583,22 @@ def _first_difference(reference: bytes, candidate: bytes) -> str:
         f"first difference at byte {offset}; "
         f"eval {window(reference)!r} vs compiled {window(candidate)!r}"
     )
+
+
+def missing_roots(case: CaseRow, stdout: bytes) -> list[str]:
+    """Declared roots that do not appear as a `name = ` label in `stdout`.
+
+    [05-OBS-6]: every root renders with a `name = value` label at every exit in
+    both lanes. A declared root absent from the rendering means the case is not
+    observing what the manifest says it observes.
+    """
+    rendered = stdout.decode("utf-8", errors="replace").splitlines()
+    labels = {
+        line.split(" = ", 1)[0]
+        for line in rendered
+        if " = " in line and not line.startswith((" ", "\t"))
+    }
+    return [root for root in case.roots if root not in labels]
 
 
 def observation_truncated(stdout: bytes) -> bool:
@@ -875,24 +919,21 @@ def execute_case(
             commands.append(compile_command)
             compile_result = runner.run_shell(compile_command, workdir)
             if compile_result.trapped:
-                return CaseVerdict(
-                    case_id=case.case_id,
-                    corpus=case.corpus,
-                    verdict=VERDICT_HARNESS_FAILURE,
-                    detail=(
-                        "the compile command the build printed failed, so the "
-                        "compiled lane produced no binary: "
-                        + compile_result.stderr.decode(
-                            "utf-8", errors="replace"
-                        ).strip()[-600:]
-                    ),
-                    commands=commands,
-                    eval_returncode=eval_result.returncode,
-                )
-            binary = workdir / "out" / "k"
-            commands.append(str(Path("out") / "k"))
-            compiled_result = runner.run([str(binary)], workdir)
-            compiled_stage = "run"
+                # The emitted C did not compile. That is the compiled lane
+                # failing, not the harness: "eval returns a value and the C the
+                # build emitted does not compile" is exactly a #1362
+                # guarantee-2 divergence, and attributing it to the harness
+                # would hide it. The receipt cannot tell an invalid artifact
+                # from a broken local toolchain, so it reports the loud
+                # direction: a toolchain that cannot compile anything makes
+                # every case lane-split, which is obvious rather than silent.
+                compiled_result = compile_result
+                compiled_stage = "compile"
+            else:
+                binary = workdir / "out" / "k"
+                commands.append(str(Path("out") / "k"))
+                compiled_result = runner.run([str(binary)], workdir)
+                compiled_stage = "run"
 
         verdict, detail = classify_case(case, eval_result, compiled_result)
         verdict, detail = apply_known_divergence(case, verdict, detail)
@@ -1001,7 +1042,15 @@ def collect_pins(
             if chelis.is_file()
             else None,
             "sealed_runtime": _sealed_from_staging(staging),
-            "repo_revision": _git_revision(REPO_ROOT),
+            # NOT the compiler's provenance. This is the revision of the
+            # checkout the receipt ran FROM, which is the harness's identity.
+            # It was previously called `repo_revision` under §4.2's "the git
+            # revision ... for the compiler under test", which made it a field
+            # that lies whenever `--chelis` points outside this checkout -- an
+            # installed toolchain still recorded this worktree's HEAD. The
+            # compiler's own identity is its `version_string`, `sha256`, and
+            # the staging receipt's `chelis_version` and archive digest.
+            "harness_repo_revision": _git_revision(REPO_ROOT),
             "staging_receipt": staging,
         },
         "manifest_version": manifest.manifest_version,
@@ -1032,12 +1081,26 @@ def pin_failures(pins: dict) -> list[str]:
             "the compiler under test produced no `--version` output; the "
             "receipt cannot state which binary it ran"
         )
-    if compiler.get("sealed_runtime") is False:
+    # §4.2: only a positively-read `sealed` mode clears this. `None` means the
+    # probe could not tell, and an unpinnable compiler is not evidence -- the
+    # installed release toolchains write no staging receipt at all, so treating
+    # `None` as acceptable made the gate inert for exactly the compiler class
+    # it exists for.
+    sealed = compiler.get("sealed_runtime")
+    if sealed is not True:
+        unknown = sealed is None
         failures.append(
-            "the compiler under test is not a sealed-runtime build: it "
-            "re-checks its source checkout on every `build`, so a concurrent "
-            "writer can change its behaviour mid-run while its hash stays "
-            "constant (§4.2). Rebuild with `--features sealed-runtime`"
+            (
+                "the receipt could not read the compiler's build mode from its "
+                "staging receipt (`chelis_runtime.receipt.json`), so the build "
+                "cannot be pinned"
+                if unknown
+                else "the compiler under test is not a sealed-runtime build"
+            )
+            + ": an unsealed build re-checks its source checkout on every "
+            "`build`, so a concurrent writer can change its behaviour mid-run "
+            "while its hash stays constant (§4.2). Build the compiler under "
+            "test with `--features sealed-runtime`"
         )
     for corpus, entry in sorted(pins["corpora"].items()):
         if entry.get("root") is None:
@@ -1065,11 +1128,18 @@ def pin_failures(pins: dict) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+# Both Chelis source extensions `chelis eval --file` accepts. Globbing `.ch`
+# alone made §5.3's "every file discovered in a pinned corpus" false: Sonar
+# carries `.dp` programs the eval lane reads.
+DISCOVERED_SUFFIXES = (".ch", ".dp")
+
+
 def discover_committed_paths(corpus_root: Path) -> set[str]:
-    """Every `.ch` file in a committed corpus, as corpus-relative POSIX paths."""
+    """Every Chelis source in a committed corpus, as corpus-relative POSIX paths."""
     return {
         str(path.relative_to(corpus_root).as_posix())
-        for path in corpus_root.rglob("*.ch")
+        for suffix in DISCOVERED_SUFFIXES
+        for path in corpus_root.rglob(f"*{suffix}")
         if ".git" not in path.parts
     }
 
@@ -1241,7 +1311,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print("RECEIPT: FAIL", file=sys.stdout)
-        return EXIT_MANIFEST_ERROR
+        return EXIT_COULD_NOT_START
 
     corpus_roots: dict[str, Path] = {}
     for spec in args.corpus:
@@ -1251,14 +1321,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"error: --corpus expects NAME=PATH, got {spec!r}",
                 file=sys.stderr,
             )
-            return EXIT_MANIFEST_ERROR
+            return EXIT_COULD_NOT_START
         if name not in KNOWN_CORPORA:
             print(
                 f"error: unknown corpus {name!r}; known corpora are "
                 f"{sorted(KNOWN_CORPORA)}",
                 file=sys.stderr,
             )
-            return EXIT_MANIFEST_ERROR
+            return EXIT_COULD_NOT_START
         corpus_roots[name] = Path(path).resolve()
 
     runner = Runner(chelis=args.chelis.resolve(), timeout_seconds=args.timeout)

@@ -117,32 +117,74 @@ class ComparatorEquivalence(unittest.TestCase):
 
     SOURCE = REPO_ROOT / "crates" / "chelis-types" / "src" / "agreement.rs"
 
-    def test_production_comparator_is_still_byte_exact(self):
-        text = self.SOURCE.read_text(encoding="utf-8")
+    # The whole function, whitespace-normalised. An exact match is the only
+    # form of this check that holds: a keyword blacklist ("ulp", "tolerance",
+    # …) is evadable by a tolerance branch that happens to use none of those
+    # words -- `} else if close_enough(a, b) { Ok(ByteExact) }`, or a
+    # delegation to the crate's own `compare_rendered_elements`, both slip
+    # straight through one. Round 1 demonstrated exactly that.
+    EXPECTED_BODY = (
+        "pub fn compare_exact_observations( context: &str, reference: &str, "
+        "candidate: &str, ) -> Result<AgreementOutcome, AgreementError> { "
+        "if reference.as_bytes() == candidate.as_bytes() { "
+        "Ok(AgreementOutcome::ByteExact) } else { "
+        "Err(AgreementError::ExactMismatch { context: context.to_string(), "
+        "reference: reference.to_string(), candidate: candidate.to_string(), "
+        "}) } }"
+    )
+
+    @classmethod
+    def comparator_body(cls) -> str | None:
+        text = cls.SOURCE.read_text(encoding="utf-8")
         match = re.search(
             r"pub fn compare_exact_observations\((?:.|\n)*?\n\}", text
         )
+        return " ".join(match.group(0).split()) if match else None
+
+    def test_production_comparator_is_still_byte_exact(self):
+        body = self.comparator_body()
         self.assertIsNotNone(
-            match,
+            body,
             "compare_exact_observations is no longer in agreement.rs; the "
             "receipt's equivalence claim in §3.1 has to be re-earned",
         )
-        body = match.group(0)
-        self.assertIn(
-            "reference.as_bytes() == candidate.as_bytes()",
+        self.assertEqual(
             body,
-            "compare_exact_observations is no longer a byte comparison, so the "
-            "receipt's Python byte comparison is no longer the same predicate. "
-            "Re-read §3.1 before changing this test.",
+            self.EXPECTED_BODY,
+            "compare_exact_observations is no longer the exact byte comparison "
+            "the receipt's §3.1 equivalence claim rests on. Any change here -- "
+            "including one that adds a branch without using the word "
+            "'tolerance' -- means the Python byte comparison may no longer be "
+            "the same predicate. Re-read §3.1 and re-earn the claim rather "
+            "than updating this constant to match.",
         )
-        # Negative half: prove the check would notice a tolerance branch.
-        for forbidden in ("ulp", "tolerance", "abs(", "epsilon"):
+
+    def test_the_lock_rejects_an_added_branch_that_names_no_tolerance_word(self):
+        # The negative control for the check above, and the exact hole round 1
+        # found in its predecessor: a tolerance branch mentioning none of
+        # "ulp"/"tolerance"/"abs("/"epsilon" must still be rejected.
+        evasive = self.EXPECTED_BODY.replace(
+            "} else { Err(AgreementError::ExactMismatch",
+            "} else if close_enough(reference, candidate) { "
+            "Ok(AgreementOutcome::ByteExact) } else { "
+            "Err(AgreementError::ExactMismatch",
+        )
+        self.assertNotEqual(evasive, self.EXPECTED_BODY)
+        for word in ("ulp", "tolerance", "abs(", "epsilon"):
             self.assertNotIn(
-                forbidden,
-                body.lower(),
-                f"compare_exact_observations now mentions {forbidden!r}; the "
-                f"exact branch may have gained a tolerance path",
+                word,
+                evasive.lower(),
+                "the evasive mutation must name no blacklisted word, or it "
+                "does not exercise the hole it is a control for",
             )
+
+    def test_the_lock_rejects_a_reformatted_but_semantically_changed_body(self):
+        # Whitespace normalisation must not launder a real change.
+        changed = self.EXPECTED_BODY.replace(
+            "reference.as_bytes() == candidate.as_bytes()",
+            "reference.trim() == candidate.trim()",
+        )
+        self.assertNotEqual(changed, self.EXPECTED_BODY)
 
     def test_streams_agree_matches_byte_equality(self):
         self.assertTrue(receipt.streams_agree(b"result = 49.0\n", b"result = 49.0\n"))
@@ -476,6 +518,97 @@ class Classification(unittest.TestCase):
         self.assertEqual(verdict, receipt.VERDICT_AGREE)
 
 
+class DeclaredRootPresence(unittest.TestCase):
+    """§5's third clause: agreement over an absent observation is not evidence.
+
+    Round 1's uncovered vacuity route. `roots` was validated at parse time and
+    never read again, so two agreeing empty streams reported whole-corpus
+    agreement, exited 0, and flipped every `known_divergence` row to
+    `unexpected-pass` -- which §6.2 reads as "drop the `demo-path` tag".
+    """
+
+    def test_agreement_with_every_declared_root_present_passes(self):
+        out = b"price = 1.0\ndelta = 2.0\n"
+        verdict, detail = receipt.classify_case(
+            case_row(roots=["price", "delta"]), lane(stdout=out), lane(stdout=out)
+        )
+        self.assertEqual(verdict, receipt.VERDICT_AGREE)
+        self.assertEqual(detail, "")
+
+    def test_two_agreeing_empty_streams_are_not_agreement(self):
+        verdict, detail = receipt.classify_case(
+            case_row(roots=["result"]), lane(stdout=b""), lane(stdout=b"")
+        )
+        self.assertEqual(verdict, receipt.VERDICT_MISSING_DECLARED_ROOT)
+        self.assertIn("result", detail)
+
+    def test_one_missing_root_among_several_is_caught(self):
+        out = b"price = 1.0\n"
+        verdict, detail = receipt.classify_case(
+            case_row(roots=["price", "delta"]), lane(stdout=out), lane(stdout=out)
+        )
+        self.assertEqual(verdict, receipt.VERDICT_MISSING_DECLARED_ROOT)
+        self.assertIn("delta", detail)
+        self.assertNotIn("'price'", detail)
+
+    def test_a_missing_root_is_not_absorbed_by_a_known_divergence(self):
+        # A silenced observation channel is never a tracked divergence. Asserting
+        # only its membership in UNTRACKED_FAILING_VERDICTS was not enough -- that
+        # is exactly what makes a verdict RELABELLABLE, so a blackout on a
+        # `known_divergence` row was being reported as `expected-failing` and the
+        # row meant to stay visible was hiding the blackout.
+        verdict, detail = receipt.apply_known_divergence(
+            case_row(known_divergence={"issue": 2379}),
+            receipt.VERDICT_MISSING_DECLARED_ROOT,
+            "both lanes agree, but the case declares root(s) ['delta']",
+        )
+        self.assertEqual(verdict, receipt.VERDICT_MISSING_DECLARED_ROOT)
+        self.assertNotIn("chelis#2379", detail)
+
+    def test_other_failures_on_a_known_row_are_still_absorbed(self):
+        # The negative partner: the exemption is specific to a missing root.
+        verdict, detail = receipt.apply_known_divergence(
+            case_row(known_divergence={"issue": 2379}),
+            receipt.VERDICT_LANE_SPLIT,
+            "compiled lane trapped",
+        )
+        self.assertEqual(verdict, receipt.VERDICT_EXPECTED_FAILING)
+        self.assertIn("chelis#2379", detail)
+
+    def test_a_missing_root_still_fails_the_receipt(self):
+        self.assertIn(
+            receipt.VERDICT_MISSING_DECLARED_ROOT, receipt.UNTRACKED_FAILING_VERDICTS
+        )
+        self.assertIn(receipt.VERDICT_MISSING_DECLARED_ROOT, receipt.FAILING_VERDICTS)
+
+    def test_a_trap_case_owes_no_rendered_root(self):
+        # The negative partner: the check must not fire on a trap case, whose
+        # lanes legitimately render nothing.
+        verdict, _ = receipt.classify_case(
+            case_row(expected="trap", roots=["result"]),
+            lane(returncode=1, stderr=b"error: x\n"),
+            lane(returncode=1, stderr=b"error: x\n"),
+        )
+        self.assertEqual(verdict, receipt.VERDICT_AGREE)
+
+    def test_a_declared_root_is_matched_by_label_not_substring(self):
+        # `delta` must not be satisfied by `call_delta = …`; a label is the
+        # whole name before ` = ` at line start.
+        out = b"call_delta = 2.0\n"
+        verdict, _ = receipt.classify_case(
+            case_row(roots=["delta"]), lane(stdout=out), lane(stdout=out)
+        )
+        self.assertEqual(verdict, receipt.VERDICT_MISSING_DECLARED_ROOT)
+
+    def test_missing_roots_helper_reports_exactly_the_absent_names(self):
+        self.assertEqual(
+            receipt.missing_roots(case_row(roots=["a", "b"]), b"a = 1\n"), ["b"]
+        )
+        self.assertEqual(
+            receipt.missing_roots(case_row(roots=["a"]), b"a = 1\n"), []
+        )
+
+
 class KnownDivergenceRelabelling(unittest.TestCase):
     def test_divergence_on_a_known_row_becomes_expected_failing(self):
         verdict, detail = receipt.apply_known_divergence(
@@ -734,12 +867,29 @@ class PinChecking(unittest.TestCase):
         failures = receipt.pin_failures(pins)
         self.assertTrue(any("sealed-runtime" in f for f in failures))
 
-    def test_an_unknown_seal_state_does_not_fail(self):
-        # `None` means the probe could not tell. That is reported, not treated
-        # as proof of either state.
+    def test_an_unknown_seal_state_fails(self):
+        # `None` means the probe could not tell, and an unpinnable compiler is
+        # not evidence. Round 1 found this pinned open: the installed release
+        # toolchains write no staging receipt at all, so `None` is the common
+        # case, and accepting it made the gate inert for exactly the
+        # release-candidate compiler class §4.2 exists for.
         pins = self.pins()
         pins["compiler"]["sealed_runtime"] = None
-        self.assertEqual(receipt.pin_failures(pins), [])
+        failures = receipt.pin_failures(pins)
+        self.assertTrue(any("could not read" in f for f in failures))
+
+    def test_only_a_positively_read_sealed_mode_clears_the_pin_check(self):
+        # The three-way control: True clears, False fails, None fails.
+        for value, should_clear in ((True, True), (False, False), (None, False)):
+            pins = self.pins()
+            pins["compiler"]["sealed_runtime"] = value
+            failures = receipt.pin_failures(pins)
+            self.assertEqual(
+                failures == [],
+                should_clear,
+                f"sealed_runtime={value!r} must "
+                f"{'clear' if should_clear else 'fail'} the pin check",
+            )
 
     def test_a_missing_corpus_checkout_fails(self):
         pins = self.pins()
@@ -828,6 +978,31 @@ class StagingReceiptMode(unittest.TestCase):
                 Path("/tmp/chelis"), BadRunner(chelis=Path("/tmp/chelis"))
             )
         )
+
+
+class RecordedProvenance(unittest.TestCase):
+    """§4.2's compiler fields must not include one that can lie (round 1 F5)."""
+
+    def test_the_harness_revision_is_named_as_the_harness_revision(self):
+        # It used to be `repo_revision` under "the git revision for the
+        # compiler under test", so pointing --chelis at an installed toolchain
+        # recorded this worktree's HEAD as the compiler's provenance.
+        source = Path(receipt.__file__).read_text(encoding="utf-8")
+        self.assertIn('"harness_repo_revision"', source)
+        self.assertNotIn('"repo_revision"', source)
+
+    def test_pin_failures_never_consults_the_harness_revision(self):
+        # The negative half: the field is recorded, not used as compiler
+        # evidence, so removing it cannot change a verdict.
+        pins = {
+            "compiler": {
+                "version_string": "chelis 0.19.0",
+                "sealed_runtime": True,
+                "harness_repo_revision": None,
+            },
+            "corpora": {},
+        }
+        self.assertEqual(receipt.pin_failures(pins), [])
 
 
 class CompileCommand(unittest.TestCase):
@@ -1232,6 +1407,38 @@ class EndToEnd(unittest.TestCase):
         verdict = receipt.execute_case(case_row(), self.corpus, runner, "emitted")
         self.assertEqual(verdict.compiled_stage, "build")
 
+    def test_a_compile_failure_is_the_compiled_lane_trapping_at_compile(self):
+        # Round 1: this used to short-circuit to `harness-failure` with no
+        # stage, so "eval returns a value and the emitted C does not compile" --
+        # a #1362 guarantee-2 divergence -- was attributed to the harness.
+        class BadCompiler(FakeRunner):
+            def run_shell(self, command, cwd):
+                self.shell_commands.append(command)
+                return lane(1, stderr=b"error: use of undeclared identifier\n")
+
+        runner = BadCompiler(
+            eval_result=lane(stdout=b"result = 1\n"),
+            build_stdout=BUILD_STDOUT,
+            binary_result=lane(),
+        )
+        verdict = receipt.execute_case(case_row(), self.corpus, runner, "emitted")
+        self.assertEqual(verdict.verdict, receipt.VERDICT_LANE_SPLIT)
+        self.assertEqual(verdict.compiled_stage, "compile")
+        self.assertTrue(verdict.comparable)
+
+    def test_every_documented_stage_value_is_reachable(self):
+        # §10 documents `build`, `compile` and `run`. Round 1 found "compile"
+        # appeared nowhere in the runner, so the documented set was wrong.
+        source = (
+            Path(receipt.__file__).read_text(encoding="utf-8")
+        )
+        for stage in ("build", "compile", "run"):
+            self.assertIn(
+                f'compiled_stage = "{stage}"',
+                source,
+                f"stage {stage!r} is documented but never assigned",
+            )
+
     def test_a_harness_failure_records_no_stage(self):
         runner = FakeRunner(
             eval_result=lane(stdout=b"result = 1\n"),
@@ -1249,7 +1456,9 @@ class EndToEnd(unittest.TestCase):
             build_stdout=BUILD_STDOUT,
             binary_result=lane(stdout=truncated),
         )
-        verdict = receipt.execute_case(case_row(), self.corpus, runner, "emitted")
+        verdict = receipt.execute_case(
+            case_row(roots=["t"]), self.corpus, runner, "emitted"
+        )
         self.assertEqual(verdict.verdict, receipt.VERDICT_AGREE)
         self.assertTrue(verdict.truncated)
 
@@ -1266,6 +1475,23 @@ class Discovery(unittest.TestCase):
                 receipt.discover_committed_paths(root),
                 {"a.ch", "fixtures/deep/b.ch"},
             )
+
+    def test_discovers_dp_programs_as_well_as_ch(self):
+        # Round 1: globbing `.ch` alone made §5.3's "every file discovered in a
+        # pinned corpus" false. `chelis eval --file` also reads `.dp`, and Sonar
+        # carries two such programs at the pinned revision.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.ch").write_text("", encoding="utf-8")
+            (root / "b.dp").write_text("", encoding="utf-8")
+            (root / "notes.md").write_text("", encoding="utf-8")
+            (root / "data.json").write_text("", encoding="utf-8")
+            self.assertEqual(
+                receipt.discover_committed_paths(root), {"a.ch", "b.dp"}
+            )
+
+    def test_the_discovered_suffix_set_is_exactly_the_two_source_forms(self):
+        self.assertEqual(set(receipt.DISCOVERED_SUFFIXES), {".ch", ".dp"})
 
     def test_skips_the_git_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
