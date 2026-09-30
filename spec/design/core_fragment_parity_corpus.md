@@ -709,6 +709,14 @@ Named, so a reader does not mistake this document for more than it is:
      chelis#2814 asks for the rule to be authored. Until it is, the Voyage third
      rests on an agreement that nothing pins.
 
+     One consequence for §7, recorded here rather than by adding a step there: a
+     Voyage divergence traceable to the two lanes resolving a relative path
+     differently is **chelis#2814's, not a `demo-path` row.** The receipt would
+     report it correctly as an `observation-mismatch` or a `lane-split` on a
+     pinned case, and §7 read literally would then tag it as a launch-gating
+     language defect, which would attribute a missing resolution rule to the
+     wrong owner.
+
   Until those rows land, #2782's `demo-path` justification rests on measurement
   recorded in that issue rather than on a row in this manifest (§9).
 - **Package-aware materialization is unbuilt**, which is what makes the 12
