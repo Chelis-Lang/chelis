@@ -36,6 +36,8 @@ import subprocess
 import sys
 from typing import Callable, Mapping, Sequence
 
+import ci_timing
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = REPO_ROOT / "scripts/runtime_extent_oracle_baseline.json"
@@ -4012,8 +4014,12 @@ def validate(
 
     head = exact_head_receipt(runner, require_clean=require_clean)
     for target in selected_targets:
-        completed = _run_text(runner, target.argv)
-        validate_target_receipt(target, completed)
+        with ci_timing.span(target.id, "runtime-extent-target") as timing:
+            timing["head"] = head
+            timing["phase"] = phase
+            timing["expected_tests"] = len(target.expected_tests)
+            completed = _run_text(runner, target.argv)
+            validate_target_receipt(target, completed)
     if registry is None and targets is None and phase in ("b", "final"):
         validate_claimed_producer_barrier_mutation(runner)
         validate_specializer_region_barrier_mutations(runner)

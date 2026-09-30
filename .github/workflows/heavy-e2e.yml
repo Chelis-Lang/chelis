@@ -480,6 +480,7 @@ jobs:
     permissions:
       contents: read
     env:
+      CHELIS_CI_TIMING_DIR: ${{ github.workspace }}/target/runtime-extent-timings
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
@@ -512,6 +513,15 @@ jobs:
       # beside the combined one.
       - name: Runtime extent oracle (completion)
         run: python scripts/runtime_extent_oracle.py --phase final
+
+      - name: Upload runtime extent target and case timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-extent-timings
+          path: target/runtime-extent-timings
+          if-no-files-found: warn
+          retention-days: 14
 
   generalize-sweep-oracle-shard:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}

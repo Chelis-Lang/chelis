@@ -10,10 +10,14 @@ import time
 def record(row):
     directory = os.environ.get("CHELIS_CI_TIMING_DIR")
     if directory:
-        destination = Path(directory)
-        destination.mkdir(parents=True, exist_ok=True)
-        with (destination / f"{os.getpid()}.jsonl").open("a") as output:
-            output.write(json.dumps({"pid": os.getpid(), **row}) + "\n")
+        try:
+            destination = Path(directory)
+            destination.mkdir(parents=True, exist_ok=True)
+            with (destination / f"{os.getpid()}.jsonl").open("a") as output:
+                output.write(json.dumps({"pid": os.getpid(), **row}) + "\n")
+        except OSError:
+            # Timing must not change the proof's execution or verdict.
+            pass
 
 
 @contextmanager

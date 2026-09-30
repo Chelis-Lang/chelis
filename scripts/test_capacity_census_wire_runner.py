@@ -16,6 +16,40 @@ from capacity_census_graph import GraphError
 
 
 class LibtestReceipts(unittest.TestCase):
+    def test_supervised_control_timings_keep_selected_failure_outcomes(self):
+        from capacity_census_wire_runner import _OwnedResult
+
+        class Controls(unittest.TestCase):
+            def test_pass(self):
+                self.assertTrue(True)
+
+            def test_fail(self):
+                self.fail("selected failure")
+
+        passing = Controls("test_pass")
+        failing = Controls("test_fail")
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"CHELIS_CI_TIMING_DIR": directory}):
+                receipt = _OwnedResult()
+                unittest.TestSuite((passing, failing)).run(receipt)
+            self.assertEqual(receipt.started, {passing.id(), failing.id()})
+            self.assertEqual(receipt.stopped, receipt.started)
+            self.assertEqual(
+                receipt.outcomes, {passing.id(): "passed", failing.id(): "failed"}
+            )
+            records = [
+                json.loads(line)
+                for path in Path(directory).glob("*.jsonl")
+                for line in path.read_text().splitlines()
+            ]
+            finishes = {row["name"]: row for row in records if row["event"] == "finish"}
+            self.assertEqual(set(finishes), receipt.started)
+            self.assertEqual(
+                {name: row["outcome"] for name, row in finishes.items()},
+                {passing.id(): "passed", failing.id(): "failed"},
+            )
+            self.assertTrue(all(row["seconds"] >= 0 for row in finishes.values()))
+
     def test_failed_native_execution_reports_its_actual_output(self):
         from capacity_census_wire_runner import run_libtest
 

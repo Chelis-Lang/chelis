@@ -2501,6 +2501,15 @@ reason = "the required script-unit job executes the changed partitioner and vali
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_timing.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit exercises timing outcomes and diagnostic write-failure handling"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/ci_failure_baseline.py"
 disposition = "owner"
 workflow = "ci.yml"

@@ -484,3 +484,14 @@ uploaded shard receipt also contains `census-timings/*.jsonl` for the nested
 commands. The directory is inside the receipt so a failed or partial shard
 can upload the timings it reached; no prior timing or build result satisfies a
 test obligation.
+
+The same diagnostic JSONL now names each selected runtime-extent target and
+each case in `claimed_extent_contract`, plus individual supervised capacity
+controls and the wire/binding verification stages. The runtime-extent job
+uploads `runtime-extent-timings` for full scheduled or selected manual runs;
+dtype and PR shard timing artifacts retain the capacity rows they execute.
+Each row has a kind and name, a start event, and a finish event with elapsed
+seconds and outcome. A start without a finish identifies interrupted work.
+Stages and subprocesses can overlap, so their seconds cannot be added to
+obtain job wall time. These rows are diagnostics outside the authoritative
+selection, evidence digests and pass/fail decisions.
