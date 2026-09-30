@@ -17,9 +17,7 @@ from . import _native
 
 ChelisError = _native.ChelisError
 
-_GPU_ERROR = (
-    "GPU tensors require chelis 3b-ii. See spec/design/chelis_phase3_plan.md."
-)
+_GPU_ERROR = "DLPack tensor conversion in the Python bindings requires a CPU tensor."
 
 _DLPACK_DEVICE_CPU = {1}
 _DLPACK_DEVICE_GPU = {2, 8, 10, 14, 16}
@@ -36,11 +34,8 @@ class Diagnostic:
     #: ``(offset, extent)`` into the checked source, or ``None`` when the
     #: producer supplied no location at all.
     #:
-    #: ``extent`` is ``None`` when the producer held only a coordinate and
-    #: measured no range. spec/04 [04-FIT-17] forbids the serializer inventing
-    #: one, so the wire distinguishes ``{"span": "point", ...}`` from
-    #: ``{"span": "range", ...}`` and this mirrors that: a ``0`` extent means a
-    #: measured empty range, which is not the same thing as an absent one.
+    #: ``extent`` is ``None`` when the location has no measured range. A zero
+    #: extent denotes a measured empty range and differs from a point location.
     span: tuple[int, int | None] | None
 
 
@@ -87,14 +82,13 @@ class CompileResult:
 
 @dataclass(frozen=True)
 class TensorValue:
-    """A decoded wire tensor (execution wire v4, spec/10 §3.2).
+    """A decoded Chelis tensor value.
 
-    ``dtype`` is the element dtype tag (``f64``/``f32``/``f16``/``bf16``/
-    ``int64``/``int32``/``int16``/``int8``/``bool``/``key``); ``data`` carries the
-    elements exactly at that dtype (Python ints for the integer families,
-    NumPy own-width scalars for the float families, ``ml_dtypes.bfloat16``
-    for bf16, bools for ``bool``, :class:`Key` for ``key``). Float transport preserves every stored
-    bit, including signaling NaNs; ``float(value)`` is an explicit conversion.
+    ``dtype`` identifies the element type. ``data`` contains Python integers for
+    integer tensors, NumPy scalars at the stored width for floating-point tensors,
+    booleans for ``bool``, and :class:`Key` values for key tensors. Floating-point
+    values preserve their stored bits; calling ``float(value)`` performs an
+    explicit conversion.
     """
 
     shape: tuple[int, ...]
@@ -107,9 +101,10 @@ _KEY_BITS = re.compile("[0-9a-f]{16}")
 
 @dataclass(frozen=True)
 class Key:
-    """A random key (spec/10 §3.2): its 64 bits as exactly 16 lowercase hex
-    digits. A key is not a number, so it has no integer or NumPy form; it
-    crosses the boundary only inside execution values."""
+    """A random key represented by exactly 16 lowercase hexadecimal digits.
+
+    A key is not a number and has no integer or NumPy representation.
+    """
 
     bits: str
 
@@ -188,7 +183,7 @@ class ChelisTensor:
 
 
 def from_dlpack(value: Any) -> ChelisTensor:
-    """Wrap a CPU tensor without copying."""
+    """Wrap a CPU tensor that implements DLPack without copying."""
 
     return ChelisTensor(value)
 
@@ -227,37 +222,34 @@ def compile_and_load(
     artifact_dir: str | Path | None = None,
     project_root: str | Path | bool | None = None,
 ) -> CompiledModel:
-    """Compile a source file to a shared library and return a callable model.
+    """Compile a source file and return a callable tensor model.
 
-    This is the product path for Phase 3b-ii direct execution. Native compilation runs
-    without holding the Python GIL.
+    Native compilation runs without holding the Python GIL.
 
-    ``project_root`` selects the reef package whose declared dependencies the source
-    may import (issue #816):
+    ``project_root`` selects the Reef package whose declared dependencies the source
+    may import:
 
-    - ``None`` (the default) — auto-discover the enclosing reef package, but *only* when
-      the source actually contains an ``import`` declaration. An import-free source (or
-      any non-Surf source) is compiled self-contained exactly as before, so a
-      self-contained file that happens to sit inside a reef project neither pays the
-      project's context-compile cost nor is coupled to a broken sibling file.
-    - A path — force in-context resolution against that reef package (it must contain a
-      ``reef.toml``), regardless of whether the source imports.
-    - ``False`` — force the bare self-contained path even for an importing source inside
-      a project. This is the explicit opt-out from auto-discovery.
+    - ``None`` (the default) — auto-discover the enclosing Reef package only when Surf
+      source contains an ``import`` declaration. Import-free and Deep source compile
+      without a Reef context.
+    - A path — resolve imports against that Reef package, which contains a
+      ``reef.toml``.
+    - ``False`` — compile without a Reef context, including when the source imports.
 
     Only the defs in the compiled source itself are selectable as entries, by
     their bare names; imported library defs are callable from the entry's body
-    but are not themselves selectable via ``entry_name=``. ``input_names`` /
-    ``output_names`` are the selected entry's own parameter/output names. A
-    scalar-signature entry (e.g.
-    ``def main(s: f32, ...) -> f32``) is not a compiled tensor kernel — wrap scalars as
-    ``tensor[1, f32]``; use :func:`eval` for scalar results.
+    but are not themselves selectable via ``entry_name=``. ``input_names`` and
+    ``output_names`` are the selected entry's parameter and result names. Entries use
+    fully concrete tensor dimensions. The C target supports ``f32`` and ``f64``
+    tensors; the HIP target supports ``f32`` tensors. Use :func:`eval` for scalar and
+    host-program entries.
 
-    The library links the runtime this extension was built with, staged beside it. A
-    development build of the extension first checks that the runtime's sources in its
-    checkout are unchanged since the build, and otherwise raises ``ChelisError`` naming
+    The compiled library uses the runtime carried by this extension. An editable
+    development build checks that the runtime sources in its checkout match the
+    extension and raises ``ChelisError`` when they differ. When runtime sources
+    differ, the error lists
     the changed files; rebuild the extension to continue. A set ``CHELIS_RUNTIME_DIR``
-    also raises ``ChelisError``.
+    is rejected; the extension uses its bundled runtime.
     """
 
     if project_root is True:
@@ -282,24 +274,24 @@ def compile_and_load(
 
 
 def load(path: str | Path) -> CompiledModel:
-    """Load a previously compiled shared library.
+    """Load a compiled model from a shared library.
 
-    If the sidecar manifest still points at an existing source file whose content hash no
-    longer matches, `load()` emits a warning about the stale artifact. If the manifest's
-    runtime or library digest is missing or differs from this extension's carried runtime or
-    the library file, `load()` raises `ChelisError` before opening the library; recompile
-    with `chelis.compile_and_load`.
+    The loader verifies the runtime and library digests before loading. When the
+    recorded source file is available and its content differs from the compiled
+    source, the loader emits a warning.
     """
 
     return CompiledModel(_native.load(str(path)))
 
 
 def check(source: str, *, source_kind: str = "surf") -> CheckResult:
+    """Check Surf or Deep source and return its fitness score and diagnostics."""
     payload = _decode_json(_native.check_json(source, source_kind=source_kind))
     return _check_result(payload)
 
 
 def desugar(source: str) -> DesugarResult:
+    """Convert Surf source to canonical Deep text and its structured AST."""
     payload = _decode_json(_native.desugar_json(source))
     return DesugarResult(
         deep_text=payload["deep_text"],
@@ -308,6 +300,7 @@ def desugar(source: str) -> DesugarResult:
 
 
 def decompile(source: str) -> DecompileResult:
+    """Convert canonical Deep source to formatter-canonical Surf text."""
     payload = _decode_json(_native.decompile_json(source))
     return DecompileResult(surf_text=payload["surf_text"])
 
@@ -319,6 +312,7 @@ def compile(
     source_kind: str = "surf",
     entry_name: str | None = None,
 ) -> CompileResult:
+    """Compile source and return generated files and their build flags."""
     payload = _decode_json(
         _native.compile_json(
             source,
@@ -347,23 +341,18 @@ def eval(
     source_kind: str = "surf",
     project_root: str | Path | bool | None = None,
 ) -> EvalResult:
-    """Evaluate Chelis source.
+    """Evaluate Chelis source and return its named roots and values.
 
-    Tensor inputs cross the boundary as per-dtype stored-bit payloads (execution
-    wire v4): the numpy array's dtype selects the wire tag. Integers and float
-    bits stay exact end-to-end. uint8/uint16/uint32 widen
-    losslessly to int16/int32/int64; u64 and unmapped float widths raise
-    `ChelisError` until the caller chooses an explicit numpy cast. Zero-copy
-    execution of compiled artifacts belongs to `chelis.load()` in Phase
-    `3b-ii`.
+    Tensor bindings accept supported NumPy arrays, :class:`ChelisTensor` values,
+    and CPU tensors that implement DLPack. Supported values preserve their integer
+    data and floating-point storage bits. Unsigned 8-, 16-, and 32-bit integers
+    widen exactly to the next signed width; unsupported dtypes raise
+    ``ChelisError``.
 
-    ``project_root`` resolves reef-declared dependencies the source imports (issue
-    #816): the source is evaluated against the compiled library context of the reef
-    package at that path (which must contain a ``reef.toml``). Because ``eval`` takes
-    raw text with no file to walk from, there is no auto-discovery — omit
-    ``project_root`` (the default), or pass ``False`` explicitly, and self-contained
-    source evaluates exactly as before. Unlike :func:`compile_and_load`,
-    scalar-signature entries work here.
+    ``project_root`` resolves imported dependencies against the Reef package at that
+    path, which contains a ``reef.toml``. Source passed as text has no path for
+    auto-discovery, so omit ``project_root`` for self-contained source or pass a
+    package path explicitly. Scalar-signature and host-program entries are supported.
     """
 
     if project_root is True:
@@ -414,11 +403,13 @@ def _eval_result(payload: dict[str, Any]) -> EvalResult:
 
 
 def validate(source: str, *, mode: str = "surf") -> ValidateResult:
+    """Validate source in Surf or Deep mode and return the result."""
     payload = _decode_json(_native.validate_json(source, mode=mode))
     return ValidateResult(mode=payload["mode"].lower(), valid=bool(payload["valid"]))
 
 
 def save_safetensors(path: str | Path, tensors: Mapping[str, Any]) -> None:
+    """Save named CPU tensors in Safetensors format."""
     arrays = {
         name: np.asarray(_tensor_to_numpy(value), copy=False)
         for name, value in tensors.items()
@@ -427,6 +418,7 @@ def save_safetensors(path: str | Path, tensors: Mapping[str, Any]) -> None:
 
 
 def load_safetensors(path: str | Path) -> dict[str, ChelisTensor]:
+    """Load named Safetensors tensors as :class:`ChelisTensor` values."""
     arrays = _load_safetensors_file(str(path))
     return {name: ChelisTensor(array) for name, array in arrays.items()}
 
@@ -467,18 +459,15 @@ def _check_result(payload: dict[str, Any]) -> CheckResult:
 
 
 def _span(payload: dict[str, Any] | None) -> tuple[int, int | None] | None:
-    """Decode the tagged span carrier (chelis#1395).
+    """Decode a diagnostic location as a measured range or point.
 
     The wire distinguishes a measured range from a bare coordinate:
     ``{"span": "range", "offset": N, "len": M}`` versus
-    ``{"span": "point", "offset": N}``. spec/04 [04-FIT-17] forbids the
-    serializer inventing an extent it did not measure, so ``point`` has no
-    ``len`` member at all.
+    ``{"span": "point", "offset": N}``. A point has no ``len`` member because
+    the producer does not measure an extent for it.
 
-    The tag is read rather than the ``len`` key probed. Probing would decode a
-    malformed ``range`` that lost its ``len`` as though it were a point --
-    silently turning a transport fault into a plausible value, which is the
-    class of defect the tagged carrier exists to prevent.
+    The tag selects the shape, so a malformed range without ``len`` remains an
+    error instead of becoming a point.
     """
     if payload is None:
         return None

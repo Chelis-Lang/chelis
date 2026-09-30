@@ -31,7 +31,7 @@ below.
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | HIP backend and validator available; [target gates](../../docs/phase_oracles.md) |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
-| **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, data loading/tokenization, `Std.Time`/`Std.Decimal`, SKILL.md v2 |  |
+| **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, file I/O, CSV/JSON, `Std.Time`/`Std.Decimal`, SKILL.md v2 |  |
 | **4** | ML & AI coding: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
 | **5** | Advanced backends + research: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU, sparse tensors, complex numbers, research type features, Lean formalization |  |
 
@@ -311,15 +311,15 @@ provenance annotation format — not whether LLMs interact with macros (they don
 programs rather than only tensor compute kernels.
 This phase is about closing the non-tensor gaps after the Phase 2 language surface is
 stable: first-class scalar/string values, collections, iteration, core numeric
-primitives beyond the initial RISC surface, data loading, tokenization, standard
-library time/exact-decimal support, and the teaching material refresh that matches that
-fuller language.
+primitives beyond the initial RISC surface, file and data loading, standard-library
+time/exact-decimal support, and the teaching material refresh that matches that fuller
+language.
 The detailed implementation plan lives in `spec/design/chelis_phase3_plan.md`.
 
 **Shipped Phase 3 foundations:** `3a` package system, `3b` Python FFI interop,
 `3b-ii` direct Python execution + NumPy guarantee, `3c` scalar/string foundation,
 `3d` collections/iteration, `3e` pipe-first style pass, `3h` core numeric primitives,
-`3m` Rust runtime rewrite, `3g` data loading/tokenization, `3i` standard-library
+`3m` Rust runtime rewrite, `3g` file I/O/CSV/JSON, `3i` standard-library
 expansion, `3j-pre` release infrastructure + std-surface expansion, and `3j` (nautilus,
 shipped in the downstream repo — `Nautilus v0.5.0` is current). Each carries a
 `**Status:** shipped.` marker in [`chelis_phase3_plan.md`](chelis_phase3_plan.md).
@@ -331,7 +331,7 @@ moved to `School.Nn.*` / `School.Loss.*` in chelis-std 0.4.0; `Std.Init` stayed)
 **Remaining Phase 3 work:** `3k` (coral) can overlap with the already-shipped `3j`
 (nautilus) — no mutual dependency; `3l` (shoals) depends on both; `3n` (octant) is
 planned but not yet started; `3f` (SKILL.md v2) is intentionally last in Phase 3 — it
-needs a real rewrite after the runtime, numeric, tokenization, standard-library, and
+needs a real rewrite after the runtime, numeric, data-loading, standard-library, and
 domain-shell surfaces stabilize.
 
 ### 3e: Style Foundation
@@ -434,7 +434,7 @@ Shipped.
   higher-order iteration (`map`, `filter`, `fold`, `scan`, `partition`,
   `flat_map`); callback effects now propagate through iteration under the shipped
   checker, and this compiled helper set now covers the practical collection surface
-  needed before `3g` data loading/tokenization work starts
+  needed before `3g` data-loading work starts
 - make preprocessing and dataset plumbing expressible in pure Chelis rather than Python
 
 ### 3h: Core Numeric Primitives
@@ -487,7 +487,7 @@ Shipped.
   land on Rust infrastructure rather than the old C runtime
 - acceptance oracle: `cargo test -p chelis-cli phase3m_rust_runtime_acceptance_oracle -- --nocapture`
 
-### 3g: Data Loading and Tokenization
+### 3g: File I/O, CSV, and JSON
 
 - add text file I/O as the minimum host-data ingress surface with IO effect
   (`read_file`, `write_file`, `read_lines`, `read_bytes`, `file_exists`, `list_dir`)
@@ -498,14 +498,7 @@ Shipped.
   `try_read_csv` as the recovery API
 - add JSON loading returning `Json` for configs and metadata, with `try_load_json` and
   `try_parse_json` for recovery paths
-- add a BPE tokenizer that loads HuggingFace `tokenizer.json` format and can
-  encode/decode text; tokenizer loading returns `Tokenizer`, with
-  `try_load_tokenizer` for recovery paths
-- add batch encode + padding flows that bridge `List[List[Int]]` into tensor model
-  inputs
-- make the tokenizer/data-loader path a first-class Phase 3 deliverable, not a Python
-  sidecar
-- acceptance oracle: `cargo test -p chelis-cli --test std_io_pipeline phase3g_text_pipeline_acceptance_oracle -- --ignored --exact --nocapture`
+- acceptance oracle: `cargo test -p chelis-cli --test std_io_pipeline io_pipeline_acceptance_oracle -- --ignored --exact --nocapture`
 
 ### 3i: Standard Library Expansion
 
@@ -848,7 +841,7 @@ Full design: `chelis_native_testing_plan.md`
 
 Full-surface teaching refresh covering Phase 2 + Phase 3 including domain shells:
 effects, linearity, macros, vmap, tuples, pipes, scalars, strings, collections,
-iteration, I/O, tokenization, core numeric primitives, package imports, dataframes
+iteration, I/O, CSV/JSON data loading, core numeric primitives, package imports, dataframes
 (`coral`, including NaN handling and Parquet), numerical methods (`nautilus`, including
 the nalgebra-backed LinAlg surface), finance (`shoals` overview), and the expanded
 neural-network surface from `3j-pre` (attention, GELU/SiLU, RMSNorm, Conv1d/2d), now

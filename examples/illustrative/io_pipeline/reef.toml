@@ -1,11 +1,11 @@
 schema = "3"
 [package]
-name = "phase3g-text-pipeline"
+name = "io-pipeline"
 version = "0.1.0"
 compiler = "=0.18.11"
 module_prefix = "Demo"
 resolver = "2"
-description = "Illustrative text pipeline for phase 3G"
+description = "Illustrative CSV and JSON data pipeline"
 license = "MIT"
 repository = "https://github.com/Chelis-Lang/chelis"
 

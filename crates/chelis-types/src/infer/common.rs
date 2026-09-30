@@ -1974,21 +1974,7 @@ pub(super) fn type_contains_rank(ty: &Type) -> bool {
 fn is_exact_op35_wrapper(name: &str) -> bool {
     matches!(
         name,
-        "pkg__chelis__std__Std__Init__Kaiming__kaiming_normal"
-            | "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform"
-            | "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform_given"
-            | "pkg__chelis__std__Std__Init__Kaiming__tensor_shape"
-            | "pkg__chelis__std__Std__Init__Random__normal_like"
-            | "pkg__chelis__std__Std__Init__Random__normal_like_given"
-            | "pkg__chelis__std__Std__Init__Random__normal_like_sample"
-            | "pkg__chelis__std__Std__Init__Random__tensor_shape"
-            | "pkg__chelis__std__Std__Init__XavierExt__trunc_normal"
-            | "pkg__chelis__std__Std__Init__XavierExt__trunc_normal_given"
-            | "pkg__chelis__std__Std__Init__XavierExt__tensor_shape"
-            | "pkg__chelis__std__Std__Init__XavierExt__xavier_normal"
-            | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform"
-            | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform_given"
-            | "pkg__chelis__std__Std__Sort__sort"
+        "pkg__chelis__std__Std__Sort__sort"
             | "pkg__chelis__std__Std__Tensor__Construct__arange"
             | "pkg__chelis__std__Std__Tensor__Construct__arange_values"
             | "pkg__chelis__std__Std__Tensor__Construct__linspace"
@@ -2006,11 +1992,8 @@ fn is_exact_op35_wrapper(name: &str) -> bool {
     )
 }
 
-/// Install only the dependency contract needed to check [05-OP-35]'s random
-/// wrapper graphs before #1295 lands the public all-active `uniform_like`
-/// parameter contract. The public builtin remains unchanged on this branch;
-/// this exact package-reserved context merely keeps its template shape and
-/// result tied while leaving the two scalar bounds to #1295's checker rule.
+/// Install dependency contracts for exact standard-library tensor wrappers
+/// whose shape relations are not yet expressible through ordinary inference.
 fn install_exact_op35_dependency_contracts(
     name: &str,
     declared_ty: Option<&Type>,
@@ -2022,36 +2005,6 @@ fn install_exact_op35_dependency_contracts(
             Type::Fn(_, result) => Some((**result).clone()),
             _ => None,
         }));
-    }
-    if matches!(
-        name,
-        "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform"
-            | "pkg__chelis__std__Std__Init__Random__normal_like_sample"
-            | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform"
-    ) {
-        let template = vg.fresh_tvar();
-        let low = vg.fresh_tvar();
-        let high = vg.fresh_tvar();
-        env.bind(
-            "uniform_like".to_string(),
-            Scheme {
-                result_origin: None,
-                constraints: vec![],
-                tvars: vec![template, low, high],
-                tvar_restrictions: vec![],
-                dvars: vec![],
-                rvars: vec![],
-                body: Type::Fn(
-                    vec![
-                        Type::Prim(Prim::Key),
-                        Type::Ref(Box::new(Type::Var(template))),
-                        Type::Var(low),
-                        Type::Var(high),
-                    ],
-                    Box::new(Type::Var(template)),
-                ),
-            },
-        );
     }
     let shape_helper = match name {
         "pkg__chelis__std__Std__Tensor__Construct__squeeze" => {
@@ -2505,15 +2458,14 @@ pub(super) fn infer_top_level(
         // existing TypeMismatch.
         let mut binder_rigidity = None;
         let scheme_body = if is_exact_op35_wrapper(&name) {
-            // These package-reserved wrappers intentionally consume contracts
-            // delivered by sibling Phase-4 issues: all-dtype random parameters
-            // (#1295) and runtime-axis shape typing (#1298). Ordinary inference
-            // still walks the complete body and owns every child stamp, while
-            // the exact manifest signature remains authoritative at this one
-            // compiler-owned boundary. Preserve all actionable diagnostics;
-            // only the currently-unprovable type/shape relations are deferred
-            // to those lower-level receipts. The stdlib surface oracle locks
-            // each accepted graph structurally, including mutation controls.
+            // These package-reserved wrappers have exact signatures whose
+            // generic or runtime-axis relations ordinary inference cannot yet
+            // establish. Inference still walks each complete body and owns
+            // every child stamp, while the exact manifest signature remains
+            // authoritative at this compiler-owned boundary. Preserve all
+            // actionable diagnostics; only the currently unprovable type and
+            // shape relations are deferred to their owning contracts. The
+            // stdlib surface oracle locks each accepted graph structurally.
             errors.retain_since(body_diagnostic_checkpoint, |error| {
                 !matches!(
                     error.kind,

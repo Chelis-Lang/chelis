@@ -1,0 +1,30 @@
+# PR #2770 red-team round 1/3: parallel wire and binding proofs
+
+Reviewed pushed head: `a76110a6fcdb9603ba7c5a7a5882ad2a6ec93ae6` (`agent/binding-parallel-proof-20260929`). Supplied worktree: `/Users/robertronan/chelis-worktrees/binding-parallel-proof-20260929`.
+
+**Verdict:** Satisfied with the in-scope scheduling change on this head. No P0, P1, P2, or P3 findings. This verdict covers the tested orchestration and source review below; the exact full binding candidate remains unvalidated here.
+
+## Findings
+
+None. No out-of-scope defect was independently found. The full-binding failure described in the brief is inherited from merged PR #2764 and assigned to PR #2771; it is a validation limit, not a PR #2770 finding.
+
+## Execution and controls
+
+- `PYTHONPATH=scripts .venv/bin/python -m unittest -v test_capacity_census_typed test_capacity_census_compiler_json` — **29 tests passed**, including overlap/no-early-finalization, wire failure, binding collection failure, dual failure, source change, saved-witness rejection, and target partition. An initial invocation without `PYTHONPATH=scripts` failed on module imports; the command above uses the repository's scripts import path.
+- `PYTHONPATH=scripts .venv/bin/python -c 'from pathlib import Path; from capacity_census_compiler_json import PYTHON_CASES; from capacity_census_wire_runner import run_python_tests; result = run_python_tests(Path.cwd(), PYTHON_CASES); print(f"supervised compiler JSON controls: selected={len(result.selected)} executed={len(result.executed)} equal={result.selected == result.executed}")'` — **8 selected, 8 executed, exact match** through the actual framework supervisor.
+- `.venv/bin/python target/reviewer-2770-probe.py` — temporary adversarial probe under ignored `target/`, now removed. It patched only the expensive collectors, exact witness classes, source identity, and finalizer. Positive: compiler JSON collection, native collection, and wire verification all called, with one finalization. Native failure after compiler JSON collection: all three called, native exception propagated, zero finalizations. Simultaneous wire/native failures: both errors preserved in `CensusError`, zero finalizations. Output: `success: PASS`, `native_failure: PASS`, `dual_failure: PASS`.
+- `.venv/bin/python scripts/capacity_census_typed.py wire --rustdoc-json target/never-read.json` — exit 1 before build, rejected supplied artifact.
+- `.venv/bin/python scripts/capacity_census_typed.py bindings-discovery --rustdoc-json target/never-read.json --registered-provenance target/reviewer-2770-provenance.json` — exit 1 before build, rejected supplied binding authority. The temporary provenance file was removed.
+- `.venv/bin/python scripts/capacity_census_typed.py bindings-discovery --target-dir target/agents/729-capacity-rustdoc --registered-provenance target/reviewer-2770-provenance.json` — exit 1 before build, rejected overlap with the default wire target.
+
+## Claim coverage and contract comparison
+
+1. **Overlap and target isolation.** `verify_binding_proofs` submits `_binding_worker` to a thread while `verify_wire_census` executes on the caller thread. The worker keeps compiler JSON and native work sequential. Each Cargo/rustdoc/compiled-invocation path used by those collectors derives from the supplied binding target; the wire verifier's main build uses the sibling wire target, and selected controls use other worktree targets distinct from the binding target. The exact-path test and overlap control passed. Target validation rejects foreign paths, identical targets, and ancestor/descendant targets. The CLI target-collision control rejected before either leg began.
+2. **Live join and separate verdicts.** After both futures finish, the join checks exact live witness/work types, matching source identity before execution and at the join, and both wire and native `validate()`. `finalize_compiler_json_bindings` constructs the compiler JSON graph from the live wire schema, checks source identity again, and validates the issued witness. `discover_bindings` still requires the compiler JSON and native witnesses for public row admission. The positive, native-failure, dual-failure, changed-source, and saved-receipt controls exercised this boundary. No failure path in the probe called the finalizer.
+3. **No scheduled controls removed.** The compiler JSON collector retains the selected supervised Python tests, exact Rust native cases, registration probe, compiled call ownership, construction controls, and MIR controls. The wire verifier retains its schema, classification, mutation/consumer, cache, and publication checks. Native authority still runs its registration, Rustdoc, compiled ownership, and exact native execution. The scheduling diff moves wire execution to the concurrent caller and moves publication-graph reconciliation to finalization. This matches the separate wire and binding acceptance obligations in `spec/design/dtype_semantics.md` §C6 and the fixed Rust CLI bridges in `tests/support/capacity_census_{wire_verifier,compiler_json}.rs`. The Python selection receipt was verified 8/8; full Rust and wire selections were not rerun in this round.
+
+## Unvalidated and restoration
+
+I did not rerun the full `capacity_census_bindings` case or measure real concurrent Cargo throughput. Per the supplied brief, the uncombined head fails at 115 seconds on the inherited shared `TestExecution` packet regression from PR #2764; PR #2771 repairs that worker, and a temporary combined run already passed for the orchestrator. Exact PR candidate CI and package expansion remain pending. I did not independently verify those supplied receipts.
+
+Temporary probe and provenance files were removed. Final `.venv/bin/python scripts/worktree_status.py --path /Users/robertronan/chelis-worktrees/binding-parallel-proof-20260929/target`: **VERDICT: FREE**, head `a76110a6fcdb9603ba7c5a7a5882ad2a6ec93ae6`, tree clean (0 modified/staged/untracked/unmerged), lease free, no scoped processes; probed `2026-09-29T17:17:38Z`. Available for verification if this head is repaired.

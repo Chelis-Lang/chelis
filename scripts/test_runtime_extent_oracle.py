@@ -4,11 +4,13 @@ from contextlib import redirect_stdout
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("runtime_extent_oracle.py")
@@ -78,6 +80,58 @@ def _spec(
 
 
 class RuntimeExtentOracleTests(unittest.TestCase):
+    def test_target_timing_records_success_and_failed_receipt(self) -> None:
+        row = ORACLE.CorpusRow("done.row", "ice", "executes_exactly", "t.done")
+        target = ORACLE.TestTarget("t", ("synthetic-target",), ("done",))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "baseline.json"
+            spec = _spec("a", (row,), baseline_path=baseline, targets=(target,))
+            baseline.write_text(ORACLE.render_baseline(spec))
+
+            def runner(argv, **_kwargs):
+                command = tuple(argv)
+                if command == ("git", "rev-parse", "HEAD"):
+                    return subprocess.CompletedProcess(command, 0, "a" * 40 + "\n", "")
+                if command == ("git", "status", "--porcelain"):
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return subprocess.CompletedProcess(command, 0, "test done ... ok\n", "")
+
+            timing = root / "success"
+            with patch.dict(os.environ, {"CHELIS_CI_TIMING_DIR": str(timing)}):
+                ORACLE.validate("a", runner=runner, registry={"a": spec}, require_clean=False)
+            records = [
+                json.loads(line)
+                for path in timing.glob("*.jsonl")
+                for line in path.read_text().splitlines()
+            ]
+            self.assertEqual(
+                [(record["event"], record["name"], record["kind"]) for record in records],
+                [("start", "t", "runtime-extent-target"), ("finish", "t", "runtime-extent-target")],
+            )
+            self.assertEqual(records[-1]["outcome"], "success")
+            self.assertEqual(records[-1]["head"], "a" * 40)
+            self.assertGreaterEqual(records[-1]["seconds"], 0)
+
+            def failed_runner(argv, **kwargs):
+                result = runner(argv, **kwargs)
+                if tuple(argv) == target.argv:
+                    return subprocess.CompletedProcess(tuple(argv), 1, "", "failed")
+                return result
+
+            failed_timing = root / "failure"
+            with patch.dict(os.environ, {"CHELIS_CI_TIMING_DIR": str(failed_timing)}):
+                with self.assertRaises(ORACLE.OracleFailure):
+                    ORACLE.validate(
+                        "a", runner=failed_runner, registry={"a": spec}, require_clean=False
+                    )
+            failed_records = [
+                json.loads(line)
+                for path in failed_timing.glob("*.jsonl")
+                for line in path.read_text().splitlines()
+            ]
+            self.assertEqual(failed_records[-1]["outcome"], "OracleFailure")
+
     def test_generated_corpus_is_sorted_unique_and_covers_slice_a_boundaries(self) -> None:
         rows = ORACLE.generated_phase_a_corpus()
         ids = [row.id for row in rows]

@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn ignores_a_skip_nested_inside_another_call_in_the_recursive_argument() {
-        // `Std.Tokenizer`'s `apply_bpe` recursion: the recursive argument is
+        // a recursive list cursor: the recursive argument is
         // `merge_once(...)`, and its own `skip` seeds a fresh empty List
         // rather than advancing `tokens`. Only the direct argument position
         // is a cursor.
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn ignores_a_bound_nested_call_in_the_recursive_argument() {
-        // `Std.Tokenizer`'s `apply_bpe` shape, routed through a binding.
+        // a recursive list-cursor shape, routed through a binding.
         // Whether `merge_once` returns a suffix of `tokens` is
         // interprocedural, so this form stays outside the rule permanently.
         let src = concat!(

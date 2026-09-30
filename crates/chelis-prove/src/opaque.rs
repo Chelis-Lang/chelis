@@ -514,6 +514,24 @@ fn record_field_type(
 /// bodies are themselves in-grammar).
 pub type ConstEnv = chelis_unord::UnordMap<String, f64>;
 
+pub(crate) fn exact_integer_constant_as_f64(integer: i64) -> Option<f64> {
+    chelis_types::dtype_semantics::integer_is_exactly_representable(integer, Prim::F64)
+        .then_some(integer as f64)
+}
+
+/// Decode only numeric constants that the real-valued constant environment
+/// represents without loss.
+pub(crate) fn finite_exact_constant(value: ScalarValue) -> Option<f64> {
+    if value.prim().is_integer() {
+        return exact_integer_constant_as_f64(value.as_i64_exact()?);
+    }
+    if value.prim().is_float() {
+        let real = value.as_f64_lossy();
+        return real.is_finite().then_some(real);
+    }
+    None
+}
+
 /// Context threaded through predicate lowering: the binder name, the
 /// dotted path prefix of the binder value, the binder's fields (so `sum`
 /// over a tensor field expands to the right number of scalar terms), the
@@ -1153,31 +1171,32 @@ pub enum GenParamKind {
     Tensor { dims: Vec<usize>, precision: String },
 }
 
-/// Generate one validated binder value for `inv`. Tiered (RFC D-STARVE):
-/// rejection sampling first, constructor-based generation on starvation,
-/// every accepted sample predicate-validated. Returns the validated
-/// sample, or a [`StarvationDiagnostic`] when both tiers starve below
-/// `floor`.
+/// The defining module's expressions and canonical Deep source used during
+/// validated binder generation.
+pub struct GenModule<'a> {
+    pub exprs: &'a [Expr],
+    pub source: &'a str,
+}
+
+/// Generate one validated binder value for `inv`. Rejection sampling runs
+/// first, followed by constructor-based generation when rejection starves.
+/// Every accepted sample satisfies the predicate. If both methods starve,
+/// the result is a [`StarvationDiagnostic`].
 ///
-/// `floor` is the acceptance-rate floor (`--invariant-min-rate`); a floor
-/// of `0.0` disables the starvation classifier — the caller then treats a
-/// failure-to-generate as legacy exhaustion (`Error`), not `Unsupported`.
-/// `budget` is the per-tier attempt budget.
-///
-/// `module_source` is the canonical Deep of the defining module (for the
-/// constructor tier's evaluator calls); `producers` are the exported
-/// producers usable for constructor-based generation.
+/// `floor` is the acceptance-rate floor (`--invariant-min-rate`). A value
+/// of `0.0` disables starvation classification; the caller reports a
+/// failure to generate as `Error`. `budget` limits attempts per method.
 pub fn generate_binder(
     inv: &OpaqueInvariant,
     consts: &ConstEnv,
-    module_source: &str,
+    module: GenModule<'_>,
     producers: &[GenProducer],
     rng: &mut GenRng,
     floor: f64,
     budget: usize,
 ) -> Result<GeneratedBinder, StarvationDiagnostic> {
     // Lower the predicate once over the binder name as prefix.
-    let predicate = lower_predicate_flattened(inv, &inv.binder, consts);
+    let predicate = lower_predicate_flattened_in(inv, &inv.binder, consts, module.exprs);
 
     // Tier 1: rejection sampling. The accepted count is definitionally 0
     // at the starvation point (we return early on the first accept), so
@@ -1228,7 +1247,7 @@ pub fn generate_binder(
     if !producers.is_empty() {
         for _ in 0..ctor_budget {
             ctor_attempts += 1;
-            let Some(env) = propose_via_constructor(inv, module_source, producers, rng) else {
+            let Some(env) = propose_via_constructor(inv, module.source, producers, rng) else {
                 continue;
             };
             // STILL validate (a buggy producer costs efficiency, never

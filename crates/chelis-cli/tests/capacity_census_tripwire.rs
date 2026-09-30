@@ -1061,13 +1061,6 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "numeric_adt"
     ),
     final_numeric_row!(
-        "std-adt-numeric",
-        "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} i64)) (t-adt {} Dict (t-prim {} string) (t-prim {} i64)) (t-adt {} Dict (t-prim {} i64) (t-prim {} string)) (t-prim {} i64))",
-        &["numeric-op"],
-        "[05-OP-34]",
-        "numeric_adt"
-    ),
-    final_numeric_row!(
         "std-def-numeric",
         "contracts::normal_cdf: [p: Float] (t-fn {} (t-var {} p) (t-var {} p))",
         &[],
@@ -1211,48 +1204,6 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "std-def-numeric",
         "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
         &["numeric-op"],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "init/kaiming::kaiming_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "init/kaiming::kaiming_uniform: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "init/random::normal_like: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "init/xavierext::trunc_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "init/xavierext::xavier_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "init/xavierext::xavier_uniform: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
-        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -1617,41 +1568,6 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "std-def-numeric",
         "time::try_date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
         &["numeric-op"],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} i64) (t-prim {} i64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} i64)))",
-        &["numeric-op"],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} i64)) (t-prim {} string))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} i64)))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "tokenizer::load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Tokenizer))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "tokenizer::try_load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Tokenizer)))",
-        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),

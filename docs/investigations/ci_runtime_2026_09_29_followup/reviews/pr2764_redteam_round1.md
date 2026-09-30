@@ -1,0 +1,22 @@
+# PR #2764 red-team round 1
+
+**Verdict:** No in-scope P0–P2 finding in the executed, bounded review. The full source-bound wire oracle remains unvalidated at this exact head because a separate binding acceptance had active Cargo/rustc builds.
+
+**Reviewed head:** `4bfcf238c3fed0e0c9577d911d39b0d8ee438ab7` (`perf/wire-probe-reuse-20260929`, pushed). Scope was the seven named changed files and their existing C6 call path. No out-of-scope defect was found.
+
+## Executed coverage
+
+- From `scripts/`, `../.venv/bin/python -m unittest -v test_capacity_census_wire_runner.SelectedWireProbe test_capacity_census_wire_local.LocalProbeTargetRouting`: **5/5 passed**. This exercised positive selected-probe receipt routing, missing/foreign/changed artifact rejection, mutation-only routing, fixture expansion's separate `target/agents/wire-codec-rustdoc`, and standalone fallback. The fixture-isolation test mocks compilation; `LocalPublicationControls.artifact` was also inspected and passes `self.target` to `expand_library`.
+- From `scripts/`, `../.venv/bin/python -m unittest -v test_capacity_census_wire_runner.SupervisedUnittest test_capacity_census_wire_runner.LibtestReceipts.test_exact_positive_selection_and_execution_are_required test_capacity_census_wire_verifier.FinalWireCensus.test_descriptor_and_saved_receipt_cannot_construct_a_wire_witness test_capacity_census_wire_verifier.FinalWireCensus.test_baseline_comparison_cannot_grant_exception_or_new_leaf_authority`: **6/6 passed**. Positive receipts and negative missing, skipped, failed, altered-selection, and false-authority cases passed.
+- From the worktree root, `.venv/bin/python - <<'PY' ... PY` invoked `run_python_tests` on two actual `MUTATION_CONTROLS` with `target/agents/729-capacity-rustdoc` and the schema receipt's probe digest: **2/2 selected and executed**, with the selected target and digest in the returned receipt. In a temporary synthetic worktree, direct `validate_wire_probe` accepted the owned canonical target and rejected outside, noncanonical, missing, symlinked target, symlinked executable, and changed-byte cases (**6/6 rejections**). The temporary artifacts were removed.
+- `.venv/bin/python scripts/ci_script_tests.py pr --list` reports all three `SelectedWireProbe` and both `LocalProbeTargetRouting` tests in the PR `script-unit` selection. `.config/ci-test-targets.toml` routes the heavy verifier/acceptance and compiler-backed local controls to their existing heavy/nightly owners.
+
+## Receipt and C6 boundary
+
+The existing `target/capacity-census-wire-execution.json` records 135/135 supervised mutation controls, 7/7 Hull controls, seven separate Rust consumer selections, and schema, cache, and publication evidence. Only the first Python selection carries `wire_probe_target` and `wire_probe_sha256`; its digest matches the current binary bytes. This receipt was written **2026-09-29 11:50 EDT**, before the reviewed commit at **11:52 EDT**. `source_identity(root) == receipt['source_sha256']` is **false**, so it is prior-head evidence, not exact-head acceptance.
+
+Code-path inspection confirms `verify_schema_codecs` builds and executes the current-source probe, records its byte digest, and passes that digest through `execute_acceptance_controls` only to `MUTATION_CONTROLS`. `run_python_tests` validates target ownership and bytes before and after supervision; `_supervise` validates before and after suite execution. The fixture expansion still uses its separate target. `verify_wire_census` still invokes cache publication and invocation ownership after acceptance, checks source identity, and validates final authority. This matches the bounded current-artifact and final-authority boundary in `spec/design/dtype_semantics.md` §C6. Those aggregate steps were inspected and have prior-head receipt evidence; they were not executed end-to-end at this head.
+
+**Unvalidated:** exact-head full `cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; hosted speedup (not claimed); exact-head hosted CI outcome. No tracked-source mutation was made, so no alternate mutation worktree was needed.
+
+**Restoration/status:** all ad hoc artifacts used `TemporaryDirectory`; `git diff --exit-code` passed. Final `.venv/bin/python scripts/worktree_status.py --path /Users/robertronan/chelis-worktrees/wire-probe-reuse-20260929/target/agents/wire-outer` at 16:15:17 UTC: **FREE**, exact reviewed head, clean tree (0 modified/staged/untracked/unmerged), lease free, no scoped processes. I remain available for repair verification.

@@ -15,6 +15,7 @@ from capacity_census_graph import GraphError
 from capacity_census_typed import NUMERIC_PRIMITIVES
 from capacity_census_wire_adapters import _target_lease, canonical, source_identity
 from capacity_census_wire_runner import _unique_fields
+from ci_timing import span
 
 # The canonical codec graph projects the two verified half-crate adapters to
 # their Chelis storage dtypes. They are not new Rust primitive spellings.
@@ -120,15 +121,19 @@ def verify_wire_census(root: Path, target: Path) -> VerifiedWireCensus:
     # Keep the sequence lock outside Cargo's target. The codec builder must
     # distinguish a fresh target from an existing Cargo cache before cleaning.
     with _target_lease(root / "target/.wire-census-sequence"):
-        schema = verify_schema_codecs(root, target)
+        with span("wire.schema", "census-stage"):
+            schema = verify_schema_codecs(root, target)
         rows = final_rows(schema.classifications)
         with _target_lease(target):
             # Consumer builds can replace shared dependency artifacts. Finish
             # those builds before binding the cache proof's exact artifacts;
             # invocation collection has its own retained Cargo namespace.
-            executions = execute_acceptance_controls(root, target, schema)
-            caches = verify_cache_publication(root, target)
-            publication = verify_invocation_ownership(root, target, schema, caches)
+            with span("wire.acceptance", "census-stage"):
+                executions = execute_acceptance_controls(root, target, schema)
+            with span("wire.cache", "census-stage"):
+                caches = verify_cache_publication(root, target)
+            with span("wire.publication", "census-stage"):
+                publication = verify_invocation_ownership(root, target, schema, caches)
         if source_identity(root) != before or schema.canonical.source_sha256 != before:
             raise GraphError("wire proof source changed during execution")
         report = {

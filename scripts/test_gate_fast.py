@@ -220,7 +220,7 @@ class FastCommandListTests(unittest.TestCase):
         the negative parity for each."""
         fires = gate.bundled_lock_guard_paths_changed
         # The bundle side: the same prefixes `std_paths_changed` already keys on.
-        self.assertTrue(fires(["packages/chelis-std/src/tokenizer.ch"]))
+        self.assertTrue(fires(["packages/chelis-std/src/decimal.ch"]))
         self.assertTrue(fires(["crates/chelis-std-bundle/dist/chelis-std-0.4.0.chb"]))
         # The lock side, matched by basename because the guard discovers its
         # lock set by walking the tree, not from an enumerated list.

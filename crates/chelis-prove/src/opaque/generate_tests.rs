@@ -28,7 +28,10 @@ fn rejection_sampling_produces_a_valid_probability() {
     let got = generate_binder(
         inv,
         &ConstEnv::new(),
-        &source_of(PROB),
+        GenModule {
+            exprs: &exprs,
+            source: &source_of(PROB),
+        },
         &[],
         &mut rng,
         0.01,
@@ -47,8 +50,32 @@ fn rejection_sampling_is_deterministic_under_fixed_seed() {
     let src = source_of(PROB);
     let mut r1 = GenRng::new(7);
     let mut r2 = GenRng::new(7);
-    let a = generate_binder(inv, &ConstEnv::new(), &src, &[], &mut r1, 0.01, 1000).unwrap();
-    let b = generate_binder(inv, &ConstEnv::new(), &src, &[], &mut r2, 0.01, 1000).unwrap();
+    let a = generate_binder(
+        inv,
+        &ConstEnv::new(),
+        GenModule {
+            exprs: &exprs,
+            source: &src,
+        },
+        &[],
+        &mut r1,
+        0.01,
+        1000,
+    )
+    .unwrap();
+    let b = generate_binder(
+        inv,
+        &ConstEnv::new(),
+        GenModule {
+            exprs: &exprs,
+            source: &src,
+        },
+        &[],
+        &mut r2,
+        0.01,
+        1000,
+    )
+    .unwrap();
     assert_eq!(a.env, b.env, "same seed => same sample");
 }
 
@@ -69,7 +96,10 @@ fn exact_equality_invariant_starves_with_equality_atoms_shape() {
     let diag = generate_binder(
         inv,
         &ConstEnv::new(),
-        &source_of(EQ_PROB),
+        GenModule {
+            exprs: &exprs,
+            source: &source_of(EQ_PROB),
+        },
         &[],
         &mut rng,
         0.01,
@@ -110,7 +140,10 @@ fn min_rate_zero_disables_floor_short_circuit() {
     let got = generate_binder(
         inv,
         &ConstEnv::new(),
-        &source_of(PROB),
+        GenModule {
+            exprs: &exprs,
+            source: &source_of(PROB),
+        },
         &[],
         &mut rng,
         0.0,
@@ -163,7 +196,10 @@ fn simplex_band_is_served_by_constructor_generation_not_starved() {
     let got = generate_binder(
         inv,
         &consts,
-        &source_of(SIMPLEX),
+        GenModule {
+            exprs: &exprs,
+            source: &source_of(SIMPLEX),
+        },
         &producers,
         &mut rng,
         0.01,
@@ -188,6 +224,41 @@ fn simplex_band_is_served_by_constructor_generation_not_starved() {
         (sum - 1.0).abs() <= 0.0001 + 1e-6,
         "validated in band, sum={sum}"
     );
+}
+
+#[test]
+fn integer_module_constant_arithmetic_admits_valid_generated_values() {
+    let surf = "module Stats.IntegerBound
+export (make)
+@opaque
+@invariant(p) p.value >= bound - 2i64
+type LargeInt =
+  | LargeInt { value: i64 }
+def bound() -> i64 = 3i64
+def make(x: i64) -> Option[LargeInt] =
+  if x >= 1i64 then Some(LargeInt { value: x }) else None
+";
+    let exprs = deep_of(surf);
+    let inv = &collect_opaque_invariants(&exprs)[0];
+    let mut consts = ConstEnv::new();
+    consts.insert("bound".to_string(), 3.0);
+    let mut rng = GenRng::new(0);
+
+    let sample = generate_binder(
+        inv,
+        &consts,
+        GenModule {
+            exprs: &exprs,
+            source: &source_of(surf),
+        },
+        &[],
+        &mut rng,
+        0.01,
+        300,
+    )
+    .expect("integer constant arithmetic admits an invariant-valid sample");
+    let value = sample.env["p.value"].as_i64_exact().expect("i64 field");
+    assert!(value >= 1);
 }
 
 #[test]

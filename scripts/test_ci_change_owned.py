@@ -1292,7 +1292,7 @@ class SchemaTests(unittest.TestCase):
                 self.assertEqual(rule.packages, ("chelis-e2e",))
         for path in (
             "examples/illustrative/moe_gather_duplicate_indices.ch",
-            "examples/illustrative/phase3g_text_pipeline/src/main.ch",
+            "examples/illustrative/io_pipeline/src/main.ch",
             "examples/illustrative/process_run_chelis_version.ch",
             "examples/illustrative/runtime_shape_semantics.ch",
             "examples/illustrative/scatter_replace_last_write_wins.ch",
@@ -1637,7 +1637,7 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual((rules[0].owner.workflow, rules[0].owner.job),
                          ("conformance.yml", "conformance"))
         # Neighboring unreviewed sources must not inherit release-pin authority.
-        for path in ("examples/illustrative/phase3g_text_pipeline/new.ch",
+        for path in ("examples/illustrative/io_pipeline/new.ch",
                      "examples/nautilus_quantile_contract/new.ch",
                      "tests/conformance/hull/new.json"):
             self.assertFalse(any(rule.matches(path) for rule in config.path_rules), path)
