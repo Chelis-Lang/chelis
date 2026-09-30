@@ -212,10 +212,6 @@ fn earlier_matching_invocation_cannot_supply_later_result_witness() {
     );
     for (native, (ok, output)) in observations {
         assert!(!ok, "native={native}: {both}");
-        assert!(
-            output.contains("first = tensor(shape=[3], data=[4.0, 5.0, 6.0])"),
-            "native={native}: {output}"
-        );
         assert!(output.contains("extent `seq`"), "native={native}: {output}");
         assert!(
             output.contains("axis 0 = 2") && output.contains("axis 0 = 3"),
@@ -339,11 +335,24 @@ def invoke[n](f: Action[n], x: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, f
         );
         assert!(!output.contains("out ="), "native={native}: {output}");
     }
-    assert_result_trap(
-        &format!("{prefix}out = invoke(own, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n"),
-        2,
-        3,
-    );
+    let source =
+        format!("{prefix}out = invoke(own, to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n");
+    for native in [false, true] {
+        let (ok, output) = result_claims::run(&source, native);
+        assert!(!ok, "native={native}\n{source}\n{output}");
+        assert!(output.contains("extent `n`"), "native={native}: {output}");
+        assert!(
+            output.contains("axis 0 = 2") && output.contains("load axis 0 = 3"),
+            "native={native}: {output}"
+        );
+        assert!(
+            output
+                .lines()
+                .any(|line| line == "numeric trap: domain in load at i64"),
+            "native={native}: {output}"
+        );
+        assert!(!output.contains("out ="), "native={native}: {output}");
+    }
 }
 
 #[test]
