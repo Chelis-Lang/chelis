@@ -176,8 +176,10 @@ Nix is a source-build channel. It does not replace the release store or the vers
 
 The `chelis` and `chelis-runtime` derivations verify the copied archive and all
 six public headers against the sealed compiler's export. `nix flake check`
-rechecks both outputs against the combined package's own compiler; it does not
-substitute for an executed check on each hosted platform.
+rechecks both outputs against the combined package's own compiler, then links
+and runs the C runtime consumer separately against each output's include
+directory and exact archive path. It does not substitute for an executed check
+on each hosted platform.
 
 Rebuild both Nix outputs from the same compiler revision when changing the
 carried runtime; do not copy a `chelis-runtime` archive/header set from a

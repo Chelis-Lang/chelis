@@ -169,18 +169,25 @@ let
         nativeBuildInputs = [ pkgs.stdenv.cc ] ++ platformBuildInputs;
       }
       ''
-        cc -std=c11 -Wall -Wextra -Werror \
-          -I${packages.chelis-runtime}/include \
-          ${./tests/runtime-consumer.c} \
-          ${packages.chelis-runtime}/lib/libchelis_runtime.a \
-          ${
-            if pkgs.stdenv.hostPlatform.isDarwin then
-              "-framework Accelerate"
-            else
-              "-lopenblas -lm -lpthread -ldl"
-          } \
-          -o runtime-consumer
-        ./runtime-consumer
+        set -eu
+        check_runtime_consumer() {
+          package="$1"
+          binary="$2"
+          cc -std=c11 -Wall -Wextra -Werror \
+            "-I$package/include" \
+            ${./tests/runtime-consumer.c} \
+            "$package/lib/libchelis_runtime.a" \
+            ${
+              if pkgs.stdenv.hostPlatform.isDarwin then
+                "-framework Accelerate"
+              else
+                "-lopenblas -lm -lpthread -ldl"
+            } \
+            -o "$binary"
+          "./$binary"
+        }
+        check_runtime_consumer ${packages.chelis-runtime} runtime-consumer-standalone
+        check_runtime_consumer ${packages.chelis} runtime-consumer-combined
         touch "$out"
       '';
 
