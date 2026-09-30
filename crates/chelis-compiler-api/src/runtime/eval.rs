@@ -551,10 +551,10 @@ fn check_callable_invocation_contract(
     args: &[RuntimeValue],
     session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
     present: Option<&[bool]>,
-) -> Result<(), String> {
+) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
     let Some((_, params)) = checked_function_children(contract).and_then(<[Expr]>::split_last)
     else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let authored = params.iter().cloned().map(Some).collect::<Vec<_>>();
     let names = (0..args.len())
@@ -564,18 +564,19 @@ fn check_callable_invocation_contract(
         actualize_tensor_entry_parameters(Some(params), &authored, args, &names, session, present)?;
     let mut entry_inputs = Vec::with_capacity(actualized.len());
     let mut entry_shapes: Vec<Vec<usize>> = Vec::with_capacity(actualized.len());
-    for (parameter, ty, shape) in actualized {
+    for (parameter, ty, shape) in &actualized {
         entry_inputs.push(chelis_ir::host::HostTensorInput {
-            name: parameter,
-            ty,
+            name: parameter.clone(),
+            ty: ty.clone(),
         });
-        entry_shapes.push(shape);
+        entry_shapes.push(shape.clone());
     }
     let entry_plan = chelis_ir::host::SignatureEntryPlan::new(entry_inputs);
     check_signature_entry_plan(
         &entry_plan,
         &entry_shapes.iter().map(Vec::as_slice).collect::<Vec<_>>(),
-    )
+    )?;
+    Ok(actualized)
 }
 
 struct EntryActual {
@@ -2724,22 +2725,57 @@ impl<'a> EvalContext<'a> {
         claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
     ) -> Result<RuntimeValue, String> {
+        let mut formal_claims = Vec::new();
         if let Some(contracts) = callable.invocation_contracts() {
             for contract in contracts {
-                check_callable_invocation_contract(
+                let actualized = check_callable_invocation_contract(
                     contract,
                     &args,
                     self.session.as_ref(),
                     present,
                 )?;
+                let Some((result, params)) =
+                    checked_function_children(contract).and_then(<[Expr]>::split_last)
+                else {
+                    continue;
+                };
+                let mut witnesses = Vec::new();
+                for (path, ty, shape) in &actualized {
+                    for (axis, (dim, size)) in ty.dims.iter().zip(shape).enumerate() {
+                        if let DimInfo::Named(name, _) = dim
+                            && name != "*"
+                            && !witnesses.iter().any(|(seen, _, _)| seen == name)
+                        {
+                            witnesses.push((
+                                name.clone(),
+                                NamedResultSource {
+                                    claim: chelis_ir::lower::extent_binder_label(name),
+                                    parameter: path.clone(),
+                                    axis,
+                                },
+                                *size,
+                            ));
+                        }
+                    }
+                }
+                let authored = params.iter().cloned().map(Some).collect::<Vec<_>>();
+                let claim = Self::declared_result_claim_at_callsite(
+                    Some(result),
+                    Some(params),
+                    &authored,
+                    &args,
+                )?;
+                let claim = Self::with_named_result_axes(claim, Some(result), &witnesses)?;
+                formal_claims.extend(claim);
             }
         }
+        formal_claims.extend_from_slice(claims);
         self.apply_resolved_callable_with_arg_types_impl(
             callable,
             args,
             arg_type_exprs,
             result_type_expr,
-            claims,
+            &formal_claims,
             present,
         )
     }

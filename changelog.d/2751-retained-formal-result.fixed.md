@@ -1,0 +1,1 @@
+Retained callable invocations check named result extents against their formal argument witnesses on Eval and compiled C. A mismatching result traps at its producing operation. See [#2751](https://github.com/Chelis-Lang/chelis/issues/2751).

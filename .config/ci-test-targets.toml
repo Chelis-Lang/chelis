@@ -1243,6 +1243,13 @@ prefix = "examples/nested_tuple_projection.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e"]
 
+# Exercised by chelis-cli::parity::parity_retained_callable_result_extent
+# and chelis-e2e::spec_all_executable_examples_parse_and_check.
+[[path_rule]]
+prefix = "examples/retained_callable_result_extent.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
 # Exact executable-corpus source exercised by both
 # chelis-cli::parity::parity_unicode_string_foundation and
 # chelis-e2e::spec_all_executable_examples_parse_and_check.
