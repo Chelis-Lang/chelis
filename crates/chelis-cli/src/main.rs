@@ -4293,34 +4293,40 @@ fn cmd_build_deep(
     let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)
         .map_err(|err| format!("Deep parse error: {err}"))?;
 
-    // Deep ingestion has no separate "entry decls" concept — the whole
-    // .dp file is the program. Treat every top-level def as an entry
-    // candidate; the existing pruner (`prune_build_program_to_reachable_defs`)
-    // will trim unreachable defs.
+    // Deep files are their own selected program. Check before pruning: the
+    // pruner seeds every top-level def but may still remove a declaration
+    // such as an orphan defsig that the semantic checker must reject.
+    let selected_checked =
+        checked_compilation_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
     let entry_seeds = entry_seed_names(&deep_exprs);
     let pruned_deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_seeds);
-    let preserve_host_library_surface =
-        if target == BuildTarget::C && pruned_deep_exprs.len() != deep_exprs.len() {
-            let full_checked = checked_program_with_effects(&deep_exprs)
-                .map_err(|e| format!("Check errors: {e}"))?;
-            shared_compiler_gate(
-                chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-                    &full_checked,
-                    target,
-                ),
-            )?;
-            execution_host_requires_host_backend(&full_checked)?
-        } else {
-            false
-        };
+    let pruning_fired = pruned_deep_exprs.len() != deep_exprs.len();
+    // The backend gate must also see declarations that pruning would remove.
+    // When nothing was pruned, the retained-program gate below sees the same
+    // checked program and needs no duplicate pass.
+    if pruning_fired {
+        shared_compiler_gate(
+            chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
+                selected_checked.program(),
+                target,
+            ),
+        )?;
+    }
+    let preserve_host_library_surface = target == BuildTarget::C
+        && pruning_fired
+        && execution_host_requires_host_backend(selected_checked.program())?;
     let final_deep_exprs = if preserve_host_library_surface {
         deep_exprs.clone()
     } else {
         pruned_deep_exprs
     };
     let symbolic_dims = collect_symbolic_dims_from_deep(&final_deep_exprs);
-    let checked_compilation = checked_compilation_with_effects(&final_deep_exprs)
-        .map_err(|e| format!("Check errors: {e}"))?;
+    let checked_compilation = if !pruning_fired || preserve_host_library_surface {
+        selected_checked
+    } else {
+        checked_compilation_with_effects(&final_deep_exprs)
+            .map_err(|e| format!("Check errors: {e}"))?
+    };
     let checked = checked_compilation.program();
     let root_manifest = build_root_manifest(checked, target);
     let requires_main = root_manifest.requires_main();

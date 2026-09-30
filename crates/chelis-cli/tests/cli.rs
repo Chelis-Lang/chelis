@@ -6771,6 +6771,72 @@ fn validate_deep_rejects_invalid_resource_arity() {
 }
 
 #[test]
+fn deep_build_rejects_selected_orphan_signature_before_pruning() {
+    let dir = tempdir().expect("tempdir");
+    let valid = dir.path().join("paired.dp");
+    let invalid = dir.path().join("orphan.dp");
+    let paired = "(defsig {} present (t-fn {} (t-prim {} string)))\n(def {} present (fn {} (params {}) (lit {type: (t-prim {} string)} \"ok\")))\n";
+    write_file(&valid, paired);
+    write_file(
+        &invalid,
+        &format!("{paired}(defsig {{}} missing (t-fn {{}} (t-prim {{}} string)))\n"),
+    );
+
+    let check = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", invalid.to_str().unwrap()])
+        .output()
+        .expect("check Deep program");
+    let check_report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert!(!check.status.success(), "{check_report}");
+    assert!(check_report.contains("UnboundVariable"), "{check_report}");
+
+    for target in ["c", "hip", "metal"] {
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                valid.to_str().unwrap(),
+                "--target",
+                target,
+                "-o",
+                dir.path().join(format!("valid-{target}")).to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        let build = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                invalid.to_str().unwrap(),
+                "--target",
+                target,
+                "-o",
+                dir.path()
+                    .join(format!("invalid-{target}"))
+                    .to_str()
+                    .unwrap(),
+            ])
+            .output()
+            .expect("build Deep program");
+        let error = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            !build.status.success(),
+            "{target} accepted orphan defsig: {error}"
+        );
+        assert!(error.contains("UnboundVariable"), "{target}: {error}");
+    }
+}
+
+#[test]
 fn reef_book_workflow_commands_are_valid() {
     let dir = tempdir().expect("tempdir");
     let pkg = dir.path().join("demo");
