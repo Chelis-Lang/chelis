@@ -1232,25 +1232,20 @@ fn int64_scalar_abs_min_traps_in_the_compiled_host_lane() {
 }
 
 // ===========================================================================
-// Std.Decimal: the surface that started this investigation.
-//
-// The original report was "Decimal doesn't work". It does: every one of these
-// is exact today, and they are the cases a user actually writes. Locked so the
-// #680 fix cannot regress them, and so the real defect stays correctly scoped
-// (Decimal's own logic is sound; it is a victim of the evaluator's f64
-// arithmetic, not the cause).
+// Std.Decimal currently rejects calls until #2778's exact arithmetic contract
+// is implemented. Retain these ordinary and rounding-boundary programs as
+// canaries so neither path silently starts returning unchecked answers.
 //
 // These need the staged chelis-std reef fixture, so they carry the same
 // manual-gate ignore as the rest of the std-dependent corpus.
 // ===========================================================================
 
-/// The classic fixed-point traps, all exact today. `0.1 + 0.2` renders `0.3`,
-/// where f64 gives `0.30000000000000004`.
+/// The classic fixed-point cases must report the Decimal fence.
 #[test]
 #[ignore = "needs the staged chelis-std reef fixture; exceeds the inner-loop \
             budget. Run with `cargo test -p chelis-cli --test precision_matrix \
             -- --ignored`."]
-fn decimal_classic_float_traps_are_exact() {
+fn decimal_classic_float_traps_report_fence() {
     let (_dir, reef_home, app_pkg) = common::make_app("precision-decimal-traps");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -1275,26 +1270,25 @@ fn decimal_classic_float_traps_are_exact() {
         ])
         .output()
         .expect("chelis eval should run");
-    assert!(
-        out.status.success(),
-        "decimal traps program should evaluate"
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let got: Vec<&str> = stdout.lines().take(4).map(str::trim).collect();
-    // f64 would give 0.30000000000000004, 0.09999999999999998, 1.2100000000000002.
-    assert_eq!(got[0], "0.3", "0.1 + 0.2 must be exactly 0.3");
-    assert_eq!(got[1], "0.1", "1.00 - 0.90 must be exactly 0.1");
-    assert_eq!(got[2], "1.21", "1.1 * 1.1 must be exactly 1.21");
-    assert_eq!(got[3], "59.97", "19.99 * 3 must be exactly 59.97");
+    assert!(
+        !out.status.success()
+            && rendered.contains("Std.Decimal is unavailable")
+            && rendered.contains("#2778"),
+        "{rendered}"
+    );
 }
 
-/// All four rounding modes on the tie case `5 / 2`, including banker's
-/// rounding. Exact today.
+/// The rounding-mode path must report the Decimal fence.
 #[test]
 #[ignore = "needs the staged chelis-std reef fixture; exceeds the inner-loop \
             budget. Run with `cargo test -p chelis-cli --test precision_matrix \
             -- --ignored`."]
-fn decimal_rounding_modes_are_correct_on_the_tie_case() {
+fn decimal_rounding_modes_report_fence() {
     let (_dir, reef_home, app_pkg) = common::make_app("precision-decimal-rounding");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -1324,17 +1318,17 @@ fn decimal_rounding_modes_are_correct_on_the_tie_case() {
         ])
         .output()
         .expect("chelis eval should run");
-    assert!(
-        out.status.success(),
-        "decimal rounding program should evaluate"
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let got: Vec<&str> = stdout.lines().take(5).map(str::trim).collect();
-    assert_eq!(got[0], "3", "5/2 half-up == 3");
-    assert_eq!(got[1], "2", "5/2 half-even == 2 (banker's)");
-    assert_eq!(got[2], "2", "5/2 down == 2");
-    assert_eq!(got[3], "3", "5/2 up == 3");
-    assert_eq!(got[4], "-3", "-5/2 half-up == -3 (away from zero)");
+    assert!(
+        !out.status.success()
+            && rendered.contains("Std.Decimal is unavailable")
+            && rendered.contains("#2778"),
+        "{rendered}"
+    );
 }
 
 // ===========================================================================
