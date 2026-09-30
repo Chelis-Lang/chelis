@@ -12699,6 +12699,17 @@ fn retain_actualized_result_claim_with_order(
     result: Option<&TensorType>,
     outer_claims_first: bool,
 ) -> HostExpr {
+    fn pattern_has_binder(pattern: &EntryPattern<HostTypeTerm>, binder: &str) -> bool {
+        match pattern {
+            EntryPattern::Tensor(HostTypeTerm::Tensor(tensor)) => tensor
+                .dims
+                .iter()
+                .any(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder)),
+            EntryPattern::List(inner) => pattern_has_binder(inner, binder),
+            _ => false,
+        }
+    }
+
     let Some(result) = result else {
         return body;
     };
@@ -12738,36 +12749,54 @@ fn retain_actualized_result_claim_with_order(
                     continue;
                 }
                 let claim = crate::lower::extent_binder_label(binder);
-                let requirement = if let Some(state) = contract
-                    .named_list_binders()
+                let first_direct = observations
                     .iter()
-                    .position(|name| name == binder)
-                {
-                    Some(HostResultRequirementPlan::NamedList { state, claim })
-                } else {
-                    observations
-                        .iter()
-                        .zip(positions)
-                        .find_map(|(observation, position)| {
-                            let formal = contract.formals().get(*position)?;
-                            let EntryPattern::Tensor(HostTypeTerm::Tensor(tensor)) =
-                                formal.pattern()
-                            else {
-                                return None;
-                            };
-                            let source_axis = tensor.dims.iter().position(
-                                |dim| matches!(dim, DimInfo::Named(name, _) if name == binder),
-                            )?;
-                            let HostExprKind::Var(prepared, _) = &observation.kind else {
-                                return None;
-                            };
-                            Some(HostResultRequirementPlan::NamedDirect {
+                    .zip(positions)
+                    .filter_map(|(observation, position)| {
+                        let formal = contract.formals().get(*position)?;
+                        let EntryPattern::Tensor(HostTypeTerm::Tensor(tensor)) = formal.pattern()
+                        else {
+                            return None;
+                        };
+                        let source_axis = tensor.dims.iter().position(
+                            |dim| matches!(dim, DimInfo::Named(name, _) if name == binder),
+                        )?;
+                        let HostExprKind::Var(prepared, _) = &observation.kind else {
+                            return None;
+                        };
+                        Some((
+                            *position,
+                            HostResultRequirementPlan::NamedDirect {
                                 claim: claim.clone(),
                                 source: formal.name().to_owned(),
                                 prepared: prepared.clone(),
                                 axis: source_axis,
-                            })
-                        })
+                            },
+                        ))
+                    })
+                    .min_by_key(|(position, _)| *position);
+                let first_list =
+                    contract
+                        .formals()
+                        .iter()
+                        .enumerate()
+                        .find_map(|(position, formal)| {
+                            (matches!(formal.pattern(), EntryPattern::List(_))
+                                && pattern_has_binder(formal.pattern(), binder))
+                            .then_some(position)
+                        });
+                let requirement = if first_list.is_some_and(|list| {
+                    first_direct
+                        .as_ref()
+                        .is_none_or(|(direct, _)| list < *direct)
+                }) {
+                    contract
+                        .named_list_binders()
+                        .iter()
+                        .position(|name| name == binder)
+                        .map(|state| HostResultRequirementPlan::NamedList { state, claim })
+                } else {
+                    first_direct.map(|(_, requirement)| requirement)
                 };
                 if let Some(requirement) = requirement {
                     axes.push((axis, requirement));
@@ -26154,5 +26183,86 @@ mod record_hoist_binder_vocabulary_tests {
             ty, body_ty,
             "body inference must not rewrite the claim plan"
         );
+    }
+
+    #[test]
+    fn retained_result_uses_the_first_formal_kind_for_its_witness() {
+        fn claim(list_first: bool) -> HostResultRequirementPlan {
+            let tensor = TensorType {
+                dims: vec![DimInfo::Named("seq".into(), None)],
+                precision: Prim::F32,
+            };
+            let tensor_term = HostTypeTerm::Tensor(tensor.clone());
+            let list_term = HostTypeTerm::List(Box::new(tensor_term.clone()));
+            let direct = HostParam {
+                name: "direct".into(),
+                ty: tensor_term.clone(),
+            };
+            let list = HostParam {
+                name: "list".into(),
+                ty: list_term.clone(),
+            };
+            let formals = if list_first {
+                vec![list, direct]
+            } else {
+                vec![direct, list]
+            };
+            let direct_position = usize::from(list_first);
+            let entry = HostExpr::new(HostExprKind::SignatureEntry {
+                contract: EntryContract::from_params(&formals),
+                plan: SignatureEntryPlan::new([HostTensorInput {
+                    name: "direct".into(),
+                    ty: tensor.clone(),
+                }]),
+                args: vec![HostExpr::new(HostExprKind::Var(
+                    "prepared_direct".into(),
+                    tensor_term.clone(),
+                ))],
+                positions: vec![direct_position],
+                lists: vec![HostListEntry {
+                    position: 1 - direct_position,
+                    name: "list".into(),
+                    ty: list_term.clone(),
+                    value: HostExpr::new(HostExprKind::Var("prepared_list".into(), list_term)),
+                }],
+            });
+            let result_ty = HostTypeTerm::Tensor(tensor.clone());
+            let retained = HostExpr::new(HostExprKind::RetainedInvocation {
+                bindings: vec![HostBinding {
+                    name: "entry".into(),
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: HostTypeTerm::Unit,
+                    value: entry,
+                }],
+                body: Box::new(HostExpr::new(HostExprKind::Var(
+                    "produced".into(),
+                    result_ty.clone(),
+                ))),
+                ty: result_ty,
+            });
+            let scoped = retain_actualized_result_claim(retained, Some(&tensor));
+            let HostExprKind::RetainedInvocation { body, .. } = scoped.kind else {
+                panic!("retained invocation lost its boundary");
+            };
+            let HostExprKind::ResultClaimScope { plan, .. } = body.kind else {
+                panic!("retained result lost its obligation");
+            };
+            plan.axes()[0].1.clone()
+        }
+
+        assert!(matches!(
+            claim(false),
+            HostResultRequirementPlan::NamedDirect {
+                source,
+                prepared,
+                axis: 0,
+                ..
+            } if source == "direct" && prepared == "prepared_direct"
+        ));
+        assert!(matches!(
+            claim(true),
+            HostResultRequirementPlan::NamedList { state: 0, .. }
+        ));
     }
 }
