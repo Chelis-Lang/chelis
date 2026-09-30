@@ -179,7 +179,9 @@ fn verify(
         }
     }
     if headers.len() != PUBLIC_HEADERS.len()
-        || PUBLIC_HEADERS.iter().any(|name| !headers.contains_key(*name))
+        || PUBLIC_HEADERS
+            .iter()
+            .any(|name| !headers.contains_key(*name))
     {
         return Err(format!(
             "the chelis {version} release's runtime export does not list exactly the six public headers"

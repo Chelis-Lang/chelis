@@ -998,6 +998,7 @@ REVIEWED: tuple[Row, ...] = (
             '"runtime export has no usable libchelis_runtime.a: libchelis_runtime.a is not a regular file",',
             '"no usable lib/libchelis_runtime.a: lib/libchelis_runtime.a is not a regular file",',
             '"no usable lib/libchelis_runtime.a: lib is not a directory",',
+            '"release has no usable lib/libchelis_runtime.a",',
         ),
         disposition="not-lookup",
         reason=(

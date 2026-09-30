@@ -240,12 +240,71 @@ fn install_refuses_each_crossed_public_header_before_store_placement() {
 
         let out = install(home.path(), release.path(), CHECKED);
         assert!(
-            !out.status.success() && stderr(&out).contains(&format!("ships include/{name} with SHA-256")),
+            !out.status.success()
+                && stderr(&out).contains(&format!("ships include/{name} with SHA-256")),
             "{name}: stdout: {}; stderr: {}",
             stdout(&out),
             stderr(&out)
         );
         assert_store_untouched(home.path(), CHECKED);
+    }
+}
+
+#[test]
+fn missing_shipped_archive_or_export_receipt_preserves_previous_install() {
+    let cases: [Refusal; 2] = [
+        (
+            "missing shipped archive",
+            |runtime| runtime.ship_archive = false,
+            "release has no usable lib/libchelis_runtime.a",
+        ),
+        (
+            "missing export receipt",
+            |runtime| runtime.export_receipt = false,
+            "chelis_runtime.receipt.json: No such file or directory",
+        ),
+    ];
+    for (case, change, expected) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let release = tempfile::tempdir().unwrap();
+        let previous = "0.18.11";
+        build_release_tarball(
+            release.path(),
+            previous,
+            &build(previous),
+            &ReleaseRuntime::matching(previous),
+        );
+        let old = install(home.path(), release.path(), previous);
+        assert!(old.status.success(), "{case}: {}", stderr(&old));
+        let old_binary = home.path().join("toolchains/0.18.11/bin/chelis");
+        let old_bytes = std::fs::read(&old_binary).unwrap();
+        let old_default = std::fs::read(home.path().join("default")).unwrap();
+        assert_eq!(old_default, b"0.18.11\n");
+
+        let mut runtime = ReleaseRuntime::matching(CHECKED);
+        change(&mut runtime);
+        build_release_tarball(release.path(), CHECKED, &build(CHECKED), &runtime);
+        let refused = install(home.path(), release.path(), CHECKED);
+        assert!(
+            !refused.status.success(),
+            "{case}: stdout: {}",
+            stdout(&refused)
+        );
+        assert!(
+            stderr(&refused).contains(expected),
+            "{case}: stderr: {}",
+            stderr(&refused)
+        );
+        assert_eq!(std::fs::read(&old_binary).unwrap(), old_bytes, "{case}");
+        assert_eq!(
+            std::fs::read(home.path().join("default")).unwrap(),
+            old_default,
+            "{case}"
+        );
+        assert!(
+            !home.path().join("toolchains").join(CHECKED).exists(),
+            "{case}"
+        );
     }
 }
 
