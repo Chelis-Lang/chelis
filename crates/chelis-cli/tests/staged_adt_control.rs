@@ -86,12 +86,18 @@ fn literal_state_and_no_reshape_controls_still_execute() {
     let (eval, native) = eval_and_c("literal", &literal);
     assert_eq!(eval, "main = tensor(shape=[2, 1], data=[1.0, 2.0])\n");
     assert_eq!(native, eval);
+    let reshaped = "[1.0f32, 2.0f32] |> to_tensor |> reshape([2i64, 1i64])";
+    assert!(
+        INITIALIZED.contains(reshaped),
+        "fixture no longer has the reshape control"
+    );
     let plain = INITIALIZED
         .replace("tensor[2, 1, f32]", "tensor[2, f32]")
-        .replace(
-            "reshape(to_tensor([1.0f32, 2.0f32]), [2i64, 1i64])",
-            "to_tensor([1.0f32, 2.0f32])",
-        );
+        .replace(reshaped, "[1.0f32, 2.0f32] |> to_tensor");
+    assert!(
+        !plain.contains("|> reshape("),
+        "no-reshape control still reshapes"
+    );
     let (eval, native) = eval_and_c("plain", &plain);
     assert_eq!(eval, "main = tensor(shape=[2], data=[1.0, 2.0])\n");
     assert_eq!(native, eval);
