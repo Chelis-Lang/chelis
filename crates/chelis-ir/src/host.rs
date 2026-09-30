@@ -24316,7 +24316,31 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                         .collect::<Vec<_>>()
                 )
             });
-        let helper_index = match &body.kind {
+        let scoped_body = match &body.kind {
+            HostExprKind::ResultClaimScope { plan, body, .. } => {
+                assert_eq!(plan.axes().len(), 1);
+                match &plan.axes()[0] {
+                    (
+                        0,
+                        HostResultRequirementPlan::NamedDirect {
+                            claim,
+                            source,
+                            prepared,
+                            axis,
+                        },
+                    ) => {
+                        assert_eq!(claim, "n");
+                        assert_eq!(source, "theta");
+                        assert_eq!(prepared, &formal_binding.name);
+                        assert_eq!(*axis, 0);
+                    }
+                    other => panic!("expected named result obligation on theta, got {other:?}"),
+                }
+                body.as_ref()
+            }
+            other => panic!("expected retained result-claim scope, got {other:?}"),
+        };
+        let helper_index = match &scoped_body.kind {
             HostExprKind::TensorCall { helper, .. } => *helper,
             other => panic!("expected retained body to call tensor helper, got {other:?}"),
         };
