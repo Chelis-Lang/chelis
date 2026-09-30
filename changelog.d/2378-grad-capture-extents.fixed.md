@@ -1,1 +1,0 @@
-Tensor captures in `grad` retain their literal or symbolic shape, while mismatching captures keep their extent checks. Evaluator, compiled C, and native test-runner regressions pin the closure-conversion repair for [#2378](https://github.com/Chelis-Lang/chelis/issues/2378).

@@ -4,6 +4,1397 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.12] - 2026-09-30
+
+### Added
+
+- **BREAKING:** Reef now parses canonical package identities and prefers valid exact locks.
+  Package versions use Semantic Versioning without build metadata. Manifest
+  schema 1 keeps exact dependency semantics; schema 2 activates deterministic
+  Cargo-style resolver-2 requirements. Noncanonical package names, partial
+  versions, non-SemVer release tags, and malformed locks, which earlier releases
+  accepted, now fail closed. See
+  [#1327](https://github.com/Chelis-Lang/chelis/pull/1327).
+
+- **BREAKING:** The `key` element dtype and the explicit key operations `key_from_seed`, `split_key`, `split_keys` and `fold_in` ([05-OP-69] through [05-OP-72], derived under [05-RNG-2]) exist in the IR, the DAG evaluator and compiled C, and `chelis build --target hip` refuses them with its typed rejection ([#2413](https://github.com/Chelis-Lang/chelis/issues/2413), step 1). `key` is an active tensor element dtype, stored as runtime dtype `key` (id 9) in a `chelis_tensor`, with no arithmetic, comparison, cast, literal or default; DLPack and NumPy refuse key tensors. A draw may take a batch of keys, one per row of its data.
+
+  BREAKING: WireDag adds the four key operations and admits `key` at any rank.
+
+- The compiler API evaluator now routes its seven filesystem builtins and
+  `process_run` through one injected system boundary with independently checked
+  Filesystem and Process permissions. Normal evaluation permits both, while
+  invariant predicate revalidation refuses both before invoking the host
+  adapter. The default adapter preserves existing filesystem, process, and
+  error behavior, including byte-ordered directory
+  names and strict UTF-8 failure under [05-HOST-4]. This evaluator-only change
+  does not alter compiled binaries or the runtime ABI; compiled host
+  `process_run` support remains required by [05-HOST-2] and tracked under
+  chelis#1297. See
+  [#1323](https://github.com/Chelis-Lang/chelis/pull/1323).
+
+- Reef documents now have independent versioned schemas. New manifests write
+  schema 3 and new lockfiles write schema 1. Legacy files remain readable with an
+  upgrade warning. `chelis reef upgrade --check|--inplace` provides preflighted
+  ordered migration. Project writers use `.reef-write.lock` and atomic
+  single-file replacement. Versioned JSON Schema files under `docs/schemas/reef/`
+  provide advisory editor validation. See
+  [#1327](https://github.com/Chelis-Lang/chelis/pull/1327).
+
+- Reef manifest schema 3 accepts typed package metadata: a description, an SPDX
+  license or a custom license file, HTTPS repository, documentation, and homepage
+  URLs, and a README. Declared files use portable paths, no-follow Unix opens,
+  stable bounded snapshots, and deterministic archive membership. Metadata is
+  not part of logical package identity or resolution, and its fields are not
+  serialized into `reef.lock`, `index.json`, or `.chb`. Artifact integrity hashes
+  still change when declared bytes or the manifest change.
+  Prepared graph cache version 10 rejects earlier envelopes. See
+  [#1327](https://github.com/Chelis-Lang/chelis/pull/1327).
+
+- Reef now performs bounded GitHub release discovery. Normal commands reuse a
+  valid lock without listing releases. `chelis reef update [<package>]` performs
+  a full or targeted refresh, and `chelis reef outdated [<package>] [--json]`
+  reports available versions without final writes. Both commands reject index
+  or remote artifact hashes that disagree with an existing lock, even when a
+  cache directory or index entry is missing and the package is unrelated to a
+  targeted refresh. An uncached pin occupies a candidate-manifest slot even
+  when newer releases exceed the scan limit; an unavailable or mismatched pin
+  fails closed. Candidate scans, requests, downloads, and resolver states
+  have finite limits, and Reef publishes complete verified cache entries before
+  it replaces `reef.lock`. An explicit `chelis-std`
+  dependency uses the compiler bundle without network access. Cyclic path
+  dependency graphs fail with an ordered cycle report before resolution. See
+  [#1327](https://github.com/Chelis-Lang/chelis/pull/1327).
+
+- `chelisup install` now checks a release's runtime files before placing it. It
+  runs the unpacked `chelis runtime export` and refuses the release unless the
+  exported archive and each receipt-listed header are regular non-symlink files
+  whose SHA-256 matches the receipt, and the shipped archive and headers match
+  those same digests. A refused release leaves the store untouched. Releases up
+  to 0.18.11 predate the export and install unchecked, with a warning. A refused
+  release newer than the running chelisup also says how to get the latest
+  chelisup, and a release whose `chelis` the operating system refuses to execute
+  is reported as such. See [#1354](https://github.com/Chelis-Lang/chelis/issues/1354).
+
+- `chelis runtime export <dir>` writes the runtime archive and public runtime
+  headers that the `chelis` binary carries, with a receipt recording the archive's
+  SHA-256. Release tarballs and the Nix `chelis` package ship its output, so their
+  `lib/libchelis_runtime.a` is the archive `chelis build` stages. See
+  [#1354](https://github.com/Chelis-Lang/chelis/issues/1354).
+
+- A core-fragment eval/C parity receipt runs a pinned corpus of programs through
+  both `chelis eval` and the compiled C lane and compares their complete
+  observations byte for byte, and their traps by exit status and complete
+  diagnostic. The corpus is a versioned manifest that records every case's
+  expected outcome and every excluded file's reason, so a run cannot pass
+  vacuously. It is a manual gate, documented in
+  [`docs/manual_gates.md`](https://github.com/Chelis-Lang/chelis/blob/main/docs/manual_gates.md); its contract is
+  [`spec/design/core_fragment_parity_corpus.md`](https://github.com/Chelis-Lang/chelis/blob/main/spec/design/core_fragment_parity_corpus.md).
+  See [#2102](https://github.com/Chelis-Lang/chelis/issues/2102).
+
+- `chelis reef conform audit` recognizes Coral and Nautilus thin callers of the known historical central workflow revision with closed profile inputs and secret mapping. Structurally parsed YAML jobs and events make alternate indentation, quoted keys (including `on`), and aliases obey one authority; duplicate keys fail closed, while comments and run strings remain inert. GitHub owner/repository case differences cannot hide mutable, unknown, or alternate-path central pointers. Each historical CI, nightly, or release profile requires the raw reef compiler, package, and Nautilus sources its actual grep-based jobs read, even when a release caller omits pin inputs; these must agree with parsed TOML and supplied caller pins. The first grep-extractable numeric version on a `^nautilus` line is decisive, even when an adjacent dependency matches the prefix; later lines do not override it. Valid inline Nautilus trailing fields/comments remain readable, while separate tables alone do not certify the 439 guard. The committed Linux/Darwin toolchain digest lock must match. CI callers must run for main pushes and pull requests to certify the guard and test suites. This audit does not approve a consumer migration, a newer central revision, or hosted execution.
+
+- Add a bounded keyed-randomness acceptance command with exact test receipts and
+  explicit compiler, `par` rejection, and shell-release coverage boundaries.
+
+- Downstream shells may add an optional Nix verification job that rebuilds the
+  shell with atoll's `chelis2nix` and requires the bytes of the shell's chelisup
+  build. `spec/design/shell_repo_contract.md` §2 states its conditions: the
+  chelisup lane stays the gate, the job runs only on pushes to `main`, and it
+  takes the compiler only by substitution and never builds it.
+
+### Changed
+
+- **BREAKING:** Randomness now uses explicit keys instead of the `Random` effect ([#2413](https://github.com/Chelis-Lang/chelis/issues/2413)). A `key` is a non-numeric dtype. `key_from_seed(seed)` makes a root key; `split_key(k)` returns two keys, `split_keys(k, n)` returns a `tensor[n, key]`, whose extent follows `expand`'s rule (a literal `n` is that literal extent and any other `n` a runtime extent, checked where it meets another), and `fold_in(k, n)` derives one key from an integer. The draws take the key first: `dropout(k, x, rate)` and `uniform_like(k, t, low, high)`; a call at the old keyless arity names the retired spelling. The `with seed(N) { ... }` handler, the `Random` effect name in Surf effect annotations, and the `random` kind of Deep's `handle-effect` are removed; each is now a typed rejection that points at keys. A function that draws takes a `key` parameter instead.
+
+  Keys are affine ([04-LIN-9]): each is used at most once on every path and cannot be copied, borrowed or captured by a closure, and reuse is a `KeyReuse` error suggesting `split_key` or `split_keys`. An as-pattern cannot bind a key-carrying value together with a key-carrying component of it, and a key a match guard consumes stays consumed in every later arm, because a failed guard falls through. `filter`, `partition`, `scan` and `tensor_scan` refuse a key-carrying element or accumulator, which would reach both their callback and their result, while `map`, `fold` and the other list builtins move keys; tensor `concat` and `split` refuse key tensors; and `vmap` refuses a key-carrying argument it would share across rows. A key-carrying value reaches only the operations the key allow-list names: a key derivation or draw at its key operand, `drop`, a branch's join, construction and destructuring, a move, a list builtin that routes each value to one consumer, and a call through a key-typed parameter, `grad`, `vmap` and `jit` applications included; reading a key tensor's extent with `shape` or `numel` (as an `expand`, `insert` or `reshape` size too), or at an extent check (of a call whose signature shares a dimension between a key tensor and other data, or of an ascription or result type that claims a `split_keys` result's extent), is not a use and leaves the key live; every other operation, `realize` and a builtin passed as a function value included, is refused at `chelis check` with a diagnostic that names it. A top-level key-carrying binding is a root, and observing it is its one use ([04-LIN-6]), so no other binding may also consume it. A generic type parameter, including a generalized `let` binding's, is never instantiated at a type that carries a key ([04-LIN-10]); pass keys through concrete `key` or `tensor[n, key]` parameters, or ascribe the binding (`e: List[key] = Nil`). `vmap` over a key parameter takes a mapped `tensor[n, key]`, giving each row its own key, so `vmap` over a function that draws is now defined ([#2409](https://github.com/Chelis-Lang/chelis/issues/2409)). In a runtime `if` lowered as a selection (under `grad` or `vmap`), one arm may split or fold a key that the other arm draws with, and an unselected arm's `split_keys` does not trap on its count. Such an `if` whose value is a key joins its arms' keys, so `if c then fold_in(k, 1) else fold_in(k, 2)` is the taken arm's key in the DAG evaluator and in compiled C; key-rule diagnostics name a key by its parameter and declaration ("key `k` of `f` is consumed twice"). Draw values are a function of the key and the element index alone ([05-RNG-1], [05-RNG-2]), so every program that drew under `with seed` produces different bits after it is rewritten with keys. The std initialisers (`normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal`) take a key first. A draw whose result is discarded still validates its rate or bounds and traps in `chelis eval` and compiled C, including a draw in a value declaration that a reached binding names but nothing reads ([#2463](https://github.com/Chelis-Lang/chelis/issues/2463)): a reference to a value declaration whose initializer can trap runs that initializer where the reference is reached, so it traps inside a taken `if` arm and runs nothing inside an untaken one, in every lane.
+
+  At the boundaries, a scalar key crosses a host entry's C ABI as the published `chelis_key` (with `chelis_key_from_seed`), and a key tensor as a `chelis_tensor` of dtype `key`; an entry on the four-argument tensor ABI takes and returns keys as `chelis_tensor`s of dtype `key`, rank 0 for a scalar key. A compiled program prints a key root as `key(<16 hex digits>)`, as `chelis eval` does ([05-OBS-2]), through the runtime's new `chelis_string_from_key`. Execution values gain `{"type":"key","bits":"<16 hex digits>"}` and the key storage object, and the execution-value schema version is now 4. A discarded draw whose controls are in-range literals and whose key batch is statically sized no longer runs, so its data is not a required input, and the evaluator rejects a lowered program that breaks the key rules, as the compiled lanes do. The WireDag schema version is now 19, and a payload of any other version is rejected; beside the key operations and the key-operand draws, it adds a `key_select` join, whose two arm activations must be its own activation conjoined with a condition and with its negation, a required `declarations` table of declaration names, a required `declaration` on each node that is its declaration's row in that table, so two declarations that share a name stay two, and a required `activation` on each node (the path condition it checks under, or null), which is the only carrier of a draw's or key operation's activation, so a trailing activation operand is an arity error. The cached standard-library, compiled-context and library typecheck formats are now 35, 38 and 20, so existing caches are rebuilt. Python passes keys as `chelis.Key` through execution values; DLPack and NumPy refuse key tensors.
+
+  BREAKING (HIP lane, experimental): `chelis build --target hip` now refuses every draw, because it refuses every key operation and the `with seed` bridge is gone. Restoring keyed draws on HIP is tracked by [#2585](https://github.com/Chelis-Lang/chelis/issues/2585).
+
+- **BREAKING:** Random draws take their controls and their key as operands ([#2413](https://github.com/Chelis-Lang/chelis/issues/2413)). `chelis eval` and compiled C evaluate the same key-operand graph, and these behaviors change:
+  - a runtime `dropout` rate and runtime `uniform_like` bounds are accepted in `chelis eval` and compiled C; the static-rate requirement and its diagnostics are gone ([#2411](https://github.com/Chelis-Lang/chelis/issues/2411));
+  - compiled C validates `uniform_like` bounds under [05-OP-8] and traps an invalid bound before the draw; an invalid literal `dropout` rate in compiled C now builds and traps at the draw, as eval does, where the entry lane used to refuse it at code generation;
+  - a draw in the unselected arm of a runtime `if` no longer changes any other draw, where compiled C used to shift every later draw ([#2410](https://github.com/Chelis-Lang/chelis/issues/2410));
+  - `chelis eval` traps on invalid literal `uniform_like` bounds before the draw, where it used to return values: reversed bounds gave `1 - u`, and a span that overflows f32 gave inf;
+  - `grad` through a `dropout` rate that a differentiated parameter reaches through differentiable operations is rejected with `RandomSelectionParameter`, and any other rate receives a zero cotangent ([#2421](https://github.com/Chelis-Lang/chelis/issues/2421)). The previous pathwise rate cotangent was a biased estimate of the derivative of the expected result; compute such a rate from values that are not differentiated.
+
+  BREAKING: WireDag random nodes carry no fields, and `DropoutReplay` and `UniformBoundAdjoint` are new.
+
+- **BREAKING:** `Result` is no longer a built-in type. The checker admitted `Result[a, b]` as a
+  native nominal type, but no constructor, runtime layout or specification ever
+  defined it, so a program could declare a `Result` parameter or field and never
+  build or read one. `Result[..]` is now an unknown type at check, like any other
+  undeclared name. A program may declare its own `Result` data type at any arity;
+  a zero-arity declaration, such as `type Result = | HomeWin | Draw | AwayWin`,
+  was rejected before because the built-in header demanded two arguments. See
+  [#2526](https://github.com/Chelis-Lang/chelis/issues/2526).
+
+- **BREAKING:** `Std.Decimal` callables now fail explicitly while their exact arithmetic contract remains unimplemented. See [#2778](https://github.com/Chelis-Lang/chelis/issues/2778).
+
+- **BREAKING:** `Std.Time` operations now raise an explicit error instead of returning incorrect dates or unnormalized durations. The module remains unavailable until its exact calendar and duration contract is implemented. See [#2779](https://github.com/Chelis-Lang/chelis/issues/2779).
+
+- **BREAKING:** WireDag now uses an exact new schema version for resolved top-level Load origins. Older WireDag payloads are rejected, and a compiled reader can distinguish a captured global from a same-spelled graph input. See [#2604](https://github.com/Chelis-Lang/chelis/issues/2604).
+
+- **BREAKING:** The bundled standard library exposes no `Std.Tokenizer` or `Std.Init.*`
+  modules. School provides normal, Kaiming, Xavier, and truncated-normal
+  initializers under `School.Init.*`; the illustrative CSV and JSON pipeline
+  uses only runtime data APIs. This boundary change is part of
+  [chelis#2303](https://github.com/Chelis-Lang/chelis/issues/2303).
+
+- The repository gate's optional extra-validation run is now
+  `python3 scripts/gate.py --validation`; the `--local` spelling is gone, and the
+  inherited agent contract names the new flag. `--fast` remains the pre-push
+  gate. On macOS that run's runtime-representation stage no longer fails on the
+  capacity census's preprocessor attribution, which now drops the blank lines
+  Apple clang emits and GCC does not. See
+  [#2326](https://github.com/Chelis-Lang/chelis/issues/2326).
+
+- Linux Extended Validation can dispatch the runtime-representation, dtype
+  Phase 0–3, or runtime-extent oracle alone, while full-scope dispatches and
+  scheduled runs retain the complete selection.
+  Scoped dispatches cannot be used as package-expansion failure baselines.
+  See [#2356](https://github.com/Chelis-Lang/chelis/issues/2356).
+
+- Loading a cached compiled context, or a standard-library typecheck cache entry
+  that carries its lowering, no longer reruns the effect and linearity checkers
+  over the cached library. Such an entry is accepted on its envelope digest,
+  format version, build identity, its binding to the sources (the live source
+  hash for a compiled context, the content key for a typecheck cache), the agreement between its
+  type environment and checked program, and the agreement between its program
+  and its stored lowering, which the decoder re-derives and compares; the
+  checker results are those the same compiler build produced when it wrote the
+  entry. `chelis eval --file`, `chelis test`, `chelis check` and `chelis build`
+  inside a package spend correspondingly less time loading the library. The
+  dependency typecheck cache, whose entries carry no lowering, still reruns both
+  checkers on load, as does a standard-library entry without a lowering. See
+  [#2558](https://github.com/Chelis-Lang/chelis/issues/2558).
+
+- A Reef package now links only the standard-library modules that its own
+  modules, its dependencies, and the entries a command runs import, directly or
+  through other standard-library modules. Previously every package that had the
+  bundled `chelis-std` runtime in its graph linked, type-checked, cached and
+  decoded the whole standard library, so `chelis eval --file`, `chelis test`,
+  `chelis check`, `chelis build` and `chelis reef build` in a package that
+  imports nothing from it paid for all of it. A loose `chelis eval --file` snippet, a `chelis test` of
+  any directory, and a Python `eval(..., project_root=...)` source still import
+  any standard-library module; the compiled context is cached separately for
+  each set of linked modules. See
+  [#2558](https://github.com/Chelis-Lang/chelis/issues/2558) and
+  [#2672](https://github.com/Chelis-Lang/chelis/issues/2672).
+
+- The VS Code extension highlights current Surf and Deep syntax, including block comments, numeric forms, and operators. The Python binding guide describes source checking, evaluation, and compiled tensor model use.
+
+- The `loc-report` tool prints Markdown to stdout by default. Use `--output PATH`
+  to save a report; it no longer updates a tracked report on a schedule.
+
+- Retired the historical Phase 1e fixed-workload benchmark runner and PyTorch scripts. Its dated results remain in the docs archive; executable model examples and backend correctness gates remain available.
+
+- Chelis OpenSpec plans, capability captures, archives, and document submission now live in the shared `Chelis-Lang/openspec` store under `chelis-*` IDs. The compiler checkout retains an immutable store pointer/lock and validates that revision through read-only CI access. Numbered specifications and executable correctness oracles remain in Chelis; planning stays optional and Phase 0 remains inactive.
+
+### Fixed
+
+- **BREAKING:** `chelis build` stages the runtime archive built into the `chelis` binary instead
+  of searching for the most recently modified `libchelis_runtime.a`, so a stale or
+  mutated archive left in a build directory is no longer linked by mistake. The
+  build report adds a `Staged runtime <path> (sha256 <digest>)` line, the output
+  directory gains `chelis_runtime.receipt.json`, and the printed compile commands
+  name the staged archive by path instead of `-L<dir> -lchelis_runtime`. Setting
+  `CHELIS_RUNTIME_DIR` is now an error for `chelis build`; unset it. See [#1354](https://github.com/Chelis-Lang/chelis/issues/1354).
+
+- **BREAKING:** `chelis.compile_and_load` stages the runtime archive built into the Python
+  extension beside the compiled library and links that archive by path, instead of
+  searching for the most recently modified `libchelis_runtime.a` or taking one from
+  `CHELIS_RUNTIME_DIR`. Setting `CHELIS_RUNTIME_DIR` is now an error for
+  `compile_and_load`; unset it. Compiled-artifact metadata records the SHA-256 of
+  that runtime and of the compiled library, and `chelis.load` refuses an artifact
+  whose digests are missing or differ, before opening its library. Artifacts
+  compiled by an earlier version must be recompiled. See
+  [#1354](https://github.com/Chelis-Lang/chelis/issues/1354).
+
+- **BREAKING:** A float literal that is finite as written but rounds to infinity at the dtype it binds at is now a type error instead of silently evaluating to `inf`. This covers a decimal body under a suffix (`70000.0f16`, `1e40f32`), an unsuffixed literal at the `f32` default (`1e40`), a literal adopted by a known element type or by `cast(literal, p)` (`[1.0, 70000.0]` as `tensor[2, f16]`, `cast(70000.0, f16)`), a literal adopted by a `Float`-bounded binder, which must be finite at every member of the family (`cast(70000.0, p)` fails because of `f16`), a float literal pattern against a narrower scrutinee, and hand-written Deep, including the integer-spelled `literal_source: integer` form. Previously only the Surf integer-bodied spelling (`65520f16`) was rejected. Rounding a small value to zero is unchanged, and so are operations that overflow: `cast(70000.0f32, f16)` and `65504.0f16 * 2.0f16` still produce infinity.
+
+  The rule is stated once as `spec/04-type-system.md` [04-LIT-2]: a numeric literal binds at its dtype by one finalization and must be in range and finite there. [04-PAT-1] no longer says a float pattern has no range. A decimal float body is still decoded to binary64 before its dtype is known (`spec/10-serialization.md` §3.3), so a body within one binary64 step of a narrower dtype's halfway point can round differently from a direct decimal conversion ([#2437](https://github.com/Chelis-Lang/chelis/issues/2437)). See [#2123](https://github.com/Chelis-Lang/chelis/issues/2123).
+
+- **BREAKING:** `grad` over a checked `cast` from a float source to an integer or bool target
+  now rejects structurally with `AdRejectionReason::PiecewiseConstant` instead of
+  contributing a silent zero gradient. `spec/04-type-system.md` [04-NUM-14] has
+  always required this — "it never contributes a silent zero" — and `cast_trunc`,
+  `floor`, `ceil` and `round` already rejected in the same position; the checked
+  default was the one operation in its class that did not, so a float-to-integer
+  round trip inside a differentiated body used to stall training quietly rather
+  than fail. The rejection reaches the evaluator and `chelis build --target c`
+  alike; it fires during lowering, so no C is emitted for a rejected program.
+  A float-to-float cast keeps [04-NUM-14]'s exact backward cast, and a bool or
+  integer SOURCE still differentiates unchanged, because a discrete source
+  "carries no cotangent, irrespective of target". Separately, and by a different
+  mechanism, a float-to-integer cast that only feeds an index — `gather`'s
+  indices, a movement bound — is still accepted, because index math is a
+  stop-gradient boundary that carries no cotangent to suppress. [05-OP-63]'s
+  `Adjoint:` restatement, which read as rejecting an integer-to-float cast too,
+  now matches the atom it defers to. A rejection reached through a comparison
+  operand still reports an unstructured reason rather than the atom's
+  ([#730](https://github.com/Chelis-Lang/chelis/issues/730)). Part of
+  [#729](https://github.com/Chelis-Lang/chelis/issues/729).
+
+- **BREAKING:** The checker decides a builtin's operand rule when the operand's type is an
+  authored type binder, at every instantiation the binder admits
+  ([04-INF-6], [04-DTYPE-2]). Previously a call whose operand was a binder, such
+  as `numel(k)` with `k: p` and `p: Float`, checked with score 1, then trapped in
+  `eval` and emitted C that does not compile. It is now rejected with the
+  operation's own diagnostic, naming the instantiation where it fails, for
+  example `p := f32`. A binder with no dtype-family bound is decided at an
+  arbitrary type rather than at any one type, so an operation that admits only
+  some types, such as `eq`, is rejected on it. An operation that every
+  instantiation admits, such as `take(xs, n)` with `n: p` and `p: Int`, is still
+  accepted.
+  See [#2216](https://github.com/Chelis-Lang/chelis/issues/2216).
+
+  `cast_trunc` rejects a source whose dtype is an `Int` or `Numeric` binder, on
+  tensor and scalar sources and with a concrete or binder target, and names the
+  `Float` bound to declare ([05-OP-6]). A cast whose target is a binder applies
+  the float-source and integer-target rule to a concrete source or a source
+  whose type is a binder at the cast, and rejects a source that is a binder with
+  no dtype-family bound. A tensor
+  precision that a later binding makes an integer is rejected too. Previously
+  these programs checked with score 1, except a scalar binder source with a
+  concrete target and a tensor source with a binder target, which were already
+  rejected with another diagnostic; the issue's programs then panicked in `eval`
+  or C emission. A cast to a binder target now accepts a `bool` source
+  ([04-NUM-14], [05-OP-63]), which the scalar form rejected before, and a
+  variable-target `cast_trunc` whose source precision a later binding makes a
+  float is now accepted instead of rejected. A dtype-family requirement that
+  reaches an authored binder through a lambda parameter is reported once, against
+  the binder, and no longer again against the parameter.
+  See [#2158](https://github.com/Chelis-Lang/chelis/issues/2158).
+
+- **BREAKING:** A `fail(...)` under `grad` or `vmap` whose message is not a string literal written
+  at the `fail` itself is now rejected instead of silently becoming a value.
+  [05-OP-68] carries the abort message as part of the operation's identity and takes
+  no string operand, so such a `fail` has no guarded form; lowering substituted a
+  zero placeholder, and under a transform that placeholder became part of the
+  answer — `grad` over `sum(add(x, fail(string_concat("bad: ", tag()))), 0i32)`
+  returned `1.0` at exit 0, and `vmap` echoed its inputs with the abort gone
+  entirely. A `let`-bound literal message had the same effect. The rejection is
+  taken by the consuming transform rather than at the `fail`, so an untransformed
+  `fail` with a computed message — including one reached through a `string`
+  parameter — still aborts at run time with its message. A literal message still
+  builds its guard and still aborts, and an untaken guard still differentiates.
+  A direct `fail(...)` whose message cannot be used no longer reports the
+  indirect-`fail` diagnostic that told the author to write `fail` directly as the
+  branch when that is what they had written; one classifier now returns either a
+  usable message or a typed reason, and a genuinely indirect `fail` keeps the
+  indirect wording
+  ([#2383](https://github.com/Chelis-Lang/chelis/issues/2383)). Part of
+  [#1464](https://github.com/Chelis-Lang/chelis/issues/1464) and
+  [#730](https://github.com/Chelis-Lang/chelis/issues/730).
+
+- **BREAKING:** `uniform_like` no longer mixes the draw and the element index symmetrically. Under 0.18.11's `with seed` stream, element `i` of the draw with call ordinal `c` equalled element `c` of draw `i`, and element `c` of draw `c` was the same value for every `c`. Element `i` of a draw now comes from the draw's key and `i` alone ([05-RNG-1]).
+
+  Every `uniform_like`-derived value changes, including `normal_like`, `trunc_normal`, the Kaiming and Xavier initialisers, and library distributions built on them; regenerate any pinned random outputs. In the Rust API, `chelis_types::dtype_semantics::uniform_sample` is removed; `PreparedUniformLike::apply` draws with a `RandomKey`. See [#2408](https://github.com/Chelis-Lang/chelis/issues/2408).
+
+- **BREAKING:** A literal pattern whose scrutinee is a rigid dtype-family binder is now
+  checked at every instantiation the binder admits, under
+  `spec/04-type-system.md` [04-PAT-1], [04-LIT-2], and [04-INF-6]. Before, the
+  checker skipped it, so `| 300 =>` under `p: Int` (out of range at `i8`),
+  `| 70000.0 =>` under `p: Float` (infinite at `f16`), and `| 0 =>` under
+  `p: Numeric` (it never matches a float) all checked at score 1. The last one
+  also gave wrong answers at run time. A literal pattern under an unbounded
+  binder is rejected too, because such a binder admits non-primitive types.
+
+  Each rejection names the binder, its family, and the member where the
+  pattern fails. It also names a repair that checks under the binder and
+  matches exactly the values equal to the literal, with no cast that can trap:
+
+  - the literal in the family's own kind, such as `0.0` for `0` under
+    `Float`;
+  - a comparison over the literal bound at the binder, such as
+    `eq(x, cast(0, p))`, or over the value widened to `i64` or `f64`, such as
+    `eq(cast(x, i64), 300i64)`. When the literal is an arm's whole pattern and
+    the scrutinee is a variable, the comparison goes in an `if` ahead of the
+    match, over that variable. Anywhere else, the literal's position is bound
+    to a fresh variable and the comparison goes in the arm's body;
+  - deleting an arm that no instantiation can match.
+
+  See [#2442](https://github.com/Chelis-Lang/chelis/issues/2442).
+
+- **BREAKING:** A guarded `match` arm no longer counts toward exhaustiveness, as
+  spec/04-type-system.md section 2.4 now states: its guard can be `false`, so the
+  match could run out of arms. A program whose only arm for a constructor is
+  guarded, such as `| Some(v) if gt(v, 10i64) => 1 | None => 3`, is now rejected
+  with `NonExhaustiveMatch`; add an unguarded arm for that constructor or a
+  wildcard. Before, it checked clean and, once guards were evaluated
+  ([#2445](https://github.com/Chelis-Lang/chelis/issues/2445)), would have
+  failed at run time.
+
+- **BREAKING:** A `match` arm guard (`| pattern if condition => body`) is now evaluated in
+  every execution lane, as [04-PAT-2] states: after the arm's pattern matches,
+  the guard runs with the pattern's bindings, and a `false` guard passes control
+  to the next arm. Before, `chelis eval` selected a guarded arm whenever its
+  pattern matched, and compiled C dropped guarded and variable arms, let the last
+  wildcard or `Some` arm win, or selected the first constructor arm whose pattern
+  matched. Programs with guards can return different values. A guard whose
+  evaluation traps now makes the `match` trap in both lanes. See
+  [#2445](https://github.com/Chelis-Lang/chelis/issues/2445).
+
+- **BREAKING:** Compiled C now lowers a `match` on every scalar dtype and on tuples, and a
+  nested sub-pattern constrains its arm. Before, a match on an `i8`, `i16`,
+  `i32`, `f16` or `bf16` value or on a tuple was rejected at build with the
+  misattributed "an Option match has no `Some` arm"
+  ([#2446](https://github.com/Chelis-Lang/chelis/issues/2446)), a `bool` match
+  without a wildcard arm was rejected for lacking a default, and a nested
+  sub-pattern under `Some` or a user constructor, such as `Some(Some(v))` or
+  `Wrap(None)`, was ignored so the arm was selected anyway
+  ([#2450](https://github.com/Chelis-Lang/chelis/issues/2450)). Compiled programs
+  with such nested patterns can return different values.
+
+- **BREAKING:** The file, mapped-file and process builtins carry the exact signatures
+  [05-OP-60] and [05-OP-38] give them: `read_file`, `write_file`, `read_lines`,
+  `read_bytes`, `file_exists`, `list_dir` and `mmap_file` take `string` paths,
+  `mmap_read` and `mmap_len` take a `MappedFile` and exact `i64` offsets and
+  counts, and `process_run` takes a `string` and a `List[string]`. Previously any
+  argument type checked with score 1, including an `f32` path or one typed by a
+  `Float` binder, and `process_run("echo", "hi")` failed only in `eval`. See
+  [#2524](https://github.com/Chelis-Lang/chelis/issues/2524).
+
+- **BREAKING:** A checked `cast` admits exactly the numeric dtypes and `bool` as its source
+  ([05-OP-63], [04-NUM-14]), whether the source is written directly or reaches the
+  cast through a lambda parameter. Previously a `string` source checked with score
+  1: `cast(s, i64)` with `s: string`, and `(fn (y) -> cast(y, i64))("s")`
+  ([#2524](https://github.com/Chelis-Lang/chelis/issues/2524)). A cast whose
+  target is a declaration's dtype binder also accepted, unchecked, a source that
+  was still an inference variable at the cast, so a `string` or an unbounded
+  binder reaching it through a lambda checked with score 1 and trapped in `eval`
+  ([#2534](https://github.com/Chelis-Lang/chelis/issues/2534)). Such a source is
+  now decided when it binds, by the rule a direct source gets, and rejected at the
+  declaration boundary if it never binds.
+
+  A `let`-bound lambda whose operand check is still waiting (a `cast`, `copy`,
+  `gather`, `scatter`, `trace` or host-slot operand) now stays monomorphic, as a
+  whole, until its first application binds the operand ([04-INF-1]); every later
+  use has that instantiation, including an unchecked second parameter. It used to generalize, so
+  each application bound a fresh copy and the check was left on a variable nothing
+  bound: `g = fn (y) -> cast(y, f64)` followed by `g(x)` was rejected with
+  `got ?N`, and a lambda over `gather` or `trace` lost the direct form's verdict.
+  Those now check, `g("s")` is rejected naming `string`, and a second application
+  at a different type is rejected, as for any lambda that carries an obligation.
+  As a consequence a tensor reaching a
+  binder-target `cast` through a lambda now keeps its dimensions, as the direct
+  cast does, where it was rejected before; the `cast_trunc` form is unchanged
+  ([#2535](https://github.com/Chelis-Lang/chelis/issues/2535)).
+
+- **BREAKING:** Two or more top-level function declarations may now read the same top-level
+  tensor-carrying value. The linearity checker walked each `def f() = value` as a
+  closure created in the top-level scope, so the first declaration consumed the
+  value and every later reader, whether another declaration, a top-level
+  initializer, or a second module of a package importing the same library value,
+  was rejected with "already consumed by closure capture" in `chelis eval`,
+  `chelis build`, `chelis check` and `chelis test`. A function declaration's body
+  is now checked against the ownership state once every top-level initializer has
+  run: it reads a value no initializer consumes without consuming it, and a
+  declaration that reads a value some initializer consumes is rejected wherever
+  the def sits in the source. This rejects programs that earlier releases
+  accepted: a declaration that only borrows a value is now rejected when some
+  initializer consumes that value, even if every call of the declaration comes
+  before the consume. Consumes inside one
+  declaration body, and by a closure an eager value creates, are still rejected.
+  See [#2549](https://github.com/Chelis-Lang/chelis/issues/2549).
+
+- **BREAKING:** `reshape` admits a tensor operand, or a scalar of an active data element dtype
+  read as its rank-0 tensor ([05-OP-49]), and rejects any other operand with its
+  own diagnostic, however the operand reaches the call
+  ([#2591](https://github.com/Chelis-Lang/chelis/issues/2591)). Previously any
+  scalar was admitted, so `reshape("s", [3i64])` checked with score 1 and failed
+  in `eval`, directly, through a lambda parameter, or through a recursive group
+  member's omitted result.
+
+- **BREAKING:** `grad` determines which parameters contribute gradients from their final
+  inferred types, including nested components and disconnected parameters.
+  A previously unannotated float parameter contributes its cotangent instead
+  of being silently omitted from the checked result type. Unresolved selected parameter
+  types at the declaration boundary are rejected. A result annotation alone does
+  not determine an unresolved parameter type, even when the differentiated
+  callable's type is determined later; neither does a typed sibling branch or
+  aggregate. Helpers retain this distinction through generalization, recursion,
+  record updates, collection operations, and cached checking environments, while
+  retaining the ordinary type equalities required by their checked signatures.
+  Result-origin transport also preserves concrete key values and the declared
+  owner of generic key restrictions.
+  Published schemes keep dtype bounds on the correct variables; concrete
+  first-order value annotations remain available to subsequent shape checks.
+  Independent declared callable inputs and results remain available to ordinary
+  generic instantiation, branch unification, and transforms without using a
+  gradient result constraint to infer its selected parameters.
+  Tensor concatenation retains computed extents when a transported callable's
+  declared result has runtime dimensions.
+
+- **BREAKING:** The checker decides every operand obligation a declaration leaves open when the
+  declaration closes ([04-INF-1], [04-INF-6], [04-INF-9]). Previously each of
+  these checked with score 1:
+
+  - A call waiting on an operand whose type nothing in the declaration determines,
+    such as `def size(k) -> i64 = numel(k)`, or a `take`, `where` or
+    `uniform_like` over a lambda parameter that is never applied, was dropped
+    ([#2518](https://github.com/Chelis-Lang/chelis/issues/2518)). It is now
+    decided at an arbitrary type, so an operation that admits only some operand
+    types is rejected, naming the declaration, and an operation that admits every
+    type is still accepted. The collection operations `len`, `index`, `append`
+    and `concat` follow the same rule and diagnostic rather than a separate one.
+    So does `eq`, which admits no function: a wrapper such as
+    `def equal(x, y) = eq(x, y)` is rejected, as `def equal[a](x: a, y: a) -> bool`
+    already was. A `to_tensor([])` whose element type nothing determines is now a
+    check error rather than an evaluation or code-generation error.
+  - `dict_get`, `dict_contains`, `dict_remove` and `dict_insert` over an operand
+    typed by an authored binder, `to_tensor` and `dict_of` over a list whose
+    element an unbounded binder types, and a tuple projection or field read on a
+    binder ([#2523](https://github.com/Chelis-Lang/chelis/issues/2523)). Each is
+    now decided at the binder's instantiations, with the operation's own
+    diagnostic. `dict_of([])` and `to_tensor([])` still take their element type
+    from a declared result.
+  - An axis argument whose type was still a variable, including one typed by an
+    authored binder or bound later to `i64`, as in `cumsum(t, ax)` with `ax: q`
+    and `q: Int` ([#2523](https://github.com/Chelis-Lang/chelis/issues/2523)).
+    An axis-domain argument is `i32` ([05-DIM-3]), so it is now constrained to
+    `i32`, and a binder there is reported as narrowed to `i32`.
+  - A tuple projection or field read on the parameter of a `let`-bound lambda let
+    the lambda generalize, so each use returned an unconstrained type and a false
+    declared result checked. The lambda now stays monomorphic until its first
+    application, like one carrying any other obligation, and a top-level lambda
+    whose projections only a later declaration's call would resolve is rejected,
+    since a later declaration is not a binding site ([04-INF-1]). A field read on
+    an opaque type through such a lambda is now reported as the opaque-boundary
+    violation it is, rather than as an unverifiable access.
+  - A dtype-family requirement that narrowed an authored binder only while the
+    declaration boundary replayed a suspended call, such as a `cast_trunc` inside
+    a returned closure whose parameter only the declared type fixes
+    ([#2537](https://github.com/Chelis-Lang/chelis/issues/2537)). The binder's
+    declared contract is now checked after the last such replay.
+  - A `grad` of an operand whose type was still a variable, such as the lambda
+    parameter in `fn (g) -> grad(g)(3.0f32)`, published a result nothing checked
+    ([#2626](https://github.com/Chelis-Lang/chelis/issues/2626)). It is now
+    decided when the operand binds, so that lambda applied to a function with a
+    tensor result is rejected with `grad`'s own diagnostic, and
+    `def h(g) = grad(g)` is rejected at the declaration boundary.
+
+  Now accepted: dictionary keys of every [05-OP-56] dtype, which are string,
+  bool and every active signed-integer dtype. `dict_of` admitted only `i64` and
+  `string` keys, so deciding it at every instantiation of a binder bounded by
+  `Int`, as in `def mk[k: Int, v](pairs: List[(k, v)]) -> Dict[k, v] = dict_of(pairs)`,
+  rejected it at `k := i8`, although `main` checked it and both lanes ran it.
+  `chelis eval` now also runs `bool` keys, which it refused at run time although
+  `main` checked them through an unbounded generic `dict_of`.
+
+  A recursive group whose members omit types is typed by [04-INF-2] and
+  [04-INF-5] together ([#2590](https://github.com/Chelis-Lang/chelis/issues/2590)).
+  Inside its group, a member whose declared header omits a type, such as its
+  result, shares its authored binders with every in-group reference, and each
+  reference takes its own instance of each omitted type. When the group
+  completes, each reference is typed at the type the member's body determines,
+  which it never narrows: an instance of an omitted type must be that type
+  itself or a fully concrete type, and anything else is polymorphic recursion
+  ([04-INF-3]), reported at the reference with both types. The verdict is
+  decided on the group's solved types, so it is the same in every declaration
+  order. A use that disagrees with the body-determined type is also reported at
+  the reference. Previously
+  each recursive call saw a fresh variable that nothing tied to the body, so
+  `def step(n: i32) = ... step(n - 1).0` over an `i32` result checked with score
+  1 and failed in `eval`. A group member's open obligations are decided when the
+  whole group has been inferred, so a sibling declared later can still determine
+  the type they wait on, and omitted types still generalize when the group
+  completes.
+
+  - Now accepted: members with authored binders and an omitted result that were
+    rejected as recursive calls at another instantiation, across two or three
+    members, over named-dimension tensors and under `grad`; an in-group call
+    that instantiates an omitted type at a fully concrete type beside an
+    authored binder, as `f(x, 3i32, n - 1)` in `def f[a](x: a, y, n: i32)`; an
+    omitted result used at a concrete type by an in-group call, as
+    `append(mk(n - 1), 1i32)` where `mk` returns `[]`; a literal pattern on a
+    sibling's omitted result; and a `cast` of a sibling's omitted result to a
+    bounded binder.
+  - Now rejected: a call inside the group that instantiates such a member's
+    binders at other types, for example `f(y, x, n - 1)` inside
+    `def f[a, b](x: a, y: b, n: i32) = ...`. It identifies two authored binders
+    ([04-INF-6]), and the diagnostic names the repair: write the omitted types,
+    after which a call at another instantiation of the member's own binders is
+    admitted ([04-INF-2]). Some of these checked with score 1 before and failed
+    in `eval`; others, such as a swapped `swap[a, b]` with its result omitted,
+    checked and ran. A member whose every type is written is still referenced at
+    its declared scheme.
+  - Now rejected, in every declaration order: in-group calls that swap or merge
+    two of a member's omitted types ([04-INF-2], [04-INF-3]), since a published
+    signature is never narrowed to fit an in-group use. The call can do it
+    directly, as `swap(y, x, n - 1)` in `def swap(x, y, n: i32)` or
+    `f(x, x, n - 1)` in `def f(x, y, n: i32)`, or through a sibling, as the two
+    calls `f(x, n)` and `f(y, n)` to a sibling that calls back with one type for
+    both, or `g(x, y, n - 1)` to a sibling whose body gives its two parameters
+    one type. The diagnostic tells the author to write the member's signature
+    with explicit type binders. `main` checked and ran these. The fully written
+    twin of the swap, `def swap[a, b](x: a, y: b, n: i32) -> (a, b)`, still
+    checks. `main` already rejected a pair whose calls swap the omitted types
+    around the group, such as `b(y, x, n - 1)` inside `def a(x, y, n: i32)` with
+    `b` calling `a(u, v, n - 1)`, and it stays rejected in every order.
+  - Now rejected: a group whose omitted types would grow with every in-group
+    call, such as `def f(n: i32) = if eq(n, 0) then [] else [f(n - 1)]`, as
+    polymorphic recursion ([04-INF-3]); `main` checked it. The
+    polymorphic-recursion diagnostics no longer suggest moving the call into a
+    separate non-recursive helper `def`: that helper would call into the group
+    and be called from it, so it would join the group.
+  - Now rejected, in every declaration order: a `let`-bound lambda inside the
+    group that calls a member with an omitted parameter type and is applied at
+    two types, such as `h = fn (z) -> f(z, n - 1)` applied to `1i32` and to
+    `"s"` inside `g`, where `def f(x, n: i32)` is `g`'s sibling. The lambda does
+    not generalize over the member's omitted type before the group completes
+    ([04-INF-2], [04-INF-5]), so its first application fixes that type and the
+    second is reported as a mismatch. `main` checked and ran it. Writing `f`'s
+    signature, `def f[a](x: a, n: i32) -> a`, makes it check.
+  - A call at a concrete type whose result the body returns makes the body itself
+    determine that type: after
+    `def pick(x, n: i32) = if eq(n, 0) then x else pick(3i32, n - 1)`,
+    `pick("s", 2)` is rejected, where it checked with score 1 and failed in
+    `eval`.
+  - Now rejected: an ill-typed use of a member's omitted result, with the
+    operation's own diagnostic or at the reference: `step(n - 1).0` over an `i32`
+    result, `numel` over a list result, and an `eq` over a list reached through
+    a recursive call, as the direct `eq([1i32], [1i32])` already was.
+    Previously the check was dropped. So is `vmap(g)(k)` over a member's
+    omitted tensor result `k`, as its direct form `vmap(g)(to_tensor(...))` and
+    its written twin already were; `main` checked and ran it.
+  - `grad` decided whether its function's result was a floating scalar, and
+    whether each parameter was differentiable, where it was inferred, while a
+    type that the group determines for a member writing no signature was still
+    a variable, or held one, such as a tuple component, a tensor's precision or
+    a list element, so the verdict depended on the declaration order
+    ([#2626](https://github.com/Chelis-Lang/chelis/issues/2626)). It now waits
+    for that type and is decided on it, in every order. Now accepted in every
+    order: `d = grad(fn (z: f32) -> f(z, 0i32))` inside `g`, where `def f(x, n)`
+    returns `mul(x, x)`, which `main` checked with `f` declared first and
+    rejected with `g` first as "grad requires a scalar floating output", a false
+    rejection; `grad(f, wrt=x)` and `grad(fn (z) -> f(z, 0i32))` over such an
+    `f`'s parameter, which `main` rejected with `g` first; and
+    `grad(ev)(y, 0i32)` over a sibling `def ev(x, n)` whose parameter only that
+    call determines, which `main` rejected in every order; and `grad(f)`, or
+    `grad(fn (z) -> f(z, 0i32))`, over an `f` whose first parameter is
+    `(a, i32)`, `tensor[3, p]` or `List[a]` with `a` or `p` determined by a
+    third member, which `main` rejected in three of the six declaration orders.
+    In every order, a
+    result that is not a floating scalar is rejected with `grad`'s own
+    diagnostic, and a parameter the group makes an integer is rejected under
+    `wrt` with it and left out of the gradient without `wrt`, where `main`
+    reported a variable's type in one order. `grad` over any other variable is
+    still decided where it is inferred, as a variable, however long `grad` then
+    waits on a type the group determines beside it, which gives one verdict in
+    every order: over a generic function
+    instantiated at the call, inside a generic function, over a lambda parameter
+    a later application determines, and over a member whose signature omits only
+    some types, as in `def f(x, n: i32) -> f32`, whose every reference takes a
+    fresh instance of them. `chelis build --target c` does not implement `grad`
+    of a generic function.
+  - Inside a recursive group, no member's body sees what another member's body
+    has determined about that member's types before the group completes, in
+    any declaration order ([04-INF-5]): a reference to another member is typed
+    at a fresh copy of that member's type, which the group's completion then
+    unifies with it. A use of a member that writes no signature that disagrees
+    with the member's type is reported at that use, naming both types
+    ([04-INF-2]), with the kind of the mismatch; `main` reported it at the use
+    in some declaration orders and with no location in others.
+
+- A Deep program now has one in-memory representation whichever door it enters
+  through. Surf desugaring, the checker's entries, the prover and the CLI no
+  longer rewrite trees into a second, transitional list spelling, so a check or
+  transformation that previously read only one spelling now runs whether the
+  program came from a `.ch` file, from the `.dp` text it prints to, through
+  `chelis check`, or through `chelis prove`. Cached compiled library and stdlib
+  contexts from earlier builds are rebuilt, because their format versions
+  advance. See [#1125](https://github.com/Chelis-Lang/chelis/issues/1125) and
+  [#1029](https://github.com/Chelis-Lang/chelis/issues/1029).
+
+- Selected tensor entries containing `grad` or `vmap` now compile through the callable C artifact path with entry-scoped inputs and outputs, including runtime extents the C backend can represent. See [#1138](https://github.com/Chelis-Lang/chelis/issues/1138).
+
+- A development build of `chelis` or of the Python extension no longer stages a
+  runtime older than its checkout. The runtime records a SHA-256 of each of its
+  declared source inputs when it is compiled, and `chelis build`,
+  `chelis runtime export` and `compile_and_load` compare that record with the
+  checkout before other work, failing with the changed, removed and added files
+  and a rebuild remedy. A sealed build reads no checkout; the Python extension
+  gains the `sealed-runtime` feature the CLI already has. See
+  [#1354](https://github.com/Chelis-Lang/chelis/issues/1354).
+
+- C host calls materialize tensor-helper results at their resolved scalar, tensor, or tuple types, preserving exact dtypes and releasing temporary scalar tensors. Invalid result rank, dtype, and arity combinations fail during code generation.
+
+- A `fail(...)` branch inside `grad` or `vmap` now aborts with its authored
+  message instead of returning a zero placeholder. Lowering represented the
+  failing branch as a value, so a taken abort was selected as the result and
+  the program exited successfully with `0.0` in both the evaluator and the
+  generated C binary. The new [05-OP-68] guarded-abort identity keeps the trap
+  in the graph, so its occurrence survives differentiation, batching and code
+  generation, while an untaken guard still computes and differentiates
+  unchanged. Part of
+  [#1464](https://github.com/Chelis-Lang/chelis/issues/1464).
+
+- Reject unconstrained `to_tensor([])` before compiled code generation instead of
+  silently choosing `f32`. Explicitly and contextually typed empty tensors retain
+  their exact checked dtype, as required by [05-OP-57] (#1754).
+
+- Preserve each differentiated actual's ordered tensor shape for disconnected gradients, including top-level inputs, empty axes, and cached helper calls. Retain input and forward result checks when returning zero cotangents.
+
+- Declared literal result claims now retain the selected producer through
+  supported callback, aggregate-projection, and concrete rank/precision-
+  polymorphic call paths in evaluation and generated C.
+
+- `chelis lint --check` now reports a `.ch` file whose module declaration
+  disagrees with its package's `module_prefix` or with its own path under the
+  source root. Previously the style tools read each file in isolation and never
+  consulted the manifest, so `lint --check` exited 0 on a package that
+  `chelis reef build` rejects at load time, and a green style gate was not
+  evidence that the package loads. The new blocking rule is
+  `reef-module-identity` (`spec/01-nomenclature.md` §6.5), and it reaches its
+  verdict through the same function the reef loader uses, so the two cannot
+  diverge. `chelis fmt --check` is unchanged: it claims that one file is
+  canonically formatted, and nothing more. See
+  [#2116](https://github.com/Chelis-Lang/chelis/issues/2116).
+
+- `python3 scripts/gate.py --fast` now reaches the `chelis-reef` bundled-lock
+  guard. That guard holds both halves of one invariant — every committed bundled
+  `reef.lock` must pin the embedded std bundle's hashes, and the compiled
+  `chelis-std-bundle` rlib must embed the bytes that are on disk. They are lib
+  unit tests in a crate that no path invalidating them selects: those paths belong
+  to other crates (`crates/chelis-cli/tests/fixtures/**/reef.lock`) or to no crate
+  at all (`examples/**/reef.lock`, and the root `Cargo.toml` whose workspace
+  version the verdict keys on), so the changed-crate stage never reached them.
+  (`--validation` does run them when `chelis-reef` itself changed — which is a
+  fourth invalidating class, and now triggers the leg too.) A change that moved
+  the bundle hash therefore passed `--fast` and failed in CI. The new leg runs when a `packages/chelis-std/`
+  or `crates/chelis-std-bundle/` path, any `reef.lock`, or the root `Cargo.toml`
+  changed, or when the guard's own crate changed, and stays off every other
+  change.
+
+  The guard also reports every stale lock in one run rather than panicking on the
+  first. The discovery walk is sorted, so a tree with three drifted locks
+  surrendered one per CI round. See
+  [#2309](https://github.com/Chelis-Lang/chelis/issues/2309).
+
+- A `uniform_like` bound written as a chain of casts now applies every cast's
+  rounding in the compiled lanes, matching `chelis eval`. Previously both compiled
+  lanes folded the chain by value and kept the innermost literal, so a bound such
+  as `cast(cast(0.30000001, f16), f32)` compiled to `0.30000001` where the program
+  declares `0.300048828125` — about 1600 f32 ULPs — and the binary sampled an
+  interval its source never declared. The two compiled lanes agreed with each
+  other and diverged from `eval`, so the error did not show up as a lane
+  inconsistency.
+
+  `spec/04-type-system.md` [04-NUM-14] already required a float-target cast to be
+  total IEEE-754 round-to-nearest, ties-to-even at the target width, and
+  [04-LIT-1] already required a literal to be finalized once at its declared
+  width without passing through f64 first. Both compiled folds now stage a bound
+  the way the evaluator does — an integer leaf stays exact through i64 and a
+  float leaf stays at its source dtype until a cast finalizes it — so they apply
+  the same roundings in the same order. This also stops an exact integer bound
+  beyond f64's integer range from losing a bit on its way to f32.
+  See [#2316](https://github.com/Chelis-Lang/chelis/issues/2316).
+
+- An exported `def` that draws can no longer escape with its randomness
+  unhandled, because a draw takes its key as an argument. Previously such a
+  `def` scored 1.0 at `chelis check`, and then the C tensor graph drew silently
+  while the C host path aborted. The keyless form is now an arity error at
+  `chelis check` and does not build, and the form that takes a `key` works in
+  both C paths and draws the same bits as `chelis eval`. Fixes
+  [#2318](https://github.com/Chelis-Lang/chelis/issues/2318).
+
+- An [05-OP-68] guarded abort whose result nothing consumes is no longer
+  removed by dead-code elimination. The atom says the abort may not be
+  removed, but an abort has no consumer by design, and every liveness
+  computation in the compiler derived "live" from value reachability — so
+  `grad` over `{ ignored = fail("m")  sum(x, 0i32) }` swept the guard and
+  returned a value with exit 0. Effect nodes are now identified by one shared
+  predicate and seeded at each of the three liveness sites (dead-code
+  elimination, grad's own pruner, and the evaluator's root mask), and the
+  verifier treats a guarded abort like `Store` and `Drop` rather than
+  requiring it to have a consumer. The generated C lane was broken the same
+  way and is fixed with it. Note one consequence for programs with no firing
+  guard: an untaken discarded guard now evaluates its fallback, so a fallback
+  that traps on its own will trap, per [05-OP-68]'s rule that the fallback is
+  an ordinary operand. Fixes
+  [#2368](https://github.com/Chelis-Lang/chelis/issues/2368).
+
+- A `fail(...)` with no enclosing `if` no longer returns a zero placeholder
+  inside `grad` or `vmap`. It is unconditional there, so it now lowers to an
+  [05-OP-68] guarded abort whose condition is a constant true, and the program
+  aborts with the authored message in both lanes. Previously `grad` over
+  `sum(add(x, fail("m")), 0i32)` returned `1.0` with exit 0 and emitted no
+  `chelis_fail` at all, so the fabricated zero silently changed the answer
+  rather than replacing it. The same route through a helper, a whole
+  transformed body, `vmap`, a `where` arm, and a statically-selected `match`
+  arm ([#2369](https://github.com/Chelis-Lang/chelis/issues/2369)) is fixed
+  with it, and `fail("")` no longer becomes a placeholder — `chelis eval`
+  names the [05-OP-68] empty-message rule, while `chelis build` reports the
+  pre-existing generic host-lowering message rather than that rule. A message
+  that is not a compile-time literal is rejected under a transform
+  ([#2383](https://github.com/Chelis-Lang/chelis/issues/2383)). Part of
+  [#2371](https://github.com/Chelis-Lang/chelis/issues/2371).
+
+- Computed tensor inputs such as `copy(x)` and `add(x, x)` now route runtime-width tensor concatenation to host execution before static lowering. The reported Eval programs execute with their concat extent guards intact. See [#2373](https://github.com/Chelis-Lang/chelis/issues/2373).
+
+- Keep declared result extent guards at their producing operation in generic and monomorphic functions when a runtime carrier introduces the extent, including forwarded axes. This partially addresses #2377; retention of discarded potentially trapping initializers remains unresolved.
+
+- Tensor captures in `grad` retain their literal or symbolic shape, while mismatching captures keep their extent checks. Evaluator, compiled C, and native test-runner regressions pin the closure-conversion repair for [#2378](https://github.com/Chelis-Lang/chelis/issues/2378).
+
+- The checker now rejects `par` with a typed unsupported-feature diagnostic until
+  its effects are implemented consistently across execution lanes. This prevents
+  compiled C from silently discarding effectful non-final children; use
+  `do { ... }` when sequential evaluation is intended. See
+  [#2388](https://github.com/Chelis-Lang/chelis/issues/2388). Full `par` execution
+  remains tracked in [#2503](https://github.com/Chelis-Lang/chelis/issues/2503).
+
+- `chelis check`, `chelis test` and the evaluator no longer slow down by up to two
+  orders of magnitude on large recursive programs. Three costs introduced in
+  0.18.7 are removed without changing any classification, kernel choice or name
+  resolution: the static-controls classifier re-walked every shared callee along
+  every call path and was re-run for each definition at every call site
+  ([#2391](https://github.com/Chelis-Lang/chelis/issues/2391)); an application
+  under an execution exclusion re-planned its callee's kernel every time
+  ([#2392](https://github.com/Chelis-Lang/chelis/issues/2392)); and a short or
+  import-qualified definition name was resolved by scanning the whole linked
+  program on each use ([#2393](https://github.com/Chelis-Lang/chelis/issues/2393)).
+  On the Hull test suite, files that took 85 to over 899 seconds on 0.18.11 now
+  finish in under 20 seconds.
+
+- `chelis eval` now runs a fixed-rate `dropout` beneath a recursive function,
+  inside the taken arm of a runtime `if` or `match`, and in any program that
+  contains a `match` or recursion elsewhere. It previously failed with "unknown
+  runtime name `dropout`", including on programs that `chelis build` runs,
+  because the caller's control flow became an execution exclusion inherited by
+  every call beneath it. Each definition and each `dropout` call now decides
+  from its own body, as compiled C does. The draws follow [05-RNG-1] and match
+  compiled C wherever C runs the program. Programs without `dropout` produce
+  the same values as before. Fixes
+  [#2405](https://github.com/Chelis-Lang/chelis/issues/2405).
+
+- The compiled C of a function whose body reads a rank-zero top-level tensor
+  value, such as `v = mul(copy(y), scalar_to_tensor(3.0f32))` read by
+  `def g(x: tensor[f32]) -> tensor[f32] = add(x, copy(v))`, now compiles and
+  reads the value. The function passed the value's global to its tensor kernel
+  as a host scalar, which the C compiler rejected. See
+  [#2413](https://github.com/Chelis-Lang/chelis/issues/2413).
+
+- Two checker and lowering gaps met while moving chelis-std and the examples to explicit keys ([#2413](https://github.com/Chelis-Lang/chelis/issues/2413)) are closed:
+  - `to_tensor` over a `List` whose leaf is a type parameter bounded by `Float`, `Int` or `Numeric` now has the result `tensor[.., p]` its nesting depth fixes. A `reshape` of that result in a generic body used to stay unresolved at the declaration boundary, and a declared result of the wrong rank was accepted; it is now rejected;
+  - a destructured `split_key` pair in a program that stages a host-produced extent, such as `reshape(x, [numel(first), 2i64])`, now lowers in eval and in compiled C. It used to fail with "tuple-get index 0 out of bounds during lowering".
+
+- A `Std.*` import in a Reef package now resolves on the first run of every
+  command, whether or not the package has a `reef.lock`. Previously the bundled
+  `chelis-std` runtime entered the package graph only through the lockfile, so
+  in a package from `chelis reef init` the first `chelis check`, `build`, `test`
+  or `prove` reported ``unresolved import `Std.Io.Json` `` and wrote the lock,
+  `chelis eval --file` failed on every run, and `chelis reef build` failed even
+  with a lock present. Manifest resolution and lockfile reconstruction now both
+  add the runtime as an implicit dependency. See
+  [#2414](https://github.com/Chelis-Lang/chelis/issues/2414).
+
+- `chelis prove` in a Reef package now runs a property whose binder is an
+  invariant-carrying opaque type, as it does for the same file outside a package.
+  Previously the property's evaluation probe was placed outside the type's
+  defining module once the program was package-linked, so every such property
+  failed with ``record construction of opaque type ... outside its defining
+  module``. The probe now takes its module from the type's own linked name, and
+  the injected assumption carries the source spelling
+  (`invariant:Probability:binder:p`). When `prove` rejects a genuine
+  construction outside the defining module, it now lists the module's exported
+  producers as `chelis check` does, instead of `none` when the entry module did
+  not import them. See [#2416](https://github.com/Chelis-Lang/chelis/issues/2416).
+
+- The checker no longer overflows the native stack while it prints a deeply
+  nested program for grad-selector identity. The canonical flat printer, the
+  Deep-to-wire conversion beneath it, and the release of the converted tree each
+  recursed once per nesting level outside the checker's stack guard, so a deep
+  enough program crashed instead of receiving the located `stack budget
+  exhausted` diagnostic. Builds with debug info crashed this way at the
+  4,000-level depth-guard fixtures. All three now work from heap stacks, and
+  printing an unknown form no longer copies its children at every level. The
+  printed text is unchanged. See
+  [#2424](https://github.com/Chelis-Lang/chelis/issues/2424).
+
+- `chelis prove` no longer aborts with a stack overflow on a deeply nested Deep
+  program. It now runs on the same grown stack segment as `chelis check`, so a
+  program `check` accepts also proves; previously a 2,000-deep application chain
+  that `check` accepted aborted `prove` with exit 134. The Deep parser runs on a
+  stack segment of its own and rejects input nested deeper than that segment
+  holds with a located diagnostic, ``Deep input nests deeper than the parser
+  supports at byte N``, identically in every command, where both `check` and
+  `prove` previously aborted. See
+  [#2425](https://github.com/Chelis-Lang/chelis/issues/2425).
+
+- Piped transform stages retain their own metadata, so a stage such as
+  `x |> grad(f, wrt=v)` checks, evaluates, and builds. Type ascriptions written
+  on a pipe result are also enforced. See [#2430](https://github.com/Chelis-Lang/chelis/issues/2430).
+
+- A `grad` or `vmap` application in the interpreter no longer re-validates every
+  definition in the program. The pipe fold rebuilds only a pipe and the nodes above
+  it, and a definition table with no pipe in it is shared rather than
+  copied when a lowering context is prepared. #2427 had made each application in
+  a package that includes the standard library roughly twice as slow. See
+  [#2434](https://github.com/Chelis-Lang/chelis/issues/2434).
+
+- Float literal patterns now compare at the scrutinee's dtype, so a pattern such as `0.1` matches an `f32` value produced from `0.1`. See [#2438](https://github.com/Chelis-Lang/chelis/issues/2438).
+
+- A discarded `gather`, `scatter`, `scatter_replace`, `scatter_elements` or
+  `one_hot` that sits under no activation is no longer eliminated, so its
+  out-of-bounds index reports in the evaluator and in compiled C instead of
+  vanishing. `spec/06-transformations.md` §5.2 makes a potentially trapping node
+  an observable root, and a sparse index is data, so no static fact rules the
+  failure out for a non-literal one. These five operations now form their own
+  run-time check class, which the one seed predicate reads, and each member is
+  pinned individually against reclassification.
+
+  The same §5.2 also says a node whose activation is false checks nothing, and
+  this is the only seeded class the lanes do not gate. An
+  activated sparse node is therefore left to ordinary value reachability rather
+  than seeded: seeding it would make a discarded out-of-bounds index in an
+  untaken `if` arm abort a correct program. Closing that half needs an
+  inactive-value contract for the class in the evaluator and the C emitter, which
+  chelis#2440 still tracks, along with an activated sparse node's index check,
+  which a discarded node still does not run.
+
+  Retaining a sparse node also makes the value declaration holding it
+  re-lowered at each reference rather than shared, which §5.2 requires of a
+  declaration whose initializer can trap. Results are unchanged and the public C
+  declaration is unchanged, but emitted C grows for a program that references
+  such a value repeatedly — measured at 27% on a six-line program holding one
+  gather referenced five times.
+
+  The checker rejects an out-of-range literal index only when the base tensor is
+  also a literal, so a provably in-range index is retained too and its plan is
+  emitted. Over-retention is the safe direction; a static index-range refinement
+  is not attempted here.
+
+  Because the node is now retained, a lane that cannot lower it refuses a program
+  whose sparse operation is dead, where before it refused only one whose sparse
+  operation was live. `chelis build --target metal` rejects any `gather` or
+  `scatter` this way ([#1383](https://github.com/Chelis-Lang/chelis/issues/1383)).
+  The default C target and HIP are unaffected. See
+  [#2440](https://github.com/Chelis-Lang/chelis/issues/2440).
+
+- A discarded potentially trapping node is no longer eliminated, so its trap
+  occurs. `spec/06-transformations.md` §5.2 makes every potentially effectful
+  or trapping node an observable root ("purity alone does not make a possible
+  trap dead"), but dead-code elimination derived liveness from value
+  reachability alone, so a discarded integer overflow, division by zero or
+  out-of-domain cast did not happen. One predicate now makes an [05-OP-68]
+  guarded abort, a potentially trapping numeric node and a draw that can trap
+  by itself observable roots, and the evaluator, dead-code elimination and
+  `grad`'s pruner all read it. The numeric test is dtype-aware: integer
+  arithmetic and division and a cast into an integer or `bool` width can trap,
+  float arithmetic cannot, and §5.2's own example of a removable dead float
+  `add` still holds.
+
+  The seeds are scoped to the declarations the evaluation enters, the rule
+  §5.2 now states: an evaluation enters each selected root's declaration, a
+  function runs inlined in its caller, and a reference to a value declaration
+  whose initializer can trap runs that initializer inlined where the reference
+  is reached, whether or not it is read, so a function's or a value's own
+  nodes run only when it is selected. The references one declaration makes
+  under one activation share one copy of the initializer, and a value named
+  in another's initializer reuses its copy there, so the copies grow linearly
+  with a chain of such values for each entry. A discarded trapping node in a selected
+  declaration, or reached through a call or such a reference, therefore traps
+  in `chelis eval` (the DAG evaluator and the host interpreter) and in compiled
+  C, while an uncalled function's discarded overflow neither runs nor makes
+  its parameters required inputs. A node in an `if` arm that is lowered as a selection checks only when its
+  arm is taken. An untaken arm's integer arithmetic, division or cast, integer
+  sum, `max_reduce` or `argmax_reduce` over an empty axis, runtime `shrink`, `stride` or
+  `pad` bound, call or result extent claim, axis restated under another
+  extent name ([#2512](https://github.com/Chelis-Lang/chelis/issues/2512)),
+  abort, or dead value reference checks nothing in
+  the DAG evaluator and in compiled C,
+  including under `grad`, per `vmap` row, at a `vmap` call site and in the
+  body of a `vmap` of `grad`
+  ([#2563](https://github.com/Chelis-Lang/chelis/issues/2563)). The same
+  holds, in the DAG evaluator, the host interpreter and compiled C, for an
+  untaken arm holding a callee's result claim, a local tensor ascription, or
+  a broadcast `expand` of a local or a parameter whose axis the arm claims is
+  1: the claim is not checked, a node sized by it yields zeros, and the `if`
+  returns the other branch when lowering proves the two arms' extents equal
+  (one origin outside the `if`, one declared extent, or one extent C names
+  both arms by). Where it does not, the DAG evaluator and the host interpreter
+  refuse the `if` with a typed error
+  ([#2583](https://github.com/Chelis-Lang/chelis/issues/2583)), and compiled C
+  runs it as host control flow or refuses to build it.
+  `where` no longer reads or shape-checks a branch
+  its condition selects in no element, so a condition that selects one branch
+  everywhere returns that branch, which must still be shaped like the
+  condition. Under `grad`
+  such an arm also contributes exactly nothing to the gradient, even where the
+  values it computes are not finite, so a `log` of zero in an untaken arm, or
+  of the zeros an untaken draw yields, no longer turns the gradient into NaN;
+  a taken arm's non-finite derivative is returned unchanged
+  ([#2640](https://github.com/Chelis-Lang/chelis/issues/2640)).
+  `chelis build --target hip` gates its integer arithmetic and division
+  kernels the same way and refuses any other checking node under an
+  activation. A dead `let` of an overflowing integer sum or product, an
+  empty-axis `max_reduce` or `argmax_reduce`, or an out-of-range runtime `shrink`, `stride` or `pad` bound now
+  traps in every lane.
+
+  Not yet covered: an unused float `mean` over a run-time-zero axis
+  ([#2780](https://github.com/Chelis-Lang/chelis/issues/2780)) and an unused
+  run-time `reshape` or `expand` target
+  ([#2783](https://github.com/Chelis-Lang/chelis/issues/2783)) may still be
+  removed, and those target checks still run in an untaken arm. A `gather`,
+  `scatter`, `scatter_add`, `scatter_elements` or `one_hot` index check is no
+  longer removed where its node carries no activation, under a separate entry for
+  the same issue; under an activation it is still removed whether or not the arm
+  is taken, while a consumed one still runs even in an untaken arm.
+  [05-OP-68] and
+  spec/03 §4.4 keep a note that their rule is not fully implemented for every
+  trapping operation. This carries and supersedes
+  [#2466](https://github.com/Chelis-Lang/chelis/pull/2466). See
+  [#2440](https://github.com/Chelis-Lang/chelis/issues/2440).
+
+- A `match` arm guard is now typed the way an `if` condition is: the checker
+  unifies it with `bool`. Before, a guard whose type was still pending, such as
+  `| v if eq(v, cast(0, p)) =>` under a dtype-family binder, was rejected with
+  `match arm guard must be bool, got ?350`, while the same expression was
+  accepted as an `if` condition. A guard that cannot be `bool` is still rejected.
+  See [#2444](https://github.com/Chelis-Lang/chelis/issues/2444).
+
+- The checker now validates literal patterns in unannotated lambdas when their
+  scrutinee type becomes known and rejects unresolved pattern obligations at the
+  declaration boundary. Float-pattern diagnostics retain compact exponent
+  notation. See [#2448](https://github.com/Chelis-Lang/chelis/issues/2448) and
+  [#2468](https://github.com/Chelis-Lang/chelis/issues/2468).
+
+- `chelis build --target c` no longer emits C that fails to compile when an ADT
+  `match` sits in one branch of a conditional and the other branch does not use
+  the matched value. The emitted release in the other branch named a temporary
+  declared inside the matching branch (`use of undeclared identifier '__adt_1'`).
+  See [#2449](https://github.com/Chelis-Lang/chelis/issues/2449).
+
+- Evaluating selected roots runs only the declarations the selection enters, so
+  a seeded node of another declaration cannot pull that declaration's
+  parameters into the run as a `missing required input`, the shape of
+  [#991](https://github.com/Chelis-Lang/chelis/issues/991). Every graph node
+  records its declaration, and the evaluator and dead-code elimination seed an
+  abort, a potentially trapping node or a draw that can trap only when its
+  declaration is a selected root's. A function runs inlined where it is
+  applied, and a value declaration whose initializer can trap runs inlined
+  where it is referenced, one copy for each referencing declaration and
+  activation, so an uncalled function's nodes do not run and its
+  parameters are not inputs, and a function named as a value and not applied
+  (`g = f`) runs nothing and initializes no value declaration its body
+  names. A selected
+  entry's required inputs are the evaluator's own live set. Fixes
+  [#2476](https://github.com/Chelis-Lang/chelis/issues/2476).
+
+- `chelis build` now compiles a program whose `if` consumes an owned value on one
+  branch and not the other, instead of rejecting it with an internal ownership
+  diagnostic. The branch arm that does not consume the value now releases it, so
+  both paths reach the join in the same state. Programs this affected typically
+  bind a value from a block expression and then return it from only one arm --
+  the shape a `nan`-sentinel guard produces, as in a matrix inverse that returns
+  the real result or a NaN fill. `chelis check`, `chelis test` and `reef build`
+  all accepted these programs already; only `chelis build` rejected them, so the
+  failure appeared only at the point of emitting code. `match` has the same
+  limitation still, tracked separately. See
+  [#2477](https://github.com/Chelis-Lang/chelis/issues/2477) and
+  [#2520](https://github.com/Chelis-Lang/chelis/issues/2520).
+
+- `scripts/gate.py --fast` no longer fails a branch that is behind `main` on
+  paths the branch never touched. Its changed-path classification diffed the
+  tip of `origin/main` against the branch, which charged the branch with every
+  path `main` changed after the fork. It now diffs from the merge base, as
+  the gate's crate selection already did, and it judges a deleted file's
+  retirement against that same commit. A branch with no history in common with
+  `origin/main` now fails the check instead of being diffed tree against tree,
+  and a missing `origin/main` fails with a message that says to fetch it. See
+  [#2480](https://github.com/Chelis-Lang/chelis/issues/2480).
+
+- Compiled C now releases the values the ownership schedule frees at the start
+  of a `match` arm or of a `map` or `fold` body, even when that arm or body
+  branches. A payload nothing reads, such as the one a `None` arm's test
+  extracts, and a scrutinee whose last use is its field extraction were never
+  released in a branching arm, so each call leaked them; a branching `map` or
+  `fold` body whose item nothing reads produced C that did not compile.
+
+  A `match` nested in another match's arm no longer reuses the enclosing
+  match's generated payload names. The nested name shadowed the enclosing
+  payload in C, so releasing that payload inside the nested arm either failed to
+  compile or released the nested value instead. See
+  [#2485](https://github.com/Chelis-Lang/chelis/issues/2485) and
+  [#2458](https://github.com/Chelis-Lang/chelis/issues/2458).
+
+- A generated C public entry now compares each supplied tensor's dtype with the
+  declared parameter dtype before it reads the tensor. A mismatch prints a line
+  naming the input and both dtypes, then traps with
+  `numeric trap: domain in load at <declared dtype>`. Previously the entry
+  checked only rank and extents, so a wrong-dtype `chelis_tensor` was accepted
+  and its storage was read at the declared dtype. The check covers the
+  four-argument tensor entry and every authored host entry, whatever it returns,
+  including a tensor nested inside a parameter value. See
+  [#2490](https://github.com/Chelis-Lang/chelis/issues/2490).
+
+- The DAG evaluator raises the typed `Overflow` trap for an `expand` or
+  `split_keys` whose extents give a result it cannot represent, as compiled C
+  does, where it used to panic with `capacity overflow`. A representable result
+  the evaluator cannot allocate fails as the C runtime's allocation failure
+  does. Fixes [#2491](https://github.com/Chelis-Lang/chelis/issues/2491).
+
+- A generated C host entry now validates every tensor nested in a parameter
+  value before the body reads it. A tensor in a tuple, a record or data-type
+  field, a list, an option or a dictionary value gets the null, dtype, rank and
+  literal-extent checks a tensor parameter gets, and a tensor at a fixed tuple
+  position is also compared with the signature's named extents. Each diagnostic
+  names the parameter path, such as `p.1`, `r.square`, `c.Ints.0` or `xs[1]`.
+  Previously a nested tensor was checked only where a tensor kernel received it,
+  under an internal helper name, and one that reached no kernel was read at the
+  declared dtype and extents whatever it held. A named extent of a tensor inside
+  an ADT, option or dictionary is not yet compared. See
+  [#2506](https://github.com/Chelis-Lang/chelis/issues/2506).
+
+- Compiled C now returns every allocation that `map`, nested `map`, `flat_map`,
+  `filter`, `partition` and `scan` touch when the list items own heap payloads
+  (strings, lists, data-type values, tensors). Previously each step copied the
+  item it had been given into the result and leaked the original, and `filter`
+  also leaked every item it rejected. A `filter` or `partition` whose callback
+  body is a bare captured variable, and a `fold` whose unread accumulator is a
+  `string`, now compile, and a `fold` with an unread data-type accumulator no
+  longer aborts. See [#2508](https://github.com/Chelis-Lang/chelis/issues/2508),
+  [#2505](https://github.com/Chelis-Lang/chelis/issues/2505) and
+  [#2332](https://github.com/Chelis-Lang/chelis/issues/2332).
+
+  Releasing a deeply nested value no longer overflows the native stack: a
+  100,000-link data-type chain is built, passed and released in compiled C.
+  Recursion over a large list parameter is linear again; every call used to walk
+  the whole carried value. See
+  [#2522](https://github.com/Chelis-Lang/chelis/issues/2522).
+
+  With `--target c`, a program whose definitions take a parameter the tensor
+  entry cannot carry (a string, data-type, container or unit parameter) now keeps each
+  such definition as its own C function. Previously a constant body such as
+  `def f(x: List[i64]) -> i64 = 1i64` emitted only a zero-input program entry and
+  dropped `f`. See [#2522](https://github.com/Chelis-Lang/chelis/issues/2522).
+
+- When a checkout has its own interpreter (its Devenv state venv, or else its
+  `.venv`) and `PYO3_PYTHON` is unset, `python3 scripts/gate.py` now runs on that
+  interpreter. This holds even when another checkout's venv comes first on
+  `PATH`. Previously the gate adopted that foreign venv and exported it to every
+  stage, and the runtime-representation oracle's capacity census refused it at
+  the end of a `--validation` run. An owned `.venv` that does not start as the
+  venv now stops the gate with exit 2 instead of re-launching it. See
+  [#2511](https://github.com/Chelis-Lang/chelis/issues/2511).
+
+- Computed tensor concat admits checked matrix products in Eval, preserves concrete tensor elements when generated C boxes a wildcard-width list, and reports concat extent overflow before constructing an invalid shape. See [#2514](https://github.com/Chelis-Lang/chelis/issues/2514).
+
+- Eval now prints canonical numeric trap lines without an extra error prefix, matching linked C for computed tensor concat failures. See [#2514](https://github.com/Chelis-Lang/chelis/issues/2514).
+
+- DAG evaluation rejects a tensor supplied to a declared scalar input. Evaluator
+  and direct DAG C entries validate inputs in ABI slot order and report one typed
+  numeric trap line for rank, dtype, and literal-extent failures. Checked value
+  declarations also carry their tensor rank into direct external loads before
+  this validation. See
+  [#2530](https://github.com/Chelis-Lang/chelis/issues/2530) and
+  [#2531](https://github.com/Chelis-Lang/chelis/issues/2531).
+
+- Fixed generated C for generic host functions that insert and permute tensor axes: result positions no longer overwrite intermediate input dimensions.
+
+- Tensor and key tuple destructuring now preserves the selected entry's graph in
+  the compiler API and compiles in the in-context C lane. See
+  [#2551](https://github.com/Chelis-Lang/chelis/issues/2551) and
+  [#2564](https://github.com/Chelis-Lang/chelis/issues/2564).
+
+- Preserve exact string selectors through differentiated helper calls, closures,
+  and structured values. String equality chooses the corresponding numeric
+  branch without storing strings in tensor IR; host components of structured
+  gradient arguments retain unit cotangents.
+  Top-level tuple and ADT selectors retain their declaring values. Unsupported
+  string computations in Grad report the operation's structural rejection.
+  Preserve host observations and their order around tensor result guards when
+  numeric helper probes encounter exact string or aggregate arguments.
+  Keep computed lexical closures on the host execution path when numeric
+  lowering cannot represent their callable values.
+  Preserve existing finite-list AD and typed builtin alias admission while
+  rejecting unsupported numeric applications.
+
+- `chelis eval` and the HIP and Metal targets close four gaps with the C lane.
+
+  - `chelis eval` builds, matches, prints and returns a data-type value nested
+    past the depth where it used to overflow its stack (a `fold`-built chain of a
+    few thousand links). Copying a value, stamping a value that crosses a
+    function interface, printing it and converting a root for output now walk it
+    from a worklist
+    ([#2567](https://github.com/Chelis-Lang/chelis/issues/2567)).
+  - `chelis eval` accepts a tensor definition whose body reaches `fold` other
+    than as its head: in a block tail, through a block binding or through a
+    callee. The shared kernel decision now keeps such a definition on the host
+    lane before lowering, as the C lane did
+    ([#2574](https://github.com/Chelis-Lang/chelis/issues/2574)).
+  - `--target hip` and `--target metal` keep a definition whose parameter the
+    single DAG entry cannot carry (a string, data-type, container, tuple or unit
+    parameter) with its authored signature, by taking their host backend as C
+    does, instead of emitting a zero-input entry that dropped it
+    ([#2575](https://github.com/Chelis-Lang/chelis/issues/2575)).
+  - The host program emitted as C++ for Metal (`.mm`) and HIP (`.cpp`) declares
+    the runtime's emitter-private entry points with C linkage, so a host program
+    using `map`, a string concatenation or a consuming container operation links
+    against `libchelis_runtime.a`
+    ([#2582](https://github.com/Chelis-Lang/chelis/issues/2582)).
+
+- A compiled program now prints an `Option` held inside a list or a data-type
+  value, directly or through a tuple nested in one, such as the result of
+  `map(fn (x: string) -> Some(x), xs)`, as `chelis eval` prints it. Previously the
+  program printed the root's label and aborted in `chelis_print_list` with
+  `validate_value rejects unknown tags`. An `Option` that is a root's own value or
+  one of a tuple root's components is not yet printable; see
+  [#2597](https://github.com/Chelis-Lang/chelis/issues/2597). See
+  [#2576](https://github.com/Chelis-Lang/chelis/issues/2576).
+
+- `chelis build` now accepts a `filter` or `partition` whose predicate passes the
+  loop item to a named definition, as in `filter(fn (x: string) -> keep(x), xs)`,
+  `filter(keep, xs)`, or a predicate received as a parameter. Previously the
+  build failed in the ownership stage with `owner %N ... is not live`. See
+  [#2577](https://github.com/Chelis-Lang/chelis/issues/2577).
+
+- Compiled `scan` no longer mutates its seed: a seed the caller keeps (a
+  parameter, a local read after the scan, or a global) keeps its value, where the
+  compiled program previously changed it in place (`sd` came back as `sdabc`). A
+  `scan` whose callback reads its accumulator no longer releases or retains the
+  variable that already holds the callback's result, which aborted tensor scans
+  and scans whose callback returns the accumulator through a nested `flat_map`,
+  and a `scan` with a named callback compiles instead of retaining the output list
+  as a string. See [#2579](https://github.com/Chelis-Lang/chelis/issues/2579),
+  [#2580](https://github.com/Chelis-Lang/chelis/issues/2580) and
+  [#2578](https://github.com/Chelis-Lang/chelis/issues/2578).
+
+- Compiled C now checks a tensor returned by `fold` against the function's
+  declared result extent and raises `numeric trap: domain in fold at i64` on a
+  mismatch, as `chelis eval` does. Previously the compiled program returned the
+  mismatched tensor, so the declared result type was false of the value. See
+  [#2581](https://github.com/Chelis-Lang/chelis/issues/2581).
+
+- A called function now reads its free names in the scope it was written in,
+  wherever the compiler inlines it. A caller's local, parameter or local function
+  alias that shares a name with a top-level value or function the callee reads no
+  longer replaces it, so `chelis eval` and compiled C return the lexically scoped
+  result instead of silently using the caller's binding. This holds through
+  nested calls, `grad`, `vmap` and function-valued arguments. See
+  [#2588](https://github.com/Chelis-Lang/chelis/issues/2588) and
+  [#2604](https://github.com/Chelis-Lang/chelis/issues/2604).
+
+- The evaluator now shares list, tuple, record, and dictionary contents when copying values. Fold-built data structures grow in linear time and deeply nested values can be released without overflowing the stack. See [#2592](https://github.com/Chelis-Lang/chelis/issues/2592).
+
+- A declared result extent is now checked when it names a dimension binder, not
+  only when it is a literal. `def f[n](a: tensor[n, f32], t0: tensor[*, f32]) ->
+  tensor[n, f32] = t0` returned a three-element tensor for a two-element `a` on
+  both `chelis eval` and compiled C; it now traps with
+  ``extent `n`: a axis 0 = 2, load axis 0 = 3`` and
+  `numeric trap: domain in load at i64`, naming the binder and the parameter axis
+  that declares it. A literal result claim on a block-bodied pass-through of a
+  wildcard parameter, which both lanes also dropped, now traps at the parameter
+  when the function runs as its own kernel.
+
+  A tensor that a builtin returns, or holds in the list, tuple, option or
+  dictionary it returns (for example `map`, `filter`, `partition`, `fold`,
+  `scan`, `flat_map`, `zip`, `append`, `chunk`, `split` and the `dict_*`
+  operations), now has that builtin as its producer for a declared-result check,
+  while `index`, `take` and `skip` keep the element's own producer (spec/04
+  §4.7). A valid program that indexes such a result no longer
+  aborts with an internal provenance error, and a wrong extent traps as, for
+  example, `numeric trap: domain in map at i64` on both lanes.
+
+  A tensor-graph operation that forwards an input axis under another binder's
+  name now checks the two extents itself and traps in that operation. See [#2608](https://github.com/Chelis-Lang/chelis/issues/2608),
+  [#1900](https://github.com/Chelis-Lang/chelis/issues/1900),
+  [#2598](https://github.com/Chelis-Lang/chelis/issues/2598) and
+  [#2512](https://github.com/Chelis-Lang/chelis/issues/2512).
+
+- The bundled `chelis-std` runtime is now read from the compiler in memory and
+  carries no filesystem location. Previously every invocation whose package graph
+  contained the runtime extracted it into a new `chelis-std-bundle-*` directory
+  under the system temporary directory and never removed it, and that directory's
+  random path was recorded in the prepared-graph cache, the compiled-context
+  cache and the `chelis test` worker hand-off, so those bytes differed between
+  two runs over the same package. The first run after upgrading rebuilds those
+  caches once. See [#2616](https://github.com/Chelis-Lang/chelis/issues/2616).
+
+- A `--timeout` or other cancellation that fires while a compiler cache is being
+  loaded is now reported as the cancellation alone. Previously the chelis-std and
+  dependency typecheck caches and the compiled-context cache classified the
+  abandoned load as a decode failure, so `chelis eval --timeout` could print
+  `... unusable (cache decode error: ...: chelis::eval::cancelled); rebuilding
+  and overwriting` before the timeout message. A valid cache file is left in
+  place; a file that genuinely fails to decode still warns and is rebuilt. See
+  [#2617](https://github.com/Chelis-Lang/chelis/issues/2617).
+
+- Names keep the meaning they have where they are written on more routes.
+  When `chelis eval` or `chelis test` applies `grad` or `vmap` to a function
+  literal, the literal reads the caller's locals, and each closure it reaches
+  reads what it closed over, while a declaration the literal calls reads
+  top-level names. Previously a caller's local or local function could replace a
+  top-level value or function the declaration read, a later rebinding could
+  replace a closure's captured value, and a captured scalar could go missing
+  ([#2619](https://github.com/Chelis-Lang/chelis/issues/2619),
+  [#2380](https://github.com/Chelis-Lang/chelis/issues/2380)). A let-bound list
+  literal or `shape(x, axis)` keeps the values it was bound from when a name it
+  reads is rebound before its use
+  ([#2603](https://github.com/Chelis-Lang/chelis/issues/2603)). A tensor
+  parameter named like a top-level function, and a local function named like a
+  builtin, are no longer taken for the function or builtin
+  ([#1949](https://github.com/Chelis-Lang/chelis/issues/1949),
+  [#1964](https://github.com/Chelis-Lang/chelis/issues/1964)). A top-level value
+  defined by a block now has a type, so a named-axis call that reads it evaluates
+  and compiles ([#2547](https://github.com/Chelis-Lang/chelis/issues/2547)).
+  Repeated `grad` and `vmap` applications in the interpreter no longer re-scan
+  the whole program each time
+  ([#2439](https://github.com/Chelis-Lang/chelis/issues/2439)).
+
+- Named and literal extents in List tensor parameters now check every element
+  at each function entry, including internal calls, nested Lists, and retained
+  callable invocations, on Eval and compiled C. Empty Lists supply no named
+  extent witness. See [#2627](https://github.com/Chelis-Lang/chelis/issues/2627)
+  and [#2752](https://github.com/Chelis-Lang/chelis/issues/2752).
+
+- Preserve scalar bitwise operations inside `grad` and `vmap` as exact signed-width IR operations in eval and C, including runtime operands and negative-shift traps. HIP and Metal reject these kernels with a typed diagnostic. WireDag version 20 carries the closed bitwise operation family.
+
+- Calls that pass a runtime-sized tensor to a literal-extent parameter now check
+  the declared extent before running the callee on Eval and C. See
+  [#2632](https://github.com/Chelis-Lang/chelis/issues/2632).
+
+- The checker now determines `vmap` batching after an enclosing recursive group
+  has solved the mapped function's types. Calls to inline and locally bound
+  untyped row lambdas infer their parameter type from a slice of the mapped
+  actual. A mapped result claim cannot supply an unknown row result, and
+  incorrect scalar claims reject during checking. See
+  [#2651](https://github.com/Chelis-Lang/chelis/issues/2651) and
+  [#1887](https://github.com/Chelis-Lang/chelis/issues/1887).
+
+- `grad` reports the specified differentiation error when a comparison operand
+  contains a structurally non-differentiable operation. Previously the error
+  leaked an internal graph node ID. See [#2666](https://github.com/Chelis-Lang/chelis/issues/2666).
+
+- `chelisup install` refuses a release tarball whose top-level `chelis-v*` entry
+  is a link rather than a directory. Through such a link the runtime check read
+  files outside the release, and the install could leave a toolchain entry that
+  pointed outside the store or dangled and blocked reinstalling that version. See
+  [#2677](https://github.com/Chelis-Lang/chelis/issues/2677).
+
+- On Linux, `chelisup install` now downloads a release's glibc-2.31 build
+  (`chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz`) instead of its `linux-x86_64`
+  build, which needs glibc 2.39. Toolchains installed from that build failed on
+  the first `chelis` command on distributions with an older glibc. With glibc 2.31
+  or later, such as Debian 11 and 12, Ubuntu 20.04 and 22.04, and RHEL 9, a new
+  install now runs; a glibc older than 2.31, such as RHEL 8's, runs neither build.
+  A version an earlier `chelisup` already installed keeps its `linux-x86_64` build
+  until you run `chelisup uninstall <ver>` and install it again. Releases before
+  0.7.24, which mostly do not publish a glibc-2.31 build, still install their
+  `linux-x86_64` build. The release workflow's installed-artifact canary now
+  installs the same build. See [#2686](https://github.com/Chelis-Lang/chelis/issues/2686).
+
+- HIP and Metal now execute represented integer bitwise tensor DAG nodes at
+  i8, i16, i32, and i64; Metal supports rank-one tensors. Shifts report the
+  first negative count. Source tensor admission and transformed-program device
+  acceptance remain tracked in [#2076](https://github.com/Chelis-Lang/chelis/issues/2076)
+  and [#2702](https://github.com/Chelis-Lang/chelis/issues/2702). Metal
+  rejects activated shifts until it can gate their checks.
+
+- Unannotated aliases of the four key builtins now execute in Eval and C at
+  independently selected scalar and tensor shapes, including local tuple
+  transport and concrete callback arguments. See
+  [#2709](https://github.com/Chelis-Lang/chelis/issues/2709).
+
+- Tuple results preserve their components across staged host computation: tensor-bearing results retain their native structure, and scalar host tuple projections carry exact reshape extents. Keyed State wrappers and scalar State tuple results evaluate and compile to C. See [#2711](https://github.com/Chelis-Lang/chelis/issues/2711) and [#2715](https://github.com/Chelis-Lang/chelis/issues/2715).
+
+- Computed scalar expressions in `reshape` target lists now retain their runtime values through lowering, so Eval and generated C agree on valid shapes and trap on mismatched element counts. See [#2719](https://github.com/Chelis-Lang/chelis/issues/2719) and [#2635](https://github.com/Chelis-Lang/chelis/issues/2635).
+
+- Forward matches on initializer-returned ADT values now retain host control beside staged tensor reshapes, preserving selected arms and returned state in Eval and C.
+
+- C compilation rejects a List gradient over a selected local List actual
+  instead of silently substituting a same-named top-level List. See
+  [#2740](https://github.com/Chelis-Lang/chelis/issues/2740).
+
+- Retained callable invocations check named result extents against their formal argument witnesses on Eval and compiled C. A mismatching result traps at its producing operation. See [#2751](https://github.com/Chelis-Lang/chelis/issues/2751).
+
+- `chelis lint --check` now reports a `.ch` file it cannot parse, as the blocking
+  rule `surf-parses` (`spec/01-nomenclature.md` §12.5). Every rule that needs an
+  abstract syntax tree declines when the parse fails, which is correct per rule
+  and was wrong in aggregate: silence from every rule was indistinguishable from
+  a clean file, so the command reported success over input no rule could read. A
+  reef package whose source declared two modules got `chelis reef build` exit 1
+  and `chelis lint --check .` exit 0; `chelis fmt --check` rejects that file but
+  has no directory form, so it could not stand in for the lint over a tree. See
+  [#2765](https://github.com/Chelis-Lang/chelis/issues/2765).
+
+- The lint's shipped traversal policy no longer prunes inside a reef package's
+  declared source roots when it can see the package's manifest. Its patterns are
+  gitignore-style and so matched at any depth, while the reef loader applies no
+  such filter: a `.ch` file under `src/target/` was compiled by
+  `chelis reef build` and invisible to `chelis lint --check`, which reported
+  success on a package that does not load. Every shipped pattern was affected,
+  not only the build-artifact names. Beneath a source root those names are
+  source, so the baseline stops pruning there. A repository `chelis-lint.toml`
+  entry is a deliberate local declaration and continues to prune inside a source
+  root, which is what excluding generated `.ch` needs. A manifest speaks for the
+  lint only when traversal policy admits it, the same admission
+  `reef-module-identity` applies, and its `additional_sources` values are
+  validated as reef validates them, so a manifest outside the lint's policy root
+  or one naming `.git` widens nothing. A manifest above the lint's policy root
+  governs nothing, so in a package with no repository `chelis-lint.toml` a lint
+  pointed straight at a source root still prunes. See
+  [#2768](https://github.com/Chelis-Lang/chelis/issues/2768).
+
+- `vmap` now keeps gather and scatter indices within each batch element, including
+  under `grad` and nested batching. Previously a vmapped gather could silently
+  read the batch axis and return a wrong result shape. See
+  [#2772](https://github.com/Chelis-Lang/chelis/issues/2772).
+
+- `chelis build` now compiles a program that reads a loop's result again inside a
+  later loop. A list built by `map`, `filter`, `scan`, `fold` or `flat_map` and
+  then passed by value to a named definition from inside another loop's callback
+  was rejected by ownership verification as reaching a block with inconsistent
+  live owners, even though `chelis check` accepted it and `chelis eval` ran it
+  correctly. The loop result is now copied for that call, as [04-LIN-5] requires
+  of any use that preserves another live use. A program that already built still
+  builds and still produces the same result. See
+  [#2781](https://github.com/Chelis-Lang/chelis/issues/2781).
+
+- `chelis reef conform sync` now materializes the pinned root `AGENTS.md` contract, honors shell-owned heading exclusions, and points `.claude/skills` and `.codex/skills` at the one synchronized `agent-skills/` tree.
+
+- Native Arb oracle builds now use the maintained `arb-sys` revision that explicitly
+  locates the bundled MPFR installation, rather than failing when `/usr/local/lib`
+  is absent. The revision also uses a standalone FLINT dependency, so a clean
+  checkout needs no sibling native-library repositories. The default Devenv
+  toolchain also supplies the `m4` processor needed for cold GMP builds.
+  The CI cache binds its fixed-output source hash to the reviewed Git revision,
+  rejecting lock updates that would otherwise reuse an older cached source.
+
+- CI can reuse eligible verification after either a base rebase or a merge from `main` when the synthetic candidate is a shallow checkout. Cache-publication census failures now show the first bounded compiler error instead of only a generic compile-outcome message. See [#2673](https://github.com/Chelis-Lang/chelis/issues/2673).
+
+- Fused C `max_reduce` now traps on a runtime-empty axis, as the unfused C and evaluator paths do. See [#2634](https://github.com/Chelis-Lang/chelis/issues/2634).
+
+- Grad can differentiate scalar map-built tensors over runtime i64 ranges, preserving the source extent and captured scalar cotangents on Eval and C. Capture contributions retain invocation/read order, one positive-zero base, and rounding at the captured dtype, including consumers outside the map. Callbacks with observable checks and transforms requiring nested invocation provenance reject explicitly pending ordered loop lowering.
+
+- Grad, vmap, and ordinary calls now keep a top-level tensor value distinct from a same-named formal or local in both evaluation and generated C. Host substitution uses the resolved binding origin, so an unrelated local inside a function literal no longer blocks a valid call. See [#2604](https://github.com/Chelis-Lang/chelis/issues/2604) and [#2615](https://github.com/Chelis-Lang/chelis/issues/2615).
+
+- HIP builds now reject pad and shrink programs that would silently execute through
+  the C host instead of emitting device kernels. The remaining HIP implementation
+  is tracked in [#2493](https://github.com/Chelis-Lang/chelis/issues/2493).
+
+- Preserve literal local tensor ascriptions at host initializers. `pad_sequences_to` checks runtime batch and width claims before allocating its result on Eval and C. Named local host witnesses remain unsupported (#2374).
+
+- Fix exact integer `abs` on HIP and Metal at every signed width, preserving minimum-value overflow traps and integer-weight gradients. Device integer-to-float casts round once at the target width, and integer constants retain their exact values. Empty Metal pointwise outputs retain their shape without issuing a zero-work dispatch.
+
+- Macro expansion now enforces caller and template type ascriptions and keeps typed
+  lambda parameters hygienic, including names that use Deep vocabulary spellings.
+  See [#2429](https://github.com/Chelis-Lang/chelis/issues/2429) and
+  [#2432](https://github.com/Chelis-Lang/chelis/issues/2432).
+
+- Opaque invariant properties generate valid Simplex samples and samples with
+  integer bounds supplied by module constants. Integer constants that cannot
+  be represented exactly as `f64` remain unsupported during sampling. The Z3
+  test helper finds link libraries and configures runtime paths on Linux,
+  macOS, and Windows.
+
+- Standard Python wheel builds now seal the runtime while editable installs remain checkout-backed and reject stale declared runtime sources. The bounded distribution smoke builds a wheel from a disposable source copy, removes it before native compile and call, reloads the persisted artifact in a second interpreter, and records digest checks. On macOS, the installed consumer also runs under a filesystem sandbox denying reads from the original checkout; Linux receipts do not claim that isolation. The hosted crossed-wheel smoke requires distinct runtime bytes and links a native C witness against each archive to observe different key-seed results before requiring the first wheel to reject the second wheel's artifact.
+
+- Implement tensor forms of `key_from_seed`, `split_key`, `split_keys`, and `fold_in` in checking, evaluation, and compiled C. Tensor keys preserve their shape; `split_keys` appends its count axis and `fold_in` requires exactly matching shapes.
+
 ## [0.18.11] - 2026-09-21
 
 ### Added
