@@ -719,6 +719,105 @@ not establish mutation-derived aggregate provenance such as `append`, general
 preallocation coverage for every host primitive, named result claims (#1900),
 or local callable aliases (#1947).
 
+##### Retained callable formal-result guards (#2751)
+
+A retained callable formal's authored result is a separate claim from the
+supplied callable's own declared result and from the formal's entry contract.
+For `f: tensor[seq, f32] -> tensor[*, f32] -> tensor[seq, f32]`,
+the result's `seq` refers to the first formal argument's axis in this
+invocation, even if the supplied callable returns its second argument. Do not
+replace the formal claim with the body's inferred output axis, satisfy it from
+the supplied callable's weaker result type, or treat a successful entry check
+as discharging the result. Literal formal-result axes keep their existing
+claim path; this slice retains the named axes that
+`retain_actualized_result_claim_with_order` currently omits.
+
+Compile the formal's result obligations from its authored, alias-expanded
+signature before specialization erases that signature. Retain a scoped binder
+identity, each claimed result axis, and the formal slot and nested List path
+of its declaring witnesses. Actualize checked rank and precision without
+turning dimensions learned only from actuals into authored claims. For each
+invocation, evaluate non-callable actuals once in caller order; map direct
+tensor observations and List element observations to the prepared values;
+execute the ordered formal entry contract; then make the independent formal
+result claim available to the supplied callable's selected producer. The
+result cannot be checked at entry merely because its witness is ready.
+Repeated invocations get fresh witness values, while two obligations in one
+invocation that name the same binder use that invocation's canonical witness.
+Do not bind by printable name, inferred result extent, or an unrelated
+same-sized axis.
+
+Extend `HostResultClaimPlan` beyond its current result `TensorType` and
+ordering bit with the invocation-local witness map and ordered result-axis
+requirements. The map refers to the retained invocation's prepared formal
+ingress values, not caller variables that may be shadowed or moved. Compiled
+C's ordinary-function `HostResultClaim::of(function)` already represents
+direct `Named` and List-backed `NamedList` requirements; reuse that frame
+semantics for `ResultClaimScope`, whose present
+`HostResultClaim::from_tensor_type` admits only literals. Eval's ordinary
+function path already constructs `named_result_witnesses`; construct the
+equivalent from the retained formal's mapped ingress observations and feed it
+to the same declared-result check. Keep List witness selection in the ordered
+entry contract so the two lanes choose the same first available observation.
+
+A nonempty List contributes its element axes in the entry contract's
+signature, element, then axis order, including recursive List paths. An empty
+List contributes no observation; it never denotes extent zero. If another
+direct or List formal supplies the same binder, that witness still guards the
+result. If a result binder occurs only under empty Lists, §4.7 and the
+current List-entry design do not specify a runtime value for the required
+result comparison. This is a normative spec gap: settle that case in
+`spec/04-type-system.md` before claiming an acceptance verdict for it. Until
+then, implementation must not manufacture a witness, silently drop the
+claim, or report that the complete #2751 contract is satisfied.
+
+The formal result obligation travels through the checked adapter around the
+supplied callable, inline beta reduction, local callable aliases, nested
+retained calls, helper lowering, and Eval/C invocation frames. It must not
+leak to a sibling call. The supplied callable's own result obligation remains
+independent, with each guard consumed once. An `if` or `match` sends the
+formal claim only to its selected result producer; an unselected arm does not
+run or trap. A later selector keeps the selected value's producer provenance
+until the guard operands are ready. The producer consumes the claim after
+earlier independent effects and before later effects, allocation, or element
+access dependent on the returned extent. Both lanes use the same ordered
+formal-result plan, witness paths and producer provenance; they may represent
+them differently but must not reconstruct them from a rendered name or
+backend result type. A missing required witness or selected producer is a
+typed lowering failure, not a successful Eval/C artifact.
+
+Implement this as a bounded #2751 exit, keeping #2627's List entry
+obligations and #1771/#1945's host declaration/inherited literal obligations
+as independent controls. Add paired Check, Eval and compiled-C fixtures to
+`crates/chelis-cli/tests/issue_2751_retained_formal_result.rs` and execute
+them with:
+
+```sh
+cargo nextest run -p chelis-cli --test issue_2751_retained_formal_result
+```
+
+Use runtime-supplied tensors for the dynamic mismatch rows, so Check cannot
+prove their widths; test the issue's literal-source program separately for
+static proof under §4.7. Each runtime row needs the complete
+`numeric trap: domain in <op> at i64` line and separate source names, axis
+and observed values under spec/04 §4.7, or the expected result value on
+success; compiled C must be compiled, linked and run.
+
+| fixture | required Check / Eval / compiled-C observation |
+|---|---|
+| Issue's `broad`/`invoke` direct formal, result width 3 against `x` width 2; matching `y` width 2 | Check admits the runtime-dependent pair and rejects a contradiction proven from the lowered graph; a dynamic mismatch traps at the returned tensor's producing `load`, with `seq` witnessed at 2 and result axis at 3; match returns width 2 |
+| Same pair with the witnessing first formal nested in a nonempty `List`, including a later mismatching element and a nested-List path | Entry rejects a disagreeing later element at its `load`; after entry succeeds, wrong returned width traps at the selected producer; matching return succeeds. These are separate failures |
+| Empty List in one witness position with a later direct or nonempty-List `seq` witness | No empty-element read or zero witness; the later witness determines the formal result guard, with mismatching and matching returns |
+| Two calls of one callable with different `seq` widths, plus an equal-sized unrelated argument and an alias of the callable | Each call compares against its own declared formal witness; one may pass while the other traps. Neither alias spelling nor equal size supplies a substitute witness |
+| Formal adapter wrapping a supplied callable with its own result claim, then an outer retained call; inline callback and local callable alias variants | Formal entry, supplied-callable result and outer formal result retain distinct ownership and order; one failing and one matching control for each boundary, including a forwarded result through a tensor helper |
+| Selected `if`/`match` result, including selection known only after the candidate producers, with an invalid unselected arm | Only the selected result is checked once against the formal witness; report its producing primitive, not `if`, `match`, the enclosing function, or a neighboring operand |
+| Eager actual effect or trap, formal entry mismatch, body effect before the selected producer, formal result mismatch, and body effect after it | Actuals run once in caller order; entry wins before body; an earlier independent body effect is observed; a failed formal result suppresses the later effect on both lanes |
+
+The only-empty-List result-binder case stays outside this matrix pending the
+normative decision above. These receipts prove retained formal tensor
+results with direct and List witnesses on Eval/C; they do not claim general
+aggregate result guards, device backends, or the broader #1277 class.
+
 ##### Host entry guards (#1788)
 
 Retain the authored signature and its checked positional types before helper
