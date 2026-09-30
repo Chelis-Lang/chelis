@@ -34,11 +34,11 @@ legacy/full/manual gate selections remain available.
 commands permitted in the gate-owned CI jobs, so shell syntax cannot hide an
 unreviewed command. `--list` prints the canonical full list. Each printed
 command carries one of four annotations: `fast + validation + ci` (the lint
-row, which `--fast` and `--validation` share), `validation + ci`, `ci-owned`,
-and `full gate; CI coverage split` (the workspace nextest row). Two trailing `#`
-notes describe the dynamic stages: what `--fast` runs, and the per-crate nextest
-`--validation` appends. The gate's own output is the only authoritative list; no document
-transcribes it.
+and evaluator source-guard rows shared by `--fast` and `--validation`),
+`validation + ci`, `ci-owned`, and `full gate; CI coverage split` (the workspace
+nextest row). Two trailing `#` notes describe the dynamic stages: what
+`--fast` runs, and the per-crate nextest `--validation` appends. The gate's own
+output is the only authoritative list; no document transcribes it.
 
 Before `--fast`, `--validation`, or another long local validation, fetch
 `origin/main` so the changed-crate selection and inherited-failure comparison
@@ -123,8 +123,9 @@ rather than skipping it.
 `scripts/regen_all.py --tier 0` (the rejection registry, the embedded
 conformance skill assets, and the opaque-invariants corpus) and
 `cargo fmt --all`, then `ci_change_owned.py classify-paths` over the changed
-set, `chelis lint --check .`, `cargo clippy -p <crate> --tests -- -D warnings`
-for each changed crate, one `cargo nextest run` over the drift tripwires (atom
+set, `chelis lint --check .`, `scripts/eval_system_guard.py` over the evaluator
+source, `cargo clippy -p <crate> --tests -- -D warnings` for each changed crate,
+one `cargo nextest run` over the drift tripwires (atom
 partition, generated dtype header, compiler pins, opaque corpus,
 loud-unsupported, payload census, bundled std loader, conformance manifest,
 asset drift, skill-set uniformity, phase-3 gate inventory, stack-guard
@@ -185,13 +186,14 @@ only the working tree, so an in-place crate rename can be ambiguous to the
 planner and clean here.
 
 `--fast` exits non-zero for any failing stage (fmt, regeneration, path
-classification, lint, per-crate clippy, the tripwire run, the std-bundle
-self-test, or the bundled-lock guard) and never for a file it fixed; a regenerated `dist/` or `reef.lock`
-is reported as a changed file to commit, never as a failure. Changed files are
-reported from content hashes of the porcelain set before and after the run, so
-a file that was already dirty and that fmt changed further is still listed. It
-never runs a workspace clippy row, the chelis#908 oracle, or the
-runtime-representation oracle, and it never takes the lease.
+classification, lint, evaluator source guard, per-crate clippy, the tripwire
+run, the std-bundle self-test, or the bundled-lock guard) and never for a file
+it fixed; a regenerated `dist/` or `reef.lock` is reported as a changed file to
+commit, never as a failure. Changed files are reported from content hashes of
+the porcelain set before and after the run, so a file that was already dirty
+and that fmt changed further is still listed. It never runs a workspace clippy
+row, the chelis#908 oracle, or the runtime-representation oracle, and it never
+takes the lease.
 
 ## What `--validation` runs
 

@@ -3252,6 +3252,33 @@ reason = "the Rust policy job's lint-and-unit gate stage runs the pipeline-core 
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/eval_system_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust-policy lint-and-unit stage scans evaluator modules for direct host access outside the single adapter"
+tracking_issue = "chelis#1323"
+
+[[path_rule]]
+prefix = "scripts/test_eval_system_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the PR script-unit job discovers the boundary guard's legitimate and bypass-case tests"
+tracking_issue = "chelis#1323"
+
+[[path_rule]]
+prefix = "scripts/eval_system_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily and workflow_dispatch"
+reason = "the integration-support gate stage executes the focused evaluator boundary, CLI process, and strict directory parity oracle"
+tracking_issue = "chelis#1323"
+
+[[path_rule]]
 prefix = "scripts/regenerate_chelis_std_bundle.py"
 disposition = "owner"
 workflow = "ci.yml"
