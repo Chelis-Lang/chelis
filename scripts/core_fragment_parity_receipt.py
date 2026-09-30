@@ -327,6 +327,16 @@ def parse_manifest(data: object) -> Manifest:
             f"case {case_id}: `roots` must be an array of strings",
         )
         assert isinstance(roots, list)
+        # §5.2's blackout guard reads `roots`, so an empty list on a `value`
+        # case silently disarms it: two agreeing empty streams would pass with
+        # nothing to be missing. A value case owing no root is incoherent
+        # anyway -- that is what the `library-only` exclusion is for.
+        _require(
+            expected != "value" or bool(roots),
+            f"case {case_id}: an `expected: \"value\"` case must declare at "
+            f"least one root; a case that owes no observation belongs in "
+            f"`exclusions` with reason 'library-only'",
+        )
 
         truncating = raw.get("truncating_roots", [])
         _require(
@@ -598,7 +608,19 @@ def missing_roots(case: CaseRow, stdout: bytes) -> list[str]:
         for line in rendered
         if " = " in line and not line.startswith((" ", "\t"))
     }
-    return [root for root in case.roots if root not in labels]
+    # [05-OBS-8]: a tuple-valued root expands recursively into dotted
+    # positional names (`result.0`, `result.1.0`), and a fixed-product ADT root
+    # into its declared field names, so the bare root name never appears. A
+    # dotted descendant therefore satisfies its declared ancestor. Requiring
+    # the exact label would turn a byte-exactly-agreeing tuple case red, and
+    # the correct spelling is not even knowable in advance: the same atom says
+    # an ADT whose constructor is not statically fixed "remains one bare root".
+    def observed(root: str) -> bool:
+        return root in labels or any(
+            label.startswith(f"{root}.") for label in labels
+        )
+
+    return [root for root in case.roots if not observed(root)]
 
 
 def observation_truncated(stdout: bytes) -> bool:
@@ -813,7 +835,9 @@ def materialize_case(case: CaseRow, corpus_root: Path, workdir: Path) -> Path:
                 f"case {case.case_id}: {source_path} does not exist at the pinned "
                 f"revision"
             )
-        target = workdir / "k.ch"
+        # Preserve the suffix: discovery walks `.ch` and `.dp`, and a `.dp`
+        # program handed over as `k.ch` is parsed as Surf and dies in `fmt`.
+        target = workdir / f"k{source_path.suffix}"
         shutil.copyfile(source_path, target)
         return target
     if kind == "derived":
@@ -1168,6 +1192,7 @@ def build_receipt(
         "observation_coverage": observation_coverage(verdicts),
         "non_vacuity_failures": list(non_vacuity),
         "pin_failures": list(pin_problems),
+        "all_failures_at_compile_stage": all_failures_at_compile_stage(verdicts),
         "exclusions": [
             {
                 "corpus": exclusion.corpus,
@@ -1193,6 +1218,18 @@ def build_receipt(
             for verdict in verdicts
         ],
     }
+
+
+def all_failures_at_compile_stage(verdicts: Sequence[CaseVerdict]) -> bool:
+    """Whether every failing case failed at the compiled lane's compile stage.
+
+    Derived from stages the verdicts already carry; it changes no verdict. It
+    exists because §7 files a defect per divergence, and a broken local C
+    toolchain produces one lane split per case -- a shape worth naming before
+    anyone files N issues for it.
+    """
+    failing = [v for v in verdicts if v.verdict in FAILING_VERDICTS]
+    return bool(failing) and all(v.compiled_stage == "compile" for v in failing)
 
 
 def receipt_passes(receipt: dict) -> bool:
@@ -1254,6 +1291,18 @@ def _summarize(receipt: dict, stream) -> None:
                 f"  FAIL {case['case_id']}: {case['verdict']}: {case['detail']}",
                 file=stream,
             )
+    if receipt.get("all_failures_at_compile_stage"):
+        # §7 step 2 files a defect per reported divergence. A local C toolchain
+        # that cannot compile anything makes every case lane-split at the
+        # compile stage, and §7 followed literally would turn that into one
+        # `demo-path` issue per case. This is a disclosure, not a gate: the
+        # verdicts stand, and the receipt says what its own stages show.
+        print(
+            "  NOTE: every failing case failed at the `compile` stage. Before "
+            "filing anything under §7, check the C toolchain: a compiler that "
+            "cannot build any case produces exactly this shape.",
+            file=stream,
+        )
     print("", file=stream)
 
 

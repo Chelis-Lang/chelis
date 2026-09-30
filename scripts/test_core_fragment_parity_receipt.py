@@ -133,13 +133,35 @@ class ComparatorEquivalence(unittest.TestCase):
         "}) } }"
     )
 
+    PATTERN = r"pub fn compare_exact_observations\((?:.|\n)*?\n\}"
+
+    @classmethod
+    def comparator_bodies(cls) -> list[str]:
+        text = cls.SOURCE.read_text(encoding="utf-8")
+        return [
+            " ".join(match.split())
+            for match in re.findall(cls.PATTERN, text)
+        ]
+
     @classmethod
     def comparator_body(cls) -> str | None:
-        text = cls.SOURCE.read_text(encoding="utf-8")
-        match = re.search(
-            r"pub fn compare_exact_observations\((?:.|\n)*?\n\}", text
+        bodies = cls.comparator_bodies()
+        return bodies[0] if bodies else None
+
+    def test_exactly_one_definition_of_the_comparator_exists(self):
+        # Round 2: matching the first definition let a second, `#[cfg]`-gated
+        # tolerant `compare_exact_observations` be appended after the exact one
+        # with the lock still green -- and the crate already gates on features,
+        # so that is a plausible way someone adds a tolerance mode.
+        bodies = self.comparator_bodies()
+        self.assertEqual(
+            len(bodies),
+            1,
+            f"agreement.rs defines compare_exact_observations {len(bodies)} "
+            f"times. The receipt's §3.1 claim is about THE comparator; a second "
+            f"definition -- feature-gated or not -- means the predicate the "
+            f"receipt mirrors is no longer the only one.",
         )
-        return " ".join(match.group(0).split()) if match else None
 
     def test_production_comparator_is_still_byte_exact(self):
         body = self.comparator_body()
@@ -374,6 +396,22 @@ class ManifestValidation(unittest.TestCase):
         parsed = receipt.parse_manifest(data)
         self.assertEqual(parsed.cases[0].known_divergence, {"issue": 2782})
 
+    def test_a_value_case_with_no_roots_is_rejected(self):
+        # Round 2: §5.2's blackout guard reads `roots`, so `roots: []` on a
+        # value case disarmed it and restored the F2 pass-with-exit-0 for one
+        # manifest edit.
+        self.assert_rejects(
+            lambda d: d["cases"][0].__setitem__("roots", []),
+            "must declare at least one root",
+        )
+
+    def test_a_trap_case_with_no_roots_is_accepted(self):
+        # The negative partner: only a value case owes a rendered observation.
+        data = minimal_manifest()
+        data["cases"][1]["roots"] = []
+        parsed = receipt.parse_manifest(data)
+        self.assertEqual(parsed.cases[1].roots, [])
+
     def test_truncating_roots_must_name_owned_roots(self):
         self.assert_rejects(
             lambda d: d["cases"][0].__setitem__("truncating_roots", ["not_a_root"]),
@@ -550,6 +588,42 @@ class DeclaredRootPresence(unittest.TestCase):
         self.assertEqual(verdict, receipt.VERDICT_MISSING_DECLARED_ROOT)
         self.assertIn("delta", detail)
         self.assertNotIn("'price'", detail)
+
+    def test_a_dotted_descendant_satisfies_its_declared_ancestor(self):
+        # [05-OBS-8]: a tuple-valued root expands into dotted positional names,
+        # so the bare root name never appears. Round 2: requiring the exact
+        # label turned a byte-exactly-agreeing tuple case red.
+        out = b"result.0 = 3.0\nresult.1 = 6.0\n"
+        verdict, _ = receipt.classify_case(
+            case_row(roots=["result"]), lane(stdout=out), lane(stdout=out)
+        )
+        self.assertEqual(verdict, receipt.VERDICT_AGREE)
+        self.assertEqual(receipt.missing_roots(case_row(roots=["result"]), out), [])
+
+    def test_a_record_field_expansion_satisfies_its_declared_ancestor(self):
+        out = b"cfg.alpha = 1.0\ncfg.beta = 2.0\n"
+        self.assertEqual(receipt.missing_roots(case_row(roots=["cfg"]), out), [])
+
+    def test_declaring_the_dotted_names_directly_also_works(self):
+        # The author should not have to know which spelling the compiler picks:
+        # [05-OBS-8] says an ADT whose constructor is not statically fixed
+        # "remains one bare root", so both spellings must be accepted.
+        out = b"result.0 = 3.0\nresult.1 = 6.0\n"
+        self.assertEqual(
+            receipt.missing_roots(case_row(roots=["result.0", "result.1"]), out), []
+        )
+
+    def test_a_dotted_prefix_does_not_satisfy_an_unrelated_root(self):
+        # The negative partner: `res` must not be satisfied by `result.0`.
+        out = b"result.0 = 3.0\n"
+        self.assertEqual(receipt.missing_roots(case_row(roots=["res"]), out), ["res"])
+
+    def test_a_blackout_still_fails_a_tuple_case(self):
+        # The widening must not reopen F2: no labels at all satisfies nothing.
+        verdict, _ = receipt.classify_case(
+            case_row(roots=["result"]), lane(stdout=b""), lane(stdout=b"")
+        )
+        self.assertEqual(verdict, receipt.VERDICT_MISSING_DECLARED_ROOT)
 
     def test_a_missing_root_is_not_absorbed_by_a_known_divergence(self):
         # A silenced observation channel is never a tracked divergence. Asserting
@@ -1463,6 +1537,65 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(verdict.truncated)
 
 
+class CompileStageDisclosure(unittest.TestCase):
+    """§7 files a defect per divergence; a broken `cc` produces one per case."""
+
+    def verdicts(self, *stages):
+        return [
+            receipt.CaseVerdict(
+                str(i), "c-note", receipt.VERDICT_LANE_SPLIT, compiled_stage=stage
+            )
+            for i, stage in enumerate(stages)
+        ]
+
+    def test_all_failures_at_compile_stage_is_flagged(self):
+        self.assertTrue(
+            receipt.all_failures_at_compile_stage(self.verdicts("compile", "compile"))
+        )
+
+    def test_a_mixture_is_not_flagged(self):
+        self.assertFalse(
+            receipt.all_failures_at_compile_stage(self.verdicts("compile", "run"))
+        )
+
+    def test_no_failures_is_not_flagged(self):
+        # The negative that matters: a clean run must not carry the note.
+        passing = [
+            receipt.CaseVerdict("a", "c-note", receipt.VERDICT_AGREE, compiled_stage="run")
+        ]
+        self.assertFalse(receipt.all_failures_at_compile_stage(passing))
+
+    def test_it_changes_no_verdict(self):
+        # It is a disclosure derived from existing stages, not a gate.
+        flagged = self.verdicts("compile")
+        self.assertTrue(receipt.all_failures_at_compile_stage(flagged))
+        self.assertEqual(flagged[0].verdict, receipt.VERDICT_LANE_SPLIT)
+
+
+class Materialization(unittest.TestCase):
+    def test_a_dp_case_keeps_its_suffix(self):
+        # Round 2: discovery widened to `.dp` but materialization hard-coded
+        # `k.ch`, so a Deep program was handed to `chelis fmt` as Surf.
+        with tempfile.TemporaryDirectory() as corpus, tempfile.TemporaryDirectory() as work:
+            (Path(corpus) / "p.dp").write_text("(module {} m)\n", encoding="utf-8")
+            case = case_row(
+                source={
+                    "kind": "committed",
+                    "repo": "Chelis-Lang/sonar",
+                    "rev": "0" * 40,
+                    "path": "p.dp",
+                }
+            )
+            target = receipt.materialize_case(case, Path(corpus), Path(work))
+            self.assertEqual(target.name, "k.dp")
+
+    def test_a_ch_case_still_lands_as_k_ch(self):
+        with tempfile.TemporaryDirectory() as corpus, tempfile.TemporaryDirectory() as work:
+            (Path(corpus) / "a.ch").write_text("x = 1\n", encoding="utf-8")
+            target = receipt.materialize_case(case_row(), Path(corpus), Path(work))
+            self.assertEqual(target.name, "k.ch")
+
+
 class Discovery(unittest.TestCase):
     def test_finds_nested_ch_files_as_posix_relative_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1521,6 +1654,18 @@ class ShippedManifest(unittest.TestCase):
                 entry["expected_case_count"],
                 f"{corpus}: expected_case_count is stale",
             )
+
+    def test_every_shipped_value_case_declares_at_least_one_root(self):
+        # The artifact the §5.2 blackout guard actually protects. Schema
+        # validation covers the shape; this covers the shipped file.
+        parsed = receipt.load_manifest(self.PATH)
+        for case in parsed.cases:
+            if case.expected == "value":
+                self.assertTrue(
+                    case.roots,
+                    f"{case.case_id}: a value case with no declared roots "
+                    f"disarms the blackout guard for that case",
+                )
 
     def test_every_known_divergence_cites_an_issue(self):
         parsed = receipt.load_manifest(self.PATH)

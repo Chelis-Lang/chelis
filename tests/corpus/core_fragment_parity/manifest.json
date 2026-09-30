@@ -309,13 +309,13 @@
     },
     {
       "corpus": "c-note",
-      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`, so the case owns no root; `build --target c` separately exits nonzero with the generic grad-lowering refusal (chelis#2755). The exit asymmetry hides no observation divergence: there is no observation",
       "path": "fixtures/dischargeability/probes/p05_grad_fuzz.ch",
       "reason": "prove-only"
     },
     {
       "corpus": "c-note",
-      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`, so the case owns no root; `build --target c` separately exits nonzero with the generic grad-lowering refusal (chelis#2755). The exit asymmetry hides no observation divergence: there is no observation",
       "path": "fixtures/dischargeability/probes/p06_nested_grad.ch",
       "reason": "prove-only"
     },
@@ -441,13 +441,13 @@
     },
     {
       "corpus": "c-note",
-      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`, so the case owns no root; `build --target c` separately exits nonzero with the generic grad-lowering refusal (chelis#2755). The exit asymmetry hides no observation divergence: there is no observation",
       "path": "fixtures/exemplars/gordon_sensitivity/corrupt.ch",
       "reason": "prove-only"
     },
     {
       "corpus": "c-note",
-      "notes": "eval reports `input contains only def declarations; nothing to evaluate`; the build emits an object-only `Compile object:` line and no `Compile:` line",
+      "notes": "eval reports `input contains only def declarations; nothing to evaluate`, so the case owns no root; `build --target c` separately exits nonzero with the generic grad-lowering refusal (chelis#2755). The exit asymmetry hides no observation divergence: there is no observation",
       "path": "fixtures/exemplars/gordon_sensitivity/source.ch",
       "reason": "prove-only"
     },

@@ -393,9 +393,9 @@ Every row is one case. Required fields:
 |---|---|
 | `case_id` | stable identity, unique across corpora; never reused after removal |
 | `corpus` | `c-note`, `sonar`, or `voyage` |
-| `source` | `{kind: "committed", repo, rev, path}` or `{kind: "derived", repo, rev, generator, task, index}` |
+| `source` | `{kind: "committed", repo, rev, path}` or `{kind: "derived", repo, rev, generator, task, index}`. A committed case keeps its suffix when materialized, so a `.dp` program is handed to the compiler as Deep rather than parsed as Surf |
 | `expected` | `value` or `trap` — see below |
-| `roots` | the root names the case owes, in manifest entry order |
+| `roots` | the root names the case owes, in manifest entry order. Required and non-empty when `expected` is `value`: §5.2's blackout guard reads this field, so an empty list disarms it, and a value case owing no observation is a `library-only` exclusion. A declared root is satisfied by its own `name = ` label **or** by any `name.`-prefixed label, because `[05-OBS-8]` expands a tuple-valued root into dotted positional names and a fixed-product ADT root into its field names — and the same atom makes the correct spelling unknowable in advance, since an ADT whose constructor is not statically fixed "remains one bare root" |
 | `truncating_roots` | root names whose rendering is expected to carry `, ...` |
 | `notes` | free text; may cite issues |
 
@@ -456,7 +456,10 @@ corpus case and gates launch regardless of priority."* This manifest is its only
 authority. The procedure:
 
 1. The receipt runs and reports a divergence or trap-parity failure on a required
-   case.
+   case. **First check that the failures are not all at the `compile` stage:** a
+   local C toolchain that cannot build anything makes every case lane-split, and
+   this procedure followed literally would then file one issue per case. The
+   receipt prints a note when that shape occurs.
 2. The defect is filed, or an existing issue is identified. The receipt links it
    rather than re-deriving it.
 3. That issue receives `demo-path`, with a comment naming the `case_id`, the
@@ -564,21 +567,34 @@ What is established, on both 0.18.11 and current `main`:
 
 - **A `cast` node in the differentiated body is sufficient to cause the
   refusal.** `add(s, 1.0)` builds; `add(s, cast(1.0, f32))` does not. So do
-  `add(cast(s, f32), k)`, `add(s, cast(1, f32))`, `f = cast(1.0, f32)`, and
-  `div(mul(s, k), add(k, cast(1.0, f32)))`. `mul`, `add`, `div`, `sub`, `neg`,
+  `add(cast(s, f32), k)`, `add(s, cast(1, f32))`,
+  `def f(s: f32, k: f32) -> f32 = cast(1.0, f32)` (the `wrt` parameter unused),
+  and `div(mul(s, k), add(k, cast(1.0, f32)))`. `mul`, `add`, `div`, `sub`, `neg`,
   nesting depth, and `add(k, k)` are all innocent.
-- **chelis#2379's stated discriminator is wrong.** It names "local binding
-  structure"; `{ a = add(s, k)  mul(a, k) }` builds. And #2379's own documented
-  *passing* control, `div(mul(s, k), add(k, cast(1.0, f32)))`, does not build on
-  the release it names.
+- **Two propositions chelis#2379's text asserts are false.** Its body names
+  local binding structure as the discriminator and offers
+  `div(mul(s, k), add(k, cast(1.0, f32)))` as a control that builds on 0.18.11.
+  Measured here: `{ a = add(s, k)  mul(a, k) }` builds, and that control does
+  **not** build on 0.18.11 or on `main`. The refutation is of the propositions;
+  that #2379 asserts them is a reading of its issue text, recorded here as such
+  so a later reader can re-check the issue rather than this document.
 
 What is **not** established, and what this document previously claimed: that
 `cast` is *the* discriminator. It is not. `add(abs(s), k)`, `add(relu(s), k)`
 and `if (s >= 0.0) then add(s, k) else k` produce the same refusal with no
 `cast` present, and `greeks.ch` with every `cast(X, f32)` textually removed
-still evals and still refuses to build — its `if` inside `normal_cdf` refuses
-independently. Only `call.ch`'s refusal is cast-attributable: with casts removed
-it builds and prints `price = 19.98864 | delta = 0.11209473`.
+still evals and still refuses to build. Its `if` inside `normal_cdf` is the sole
+remaining refusing element, measured rather than inferred: cast-stripped
+`greeks.ch` with both `if` expressions also removed **builds**, and a nested
+user-`def` call, that call wrapping `exp(neg(mul(x, x)))`, the same through a
+local binding, unary minus, and infix division were each cleared individually.
+Only `call.ch`'s refusal is cast-attributable: with casts removed it builds and
+prints
+
+```text
+price = 19.98864
+delta = 0.11209473
+```
 
 The refusal message itself points at the real shape — *"make sure that function
 uses only pure tensor ops (sum, add, mul, einsum, etc.)"* — so this is an
