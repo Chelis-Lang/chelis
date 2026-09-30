@@ -995,6 +995,13 @@ tracking_issue = "chelis#1354"
 
 [[manual_gate_target]]
 package = "chelis-cli"
+name = "chelis_std_self_test_corpus"
+manual_gates = ["Phase 3t chelis-std self-test corpus"]
+reason = "the all-ignored std self-test corpus exceeds the default inner-loop budget; its documented gate was run on this candidate"
+tracking_issue = "chelis#1824"
+
+[[manual_gate_target]]
+package = "chelis-cli"
 name = "cross_library_semantic_gap_hip_gpu"
 manual_gates = ["cross_library_semantic_gap_hip_gpu suite"]
 reason = "the two ignored matmul checks require an AMD HIP GPU, hipcc, and hipBLAS unavailable to Linux PR workers"
