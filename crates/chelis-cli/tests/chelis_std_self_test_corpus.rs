@@ -1,12 +1,14 @@
 //! chelis-std self-test corpus integration test.
 //!
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
-//! exercise chelis-std's own modules (Std.Tensor, Std.Io, Std.Time,
-//! Std.Decimal, Std.Sort, Std.Scan, Std.Process, Std.Test). School provides
+//! exercise chelis-std's own modules (Std.Tensor, Std.Io, Std.Decimal,
+//! Std.Sort, Std.Scan, Std.Process, Std.Test). School provides
 //! the neural-network, loss, optimizer, and scheduling libraries. The corpus
 //! runs via `chelis test packages/chelis-std/tests/`; the default
 //! `cargo test --workspace` gate does not exercise it, so regressions here
 //! otherwise surface only when somebody invokes the CLI manually.
+//! The Std.Time success tests were removed with the #2779 fence;
+//! `std_package_acceptance` checks the error.
 //!
 //! This test wires the corpus into the default workspace gate. It stages
 //! chelis-std into a tempdir, points CHELIS_REEF_HOME at a tempdir reef home
