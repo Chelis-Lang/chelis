@@ -1198,7 +1198,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit checks positive and negative Surf and Deep numeric token scopes"
+reason = "script-unit checks Surf and Deep numeric scopes and Surf property keywords"
 tracking_issue = "chelis#1592"
 
 # Exact executable-corpus source exercised by both

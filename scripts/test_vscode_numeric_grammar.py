@@ -28,6 +28,18 @@ def _scopes(grammar_name: str, token: str) -> list[str]:
     return scopes
 
 
+def _surf_keyword_scopes(token: str) -> list[str]:
+    grammar = json.loads(
+        (GRAMMAR_DIR / "chelis.tmLanguage.json").read_text(encoding="utf-8")
+    )
+    scopes = []
+    for pattern in grammar["repository"]["keywords"]["patterns"]:
+        match = re.compile(pattern["match"]).match(token)
+        if match is not None and match.end() == len(token):
+            scopes.append(pattern["name"])
+    return scopes
+
+
 class NumericGrammarTests(unittest.TestCase):
     def test_surf_float_suffixes_on_integer_bodies_are_float_scoped(self) -> None:
         for token in ("42f32", "42f64", "42bf16", "42f16"):
@@ -69,6 +81,14 @@ class NumericGrammarTests(unittest.TestCase):
             for token in ("42f32x", "42i32f32"):
                 with self.subTest(grammar=grammar_name, token=token):
                     self.assertEqual(_scopes(grammar_name, token), [])
+
+    def test_surf_property_declaration_keywords_remain_control_scoped(self) -> None:
+        for token in ("property", "forall", "where"):
+            with self.subTest(token=token):
+                self.assertEqual(
+                    _surf_keyword_scopes(token),
+                    ["keyword.control.chelis"],
+                )
 
 
 if __name__ == "__main__":

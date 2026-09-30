@@ -50,7 +50,7 @@
       "patterns": [
         {
           "name": "keyword.control.chelis",
-          "match": "\\b(def|sig|type|dim|macro|match|with|fn|module|import|export|if|then|else|grad|vmap|jit|realize|copy|tensor|cast|cast_trunc|par|do|quote|unquote|splice|effect|handler|perform|resume|borrow)\\b"
+          "match": "\\b(def|sig|type|dim|macro|match|with|fn|module|import|export|if|then|else|grad|vmap|jit|realize|copy|tensor|cast|cast_trunc|par|do|quote|unquote|splice|effect|handler|perform|resume|borrow|property|forall|where)\\b"
         },
         {
           "name": "constant.language.boolean.chelis",
