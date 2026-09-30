@@ -1,1 +1,0 @@
-Preserve literal local tensor ascriptions at host initializers. `pad_sequences_to` checks runtime batch and width claims before allocating its result on Eval and C. Named local host witnesses remain unsupported (#2374).
