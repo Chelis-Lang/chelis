@@ -50,6 +50,16 @@ def select_range(event_name,event,repo):
     raise ValueError('Unsupported secret scanning event')
 
 
+def prepare_source(repo,destination):
+    """Isolate Git history from checkout-controlled scanner configuration."""
+    candidate=valid_sha(git(repo,'rev-parse','HEAD^{commit}').stdout.strip())
+    git(repo,'-c','core.hooksPath=/dev/null','clone','--mirror','--shared','--',
+        str(repo.resolve()),str(destination.resolve()))
+    # Explicitly preserve an unadvertised, detached Actions checkout in --all.
+    git(destination,'update-ref','refs/secret-scan/checked-out',candidate)
+    return destination
+
+
 def extract_verified(data,digest,destination):
     if hashlib.sha256(data).hexdigest()!=digest:
         raise ValueError('Secret scanner download failed checksum verification')
@@ -61,6 +71,11 @@ def extract_verified(data,digest,destination):
         if source is None:raise ValueError('Secret scanner binary is absent')
         path=destination/'gitleaks';path.write_bytes(source.read());path.chmod(0o700)
     return path
+
+
+def download_binary(destination):
+    with urllib.request.urlopen(URL,timeout=120) as response:data=response.read()
+    return extract_verified(data,SHA256,destination)
 
 
 def command(binary,repo,selected,config,ignore):
@@ -76,25 +91,30 @@ def main():
     parser.add_argument('--repo',type=Path,default=Path.cwd())
     parser.add_argument('--gitleaks',type=Path)
     parser.add_argument('--config',type=Path)
+    parser.add_argument('--install',type=Path,help='Install only the checksum-verified scanner in this directory')
     args=parser.parse_args()
     try:
+        if args.install is not None:
+            download_binary(args.install)
+            return 0
         event=json.loads(args.event_file.read_text()) if args.event_file else {}
         selected=select_range(args.event_name,event,args.repo)
         # Validate the entire range before calling Gitleaks: invalid ranges can exit 0.
         git(args.repo,'rev-list',*selected.split())
         with tempfile.TemporaryDirectory(prefix='secret-scan-') as directory:
             root=Path(directory)
+            source=prepare_source(args.repo,root/'source.git')
+            git(source,'rev-list',*selected.split())
             binary=args.gitleaks
             if binary is None:
-                with urllib.request.urlopen(URL,timeout=120) as response:data=response.read()
-                binary=extract_verified(data,SHA256,root/'bin')
+                binary=download_binary(root/'bin')
             config=args.config
             if config is None:
                 config=root/'gitleaks.toml';config.write_text('title = "Repository secret scan"\n[extend]\nuseDefault = true\n')
             ignore=root/'empty.gitleaksignore';ignore.write_text('')
             env={k:v for k,v in os.environ.items() if not k.startswith('GITLEAKS')}
-            return subprocess.run(command(binary,args.repo,selected,config,ignore),env=env).returncode
-    except (ValueError,KeyError,OSError,json.JSONDecodeError) as error:
+            return subprocess.run(command(binary,source,selected,config,ignore),env=env).returncode
+    except (ValueError,KeyError,OSError,json.JSONDecodeError,tarfile.TarError) as error:
         # Diagnostics contain no event payloads, download bodies or credentials.
         print('Secret scan could not complete: '+type(error).__name__)
         return 2

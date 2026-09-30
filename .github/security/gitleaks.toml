@@ -6,47 +6,47 @@ useDefault = true
 description = "Reviewed OSS audit false positive: fixture, cache key or prose; exact path and match"
 condition = "AND"
 regexTarget = "match"
-paths = ["(^|/)CHANGELOG\\.md$"]
-regexes = ["tokens,\\\n\\ \\ declaration/symbol\\ "]
+paths = ["^CHANGELOG\\.md$"]
+regexes = ["^tokens,\\\n\\ \\ declaration/symbol\\ $"]
 
 [[allowlists]]
 description = "Reviewed OSS audit false positive: fixture, cache key or prose; exact path and match"
 condition = "AND"
 regexTarget = "match"
-paths = ["(^|/)crates/chelis\\-compiler\\-api/tests/fixtures/cache_wire_v3/producer\\.json$"]
-regexes = ["library\\-v11\\-key\\-input\\.bin\":\\ \"3de3d58aea89df066dd49212d2631ae943b3d4ae4c768672fa0e44f8137bd960\""]
+paths = ["^crates/chelis\\-compiler\\-api/tests/fixtures/cache_wire_v3/producer\\.json$"]
+regexes = ["^library\\-v11\\-key\\-input\\.bin\":\\ \"3de3d58aea89df066dd49212d2631ae943b3d4ae4c768672fa0e44f8137bd960\"$"]
 
 [[allowlists]]
 description = "Reviewed OSS audit false positive: fixture, cache key or prose; exact path and match"
 condition = "AND"
 regexTarget = "match"
-paths = ["(^|/)crates/chelis\\-compiler\\-api/tests/fixtures/cache_wire_v3/producer\\.json$"]
-regexes = ["stdlib\\-v15\\-key\\-input\\.bin\":\\ \"87d4c0e2913392d125ab453791aa2d03d2e90c9708bb89de26ae7657a51ff50e\""]
+paths = ["^crates/chelis\\-compiler\\-api/tests/fixtures/cache_wire_v3/producer\\.json$"]
+regexes = ["^stdlib\\-v15\\-key\\-input\\.bin\":\\ \"87d4c0e2913392d125ab453791aa2d03d2e90c9708bb89de26ae7657a51ff50e\"$"]
 
 [[allowlists]]
 description = "Reviewed OSS audit false positive: fixture, cache key or prose; exact path and match"
 condition = "AND"
 regexTarget = "match"
-paths = ["(^|/)\\.github/workflows/ci\\.yml$"]
-regexes = ["key:\\ smt\\-glibc231"]
+paths = ["^\\.github/workflows/ci\\.yml$"]
+regexes = ["^key:\\ smt\\-glibc231$"]
 
 [[allowlists]]
 description = "Reviewed OSS audit false positive: fixture, cache key or prose; exact path and match"
 condition = "AND"
 regexTarget = "match"
-paths = ["(^|/)\\.github/workflows/ci\\.yml$"]
-regexes = ["shared\\-key:\\ smt\\-glibc231\\-nix"]
+paths = ["^\\.github/workflows/ci\\.yml$"]
+regexes = ["^shared\\-key:\\ smt\\-glibc231\\-nix$"]
 
 [[allowlists]]
 description = "Reviewed OSS audit false positive: fixture, cache key or prose; exact path and match"
 condition = "AND"
 regexTarget = "match"
-paths = ["(^|/)changelog\\.d/2107\\-c\\-export\\-contract\\.fixed\\.md$"]
-regexes = ["tokens,\\\ndeclaration/symbol\\ "]
+paths = ["^changelog\\.d/2107\\-c\\-export\\-contract\\.fixed\\.md$"]
+regexes = ["^tokens,\\\ndeclaration/symbol\\ $"]
 
 [[allowlists]]
 description = "Reviewed OSS audit false positive: fixture, cache key or prose; exact path and match"
 condition = "AND"
 regexTarget = "match"
-paths = ["(^|/)scripts/test_openspec_controller\\.py$"]
-regexes = ["APP_TOKEN_SHA\\ =\\ \"bcd2ba49218906704ab6c1aa796996da409d3eb1\""]
+paths = ["^scripts/test_openspec_controller\\.py$"]
+regexes = ["^APP_TOKEN_SHA\\ =\\ \"bcd2ba49218906704ab6c1aa796996da409d3eb1\"$"]

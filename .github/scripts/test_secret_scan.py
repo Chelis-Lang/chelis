@@ -34,6 +34,21 @@ class SecretScanTests(unittest.TestCase):
         self.assertNotRegex(workflow,r'(?m)^[ \t]*concurrency:')
         self.assertNotIn('cancel-in-progress:',workflow)
 
+    def test_isolated_bare_source_preserves_refs_and_detached_head(self):
+        self.git('tag','retained-tag',self.before)
+        self.git('checkout','--detach',self.after)
+        (self.repo/'detached').write_text('detached candidate')
+        self.git('add','detached');self.git('commit','-m','detached candidate')
+        candidate=self.git('rev-parse','HEAD').strip()
+        (self.repo/'.gitleaksignore').write_text('checkout-controlled suppression')
+        with tempfile.TemporaryDirectory() as directory:
+            source=scan.prepare_source(self.repo,Path(directory)/'source.git')
+            self.assertFalse((source/'.gitleaksignore').exists())
+            self.assertEqual(scan.git(source,'rev-parse','--is-bare-repository').stdout.strip(),'true')
+            self.assertEqual(scan.git(source,'rev-parse','refs/tags/retained-tag').stdout.strip(),self.before)
+            self.assertIn(candidate,scan.git(source,'rev-list','--all').stdout.splitlines())
+        self.assertEqual((self.repo/'.gitleaksignore').read_text(),'checkout-controlled suppression')
+
     def test_push_scans_introduced_commits(self):
         selected=scan.select_range('push',{'before':self.before,'after':self.after},self.repo)
         self.assertEqual(selected,self.before+'..'+self.after)
