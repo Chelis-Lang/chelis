@@ -49,6 +49,22 @@
       "reason": "decision helper has no diagnostic sink; either unresolved concat operand returns Ok(None), leaving overload selection and compatibility pending"
     },
     {
+      "file": "app_equality.rs",
+      "function": "reach",
+      "ordinal": 1,
+      "pattern": "Type::Var(var)",
+      "disposition": "not_a_route",
+      "reason": "structural walk with no diagnostic sink; a reached variable is returned to equality_domain, whose caller suspends the call on it"
+    },
+    {
+      "file": "app_equality.rs",
+      "function": "reachable_definitions",
+      "ordinal": 1,
+      "pattern": "Type::Fn(..) | Type::Prim(_) | Type::Tensor(..) | Type::Var(_) | Type::Unit | Type::Error(_)",
+      "disposition": "not_a_route",
+      "reason": "collects data type definitions by name; it publishes no type and holds no diagnostic sink"
+    },
+    {
       "file": "app_helpers.rs",
       "function": "types_structurally_equal",
       "ordinal": 1,
@@ -159,7 +175,7 @@
       "file": "app_numeric.rs",
       "function": "operand_dtype_rejection",
       "ordinal": 8,
-      "pattern": "resolved , Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
+      "pattern": "resolved , Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_) | Type::Prim(_) | Type::Unit | Type::Tuple(_) | Type::Adt(..) | Type::KindedAdt(..)",
       "disposition": "not_a_route"
     },
     {
