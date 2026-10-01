@@ -40,10 +40,10 @@ impl EvalSystem for UnreachableAdapter {
     fn run_process(&mut self, _: &str, _: &[String]) -> Result<EvalProcessOutput, EvalSystemError> {
         panic!("denied process operation reached the adapter")
     }
-    fn read_wall_clock(&mut self) -> Result<EvalClockReading, EvalSystemError> {
+    fn read_wall_clock(&mut self) -> std::io::Result<EvalClockReading> {
         panic!("denied clock operation reached the adapter")
     }
-    fn read_monotonic_clock(&mut self) -> Result<EvalClockReading, EvalSystemError> {
+    fn read_monotonic_clock(&mut self) -> std::io::Result<EvalClockReading> {
         panic!("denied clock operation reached the adapter")
     }
 }
@@ -160,10 +160,10 @@ impl EvalSystem for FailingReadAdapter {
     fn run_process(&mut self, _: &str, _: &[String]) -> Result<EvalProcessOutput, EvalSystemError> {
         unreachable!()
     }
-    fn read_wall_clock(&mut self) -> Result<EvalClockReading, EvalSystemError> {
+    fn read_wall_clock(&mut self) -> std::io::Result<EvalClockReading> {
         unreachable!()
     }
-    fn read_monotonic_clock(&mut self) -> Result<EvalClockReading, EvalSystemError> {
+    fn read_monotonic_clock(&mut self) -> std::io::Result<EvalClockReading> {
         unreachable!()
     }
 }
@@ -211,14 +211,8 @@ impl FixedClockAdapter {
         }
     }
 
-    fn serve(
-        reading: Result<EvalClockReading, &'static str>,
-        operation: EvalSystemOperation,
-    ) -> Result<EvalClockReading, EvalSystemError> {
-        reading.map_err(|detail| EvalSystemError::ClockHost {
-            operation,
-            source: std::io::Error::other(detail),
-        })
+    fn serve(reading: Result<EvalClockReading, &'static str>) -> std::io::Result<EvalClockReading> {
+        reading.map_err(std::io::Error::other)
     }
 }
 
@@ -247,11 +241,11 @@ impl EvalSystem for FixedClockAdapter {
     fn run_process(&mut self, _: &str, _: &[String]) -> Result<EvalProcessOutput, EvalSystemError> {
         unreachable!("the clock fixture performs no process access")
     }
-    fn read_wall_clock(&mut self) -> Result<EvalClockReading, EvalSystemError> {
-        Self::serve(self.wall, EvalSystemOperation::ClockWallRead)
+    fn read_wall_clock(&mut self) -> std::io::Result<EvalClockReading> {
+        Self::serve(self.wall)
     }
-    fn read_monotonic_clock(&mut self) -> Result<EvalClockReading, EvalSystemError> {
-        Self::serve(self.monotonic, EvalSystemOperation::ClockMonotonicRead)
+    fn read_monotonic_clock(&mut self) -> std::io::Result<EvalClockReading> {
+        Self::serve(self.monotonic)
     }
 }
 

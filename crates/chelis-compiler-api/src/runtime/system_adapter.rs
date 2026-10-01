@@ -118,7 +118,7 @@ impl EvalSystem for DefaultEvalSystem {
         })
     }
 
-    fn read_wall_clock(&mut self) -> Result<EvalClockReading, EvalSystemError> {
+    fn read_wall_clock(&mut self) -> std::io::Result<EvalClockReading> {
         // One host read; the sign split is the host's own representation.
         Ok(match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(after) => EvalClockReading::AtOrAfterOrigin(after),
@@ -126,7 +126,7 @@ impl EvalSystem for DefaultEvalSystem {
         })
     }
 
-    fn read_monotonic_clock(&mut self) -> Result<EvalClockReading, EvalSystemError> {
+    fn read_monotonic_clock(&mut self) -> std::io::Result<EvalClockReading> {
         // `Instant` exposes no absolute value, so the origin is the first
         // reading this process takes. It is fixed before `now` is read, and
         // `Instant` never runs backwards, so the distance is exact.

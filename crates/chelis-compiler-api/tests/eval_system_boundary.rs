@@ -116,3 +116,55 @@ fn permitted_program_preserves_file_directory_mapping_and_process_semantics() {
         matches!(root(&result, "process.2"), ExecutionValue::String { value } if value.is_empty())
     );
 }
+
+fn integer(value: &ExecutionValue) -> i64 {
+    match value {
+        ExecutionValue::Scalar { value } => value.get().as_i64_exact().expect("integer"),
+        other => panic!("expected an integer, got {other:?}"),
+    }
+}
+
+fn host_now() -> (i64, i64) {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the host clock is after 1970");
+    (
+        i64::try_from(since.as_secs()).expect("fits"),
+        i64::from(since.subsec_nanos()),
+    )
+}
+
+/// [05-OP-75] through the public API: each clock read is `(seconds,
+/// nanoseconds)` with nanoseconds in `[0, 10^9)`, the wall reading lies
+/// between host reads taken around the evaluation, and successive monotonic
+/// reads never decrease.
+#[test]
+fn permitted_program_reads_both_host_clocks() {
+    let lower = host_now();
+    let result = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: "wall = clock_wall_read()\n\
+                 first = clock_monotonic_read()\n\
+                 second = clock_monotonic_read()\n"
+            .to_owned(),
+        bindings: BTreeMap::new(),
+    })
+    .expect("both clock reads execute under normal evaluation");
+    let upper = host_now();
+    let reading = |name: &str| {
+        (
+            integer(root(&result, &format!("{name}.0"))),
+            integer(root(&result, &format!("{name}.1"))),
+        )
+    };
+    let wall = reading("wall");
+    assert!(
+        lower <= wall && wall <= upper,
+        "{lower:?} <= {wall:?} <= {upper:?}"
+    );
+    let (first, second) = (reading("first"), reading("second"));
+    assert!(first <= second, "{first:?} then {second:?}");
+    for (_, nanoseconds) in [wall, first, second] {
+        assert!((0..1_000_000_000).contains(&nanoseconds));
+    }
+}

@@ -243,8 +243,8 @@ pub(crate) trait EvalSystem {
         program: &str,
         args: &[String],
     ) -> Result<EvalProcessOutput, EvalSystemError>;
-    fn read_wall_clock(&mut self) -> Result<EvalClockReading, EvalSystemError>;
-    fn read_monotonic_clock(&mut self) -> Result<EvalClockReading, EvalSystemError>;
+    fn read_wall_clock(&mut self) -> std::io::Result<EvalClockReading>;
+    fn read_monotonic_clock(&mut self) -> std::io::Result<EvalClockReading>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -395,16 +395,25 @@ impl EvalSystemBoundary {
     }
 
     pub(crate) fn clock_wall_read(&mut self) -> Result<EvalClockTime, EvalSystemError> {
-        self.check(EvalSystemOperation::ClockWallRead)?;
-        self.adapter_mut()
-            .read_wall_clock()?
-            .checked_time(EvalSystemOperation::ClockWallRead)
+        let operation = EvalSystemOperation::ClockWallRead;
+        self.check(operation)?;
+        let reading = self.adapter_mut().read_wall_clock();
+        Self::checked_clock_reading(operation, reading)
     }
 
     pub(crate) fn clock_monotonic_read(&mut self) -> Result<EvalClockTime, EvalSystemError> {
-        self.check(EvalSystemOperation::ClockMonotonicRead)?;
-        self.adapter_mut()
-            .read_monotonic_clock()?
-            .checked_time(EvalSystemOperation::ClockMonotonicRead)
+        let operation = EvalSystemOperation::ClockMonotonicRead;
+        self.check(operation)?;
+        let reading = self.adapter_mut().read_monotonic_clock();
+        Self::checked_clock_reading(operation, reading)
+    }
+
+    fn checked_clock_reading(
+        operation: EvalSystemOperation,
+        reading: std::io::Result<EvalClockReading>,
+    ) -> Result<EvalClockTime, EvalSystemError> {
+        reading
+            .map_err(|source| EvalSystemError::ClockHost { operation, source })?
+            .checked_time(operation)
     }
 }
