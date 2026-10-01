@@ -498,9 +498,14 @@ tracks implementation sequencing, while `spec/06` owns the language rule.
 
 ## 6. Backends — `spec/08-backends.md`
 
-`chelis build` selects C, HIP, or Metal code generation. It emits source,
-headers/runtime artifacts, and compile flags; it does not invoke
-`gcc`, `hipcc`, or `clang++`. Generated host code can carry selected tensor
+`chelis build` selects C, HIP, or Metal and invokes the native toolchain to
+produce an executable for observable programs or a static library for
+modules of callable definitions. It retains generated source, headers,
+and carried runtime artifacts. `--emit-c` stops after source emission and
+runtime staging, prints compile guidance, and requires no native compiler
+or archiver. Host compilation disables implicit floating-point contraction.
+CPU is the primary acceptance lane; HIP and Metal are prerelease targets
+with known imperfections. Generated host code can carry selected tensor
 helpers, while device kernels have their own supported operation sets.
 `spec/04` §1.1.3 controls dtype admission and `spec/08` controls target
 strategy; rejection gates are in
