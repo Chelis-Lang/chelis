@@ -341,6 +341,8 @@ mod tests {
         // A radix body never carries a float suffix.
         assert_silent("x = cast(0x10, f32)\n");
         assert_silent("x = cast(0b1, f64)\n");
+        assert_silent("x = cast(0X10, f32)\n");
+        assert_silent("x = cast(0B1, f32)\n");
         // `0bf16` lexes as a binary prefix.
         assert_silent("x = cast(0, bf16)\n");
     }
