@@ -96,7 +96,7 @@ reusable CLI.
 ### PD2. The gate needs a separate strict compile/link profile
 
 `chelis_backend_c::toolchain::runtime_toolchain` currently inserts
-`-march=native` and honors `CHELIS_CC`; `chelis build` prints that resolver's
+`-march=native` and honors `CHELIS_CC`; `chelis build --emit-c` prints that resolver's
 recipe. The reference gate cannot execute or copy this printed shell command:
 the portable profile forbids `-march=native`, and a hostile `CHELIS_CC` changes
 the printed compiler without changing the generated C. The narrower
