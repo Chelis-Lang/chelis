@@ -493,7 +493,7 @@ pub(crate) fn evaluate_host_program_filtered(
 /// Phase G' — host-runtime entry that seeds the `top_level_defs` table
 /// with library defs in addition to the new-code program. This is the
 /// host-side parity counterpart to `lower_program_with_context`: when
-/// new code calls a library function (e.g. `Std.Time.is_leap_year`),
+/// new code calls a library function (e.g. `Std.Datetime.is_leap_year`),
 /// `eval_app` looks up that name through `lookup_top_level_def`, and
 /// the function body must be reachable. Pre-Phase-G' the runtime only
 /// saw `program.exprs()`, so library names errored as `unknown runtime

@@ -2067,14 +2067,14 @@ class ContractValidationTests(unittest.TestCase):
             REPO_ROOT / "spec/registry/stdlib_numeric_manifest.md"
         ).read_text(encoding="utf-8")
         rows = re.findall(r"^\| `([^`]+)` \|", registry, re.MULTILINE)
-        self.assertEqual(len(rows), 73)
-        self.assertEqual(len(set(rows)), 73)
+        self.assertEqual(len(rows), 195)
+        self.assertEqual(len(set(rows)), 195)
         identities = set(rows)
         for identity in (
             "decimal::decimal_add",
             "io/json::json_bigint",
             "io/json::load_json",
-            "time::date_lt",
+            "datetime::date_lt",
         ):
             with self.subTest(identity=identity):
                 self.assertIn(identity, identities)
@@ -2959,12 +2959,12 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
-    def test_stdlib_time_contract_is_total(self) -> None:
-        block = self.repository_atom("05-OP-35")
+    def test_stdlib_datetime_contract_is_total(self) -> None:
+        block = self.repository_atom("05-OP-73")
         for clause in (
-            "Years `0000` through `9999` use exactly four digits",
-            "`day_of_week` fixes `1970-01-01` as Thursday",
-            "date comparisons are lexicographic on `(year, month, day)`",
+            "years 0..9999 as four digits",
+            "`date_weekday` (1970-01-01 is a Thursday)",
+            "`date_lt`, `date_lte`, `date_gt`, and `date_gte` order by epoch day",
         ):
             with self.subTest(clause=clause):
                 self.assertIn(clause, block)
@@ -3102,7 +3102,7 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
-    def test_stdlib_exact_domain_blanket_cannot_capture_decimal_or_calendar(self) -> None:
+    def test_stdlib_exact_domain_blanket_cannot_capture_decimal(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "Every primitive-width intermediate in a graph whose contract names a dtype",
@@ -3113,18 +3113,26 @@ class ContractValidationTests(unittest.TestCase):
     def test_date_difference_orientation_is_frozen(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "`days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`",
-            "`days_between(lhs,rhs) = ordinal(lhs) - ordinal(rhs)`",
+            "`date_days_until(a,b)` is\n> `epoch_day(b) - epoch_day(a)`",
+            "`date_days_until(a,b)` is\n> `epoch_day(a) - epoch_day(b)`",
         )
-        self.assert_contract_fails("OP-35.*days_between")
+        self.assert_contract_fails("OP-73.*date_days_until")
 
-    def test_duration_overflow_is_on_the_final_days_field(self) -> None:
+    def test_duration_range_failure_is_on_the_normalized_second(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "final normalized `days` field has no i64 representation",
-            "any intermediate component total exceeds i64",
+            "fails `domain`\n> when the normalized second leaves i64",
+            "fails `domain`\n> when any intermediate component total exceeds i64",
         )
-        self.assert_contract_fails("OP-35.*final normalized")
+        self.assert_contract_fails("OP-73.*normalized second")
+
+    def test_rounding_ties_to_even_takes_the_even_multiple(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "an exact tie\n> taking the even `k`",
+            "an exact tie\n> taking either multiple",
+        )
+        self.assert_contract_fails("OP-74.*even")
 
     def test_assert_close_finite_pairs_use_inclusive_tolerance(self) -> None:
         self.replace(
@@ -3138,12 +3146,10 @@ class ContractValidationTests(unittest.TestCase):
     def test_negative_year_canonical_digit_count_is_exact(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "A negative year uses `-` followed by exactly\n"
-            "> `max(4, digits(|year|))` decimal digits, where `|year|` is the exact\n"
-            "> mathematical magnitude rather than an i64 `abs`",
-            "A negative year uses an implementation-defined number of digits",
+            "negative years as `-` and six digits",
+            "negative years with an implementation-defined number of digits",
         )
-        self.assert_contract_fails("OP-35.*negative year")
+        self.assert_contract_fails("OP-73.*six digits")
 
     def test_bool_counting_has_no_explicit_cast_compatibility_idiom(self) -> None:
         self.replace(
