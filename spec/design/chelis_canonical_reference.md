@@ -161,7 +161,7 @@ All project-level naming follows the turtle/ocean metaphor.
 | Dataframe shell | **Coral** | Structured colonies built from the reef |
 | Finance shell | **Shoals** | Where the currents of capital run shallow |
 | LaTeX ↔ Deep bridge shell | **Octant** | Navigational instrument bridging celestial observation (math) and positional computation (code) |
-| Classical ML shell | **School** | A school of fish learning together — and the ML sense of *learning* |
+| Machine-learning shell | **School** | A school of fish learning together — and the ML sense of *learning* |
 | Evolutionary algorithms shell | **Darwin** | Natural selection — survival of the fittest programs, mutated and crossed over the Deep AST |
 | Language specification shell | **Hull** | The hull defines the shape of the vessel — the spec defines the shape of the language |
 | Automated static analysis shell | **Hydrostatic** | A pressure test proving the hull holds before the vessel sails |

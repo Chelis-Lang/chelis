@@ -740,7 +740,7 @@ Three further shells (and one Octant sub-scope) are named and reserved but scope
 as stubs beyond Phase 3. They are listed here so the ecosystem story is explicit,
 but no Phase 3 sub-phase implements them.
 
-- **`school`** — classical ML (the scikit-learn analogue). Regression, decision trees,
+- **`school`** — machine learning: classical models and the neural-network surface. Regression, decision trees,
   SVMs, clustering, pipelines, cross-validation. Depends on `chelis-std` + `nautilus` +
   `coral`.
 - **`darwin`** — evolutionary algorithms. Genetic algorithms, genetic programming over

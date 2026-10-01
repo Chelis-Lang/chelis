@@ -1700,7 +1700,7 @@ specifications above, not deferred post-phase work. The tier structure is:
 
 Three further shells are named and reserved but scoped as stubs beyond Phase 3:
 
-- `school` — classical ML (the scikit-learn analogue). Depends on `chelis-std` + `nautilus`
+- `school` — machine learning: classical models and the neural-network surface. Depends on `chelis-std` + `nautilus`
   + `coral`.
 - `darwin` — evolutionary algorithms (GA, genetic programming over the Deep AST, ES,
   PBT, NAS). Depends on `chelis-std` + `nautilus`; optionally uses `coral` for evolving
@@ -1872,7 +1872,7 @@ unshipped shell. `3l` depends on `3j` and `3k`. `3n` can proceed against `3j`, w
 `3f` goes truly last because it must cover the complete ecosystem including the domain
 shells.
 
-`school` (classical ML, the scikit-learn analogue), `darwin` (evolutionary algorithms), `hull`
+`school` (machine learning, classical models and neural networks), `darwin` (evolutionary algorithms), `hull`
 (executable language specification), `hydrostatic` (automated static analysis on the
 tensor DAG), and `beacon` (IR-native bound-propagation verification) are post-Phase-3
 shell stubs and do not appear as Phase 3 sub-phases.
