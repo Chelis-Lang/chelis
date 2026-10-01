@@ -10,7 +10,7 @@ use chelis_deep::annotations::{
     BindingTypeOrigin, EffectMember, LiteralStyle, MetadataKey as K, MetadataValue as M, TypeSyntax,
 };
 use chelis_deep::ast::{Atom, Expr as DeepExpr, Metadata};
-use chelis_deep::{DeepTag, DtypeFamily, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
+use chelis_deep::{DeepTag, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
 use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::EffectKind;
 use std::collections::BTreeMap;

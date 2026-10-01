@@ -34,8 +34,7 @@ pub use annotations::Metadata;
 mod annotations_codec;
 mod annotations_transform;
 pub use dtype_bounds::{
-    BoundDtype, DTYPE_BOUNDS_KEY, DtypeBound, DtypeFamily, decode_dtype_bounds,
-    encode_dtype_bounds,
+    BoundDtype, DTYPE_BOUNDS_KEY, DtypeBound, DtypeFamily, decode_dtype_bounds, encode_dtype_bounds,
 };
 pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;

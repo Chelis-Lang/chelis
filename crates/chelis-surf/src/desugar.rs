@@ -4,8 +4,8 @@
 //! where {} is an inline metadata map.
 
 use chelis_deep::{
-    Atom as DeepAtom, DeepTag, DtypeFamily, LiteralFamilyFit, LiteralSource,
-    classify_literal_source, encode_dtype_bounds,
+    Atom as DeepAtom, DeepTag, LiteralFamilyFit, LiteralSource, classify_literal_source,
+    encode_dtype_bounds,
 };
 use chelis_unord::{UnordMap, UnordSet};
 
@@ -1269,7 +1269,12 @@ fn internal_node(tag: &str, children: Vec<deep::Expr>) -> deep::Expr {
 fn with_dtype_bounds(expr: deep::Expr, binders: &[TypeBinder]) -> deep::Expr {
     let bounds: Vec<(String, chelis_deep::DtypeBound)> = binders
         .iter()
-        .filter_map(|binder| binder.bound.clone().map(|bound| (binder.name.clone(), bound)))
+        .filter_map(|binder| {
+            binder
+                .bound
+                .clone()
+                .map(|bound| (binder.name.clone(), bound))
+        })
         .collect();
     if bounds.is_empty() {
         return expr;

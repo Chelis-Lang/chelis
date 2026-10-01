@@ -127,7 +127,9 @@ impl BoundDtype {
 
     /// Parse the lowercase spelling.
     pub fn from_name(name: &str) -> Option<BoundDtype> {
-        BoundDtype::ALL.into_iter().find(|dtype| dtype.name() == name)
+        BoundDtype::ALL
+            .into_iter()
+            .find(|dtype| dtype.name() == name)
     }
 
     /// Whether this member belongs to [`DtypeFamily::Float`].
@@ -289,8 +291,9 @@ mod tests {
     /// is what delivers it, so a set built in any order prints canonically.
     #[test]
     fn a_set_prints_in_canonical_order_whatever_the_build_order() {
-        let authored: BTreeSet<BoundDtype> =
-            [BoundDtype::F64, BoundDtype::Bf16, BoundDtype::F32].into_iter().collect();
+        let authored: BTreeSet<BoundDtype> = [BoundDtype::F64, BoundDtype::Bf16, BoundDtype::F32]
+            .into_iter()
+            .collect();
         assert_eq!(
             DtypeBound::Set(authored).surf_spelling(),
             "{f32, f64, bf16}",

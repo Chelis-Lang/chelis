@@ -940,7 +940,10 @@ fn shape_valid(shape: Shape, v: View<'_>) -> bool {
                 let set = v.list().is_some_and(|members| {
                     !members.is_empty()
                         && members.iter().enumerate().all(|(j, member)| {
-                            member.name().and_then(crate::BoundDtype::from_name).is_some()
+                            member
+                                .name()
+                                .and_then(crate::BoundDtype::from_name)
+                                .is_some()
                                 && !members[..j]
                                     .iter()
                                     .any(|prior| prior.name() == member.name())

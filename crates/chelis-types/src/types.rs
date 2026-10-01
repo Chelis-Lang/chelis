@@ -192,7 +192,6 @@ impl TypeVarRestriction {
         }
     }
 
-
     pub(crate) fn is_value_constraint(self) -> bool {
         matches!(self, Self::FloatValue | Self::IntValue | Self::NumericValue)
     }

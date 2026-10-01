@@ -839,13 +839,10 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     /// A dtype family names a set of element types, so a bounded binder can
     /// never stand for an extent or a run of extents ([04-DTYPE-2]).
     fn bounded_binder_misuse(&mut self, name: &str, position: &str) -> ErrorWitness {
-        let family = self
-            .dtype_bounds
-            .get(name)
-            .map_or_else(
-                || "a dtype bound".to_string(),
-                |restriction| restriction.bound_spelling(),
-            );
+        let family = self.dtype_bounds.get(name).map_or_else(
+            || "a dtype bound".to_string(),
+            |restriction| restriction.bound_spelling(),
+        );
         self.type_error(format!(
             "binder `{name}` is bounded by `{family}` and cannot be used as {position} in {}",
             self.use_site.label()

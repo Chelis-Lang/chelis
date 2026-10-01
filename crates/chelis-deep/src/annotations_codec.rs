@@ -217,9 +217,10 @@ fn decode_value(key: MetadataKey, raw: RawExpr) -> Result<MetadataValue, Metadat
                         }
                         for member in members {
                             let member = name(member.clone(), spelling)?;
-                            let dtype = crate::BoundDtype::from_name(member.value()).ok_or_else(
-                                || invalid(spelling, member.span(), "an active §1.1 dtype"),
-                            )?;
+                            let dtype =
+                                crate::BoundDtype::from_name(member.value()).ok_or_else(|| {
+                                    invalid(spelling, member.span(), "an active §1.1 dtype")
+                                })?;
                             if !set.insert(dtype) {
                                 return Err(invalid(
                                     spelling,
