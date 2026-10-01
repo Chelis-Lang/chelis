@@ -93,7 +93,7 @@ class FakeRunner:
 
 @functools.cache
 def default_programs() -> tuple[Program, ...]:
-    return tuple(harness.make_programs(CORPUS, 150, 4, 2, frozenset({"row_eq"})))
+    return tuple(harness.make_programs(CORPUS, 150, 4, 2))
 
 
 def programs() -> list[Program]:
@@ -331,16 +331,17 @@ class Generator(unittest.TestCase):
         self.assertEqual(reasons[("decimal_from_f64", (1.1, 38))], ("domain", "inexact"))
         self.assertEqual(reasons[("decimal_round", ("2.5", 39))], ("domain", "scale"))
 
-    def test_the_equality_row_runs_only_when_asked(self) -> None:
+    def test_the_equality_row_runs_by_default(self) -> None:
         default = harness.make_programs(CORPUS, 150, 4, 1)
-        self.assertFalse(any(b.row == "row_eq" for p in default for b in p.bindings))
-        self.assertTrue(any(b.row == "row_eq" for p in programs() for b in p.bindings))
+        equality = [p for p in default if any(b.row == "row_eq" for b in p.bindings)]
+        self.assertTrue(equality)
+        self.assertTrue(all(b.row == "row_eq" for p in equality for b in p.bindings))
         placed = sum(len(b.cases) for p in default for b in p.bindings)
-        self.assertEqual(placed, sum(1 for c in CORPUS.cases if c.row != "row_eq"))
+        self.assertEqual(placed, len(CORPUS.cases))
 
     def test_every_case_lands_in_exactly_one_binding(self) -> None:
         for chunk, per_program in ((150, 4), (7, 3), (1000, 1)):
-            selected = harness.make_programs(CORPUS, chunk, per_program, 1, frozenset({"row_eq"}))
+            selected = harness.make_programs(CORPUS, chunk, per_program, 1)
             placed = [case for p in selected for binding in p.bindings for case in binding.cases]
             self.assertEqual(len(placed), len(CORPUS.cases))
             for p in selected:

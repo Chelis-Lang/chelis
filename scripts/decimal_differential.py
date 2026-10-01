@@ -724,18 +724,10 @@ def representative_failures(failures: list[Failure], per_path: int) -> list[Fail
     return sorted(chosen, key=lambda f: f.name)
 
 
-# Rows a run leaves out unless asked: `==` on the opaque Decimal needs
-# chelis#2587's structural equality.
-OPTIONAL_ROWS = {"row_eq": "--structural-equality"}
-
-
-def make_programs(corpus: Corpus, chunk: int, per_program: int, failures_per_path: int,
-                  include: frozenset[str] = frozenset()) -> list[Program]:
+def make_programs(corpus: Corpus, chunk: int, per_program: int, failures_per_path: int) -> list[Program]:
     programs = []
     by_row: dict[str, list[Case]] = {}
     for case in corpus.cases:
-        if case.row in OPTIONAL_ROWS and case.row not in include:
-            continue
         by_row.setdefault(case.row, []).append(case)
     for row_name, cases in by_row.items():
         bindings = [Binding(f"{row_name}_{k // chunk:04d}", row_name, tuple(cases[k:k + chunk]))
@@ -1091,8 +1083,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keep-artifacts", action="store_true", help="keep each C build's out/ directory")
     parser.add_argument("--list", action="store_true", help="print the corpus composition and exit")
     parser.add_argument("--only", help="diagnosis: run only programs whose name matches this regular expression")
-    parser.add_argument("--structural-equality", action="store_true",
-                        help="also run the `==` row, which needs chelis#2587's structural equality")
     args = parser.parse_args(argv)
 
     lanes = args.lanes.split(",")
@@ -1100,8 +1090,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--lanes is a comma-separated subset of eval,c")
     corpus = build_corpus(args.large)
     per_path = args.failures_per_path or (12 if args.large else 3)
-    include = frozenset({"row_eq"} if args.structural_equality else ())
-    programs = make_programs(corpus, args.chunk, args.per_program, per_path, include)
+    programs = make_programs(corpus, args.chunk, args.per_program, per_path)
     if args.only:
         programs = [p for p in programs if re.search(args.only, p.name)]
     if args.list:
