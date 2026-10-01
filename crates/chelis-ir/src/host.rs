@@ -19108,6 +19108,12 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
     }
 }
 
+/// Give `expr` the checked type `ty` and carry the checked context down to
+/// every subexpression (chelis#2599). A child whose type the parent fixes
+/// receives that type. Any other child is conformed by
+/// `conform_host_subexpr`, so a context deeper in the tree, such as a call's
+/// parameter types beneath `len(...)` or a fold seed beneath a callback, still
+/// reaches a bare `None` or `[]` whose type only that context fixes.
 fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
     let HostExpr {
         kind,
@@ -19121,7 +19127,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                     .into_iter()
                     .map(|item| force_host_expr_type(item, (**inner).clone()))
                     .collect(),
-                _ => items,
+                _ => conform_host_subexprs(items),
             };
             HostExprKind::List(items, ty)
         }
@@ -19132,7 +19138,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                     .zip(expected.iter())
                     .map(|(item, expected)| force_host_expr_type(item, expected.clone()))
                     .collect(),
-                _ => items,
+                _ => conform_host_subexprs(items),
             };
             HostExprKind::Tuple(items, ty)
         }
@@ -19150,7 +19156,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                     if let Some(expected) = arg_tys.get(index) {
                         force_host_expr_type(arg, expected.clone())
                     } else {
-                        arg
+                        conform_host_subexpr(arg, None)
                     }
                 })
                 .collect();
@@ -19165,13 +19171,15 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             let args = conform_builtin_arguments(&name, args, &ty);
             HostExprKind::Builtin { name, args, ty }
         }
-        HostExprKind::AdtConstruct { ctor, fields, .. } => {
-            HostExprKind::AdtConstruct { ctor, fields, ty }
-        }
+        HostExprKind::AdtConstruct { ctor, fields, .. } => HostExprKind::AdtConstruct {
+            ctor,
+            fields: conform_host_subexprs(fields),
+            ty,
+        },
         HostExprKind::AdtFieldAccess {
             base, field_index, ..
         } => HostExprKind::AdtFieldAccess {
-            base,
+            base: Box::new(conform_host_subexpr(*base, None)),
             field_index,
             ty,
         },
@@ -19193,7 +19201,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             none_expr,
             ..
         } => HostExprKind::MatchOption {
-            scrutinee,
+            scrutinee: Box::new(conform_host_subexpr(*scrutinee, None)),
             bind_name,
             some_expr: Box::new(force_host_expr_type(*some_expr, ty.clone())),
             none_expr: Box::new(force_host_expr_type(*none_expr, ty.clone())),
@@ -19205,7 +19213,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             default_expr,
             ..
         } => HostExprKind::MatchAdt {
-            scrutinee,
+            scrutinee: Box::new(conform_host_subexpr(*scrutinee, None)),
             arms: arms
                 .into_iter()
                 .map(|mut arm| {
@@ -19246,17 +19254,27 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 ty,
             }
         }
-        HostExprKind::Map { callback, list, .. } => HostExprKind::Map { callback, list, ty },
-        HostExprKind::Filter { callback, list, .. } => HostExprKind::Filter { callback, list, ty },
+        HostExprKind::Map { callback, list, .. } => HostExprKind::Map {
+            callback: conform_host_callback(callback, &list_item_type(&ty)),
+            list: Box::new(conform_host_subexpr(*list, None)),
+            ty,
+        },
+        HostExprKind::Filter { callback, list, .. } => HostExprKind::Filter {
+            callback: conform_host_callback(callback, &HostTypeTerm::Bool),
+            list: Box::new(conform_host_subexpr(*list, Some(&ty))),
+            ty,
+        },
+        // The accumulator, the seed, the callback's result and the fold's
+        // result share one checked type.
         HostExprKind::Fold {
             callback,
             init,
             list,
             ..
         } => HostExprKind::Fold {
-            callback,
-            init,
-            list,
+            callback: conform_host_callback(callback, &ty),
+            init: Box::new(conform_host_subexpr(*init, Some(&ty))),
+            list: Box::new(conform_host_subexpr(*list, None)),
             ty,
         },
         HostExprKind::RetainedInvocation {
@@ -19288,26 +19306,37 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 ty,
             }
         }
+        // A scan's result lists the accumulators, so its element type is the
+        // seed's and the callback's result type.
         HostExprKind::Scan {
             callback,
             init,
             list,
             ..
-        } => HostExprKind::Scan {
-            callback,
-            init,
-            list,
+        } => {
+            let accumulator_ty = list_item_type(&ty);
+            HostExprKind::Scan {
+                callback: conform_host_callback(callback, &accumulator_ty),
+                init: Box::new(conform_host_subexpr(*init, Some(&accumulator_ty))),
+                list: Box::new(conform_host_subexpr(*list, None)),
+                ty,
+            }
+        }
+        HostExprKind::Partition { callback, list, .. } => HostExprKind::Partition {
+            callback: conform_host_callback(callback, &HostTypeTerm::Bool),
+            list: Box::new(conform_host_subexpr(*list, None)),
             ty,
         },
-        HostExprKind::Partition { callback, list, .. } => {
-            HostExprKind::Partition { callback, list, ty }
-        }
-        HostExprKind::FlatMap { callback, list, .. } => {
-            HostExprKind::FlatMap { callback, list, ty }
-        }
-        HostExprKind::TensorCall { helper, args, .. } => {
-            HostExprKind::TensorCall { helper, args, ty }
-        }
+        HostExprKind::FlatMap { callback, list, .. } => HostExprKind::FlatMap {
+            callback: conform_host_callback(callback, &ty),
+            list: Box::new(conform_host_subexpr(*list, None)),
+            ty,
+        },
+        HostExprKind::TensorCall { helper, args, .. } => HostExprKind::TensorCall {
+            helper,
+            args: conform_host_subexprs(args),
+            ty,
+        },
         HostExprKind::ResultClaimScope { plan, body, .. } => HostExprKind::ResultClaimScope {
             plan,
             body: Box::new(force_host_expr_type(*body, ty.clone())),
@@ -19317,13 +19346,80 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             value: Box::new(force_host_expr_type(*value, ty.clone())),
             ty,
         },
-        other => other,
+        HostExprKind::SignatureEntry {
+            contract,
+            plan,
+            args,
+            positions,
+            lists,
+        } => HostExprKind::SignatureEntry {
+            contract,
+            plan,
+            args: conform_host_subexprs(args),
+            positions,
+            lists: lists
+                .into_iter()
+                .map(|entry| HostListEntry {
+                    value: conform_host_subexpr(entry.value, Some(&entry.ty)),
+                    ..entry
+                })
+                .collect(),
+        },
+        leaf @ (HostExprKind::Int(_)
+        | HostExprKind::Float(_)
+        | HostExprKind::Bool(_)
+        | HostExprKind::String(_)
+        | HostExprKind::Unit) => leaf,
     };
     HostExpr {
         kind: new_kind,
         span_id,
         merged_spans,
     }
+}
+
+/// Conform a subexpression whose parent does not force its type. A resolved
+/// own type wins; otherwise a resolved `expected` type from the parent fills
+/// the hole. An expression neither resolves is returned unchanged, so this
+/// step never writes an unresolved type over a resolved one; the unresolved
+/// node is rejected at the code-generation boundary on its own.
+fn conform_host_subexpr(expr: HostExpr, expected: Option<&HostTypeTerm>) -> HostExpr {
+    let own = host_expr_type(&expr);
+    if !own.is_unresolved() {
+        return force_host_expr_type(expr, own);
+    }
+    match expected {
+        Some(expected) if !expected.is_unresolved() => force_host_expr_type(expr, expected.clone()),
+        _ => expr,
+    }
+}
+
+fn conform_host_subexprs(exprs: Vec<HostExpr>) -> Vec<HostExpr> {
+    exprs
+        .into_iter()
+        .map(|expr| conform_host_subexpr(expr, None))
+        .collect()
+}
+
+/// Conform an inline callback's body to its result type, taking `expected`
+/// from the enclosing operation when the callback's own result type is
+/// unresolved. A named callback is a separate function the program-level pass
+/// conforms itself.
+fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> HostCallback {
+    let HostCallback { kind, ret_ty } = callback;
+    let ret_ty = if ret_ty.is_unresolved() && !expected.is_unresolved() {
+        expected.clone()
+    } else {
+        ret_ty
+    };
+    let kind = match kind {
+        HostCallbackKind::Inline { params, body } => HostCallbackKind::Inline {
+            params,
+            body: Box::new(conform_host_subexpr(*body, Some(&ret_ty))),
+        },
+        named @ HostCallbackKind::Named { .. } => named,
+    };
+    HostCallback { kind, ret_ty }
 }
 
 /// Materialize checked context into every host-program root before term
@@ -19397,7 +19493,7 @@ fn conform_builtin_arguments(
             if let Some(expected) = expected {
                 force_host_expr_type(arg, expected)
             } else {
-                arg
+                conform_host_subexpr(arg, None)
             }
         })
         .collect()

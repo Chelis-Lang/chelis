@@ -140,6 +140,11 @@ path = "tests/issue_2577_filter_named_predicate.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_2599_contextual_nullary_host_types"
+path = "tests/issue_2599_contextual_nullary_host_types.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "issue_2781_loop_result_captured_by_a_loop"
 path = "tests/issue_2781_loop_result_captured_by_a_loop.rs"
 required-features = ["ownership-ledger"]
