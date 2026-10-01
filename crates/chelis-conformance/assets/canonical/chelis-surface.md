@@ -75,7 +75,7 @@ are specified separately.
 | `add` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g, g)` |
 | `sub` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g, -g)` on floats; signed-integer forms are forward-only |
 | `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g*y, g*x)` |
-| `div` | `(&tensor[D,p_float], &tensor[D,p_float]) -> tensor[D,p_float]` | `(g/b, -g*y/b)`; IEEE-754, **float operands only** (chelis#178) |
+| `div` | `(&tensor[D,p_float], &tensor[D,p_float]) -> tensor[D,p_float]` | `(g/b, -g*y/b)`; IEEE-754, **float operands only** |
 | `floor_div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | **non-differentiable** — `grad` rejects; round quotient toward −∞ (Python `//`); ints and floats |
 | `trunc_div` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | **non-differentiable** — `grad` rejects; round toward zero (C `/`); **integer operands only** |
 | `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | complete `g` to the exact operand selected by [05-OP-40], including its stored-bit tie rule; integer forms are forward-only |
@@ -296,8 +296,7 @@ contribute to the named extent `n` check; `List[tensor[2, p]]` checks the
 literal extent of each element. This includes nested Lists, internal calls,
 and retained callable invocations. An empty List contributes no named witness.
 Eval and C enforce these checks before the function body; see
-[`list_shared_extent.ch`](../examples/list_shared_extent.ch), [#2627](https://github.com/Chelis-Lang/chelis/issues/2627),
-and [#2752](https://github.com/Chelis-Lang/chelis/issues/2752).
+[`list_shared_extent.ch`](../examples/list_shared_extent.ch).
 The spec defines positional List cotangents for several forms. Eval/C tests
 cover selected list gradients, including
 `to_list`/`map`/`to_tensor` paths; other transforms and callback shapes
@@ -543,7 +542,7 @@ route; count helpers also receive device capability checks.
 The exact `spec/04` table and target gates decide each operation and dtype
 cell. Unsupported operations produce target diagnostics before emission.
 
-### 6.3 Exact eval/C output gate — chelis#763
+### 6.3 Exact eval/C output gate
 
 `chelis lane-check <FILE|DIRECTORY> [--json] [--timeout SECONDS]` evaluates
 each `.ch` program, builds C, compiles and links its carried runtime with
@@ -666,6 +665,7 @@ not replace the selected backend's admission check.
 | `eval` | Evaluate an expression or `--file`; `--json`, `--target`, and `--timeout` are available | yes for file input |
 | `fmt` | Canonical formatter (`--check`, `--inplace`) | gate subject |
 | `lint` | Naming/style rules (`--check`, `--fix`, `--list`, `--rule`) — `spec/01-nomenclature.md` | gate subject |
+| `lane-check` | Compare evaluator and compiled-C stdout exactly over a file or corpus (`--json`, `--timeout`); see §6.3 | yes, through its `eval --file` and `build` runs |
 | `cost` | Report lowered-IR copy cost (`--json`) | no |
 | `deep` | Desugar Surf → Deep s-expr (`--annotate`) | no |
 | `surf` | Resugar well-formed public Deep → canonical Surf; invalid or unpreservable metadata is an error | no |
@@ -697,7 +697,7 @@ owns neural-network layers, losses, optimizers, and training loops
 
 | Module | Key exports |
 |---|---|
-| `Std.Tensor.Construct` | `linspace`, `arange`, `stack`, `squeeze`, `unsqueeze`. `Float`/`Int` bounds are checked; compiled-host generic casts and some concrete calls have gaps ([#1418](https://github.com/Chelis-Lang/chelis/issues/1418), [#1416](https://github.com/Chelis-Lang/chelis/issues/1416)). |
+| `Std.Tensor.Construct` | `linspace`, `arange`, `stack`, `squeeze`, `unsqueeze`. `Float`/`Int` bounds are checked; some concrete calls have gaps ([#1416](https://github.com/Chelis-Lang/chelis/issues/1416)). |
 | `Std.Tensor.Mask` | `where_indices`, a source-defined mask index helper. |
 | `Std.Sort`, `Std.Scan`, `Std.Index` | `sort`; `scan_list`; `list_index`, `take_list`, `skip_list`. The `sort` wrapper and host builtin return `i64` indices. Selected List index/selection adjoints have Eval/C coverage. |
 | `Std.Io` | `read_text`, `write_text`, `read_trimmed_lines`, `read_head_bytes`, `exists`, `list`, `mmap_size`. |
