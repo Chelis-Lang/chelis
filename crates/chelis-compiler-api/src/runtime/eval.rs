@@ -3368,6 +3368,14 @@ impl<'a> EvalContext<'a> {
             // route through `numeric_unop` so scalar Int64/Int32/F32/F64
             // inputs all keep their dtype.
             "abs" => numeric_unop(args, Some(IntUnOp::Abs), Some(FloatUnOp::Abs)),
+            // [05-OP-36]: unit and two List, tuple, Dict, Option or ADT values
+            // compare structurally to one bool scalar, and `neq` is the
+            // complement. Scalars, strings and direct tensor operands keep
+            // their own comparison.
+            "eq" | "neq" if is_recursive_equality_operand(args) => {
+                let equal = runtime_values_equal(&args[0], &args[1])?;
+                Ok(RuntimeValue::Bool(equal == (name == "eq")))
+            }
             "eq" => compare_eq(args),
             "neq" => compare_runtime(args, CompareOp::Ne),
             "cmplt" => ordered_compare(args, CompareOp::Lt),
@@ -5044,9 +5052,26 @@ enum Step<'a> {
     },
 }
 
-/// Structural equality for `test_assert_eq`. Every nested container walk,
-/// including a dictionary candidate search, runs from an explicit stack so
-/// value depth cannot consume the native stack (chelis#2592).
+/// Whether `args` is a pair `eq` and `neq` compare by [05-OP-36]'s recursive
+/// rule rather than as scalars, strings or direct tensors.
+fn is_recursive_equality_operand(args: &[RuntimeValue]) -> bool {
+    let recursive = |value: &RuntimeValue| {
+        matches!(
+            value,
+            RuntimeValue::Unit
+                | RuntimeValue::List(_)
+                | RuntimeValue::Tuple(_)
+                | RuntimeValue::Dict(_)
+                | RuntimeValue::Adt { .. }
+        )
+    };
+    matches!(args, [lhs, rhs] if recursive(lhs) && recursive(rhs))
+}
+
+/// [05-OP-36]'s structural equality, for `eq`, `neq` and `test_assert_eq`.
+/// Every nested container walk, including a dictionary candidate search, runs
+/// from an explicit stack so value depth cannot consume the native stack
+/// (chelis#2592).
 pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, String> {
     let mut steps = vec![Step::Pair(lhs, rhs)];
     // The result of the last child comparison is consumed by its parent
@@ -5116,9 +5141,10 @@ pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Re
                     | (RuntimeValue::Closure { .. }, _)
                     | (_, RuntimeValue::Closure { .. })
                     | (RuntimeValue::Transform { .. }, _)
-                    | (_, RuntimeValue::Transform { .. }) => {
-                        Err("assert_eq does not admit functions or resource handles".to_string())
-                    }
+                    | (_, RuntimeValue::Transform { .. }) => Err(
+                        "[05-OP-36] equality does not admit functions or resource handles"
+                            .to_string(),
+                    ),
                     _ => Ok(false),
                 });
             }
