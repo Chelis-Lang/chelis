@@ -155,16 +155,18 @@ starting and again before merging, and use the acknowledgement lines it requires
    mergeability, and inspect the prospective merge with `git merge-tree`. Rebase only
    when that result differs, is unsafe or unclear, or an identified semantic or
    structural issue requires a changed head. If a rebase is already planned, do it before
-   any other pushed change.
+   any other pushed change. When a base update is necessary, rebase onto the target
+   rather than merging the target in, and prefer that rebase to closing and reopening the
+   pull request or rerunning old CI: a rerun reuses the old synthetic merge, and a reopen
+   reruns CI anyway without moving the head.
 4. Every base merge, base-changing rebase, or other force-pushed rewrite is declared in
    the PR body with exactly one head-bound line before it is pushed:
    `Candidate-base-update: <new-head-sha> <specific conflict or semantic reason>` for a
-   base update, or `Candidate-history-rewrite: <new-head-sha> <specific approved reason>`
+   base update, or `Candidate-history-rewrite: <new-head-sha> <specific reason>`
    for any other rewrite. The preflight rejects a missing, duplicate, stale-head, or
    empty line. If it rejects an already-pushed head, repair the body and rerun that same
    workflow; do not manufacture another change to satisfy the guard.
-5. Never force-push a red gate. Obtain explicit approval before any force push, then
-   use an exact-head `--force-with-lease`.
+5. Never force-push a red gate. Force-push only with an exact-head `--force-with-lease`.
 6. Documentation-only changes still require applicable CI on the candidate head.
 7. When reviews and repairs are complete and no further content change is planned,
    dispatch `PR Package Expansion` with the pull request number and exact head SHA,
