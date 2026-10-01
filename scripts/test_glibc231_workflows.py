@@ -102,7 +102,7 @@ class Glibc231WorkflowTests(unittest.TestCase):
 
     def test_release_docs_name_active_bullseye_snapshot_bootstrap(self):
         release_docs = markdown_h2_section(
-            SMT_BUILD_DOC, "Release builds (chelis#422)"
+            SMT_BUILD_DOC, "Release builds"
         )
 
         for contract_term in ("Python 3.11", "Bullseye", "snapshot"):
@@ -113,7 +113,7 @@ class Glibc231WorkflowTests(unittest.TestCase):
 
     def test_release_docs_do_not_name_retired_container_or_pypi_dependency(self):
         release_docs = markdown_h2_section(
-            SMT_BUILD_DOC, "Release builds (chelis#422)"
+            SMT_BUILD_DOC, "Release builds"
         )
 
         self.assertNotRegex(release_docs, re.compile(r"debian:11", re.IGNORECASE))
@@ -124,7 +124,7 @@ class Glibc231WorkflowTests(unittest.TestCase):
 
     def test_release_docs_explicitly_deny_separate_pypi_bootstrap(self):
         release_docs = markdown_h2_section(
-            SMT_BUILD_DOC, "Release builds (chelis#422)"
+            SMT_BUILD_DOC, "Release builds"
         )
 
         self.assertRegex(release_docs, NO_PYPI_BOOTSTRAP_CLAIM)

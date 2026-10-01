@@ -1,8 +1,8 @@
-# erf Envelope: Sollya + Gappa Proof, Arb Cross-check, Regeneration (WI-13)
+# erf Envelope: Sollya + Gappa Proof, Arb Cross-check, Regeneration
 
 The `chelis-prove` crate ships a committed, certified `erf` envelope —
 `crates/chelis-prove/data/erf_envelope.json` — that the runtime discharge and
-Beacon's `erf` relaxation (WI-B6) consume to bound `erf` soundly with **no
+Beacon's `erf` relaxation consume to bound `erf` soundly with **no
 runtime dependency** on Sollya, Gappa, or Arb. This document covers what is
 committed, how it is proved and cross-checked, how CI re-validates it, and the
 environment each step needs.
@@ -78,7 +78,7 @@ no FLINT/Arb/Sollya/Gappa link (`arb` is off by default and absent from the
   line, extracts its asserted bound, and asserts `central_eps_math >= max(bounds)`
   and `central_eps_f64_rounding >= rounding_proof_bound`. This closes the
   eps-to-proof link on every PR without requiring Arb, Gappa, or Sollya.
-- **Arb cross-check (belt + suspenders).** The WI-14 Arb whole-box certifier
+- **Arb cross-check (belt + suspenders).** The Arb whole-box certifier
   re-validates every box's committed `eps` in the **SMT Full Prove** workflow
   (`.github/workflows/smt-full-prove.yml`, the `--features arb` steps) by
   asserting the committed `eps` bounds the Arb sup-norm bound. The central arm
@@ -184,4 +184,4 @@ GMP/MPFR). It does **not** use a system FLINT.
 `GMP_MPFR_SYS_CACHE`/`FLINT_SYS_CACHE`/`ARB_SYS_CACHE` dirs so a clean
 `--features arb` build is position-independent with no per-developer step. The
 LGPL obligation attaches only to a binary built with the `arb` feature
-(offline/CI tooling, never shipped); recorded and deferred per master WI-19.
+(offline/CI tooling, never shipped).

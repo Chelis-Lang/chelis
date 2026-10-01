@@ -27,9 +27,9 @@ Migrated Devenv-backed jobs reserve cold setup headroom without changing executi
 
 Rust policy and the native SMT feature lane retain total job timeouts of 75 and 90 minutes respectively. These are cold-build safety limits, not a measured performance result.
 
-GitHub-hosted runners run every job for ordinary pull-request and push events. `Fast Tests (Linux)` ran on the warm pool from chelis#2406 until chelis#2543: it queued there behind the nightly, and the host admits pull requests only against `main`. Explicit dispatches keep their existing route: `execution_target=self-hosted` requires an exact candidate SHA and a matching reviewed route on the runner host, and `github-hosted` dispatches stay hosted. The workflows grant no runner routing for ordinary events.
+GitHub-hosted runners run every job for ordinary pull-request and push events. `Fast Tests (Linux)` stays hosted because on the warm pool it would queue behind the nightly, and the pool host admits pull requests only against `main`. Explicit dispatches keep their existing route: `execution_target=self-hosted` requires an exact candidate SHA and a matching reviewed route on the runner host, and `github-hosted` dispatches stay hosted. The workflows grant no runner routing for ordinary events.
 
-In a full `heavy-e2e.yml` run on `main`, every execution job except `test-telemetry` uses the `chelis-ci-warm-x64` label. The separate dispatch-scope receipt job uses a GitHub-hosted runner. Dispatches on any other branch stay GitHub-hosted. GitHub Actions has no job priority, so on `main` the warm jobs share the `linux-extended-warm-x64` concurrency group with `queue: max`: the nightly holds at most one runner of the two-runner pool and leaves the other free for the pool's other jobs (chelis#2543). Waiting jobs stay pending in order instead of being cancelled, so a `main` run lasts about the sum of its jobs: run 36090758498 used 5.2 runner-hours and finished in 3.6 hours while holding both runners. Off `main` each job has its own group, so candidate validation stays parallel. `scripts/test_ci_cadence.py` locks both properties.
+In a full `heavy-e2e.yml` run on `main`, every execution job except `test-telemetry` uses the `chelis-ci-warm-x64` label. The separate dispatch-scope receipt job uses a GitHub-hosted runner. Dispatches on any other branch stay GitHub-hosted. GitHub Actions has no job priority, so on `main` the warm jobs share the `linux-extended-warm-x64` concurrency group with `queue: max`: the nightly holds at most one runner of the two-runner pool and leaves the other free for the pool's other jobs (chelis#2543). Waiting jobs stay pending in order instead of being cancelled, so a `main` run lasts about the sum of its jobs. Off `main` each job has its own group, so candidate validation stays parallel. `scripts/test_ci_cadence.py` locks both properties.
 
 Eligible jobs execute repository commands through `chelis-ci-shell run` and `chelis-gate` whichever runner kind executes them. `.github/actions/setup-project-ci` supplies both. GitHub-hosted runners cannot reach the private Nix cache, so they keep the toolchain main uses: Ubuntu's C compilers and OpenBLAS, a stable rustup toolchain, the uv-managed interpreter from `scripts/ci_setup_uv_python.py`, and two plain shims from `scripts/ci_hosted_commands.py`; Cargo compiles the numerics from their vendored sources and no Devenv profile is realized there. The self-hosted runner activates the `ci` profile once, which owns the Nix-built numerics cache and the static LP64 OpenBLAS provider substituted from the private cache; its SMT worker selects `ci-smt`, which extends `ci` with the CVC5 closure. Python, its virtual environment and PyO3 use one project-owned interpreter on either runner. Native library paths apply to repository commands, not GitHub action runtimes.
 
@@ -41,9 +41,7 @@ Self-hosted Linux C dependencies use the Nix GCC provider in GNU C17 mode with P
 
 The self-hosted CI profile disables Cargo incremental compilation for shared compiler caching and omits the legacy Kache schema fixture. That fixture remains in the default development profile for its dedicated transition oracle. Self-hosted Linux Rust policy selects `lint-and-unit-nix`: it preserves every existing policy command and solver-free feature while adding `chelis-prove/ci-openblas-system`, which selects the pinned static LP64 OpenBLAS archive through pkg-config rather than rebuilding it in Cargo. Hosted Rust policy runs `lint-and-unit` with the bundled provider, as main does; the developer gate retains its bundled provider and Darwin retains Accelerate.
 
-The `ci-smt` provider binds CVC5 1.3.1 to the locked cvc5-sys 0.3.1 checksum, its Production configuration, parser, CaDiCaL and LibPoly dependencies. Cargo consumes its `CVC5_DIR` on the self-hosted worker; the hosted worker fetches, harvests and republishes the prebuilt cvc5 stores through `scripts/ci_cvc5_cache.py` exactly as before. The glibc 2.31 compatibility lane, the native release producers and the frozen manual `nix-packages.yml` recipe are unchanged.
-
-Self-hosted evidence: CI run 35715695263 and Hull run 35715698132 executed every self-hosted job on runner 2438 with Kache and Nix cache reads and writes over Tunnet alone; every publishing job verified all of its Kache entries against the remote listing and its Nix roots against the cache. The complete workload took 47 minutes with the self-hosted jobs serialized on one worker. Hosted evidence for the unchanged hosted toolchain is the ordinary pull-request run of this change.
+The `ci-smt` provider binds CVC5 1.3.1 to the locked cvc5-sys 0.3.1 checksum, its Production configuration, parser, CaDiCaL and LibPoly dependencies. Cargo consumes its `CVC5_DIR` on the self-hosted worker; the hosted worker fetches, harvests and republishes the prebuilt cvc5 stores through `scripts/ci_cvc5_cache.py`. The glibc 2.31 compatibility lane, the native release producers and the frozen manual `nix-packages.yml` recipe keep their own toolchains.
 
 The runtime-representation inventory admits Clang's canonical resource `include` directory, including split Nix installations where it is a symlink. Resource-root siblings and headers escaping that include directory remain outside the inventory universe. Its fixed-target scan disables host C++ standard-library headers and uses the existing SDK stubs.
 
@@ -125,7 +123,7 @@ its red said nothing the others did not.
 
 No step in that job can fail it, job setup aside: an unresolvable action
 reference or a lost runner still fails it, and the required Docs context
-reports that case. A hard failure there used to leave required
+reports that case. A hard failure there would leave required
 contexts with no check run at all, which cannot be waited out, re-run into
 existence or overridden, and that is what made a pull request unmergeable
 rather than merely red. The job therefore always completes and always emits
@@ -247,15 +245,14 @@ The Linux workspace worker executes as four shards of one
 The selection is unchanged and still unfiltered. A hash partition hides nothing:
 nextest assigns every listed test to exactly one partition, so the union of the
 four shards is the whole selection. That is the distinction
-`scripts/test_ci_cadence.py` now draws. It still rejects dropping
-`--ignore-default-filter`, which really can hide a newly added target, and still
-rejects the census returning to the workspace worker; it additionally rejects a
+`scripts/test_ci_cadence.py` draws. It rejects dropping
+`--ignore-default-filter`, which really can hide a newly added target, and
+rejects the census returning to the workspace worker; it also rejects a
 shard matrix that does not enumerate 1..M of the command's own `hash:N/M`, which
-is the only way a partition can drop coverage. It no longer rejects partitioning
+is the only way a partition can drop coverage. It does not reject partitioning
 as such.
 
-One unsharded run of this selection had never finished inside any budget
-(chelis#1819), and a cancelled nextest run writes no JUnit at all, so the nightly
+An unsharded run of this selection does not finish inside any budget, and a cancelled nextest run writes no JUnit at all, so the nightly
 reported nothing rather than reporting a failure. Four shards each report a
 verdict and upload their own `junit-linux-full-N`. The two steps that are not
 part of the partition, the profile-coverage listing and the stdlib self-test
@@ -270,7 +267,7 @@ only (chelis#1781).
 
 On a pull request or trusted exact-candidate dispatch, `Integration Tests (Linux)` fails closed on both the standing fast worker and the required change-owned report. The four required shards and the four package-expansion shards use deterministic longest-processing-time assignment from the reviewed `.config/ci-change-owned-durations.json` target baseline; unknown targets receive a 30-second fallback that may underestimate a new long test. Each plan binds the exact weights, baseline digest and estimated shard totals. To remain dispatchable before a planner change merges, the v3 package-expansion hash fields remain a compatibility envelope for the trusted validator; a digested execution disposition owns the duration-balanced shards that candidate workers and reports use, and both representations must cover the same targets exactly. Refresh the baseline explicitly with `scripts/ci_change_owned.py build-duration-baseline` and authenticated plan/receipt artifact pairs; `--seed` retains a reviewed prior baseline. The builder accepts complete successful expansion receipts as well as change-owned receipts. For a grouped expansion command it divides observed command wall time among targets in proportion to their JUnit test times, with each target's longest test as a floor. This is a scheduling estimate, not an exact per-target runtime measurement. Workspace-build time is excluded because every nonempty shard pays it independently. Estimate error is diagnostic and never changes exact coverage or test verdicts. The report rejects missing shards, digest disagreement, duplicate execution, uncovered selected targets, executed exclusions, and test failure. A change-owned target already in the standing set is removed from shard execution only when the report verifies the ci-fast record against the same candidate SHA, normalized configuration digest, exact execution mode, complete standing target set, and matching selected/executed per-test results. Missing, stale, partial, failed, or tampered standing evidence does not satisfy the obligation. The `integration-change-plan`, per-shard receipts, standing coverage, required report, JUnit, commands, selected/executed lists, and timings are retained for 14 days.
 
-The 2026-09-27 baseline refresh added the authenticated four-shard plan and receipt artifacts from [expansion run 36318230980](https://github.com/Chelis-Lang/chelis/actions/runs/36318230980), [run 36321480379](https://github.com/Chelis-Lang/chelis/actions/runs/36321480379), and [run 36327831748](https://github.com/Chelis-Lang/chelis/actions/runs/36327831748), retaining the prior two change-owned sources. Each expansion selected 599 targets. Their observed longest execution steps were 46.3, 48.1 and 74.7 minutes. The binding census test varied from about 29 minutes in the first two to 44 minutes in the last, although that run's source difference from the second was a C indexing test. The old baseline assigned both census targets a 30-second fallback. Replaying each run's measured target work through the refreshed assignment, with its observed workspace-build durations, gives approximate longest shards of 33.4, 32.9 and 47.8 minutes. A cross-run replay trained on only one of the first two expansion runs and evaluated on the other gives 37.9 to 39.6 minutes. These are modelled schedules, not observed new runs: grouping, cache state and nested census builds can change. The next complete dispatch is the acceptance measurement. Random assignment by whole package would leave the large `chelis-cli` package indivisible, and the four independent hosted jobs have no shared work queue to support work stealing.
+The baseline combines authenticated plan and receipt artifacts from complete package-expansion runs with change-owned sources. Replaying a run's measured target work through the refreshed assignment, with its observed workspace-build durations, gives a modelled schedule rather than an observed run: grouping, cache state and nested census builds can change it, so the next complete dispatch after a refresh is its acceptance measurement. Random assignment by whole package would leave the large `chelis-cli` package indivisible, and the four independent hosted jobs have no shared work queue to support work stealing.
 
 For an accepted targeted rebase, the planner compares the prior receipt's
 synthetic candidate with the current synthetic candidate. It maps every code
@@ -381,18 +378,14 @@ the deadline cut always sets it; its only discriminating power is over shards
 that finished. The window is ten minutes rather than the permitted minimum
 because elapsed time advances in whole commands, and a window narrower than one
 command is jumped over rather than landed in: the longest single command
-observed to date is about 593s, so 600s clears it by seven seconds. The measurement that removed the finding was taken when
-the two were fifteen and sixteen minutes, a minute apart, where every shard reaching the
-deadline had also exceeded the budget and every shard exceeding the budget
-without the deadline had finished its complete selection; that reading describes
-the old limits and is kept here as the history it is. An independent constant is
-what let the pair drift into a budget every shard exceeds, which warns nobody.
+observed is about 593s, so 600s clears it by seven seconds. Deriving the budget
+from the deadline, rather than setting it as an independent constant, keeps the
+pair from drifting into a budget every shard exceeds, which would warn nobody.
 
 ### Measured figures for the expansion deadline
 
 Every number the prose, the comments and the tests' docstrings above rely on,
-with what it measures and how to re-take it. Taken 2026-09-20 against
-`26549bd68` and its base. A figure here is evidence with a date on it, not a
+with what it measures and how to re-take it. A figure here is a measurement, not a
 constant: re-run the command before relying on one, and correct this table
 rather than the prose that cites it.
 
@@ -402,8 +395,8 @@ rather than the prose that cites it.
 | post-executor 11s max | receipt upload and post-steps, the other side of the gap | same sample |
 | finalization 0.28s, and 1.58s at 98 MB | merging, digesting and writing a shard's JUnit and three sidecars, which the gap does *not* need to cover | probe over 104 targets x 500 cases (25.6 MB) and 200 x 1000 (98 MB) |
 | real slack 18s at 16-in-20, 78s at 85-in-90, 378s at 80-in-90 | what the gap leaves after the worst observed setup and upload | arithmetic on the three rows above |
-| longest single command 593.1s | the granularity the soft-budget window has to exceed, since elapsed advances in whole commands | `chelis-cli::runtime_extent_claim_preparation` in run 35478889993 shard 0, the command the deadline cut |
-| batching discount 3.87x | why the balancing weight overstates a shard that runs | same run: 64 targets carrying 1134s of weight executed in 293s of list and run time |
+| longest single command 593.1s | the granularity the soft-budget window has to exceed, since elapsed advances in whole commands | `chelis-cli::runtime_extent_claim_preparation` in the longest observed expansion shard, the command the deadline cut |
+| batching discount 3.87x | why the balancing weight overstates a shard that runs | same shard: 64 targets carrying 1134s of weight executed in 293s of list and run time |
 | 54% unmeasured, 30s default against a 28.4s p90 | why the projection is biased high a second way | 255 of 473 expansion targets have no row in `.config/ci-change-owned-durations.json`, and the default exceeds the p90 of the 218 that do |
 | longest shard 1580s median, 2993s p90, 4410s max | the distribution the deadline is sized against | weight-fraction projection over the 38 dispatches under the current planner, from their `integration-package-expansion-*` receipts |
 | estimate 3.73x over | why the plan's per-shard estimate is not a predicted duration | 96 shards that finished, estimated against actual |
@@ -417,10 +410,9 @@ The developer's `gate.py --fast`, `--validation`, `integration`, and full/manual
 
 ### Measured figures for the changed-path classification stage
 
-Taken 2026-09-20 against `64a446998` and `5e361bbc7` on an Apple-silicon
-workstation. A figure here is evidence with a date on it, not a constant:
-re-run the command before relying on one, and correct this table rather than
-the prose that cites it.
+Measured on an Apple-silicon workstation. A figure here is a measurement, not
+a constant: re-run the command before relying on one, and correct this table
+rather than the prose that cites it.
 
 | figure | conditions | how it was taken |
 |---|---|---|

@@ -6,22 +6,11 @@ repo coherent.
 
 ## Documentation Hierarchy
 
-For project-level questions, use the authority order in
-[AGENTS.md](AGENTS.md#documentation-authority):
-
-1. `spec/design/chelis_canonical_reference.md` controls cross-subject
-   architecture and project boundaries.
-2. A transferred chapter's named capability in the pinned `chelis-plans`
-   store controls that subject.
-3. An untransferred `spec/00-12*.md` chapter controls its subject.
-4. `spec/design/chelis_project_plan.md` controls project sequence that a
-   higher authority does not define.
-5. `spec/design/archive/` is historical reference only.
-
-No numbered chapter has transferred. The numbered chapters decide language
-semantics, types, syntax, diagnostics, CLI behavior, and other user-visible
-contracts. `spec/design/*.md` explains implementation and sequence; it does
-not decide language rules. See
+For project-level questions, follow the authority order in
+[AGENTS.md](AGENTS.md#documentation-authority). The numbered chapters
+(`spec/00-12*.md`) decide language semantics, types, syntax, diagnostics, CLI
+behavior, and other user-visible contracts. `spec/design/*.md` explains
+implementation and sequence; it does not decide language rules. See
 [Numbered Specs Decide; Design Docs Implement](AGENTS.md#numbered-specs-decide-design-docs-implement).
 Correct the controlling document when active docs disagree instead of adding
 another explanation.
@@ -101,8 +90,8 @@ authorization for new phase-based names.
 `scripts/gate.py` is the single source of truth for the per-PR
 developer-runnable gate; CI runs the same commands. `--fast` is the pre-push
 gate: fix-in-place, run before every push. Applicable CI checks on the pushed
-candidate must pass before ready-for-review. `--validation` (chelis#360) is
-optional, for troubleshooting or additional local validation:
+candidate must pass before ready-for-review. `--validation` is optional, for
+troubleshooting or additional local validation:
 
 ```sh
 python3 scripts/gate.py --fast
@@ -115,10 +104,11 @@ not already a uv- or Devenv-managed runtime, so that form is correct in every
 environment; every other script is invoked as
 `.venv/bin/python scripts/<name>.py`.
 
-Push before requesting the red-team round; the review runs against the
-pushed head while CI runs on it. The full workspace test suite is
-CI-owned: open a draft PR early and
-let CI (macOS Smoke is the authoritative workspace oracle) run it.
+Push before requesting review; the review runs against the pushed head
+while CI runs on it. The full workspace test suite is CI-owned: open a draft
+PR early and let CI run it. Pull requests run on Linux; the macOS workspace
+suite runs nightly and on manual dispatch
+([CI validation cadence](docs/ci_validation.md)).
 See [contributor setup](docs/contributor_setup.md) for the toolchain the gate
 needs (rustup, cargo-nextest, and the uv-managed Python 3.11 venv).
 
@@ -148,8 +138,8 @@ For lint triage, distinguish **allow** from **keep**. Allow means the
 form is accepted project style and should not be reported. Keep means
 existing checked-in source may remain for compatibility or baseline
 evidence, while new human-facing source should use the preferred form.
-`redundant-linearity-call` is currently a keep-style advisory warning
-for explicit `copy()` and `drop()` calls.
+`redundant-linearity-call` is a keep-style advisory warning for explicit
+`copy()` and `drop()` calls.
 
 The style guide that the gate enforces lives in
 `spec/01-nomenclature.md`. The lint rules that codify it live under

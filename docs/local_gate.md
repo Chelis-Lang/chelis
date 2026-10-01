@@ -54,7 +54,7 @@ the one `python3` entry point that self-heals. Without an explicit
 `PYO3_PYTHON`, it runs on this checkout's own interpreter whenever one exists:
 the activated Devenv state venv under this checkout, else `.venv`. A launch
 under any other interpreter re-executes through it, including another
-checkout's venv that comes first on `PATH` (chelis#2511); the capacity census
+checkout's venv that comes first on `PATH`; the capacity census
 accepts only this checkout's interpreter and would otherwise refuse it at the
 end of the runtime-representation stage. With no owned interpreter, a runtime
 that is not already uv- or Devenv-managed re-executes through
@@ -111,7 +111,7 @@ the primary path.
 **macOS:** Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. Do
 not route PyO3 to it.
 
-**C front end.** The chelis#893 Phase 0 oracle and the `chelis-repr-inventory`
+**C front end.** The runtime-representation oracle and the `chelis-repr-inventory`
 tests read the registered C and Objective-C headers through a `clang` binary on
 PATH (any clang that prints `-ast-dump=json`), in addition to the `cc` the
 capacity census already requires; a missing `clang` fails the scan loudly
@@ -144,24 +144,20 @@ the bytes that are on disk. They are lib unit tests in `chelis-reef`, and the
 changed-crate stage never selects that crate, because the paths that invalidate
 them belong to other crates (`crates/chelis-cli/tests/fixtures/**/reef.lock`) or
 to no crate at all (`examples/**/reef.lock`, and the root `Cargo.toml` whose
-workspace version `chelis-reef` inherits and feeds into the comparison). Before
-chelis#2309 no local invocation reached either one, so chelis#2305 got PASS from
-`--fast` in 202.3 s on a head that CI then rejected on this exact test. A fourth
-class was added in review: `crates/chelis-reef/` itself, because `--fast` runs
-clippy rather than nextest per changed crate, so editing the discovery walk never
-ran the guard either. The trigger is
+workspace version `chelis-reef` inherits and feeds into the comparison). A
+fourth trigger is `crates/chelis-reef/` itself, because `--fast` runs clippy
+rather than nextest per changed crate, so editing the discovery walk would
+otherwise never run the guard. The trigger is
 a **superset** of the std one and matches locks by basename rather than by a path
 prefix, because the guard discovers its lock set by walking the tree: a lock
 committed at a new path is in scope the moment it exists. The guard reports
-**every** drifted lock in one run, not the first — chelis#2305 had three, and the
-sorted walk meant a fix-the-named-row loop would have spent one CI round per
-lock.
+**every** drifted lock in one run, not the first, so a change that drifts several
+locks costs one CI round rather than one per lock.
 
 Every writer runs before every check, and the path classification is the first
 check because it is the cheapest row that can reject a push: it is the
 planner's own rule lookup, and a new tracked file that no `[[path_rule]]`
-routes fails `Plan Changed Integration Tests` in CI, which nothing local could
-see before chelis#2250. It reports every unrouted path rather than the first
+routes fails `Plan Changed Integration Tests` in CI. It reports every unrouted path rather than the first
 and prints the same sentence CI prints. It needs cargo on PATH, because it
 reads the workspace package roots from `cargo metadata --no-deps --locked`,
 and it costs a fraction of a second (see the measured figures in
@@ -197,7 +193,7 @@ takes the lease.
 
 ## What `--validation` runs
 
-`--validation` (chelis#360) is an optional extra validation command, not the
+`--validation` is an optional extra validation command, not the
 pre-push gate; `--fast` is. It runs two of
 the three workspace clippy configurations (`-D warnings`, compile-only): the
 default row and the solver-free-features row. The `--no-default-features` row
@@ -210,7 +206,7 @@ row compiles a strict subset of the default row. It then runs
 regeneration check, the explicit rustdoc commands, the checkpoint and
 hash-order compile-fail fixtures, the configuration-closure check, both
 pipeline-core guards, the chelis#908 unrepresentable-domain oracle, the
-runtime-representation Phase 2 oracle, and
+runtime-representation oracle, and
 `cargo nextest run -p <crate> --no-fail-fast` for each crate changed vs
 `origin/main` (committed diff plus uncommitted work; owning packages are
 resolved from each member's `Cargo.toml`, not the directory name). The derived
@@ -341,8 +337,8 @@ Markdown parsed, embedded, mirrored, or used as agent instructions is a
 control artifact, not inert prose. Its focused validators must run even when
 CI reports `docs_only=true`. The always-run Docs job owns shared-agent-skill
 validation: `scripts/check_agent_skills.py` validates metadata, the registered
-shared set, source/embedded byte agreement, and Claude/Codex red-team wrapper
-agreement; the validator and CI-routing tests exercise failure cases; and
+shared set, source/embedded byte agreement, and Claude/Codex review-command
+wrapper agreement; the validator and CI-routing tests exercise failure cases; and
 `chelis-conformance`'s `asset_drift_tripwire` and `skill_set_uniformity` tests
 exercise compiled assets and downstream distribution. Local reruns of these
 checks are optional. Docs also builds mdBook and validates the package
@@ -393,7 +389,7 @@ skill/examples.
   children stopped; use the scoped `reap_orphans.py` dry run and kill only
   confirmed task-owned stragglers.
 - macOS workstation only: first-exec assessment can degrade under mass
-  fresh-binary bursts and stall multi-binary test runs at ~0 CPU (chelis#356).
+  fresh-binary bursts and stall multi-binary test runs at ~0 CPU.
   Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
   slow), or `chelis-exec-preflight` inside Devenv, before a local workspace
   nextest stage. If the probe reports degradation, use the manually dispatched
