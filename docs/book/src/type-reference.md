@@ -171,10 +171,10 @@ their `i64` elements explicitly.
 a = cast(x, bf16)
 -- suffix binds f64
 b = 1.0f64
--- literal binds directly at i64
-c = cast(3000000000, i64)
--- literal binds directly at f64
-d = cast(1.1, f64)
+-- suffix binds i64; cast(3000000000, i64) binds the same literal the same way
+c = 3000000000i64
+-- each element binds directly at f64, not at f32 and then widened
+d = cast([1.1, 2.2], f64)
 ```
 
 Arithmetic operands must have the same numeric dtype and dimensions, with
