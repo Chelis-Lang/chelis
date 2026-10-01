@@ -82,8 +82,8 @@ significant digits sum to at most 38 and their scales sum to at most 38, which c
 `round(amount * rate, 2)` for a 9-digit amount and an 11-digit rate.
 
 **Why 38 digits.** 38 is the precision ceiling of SQL Server, Snowflake, BigQuery `NUMERIC`
-and DuckDB decimals and of Arrow `decimal128` (prior art §9, §10; PostgreSQL's `numeric` is
-unbounded), so every `decimal128` value whose exact value has at most 38 significant digits
+and DuckDB decimals and of Arrow `decimal128` (prior art §9, §10; PostgreSQL's `numeric`
+reaches far above it), so every `decimal128` value whose exact value has at most 38 significant digits
 and 38 fractional digits is a `Decimal`. It holds 18-decimal crypto amounts and the exact product of
 any two values that fit an i64 coefficient with scales summing to at most 38. An 18-digit
 envelope (the old coefficient width, Arrow `decimal64`) overflows on ordinary rate
@@ -149,9 +149,8 @@ name and `<detail>` names the offending value. `<kind>` is:
 
 Every range and validity check precedes the arithmetic it guards, so no [04-NUM-9] trap
 of a primitive escapes a call for any arguments. When several checks fail, the first in
-this order is reported, so the message is deterministic: the arguments' own validity left
-to right (text, scale, divisor, finiteness), then `RejectInexact`, then the result's
-range.
+this order is reported, so the message is deterministic: each argument's own validity in
+argument order, then `RejectInexact`, then the result's range.
 
 A `try_` callable takes its twin's arguments and returns `Some` of the twin's result, or
 `None` exactly where the twin fails `domain`. A twin exists for each callable with a
@@ -299,9 +298,10 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
   comparison), minimum and maximum, integer division (`decimal_div` at scale 0 with
   `RoundTowardNegative`, whose failure is correct because such a quotient is outside the
   value set), and f32 ingress (exact widening to f64).
-- **Composes except near the envelope:** a remainder `a - q·b` from that quotient. When
-  `q·b` leaves the value set the composition fails although the remainder itself is
-  representable (for `a = -(10^38 - 1)` and `b = 10^38 - 2`, `q·b` is about `-2·10^38`).
+- **Composes except at the range edge:** a remainder `a - q·b` from that quotient. When
+  `q` or `q·b` leaves the value set the composition fails although the remainder itself
+  is representable (for `a = 1` and `b = 1e-38`, `q` is `10^38`; for `a = -(10^38 - 1)` and
+  `b = 10^38 - 2`, `q·b` is about `-2·10^38`).
   A dedicated remainder is additive later if a consumer meets that edge.
 - **Inexact by nature:** square roots, powers with fractional exponents, logarithms and
   exponentials; they go through `decimal_to_f64`.
