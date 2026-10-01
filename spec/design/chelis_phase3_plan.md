@@ -1372,9 +1372,7 @@ reference `@property` functions:
 Convention (cross-cutting, applies to every domain shell): properties are co-located
 with the implementation code they constrain — same repo, same package, version-
 controlled together. Properties are NOT a separate shell. `chelis prove src/` runs them
-all against the shipped exports. Status of the underlying tool: `chelis prove` with
-first-class `@property` annotations is **demo-blocking, scoped, ready to build** for
-the first commercial CProof prospect. Full conventions: `chelis_trust_stack.md`,
+all against the shipped exports. Full conventions: `chelis_trust_stack.md`,
 `chelis_property_spec.md`.
 
 **Reference implementations.** Shoals' delivery scope now includes a `references/`
@@ -1383,7 +1381,7 @@ directory alongside `properties/`. Each standard model in `Shoals.Pricing`,
 textbook-formula reference (Black-Scholes call/put + Greeks, Heston, Vasicek, CIR,
 vanilla Monte Carlo, VaR/CVaR via historical simulation). The optimized `src/`
 implementation is verified against the reference by
-`@property matches_textbook_reference forall(...)` in `properties/pricing.ch`. Customers
+`@property matches_textbook_reference forall(...)` in `properties/pricing.ch`. Users
 write their own references only for proprietary models. Full design:
 `chelis_reference_implementations_spec.md`.
 
@@ -1401,7 +1399,7 @@ DAG path cannot execute.
 **Manual gate.** Wall-clock ~5 minutes on AMD Ryzen AI Max+ 395 (driven by the
 host evaluator's 20K MC sample loop on Shoals). The test is marked `#[ignore]`
 to keep `cargo test --workspace` under the 60-second inner-loop budget defined
-in `AGENTS.md` / `CLAUDE.md`. Run before any release tag whose pitch includes Shoals
+in `AGENTS.md` / `CLAUDE.md`. Run before any release tag whose release notes claim Shoals
 end-to-end pricing. Skips with a clear message if a Shoals checkout is not
 present (set `CHELIS_SHOALS_PATH` or place `shoals/` as a sibling of the
 chelis monorepo root).
@@ -1435,7 +1433,7 @@ Full architectural spec: `chelis_octant_design.md`. Executable sub-phase contrac
 | `Octant.Symbolic` | The ~30-node `SymExpr` AST. | `chelis-std` |
 | `Octant.Lower` (deterministic path) | SymExpr → Deep for every form where the LaTeX uniquely determines the computation. Special functions route through `Nautilus.Special` / `Nautilus.Distributions`; integrals through `Nautilus.Integrate`; matrix ops through `Nautilus.LinAlg`. | `Nautilus.Special`, `Nautilus.Distributions`, `Nautilus.LinAlg`, `Nautilus.Integrate` |
 | `Octant.Render` | Deep → LaTeX with type overlays (named tensor dims → subscripts, effect markers, `grad` → partial-derivative notation). Excludes the Greek pattern matches that need Shoals context (deferred to 3o). | typed Deep from the compiler |
-| `Octant.Provenance` | Source-span annotations on every Deep node produced by Octant lowering. Contract: every lowered Deep node's metadata map carries `provenance` (raw LaTeX fragment) and `source_span` (line, column, length). This is the core value proposition — the audit trail that proves compiled code implements the formula. | nothing new — Deep nodes already carry a metadata slot |
+| `Octant.Provenance` | Source-span annotations on every Deep node produced by Octant lowering. Contract: every lowered Deep node's metadata map carries `provenance` (raw LaTeX fragment) and `source_span` (line, column, length). This is Octant's central purpose — the audit trail that proves compiled code implements the formula. | nothing new — Deep nodes already carry a metadata slot |
 
 ### Test Plan
 
@@ -1458,8 +1456,8 @@ Full architectural spec: `chelis_octant_design.md`. Executable sub-phase contrac
   fragment (for example a shape-mismatched `\sigma \sqrt{T}`) produces a
   `chelis check` error whose message surfaces the originating LaTeX source
   span, not just the Deep node id. This pins the audit-trail semantics — the
-  presence-only provenance check is not enough by itself to prove the core
-  value proposition.
+  presence-only provenance check is not enough by itself to prove the
+  audit-trail guarantee.
 - **Out-of-scope LaTeX invariant test (Cross-Sub-Phase Invariant §3.2):** fed
   `\begin{theorem}`, a TikZ block, and "please integrate `\int e^{-x^2}`", the
   parser returns diagnostics naming the offending token — it must never
@@ -1563,8 +1561,7 @@ completion claim.
   indefinitely by complex-number support (Phase 5f).
 
 **Effort:** medium to large. The LLM-assisted lowering path is the novel piece
-and depends on the SSD → SDFT → RLVR coding-model pipeline being mature enough
-to produce correct Deep fragments for SDE / MC / calibration notation. Greek
+and depends on a coding model that reliably produces correct Deep fragments for SDE / MC / calibration notation. Greek
 rendering, notebook cell runtime, and provenance extension are mechanical by
 comparison.
 
@@ -1726,8 +1723,7 @@ Three further shells are named and reserved but scoped as stubs beyond Phase 3:
 
 `chelis prove` scope has expanded from a CLI-flag property testing tool to first-class
 executable properties with `@property` annotations. See `chelis_trust_stack.md` for the
-full design. Implementation remains deferred until after the RLVR pipeline (Phase 4)
-but the design is locked.
+full design.
 
 ---
 

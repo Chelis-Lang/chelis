@@ -6,7 +6,7 @@ This is a research direction within Chelis's numerical computing scope (see
 `spec/design/chelis_canonical_reference.md` §1); it does not define the language.
 The long-term aim is a fully differentiable language: AD composes through arbitrary program structure (control flow, user-defined functions, custom data, effects, fixed points), not just tensor operations. The compiler treats AD as a first-class language transformation rather than a library feature, with type-level expression of differentiability and verified properties about gradient behavior.
 
-## Audience and value proposition
+## Audience and purpose
 
 The target audience is researchers and engineers working on problems where the standard ML framework boundary doesn't fit:
 

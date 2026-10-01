@@ -12,7 +12,7 @@ Today, Chelis's tensor operations lower through the RISC DAG to backends that ei
 
 That gap is the dominant performance cost for transformer-shaped workloads. The attention block materializes the full [batch, heads, seq, seq] intermediate because there's no fused-attention kernel for Chelis to call. Sequence length scales the cost quadratically. Modern frameworks ship hand-authored kernels for these cases; Chelis doesn't, and falls behind on the workloads where these kernels matter.
 
-Kerrent closes the gap by letting Chelis author its own kernels — under the same type system, same dimension types, same AD machinery, same property verification — and call them from regular tensor-level Chelis code. The transformer block in Chelis becomes competitive with PyTorch+CUDA when Kerrent ships the attention kernel.
+Kerrent closes the gap by letting Chelis author its own kernels — under the same type system, same dimension types, same AD machinery, same property verification — and call them from regular tensor-level Chelis code. When Kerrent ships the attention kernel, the transformer block in Chelis no longer materializes the full attention intermediate.
 
 The broader strategic value is bigger than performance. Kerrent unlocks several patterns that aren't expressible without it: custom kernels for domain operations vendor libraries don't serve, dimension-typed safety for GPU code that today relies on convention, AD that composes through kernels without hand-written backward passes. These are differentiating capabilities, not just performance fixes.
 
@@ -77,9 +77,9 @@ The work decomposes into bounded milestones:
 
 **Milestone 5: Runtime integration.** Kernel calls from tensor-level Chelis lower to launches against Triton artifacts. Memory layout matching at the kernel boundary works correctly. Existing backends (HIP, CUDA) handle the launch machinery.
 
-**Milestone 6: First production kernel.** FlashAttention-shaped fused attention kernel written in Kerrent, replacing the current attention decomposition. Transformer inference becomes competitive with PyTorch+CUDA for the attention block.
+**Milestone 6: First production kernel.** FlashAttention-shaped fused attention kernel written in Kerrent, replacing the current attention decomposition.
 
-The first five milestones are infrastructure. Milestone 6 is the proof point: a single hand-authored Kerrent kernel that demonstrates the capability end-to-end and produces customer-visible performance improvement.
+The first five milestones are infrastructure. Milestone 6 is the proof point: a single hand-authored Kerrent kernel that demonstrates the capability end-to-end and produces a measurable performance improvement.
 
 ## Guarantees Kerrent v1 provides
 
@@ -101,19 +101,19 @@ What Kerrent v1 doesn't guarantee:
 - Performance bounds. Triton handles autotuning; the resulting performance is whatever Triton produces.
 - AD correctness through kernels. v1 kernels are forward-only.
 
-## What Kerrent v1 unlocks for customers
+## What Kerrent v1 unlocks for users
 
 Concrete capabilities that ship when v1 ships:
 
-**Competitive transformer inference performance.** With a FlashAttention-shaped Kerrent kernel replacing the current attention decomposition, transformer inference (encoder-only, eventually decoder when KV cache support lands) becomes competitive with PyTorch+CUDA. The materialization cost of the attention intermediate goes away.
+**Fused attention for transformer inference.** With a FlashAttention-shaped Kerrent kernel replacing the current attention decomposition, transformer inference (encoder-only, eventually decoder when KV cache support lands) no longer materializes the attention intermediate, so its quadratic memory cost in sequence length goes away.
 
 **Custom domain kernels.** Users in domains where vendor libraries don't cover the needed operations can author kernels in Kerrent. Finance-specific reductions, sparse-pattern operations for graph workloads, custom convolutions for image processing — all become expressible in Chelis source.
 
 **Type-safe GPU code.** The class of GPU correctness bugs that depend on convention (correct stride, correct tile alignment, correct memory layout) become impossible by construction.
 
-**Single-source cross-platform deployment.** A Chelis program with Kerrent kernels runs on both NVIDIA and AMD without source changes. Customers deploying across vendor environments stop maintaining parallel kernel implementations.
+**Single-source cross-platform deployment.** A Chelis program with Kerrent kernels runs on both NVIDIA and AMD without source changes. Users deploying across vendor environments stop maintaining parallel kernel implementations.
 
-The audience for this is the customers Chelis already targets: AI/ML practitioners with mainstream inference workloads, finance customers with domain-specific computation needs, research users building differentiable simulators and probabilistic programs.
+The audience for this is the users Chelis already serves: AI/ML practitioners with mainstream inference workloads, finance users with domain-specific computation needs, research users building differentiable simulators and probabilistic programs.
 
 ## Addendums: paths beyond v1
 
@@ -185,7 +185,7 @@ The addendums divide into priority tiers:
 
 **High priority once v1 ships.** Addendum A (AD through kernels) is the highest-leverage extension. It's the capability that genuinely differentiates Chelis from other frameworks and aligns with the differentiable-language strategic direction. Should be the first major Kerrent extension.
 
-**Medium priority.** Addendum B (thread-level) and Addendum C (shared memory) extend the capability surface to patterns Triton can't express well. Worth doing when customer pull surfaces specific patterns that Triton handles poorly.
+**Medium priority.** Addendum B (thread-level) and Addendum C (shared memory) extend the capability surface to patterns Triton can't express well. Worth doing when user demand surfaces specific patterns that Triton handles poorly.
 
 **Lower priority.** Addendum D (MLIR direct), Addendum E (verified kernels), Addendum F (additional platforms) are larger investments with longer payoff windows. Each is real strategic value but each is substantial work. Schedule when other priorities clear.
 
@@ -195,6 +195,6 @@ The v1 effort plus Addendum A together is the right scope to plan against. v1 pr
 
 Kerrent is the path to kernel authorship in Chelis. v1 targets Triton as the kernel compiler, ships a bounded language feature with dimension-typed GPU code and cross-vendor portability, and produces the FlashAttention-shaped kernel that closes the dominant transformer performance gap. The work decomposes into six milestones, each bounded.
 
-The strategic value of Kerrent extends beyond performance. Type-safe GPU code, custom domain kernels, and (via Addendum A) AD composition through kernels are capabilities no other framework offers in combination. The audience that values these is the same audience that values the rest of Chelis: AI/ML practitioners, finance customers, research users in differentiable programming.
+The strategic value of Kerrent extends beyond performance. Type-safe GPU code, custom domain kernels, and (via Addendum A) AD composition through kernels are capabilities no other framework offers in combination. The audience that values these is the same audience that values the rest of Chelis: AI/ML practitioners, finance users, research users in differentiable programming.
 
-The first effort is real work but bounded by what Triton provides. The addendums extend the capability over time as customer pull and strategic priority justify. The v1 plus Addendum A combination is the most-leverage scope to plan against; everything else is opportunistic extension.
+The first effort is real work but bounded by what Triton provides. The addendums extend the capability over time as user demand and project priority justify. The v1 plus Addendum A combination is the most-leverage scope to plan against; everything else is opportunistic extension.

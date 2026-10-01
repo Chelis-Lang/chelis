@@ -58,11 +58,11 @@ Recorded so the next reader does not have to re-derive it:
    C-scalar does not ([#718]); prove's interpreter collapses what the SMT
    tier keeps exact ([#688]). "Make X match Y" is undefined when no Y holds
    the semantics.
-3. **Dtype discipline is the language's stated value proposition.** The
+3. **Dtype discipline is the language's stated core commitment.** The
    spec's differentiators - no implicit precision promotion, explicit
    casts, named dimensions - are precision-centric promises. A numeric
    layer with no grounded notion of `f16` or `i8` contradicts the
-   product's own core claim.
+   language's own core claim.
 
 ## Non-goals
 

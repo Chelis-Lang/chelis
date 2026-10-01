@@ -83,7 +83,7 @@ builtin routes, not future direct Rust callsites.
 ### Item 1 — Add `Network` and `Filesystem` variants
 
 **Driver.** The trust stack story needs the effect taxonomy to cover the
-categories that matter for the broader supply-chain pitch — "this package
+categories that matter for broader supply-chain claims — "this package
 touches the network" and "this package reads files" are the questions
 operators ask, and the type system can answer them only if the variants
 exist.

@@ -145,4 +145,4 @@ The `--check` flag fails the build if any random operation's key does not trace 
 3. `chelis manifest --format human` produces the human-readable format specified above.
 4. The manifest correctly identifies every random primitive call in the program.
 5. The manifest correctly identifies the seed source (explicit parameter, literal seed, environment variable, etc.) of each random op's key.
-6. End-to-end demo: a Shoals Monte Carlo example where the manifest is generated, a customer can read it, and re-running with the same seeds produces identical numerical output.
+6. End-to-end demo: a Shoals Monte Carlo example where the manifest is generated, a reviewer can read it, and re-running with the same seeds produces identical numerical output.

@@ -333,4 +333,4 @@ SIMD improvements apply only to the C backend's CPU path. The HIP backend uses G
 - Large tensors (n > 100k): GPU wins (massive parallelism)
 - Medium tensors: depends on the operation and the hardware
 
-The C backend with good SIMD support is the right execution path for the finance use case (Shoals/CProof) where tensor sizes are moderate (portfolios of hundreds to thousands of instruments, not ImageNet-scale batches) and latency matters more than throughput.
+The C backend with good SIMD support is the right execution path for the finance use case (Shoals) where tensor sizes are moderate (portfolios of hundreds to thousands of instruments, not ImageNet-scale batches) and latency matters more than throughput.

@@ -89,7 +89,7 @@ Build prerequisite (pinned source versions). Carcara depends on `rug -> gmp-mpfr
 
 ## 5. Downstream pickup (deferred)
 
-Recorded for continuity, revisited once the stack is built. Shoals dispatches the European pricer through the orchestrator, bounding `erf64` directly via Beacon, which yields verified pricing bounds and, through WI-10, verified bounded Greeks over the trading range; C Proof is the commercial vehicle around those guarantees. Other shells follow the same dispatch pattern. Path-dependent and Monte Carlo pricing need the host/tensor seam specified in the Beacon plan and are a later fragment. None of this is built against in this plan.
+Recorded for continuity, revisited once the stack is built. Shoals dispatches the European pricer through the orchestrator, bounding `erf64` directly via Beacon, which yields verified pricing bounds and, through WI-10, verified bounded Greeks over the trading range. Other shells follow the same dispatch pattern. Path-dependent and Monte Carlo pricing need the host/tensor seam specified in the Beacon plan and are a later fragment. None of this is built against in this plan.
 
 ## Appendix: dependency summary
 
