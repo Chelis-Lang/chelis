@@ -107,6 +107,11 @@
   "rows": [
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_adt_eq ( const chelis_adt * lhs , const chelis_adt * rhs ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_adt_tag_equals ( const chelis_adt * adt , chelis_string ctor ) ;",
       "flags": []
     },
@@ -117,7 +122,22 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_dict_eq ( const chelis_dict * lhs , const chelis_dict * rhs ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_file_exists ( chelis_string path ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_list_eq ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_option_eq ( const chelis_option * lhs , const chelis_option * rhs ) ;",
       "flags": []
     },
     {
@@ -143,6 +163,11 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_starts_with ( chelis_string value , chelis_string prefix ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_tuple_eq ( const chelis_tuple * lhs , const chelis_tuple * rhs ) ;",
       "flags": []
     },
     {

@@ -7432,19 +7432,31 @@ impl<'a> HostEmitter<'a> {
                 CExpressionBuiltin::LessEqual => {
                     binary(BinaryOperator::LessEqual, numeric_arg(0), numeric_arg(1))
                 }
-                CExpressionBuiltin::Equal => match (&arg_vars[0].1, &arg_vars[1].1) {
-                    (HostType::String, HostType::String) => {
-                        EmittedExpr::call("chelis_string_eq", [arg(0), arg(1)])
+                CExpressionBuiltin::Equal | CExpressionBuiltin::NotEqual => {
+                    let equal = expression_builtin == CExpressionBuiltin::Equal;
+                    match equality_entry(name, &arg_vars[0].1, &arg_vars[1].1)? {
+                        EqualityEntry::Scalar => binary(
+                            if equal {
+                                BinaryOperator::Equal
+                            } else {
+                                BinaryOperator::NotEqual
+                            },
+                            numeric_arg(0),
+                            numeric_arg(1),
+                        ),
+                        EqualityEntry::Unit => {
+                            EmittedExpr::identifier(if equal { "true" } else { "false" })
+                        }
+                        EqualityEntry::Runtime(entry) => {
+                            let call = EmittedExpr::call(entry, [arg(0), arg(1)]);
+                            if equal {
+                                call
+                            } else {
+                                unary(UnaryOperator::LogicalNot, call)
+                            }
+                        }
                     }
-                    _ => binary(BinaryOperator::Equal, numeric_arg(0), numeric_arg(1)),
-                },
-                CExpressionBuiltin::NotEqual => match (&arg_vars[0].1, &arg_vars[1].1) {
-                    (HostType::String, HostType::String) => unary(
-                        UnaryOperator::LogicalNot,
-                        EmittedExpr::call("chelis_string_eq", [arg(0), arg(1)]),
-                    ),
-                    _ => binary(BinaryOperator::NotEqual, numeric_arg(0), numeric_arg(1)),
-                },
+                }
                 CExpressionBuiltin::And => binary(BinaryOperator::LogicalAnd, arg(0), arg(1)),
                 CExpressionBuiltin::Or => binary(BinaryOperator::LogicalOr, arg(0), arg(1)),
                 CExpressionBuiltin::Not => unary(UnaryOperator::LogicalNot, arg(0)),
@@ -10652,6 +10664,64 @@ fn c_type(ty: &HostAbiType) -> Result<&'static str, Unsupported> {
             format!("callback type {ty:?} used where C requires a standalone value type"),
             "C host value type emission",
         )
+    })
+}
+
+/// How `eq` and `neq` compare one pair of host operands.
+enum EqualityEntry {
+    /// The C comparison operators over two scalar values.
+    Scalar,
+    /// Unit equals unit ([05-OP-36]).
+    Unit,
+    /// A runtime entry that compares two borrowed values of one type.
+    Runtime(&'static str),
+}
+
+/// Select `eq` and `neq`'s comparison for an operand pair. A heap value is a
+/// pointer in C, so every handle type names its runtime entry here and the C
+/// operators apply only to scalars: an unlisted handle type is refused rather
+/// than compared by address.
+fn equality_entry(
+    name: &str,
+    lhs: &HostType,
+    rhs: &HostType,
+) -> Result<EqualityEntry, Unsupported> {
+    let scalar = |ty: &HostType| {
+        matches!(
+            ty,
+            HostType::Int8
+                | HostType::Int16
+                | HostType::Int32
+                | HostType::Int64
+                | HostType::Float16
+                | HostType::BFloat16
+                | HostType::Float32
+                | HostType::Float64
+                | HostType::Bool
+        )
+    };
+    Ok(match (lhs, rhs) {
+        (lhs, rhs) if scalar(lhs) && scalar(rhs) => EqualityEntry::Scalar,
+        (HostType::Unit, HostType::Unit) => EqualityEntry::Unit,
+        (HostType::String, HostType::String) => EqualityEntry::Runtime("chelis_string_eq"),
+        // [05-OP-36]'s recursive equality.
+        (HostType::List(_), HostType::List(_)) => EqualityEntry::Runtime("chelis_list_eq"),
+        (HostType::Tuple(_), HostType::Tuple(_)) => EqualityEntry::Runtime("chelis_tuple_eq"),
+        (HostType::Dict(..), HostType::Dict(..)) => EqualityEntry::Runtime("chelis_dict_eq"),
+        (HostType::Option(_), HostType::Option(_)) => EqualityEntry::Runtime("chelis_option_eq"),
+        (HostType::Adt(..), HostType::Adt(..)) => EqualityEntry::Runtime("chelis_adt_eq"),
+        (lhs, rhs) => {
+            return Err(Unsupported::new(
+                UnsupportedKind::Builtin(name.to_string()),
+                format!("`{lhs:?}` and `{rhs:?}` operands in `chelis build` host emission"),
+                Stage::Codegen("c"),
+                chelis_types::deliberate_rejection!(
+                    "[04-TOT-2]",
+                    "the host scalar lane has no comparison for this operand pair; a heap \
+                     value is never compared by address"
+                ),
+            ));
+        }
     })
 }
 

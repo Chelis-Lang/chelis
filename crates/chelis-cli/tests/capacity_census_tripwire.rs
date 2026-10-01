@@ -1032,6 +1032,43 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "[05-OP-32]",
         "shape_index(container, parameters...) -> result"
     ),
+    // [05-OP-36]'s recursive equality: each entry reads the numeric leaves
+    // of two borrowed values and compares them at their own dtype.
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_list_eq ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+        &[],
+        "[05-OP-36]",
+        "Lists and tuples compare length and"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_tuple_eq ( const chelis_tuple * lhs , const chelis_tuple * rhs ) ;",
+        &[],
+        "[05-OP-36]",
+        "Lists and tuples compare length and"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_dict_eq ( const chelis_dict * lhs , const chelis_dict * rhs ) ;",
+        &[],
+        "[05-OP-36]",
+        "Dictionaries compare key/value sets"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_adt_eq ( const chelis_adt * lhs , const chelis_adt * rhs ) ;",
+        &[],
+        "[05-OP-36]",
+        "`Option` and ADT values compare exact"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_option_eq ( const chelis_option * lhs , const chelis_option * rhs ) ;",
+        &[],
+        "[05-OP-36]",
+        "`Option` and ADT values compare exact"
+    ),
     final_numeric_row!(
         "std-adt-numeric",
         "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} i64)) (field {} scale (t-prim {} i64)))",

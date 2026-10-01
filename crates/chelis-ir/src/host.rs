@@ -12666,7 +12666,27 @@ fn lower_app_host_expr(
     } else {
         infer_builtin_host_type(&name, &args).unwrap_or_else(fresh_host_inference)
     };
+    let args = if matches!(name.as_str(), "eq" | "neq") {
+        conform_equality_operands(args)
+    } else {
+        args
+    };
     Ok(HostExpr::new(HostExprKind::Builtin { name, args, ty }))
+}
+
+/// [05-OP-36]: `eq` and `neq` compare two operands of one static type, so an
+/// operand whose host type is still unresolved, such as `None` or an empty
+/// list, takes the other operand's resolved type.
+fn conform_equality_operands(mut args: Vec<HostExpr>) -> Vec<HostExpr> {
+    if let [lhs, rhs] = args.as_mut_slice() {
+        let (lhs_ty, rhs_ty) = (host_expr_type(lhs), host_expr_type(rhs));
+        match (lhs_ty.is_unresolved(), rhs_ty.is_unresolved()) {
+            (true, false) => *lhs = force_host_expr_type(lhs.clone(), rhs_ty),
+            (false, true) => *rhs = force_host_expr_type(rhs.clone(), lhs_ty),
+            (true, true) | (false, false) => {}
+        }
+    }
+    args
 }
 
 /// A callable-parameter declaration is specialized at its call site because
