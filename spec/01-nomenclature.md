@@ -11,9 +11,8 @@ The conventions documented here fall into three categories:
    or backend. Immovable; not subject to style choice.
 2. **Settled conventions** (§§2–10). Project-wide rules. Consistent
    across the ecosystem. Enforced by the `chelis lint` tool.
-3. **Resolved decisions** (§11). Architectural questions surfaced
-   during the May 2026 ecosystem naming pass and now closed. Recorded
-   with their resolution so the rationale is visible.
+3. **Design decisions** (§11). Naming questions with more than one
+   plausible answer, recorded with the chosen rule and its rationale.
 
 A standalone lint tool (`chelis lint`) verifies adherence to the
 settled conventions in §§2–10. CI runs it as a gate on every PR.
@@ -117,7 +116,7 @@ rules out hyphens; Deep is the compiler IR where compound tag names
 follow a deliberate convention. User-defined Deep symbols (variable
 names, function names) originate from Surf desugaring and inherit
 Surf's no-hyphen rule by construction — there is no path by which a
-hyphenated user symbol can enter Deep today.
+hyphenated user symbol can enter Deep.
 
 The corresponding lint rule (§12) enforces the narrower invariant:
 any Deep `Symbol` that is not in the closed tag vocabulary of §1.4
@@ -180,6 +179,22 @@ reservation is introduced. The compiler-owned spelling is the published C ABI
 identity, not a renamed Chelis binding. Other backend-local user identifiers
 remain subject to their target language's identifier rules.
 
+### 1.8 Lanes
+
+A **lane** is one path by which the toolchain processes a program and
+produces its observable results. The execution lanes are the IR
+evaluator (`chelis eval`) and the compiled targets (`chelis build
+--target c`, `hip`, and `metal`). The specs also name narrower lanes for
+one route through a stage, such as the host-program lane or the
+entry-scoped lane of a compiled C artifact, and `chelis validate` is a
+syntax-grammar lane.
+
+Every lane owes the same observable results to the numbered specs: where
+a lane and a spec atom disagree, the lane has the bug. Lanes may differ
+only where an atom permits it, as the tolerance table of [05-OBS-3]
+does. `chelis lane-check` compares the evaluator lane against the
+compiled C lane.
+
 ---
 
 ## 2. Filesystem and manifest layer
@@ -200,8 +215,8 @@ Examples: `chelis-backend-c`, `chelis-cli`, `chelis-effects`,
 
 Rust standard hyphen→underscore coercion applies to library names:
 `chelis-python` (package) becomes `chelis_python` (lib symbol). This is
-a Rust language norm. See §11.2 for the orchestrator decision to keep
-this shoreline as documentation rather than rename.
+a Rust language norm. See §11.2 for the decision to keep this
+shoreline as documentation rather than rename.
 
 ### 2.3 `.rs` module files
 
@@ -285,16 +300,17 @@ exception list; every other script remains Python.
 
 ### 2.10 CI workflow filenames
 
-**Rule:** lowercase, no separator.
+**Rule:** lowercase kebab-case.
 
-Examples: `ci.yml`, `release.yml`, `nightly.yml`. Identical across all
-five ecosystem repos.
+Examples: `ci.yml`, `release.yml`, `heavy-e2e.yml`, `macos-nightly.yml`.
+A repository has as many workflows as its CI needs; each filename names
+what the workflow does.
 
 ### 2.11 Hidden config conventions
 
 | Path                       | Convention                                                  |
 |----------------------------|-------------------------------------------------------------|
-| `.github/workflows/*.yml`  | lowercase no-separator                                      |
+| `.github/workflows/*.yml`  | lowercase kebab-case (§2.10)                                |
 | `.claude/skills/<name>/`   | kebab-case                                                  |
 | `.claude/commands/*.md`    | kebab-case                                                  |
 | `.claude/skills/*/SKILL.md`| SCREAMING_SNAKE_CASE (literal filename, see §8.3)           |
@@ -339,7 +355,7 @@ multi-letter PascalCase name is a type or constructor, §3.1). The parser
 accepts the single-letter uppercase value binder directly; in
 value-*reference* position the name lexes as a constructor head and the
 resolver binds it to the in-scope value
-(`crates/chelis-types/src/infer.rs` resolves `var`/constructor heads by
+(`crates/chelis-types/src/infer/` resolves `var`/constructor heads by
 environment lookup, so an uppercase reference with a value binding in
 scope is a value, and an uppercase reference with no binding remains an
 unknown-constructor error).
@@ -528,9 +544,9 @@ substituted independently. The reef lockfile records it as
 supporting the C backend. Different artifact, different role.
 
 The ecosystem's other reef packages are **shells**: distributable
-libraries that build on `chelis-std`. The currently shipped shells
-are `nautilus`, `coral`, `shoals`, and `octant`. Designed but not
-yet shipped: `school`, `darwin`, `hull`, `hydrostatic`, `beacon`.
+libraries that build on `chelis-std`, such as `nautilus`, `coral`,
+`shoals`, and `octant`. The conformance tooling's registry
+(`crates/chelis-conformance`) names the shells it binds.
 
 ### 6.5 Module identity inside a reef package
 
@@ -614,7 +630,7 @@ The rule covers both directions:
   (rule: drop "helper" status) or a violation (rule: add the prefix).
 
 The prefix is a domain shorthand, not the full module name. `Nautilus.LinAlg`
-uses `la_*`; `Coral.Frame` uses no internal prefix today (its private
+uses `la_*`; `Coral.Frame` uses no internal prefix (its private
 helpers, where they exist, would use `frame_*` or similar). The lint
 flags inconsistency within a module: either all internal helpers have
 the prefix or none do.
@@ -773,9 +789,9 @@ def is_nan_col[n](f: Frame, name: string) -> tensor[n, bool] = ... // column var
 def is_nan_int[n](f: Frame, name: string) -> tensor[n, bool] = ...
 ```
 
-The historical Coral `*_int` family (`is_nan_int`, `any_nan_int`,
-`count_nan_int`, `fill_nan_int`, `drop_nan_int`) is renamed to the
-`*_col` form per this rule. The `_int` was extraneous: column dtype
+Under this rule the Coral `*_int` family (`is_nan_int`, `any_nan_int`,
+`count_nan_int`, `fill_nan_int`, `drop_nan_int`) takes the
+`*_col` form. The `_int` was extraneous: column dtype
 is inferred when the column is fetched.
 
 #### Parser/converter idiom (allowed)
@@ -835,9 +851,7 @@ Examples: `dtype_semantics.md`, `chelis_canonical_reference.md`,
 `pre_release_validation.md`, `grad_eval_host_runtime.md`,
 `runtime_abi.md` (shell repo implementation plan).
 
-The historical kebab-case minority files (`grad-eval-host-runtime.md`,
-`host-emit-hashmap-iteration-nondeterminism.md`, etc.) rename to
-snake_case.
+A kebab-case filename in these directories is a violation.
 
 ### 8.3 Per-shell `docs/`
 
@@ -877,7 +891,7 @@ A narrative-docs filename may use kebab-case when its filename stem
 matches the `name` of a Cargo package in the workspace. This carve-out
 exists because Cargo package names are kebab-case by convention
 (`c-earchin`, `chelis-runtime`, `chelis-cli`), and a documentation file
-named for a specific Cargo crate (`docs/shells/c-earchin.md`) reads
+named for a specific Cargo crate (for example `chelis-runtime.md`) reads
 more naturally with the package's own name shape than with a forced
 snake-case rewrite.
 
@@ -897,14 +911,13 @@ the workspace for `Cargo.toml` files and reading their `[package].name`.
 **Rule:** snake_case with version markers in underscored form.
 
 ```
-red_team_v0_4_0_pre_tag.md
-red_team_o3.md
-red_team_o4.md
-red_team_pre_v0_1_0.md
+release_notes_v0_4_0.md
+audit_v0_4_0_pre_tag.md
+audit_pre_v0_1_0.md
 ```
 
-The historical kebab+version style (`red-team-v0.2.0-final.md`)
-renames forward.
+A dotted or kebab-case version marker (`audit-v0.2.0-final.md`) is a
+violation.
 
 ### 8.5 mdBook book chapters (deliberate exception)
 
@@ -930,11 +943,11 @@ monte-carlo.md
 The discriminator is path-based, not `book.toml`-anchored. A
 `book.toml` sitting in `docs/` (or anywhere else in the ancestor
 chain) does not retroactively promote sibling `docs/*.md` files to
-§8.5. This is the issue #190 fix: previously the rule walked ancestors
-looking for `book.toml`, which made the verdict for every `docs/*.md`
-depend on unrelated filesystem state (adding or removing one
-`book.toml` flipped every narrative doc between accepted and
-rejected). Path-based opt-in keeps each verdict local to the file.
+§8.5. Walking ancestors for `book.toml` would make the verdict for
+every `docs/*.md` depend on unrelated filesystem state (adding or
+removing one `book.toml` would flip every narrative doc between
+accepted and rejected). Path-based opt-in keeps each verdict local to
+the file.
 
 Shells that want mdBook content put it under `book/` or `docs/book/`.
 This is the chelis-ecosystem convention; non-`book/` mdBook layouts
@@ -972,11 +985,10 @@ when cleaning existing text:
 
 The blocking `no-em-dash-in-public-strings` rule enforces this for
 Surf, Deep, Rust, and Python string literals that are likely to reach
-users as diagnostics, log messages, or public output. The v1 fixer is
+users as diagnostics, log messages, or public output. The fixer is
 deliberately narrow: `a — b` becomes `a. B`; paired parenthetical
 dashes become commas; whitespace-asymmetric cases require manual
-review. Markdown prose enforcement is queued until the active doc
-corpus is cleaned. Do not add lint exceptions merely to preserve an em
+review. Do not add lint exceptions merely to preserve an em
 dash in current-state docs. This rule does not prohibit syntax or
 notation that is semantically meaningful in a spec, such as `->`, `|>`,
 section references, or mathematical symbols.
@@ -1014,14 +1026,8 @@ docs(spec): define declarative naming
 
 ### 9.2 CI workflows
 
-**Rule:** Three workflow files per repo, identical names across all
-five repos.
-
-```
-.github/workflows/ci.yml
-.github/workflows/release.yml
-.github/workflows/nightly.yml
-```
+**Rule:** `ci.yml` holds the per-change checks and `release.yml` builds
+release artifacts. Other workflows follow the filename rule of §2.10.
 
 ---
 
@@ -1065,82 +1071,62 @@ snapshot test files across the ecosystem.
 
 ## 11. Resolved decisions
 
-These were open architectural questions during the May 2026 ecosystem
-naming pass. Each is now closed with the orchestrator's resolution
-recorded. The lint enforces the resolved rule.
+Each of these naming questions had more than one plausible answer.
+This section records the chosen rule and why. The lint enforces the
+chosen rule.
 
-### 11.1 Surf hyphen support — resolved: keep Deep grammar; document asymmetry as intentional
+### 11.1 Surf hyphens: the Deep grammar keeps hyphens, and the asymmetry is intentional
 
-**Status:** closed.
-
-The original framing surfaced this as a "latent round-trip risk":
 Deep's `Symbol` lexer accepts hyphens (`[A-Za-z_][A-Za-z0-9_-]*`);
-Surf does not. A first-pass plan proposed tightening the Deep lexer
-to reject hyphens.
+Surf does not. The asymmetry is by design.
 
-That plan was based on incorrect facts. The Deep tag vocabulary
-(§1.4) deliberately uses hyphens as the compound separator: `t-fn`,
-`t-prim`, `pat-ctor`, `pat-var`, `d-name`, `d-var`, `d-lit`. The
-hardcoded list lives in `crates/chelis-deep/src/validate.rs`; the
-printer at `crates/chelis-deep/src/printer.rs` emits these hyphenated
-forms; checked-in `.dp` fixtures depend on parsing them. Closing the
-loose side of the asymmetry would have required renaming the entire
-compound-tag vocabulary and breaking every checked-in `.dp` fixture
-plus the round-trip lexer test that explicitly asserts `x-y` lexes
-as a single Symbol.
+The Deep tag vocabulary (§1.4) deliberately uses hyphens as the
+compound separator: `t-fn`, `t-prim`, `pat-ctor`, `pat-var`, `d-name`,
+`d-var`, `d-lit`. The hardcoded list lives in
+`crates/chelis-deep/src/validate.rs`; the printer at
+`crates/chelis-deep/src/printer.rs` emits these hyphenated forms;
+checked-in `.dp` fixtures depend on parsing them, and a round-trip lexer
+test asserts that `x-y` lexes as a single Symbol. Tightening the Deep
+lexer to reject hyphens would require renaming the entire compound-tag
+vocabulary.
 
-The actual resolution: **the Surf-vs-Deep hyphen asymmetry is by
-design and documented as such.** Surf is the human authoring surface
-where operator ambiguity rules out hyphens. Deep is the compiler IR
-where compound tag names follow a deliberate naming convention that
-gives the closed vocabulary its visual structure. User-defined Deep
-symbols originate from Surf desugaring and inherit Surf's no-hyphen
-rule by construction; there is no path by which a hyphenated user
-symbol can enter Deep today.
+Surf is the human authoring surface where operator ambiguity rules out
+hyphens. Deep is the compiler IR where compound tag names follow a
+deliberate naming convention that gives the closed vocabulary its visual
+structure. User-defined Deep symbols originate from Surf desugaring and
+inherit Surf's no-hyphen rule by construction; there is no path by which
+a hyphenated user symbol can enter Deep.
 
-The lint rule (§12) captures the actual narrower invariant: any Deep
-`Symbol` that is not in the closed tag vocabulary of §1.4 must
-satisfy the Surf identifier charset `[A-Za-z_][A-Za-z0-9_]*`. This
-rule fires if a future Deep emitter accidentally produces a
-hyphenated user symbol while leaving the legitimate compound-tag use
-untouched.
+The lint rule (§12) captures the narrower invariant: any Deep `Symbol`
+that is not in the closed tag vocabulary of §1.4 must satisfy the Surf
+identifier charset `[A-Za-z_][A-Za-z0-9_]*`. This rule fires if a Deep
+emitter produces a hyphenated user symbol while leaving the legitimate
+compound-tag use untouched.
 
-The three candidate resolutions considered, for historical
-visibility:
+The alternatives considered and rejected:
 
 - (a) Allow hyphens in Surf with mandatory whitespace around `-`.
-  Breaking parse change; rejected.
-- (b) Allow hyphens in Surf in restricted positions. Complex;
-  rejected.
-- (c) Tighten the Deep lexer to reject hyphens. Initially preferred
-  on the assumption that no hyphenated Deep symbols existed. Rejected
-  once evidence showed the entire compound-tag vocabulary uses
-  hyphens.
-- (d, chosen) Document the asymmetry as intentional structure; keep
-  both lexers as-is; rely on the user-symbol-charset lint rule.
+  Breaking parse change.
+- (b) Allow hyphens in Surf in restricted positions. Complex.
+- (c) Tighten the Deep lexer to reject hyphens. Breaks the compound-tag
+  vocabulary.
 
-### 11.2 Rust hyphen→underscore lib name — resolved: documented shoreline crossing
-
-**Status:** closed.
+### 11.2 Rust hyphen→underscore lib name: a documented shoreline crossing
 
 `chelis-python` package name maps to `chelis_python` lib name per
-Rust standard hyphen→underscore coercion. The orchestrator
-resolution: **document this as a known shoreline crossing imposed
-by Rust language norms; no rename.** §2.2 records the rule;
-the implicit hyphen→underscore in lib symbols is the Rust
-standard, not a project-specific deviation.
+Rust standard hyphen→underscore coercion. This is a known shoreline
+crossing imposed by Rust language norms; nothing is renamed. §2.2
+records the rule; the implicit hyphen→underscore in lib symbols is the
+Rust standard, not a project-specific deviation.
 
-The two alternatives considered:
+The alternatives considered and rejected:
 
-- Rename the package name to `chelis_python` so package and lib
-  align (kebab → snake migration). Would have set precedent for the
-  kebab convention being violated for Rust packages. Rejected.
-- Rename the lib name to break the Rust standard (not actually
-  possible without hacks). Rejected.
+- Rename the package to `chelis_python` so package and lib align.
+  This would violate the kebab-case convention for Rust packages.
+- Rename the lib to break the Rust standard (not possible without
+  hacks).
 
-### 11.3 Allow vs keep semantics — resolved: distinct lint meanings
-
-**Status:** closed.
+### 11.3 Allow vs keep: distinct lint meanings
 
 The Surf/Deep lint cleanup uses two different terms intentionally:
 
@@ -1184,8 +1170,8 @@ explicitly waived in the style guide (e.g., the mdBook exception in
 §8.5).
 
 The lint is the persistent artifact: it prevents drift after a
-cleanup pass. Without the lint, fixing today's outliers does not
-prevent tomorrow's. CI invokes it directly via:
+cleanup pass. Without the lint, fixing existing outliers does not
+prevent new ones. CI invokes it directly via:
 
 ```
 chelis lint --check
@@ -1508,7 +1494,7 @@ the rule cannot know the length.
 
 ### 12.4 Future rule queue
 
-The following rules are intentionally queued, not currently part of
+The following rules are intentionally queued, not part of
 the blocking registry:
 
 - Markdown prose punctuation: extend `no-em-dash-in-public-strings`
@@ -1562,6 +1548,6 @@ this requirement, whatever it reports.
   identifier case.
 - `crates/chelis-backend-c/src/emit.rs`: backend symbol emission.
 - `crates/chelis-lint/`: lint implementation.
-- `docs/archive/snapshots/ecosystem_naming_snapshot.md`: empirical snapshot of the
-  May 2026 ecosystem state and the cleanup inventory.
+- `docs/archive/snapshots/ecosystem_naming_snapshot.md`: historical snapshot of the
+  ecosystem's naming state and the cleanup inventory that preceded these rules.
 - the `example-corpus` skill (`agent-skills/example-corpus/SKILL.md`) §Writing Surf: Surf code-style guidance.

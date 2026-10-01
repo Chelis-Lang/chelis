@@ -3,6 +3,9 @@
 **Scope:** ADTs, Hindley-Milner inference, numeric precision types, named tensor
 dimensions, fitness scoring, annotated checked Deep, effects, and linearity.
 
+**Terminology:** a *lane* is one execution path, such as the evaluator or a compiled
+target, as defined in [spec/01 §1.8](01-nomenclature.md#18-lanes).
+
 ---
 
 ## 0. Checked Deep Contract
@@ -690,7 +693,7 @@ checker.
 
 **Gating.** `chelis check` is a scorer-with-exit-code: for a file target it
 always reports a fitness score and the full error list, and its exit code
-mirrors that list (`0` iff empty, non-zero otherwise; Issue #207). A directory
+mirrors that list (`0` iff empty, non-zero otherwise). A directory
 target reports one score per checked file inside the envelope of §6.4
 § Directory mode, and [04-FIT-25] states its exit rule in the same terms.
 A declaration error such

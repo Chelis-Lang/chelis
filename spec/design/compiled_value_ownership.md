@@ -1130,7 +1130,7 @@ Phase 3 oracle; neither issue closure nor Phase 3 completion is authorized by
 that implementation merge. The manually dispatched `ownership-hip.yml`
 workflow runs this unchanged oracle and uploads its log and commit receipt.
 It requires a separately registered AMD runner; see
-[`docs/local_hip_environment.md`](../../docs/local_hip_environment.md#ownership-phase-3-in-ci).
+[`docs/local_hip_environment.md`](../../docs/local_hip_environment.md#6-ownership-hardware-gate-in-ci).
 
 **Not this phase:** a backend-specific escape hatch or a caller-buffer copy-on-
 write compatibility mode.

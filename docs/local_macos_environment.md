@@ -1,20 +1,19 @@
 # Local macOS Environment
 
-This repository is also developed from a macOS (darwin-arm64) workstation. The
-default toolchain works without special setup, but there is one recurring local
-failure mode worth a runbook: macOS first-exec assessment (`syspolicyd` /
-Gatekeeper) can degrade and make **freshly linked binaries hang or stall on
-their first exec**. Every `cargo build` produces fresh binaries, so this
-poisons exactly the edit-build-test loop. Two variants have been observed
-(chelis#356 tracks the investigation):
+On a macOS (darwin-arm64) workstation the default toolchain works without
+special setup, but one recurring local failure mode needs a runbook: macOS
+first-exec assessment (`syspolicyd` / Gatekeeper) can degrade and make
+**freshly linked binaries hang or stall on their first exec**. Every
+`cargo build` produces fresh binaries, so this poisons exactly the
+edit-build-test loop. It has two variants:
 
 - **Variant A - hard wedge**: an error loop in `syspolicyd`; first execs hang
   indefinitely.
 - **Variant B - silent slow assessment**: no error log lines at all, but each
-  fresh binary waits minutes before being admitted. Volume-induced: it has
-  been reproduced on a 28-minute-old boot, triggered by a mass first-exec
-  burst (workspace `clippy --all-targets` + `cargo nextest run --workspace`,
-  ~130 fresh test binaries). **A reboot is a reprieve, not a fix.**
+  fresh binary waits minutes before being admitted. It is volume-induced: a
+  mass first-exec burst (workspace `clippy --all-targets` + `cargo nextest run
+  --workspace`, ~130 fresh test binaries) can trigger it shortly after a fresh
+  boot. **A reboot is a reprieve, not a fix.**
 
 ## Quick reference (is first-exec wedged right now?)
 
@@ -39,9 +38,9 @@ binaries slowly", Variant B; first exec succeeded but took longer than
 mitigations below and use CI as the oracle in the meantime.
 
 A passing probe is a point-in-time result, not a session clearance:
-degradation is volume-induced and can begin under a later build burst
-(observed: probe at 377 ms immediately post-boot; minutes-long stalls within
-the hour once a workspace build mass-launched fresh binaries).
+degradation is volume-induced and can begin under a later build burst (a
+probe can pass right after boot, and minutes-long stalls can begin within the
+hour once a workspace build mass-launches fresh binaries).
 
 The sections below explain the symptom, the diagnosis, and the mitigations;
 read them when the loop looks wedged, not on the happy path.
@@ -67,12 +66,10 @@ passes.
 
 ## Domain-oracle child timeout
 
-The repository-owned cause of chelis#1429 was path amplification before the
-compiler child reached its semantic work: `chelis check <fixture>` ran advisory
-lint over the fixture's parent directory. Oracle fixtures live in the shared
-system temporary directory, so one check could recursively inspect unrelated
-temporary trees. The check path now gives advisory lint the explicit input file
-as both its traversal scope and fixability-probe target.
+Oracle fixtures live in the shared system temporary directory. `chelis check
+<fixture>` gives advisory lint the explicit input file as both its traversal
+scope and fixability-probe target, so a check never recursively inspects
+unrelated temporary trees beside the fixture.
 
 The unrepresentable-domain oracle runs each `chelis check` and `chelis
 validate --deep` fixture as a bounded child. A timeout is not a semantic
@@ -97,10 +94,9 @@ preflight, and the orphan reaper must all agree.
 - Freshly linked binaries hang in `_dyld_start` on their **first** exec, for
   minutes or indefinitely. The process starts but never reaches `main`.
 - The effect is worst under parallel first-exec bursts — e.g. `cargo nextest`
-  listing ~30 newly built test binaries at once. Suites that could not
-  complete locally when this struck: the workspace-level
-  `cargo nextest run -p chelis-compiler-api` and the full `-p chelis-cli`
-  runs.
+  listing ~30 newly built test binaries at once. Suites such as
+  `cargo nextest run -p chelis-compiler-api` and full `-p chelis-cli` runs
+  may not complete locally while it is active.
 - The edit-build-test loop appears wedged: every rebuild produces fresh
   binaries, and each fresh binary pays the hang again.
 - Already-assessed binaries run fine. Re-running a binary that has executed
@@ -124,7 +120,6 @@ Three checks distinguish this from a code or harness regression:
    dispatch_mig_server returned 268435459
    ```
 
-   Observed against `syspolicyd` PID 289 on darwin-arm64, 2026-06-10.
    **Variant B logs nothing** - a quiet log does not rule this out.
 
 2. Sample a hung process:
@@ -145,18 +140,17 @@ Three checks distinguish this from a code or harness regression:
    ```
 
    Stalled binaries accumulate essentially zero CPU while `syspolicyd` runs
-   sustained 50-80% CPU. Measured 2026-06-11: an 84 MB Rust test binary took
-   15-21 minutes to admit; small clang-compiled C binaries cleared in ~0.2 s
-   (admission cost correlates with binary size); the assessment queue kept
-   draining (syspolicyd busy) long after all exec load stopped.
+   sustained 50-80% CPU. Admission cost grows with binary size: a large Rust
+   test binary can wait many minutes while a small C binary clears in well
+   under a second, and the assessment queue keeps draining (`syspolicyd` busy)
+   long after all exec load stops.
 
 ## Mitigations
 
 In order of preference:
 
-1. **Wait.** The loop has been observed to self-clear; in the one measured
-   incident it cleared after ~25 minutes, then returned under load. If the
-   probe starts passing again, the window is open.
+1. **Wait.** The loop can self-clear after tens of minutes and return under
+   load. If the probe starts passing again, the window is open.
 2. **Serialize first-execs.** The wedge is load-sensitive. Run suites one at a
    time and pass `--test-threads=1` so only one fresh binary is being assessed
    at any moment:
@@ -166,15 +160,14 @@ In order of preference:
    ```
 
 3. **Avoid mass first-exec bursts.** Do not run full-workspace nextest
-   locally during heavy agent sessions on this machine; the Mac nightly CI
+   locally during heavy build sessions; the Mac nightly CI
    job is the workspace oracle (next section). Single-binary work
    (`chelis` CLI on an already-assessed build, clippy, fmt, lint) is
    unaffected.
 4. **Reboot.** Clears the current backlog, but is a reprieve, not a fix:
    Variant B has been reproduced within an hour of a fresh boot under
    first-exec volume.
-5. **Durable fix (VERIFIED on this workstation 2026-06-11, chelis#356):
-   Developer Tools exemption.** macOS exempts processes spawned by apps listed under
+5. **Durable fix: Developer Tools exemption.** macOS exempts processes spawned by apps listed under
    System Settings > Privacy & Security > Developer Tools from the
    first-run malware scan. The app that needs the exemption is the
    RESPONSIBLE APP for the session's processes - NOT necessarily
@@ -191,21 +184,17 @@ In order of preference:
    and does not help there). After toggling, FULLY quit and relaunch the
    responsible app (Cmd+Q; a new terminal tab is not enough). Before
    toggling, record whether the app was ALREADY exempted - if degradation
-   occurred while exempted, the fix is refuted for that app. Verification
-   protocol once enabled: re-check the ancestry, run the preflight probe,
+   occurred while exempted, the exemption does not fix it for that app. To
+   verify once enabled: re-check the ancestry, run the preflight probe,
    then a deliberate burst (`cargo nextest run -p chelis-compiler-api`
-   after a `touch` rebuild) and compare admission behavior against the
-   chelis#356 baselines; report on chelis#356.
+   after a `touch` rebuild).
 
-   Verification result (2026-06-11, VS Code exempted + fully relaunched):
-   a touch-rebuild of chelis-compiler-api followed by its suite admitted
-   ~25 fresh test binaries and ran 264 tests in 1.05 s (vs 223 s wall for
-   ONE binary the night before); the full-workspace burst (~130 fresh
-   binaries, the canonical degradation trigger) ran 1,141+ tests with
-   zero admission stalls while `syspolicyd` fell from 86% to ~8% CPU
-   during the mass-exec phase. Heavyweight end-to-end tests were slow
-   under CPU contention but always progressing (real accumulated CPU,
-   never parked in `_dyld_start`).
+   With the responsible app exempted and relaunched, a full-workspace burst
+   (~130 fresh binaries, the usual degradation trigger) admits every fresh
+   binary without stalls and `syspolicyd` CPU stays low during the mass-exec
+   phase. Heavyweight end-to-end tests can still be slow under CPU contention,
+   but they keep progressing (real accumulated CPU, never parked in
+   `_dyld_start`).
 
    Security trade-off of the exemption (understand before enabling):
    processes spawned by the exempted apps skip the Gatekeeper/XProtect
@@ -222,13 +211,12 @@ In order of preference:
    recommended on a general-purpose machine. The exemption is
    per-responsible-app and machine-local: nothing in this repo can
    enforce or verify it, so the volume-reduction practice (CI owns the
-   workspace suite; see chelis#360) remains the primary discipline. The
-   division of labor, post-verification: single binaries on a healthy
-   queue always admitted in milliseconds, and the inner loop only ever
-   suffered as collateral damage of mass bursts - so CI-first removes the
-   common trigger, while the exemption removes the failure mode
-   (degradation caused by anything else on the machine, or by a
-   discipline slip, no longer stalls this workflow).
+   workspace suite) remains the primary discipline. The division of labor:
+   single binaries on a healthy queue are admitted in milliseconds, and the
+   inner loop suffers only as collateral damage of mass bursts - so CI-first
+   removes the common trigger, while the exemption removes the failure mode
+   (degradation caused by anything else on the machine, or by a discipline
+   slip, does not stall this workflow).
 
 ## CI Is the Fallback Oracle
 
@@ -241,7 +229,7 @@ aggregate requires both shards and that job, and serves as the macOS signal in
 `.github/workflows/macos-nightly.yml` (daily 04:17 UTC and
 manual dispatch only). Push the branch and dispatch this workflow on that branch
 for a Mac validation result; ordinary PR CI does not run it. Note in
-the PR or phase docs that local validation was blocked by this failure mode.
+the PR that local validation was blocked by this failure mode.
 
 ## Gate Preflight
 

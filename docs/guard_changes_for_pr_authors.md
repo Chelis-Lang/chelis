@@ -232,7 +232,7 @@ expect an error for a rejection canary, or compare the operation mapping with
 checks directly on the call; routing through a local/helper needs a reviewed
 extension to the accepted syntax. The check does not prove arbitrary execution
 or complete test semantics, so retain the behavioral assertions and full owning
-acceptance checks. Ordinary body edits no longer require checksum updates.
+acceptance checks. Ordinary body edits do not require checksum updates.
 
 ## Updating an inventory
 
@@ -256,7 +256,7 @@ unclassified export does not authorize it.
 
 ## Changing a protected rule or test
 
-Protected rules and contract regions no longer need checksum updates. Review
+Protected rules and contract regions do not need checksum updates. Review
 the underlying change, its consumers, and its positive and negative behavior
 evidence, then supply the exact acknowledgements below. Required identities,
 region boundaries, literal clauses and semantic checks remain blocking; an
@@ -293,7 +293,8 @@ The lightweight enforcing check accepts the saved PR body:
 .venv/bin/python scripts/phase4b_change_report.py --base origin/main --output target/phase4b-contract-changes.json --require-acknowledgement --acknowledgements-file target/pr-body.md
 ```
 
-The full Phase 4B oracle remains an independent compiler-contract check; an
+The full frozen-contract oracle (`scripts/dtype_phase4b_oracle.py`) remains an
+independent compiler-contract check; an
 acknowledgement cannot replace it. CI supplies its own validated PR comparison.
 Do not use `--pr-head` on an ordinary local branch.
 
@@ -346,11 +347,11 @@ After changing a production `unimplemented_rejection!` citation, regenerate:
 
 Review that the issue is relevant to the missing implementation. PR validation
 is split across existing owners: `script-unit` checks privacy and source-usage
-construction, while the always-running Docs Phase 4B oracle freshly derives
+construction, while the always-running Phase 4B freeze step (`Validate the chelis#729 Phase 4B freeze` in CI) freshly derives
 compiler closure and generated-registry agreement. Neither queries GitHub. The
 scheduled canary checks every source-derived identity and rejects closed,
 missing, or pull-request references; run it manually as well before release or
-relevant red-team claims. Do not re-cite unrelated code merely to quiet that
+relevant review claims. Do not re-cite unrelated code merely to quiet that
 report.
 
 ## Changing the guarded Nix workflow

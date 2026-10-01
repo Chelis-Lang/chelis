@@ -388,8 +388,8 @@ enum has the same constructor with no continuous cotangent payload. For a
 multi-constructor sum type, the gradient uses the constructor selected by the
 primal argument.
 
-The ADT argument may appear ALONGSIDE plain tensor/scalar arguments — the
-chelis#520 closing bar `grad(model_forward, wrt=params)(x, params)`. The
+The ADT argument may appear ALONGSIDE plain tensor/scalar arguments, as in
+`grad(model_forward, wrt=params)(x, params)`. The
 result is the per-target tuple, whose ADT slot is the field-wise gradient
 struct and whose tensor slots are bare tensor gradients, exactly as the
 multi-parameter tensor contract in §2.1; when `wrt` narrows to a single
@@ -1101,4 +1101,4 @@ Every optimization pass must preserve the semantics of the DAG. Formally:
 For all inputs x: eval(optimize(G), x) = eval(G, x)
 ```
 
-where `eval(G, x)` evaluates the DAG `G` on input `x`. The compiler's test suite verifies this property for each pass using property-based testing with random DAGs and inputs.
+where `eval(G, x)` evaluates the DAG `G` on input `x`.

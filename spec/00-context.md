@@ -91,7 +91,9 @@ This regularity is a design feature.
 Agents do not need to infer whether a node head is structural or user-defined.
 
 Surf desugars losslessly to Deep.
-Deep decompiles back to Surf on a best-effort basis.
+Deep decompiles back to formatter-canonical Surf, apart from the fail-closed
+resugaring exceptions in `02-surf-syntax.md`; a best-effort verbose form exists for
+debugging (`09-tide.md` §4).
 The compiler treats Deep as the source of truth.
 
 ## 7. Type System Scope
@@ -126,7 +128,8 @@ They are compiler transforms, not ordinary library conveniences.
 ## 9. Backends and Execution
 
 The reference backend is C with BLAS and OpenMP.
-GPU compilation uses HIP rather than separate CUDA and OpenCL backends.
+GPU compilation is source-to-source: HIP for AMD GPUs and Metal for Apple GPUs, rather
+than separate CUDA and OpenCL backends.
 StableHLO and FX are integration layers rather than replacements.
 
 Interactive execution uses the IR evaluator. Cached C artifacts, persistent compiler
@@ -155,9 +158,13 @@ Use the spec in this order:
 4. `03-deep-syntax.md`
 5. `04-type-system.md`
 6. `05-risc-primitives.md`
-7. `08-backends.md`
-8. `09-tide.md`
-9. `12-roadmap.md`
+7. `06-transformations.md`
+8. `07-concurrency.md`
+9. `08-backends.md`
+10. `09-tide.md`
+11. `10-serialization.md`
+12. `11-ffi.md`
+13. `12-roadmap.md`
 
 For project-level decisions rather than language semantics, read
 `spec/design/chelis_canonical_reference.md`.

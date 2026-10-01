@@ -13,7 +13,7 @@
 //! Linux unchanged) and mirrors HIP exactly.
 //!
 //! See `spec/design/chelis_metal_backend_plan.md` and
-//! `spec/08-backends.md` §4 (Phase M).
+//! `spec/08-backends.md` §4.
 
 /// Primitive types the Metal backend's tensor-DAG path can realize.
 /// Declared from Metal hardware spec (Apple Silicon): no f64 support.
