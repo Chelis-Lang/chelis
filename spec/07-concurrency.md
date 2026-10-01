@@ -17,7 +17,7 @@ The semantics of `par` do not require a particular scheduler. A conforming
 implementation may execute it sequentially or in parallel, but observable results must
 be identical.
 
-(`par` is not fully implemented and is currently rejected by the checker; chelis#2503.)
+(`par` is not fully implemented; see chelis#2503.)
 
 ## 3. Backend Mapping
 

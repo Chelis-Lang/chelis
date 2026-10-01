@@ -38,7 +38,7 @@ without a `copy()`. The runtime backings (`chelis_list_len`, `chelis_list_index`
 `const` container pointer and never free it — `index` retains the element it returns — so
 the caller still owns the container afterwards. A genuine consume of the container (an
 explicit `drop`, or moving it into an owned parameter) still makes a later `len` / `index`
-read a use-after-consume (chelis#527). As with tensors, the borrow is auto-applied to the
+read a use-after-consume. As with tensors, the borrow is auto-applied to the
 owned argument; writing the container query as `len(&xs)` is not a supported surface form.
 
 ### 1.4 Two Tiers
@@ -469,7 +469,7 @@ dimension at position `axis`", the type checker cannot determine which
 dimension is dropped from a runtime integer value. A reduction whose axis is
 a runtime expression (for example a function-parameter `i32`) is rejected
 at the reduction call site with a diagnostic naming the constant-or-named-axis
-requirement, rather than leaving the output shape unresolved (chelis#259).
+requirement, rather than leaving the output shape unresolved.
 The same constraint and diagnostic apply to `expand`'s broadcast axis and
 to `insert`'s new-axis position.
 
@@ -830,7 +830,7 @@ literals — named-dimension targets read as `InputAxis` and literal targets
 over runtime-sized inputs included, not only node-valued targets — and
 same-shape elementwise ops guard
 operand-shape agreement at equal rank whenever a non-static extent is
-involved (chelis#664; rank-0 scalar operands are the backend's broadcast
+involved (rank-0 scalar operands are the backend's broadcast
 idiom and are exempt). A dim whose extent
 is computed by the op at run time is an *op-declared* symbolic dim bound from
 the executed [05-DIM-1] i64 value; a second site
@@ -891,7 +891,7 @@ does not enter (spec/06 §5.2) is not part of the evaluated program, so neither
 its loads nor its potentially trapping nodes create top-level input
 requirements. A load that is outside the value-dependency slice
 but supplies a symbolic extent to a live node remains a required shape
-dependency and fails closed when its input is absent (chelis#351).
+dependency and fails closed when its input is absent.
 
 #### 2.5.1 Shape query (`shape`)
 
@@ -4314,7 +4314,7 @@ count allowlist is supporting evidence only and cannot satisfy [05-UNS-1].
 > **[05-OBS-3]** Cross-lane VALUE differences are permitted only for the
 > ops listed in the per-op tolerance table below, within the listed bound;
 > `sqrt`
-> SHALL be correctly rounded (bound zero, per chelis#719). Formatting
+> SHALL be correctly rounded (bound zero). Formatting
 > differences are never within tolerance.
 
 The following table is normative. Implementations SHALL mirror it through a

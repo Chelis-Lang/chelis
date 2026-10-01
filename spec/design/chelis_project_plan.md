@@ -220,7 +220,7 @@ parallel with the type-system track once 2e has enough compiler API surface.
 | Sub-phase | Doc | Summary |
 |---|---|---|
 | Phase 1 dependencies | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Symbolic dimensions and dotted Deep round-tripping |
-| 2a: Algebraic Effects | [chelis_phase2_plan.md](chelis_phase2_plan.md) | shipped subset: `Random` / `Resource(D)` boundary effects, `Diff` as capability, `Accum` internal-only |
+| 2a: Algebraic Effects | [chelis_phase2_plan.md](chelis_phase2_plan.md) | shipped subset: `Resource(D)` boundary effect, `Diff` as capability, `Accum` internal-only; randomness is not an effect (explicit keys, `spec/04-type-system.md` §7.1) |
 | 2b: Linear Types | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Lightweight uniqueness, borrowing, explicit `copy`, safe buffer reuse |
 | 2c: Macro System | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Hygienic expansion before all LLM-facing operations, provenance metadata |
 | 2d: `vmap` | [chelis_phase2_plan.md](chelis_phase2_plan.md) | DAG rewrite for automatic vectorization with correct `grad` interaction |
@@ -232,7 +232,9 @@ parallel with the type-system track once 2e has enough compiler API surface.
 ### 2a: Algebraic Effects
 
 - `Diff` is a compiler capability, not a boundary effect
-- `Random` and `Resource(Device)` are the user-visible Phase 2a boundary effects
+- `Resource(Device)` is the user-visible Phase 2a boundary effect; the original
+  `Random` effect and its `with seed` handler were replaced by explicit keys, so
+  randomness is not an effect (`spec/04-type-system.md` §7.1)
 - `Accum` is the design hook for parallelism-preserving gradient accumulation, but it
   remains internal-only in the shipped subset
 - implementation split: effect types live in `chelis-types`; inference/checking lives in

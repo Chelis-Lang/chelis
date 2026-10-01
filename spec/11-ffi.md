@@ -80,7 +80,7 @@ one live storage owner for the consumer's entire use. A current-device
 zero-copy implementation does not promise support for every device or copy
 request, and the metadata contract does not mandate an implementation strategy.
 
-(The validated DLPack wrapper is not fully implemented; see chelis#1345.)
+(The validated DLPack wrapper is not fully implemented; see chelis#893.)
 
 ### 1.4 Compiled artifact entry and resolution
 
@@ -163,11 +163,10 @@ entry contracts:
   `entry_name`, an ambiguous default (multiple tensor defs, none named `main`),
   a program with top-level (non-`def`) value bindings, or a selected entry
   whose checked body cannot lower to one standalone tensor result is a loud
-  error; this surface never returns metadata merged from every def (the
-  chelis#817 defect class)
+  error; this surface never returns metadata merged from every def
   and never silently ignores the requested entry.
 - **The C-source surface** (`compile`, backing tide's `/compile`, cove's live
-  pane, and Python's `chelis.compile()`) keeps the legacy whole-program
+  pane, and Python's `chelis.compile()`) keeps the whole-program
   contract: with no unambiguous entry it emits the whole program, and an
   `entry_name` naming no def is the sanitized OUTPUT SYMBOL, not a selector
   error. When the entry lane does claim a program (an unambiguous tensor
@@ -178,9 +177,9 @@ emitted C symbol is decoupled from the def name: the artifact always emits the
 fixed symbol `chelis_main`. Because each artifact is scoped to exactly one entry
 def there is exactly one emitted entry per translation unit, so a single fixed
 symbol suffices and is collision-free by construction — a def literally named
-`main` no longer redefines the reserved process entry
+`main` does not redefine the reserved process entry
 `int main(int, char**, char**)`, a def named after a libc symbol (`free`,
-`malloc`) no longer collides at link time, and neither does a def named after a
+`malloc`) does not collide at link time, and neither does a def named after a
 runtime symbol in the `chelis_*` namespace (`chelis_runtime.h` declares
 `chelis_free`, `chelis_tuple_get`, …). The artifact manifest's `host_entry_name`
 carries `chelis_main` so the loader (`dlsym`) and generated header stay consistent.
@@ -194,8 +193,8 @@ C-source surface's whole-program fallback when the entry lane declines —
 empty name gains a `chelis_` prefix. Any other name passes through unchanged, so
 these paths guard neither libc nor the runtime's own `chelis_*` namespace: a
 single-def pure program whose def is named `free` still emits `void free(...)`,
-and an `entry_name` of `chelis_free` is emitted verbatim. Those are pre-existing
-gaps of the legacy symbol mapping, accepted on the C-source surface where the
+and an `entry_name` of `chelis_free` is emitted verbatim. Those gaps of the
+sanitizing symbol mapping are accepted on the C-source surface, where the
 caller owns the symbol choice; the strict callable surface is immune because it
 always emits `chelis_main`.
 

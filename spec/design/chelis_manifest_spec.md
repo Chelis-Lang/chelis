@@ -1,5 +1,8 @@
 # `chelis manifest` Specification
 
+**Status:** Unimplemented design. The `chelis` CLI has no `manifest` subcommand; this
+document describes the intended command and its schema, neither of which exists yet.
+
 ## Purpose
 
 `chelis manifest` produces a machine-readable reproducibility certificate for a Chelis program. The certificate documents every random operation, the seed its key derives from, and the static guarantee that the program is reproducible given the same inputs and seeds.
@@ -12,7 +15,7 @@ The compile-time guarantee already exists: every random primitive takes an expli
 - Compiler rejection of a second use of a key: keys are affine.
 - `key_from_seed(seed)`: the one way a seed becomes a key.
 
-What's missing: the CLI tool that emits the manifest artifact.
+What's missing: the CLI command that emits the manifest artifact.
 
 ## CLI Surface
 
