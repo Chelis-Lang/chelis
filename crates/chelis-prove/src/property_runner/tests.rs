@@ -1371,3 +1371,33 @@ fn producer_property_marker_has_no_discovery_authority() {
         run_deep_source_properties(source, &PropertyRunOptions::default()).unwrap();
     assert!(outcomes.is_empty(), "{outcomes:?}");
 }
+
+/// The Beacon route reads a pipe as the scalar bridge only when its last stage
+/// is the bare name `tensor_to_scalar`. A pipe that ends anywhere else, or in
+/// the zero-argument call `tensor_to_scalar()`, is not that bridge.
+#[test]
+fn beacon_pipe_goal_must_end_in_bare_tensor_to_scalar() {
+    let reason_for = |goal: &str| {
+        let source = format!(
+            "def neuron(x: tensor[f64]) -> tensor[f64] = relu(x)\n\
+             @property bounded_neuron forall(x: tensor[f64]) where tensor_to_scalar(x) >= -1.0f64, tensor_to_scalar(x) <= 1.0f64:\n  \
+             (({goal}) <= 2.0f64)\n"
+        );
+        let outcomes = run_surf(&source, "beacon-only");
+        assert_eq!(outcomes.len(), 1, "{outcomes:#?}");
+        assert_eq!(outcomes[0].proof_tier, PropertyTier::Beacon);
+        outcomes[0].reason.clone().unwrap_or_default()
+    };
+    let not_bridged = "Beacon output must use tensor_to_scalar on its scalar graph output";
+    for goal in [
+        "x |> neuron |> tensor_to_scalar |> abs",
+        "x |> neuron |> tensor_to_scalar()",
+    ] {
+        assert_eq!(reason_for(goal), not_bridged, "{goal}");
+    }
+    assert_ne!(
+        reason_for("x |> neuron |> tensor_to_scalar"),
+        not_bridged,
+        "the canonical pipe goal reaches past the bridge matcher"
+    );
+}

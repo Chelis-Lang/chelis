@@ -15,9 +15,8 @@
 #   chelisup-<slug>   with slug in { darwin-arm64, darwin-x86_64, linux-x86_64 }
 # attached to each GitHub release (no version in the name, no tarball).
 #
-# Private-repo era (chelis#164): while Chelis-Lang/chelis is private the
-# public release URL does not serve asset bytes, so an authenticated `gh`
-# is REQUIRED. The curl path below works once releases are public.
+# With `gh` on PATH the download uses `gh release download`; without it,
+# the public release URL is fetched with curl.
 set -eu
 
 repo="Chelis-Lang/chelis"
@@ -50,7 +49,6 @@ if command -v gh >/dev/null 2>&1; then
   gh release download --repo "$repo" --pattern "$asset" --output "$tmp" --clobber
 else
   url="https://github.com/$repo/releases/latest/download/$asset"
-  printf 'chelisup bootstrap: while %s is private this needs an authenticated gh (https://cli.github.com); trying the public URL anyway\n' "$repo" >&2
   printf 'chelisup bootstrap: downloading %s\n' "$url"
   curl -fsSL -o "$tmp" "$url"
 fi

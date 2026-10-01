@@ -164,18 +164,19 @@ enum Command {
         expr: Option<String>,
         /// Emit the raw `EvalResult` as JSON on stdout instead of the
         /// human-readable rendering. Stdout carries JSON only; warnings
-        /// and errors stay on stderr. Empty-roots inputs emit
-        /// `{"roots":[]}`.
+        /// and errors stay on stderr. A definitions-only input emits a
+        /// record whose `roots` array is empty.
         #[arg(long, action = ArgAction::SetTrue)]
         json: bool,
         /// Bypass `chelis fmt --check` and `chelis lint --check` gates.
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
-        /// Target backend for realizability inference. Determines which
-        /// capability set is used for lane assignment. Default: `eval`
-        /// (full capability). Use `--target c` to manifest under C
-        /// backend constraints — required for #763 cross-lane comparison.
+        /// Target backend for realizability inference: `eval`, `c`, `hip`,
+        /// or `metal`. Determines which backend's capabilities the
+        /// evaluation must respect. Default: `eval` (full capability). Use
+        /// `--target c` to evaluate under the C backend's constraints, for
+        /// example when comparing evaluator output with a C build.
         #[arg(long)]
         target: Option<String>,
         /// Abandon the evaluation after this many seconds and exit
@@ -183,7 +184,7 @@ enum Command {
         ///
         /// For unattended and scripted use: without it, a mis-sized or
         /// accidentally quadratic program is indistinguishable from one
-        /// that is still making progress (chelis#914). Interactive Ctrl-C
+        /// that is still making progress. Interactive Ctrl-C
         /// already works and needs no flag.
         #[arg(long, value_name = "SECS")]
         timeout: Option<u64>,
@@ -244,7 +245,7 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
     },
-    /// Compile to C (default) or HIP GPU code
+    /// Compile to C (default), HIP, or Metal code
     ///
     /// Auto-detects the input language from the file extension: `.dp`
     /// inputs are routed through the Deep ingestion path; everything else
@@ -325,7 +326,7 @@ enum Command {
         #[clap(long, value_name = "neg|blocked")]
         expect: Option<ExpectArg>,
     },
-    /// Run L2 property checks discovered in Surf or Deep inputs
+    /// Check the `@property` declarations in Surf or Deep inputs
     Prove {
         /// Path to a package, directory, `.ch`, or `.dp` input
         path: Option<PathBuf>,
@@ -347,7 +348,7 @@ enum Command {
         /// Override bridge span manifest for a single `.dp` input
         #[clap(long)]
         spans: Option<PathBuf>,
-        /// Verification tier: auto (A→B→C), fuzz-only, smt-only, induction-only, type-only, beacon-only
+        /// Verification tier: auto (type check, then induction for a property that calls a recursive function, otherwise SMT, then sampling), fuzz-only, smt-only, induction-only, type-only, beacon-only
         #[clap(long, default_value = "auto")]
         tier: String,
         /// SMT solver timeout in milliseconds (default 5000)
@@ -359,9 +360,10 @@ enum Command {
         /// Optional wall budget in milliseconds including compiler preparation (maximum one day)
         #[arg(long, value_parser = clap::value_parser!(u64).range(..=86_400_000))]
         beacon_wall_budget: Option<u64>,
-        /// Floor for invariant rejection-sampling acceptance rate before
-        /// the generator-starvation classifier fires (RFC D-STARVE). 0.0
-        /// disables the classifier (legacy exhaustion => error path).
+        /// Minimum acceptance rate when sampling inputs that must satisfy an
+        /// opaque type's invariant. Below it, the property is reported as
+        /// unsupported because the generator is starved. 0.0 disables the
+        /// floor, and an exhausted generator is then reported as an error.
         #[clap(long, default_value = "0.01")]
         invariant_min_rate: f64,
         /// Resolve imports through the reef package rooted at this path.
@@ -540,12 +542,11 @@ enum ReefCommand {
     /// By default, missing-from-registry dependencies are
     /// auto-fetched from the canonical hosting org's GitHub release
     /// tags before the build resumes; pass `--no-auto-fetch` to
-    /// opt out. Phase A Item 8 introduced this default and the
-    /// opt-out flag — see `spec/design/reef_distribution.md` § Item 8.
+    /// opt out.
     Build {
         path: Option<PathBuf>,
-        /// Disable Item 8's default-on auto-fetch of missing-from-
-        /// registry dependencies. With this flag set, a missing
+        /// Disable the default auto-fetch of dependencies missing from
+        /// the local registry. With this flag set, a missing
         /// dependency surfaces an error naming the URL that
         /// would have been auto-fetched, plus the recommended
         /// `chelis reef install --from-github <url>` recovery step.
@@ -586,11 +587,9 @@ enum ReefCommand {
     ///   chelis monorepo's `packages/<name>/dist/` directory.
     /// * `--from-github <ORG>/<REPO>@<TAG>` — fetch the release assets
     ///   `<repo>-<version>.tar.zst` and `<repo>-<version>.chb` via
-    ///   the GitHub REST API (the public `/releases/download/...` URL
-    ///   form does not serve private-repo bytes; the canonical
-    ///   chelis-lang shells are private during the pre-launch era).
-    ///   Both assets are validated through the same on-disk
-    ///   verification path as `--from-monorepo`. Authentication uses
+    ///   the GitHub REST API. Both assets are validated through the
+    ///   same on-disk verification path as `--from-monorepo`. Every
+    ///   request is authenticated, also for a public repository, with
     ///   `GITHUB_TOKEN`, falling back to `gh auth token`.
     /// * `--from-lockfile` — read the project's `reef.lock`, walk every
     ///   dependency, and re-fetch each one from the `remote_origin` it
@@ -601,8 +600,8 @@ enum ReefCommand {
     ///   populate origins.
     /// * `--bootstrap [<ORG>/<REPO>@<TAG>...]` — install canonical shell
     ///   releases in dependency order. With no explicit entries, the
-    ///   built-in default list installs nautilus, coral, shoals, and
-    ///   octant. `chelis-std` is compiler-bundled and rejected as an
+    ///   toolchain's built-in default list is installed. `chelis-std`
+    ///   is compiler-bundled and rejected as an
     ///   explicit bootstrap target.
     ///
     /// The four sources are mutually exclusive — exactly one of them
@@ -620,8 +619,9 @@ enum ReefCommand {
         from_monorepo: Option<PathBuf>,
         /// GitHub release reference: `<org>/<repo>@<tag>`. The tag may
         /// have an optional leading `v` (e.g. `v0.4.0` or `0.4.0`).
-        /// Requires `GITHUB_TOKEN` (or a working `gh auth token`)
-        /// because the canonical-org repos are private.
+        /// Requires `GITHUB_TOKEN` (or a working `gh auth token`): Reef
+        /// fetches release assets through the authenticated GitHub REST
+        /// API, also for a public repository.
         #[arg(long, value_name = "ORG/REPO@TAG", conflicts_with_all = ["from_lockfile", "bootstrap"])]
         from_github: Option<String>,
         /// Re-install every dependency named by the project's
@@ -642,9 +642,8 @@ enum ReefCommand {
         /// canonical-org GitHub Releases.
         ///
         /// Pass zero or more `<org>/<repo>@<tag>` entries. With no
-        /// entries, the built-in
-        /// [`chelis_reef::DEFAULT_BOOTSTRAP_LIST`] is used (canonical
-        /// shells: nautilus, coral, shoals, octant). The
+        /// entries, the toolchain's built-in list of canonical shells is
+        /// used. The
         /// installer fetches each shell's manifest, builds a
         /// dependency graph, topologically sorts, and installs each
         /// shell via the same path as `--from-github`. Cycles and
@@ -689,9 +688,9 @@ enum ReefCommand {
         /// Package root (defaults to `.`).
         path: Option<PathBuf>,
     },
-    /// Manage chelis compiler **source crates** (the class-(c) dependency)
-    /// for shells that link `chelis-ir` / `chelis-types` … as Cargo path
-    /// deps via a `[chelis-src]` section in `reef.toml`.
+    /// Manage chelis compiler **source crates** for shells that link
+    /// `chelis-ir` / `chelis-types` … as Cargo path deps via a
+    /// `[chelis-src]` section in `reef.toml`.
     ///
     /// Maintains a version-keyed source store under
     /// `~/.local/share/chelis-src/` (a bare mirror of canonical
@@ -713,7 +712,7 @@ enum ReefCommand {
     /// (`<chelis home>/toolchains/<ver>`, fixed with `chelisup install`);
     /// for crate-linking shells, whether the source store and `../chelis`
     /// slot are synced to the pin; and for shells declaring `[artifacts]`,
-    /// whether each binary artifact is installed (Item 11 / chelis#468).
+    /// whether each binary artifact is installed.
     /// Read-only; it never installs.
     Doctor {
         /// Directory to scan (defaults to `.`): the root itself and each
@@ -723,7 +722,7 @@ enum ReefCommand {
     },
     /// Print the resolved on-disk path of an installed binary artifact.
     ///
-    /// Item 11 (chelis#468): binary artifacts declared in `[artifacts]`
+    /// Binary artifacts declared in `[artifacts]`
     /// and installed via `chelis reef install --from-lockfile` are placed
     /// at `$CHELIS_HOME/bin/<name>` (default `~/.chelis/bin/<name>`).
     /// `chelis reef which <artifact>` prints that path so consumers point
@@ -733,20 +732,20 @@ enum ReefCommand {
         /// Logical artifact name (the `[artifacts.<name>]` key).
         artifact: String,
     },
-    /// Bring a freshly-cloned shell to its pins in one command (WS-C, §7).
+    /// Bring a freshly-cloned shell to its pins in one command.
     ///
     /// Reads the `reef.toml` compiler pin, then, in order:
     /// 1. ensures the pinned toolchain is installed, auto-installing it by
     ///    delegating to `chelisup` when it is missing;
     /// 2. `reef install --from-lockfile` — source packages + binary
-    ///    artifacts (chelis#468) from `reef.lock`, when one is present;
-    /// 3. `reef src sync` — chelis source crates (chelis#571), when the
+    ///    artifacts from `reef.lock`, when one is present;
+    /// 3. `reef src sync` — chelis source crates, when the
     ///    manifest carries a `[chelis-src]` section;
     /// 4. prints the `reef doctor` health summary.
     ///
-    /// This is the current-chelis entry point for the cross-version case
-    /// (§5.4): it may itself install the pinned toolchain, so a
-    /// clone-and-`setup` does the right thing without reaching for `+<ver>`.
+    /// It may itself install the pinned toolchain, so a clone followed by
+    /// `setup` works even when the pin names a toolchain other than the
+    /// running one, without reaching for `+<ver>`.
     Setup {
         /// Shell package root (defaults to `.`).
         #[arg(long)]
@@ -4970,8 +4969,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                                  selectors; pass each `<ORG>/<REPO>@<TAG>` after `--bootstrap`"
                             .into());
                     }
-                    // Empty list = use the built-in default. The list is
-                    // hand-maintained for the pre-launch dev team; see
+                    // Empty list = use the built-in default; see the
                     // `chelis_reef::DEFAULT_BOOTSTRAP_LIST` rustdoc.
                     let raw_specs: Vec<String> = if bootstrap_args.is_empty() {
                         chelis_reef::DEFAULT_BOOTSTRAP_LIST

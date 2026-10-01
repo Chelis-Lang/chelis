@@ -24,7 +24,7 @@ A Surf property can live in `properties/nonnegative.ch`:
 
 ```chelis-surf-fragment
 @property nonnegative forall(x: f32):
-  (x * x) >= 0.0
+  ((x * x) >= 0.0)
 ```
 
 From the directory containing `properties/` or `src/`, `chelis prove` discovers `.ch` and

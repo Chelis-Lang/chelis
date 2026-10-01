@@ -32,11 +32,11 @@ fn report_par_fence(node: &DeepNode, source_span: &Span, errors: &mut Diagnostic
     };
     let unsupported = Unsupported::new(
         UnsupportedKind::Construct("`par` expression".to_string()),
-        "the Chelis execution surface while cross-lane `par` effects are incomplete",
+        "every evaluation and build target",
         Stage::Checker,
         crate::unimplemented_rejection!(
             2503,
-            "`par` is not fully implemented across evaluation and compiled lanes; \
+            "`par` is not fully implemented in the evaluator or in compiled code; \
              use `do { ... }` when sequential evaluation is intended"
         ),
     )

@@ -2,7 +2,8 @@
 
 Reef builds and installs Chelis packages, also called shells. A package has a
 `reef.toml` manifest and Chelis source files. `chelis-std` ships inside the
-compiler: programs can import `Std.*` without installing it through Reef.
+compiler: a Reef package can import `Std.*` modules without installing them
+through Reef. A standalone file outside a package cannot import `Std` modules.
 [Install](install.md) covers the toolchain needed to run Reef commands.
 
 ## Create and build a package
@@ -48,9 +49,7 @@ nautilus = "^0.7"
 
 If the manifest already has a `[dependencies]` table, add only the entry.
 Use `=X.Y.Z` for an exact dependency version; the compiler pin is always
-exact. Choose a version compatible with your compiler. The canonical shell
-repositories, including Nautilus, are private; fetching their releases
-requires repository access.
+exact. Choose a version compatible with your compiler.
 
 `chelis reef build` prefers a valid `reef.lock`. If dependencies need to be
 resolved and the local registry cannot complete the graph, Reef searches
@@ -105,12 +104,12 @@ fetched files with the lockfile hashes and reports mismatches.
   built under a Chelis source checkout's `packages/` directory. Such local
   installs have no GitHub origin for later lockfile fetching.
 - `chelis reef install --bootstrap` uses the toolchain's fixed list of
-  Nautilus, Coral, Shoals, and Octant release tags. These repositories are
-  private. You can supply explicit `ORG/REPO@TAG` entries instead.
+  shell release tags. You can supply explicit `ORG/REPO@TAG` entries
+  instead.
 
-Remote GitHub fetches use `GITHUB_TOKEN` if set, then `gh auth token`.
-An authenticated token is required by the current fetch commands, even for a
-public repository. Access to a private release is also required. Source
+Remote GitHub fetches go through the authenticated GitHub REST API, so they
+need a token even for a public repository: Reef uses `GITHUB_TOKEN` if set,
+then `gh auth token`. A private repository also needs read access. Source
 packages install in the local Reef registry, normally `~/.chelis/reef`.
 `CHELIS_REEF_HOME` selects a different registry; setting `CHELIS_HOME` alone
 does not move it.

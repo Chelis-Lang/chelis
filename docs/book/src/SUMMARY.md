@@ -5,7 +5,7 @@
 - [First Program](first-program.md)
 - [CLI Workflow](cli.md)
 - [Type System Basics](types.md)
-- [Effects and Handlers](effects.md)
+- [Effects](effects.md)
 - [Transforms: grad and vmap](transforms.md)
 - [Reef and Packages](reef.md)
 - [Testing](testing.md)

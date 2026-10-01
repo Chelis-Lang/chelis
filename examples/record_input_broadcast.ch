@@ -1,6 +1,6 @@
 -- A multi-input forward takes its arguments as a record, so every
--- symbolic-extent broadcast inside it sizes an axis from a field's shape
--- (chelis#1266). `shape(inputs.features, 0i32)` is admissible exactly where
+-- symbolic-extent broadcast inside it sizes an axis from a field's shape.
+-- `shape(inputs.features, 0i32)` is admissible exactly where
 -- `shape(x, 0i32)` is: spec/04-type-system.md §4.7.2 admits an extent by
 -- what supplies it, never by how the read is spelled.
 type ForwardInputs =

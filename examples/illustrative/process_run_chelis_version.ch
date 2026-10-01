@@ -1,7 +1,7 @@
--- Hull subprocess exec from pure Chelis.
+-- Run a subprocess from Chelis.
 --
 -- process_run(cmd, args) runs an external program and returns
--- (exit_code, stdout, stderr). It carries the Io effect and is an
+-- (exit_code, stdout, stderr). It carries the IO effect and is an
 -- eval/test-only builtin: it works under chelis eval / chelis test but
 -- the C/HIP build backends reject it (a compiled artifact has no host
 -- interpreter to reach the subprocess exec path).

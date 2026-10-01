@@ -7,9 +7,10 @@ Packages](reef.md) covers package creation and dependencies.
 
 ## Install a release toolchain
 
-The Chelis GitHub releases are private. You need access to
-`Chelis-Lang/chelis` and an authenticated [GitHub CLI](https://cli.github.com).
-Prebuilt release assets are available for macOS arm64 and Linux x86-64. For
+You need an authenticated [GitHub CLI](https://cli.github.com). `chelisup`
+downloads release assets through the authenticated GitHub REST API, so it needs a
+GitHub token even though the releases are public: it reads `GITHUB_TOKEN`, or
+`gh auth token` when that is unset. Prebuilt release assets are available for macOS arm64 and Linux x86-64. For
 source-build workflows, see [Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md).
 
 Run these commands in a terminal outside a Chelis project:
@@ -39,9 +40,10 @@ Before placing a toolchain, `chelisup` reads the unpacked compiler's live
 `chelis runtime export` receipt and checks its sealed archive and six public
 headers against the shipped `lib/` and `include/` files. Missing or crossed
 files and malformed or ambiguous receipts (including duplicate JSON keys in
-nested objects) refuse installation before store placement. Older releases
-without an export install with a warning that their runtime files are unchecked;
-if a newer receipt format is unreadable, update `chelisup` with the bootstrap.
+nested objects) refuse installation before store placement. A toolchain whose
+compiler has no runtime export installs with a warning that its runtime files
+are unchecked; if a newer receipt format is unreadable, update `chelisup` with
+the bootstrap.
 
 Publish the compiler, archive, and headers together as one versioned toolchain;
 never replace only an installed archive or header. A rejected install leaves

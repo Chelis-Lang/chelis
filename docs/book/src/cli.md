@@ -19,6 +19,11 @@ forms.
 | `chelis test` | Runs tests in the current Reef package; see [Testing](testing.md). |
 | `chelis prove` | Checks properties; see [Checking Properties](proving.md). |
 | `chelis reef` | Manages packages; see [Reef and Packages](reef.md). |
+| `chelis lane-check PATH` | Runs each program through the evaluator and a compiled C build and compares their complete stdout. |
+| `chelis cost FILE` | Reports the copy cost of the lowered IR. |
+| `chelis runtime export DIR` | Writes the runtime archive, public headers, and staging receipt this compiler carries. |
+| `chelis migrate surf --from 0.18 PATH...` | Prints Surf written in the 0.18 grammar in the current grammar; `migrate deep` does the same for Deep. `--check` verifies the files are already migrated, and `--inplace` rewrites them. |
+| `chelis cove` | Opens the Cove terminal UI. |
 | `chelis tide` | Opens the interactive REPL. `chelis tide serve`, `chelis tide mcp`, and `chelis tide lsp` start the HTTP, MCP, and language servers. |
 
 `validate` requires exactly one of `--surf`, `--deep`, or `--desugar`. It checks syntax; use
@@ -44,7 +49,7 @@ check exits `2`.
 
 For a short calculation without a file, use `chelis eval 'EXPR'`. A file containing
 definitions but no expression has nothing to display; with `--json`, a successful evaluation
-of such a file returns `{"roots":[]}`. `chelis eval --file app.ch --timeout 30` bounds an
+of such a file prints a result whose `roots` array is empty. `chelis eval --file app.ch --timeout 30` bounds an
 evaluation in seconds. A timeout fails with a diagnostic.
 
 For scripts, `chelis eval --json --file app.ch` writes one JSON result to stdout on success. On

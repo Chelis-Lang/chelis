@@ -4,7 +4,7 @@ Chelis records tensor shape and element dtype in types. It does not implicitly
 broadcast tensors or promote numeric operands. Dimension names preserve axis
 identity: distinct names do not unify, while a literal extent can satisfy a
 named dimension at a call site. This page covers the type surface and its
-checking rules. `spec/04-type-system.md` defines the full semantics.
+checking rules. The [type system specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md) defines the full semantics.
 
 ## Primitive types
 
@@ -27,7 +27,7 @@ host work and cannot be tensor elements.
 
 `key` is the non-numeric type of a random key: `key_from_seed(42i64)` makes one, and
 `tensor[n, key]` holds `n` of them. A key has no arithmetic and no cast, and each key is used
-at most once on every path; see [Effects and Handlers](effects.md#randomness-is-not-an-effect).
+at most once on every path; see [Effects](effects.md#random-keys).
 
 ## Tensor types
 
@@ -49,7 +49,7 @@ tensor[batch, key]          -- random keys
 Dimension positions can hold a declared name such as `batch`, a variable
 introduced in `[...]`, a nonnegative literal such as `512`, or the wildcard
 `*` for an unknown extent. A `..r` spread stands for a run of dimensions
-in a rank-polymorphic signature. See `spec/03-deep-syntax.md` for their Deep forms.
+in a rank-polymorphic signature. See the [Deep syntax specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/03-deep-syntax.md) for their Deep forms.
 
 ## Named dimensions and polymorphism
 
@@ -121,8 +121,8 @@ def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, 
 
 Rank-polymorphic bodies admit operations whose shape effect can be tracked by
 name, including elementwise operations, named-axis reductions such as `sum`
-and `count`, and named-axis `insert`. The current named-axis `insert` form
-requires a compile-time constant `i64` size. Positional rewriters such as
+and `count`, and named-axis `insert`. Named-axis `insert` requires a
+compile-time constant `i64` size. Positional rewriters such as
 `permute`, `reshape`, and `matmul` are rejected inside a `..r` body.
 
 ## No broadcasting
@@ -167,10 +167,14 @@ a callee's dtype. Structural lists such as reshape sizes therefore spell
 their `i64` elements explicitly.
 
 ```chelis-surf-fragment
-a = cast(x, bf16)           -- explicit tensor conversion
-b = 1.0f64                  -- suffix binds f64
-c = cast(3000000000, i64)   -- literal binds directly at i64
-d = cast(1.1, f64)          -- literal binds directly at f64
+-- explicit tensor conversion
+a = cast(x, bf16)
+-- suffix binds f64
+b = 1.0f64
+-- literal binds directly at i64
+c = cast(3000000000, i64)
+-- literal binds directly at f64
+d = cast(1.1, f64)
 ```
 
 Arithmetic operands must have the same numeric dtype and dimensions, with
@@ -204,8 +208,9 @@ tensor[n, f32] -> tensor[n, f32] -> tensor[f32]   -- two args, scalar result
 ## Aggregate types
 
 - Tuples: `(f32, f32)` as a type, `(a, b)` as a value, projected with `.0`, `.1`.
-- Algebraic data types: `type Option[a] = | None | Some { value: a }`, with positional or
-  record-field payloads. Recursive types refer to themselves by name.
+- Algebraic data types: `type Option[a] = | None | Some(a)` has a positional payload, and
+  `type Shape = | Circle { radius: f32 } | Square { side: f32 }` has record-field payloads.
+  Recursive types refer to themselves by name.
 - Records: constructed with `Foo { x: e1, y: e2 }` (punning allowed), read with `e.field`.
 - Type aliases: a `type` without variants is transparent and expanded at desugaring.
 - Lists: `List[T]` holds rank-uniform elements; a list of tensors fixes one rank for every
@@ -225,8 +230,7 @@ sig report[n]: tensor[n, f32] -> unit ! { IO }
 Effect inference runs after type inference. Host operations such as `print`
 and file reads contribute `IO`. Random draws take a `key` and contribute no
 effect. `with device(...)` introduces a resource region checked against the
-build target. See [Effects and Handlers](effects.md) for the effect vocabulary
-and handler rules.
+build target. See [Effects](effects.md) for the effect vocabulary.
 
 ## Linearity and borrowing
 

@@ -98,6 +98,33 @@ fn result_claim_dependencies_remain_outside_the_scalar_proof_envelope() {
 }
 
 #[test]
+fn scalar_closure_drops_declarations_it_does_not_retain() {
+    let lowered = compiler::lower(LowerRequest {
+        source_kind: SourceKind::Surf,
+        source: "def helper(z: tensor[f64]) -> tensor[f64] = relu(z)\n\
+                 x = (x : tensor[f64])\n\
+                 out = (helper(x) : tensor[f64])\n"
+            .into(),
+        entry: Some("out".into()),
+    })
+    .expect("source lowers");
+    let root = lowered.named_roots["out"];
+    let (closure, root) =
+        scalar_root_closure(&lowered.dag, root).expect("closure keeps a valid declaration table");
+    assert!(
+        closure.declarations.len() < lowered.dag.declarations.len(),
+        "{:?} -> {:?}",
+        lowered.dag.declarations,
+        closure.declarations
+    );
+    assert!(lowered.dag.declarations.iter().any(|name| name == "helper"));
+    assert_eq!(closure.roots, vec![root]);
+    closure
+        .validate_wire_contract()
+        .expect("every retained row is some node's declaration");
+}
+
+#[test]
 fn real_source_yields_box_range_goal_with_populated_handle() {
     let extracted = box_range_goal_from_source(
         SINGLE_OUTPUT_SOURCE,

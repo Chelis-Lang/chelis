@@ -7,7 +7,7 @@ there is no separate standard-library install. The `Std` source modules and the
 native runtime archive emitted by `chelis build` are different parts of the
 runtime.
 
-This page covers commonly used names and current availability. The
+This page covers commonly used names and which of them run. The
 [operation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md) defines the full
 signatures, failure rules, and differentiation behavior. The module sources
 are in `packages/chelis-std/src/`.
@@ -96,7 +96,7 @@ the same key cannot be consumed twice.
   `i64` count. These functions run for supported inputs in evaluation and
   generated C. Imported calls do not enforce every endpoint dtype family
   restriction, so use the stated types. Its `stack`, `squeeze`, and
-  `unsqueeze` names are exported, but concrete tensor calls do not currently
+  `unsqueeze` names are exported, but concrete tensor calls do not
   type-check; do not depend on them in a runnable program.
 - `Std.Tensor.Mask.where_indices(mask)` returns the increasing flat `i64`
   indices of true elements. `Std.Sort.sort` exposes the built-in tensor sort
@@ -144,18 +144,18 @@ under `chelis eval` and in supported generated C host programs.
 `Std.Test` provides `assert_true`, `assert_false`, `assert_eq`,
 `assert_close`, `assert_close_tensor`, `assert_eq_tensor`, `assert_shape`,
 and `fail` for `def test_*()` functions run by `chelis test`. Assertions carry
-the `Test` effect. Generated builds currently reject these assertion calls.
+the `Test` effect. Generated builds reject these assertion calls.
 
 `Std.Process.run(cmd, args)` passes an argument list to an external program
 and returns `(exit_code, stdout, stderr)`. `run_chelis(args)` invokes the
 `chelis` command. Both carry `IO` and run during evaluation and
-testing. The language specifies compiled host process execution too, but the
-current build path rejects these calls.
+testing. The language specifies compiled host process execution too, but
+`chelis build` rejects these calls.
 
 ### Exported but unavailable
 
 `Std.Decimal` and `Std.Time` export types and callable names, but calling
-their arithmetic and calendar functions currently fails. `Std.Io.Parquet`
+their arithmetic and calendar functions fails. `Std.Io.Parquet`
 and `Std.Io.Safetensors` also export names whose calls fail. Use the modules
 above for runnable programs; the [operation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md)
 records the intended contracts for Decimal and Time.
