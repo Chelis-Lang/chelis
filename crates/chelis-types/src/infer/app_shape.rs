@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use chelis_axis_core::{Permutation, PermutationError};
 
 /// chelis#339 Part 2: infer a variadic named-axis reduction
 /// `sum(x, seq, head)` (spec/04-type-system.md §4.5.3). The reduction HM
@@ -310,26 +311,21 @@ pub(super) fn check_permute_signature(
         return Type::Tensor(dims, prec);
     };
 
-    if axes.len() != dims.len() {
-        return report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::ArityMismatch,
-                format!(
-                    "permute expects {} axis indices for rank {} tensor, got {}",
-                    dims.len(),
-                    dims.len(),
-                    axes.len()
+    let plan = match Permutation::from_raw(dims.len(), &axes) {
+        Ok(plan) => plan,
+        Err(PermutationError::Arity { rank, got }) => {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::ArityMismatch,
+                    format!(
+                        "permute expects {rank} axis indices for rank {rank} tensor, got {got}"
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ),
-        );
-    }
-
-    let mut seen = UnordSet::new();
-    let mut reordered = Vec::with_capacity(dims.len());
-    for axis in axes {
-        if axis < 0 || axis as usize >= dims.len() {
+            );
+        }
+        Err(PermutationError::NegativeAxis(axis) | PermutationError::UnrepresentableAxis(axis)) => {
             return report(
                 errors,
                 CheckError::new(
@@ -342,8 +338,20 @@ pub(super) fn check_permute_signature(
                 ),
             );
         }
-        let axis = axis as usize;
-        if !seen.insert(axis) {
+        Err(PermutationError::OutOfBounds(axis)) => {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "permute axis {axis} is out of bounds for rank {} tensor",
+                        dims.len()
+                    ),
+                    vec![],
+                ),
+            );
+        }
+        Err(PermutationError::Duplicate(axis)) => {
             return report(
                 errors,
                 CheckError::new(
@@ -353,8 +361,8 @@ pub(super) fn check_permute_signature(
                 ),
             );
         }
-        reordered.push(dims[axis].clone());
-    }
+    };
+    let reordered = plan.axes().iter().map(|&axis| dims[axis].clone()).collect();
 
     Type::Tensor(reordered, prec)
 }

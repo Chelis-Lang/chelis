@@ -465,9 +465,7 @@ pub(super) fn static_einsum(
 }
 
 pub(super) fn normalize_static_axis(rank: usize, axis: i64) -> Option<usize> {
-    let rank = rank as i64;
-    let axis = if axis < 0 { rank + axis } else { axis };
-    (0..rank).contains(&axis).then_some(axis as usize)
+    chelis_axis_core::normalize_axis(rank, axis)
 }
 
 /// Reject an axis argument whose resolved type is not `i32`.

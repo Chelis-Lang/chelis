@@ -652,6 +652,42 @@ def transpose(x: tensor[seq, hidden, f32]) -> tensor[hidden, seq, f32] =
 }
 
 #[test]
+fn surf_permute_preserves_ordered_positions_and_rejects_bad_axes() {
+    let accepted = infer_surf(
+        r#"
+module Repro.PermuteOrdered
+def reorder(x: tensor[2, 2, 3, f32]) -> tensor[3, 2, 2, f32] =
+  permute(x, 2, 0, 1)
+"#,
+    );
+    assert!(
+        accepted.errors.is_empty(),
+        "ordered permutation: {:?}",
+        accepted.errors
+    );
+
+    for (axes, reason) in [
+        ("0, 0, 2", "appears more than once"),
+        ("-1, 0, 1", "out of bounds"),
+        ("3, 0, 1", "out of bounds"),
+        ("0, 1", "axis indices"),
+    ] {
+        let source = format!(
+            "module Repro.BadPermute\ndef reorder(x: tensor[2, 2, 3, f32]) = permute(x, {axes})\n"
+        );
+        let rejected = infer_surf(&source);
+        assert!(
+            rejected
+                .errors
+                .iter()
+                .any(|error| error.message.contains(reason)),
+            "axes {axes:?} should fail for {reason:?}: {:?}",
+            rejected.errors
+        );
+    }
+}
+
+#[test]
 fn surf_list_builtins_type_check() {
     let checked = checked_surf(
         r#"

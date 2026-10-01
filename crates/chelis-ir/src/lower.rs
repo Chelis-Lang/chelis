@@ -2,6 +2,7 @@
 //!
 //! Walks the Deep AST and produces a flat DAG of RISC primitive nodes.
 
+use chelis_axis_core::{Permutation, normalize_axis, reduction_survivors};
 use chelis_unord::{UnordMap, UnordSet};
 use std::any::Any;
 use std::cell::Cell;
@@ -7121,14 +7122,14 @@ fn vectorized_root_map(before: &Dag, after: &Dag) -> Result<UnordMap<NodeId, Nod
 fn axis_to_front_perm(rank: usize, axis: usize) -> Vec<usize> {
     let mut perm = Vec::with_capacity(rank);
     perm.push(axis);
-    perm.extend((0..rank).filter(|candidate| *candidate != axis));
+    perm.extend(reduction_survivors(rank, axis).expect("validated axis"));
     perm
 }
 
 fn front_to_axis_perm(rank: usize, axis: usize) -> Vec<usize> {
-    let mut perm: Vec<usize> = (1..rank).collect();
-    perm.insert(axis, 0);
-    perm
+    Permutation::from_indices(rank, &axis_to_front_perm(rank, axis))
+        .expect("validated axis-to-front permutation")
+        .inverse()
 }
 
 fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
@@ -7728,10 +7729,14 @@ impl<'program> LowerCtx<'program> {
     /// dynamic-shape sources (variable-fed `to_tensor(items)`,
     /// `concat` along the concat axis, `split`, `pad_sequences`).
     fn reduction_out_dims(input_dims: &[DimInfo], ty: &TensorType, axis: usize) -> Vec<DimInfo> {
-        let mut from_input = input_dims.to_vec();
-        if axis < from_input.len() {
-            from_input.remove(axis);
-        }
+        let from_input: Vec<DimInfo> = reduction_survivors(input_dims.len(), axis)
+            .map(|positions| {
+                positions
+                    .into_iter()
+                    .map(|i| input_dims[i].clone())
+                    .collect()
+            })
+            .unwrap_or_else(|| input_dims.to_vec());
         if !input_dims.is_empty() && !any_wildcard_dim(&from_input) {
             return from_input;
         }
@@ -15293,10 +15298,23 @@ impl<'program> LowerCtx<'program> {
                 let x = self.lower_expr_node(&args[0], "permute input");
                 // Extract axes ordering from remaining args.
                 let axes = self.extract_usize_list(&args[1..]);
+                let rank = self
+                    .dag
+                    .get(x)
+                    .expect("permutation input exists")
+                    .output_type
+                    .dims
+                    .len();
+                let axes = Permutation::from_indices(rank, &axes).unwrap_or_else(|error| {
+                    raise_fatal_lowering_error(
+                        format!("invalid checked `permute` axes in lowering: {error:?}"),
+                        Some(args[0].span()),
+                        args[0].span_id().map(ToOwned::to_owned),
+                    )
+                });
                 // `permute` never changes precision; it only reorders
                 // axes. Compute the output type directly from the input
-                // operand's resolved type and the axes when the axes
-                // cover the operand's full rank — this is the
+                // operand's resolved type and the validated full-rank axes — this is the
                 // authoritative shape/precision and is independent of the
                 // app-node's `type:` metadata.
                 //
@@ -15313,16 +15331,18 @@ impl<'program> LowerCtx<'program> {
                 // already resolved to the concrete call-site precision —
                 // sidesteps the rename. This mirrors how tier-1 ops (e.g.
                 // `mul`) already derive their precision from operands.
-                let out_ty = self
+                let input_ty = self
                     .dag
                     .get(x)
-                    .map(|node| node.output_type.clone())
-                    .filter(|input_ty| axes.len() == input_ty.dims.len())
-                    .map(|input_ty| permuted_tensor_type(&input_ty, &axes))
-                    .unwrap_or_else(|| ty.clone());
+                    .expect("permutation input exists")
+                    .output_type
+                    .clone();
+                let out_ty = permuted_tensor_type(&input_ty, axes.axes());
                 self.dag.add_node(
                     self.owner(),
-                    RiscOp::Permute { axes },
+                    RiscOp::Permute {
+                        axes: axes.axes().to_vec(),
+                    },
                     vec![x],
                     out_ty,
                     self.current_span_id.clone(),
@@ -17723,8 +17743,7 @@ impl<'program> LowerCtx<'program> {
     /// `axis_expr` supplies the span so the diagnostic points at the
     /// offending axis literal.
     fn normalize_axis(&self, raw: i64, rank: usize, op: &str, axis_expr: &Expr) -> usize {
-        let normalized = if raw < 0 { raw + rank as i64 } else { raw };
-        if normalized < 0 || normalized as usize >= rank {
+        normalize_axis(rank, raw).unwrap_or_else(|| {
             raise_lowering_error(
                 format!(
                     "`{op}` axis {raw} is out of range for an operand of rank {rank} \
@@ -17732,9 +17751,8 @@ impl<'program> LowerCtx<'program> {
                 ),
                 Some(axis_expr.span()),
                 axis_expr.span_id().map(ToOwned::to_owned),
-            );
-        }
-        normalized as usize
+            )
+        })
     }
 
     fn gather_out_ty_from_inputs(

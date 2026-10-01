@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/chelis-axis-core",
     "crates/chelis-unord",
     "crates/chelis-repr-inventory",
     "crates/chelis-vocab",
@@ -53,9 +54,10 @@ repository = "https://github.com/Chelis-Lang/chelis"
 # compiles under `cargo rustc -- --cfg anything` and is invisible to a Clippy
 # run that does not pass that flag, which is the hole
 # spec/design/hash_order_determinism.md C2.3 exists to close.
-unexpected_cfgs = "deny"
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(verus_only)', 'cfg(verus_keep_ghost)'] }
 
 [workspace.dependencies]
+chelis-axis-core = { path = "crates/chelis-axis-core" }
 chelis-unord = { path = "crates/chelis-unord" }
 chelis-vocab = { path = "crates/chelis-vocab" }
 chelis-abi = { path = "crates/chelis-abi" }

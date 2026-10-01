@@ -11,6 +11,7 @@ checkpoint-compile-probe = []
 generalize-sweep-oracle = []
 
 [dependencies]
+chelis-axis-core.workspace = true
 chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-pred.workspace = true

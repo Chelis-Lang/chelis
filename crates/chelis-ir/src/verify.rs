@@ -3,6 +3,7 @@
 use crate::dag::{
     ComparisonKind, Dag, DimExpr, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim,
 };
+use chelis_axis_core::{Permutation, PermutationError};
 #[allow(unused_imports)]
 use chelis_types::key_admission::{KeyAdmission, KeyPrimitive};
 use chelis_types::types::Prim;
@@ -3605,29 +3606,21 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         {
             let input = dag.get(node.inputs[0]).unwrap();
             let rank = input.output_type.dims.len();
-            if axes.len() != rank {
-                errors.push(format!(
-                    "permute at node {}: axes len {} != input rank {}",
-                    node.id.0,
-                    axes.len(),
-                    rank
-                ));
-            }
-            let mut seen = vec![false; rank];
-            for &a in axes {
-                if a >= rank {
-                    errors.push(format!(
-                        "permute at node {}: axis {} >= rank {}",
-                        node.id.0, a, rank
-                    ));
-                } else if seen[a] {
-                    errors.push(format!(
-                        "permute at node {}: duplicate axis {}",
-                        node.id.0, a
-                    ));
-                } else {
-                    seen[a] = true;
-                }
+            if let Err(error) = Permutation::from_indices(rank, axes) {
+                let detail = match error {
+                    PermutationError::Arity { rank, got } => {
+                        format!("axes len {got} != input rank {rank}")
+                    }
+                    PermutationError::OutOfBounds(axis) => {
+                        format!("axis {axis} >= rank {rank}")
+                    }
+                    PermutationError::Duplicate(axis) => format!("duplicate axis {axis}"),
+                    PermutationError::NegativeAxis(_)
+                    | PermutationError::UnrepresentableAxis(_) => {
+                        unreachable!("usize axes cannot be negative")
+                    }
+                };
+                errors.push(format!("permute at node {}: {detail}", node.id.0));
             }
         }
 

@@ -3,6 +3,7 @@
 //! Given a forward DAG computing `f(inputs) -> output`, produces a backward DAG
 //! computing gradients of the output with respect to specified input nodes.
 
+use chelis_axis_core::Permutation;
 use chelis_unord::UnordMap;
 use std::fmt;
 
@@ -2229,7 +2230,9 @@ fn compute_adjoints(
         RiscOp::Permute { axes } => {
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            let inv = inverse_permutation(axes);
+            let inv = Permutation::from_indices(input_ty.dims.len(), axes)
+                .ok()?
+                .inverse();
             let dx = dag.add_node(
                 node.owner,
                 RiscOp::Permute { axes: inv },
@@ -3221,14 +3224,6 @@ fn extrema_reduce_adjoint(
         None,
     );
     Some(vec![(x, dx)])
-}
-
-fn inverse_permutation(axes: &[usize]) -> Vec<usize> {
-    let mut inv = vec![0; axes.len()];
-    for (new_pos, &old_pos) in axes.iter().enumerate() {
-        inv[old_pos] = new_pos;
-    }
-    inv
 }
 
 fn dim_size(dim: &DimInfo) -> usize {
@@ -5122,9 +5117,18 @@ mod tests {
 
     #[test]
     fn grad_inverse_permutation() {
-        assert_eq!(inverse_permutation(&[2, 0, 1]), vec![1, 2, 0]);
-        assert_eq!(inverse_permutation(&[0, 1]), vec![0, 1]);
-        assert_eq!(inverse_permutation(&[1, 0]), vec![1, 0]);
+        assert_eq!(
+            Permutation::from_indices(3, &[2, 0, 1]).unwrap().inverse(),
+            vec![1, 2, 0]
+        );
+        assert_eq!(
+            Permutation::from_indices(2, &[0, 1]).unwrap().inverse(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            Permutation::from_indices(2, &[1, 0]).unwrap().inverse(),
+            vec![1, 0]
+        );
     }
 
     #[test]

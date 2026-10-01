@@ -11,6 +11,7 @@ repository.workspace = true
 lowering-trace = []
 
 [dependencies]
+chelis-axis-core.workspace = true
 chelis-abi.workspace = true
 chelis-unord.workspace = true
 chelis-deep.workspace = true
