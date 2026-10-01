@@ -736,6 +736,11 @@ name = "test_command_smoke"
 package = "chelis-cli"
 name = "parity"
 
+# chelis#763: public exact-output gate runs real eval/build/link/execute lanes.
+[[standing_target]]
+package = "chelis-cli"
+name = "lane_check"
+
 # chelis#1351: [05-OP-33] expectations that neither lane computes, checked
 # against eval and against the compiled C lane separately.
 [[standing_target]]
@@ -2553,6 +2558,25 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "the discovered PR script suite executes the managed toolchain contracts"
 tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/lane_check_scope.py"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the native sandbox authors its locked proof scope from this generator"
+tracking_issue = "chelis#763"
+
+# The Nix x86-64 gate consumes this complete exact-safe corpus as an input.
+[[path_rule]]
+prefix = "tests/corpus/lane_check/"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the native sandbox builds, links and executes every lane-check corpus member"
+tracking_issue = "chelis#763"
 
 [[path_rule]]
 prefix = "scripts/test_nix_flake_contract.py"

@@ -324,47 +324,22 @@ fn run_binary(binary: &Path) -> Vec<u8> {
 // Shared Phase 3 comparison
 // -----------------------------------------------------------------------------
 
-/// Compare two stdout byte-streams under the parity invariant: same line
-/// count, every line byte-equal.
+/// Compare the complete UTF-8 stdout streams through the one production
+/// exact-output comparator. Line splitting would conceal a final newline
+/// difference; lossy decoding would equate distinct invalid byte streams.
 ///
-/// The former mismatch fallback (re-parse both lines via a
-/// `parse_tensor_line -> Vec<f64>` and compare under 1e-6 tolerance) is
-/// deliberately gone (chelis#729 Phase 0, chelis#687): it engaged exactly
-/// when a real divergence was present and re-read integer payloads as
-/// floats, so an i64 corruption above 2^53 could never fail this
-/// harness. A mismatch now REPORTS. chelis#732 Phase 2 is the release
-/// valve for formatting differences by making both lanes canonical;
-/// Phase 3's explicit per-op table is the only release valve for a genuine
-/// value difference, and this mixed-operation corpus has no eligible row.
-///
-/// Returns `Ok(())` if parity holds, or `Err(reason)` on first divergence.
+/// The former mismatch fallback parsed integers through `f64` and tolerated
+/// different values above 2^53. The exact-only corpus has no tolerance grant.
 fn assert_parity(eval_out: &[u8], c_out: &[u8], label: &str) -> Result<(), String> {
-    let eval_text = String::from_utf8_lossy(eval_out);
-    let c_text = String::from_utf8_lossy(c_out);
-
-    let eval_lines: Vec<&str> = eval_text.lines().collect();
-    let c_lines: Vec<&str> = c_text.lines().collect();
-
-    if eval_lines.len() != c_lines.len() {
-        return Err(format!(
-            "[{label}] line count mismatch: eval={} c={}\n--- eval ---\n{}\n--- c ---\n{}",
-            eval_lines.len(),
-            c_lines.len(),
-            eval_text,
-            c_text,
-        ));
-    }
-
-    for (i, (e, c)) in eval_lines.iter().zip(c_lines.iter()).enumerate() {
-        if let Err(error) = compare_exact_observations(&format!("{label} line {i}"), e, c) {
-            return Err(format!(
-                "[{label}] line {i} differs between lanes under the shared \
-                 chelis#732 Phase 3 comparator (this mixed-op corpus is \
-                 exact-only): {error}",
-            ));
-        }
-    }
-    Ok(())
+    let eval = std::str::from_utf8(eval_out).map_err(|error| {
+        format!("[{label}] eval stdout violates UTF-8 observation contract: {error}")
+    })?;
+    let compiled = std::str::from_utf8(c_out).map_err(|error| {
+        format!("[{label}] C stdout violates UTF-8 observation contract: {error}")
+    })?;
+    compare_exact_observations(label, eval, compiled)
+        .map(|_| ())
+        .map_err(|error| format!("[{label}] complete stdout differs: {error}"))
 }
 
 // The chelis#732 Phase 1 interim line equivalence
@@ -940,6 +915,13 @@ fn parity_comparator_rejects_non_tensor_diff() {
     let a = b"len=4, items=4, shape=2x2\n";
     let b = b"len=5, items=4, shape=2x2\n";
     assert!(assert_parity(a, b, "byte-diff").is_err());
+}
+
+#[test]
+fn parity_comparator_rejects_missing_newline_and_invalid_rendering() {
+    assert!(assert_parity(b"x = 1\n", b"x = 1", "newline").is_err());
+    assert!(assert_parity(b"x = \xff\n", b"x = \xfe\n", "invalid").is_err());
+    assert!(assert_parity(b"x = \xff\n", b"x = \xff\n", "invalid-equal").is_err());
 }
 
 #[test]

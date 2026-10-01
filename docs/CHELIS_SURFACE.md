@@ -541,6 +541,36 @@ route; count helpers also receive device capability checks.
 The exact `spec/04` table and target gates decide each operation and dtype
 cell. Unsupported operations produce target diagnostics before emission.
 
+### 6.3 Exact eval/C output gate — chelis#763
+
+`chelis lane-check <FILE|DIRECTORY> [--json] [--timeout SECONDS]` evaluates
+each `.ch` program, builds C, compiles and links its carried runtime with
+strict `-O2 -ffp-contract=off -fno-fast-math` flags, runs the binary, and
+compares complete UTF-8 stdout through the shared exact comparator.
+Directory entries are visited in sorted relative-path order without following
+symlinks. No float tolerance or automatic skip applies; unsupported C,
+library-only/zero-output programs, and an empty corpus are errors.
+Exit 0 requires at least one comparison and no errors or divergences;
+divergences exit 1 and infrastructure/unsupported/timeout errors exit 2.
+`--json` writes one versioned NDJSON record per program followed by a
+summary with a `proof_scope`. Human-readable diagnostics are the default.
+
+Local invocations report an `unpinned-host` scope for diagnosis, **not**
+hermetic acceptance. The authoritative x86-64 Linux gate is
+`nix build .#checks.x86_64-linux.lane-check`; inspect its
+`report.ndjson` output. The check owns the locked Chelis/compiler/native
+closure, an exact-safe int/bool/dyadic-float corpus (including signed zero),
+the sanitized runtime environment, and a queried-compiler-target check.
+It is not available as a Darwin check, and its passing verdict does not
+generalize to another hardware tuple. See
+[`manual_gates.md`](manual_gates.md#compiler-feature-acceptance-gates).
+
+An existing or substituted Nix output is a receipt from its recorded builder,
+not evidence that the current host ran the gate. To repeat on the current
+Linux builder, first build the check, then use
+`nix build --rebuild --no-substitute .#checks.x86_64-linux.lane-check`;
+Nix compares the fresh report against the existing output.
+
 ---
 
 ## 7. Types, shapes, and ownership — `spec/04-type-system.md`
