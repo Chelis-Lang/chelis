@@ -23,11 +23,8 @@ still supply values when you call the gradient function, but receive no
 gradient in its result.
 
 ```chelis-surf
-def squared(x: tensor[features, f32]) -> tensor[f32] =
-  sum(mul(copy(x), x), 0i32)
-
-def squared_grad(x: tensor[features, f32]) -> tensor[features, f32] =
-  grad(squared)(x)
+def squared(x: tensor[features, f32]) -> tensor[f32] = x |> mul(x) |> sum(0i32)
+def squared_grad(x: tensor[features, f32]) -> tensor[features, f32] = grad(squared)(x)
 ```
 
 The gradient of a tensor parameter has the parameter's shape and precision.
@@ -47,9 +44,7 @@ rejected.
 
 ```chelis-surf
 def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)
-
-def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] =
-  xs |> vmap(process)
+def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(process)
 ```
 
 A reduction inside `process` would reduce its row's data axis, leaving the
@@ -61,19 +56,16 @@ new batch axis intact. The runnable source is
 Apply `vmap` to a gradient function to get one gradient per batch row:
 
 ```chelis-surf
-def loss(x: tensor[features, f32]) -> tensor[f32] =
-  sum(mul(copy(x), x), 0i32)
-
-def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] =
-  vmap(grad(loss))(xs)
+def loss(x: tensor[features, f32]) -> tensor[f32] = x |> mul(x) |> sum(0i32)
+def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = vmap(grad(loss))(xs)
 ```
 
-This form has an evaluator test against separate row-by-row gradients. A bare
+Row `i` of the result is the gradient of `loss` at row `i` of `xs`. A bare
 `grad(vmap(f))` does not sum the batch: if the mapped function returns a
 tensor, its output must be reduced all the way to a scalar before `grad` can
 differentiate it.
 
-## Current execution limits
+## Execution limits
 
 - A direct, unshadowed top-level function is a reliable named target for
   `grad` and `vmap`. A direct alias of a top-level function, or a local
@@ -84,16 +76,16 @@ differentiate it.
 - In the evaluator, gradients of ADT arguments keep the executed constructor
   and its fields. A discrete field remains in place as `unit`; a float field
   receives its gradient. A selected parameter with no differentiable float
-  field is rejected. C builds currently reject an exported gradient function
+  field is rejected. C builds reject an exported gradient function
   whose parameter is an ADT.
 - Differentiation through a `match` works when its selected constructor is
   known during lowering. A runtime-dependent scrutinee or a guarded arm is
   rejected. Scalar `if` conditions can select a branch at runtime; a
   runtime-dependent `if` returning an ADT or tuple is still rejected.
 - The evaluator can differentiate a selected local `List` argument. A C build
-  currently rejects that form when it cannot reconstruct the List shape; a
+  rejects that form when it cannot reconstruct the List shape; a
   literal or resolved top-level List has a supported path.
 
-These limits describe the current evaluator and C build. The numbered
+These limits belong to the evaluator and the C backend. The numbered
 [transformation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/06-transformations.md) defines
 the broader language rule.

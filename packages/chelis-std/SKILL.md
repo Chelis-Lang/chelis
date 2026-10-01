@@ -37,7 +37,7 @@ Prefer this subset before trying broader planned language features:
 - Reductions with explicit integer axes: `sum(x, 0)`, `mean(x, 0)`,
   `max_reduce(x, 0)`, `softmax(x, 0)`
 - Structural/tensor helpers are available but more shape-sensitive: `matmul`, `reshape`,
-  `permute`, `expand`, `pad`, `copy`, `cast`
+  `permute`, `expand`, `pad`, `cast`
 
 Rules to preserve:
 
@@ -64,21 +64,18 @@ def square(x: tensor[f32]) -> tensor[f32] = mul(x, x)
 ```
 
 ```chelis-surf
-def relu_then_softmax[n](x: tensor[n, f32]) -> tensor[n, f32] =
-  softmax(relu(x), 0)
+def relu_then_softmax[n](x: tensor[n, f32]) -> tensor[n, f32] = x |> relu |> softmax(0)
 ```
 
 ```chelis-surf
-def add_vec[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] =
-  add(x, y)
+def add_vec[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
 ```
 
 ```chelis-surf
-def twice_then_relu[n](x: tensor[n, f32]) -> tensor[n, f32] =
-  {
-    y = add(x, x)
-    relu(y)
-  }
+def twice_then_relu[n](x: tensor[n, f32]) -> tensor[n, f32] = {
+  y = add(x, x)
+  relu(y)
+}
 ```
 
 ```chelis-surf
@@ -94,13 +91,11 @@ def classify[n](x: tensor[n, f32], labels: tensor[n, f32]) -> tensor[f32] = {
 ```
 
 ```chelis-surf
-def logistic_step[n](x: tensor[n, f32]) -> tensor[n, f32] =
-  sigmoid(x)
+def logistic_step[n](x: tensor[n, f32]) -> tensor[n, f32] = sigmoid(x)
 ```
 
 ```chelis-surf
-def clamp_low[n](x: tensor[n, f32], low: tensor[n, f32]) -> tensor[n, f32] =
-  max_elem(x, low)
+def clamp_low[n](x: tensor[n, f32], low: tensor[n, f32]) -> tensor[n, f32] = max_elem(x, low)
 ```
 
 ```chelis-surf
@@ -109,7 +104,6 @@ def identity[a](x: tensor[a, f32]) -> tensor[a, f32] = x
 
 ```chelis-surf
 type Weights = tensor[n, f32]
-
 def keep(w: Weights) -> Weights = w
 ```
 
@@ -117,7 +111,6 @@ def keep(w: Weights) -> Weights = w
 type Activation =
   | Relu
   | Sigmoid
-
 def activate[n](act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
   match act with {
     | Relu => relu(x)
@@ -129,7 +122,6 @@ def activate[n](act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
 type Optimizer =
   | Sgd { lr: tensor[f32] }
   | Adam { lr: tensor[f32], beta1: tensor[f32], beta2: tensor[f32], eps: tensor[f32] }
-
 def learning_rate(opt: Optimizer) -> tensor[f32] =
   match opt with {
     | Sgd { lr } => lr
@@ -199,10 +191,10 @@ map, calls use `app`, references use `var`, and literals carry a type.
   relu_then_softmax
   (fn {}
     (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
-    (app {}
-      (var {} softmax)
-      (app {} (var {} relu) (var {} x))
-      (lit {type: (t-prim {} i32)} 0))))
+    (pipe {}
+      (var {} x)
+      (var {} relu)
+      (fn {} (params {} __chelis_pipe) (app {} (var {} softmax) (var {} __chelis_pipe) (lit {type: (t-prim {} i32)} 0))))))
 ```
 
 ```chelis-deep
@@ -347,23 +339,27 @@ flows.
   with `chelis reef install`.
 - Shell packages such as `nautilus`, `coral`, `shoals`, and `octant` are Reef
   dependencies and can be installed or bootstrapped.
-- `reef.toml` pins the compiler exactly and declares a module prefix:
+- `reef.toml` pins the compiler exactly and declares a module prefix. `chelis reef init`
+  writes the pin for the toolchain that runs it; `X.Y.Z` below stands for that version:
 
 ```toml
+schema = "3"
+
 [package]
 name = "demo"
 version = "0.1.0"
-compiler = "=0.7.10"
+compiler = "=X.Y.Z"
 module_prefix = "Demo"
+resolver = "2"
 
 [dependencies]
-nautilus = { version = "0.5.0" }
+nautilus = "^0.7"
 ```
 
 - Package source lives under `src/`; module names should match the prefix and path.
 - `CHELIS_REEF_HOME` defaults to `~/.chelis/reef`.
-- Remote shell fetches require `GITHUB_TOKEN` or a working `gh auth token` during the
-  pre-launch private-repo period.
+- Remote shell fetches use the authenticated GitHub REST API, so they need
+  `GITHUB_TOKEN` or a working `gh auth token`, also for public repositories.
 
 Common Reef loop:
 

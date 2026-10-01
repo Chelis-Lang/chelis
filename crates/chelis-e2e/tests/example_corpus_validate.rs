@@ -263,6 +263,63 @@ fn phase1f_skill_blocks_agree_with_compiler_paths() {
     }
 }
 
+fn documentation_markdown_files() -> Vec<PathBuf> {
+    fn collect(dir: &Path, files: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                collect(&path, files);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                files.push(path);
+            }
+        }
+    }
+    let mut files = vec![repo_root().join("packages/chelis-std/SKILL.md")];
+    let mut book = Vec::new();
+    collect(&repo_root().join("docs/book/src"), &mut book);
+    book.sort();
+    files.extend(book);
+    files
+}
+
+/// Documented Surf models the style a reader should copy, so every block that
+/// parses as a program, complete or fragment, draws no `chelis lint`
+/// diagnostic: neither a blocking error that would fail the style gate nor an
+/// advisory warning such as a redundant `copy()`.
+#[test]
+fn documentation_surf_blocks_draw_no_lint_diagnostics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut linted = 0usize;
+    for markdown in documentation_markdown_files() {
+        let text = fs::read_to_string(&markdown).expect("read markdown");
+        for (index, block) in extract_code_blocks(&text).into_iter().enumerate() {
+            let is_surf = block.lang == "chelis-surf"
+                || (block.lang == "chelis-surf-fragment" && parse_surf(&block.body).is_ok());
+            if !is_surf {
+                continue;
+            }
+            let file = dir.path().join(format!("block_{linted}.ch"));
+            fs::write(&file, format!("{}\n", block.body)).expect("write block");
+            let output = Command::new(chelis_bin())
+                .args(["lint", "--check", file.to_str().unwrap()])
+                .output()
+                .expect("run chelis lint");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.trim().is_empty(),
+                "{} block {} draws lint diagnostics:\n{}{}\n{}",
+                markdown.display(),
+                index + 1,
+                stdout,
+                String::from_utf8_lossy(&output.stderr),
+                block.body
+            );
+            linted += 1;
+        }
+    }
+    assert!(linted >= 30, "expected to lint the documented Surf blocks, linted {linted}");
+}
+
 #[test]
 fn phase1f_desugar_accepts_executable_examples() {
     for entry in fs::read_dir(examples_dir()).expect("read_dir") {

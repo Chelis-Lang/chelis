@@ -5,6 +5,7 @@ use chelis_deep::parser::{parse_str as parse_deep, parse_str_strict as parse_dee
 use chelis_deep::printer::print_canonical;
 use chelis_deep::validate::{WarningKind, validate};
 use chelis_surf::desugar::desugar_program;
+use chelis_surf::format::format_source;
 use chelis_surf::parser::parse_str as parse_surf;
 
 #[derive(Debug)]
@@ -96,6 +97,20 @@ fn assert_valid_report(label: &str, report: &chelis_types::fitness::FitnessRepor
     );
 }
 
+/// A documented Surf block is what a reader copies into a `.ch` file, and
+/// `chelis check`, `eval`, and `build` refuse a file that is not canonically
+/// formatted. Parsing and type-checking the block is therefore not enough: it
+/// must also be byte-identical to the formatter's output.
+fn assert_canonical_surf(label: &str, body: &str) {
+    let source = format!("{body}\n");
+    let canonical = format_source(&source)
+        .unwrap_or_else(|err| panic!("{label} failed to format: {err}\n{body}"));
+    assert_eq!(
+        canonical, source,
+        "{label} is not canonically formatted; `chelis fmt` prints:\n{canonical}"
+    );
+}
+
 fn validate_markdown_file(path: &PathBuf, expectations: Option<MarkdownExpectations>) {
     let markdown =
         fs::read_to_string(path).unwrap_or_else(|_| panic!("failed to read {}", path.display()));
@@ -139,10 +154,27 @@ fn validate_markdown_file(path: &PathBuf, expectations: Option<MarkdownExpectati
         let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let report = chelis_types::check_program(&deep);
         assert_valid_report(&label, &report);
+        assert_canonical_surf(&label, &block.body);
 
         let printed = print_canonical(&deep);
         parse_deep_strict(&printed)
             .unwrap_or_else(|err| panic!("{label} desugared to invalid Deep: {err}\n{printed}"));
+    }
+
+    // A fragment is not type-checked on its own, but one that parses as a
+    // program is still shown the way the formatter prints it.
+    for block in blocks
+        .iter()
+        .filter(|block| block.lang == "chelis-surf-fragment")
+    {
+        if parse_surf(&block.body).is_ok() {
+            let label = format!(
+                "Surf fragment at {}:{}",
+                path.display(),
+                block.start_line
+            );
+            assert_canonical_surf(&label, &block.body);
+        }
     }
 
     for (index, block) in deep_blocks.iter().enumerate() {

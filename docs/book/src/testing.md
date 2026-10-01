@@ -11,7 +11,6 @@ no parameters, and a `unit` result. For a package whose module prefix is `Demo`:
 
 ```chelis-surf-fragment
 module Demo.Tests.Core
-
 def test_value() -> unit = test_assert(true, "value is valid")
 ```
 

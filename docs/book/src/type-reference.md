@@ -167,10 +167,14 @@ a callee's dtype. Structural lists such as reshape sizes therefore spell
 their `i64` elements explicitly.
 
 ```chelis-surf-fragment
-a = cast(x, bf16)           -- explicit tensor conversion
-b = 1.0f64                  -- suffix binds f64
-c = cast(3000000000, i64)   -- literal binds directly at i64
-d = cast(1.1, f64)          -- literal binds directly at f64
+-- explicit tensor conversion
+a = cast(x, bf16)
+-- suffix binds f64
+b = 1.0f64
+-- literal binds directly at i64
+c = cast(3000000000, i64)
+-- literal binds directly at f64
+d = cast(1.1, f64)
 ```
 
 Arithmetic operands must have the same numeric dtype and dimensions, with

@@ -1,6 +1,6 @@
 //! Rule `redundant-linearity-call` — source-level `copy()` and `drop()` are
-//! accepted for migration compatibility, but the implicit linearity model
-//! inserts equivalent IR nodes automatically.
+//! accepted, but the implicit linearity model inserts equivalent IR nodes
+//! automatically.
 //!
 //! This rule is advisory-only. It is wired through `registry::advisory_rules`
 //! instead of `registry::all_rules`, so it does not fail style-gated build,
@@ -67,7 +67,7 @@ impl Rule for RedundantLinearityCall {
                     line: Some(line_no),
                     col: Some(col_no),
                     message: format!(
-                        "`{call}()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node"
+                        "`{call}()` is valid but redundant; the compiler inserts the corresponding IR node implicitly"
                     ),
                     });
                 }

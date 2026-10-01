@@ -25,7 +25,6 @@ package prefix and path beneath the source root.
 
 ```chelis-surf-fragment
 -- line comment to end of line
-
 {- block comment,
    which {- nests -} cleanly -}
 ```
@@ -178,13 +177,16 @@ overloading and no infix bitwise operator; use the named builtins `bitand`, `bit
 `bitxor`, `shl`, `shr`, and `pow` for exponentiation.
 
 The pipe operator threads its left value as the first argument of the call on its right.
-`x |> f(y)` is `f(x, y)`. When the piped value belongs in a later position, pipe into a
-lambda:
+`x |> f(y)` is `f(x, y)`, and stages chain from left to right:
 
 ```chelis-surf-fragment
-hidden = matmul(x, w1)
-  |> add(b1)
-  |> relu
+hidden = matmul(x, w1) |> add(b1) |> relu
+```
+
+When the piped value belongs in a later position, pipe into a lambda:
+
+```chelis-surf-fragment
+complement = p |> fn (q) -> sub(1.0, q)
 ```
 
 ## Function application
@@ -314,7 +316,6 @@ A module-level `dim` declares concrete named dimensions used across the file. Fu
 
 ```chelis-surf-fragment
 dim batch, vocab_size
-
 def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)
 ```
 
