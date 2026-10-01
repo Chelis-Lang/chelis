@@ -140,3 +140,14 @@ structured rejections.
 The direction is Deep-path diagnostics for compiler pass errors, which needs
 provenance threaded through the passes; query and edit failures identify the
 addressed function. Detailed design: `spec/design/chelis_agent_editing_surface.md`.
+
+## 8. Agent-Authoring Research
+
+Chelis is written by agents and reviewed by people, so how well agents write it is
+measured rather than assumed. The direction is a seed corpus of checked Chelis
+programs, measurement of how much an agent learns in context from the language's own
+documentation, collection of agent trajectories, and a reproducible benchmark that
+compares agent-written Chelis with agent-written Python on equivalent tasks. A
+refreshed downstream skill (`packages/chelis-std/SKILL.md`) that teaches the full
+language, including the domain shells, belongs to this track. Sequencing and
+prerequisites are in `spec/design/chelis_project_plan.md`.

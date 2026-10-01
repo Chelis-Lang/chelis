@@ -139,7 +139,7 @@ Tide must not reinterpret the request as a fuzz run.
 ### `chelis tide lsp`
 
 Launch the Tide LSP server on stdio.
-The server recomputes the full file on each open/change and provides:
+The server provides:
 
 - diagnostics
 - completion
@@ -217,44 +217,25 @@ Tide extends beyond the REPL with:
   itself remains unchanged.
 - `/grad` is DAG-level and returns differentiated DAG JSON plus node mappings, not a
   source-level differentiated Surf or Deep program.
-- `cargo test -p chelis-tide --test api` is the automated test of this surface.
-- MCP-agent end-to-end validation is a documented manual gate rather than part of
-  the default workspace run.
 
 ## 9. Language Server Contract Notes
 
 - `chelis tide lsp` is the stdio entrypoint; there is no separate `chelis-lsp`
   binary on the user-facing CLI surface.
-- The LSP does not depend on `salsa`; it recomputes from the full current document.
 - The bundled VS Code-compatible extension lives in `editors/vscode/` and includes
   TextMate grammars for Surf and Deep so syntax highlighting works before the LSP is
   ready.
 - The Deep toggle is a read-only command that shows canonical Deep; it does not attempt
   bidirectional Surf/Deep editing.
-- Automated coverage is library-level: `cargo test -p chelis-lsp` exercises the
-  analysis engine and command preparation. Full editor-host protocol behavior is a
-  manual gate rather than a claimed automated proof.
-- The manual editor-host check is opening a `.ch` file through the extension and
-  verifying immediate syntax highlighting, diagnostics, hover, completion, definition
-  lookup, Deep view, and fitness status in one session.
 
 ## 10. Cove Contract Notes
 
 - `chelis cove` is the TUI entrypoint; `chelis cove --file examples/mnist.ch`
   opens a specific file.
-- Cove is single-file and direct-library: it calls `chelis-tide::compiler`
-  helpers in-process rather than talking to a background daemon.
+- Cove calls the `chelis-tide::compiler` helpers.
 - The pane layout is Surf editor, read-only Deep view, diagnostics/fitness, and
   output.
 - The output pane supports compile-preview and evaluator execution with auto-generated
   zero-filled named bindings for `Load` nodes whose shapes are known.
 - The bundled tree-sitter grammars live in `grammars/tree-sitter-chelis-surf/` and
   `grammars/tree-sitter-chelis-deep/`; Cove uses them for Surf and Deep highlighting.
-- Cove does not embed an MCP-driven assistant session.
-- Automated coverage is non-UI only: the live pipeline helpers, zero-binding
-  eval, file loading, and CLI surface are tested, but the terminal event loop and panel
-  behavior are manual-gate territory.
-- The manual acceptance check is:
-  `cargo run -p chelis-cli -- cove --file examples/mnist.ch`
-  and confirming that editing updates Deep/diagnostics live, `Ctrl-S` saves, and
-  compile/eval actions populate the output pane.

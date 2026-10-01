@@ -239,8 +239,6 @@ Greedy elementwise fusion merges adjacent single-consumer elementwise ops into
 - `chelis build --target hip` prints the formula unconditionally and the concrete
   estimate when available
 - the reported formula includes the inline staged-reduction scratch chains of §3.4
-- memory planning reports peak usage only: it performs no runtime memory-budget
-  comparison and inserts no checkpoints
 
 ### 3.4 Reductions and hipBLAS
 
@@ -403,7 +401,6 @@ single-element reductions, matmul with degenerate dimensions.
   guards `bfloat` on `__METAL_VERSION__ >= 320`, and runtime pipeline creation
   surfaces a clean diagnostic on M1/M2 devices. See `spec/04-type-system.md`
   §1.1.3 for both surfaces.
-- kernel launches are synchronous (`waitUntilCompleted`)
 - `peak_device_bytes_formula` reports peak system RAM for tensor storage on Apple
   Silicon (no separate VRAM); the CLI prefixes the formula with a one-line note so
   users do not double-count

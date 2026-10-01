@@ -91,8 +91,9 @@ This regularity is a design feature.
 Agents do not need to infer whether a node head is structural or user-defined.
 
 Surf desugars losslessly to Deep.
-Deep decompiles back to formatter-canonical Surf; a best-effort verbose form exists
-for debugging (`09-tide.md` §4).
+Deep decompiles back to formatter-canonical Surf, apart from the fail-closed
+resugaring exceptions in `02-surf-syntax.md`; a best-effort verbose form exists for
+debugging (`09-tide.md` §4).
 The compiler treats Deep as the source of truth.
 
 ## 7. Type System Scope

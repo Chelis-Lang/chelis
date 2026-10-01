@@ -1,4 +1,4 @@
-//! GPU execution correctness tests for the Metal backend (Phase M6).
+//! GPU execution correctness tests for the Metal backend.
 //!
 //! These require an Apple Silicon Mac with a usable Metal device. They
 //! are `#[ignore]` by default — run with:
@@ -7,9 +7,8 @@
 //! cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1
 //! ```
 //!
-//! Manual gate per CLAUDE.md "One Acceptance Oracle Per Phase" + the
-//! Phase M section in spec/08-backends.md. Not part of default CI; the M3
-//! macOS-smoke step gates compile+link only because GitHub's
+//! Manual gate (`docs/manual_gates.md`) for the Metal agreement contract in
+//! spec/08-backends.md §4.6. Not part of default CI; the macOS smoke step gates compile+link only because GitHub's
 //! macos-latest VMs may return null from `MTLCreateSystemDefaultDevice`.
 //!
 //! Numerical tolerance: MSL's default `exp`/`log`/`sqrt`/`sin` are fast-math
@@ -1181,7 +1180,7 @@ int main(void) {{
 // `-framework Metal -framework Foundation`, runs it on the Metal device, and
 // asserts agreement with the `chelis-ir` evaluator within the Metal f32
 // tolerance. `#[ignore]` because they require an Apple Silicon Mac with a
-// usable Metal device (see `spec/08-backends.md` §M6 + §4).
+// usable Metal device (see `spec/08-backends.md` §4.6).
 // ===========================================================================
 
 fn mat_f32(r: usize, c: usize) -> TensorType {
