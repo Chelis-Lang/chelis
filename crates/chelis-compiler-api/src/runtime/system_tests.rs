@@ -257,6 +257,22 @@ fn before(seconds: u64, nanoseconds: u32) -> EvalClockReading {
     EvalClockReading::BeforeOrigin(Duration::new(seconds, nanoseconds))
 }
 
+fn describe(reading: EvalClockReading) -> String {
+    let (side, distance) = match reading {
+        EvalClockReading::AtOrAfterOrigin(distance) => ("after", distance),
+        EvalClockReading::BeforeOrigin(distance) => ("before", distance),
+    };
+    format!(
+        "reading {} s {} ns {side} the origin",
+        distance.as_secs(),
+        distance.subsec_nanos()
+    )
+}
+
+fn show((seconds, nanoseconds): (i64, i64)) -> String {
+    format!("({seconds}, {nanoseconds})")
+}
+
 fn time(seconds: i64, nanoseconds: i64) -> EvalClockTime {
     EvalClockTime {
         seconds,
@@ -302,12 +318,15 @@ fn evaluate_with(
 
 fn pair(value: &RuntimeValue) -> (i64, i64) {
     let RuntimeValue::Tuple(items) = value else {
-        panic!("a clock read returns a tuple, got {value:?}");
+        panic!("a clock read returns a tuple");
     };
     let halves: Vec<Option<i64>> = items.iter().map(RuntimeValue::as_i64).collect();
     match halves.as_slice() {
         [Some(seconds), Some(nanoseconds)] => (*seconds, *nanoseconds),
-        other => panic!("a clock read returns two i64 halves, got {other:?}"),
+        other => panic!(
+            "a clock read returns two i64 halves, got {} values",
+            other.len()
+        ),
     }
 }
 
@@ -374,7 +393,7 @@ fn readings_before_the_origin_are_euclidean() {
         (after(0, 999_999_999), time(0, 999_999_999)),
     ] {
         for read in read_both(FixedClockAdapter::both(reading)) {
-            assert_eq!(read, Ok(expected), "reading {reading:?}");
+            assert_eq!(read, Ok(expected), "{}", describe(reading));
         }
     }
 }
@@ -392,7 +411,7 @@ fn readings_at_the_range_bounds_are_admitted() {
         (before(least, 0), time(CLOCK_SECONDS_MIN, 0)),
     ] {
         for read in read_both(FixedClockAdapter::both(reading)) {
-            assert_eq!(read, Ok(expected), "reading {reading:?}");
+            assert_eq!(read, Ok(expected), "{}", describe(reading));
         }
     }
 }
@@ -421,7 +440,8 @@ fn readings_outside_the_range_fail_with_the_io_message() {
                     "{operation}: io: host reading (seconds {seconds}, nanoseconds {nanoseconds}) \
                      is outside seconds -377705030401..253402214400"
                 )),
-                "reading {reading:?}"
+                "{}",
+                describe(reading)
             );
         }
     }
@@ -494,7 +514,10 @@ fn default_adapter_reads_the_host_clocks() {
     let wall = (wall.seconds, wall.nanoseconds);
     assert!(
         lower <= wall && wall <= upper,
-        "{lower:?} <= {wall:?} <= {upper:?}"
+        "{} <= {} <= {}",
+        show(lower),
+        show(wall),
+        show(upper)
     );
 
     let mut previous = system.clock_monotonic_read().expect("monotonic clock");
@@ -502,7 +525,9 @@ fn default_adapter_reads_the_host_clocks() {
         let next = system.clock_monotonic_read().expect("monotonic clock");
         assert!(
             (previous.seconds, previous.nanoseconds) <= (next.seconds, next.nanoseconds),
-            "{previous:?} then {next:?}"
+            "{} then {}",
+            show((previous.seconds, previous.nanoseconds)),
+            show((next.seconds, next.nanoseconds))
         );
         assert!((0..1_000_000_000).contains(&next.nanoseconds));
         previous = next;

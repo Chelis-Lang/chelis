@@ -30,9 +30,11 @@ explicit `key`, [05-RNG-1]):
   user-facing as a checked effect; reserved.
 - `Io` — host-side print/debug, filesystem builtins (`read_file`,
   `write_file`, `read_lines`, `read_bytes`, `file_exists`, `list_dir`,
-  `mmap_file`), and subprocess execution (`process_run`). Today the latter
-  runs in the evaluator; [05-HOST-2] also requires compiled host support,
-  which chelis#1297 has not completed. Network access is not part of this effect.
+  `mmap_file`), subprocess execution (`process_run`), and the clock reads
+  (`clock_wall_read`, `clock_monotonic_read`, [05-OP-75]). Today the process
+  and clock operations run in the evaluator; [05-HOST-2] also requires
+  compiled host support, which chelis#1297 has not completed. Network access
+  is not part of this effect.
 - `Test` — the in-language test runner's effect. Functions defined as
   `! { Test }` may use test-only assertions.
 - `Resource(String)` — device resource boundaries (`gpu:0`, `cpu`). Validated
@@ -49,17 +51,20 @@ expansion below covers `Network` and `Filesystem` only.
 ### Evaluator system boundary
 
 The compiler API's host evaluator carries a mandatory `EvalSystemBoundary`
-through each evaluation context. Its `Filesystem` and `Process` capabilities
-are evaluator-internal policy categories with **independent** allow decisions,
-not additions to language effect rows. Every adapter call checks the
-operation's capability first. Normal program evaluation permits both;
-invariant predicate revalidation denies both before the adapter can access
-the OS. Seven filesystem builtins and `process_run` pass through this one
-boundary. `print` and `debug` remain transcript operations.
+through each evaluation context. Its `Filesystem`, `Process`, and `Clock`
+capabilities are evaluator-internal policy categories with **independent**
+allow decisions, not additions to language effect rows. Every adapter call
+checks the operation's capability first. Normal program evaluation permits all
+three; invariant predicate revalidation denies all three before the adapter
+can access the OS. Seven filesystem builtins, `process_run`, and the two clock
+reads pass through this one boundary. `print` and `debug` remain transcript
+operations.
 
-For the current eight evaluator builtin routes, the default adapter in
+For the current ten evaluator builtin routes, the default adapter in
 `crates/chelis-compiler-api/src/runtime/system_adapter.rs` performs the host
-filesystem and process calls after the policy wrapper checks permission.
+filesystem, process, and clock calls after the policy wrapper checks
+permission. The wrapper, not the adapter, normalizes a clock reading and
+checks its range, so an injected test clock meets the same contract.
 The adapter preserves directory-name byte ordering and strict UTF-8 failure
 under `spec/05-risc-primitives.md` [05-HOST-4], rather than inventing a lossy
 or unsorted evaluator rule. The compiled C lane and `chelis-runtime` ABI are
