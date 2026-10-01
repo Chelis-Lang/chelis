@@ -9,6 +9,8 @@
 //!    value on every call. Interface values now carry one uniform `load`
 //!    origin. The oracle counts the ledger's `retain` rows, which the walk
 //!    produced once per element per call, rather than timing the program.
+//! 3. chelis#2587: [05-OP-36]'s structural `eq` and `neq` walk the same deep
+//!    chains, so the runtime compares them from an explicit stack too.
 //!
 //! Oracle: the compiled program runs against the `ownership-ledger` runtime,
 //! every allocation must be finalized with no live owner left, and stdout must
@@ -91,4 +93,23 @@ fn recursion_over_a_carried_list_does_linear_ownership_work() {
         large <= 5 * small,
         "retains grew from {small} at n = 64 to {large} at n = 256: superlinear"
     );
+}
+
+/// chelis#2587: structural equality over two chains 100,000 links deep runs in
+/// bounded native stack and releases every owner; the compared values are
+/// borrowed, so the ledger stays balanced. Two chains of different depths
+/// compare unequal.
+#[test]
+fn chains_one_hundred_thousand_links_deep_compare_structurally() {
+    let source = format!(
+        "{CHAIN}def same(n: i64, m: i64) -> bool = eq(fold(fn (acc: Chain, i: i64) -> Link(i, \
+         acc), End, range(0i64, n)), fold(fn (acc: Chain, i: i64) -> Link(i, acc), End, \
+         range(0i64, m)))\n\
+         a = same(100000i64, 100000i64)\n\
+         b = same(3i64, 2i64)\n"
+    );
+    let generated = ownership_support::emit(&source, "deep_equality");
+    let (summary, stdout) = ownership_support::run_program(&generated);
+    ownership_support::balanced(&summary);
+    assert_eq!(stdout, "a = true\nb = false\n");
 }

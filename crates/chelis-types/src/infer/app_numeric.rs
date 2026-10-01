@@ -463,10 +463,19 @@ pub(super) fn operand_dtype_rejection(
             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                 || matches!(resolved, Type::Prim(prim) if prim.is_numeric())
         }
-        "eq" | "neq" => {
-            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                || matches!(resolved, Type::Prim(_))
-        }
+        // [05-OP-36]: a structured operand's reachable fields are decided by
+        // `equality_domain`, which runs before this policy.
+        "eq" | "neq" => matches!(
+            resolved,
+            Type::Tensor(_, _)
+                | Type::Var(_)
+                | Type::Error(_)
+                | Type::Prim(_)
+                | Type::Unit
+                | Type::Tuple(_)
+                | Type::Adt(..)
+                | Type::KindedAdt(..)
+        ),
         "and" | "or" | "not" => {
             matches!(
                 resolved,
@@ -551,6 +560,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
     arg_tys: &[Type],
     env: &Env,
     subst: &Subst,
+    adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     route_observed: &mut bool,
     suspension: Option<&DtypeAdmissibilitySite<'_>>,
@@ -595,6 +605,33 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                     }
                 }
                 _ => {
+                    if matches!(fname.as_str(), "eq" | "neq") {
+                        match equality_domain(&resolved, subst, adt_reg) {
+                            EqualityDomain::Admitted => {}
+                            // chelis#2587: a field type that is still a
+                            // variable is not admissible YET. The call resumes
+                            // once it binds, and the declaration boundary
+                            // decides one that never does.
+                            EqualityDomain::Awaits => {
+                                if let Some(site) = suspension {
+                                    site.register(arg_tys, result_ty, subst, product);
+                                }
+                                continue;
+                            }
+                            EqualityDomain::Rejected(incomparable) => {
+                                let (kind, message, hints) =
+                                    equality_domain_rejection(fname, &resolved, &incomparable);
+                                reject!(
+                                    errors,
+                                    CheckError::new(
+                                        kind,
+                                        with_node_provenance(node, message),
+                                        hints,
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved)
                     {
                         reject!(

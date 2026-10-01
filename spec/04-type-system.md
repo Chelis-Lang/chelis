@@ -666,6 +666,10 @@ opaque scrutinee only with irrefutable patterns; with §2.4's
 irrefutable-arm rule, `| x =>`, `| q @ x =>`, and `| _ =>` all cover
 such a match without naming constructors.
 
+**Equality over opaque values.** Structural `eq` and `neq` ([05-OP-36]) are
+admitted on opaque values outside the defining module, since equality
+inspects no field through the surface.
+
 **Error contract.** The violation message names the type, the defining
 module, and the exported producers of that module with signatures;
 location context is the enclosing def name embedded in the message:

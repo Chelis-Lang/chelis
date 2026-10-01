@@ -7194,6 +7194,210 @@ pub unsafe extern "C" fn chelis_print_adt(adt: *const chelis_adt) {
     write_stdout(&adt_to_string(adt));
 }
 
+const STRUCTURAL_EQUALITY: &str = "structural equality";
+
+/// [05-OP-36]'s scalar equality at the scalar's own dtype: a NaN is unequal
+/// to every value, the signed zeros are equal, and an integer or bool compares
+/// its exact stored value.
+fn scalars_equal(lhs: chelis_scalar, rhs: chelis_scalar) -> bool {
+    let dtype = validate_scalar(lhs, STRUCTURAL_EQUALITY);
+    if dtype != validate_scalar(rhs, STRUCTURAL_EQUALITY) {
+        return false;
+    }
+    match dtype {
+        RuntimeDType::F32 => f32::from_bits(lhs.bits as u32) == f32::from_bits(rhs.bits as u32),
+        RuntimeDType::F64 => f64::from_bits(lhs.bits) == f64::from_bits(rhs.bits),
+        RuntimeDType::F16 => {
+            half::f16::from_bits(lhs.bits as u16) == half::f16::from_bits(rhs.bits as u16)
+        }
+        RuntimeDType::Bf16 => {
+            half::bf16::from_bits(lhs.bits as u16) == half::bf16::from_bits(rhs.bits as u16)
+        }
+        // `validate_scalar` zeroes every unused bit, so the stored bits are
+        // the exact value.
+        RuntimeDType::Bool
+        | RuntimeDType::I8
+        | RuntimeDType::I16
+        | RuntimeDType::I32
+        | RuntimeDType::I64 => lhs.bits == rhs.bits,
+        RuntimeDType::Key => unreachable!("validate_scalar rejects a key"),
+    }
+}
+
+/// [05-OP-36]'s tensor case for a tensor reached as a field: equal exactly
+/// when the dtype, the dimensions and every row-major element compare equal.
+unsafe fn tensors_equal(lhs: *const chelis_tensor, rhs: *const chelis_tensor) -> bool {
+    unsafe fn elements_equal<T: TensorElement + PartialEq>(
+        lhs: *const chelis_tensor,
+        rhs: *const chelis_tensor,
+    ) -> bool {
+        let count = (*lhs).count();
+        let lp = T::data_ptr_unchecked(lhs.cast_mut());
+        let rp = T::data_ptr_unchecked(rhs.cast_mut());
+        (0..count).all(|index| *lp.add(index) == *rp.add(index))
+    }
+    let [dtype, rhs_dtype] = validate_tensor_inputs([
+        (lhs, "structural equality lhs"),
+        (rhs, "structural equality rhs"),
+    ]);
+    if dtype != rhs_dtype || (*lhs).shape() != (*rhs).shape() {
+        return false;
+    }
+    match dtype {
+        RuntimeDType::F32 => elements_equal::<f32>(lhs, rhs),
+        RuntimeDType::F64 => elements_equal::<f64>(lhs, rhs),
+        RuntimeDType::F16 => elements_equal::<half::f16>(lhs, rhs),
+        RuntimeDType::Bf16 => elements_equal::<half::bf16>(lhs, rhs),
+        RuntimeDType::I64 => elements_equal::<i64>(lhs, rhs),
+        RuntimeDType::I32 => elements_equal::<i32>(lhs, rhs),
+        RuntimeDType::I16 => elements_equal::<i16>(lhs, rhs),
+        RuntimeDType::I8 => elements_equal::<i8>(lhs, rhs),
+        RuntimeDType::Bool => elements_equal::<Bool8>(lhs, rhs),
+        RuntimeDType::Key => unreachable!("validate_tensor_inputs rejects a key tensor"),
+    }
+}
+
+/// [05-OP-36]'s recursive equality over two values of one static type.
+///
+/// Lists and tuples compare length and then corresponding items in order.
+/// Option nodes and ADT values compare their exact constructor and then their
+/// fields in order. Dictionaries compare key/value sets independent of
+/// insertion order: each key is found by [05-OP-32]'s exact key equality and
+/// its values compare by this rule. The walk keeps its pending pairs on an
+/// explicit stack, as release does (chelis#2522), so value depth cannot
+/// consume the native stack.
+unsafe fn values_equal(lhs: chelis_value, rhs: chelis_value) -> bool {
+    let mut pending = vec![(lhs, rhs)];
+    while let Some((lhs, rhs)) = pending.pop() {
+        validate_value(lhs, STRUCTURAL_EQUALITY);
+        validate_value(rhs, STRUCTURAL_EQUALITY);
+        if lhs.tag != rhs.tag {
+            return false;
+        }
+        match lhs.tag {
+            CHELIS_VALUE_UNIT => {}
+            CHELIS_VALUE_SCALAR => {
+                if !scalars_equal(lhs.payload.scalar, rhs.payload.scalar) {
+                    return false;
+                }
+            }
+            CHELIS_VALUE_STRING => {
+                if !chelis_string_eq(lhs.payload.string, rhs.payload.string) {
+                    return false;
+                }
+            }
+            CHELIS_VALUE_TENSOR => {
+                if !tensors_equal(lhs.payload.tensor, rhs.payload.tensor) {
+                    return false;
+                }
+            }
+            CHELIS_VALUE_LIST | CHELIS_VALUE_TUPLE => {
+                let (lhs, rhs) = if lhs.tag == CHELIS_VALUE_LIST {
+                    ((*lhs.payload.list).live(), (*rhs.payload.list).live())
+                } else {
+                    (
+                        (*lhs.payload.tuple).items.as_slice(),
+                        (*rhs.payload.tuple).items.as_slice(),
+                    )
+                };
+                if lhs.len() != rhs.len() {
+                    return false;
+                }
+                pending.extend(lhs.iter().copied().zip(rhs.iter().copied()).rev());
+            }
+            CHELIS_VALUE_ADT => {
+                let (lhs, rhs) = (&*lhs.payload.adt, &*rhs.payload.adt);
+                if !chelis_string_eq(lhs.ctor, rhs.ctor) || lhs.fields.len() != rhs.fields.len() {
+                    return false;
+                }
+                pending.extend(
+                    lhs.fields
+                        .iter()
+                        .copied()
+                        .zip(rhs.fields.iter().copied())
+                        .rev(),
+                );
+            }
+            CHELIS_VALUE_OPTION => {
+                match ((*lhs.payload.option).value, (*rhs.payload.option).value) {
+                    (Some(lhs), Some(rhs)) => pending.push((lhs, rhs)),
+                    (None, None) => {}
+                    (Some(_), None) | (None, Some(_)) => return false,
+                }
+            }
+            CHELIS_VALUE_DICT => {
+                let (lhs, rhs) = (lhs.payload.dict, rhs.payload.dict);
+                if (*lhs).entries.len() != (*rhs).entries.len() {
+                    return false;
+                }
+                for entry in (*lhs).entries.iter().rev() {
+                    let Some(index) = dict_find(rhs, entry.key) else {
+                        return false;
+                    };
+                    pending.push((entry.value, (*rhs).entries[index].value));
+                }
+            }
+            CHELIS_VALUE_MAPPED_FILE => runtime_fail!(
+                "Domain: {STRUCTURAL_EQUALITY}: [05-OP-36] makes a resource handle not \
+                 equality-comparable"
+            ),
+            _ => unreachable!("validate_value rejects unknown tags"),
+        }
+    }
+    true
+}
+
+/// [05-OP-36] `eq` over two borrowed `List` values; `neq` is its complement.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_list_eq(lhs: *const chelis_list, rhs: *const chelis_list) -> bool {
+    values_equal(
+        value_from_handle(CHELIS_VALUE_LIST, lhs.cast_mut().cast()),
+        value_from_handle(CHELIS_VALUE_LIST, rhs.cast_mut().cast()),
+    )
+}
+
+/// [05-OP-36] `eq` over two borrowed tuples; `neq` is its complement.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tuple_eq(
+    lhs: *const chelis_tuple,
+    rhs: *const chelis_tuple,
+) -> bool {
+    values_equal(
+        value_from_handle(CHELIS_VALUE_TUPLE, lhs.cast_mut().cast()),
+        value_from_handle(CHELIS_VALUE_TUPLE, rhs.cast_mut().cast()),
+    )
+}
+
+/// [05-OP-36] `eq` over two borrowed dictionaries; `neq` is its complement.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_dict_eq(lhs: *const chelis_dict, rhs: *const chelis_dict) -> bool {
+    values_equal(
+        value_from_handle(CHELIS_VALUE_DICT, lhs.cast_mut().cast()),
+        value_from_handle(CHELIS_VALUE_DICT, rhs.cast_mut().cast()),
+    )
+}
+
+/// [05-OP-36] `eq` over two borrowed ADT values; `neq` is its complement.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_adt_eq(lhs: *const chelis_adt, rhs: *const chelis_adt) -> bool {
+    values_equal(
+        value_from_handle(CHELIS_VALUE_ADT, lhs.cast_mut().cast()),
+        value_from_handle(CHELIS_VALUE_ADT, rhs.cast_mut().cast()),
+    )
+}
+
+/// [05-OP-36] `eq` over two borrowed option nodes; `neq` is its complement.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_option_eq(
+    lhs: *const chelis_option,
+    rhs: *const chelis_option,
+) -> bool {
+    values_equal(
+        value_from_handle(CHELIS_VALUE_OPTION, lhs.cast_mut().cast()),
+        value_from_handle(CHELIS_VALUE_OPTION, rhs.cast_mut().cast()),
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_fail(message: chelis_string) -> ! {
     runtime_fail!("{}", string_value(message).value);

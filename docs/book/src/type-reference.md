@@ -180,7 +180,9 @@ d = cast([1.1, 2.2], f64)
 Arithmetic operands must have the same numeric dtype and dimensions, with
 each operation's own dtype domain. Ordered comparisons such as `cmplt` take
 equal numeric types; `eq` and `neq` also compare booleans, strings, unit, and
-supported structured values. Tensor comparisons produce a boolean tensor.
+two `List`, tuple, `Dict`, `Option`, or data-type values of one type,
+structurally, when no part of the value is a function, key, or resource
+handle. Tensor comparisons produce a boolean tensor.
 Logical operations (`and`, `or`, `not`) take `bool`; transcendental operations
 such as `exp`, `log`, and `sqrt` take float types.
 

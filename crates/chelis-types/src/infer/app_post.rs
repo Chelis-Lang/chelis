@@ -292,6 +292,7 @@ pub(super) fn finish_unified_app(
         &arg_tys,
         env,
         subst,
+        adt_reg,
         errors,
         &mut checked_route_observed,
         dtype_site.as_ref(),
@@ -621,10 +622,16 @@ pub(super) fn finish_unified_app(
             }
             return subst.apply(&ret_tv);
         }
-        // No tensor arg → scalar comparison, returns scalar bool.
+        // No tensor arg → scalar comparison, returns scalar bool. [05-OP-36]'s
+        // recursive equality returns one scalar bool as well.
         if let Some(first_arg) = arg_tys.first() {
             let resolved_arg = type_for_readonly_check(first_arg, subst);
-            if matches!(resolved_arg, Type::Prim(_)) {
+            let recursive_equality = matches!(fname.as_str(), "eq" | "neq")
+                && matches!(
+                    resolved_arg,
+                    Type::Unit | Type::Tuple(_) | Type::Adt(..) | Type::KindedAdt(..)
+                );
+            if matches!(resolved_arg, Type::Prim(_)) || recursive_equality {
                 let result = Type::Prim(Prim::Bool);
                 if let Err(error) = unify(&ret_tv, &result, subst) {
                     return report(errors, error.into());

@@ -1170,6 +1170,18 @@ impl InferenceProduct {
                 self.deferred_shape_checks.push(check);
                 continue;
             }
+            // chelis#2587: a suspended `eq` or `neq` resumes on the condition
+            // it suspended on, a reachable field type that is still a variable.
+            if let DeferredShapeRule::PostApp {
+                replay: PostAppReplay::DtypeAdmissibility,
+                func_name,
+                ..
+            } = &check.rule
+                && equality_call_awaits_binding(func_name, &check.arg_tys, subst, adt_reg)
+            {
+                self.deferred_shape_checks.push(check);
+                continue;
+            }
             // An entry the replay registers again belongs to this one's owner.
             self.replaying_owner.clone_from(&check.owner);
 
@@ -1345,6 +1357,7 @@ impl InferenceProduct {
                 &settled,
                 vg,
                 subst,
+                adt_reg,
                 errors,
                 self,
                 resuspend,
