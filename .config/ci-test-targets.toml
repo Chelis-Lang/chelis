@@ -127,6 +127,26 @@ cadence = "pull_request and push"
 reason = "script-unit executes the reference's positive and negative rows and the harness comparison logic"
 tracking_issue = "chelis#2859"
 
+# chelis#2778: the Std.Decimal reference. script-unit runs its tests on every
+# pull request.
+[[path_rule]]
+prefix = "scripts/decimal_reference.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the reference through its own tests"
+tracking_issue = "chelis#2778"
+
+[[path_rule]]
+prefix = "scripts/test_decimal_reference.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the reference's accepting and rejecting rows against independent derivations"
+tracking_issue = "chelis#2778"
+
 [[path_rule]]
 prefix = "tests/corpus/core_fragment_parity/"
 disposition = "owner"
