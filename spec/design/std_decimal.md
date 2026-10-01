@@ -299,7 +299,7 @@ fails `domain`, never rounds; and export to a declared `(p, s)` rounds only by a
   §1.1.1's scaled-storage rule; it lands when Coral needs it.
 - **JSON exactness:** a JSON float token ingests as `JsonFloat(f64)` under [05-OP-2], so a
   JSON price reaches `Decimal` only through f64. Keeping the token text is a [05-OP-2]
-  decision, tracked separately.
+  decision, tracked by #2871.
 
 ## 12. Normative placement
 
