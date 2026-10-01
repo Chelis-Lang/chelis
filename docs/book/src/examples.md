@@ -1,50 +1,52 @@
 # Examples
 
-The repository keeps runnable examples in `examples/` and non-contract teaching sketches
-in `examples/illustrative/`.
+The commands on this page run from the root of a Chelis source checkout, where
+the `examples/` directory is available. Install the toolchain first if `chelis`
+is not on your path.
 
-## Runnable Corpus
+## Examples with results
 
-Use these files when you want examples that should survive the normal CLI loop:
+These files have a value or an entry point that `chelis eval --file` can run:
 
-- `examples/recursive_cast_targets.ch`: recursive generic scalar casts at each call's concrete dtype.
-- `examples/hello_tensor.ch`: tensor construction and elementwise addition.
-- `examples/integer_functions.ch`: integer literal returns and nullary calls in eval and C builds.
-- `examples/linreg.ch`: matmul, insert, copy, and reductions.
-- `examples/vmap_relu.ch`: transform-oriented tensor flow.
-- `examples/tensor_structural_ops.ch`: reshape, permute, pad, and related shape helpers.
-- `examples/transformer_block.ch`: larger model-style composition.
+- `examples/hello_tensor.ch`: constructs tensors and adds them elementwise.
+- `examples/integer_functions.ch`: integer values, nullary calls, and a tensor gradient.
+- `examples/recursive_cast_targets.ch`: recursive generic scalar functions at several dtypes.
+- `examples/tensor_structural_ops.ch`: reshaping, concatenation, gather and scatter,
+  window reductions, and convolution.
 
-Check one example:
-
-```sh
-chelis fmt --check examples/hello_tensor.ch
-chelis lint --check examples/hello_tensor.ch
-chelis check examples/hello_tensor.ch
-```
-
-Check the executable corpus:
+Try one:
 
 ```sh
-python - <<'PY'
-from pathlib import Path
-import subprocess
-
-for path in sorted(Path("examples").glob("*.ch")):
-    subprocess.run(["chelis", "fmt", "--check", str(path)], check=True)
-    subprocess.run(["chelis", "lint", "--check", str(path)], check=True)
-    subprocess.run(["chelis", "check", str(path)], check=True)
-PY
+chelis eval --file examples/hello_tensor.ch
 ```
 
-## Illustrative Examples
+## Definitions to check and reuse
 
-`examples/illustrative/` is for syntax and design sketches that are useful to read but
-are not part of the executable corpus. Do not use those files as package acceptance
-evidence unless the owning docs say a specific file is executable.
+These files define functions but have no value or entry point for the evaluator
+to print on their own:
 
-## Package Examples
+- `examples/linreg.ch`: matrix multiplication, explicit bias insertion, and reductions.
+- `examples/vmap_relu.ch`: vectorized ReLU over a batch.
+- `examples/transformer_block.ch`: a larger model function built from tensor operations.
 
-For Reef package layout and shell authoring, read `packages/chelis-std/reef.toml` and the
-source under `packages/chelis-std/src/`. `chelis-std` itself is bundled with the compiler;
-use it as a runtime/package-layout reference, not something to install with Reef.
+Check one before adapting its functions in your own program:
+
+```sh
+chelis fmt --check examples/linreg.ch
+chelis lint --check examples/linreg.ch
+chelis check examples/linreg.ch
+```
+
+A successful `check` confirms that the source passes the checker; it does not
+mean evaluating the file will print a result. See [First Program](first-program.md)
+for a file that does both.
+
+## Other example sources
+
+`examples/illustrative/` contains sketches for reading and adapting. They are
+outside the top-level checkable corpus, so check an individual file before
+using it in a program.
+
+For a Reef package layout, see `packages/chelis-std/reef.toml` and its `src/`
+directory. `chelis-std` is bundled with the toolchain; see
+[Reef and Packages](reef.md) to build your own package.
