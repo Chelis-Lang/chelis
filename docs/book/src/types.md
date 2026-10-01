@@ -1,115 +1,63 @@
 # Type System Basics
 
-Chelis keeps tensor dimensions and precision explicit. The type checker reads the shape and
-precision of every tensor from its type, so a transposition or a precision mismatch is a
-compile error rather than a wrong number at runtime. This page covers the ideas you meet
-first. The full surface is in the [Type System Reference](type-reference.md).
-
-## Primitive ideas
-
-- No implicit precision promotion. Mixed precision is an error; change it with `cast`.
-- No implicit broadcasting. Shapes must match; change rank with `insert`, `reshape`, or
-  `permute`.
-- Named tensor dimensions are nominal. `batch` and `seq` match only by name, not by size.
-- Integer literals default to `i32`, float literals to `f32`.
+Chelis makes tensor dimensions and numeric precision explicit. The checker
+rejects an axis order that conflicts with a declared type and an arithmetic
+operation whose operands have different precision. See the
+[Type System Reference](type-reference.md) for the full type surface.
 
 ## Tensor types
 
-A tensor type lists its dimensions and ends with the element type. A scalar on the device
-is a tensor with no dimensions.
+A tensor type lists its dimensions followed by its element type:
 
 ```chelis-surf-fragment
-tensor[f32]              -- scalar
-tensor[n, f32]           -- one named dimension
+tensor[f32]              -- rank-zero tensor
+tensor[n, f32]           -- one dimension
 tensor[batch, seq, f32]  -- two named dimensions
 ```
 
-The canonical Deep form names each dimension and the precision:
-
-```chelis-deep-fragment
-(t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))
-```
-
-An empty List keeps its declared element dtype when converted to a tensor:
-
-```chelis-surf
-empty_values: List[f64] = []
-empty_tensor = to_tensor(empty_values)
-empty_rows: List[List[f64]] = [[], []]
-empty_matrix = to_tensor(empty_rows)
-```
-
-These tensors have shapes `[0]` and `[2, 0]`, both with dtype `f64`.
-`eval --json` exposes the dtype even when there are no elements to print.
-Eval and `build --target c` reject unconstrained `to_tensor([])`; declare the List
-element type as above.
-A missing inner extent is an error; empty payloads do not supply shape evidence.
-
-## A small typed program
+A rank-zero `tensor[f32]` is distinct from an `f32` host scalar. A dimension
+variable such as `n` is declared in a function's `[...]` clause. Distinct named
+dimensions, such as `batch` and `seq`, do not match each other just because
+they have the same extent.
 
 ```chelis-surf
 def add_vec[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
 ```
 
-Both arguments share the dimension variable `n`, so the checker requires the two inputs to
-have the same length and gives the result that same length.
+Both arguments must have the same dimension, and the result keeps it. Call
+sites bind `n` from their inputs, so the function works with different vector
+lengths.
 
-## Reading the Deep shape
+## Shapes and precision
 
-A `def` with annotations desugars to a signature plus the function. The signature is a flat
-`t-fn` whose last child is the return type.
+- Elementwise operations do not broadcast implicitly; their tensor dimension
+  lists must match. Use `insert` to add an axis, `expand` to repeat a size-one
+  axis, `reshape` to specify a new shape, or `permute` to reorder axes.
+- Arithmetic does not promote precision implicitly. Use `cast(x, f32)` when a
+  conversion is intended.
+- An unsuffixed integer literal has type `i32`; an unsuffixed float literal has
+  type `f32`. A suffix such as `1.0f64` selects another dtype explicitly.
 
-```chelis-deep-fragment
-(defsig {}
-  add_vec
-  (n)
-  (t-fn {}
-    (t-tensor {} (d-var {} n) (t-prim {} f32))
-    (t-tensor {} (d-var {} n) (t-prim {} f32))
-    (t-tensor {} (d-var {} n) (t-prim {} f32))))
-```
-
-## Dimension polymorphism
-
-Names in the `[...]` clause before the parameters are dimension variables. A call site
-binds them by unification, so one definition serves every concrete shape.
+An empty list supplies no element values from which to determine a tensor's
+dtype. Give the list an element type before converting it:
 
 ```chelis-surf
-def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)
+empty_values: List[f64] = []
+empty_tensor = to_tensor(empty_values)
 ```
 
-A binder can also carry a dtype-family bound - `Float`, `Int`, or `Numeric` - which limits
-the dtypes it may be instantiated at:
+Here `empty_tensor` has shape `[0]` and dtype `f64`. An unconstrained
+`to_tensor([])` is rejected by the checker.
+
+## Dtype parameters
+
+A dtype-family bound restricts the dtypes a parameter accepts. `Int` accepts
+integer dtypes; `Float` accepts floating dtypes; `Numeric` accepts both:
 
 ```chelis-surf
 def double_ints[p: Int](x: p) -> p = add(x, x)
 ```
 
-A bounded dtype can also be a tensor cast target. The cast preserves the shape;
-each call supplies its own concrete target dtype:
-
-```chelis-surf
-def convert[p: Numeric](values: tensor[3, i32], witness: p) -> tensor[3, p] = cast(values, p)
-as_float = convert(to_tensor([1, 2, 3]), 0.0f64)
-as_integer = convert(to_tensor([1, 2, 3]), 0i64)
-```
-
-A separate signature supplies the same dtype evidence when the function builds a List
-internally, including an empty List:
-
-```chelis-surf
-sig empty_like[n, p: Numeric]: p -> tensor[n, p]
-def empty_like(x) = to_tensor(skip([x], 1i64))
-empty_f64 = empty_like(0.0f64)
-empty_int64 = empty_like(0i64)
-```
-
-An unbounded `[p]` is not a dtype guarantee and cannot be a cast target.
-
-## Where to go next
-
-- Named dimensions, rank polymorphism, and the no-broadcasting rule:
-  [Type System Reference](type-reference.md).
-- Precision rules and the accumulator parameter: [Type System Reference](type-reference.md).
-- Effects in signatures: [Effects and Handlers](effects.md).
-- Ownership and borrowing: [Type System Reference](type-reference.md).
+For named dimensions, rank polymorphism, generic casts, ownership, and the
+corresponding Deep forms, see the [Type System Reference](type-reference.md).
+For effects in function types, continue to [Effects and Handlers](effects.md).

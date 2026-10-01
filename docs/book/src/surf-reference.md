@@ -1,9 +1,8 @@
 # Surf Syntax Reference
 
-Surf is the human-facing syntax. Every Surf program desugars to Deep, the canonical
-s-expression form the compiler works on. This page is a reference for the constructs you
-write in Surf. For the corresponding Deep nodes see `spec/03-deep-syntax.md`; for the full
-grammar see `spec/02-surf-syntax.md`.
+Surf is Chelis's source syntax. This page shows how to write its declarations and
+expressions. `spec/02-surf-syntax.md` defines the full grammar; `spec/03-deep-syntax.md`
+defines the corresponding Deep representation.
 
 Fenced `chelis-surf` and `chelis-deep` blocks below are complete programs and are
 validated in CI. `chelis-surf-fragment` and `chelis-deep-fragment` blocks isolate one
@@ -12,14 +11,15 @@ construct and are not standalone programs.
 ## Modules
 
 One module per file. The `module` declaration is the first non-comment line. Module names
-are PascalCase and dot-separated. A module `Foo.Bar` lives at `foo/bar.ch`.
+are PascalCase and dot-separated. In a package with `module_prefix = "School"`,
+`src/nn/linear.ch` declares:
 
 ```chelis-surf-fragment
 module School.Nn.Linear
 ```
 
-A file without a `module` line is still valid for scripts and snippets; the named form is
-the convention for package source.
+A script or snippet can omit `module`. Package source must declare the name fixed by its
+package prefix and path beneath the source root.
 
 ## Comments
 
@@ -49,9 +49,9 @@ def twice_then_relu[n](x: tensor[n, f32]) -> tensor[n, f32] = {
 }
 ```
 
-A function can be polymorphic over dimensions. Names in the `[...]` clause before the
-parameter list are dimension or precision variables, instantiated by unification at each
-call site:
+The `[...]` clause declares variables used in a function's types. Depending on where a
+name appears, it can stand for a dimension, rank, dtype, or general type. Calls
+instantiate these variables by unification:
 
 ```chelis-surf
 def identity[a](x: tensor[a, f32]) -> tensor[a, f32] = x
@@ -65,33 +65,27 @@ sig scale_ints[p: Int]: p -> p -> p
 def scale_ints(x, k) = mul(x, k)
 ```
 
-Direct calls are flat: write `f(x, y)`. If an expression itself returns a
-function value, group that callee explicitly: `(make_adder(x))(y)`. The
-ungrouped `f(x)(y)` spelling is rejected because v0.18 treated it as an alias
-for the flat multi-argument call `f(x, y)`.
+Direct calls are flat: write `f(x, y)`. To call a function returned by an ordinary
+expression, group the callee: `(make_adder(x))(y)`. The ungrouped `f(x)(y)`
+form is rejected. Compiler transforms are self-delimiting, so `grad(f)(x)`
+and `vmap(f)(xs)` need no extra grouping.
 
 Empty brackets are not decorative syntax: write `Option` and `def f(x)`, not
 `Option[]` or `def f[](x)`. A constructor value such as `None` is bare;
-`None()` is the distinct zero-argument application, and `Empty {}` specifically
-represents a zero-field Deep record. Formatting and round-trip normalization do
-not collapse any of these three structures.
+`None()` calls the zero-argument constructor, while `Empty {}` constructs a
+zero-field record. These forms have distinct meanings.
 
-A standalone signature with `sig` can precede a `def`. It must appear directly before the
-function it describes:
-
-```chelis-surf-fragment
-sig predict:
-  tensor[samples, features, f32]
-  -> tensor[features, 1, f32]
-  -> tensor[1, f32]
-  -> tensor[samples, 1, f32]
-```
+A standalone `sig` must precede a matching definition in the same module, but need not
+be adjacent to it. The `scale_ints` signature above is a complete example. A `sig`
+without a matching definition is rejected.
 
 ## Local bindings and blocks
 
 There is no `let` keyword. Inside a block, `name = expr` introduces a binding; bindings are
-separated by newlines, and the final bare expression is the block's value. Semicolons are
-reserved for `do` and `par`; blocks are themselves expressions.
+separated by newlines, and the final bare expression is the block's value. A block needs
+at least one binding and a final expression. For ordered expression sequencing, use
+semicolons in `do { first; second }`. `par { ... }` is reserved syntax and is currently
+rejected by the checker.
 
 ```chelis-surf-fragment
 {
@@ -121,8 +115,8 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 - Integers: canonical decimal such as `42` and `1000000`. Default type `i32`.
 - Floats: finite shortest round-trippable spellings such as `1.0`, `1e-5`, and
   `31400000000.0`. Default type `f32`. You may write a longer body that decodes
-  to the same value — a constant transcribed from a reference at published
-  precision, say `0.319381530f64` — and `chelis fmt` prints the shortest
+  to the same value. For example, you can transcribe a constant at published
+  precision as `0.319381530f64`. `chelis fmt` prints the shortest
   spelling for it. A float literal must be finite at the type it binds at:
   `70000.0f16` and an unsuffixed `1e40` (an `f32`) are rejected because they
   round to infinity there. A cast of a finite wider value,
@@ -140,11 +134,12 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 - Tuples: `(a, b, c)`. `(a)` is grouping; a one-element tuple is `(a,)`.
 - Bracket literals: `[1.0, 2.0, 3.0]` builds a tensor, and bracket lists also pass list
   arguments to operators, for example the window and stride lists in
-  `reduce_window_max(grid, [2i64, 2i64], [1i64, 1i64])`. A negative numeral is unary minus applied to a
+  `reduce_window_max(grid, [2i64, 2i64], [1i64, 1i64])`. Brackets can also build a
+  `List`, depending on the expected type. A negative numeral is unary minus applied to a
   literal, so write `f(-42)` to pass a negative argument.
 
 Delimited nonempty lists may carry one trailing comma (or a trailing semicolon in
-`par`/`do`). The parser discards it and the formatter omits it; the comma in `(a,)`
+`do`). The parser discards it and the formatter omits it; the comma in `(a,)`
 remains because it distinguishes a one-element tuple from grouping.
 
 The parser accepts value-preserving digit separators, hexadecimal/binary integers, every
@@ -153,10 +148,12 @@ Unicode escapes. `chelis fmt` prints their canonical decimal/string spelling; `f
 rejects the resulting source diff. Malformed separators, a redundant leading zero on an
 integer body, invalid escapes, and semantic suffix/adoption changes remain errors.
 
-In a position with a known element type (a tensor-typed argument, a tensor return body, or
-the first argument of `cast`), bracket-literal elements adopt that element type. So
-`[1, 2, 3]` is `tensor[3, i32]` on its own, but takes the surrounding element type where
-one is imposed.
+A tensor literal's unsuffixed elements can adopt a known element type when the literal
+is assigned to a tensor-typed binding, passed to a declared tensor parameter, or used
+as a declared tensor return body. An unsuffixed literal passed directly to `cast`
+adopts the cast target, including a bare numeric scalar. These are the only adoption
+positions: an unannotated `[1, 2, 3]` uses `i32` elements, while a structural list
+such as the window sizes above needs explicit `i64` elements.
 
 ## Operators
 
@@ -236,7 +233,6 @@ scrutinee's type; a missing variant is a compile error.
 type Activation =
   | Relu
   | Sigmoid
-
 def activate[n](act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
   match act with {
     | Relu => relu(x)
@@ -267,7 +263,6 @@ carry positional payloads, or carry named record fields.
 type Optimizer =
   | Sgd { lr: tensor[f32] }
   | Adam { lr: tensor[f32], beta1: tensor[f32], beta2: tensor[f32], eps: tensor[f32] }
-
 def learning_rate(opt: Optimizer) -> tensor[f32] =
   match opt with {
     | Sgd { lr } => lr
@@ -279,7 +274,6 @@ A `type` without variants (no `|`) is a transparent alias, expanded at desugarin
 
 ```chelis-surf
 type Weights = tensor[n, f32]
-
 def keep(w: Weights) -> Weights = w
 ```
 
@@ -326,28 +320,26 @@ def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0
 
 ## Effects and handlers
 
-A function's effects can be annotated with a `! { ... }` suffix on the signature or the
-`def`. The handled effect is `Resource("device")`; `IO` is inferred from host operations
-such as `print`. Randomness is not an effect: a draw takes a `key`. Handlers are introduced
-by `with`:
+A function's effects can be annotated with a `! { ... }` suffix on its `sig` or
+`def`. `IO` is inferred from host operations such as `print`. Random draws take
+a `key` and add no effect. Omitting the clause leaves effects inferred; `! {}`
+declares a pure upper bound. The `with` form introduces a device region:
 
-An explicit empty effect row `! {}` declares a pure upper bound. It is distinct
-from omitting the clause, which leaves effects inferred.
-
-```chelis-surf-fragment
-with device("gpu:0") {
-  dropout(key_from_seed(42i64), x, 0.5)
-}
+```chelis-surf
+def local_region() -> i32 = with device("cpu") { 1i32 }
 ```
 
-`with device("...")` takes a string literal. `with seed(...)` and a `Random` effect are
-retired spellings that the parser rejects. See [Effects and Handlers](effects.md) for the
-full model.
+`with device("...")` takes a string literal. For a host-C build, only the exact
+device name `"cpu"` is accepted; other names are rejected before output is written.
+See [Effects and Handlers](effects.md) for the full model.
 
 ## Transforms
 
-`grad` and `vmap` are written as calls but are compiler transforms, not ordinary functions.
-They must always be applied, and they compose.
+`grad` and `vmap` use call syntax but are compiler transforms. Each requires a
+function argument, and their results are functions that can be called or bound to
+a name. Transform targets that are aliases of top-level functions can currently
+be rejected; use a direct, unshadowed top-level function when that occurs. See
+[Transforms](transforms.md) for supported target forms.
 
 ```chelis-surf-fragment
 (dw, db) = grad(loss_fn, wrt=(w, b))(w, b)
@@ -355,13 +347,16 @@ They must always be applied, and they compose.
 batched = vmap(process)(xs)
 ```
 
-`cast(e, p)` changes precision, and `copy(e)` produces an owned duplicate of a value. See
-[Transforms](transforms.md) and the [Type System Reference](type-reference.md) for details.
+`cast(e, p)` converts a scalar or tensor to the named numeric or boolean dtype;
+tensor dimensions stay the same. `copy(e)` produces an owned duplicate where
+copying is permitted; keys cannot be copied. See the [Type System Reference](type-reference.md)
+for details.
 
 ## Naming conventions
 
-- Values, parameters, dimensions, and fields are snake_case and start with a lowercase
-  letter or underscore.
-- Types, constructors, and module path segments are PascalCase.
-- `chelis lint` enforces these from `spec/01-nomenclature.md`. Run `chelis fmt` to
-  canonicalize whitespace rather than tuning it by hand.
+- Function names use snake_case. Types, constructors, and module path segments use
+  PascalCase. Descriptive value, parameter, dimension, and field names use snake_case;
+  a single uppercase letter is also valid for a value binding or parameter.
+- The parser enforces identifier roles; `chelis lint` checks additional naming
+  conventions, including `def` and `type` declaration names. Run `chelis fmt`
+  to format source consistently. See `spec/01-nomenclature.md` for the full rules.

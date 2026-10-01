@@ -1,9 +1,8 @@
 # Chelis
 
 Chelis is a functional language for AI research. It is designed for programs
-such as models, training loops, and learned functions, with a coding agent as
-the primary author and a human as supervisor. Surf (`.ch`) is the readable
-syntax; Deep (`.dp`) is the canonical syntax used by the compiler and agents.
+such as models, training loops, and learned functions. Surf (`.ch`) is the
+source syntax; Deep (`.dp`) is the compiler's canonical representation.
 
 <p align="center">
   <img src="assets/mascot/chev.svg" alt="Chev Chelis, the project mascot — a turtle on a mountain bike climbing a hill" width="320"/>
@@ -25,25 +24,26 @@ chelisup install "${release_tag#v}"
 chelis --version
 ```
 
-The release tag has a leading `v`; `chelisup install` takes the bare `X.Y.Z`
-version. In a project with a `reef.toml`, run `chelis reef setup` to install
-its pinned toolchain and dependencies. The [install guide](docs/book/src/install.md)
-explains version selection and setup.
+The bootstrap script installs `chelisup`; the next command installs the
+compiler. The release tag has a leading `v`, while `chelisup install` takes
+the bare `X.Y.Z` version. For a project with a `reef.toml`, install the
+version named by its `compiler` pin before running `chelis reef setup`, then
+run `chelis reef build`. The [install guide](docs/book/src/install.md)
+explains the project workflow.
 
 ## Start here
 
-- [User book](docs/book/src/README.md): first program, CLI, Reef, and backends.
+- [Chelis Guide](docs/book/src/README.md): first program, language reference,
+  CLI, packages, and backends.
 - [Examples](examples/): executable Chelis programs.
 - [Architecture](ARCHITECTURE.md): compiler, evaluator, and code generation.
 - [Contributor setup](docs/contributor_setup.md) and [contribution guide](CONTRIBUTING.md):
   build from source and prepare a change.
-- [Agent contract](AGENTS.md): repository rules for coding agents.
-- [Canonical project reference](spec/design/chelis_canonical_reference.md) and
-  [numbered language specs](spec/00-context.md): project intent and language
-  contracts.
+- [Language specifications](spec/00-context.md): the detailed contracts for
+  syntax, types, operations, and targets.
 
-The repository also contains `chelis-std`, the runtime bundled with the
-compiler, and Reef, the package system for downstream shells.
+The toolchain bundles the `chelis-std` library and the native runtime used by
+generated code. Reef manages project dependencies.
 
 ## License
 

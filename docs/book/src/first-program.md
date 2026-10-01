@@ -1,71 +1,36 @@
 # First Program
 
-Start with a small Surf function, format it, check it, then ask the compiler to show the
-canonical Deep form.
-
-Create `app.ch`:
-
-## Surf
+Create `app.ch` with a function that applies ReLU and softmax to a tensor, then
+calls that function with three values:
 
 ```chelis-surf
-def relu_then_softmax[n](x: tensor[n, f32]) -> tensor[n, f32] =
-  softmax(relu(x), 0)
+def relu_then_softmax[n](x: tensor[n, f32]) -> tensor[n, f32] = x |> relu |> softmax(0)
+result = [-1.0, 0.0, 1.0] |> to_tensor |> relu_then_softmax
 ```
 
-Then run:
+The dimension variable `n` lets the function accept a vector of any length.
+`tensor[n, f32]` says that its elements have `f32` precision. The `|>` operator
+passes its left value as the first argument of the next call: `x |> softmax(0)`
+means `softmax(x, 0)`.
+
+Run these commands in the directory containing `app.ch`:
 
 ```sh
 chelis fmt --inplace app.ch
 chelis check app.ch
-chelis deep app.ch > app.dp
-chelis surf app.dp
+chelis eval --file app.ch
 ```
 
-`check`, `deep`, and `surf` are useful together: Surf stays readable for humans, while
-Deep is the stable machine form that shell tooling can inspect.
+The evaluator prints `result` as a tensor with shape `[3]`. Its values are
+approximately `0.212`, `0.212`, and `0.576`.
 
-## Deep
-
-```chelis-deep
-(defsig {}
-  relu_then_softmax
-  (n)
-  (t-fn {}
-    (t-tensor {} (d-var {} n) (t-prim {} f32))
-    (t-tensor {} (d-var {} n) (t-prim {} f32))))
-
-(def {}
-  relu_then_softmax
-  (fn {}
-    (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
-    (app {}
-      (var {} softmax)
-      (app {} (var {} relu) (var {} x))
-      (lit {type: (t-prim {} i32)} 0))))
-```
-
-## Useful Commands
-
-Check a program:
-
-```sh
-chelis check app.ch
-```
-
-Print canonical Deep:
+To inspect the compiler's Deep representation or emit C source and runtime
+artifacts, run:
 
 ```sh
 chelis deep app.ch
-```
-
-Convert Deep back to Surf:
-
-```sh
-chelis surf app.dp
-```
-
-Build source artifacts without invoking a native compiler:
-
-```sh
 chelis build app.ch --target c --output out/
 ```
+
+`chelis build` writes source artifacts; it does not invoke a C compiler.
+See [CLI Workflow](cli.md) for the other commands and their output.

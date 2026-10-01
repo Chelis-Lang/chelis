@@ -1,71 +1,49 @@
 # Effects and Handlers
 
-Chelis tracks effects explicitly. Pure tensor code stays pure, and the places that touch
-host input and output or a specific device are surfaced in the type. Effect inference runs
-after type checking: a function's effect set is the union of the effects of the operations
-in its body.
+Chelis tracks observable host work and resource requirements in function types.
+The checker infers effects after checking types. An effect annotation can set an
+upper bound on what a function may do.
 
-## The effects
+## Host I/O and tests
 
-- `IO` is inferred from host operations such as `print` and the file builtins. It is
-  permitted at the top level rather than requiring a handler.
-- `Resource("device")` marks a region that runs on a named device. It is introduced by
-  `with device(...)` and validated against the build target.
-- `Test` comes from the assertion operations; only `chelis test` handles it.
+- `IO` covers host operations such as `print` and file access. It is allowed
+  at the program boundary.
+- `Test` comes from assertions and is handled by `chelis test`.
 
-## Randomness is not an effect
+A function may declare an effect bound with `! { ... }`:
 
-A random draw is a pure function of the key it is given. `dropout` and `uniform_like` take
-a `key` as their first argument and contribute no effect, so a function that draws takes a
-`key` parameter and needs no annotation. `key_from_seed(42i64)` makes a root key;
-`split_key`, `split_keys` and `fold_in` derive fresh keys from one. A key is used at most
-once on every path, so two draws need two keys:
+```chelis-surf
+def report(value: f32) -> unit ! { IO } = print(value)
+```
+
+`! { IO }` permits host I/O. `! {}` declares a pure upper bound; leaving off
+the suffix lets the checker infer the effects.
+
+## Random keys
+
+Random draws are pure functions of explicit keys. `dropout` and `uniform_like`
+take a key as their first argument and add no effect. Create a key from a seed,
+then split it when you need more than one draw. Each key can be used at most
+once along any execution path:
 
 ```chelis-surf-fragment
-(k1, k2) = split_key(key_from_seed(42i64))
-first = dropout(k1, x, 0.5)
-second = dropout(k2, x, 0.5)
+(first_key, second_key) = split_key(key_from_seed(42i64))
+first = dropout(first_key, x, 0.5f32)
+second = dropout(second_key, x, 0.5f32)
 ```
 
-`with seed(...)` and a `Random` effect annotation are retired spellings; the parser rejects
-both. See [Types](type-reference.md) for the `key` type.
+See [Type System Reference](type-reference.md) for the `key` type.
 
-## Annotating effects
+## Device regions
 
-A signature or a `def` carries its effect set as a `! { ... }` suffix. The annotation is
-optional; the checker infers the set and verifies any annotation you supply.
+`with device(...)` marks a requested placement region. The device name must
+be a string literal, and a build checks whether its target accepts that
+request. For the C target, the accepted name is exactly `"cpu"`:
 
-```chelis-surf-fragment
-sig report[n]: tensor[n, f32] -> unit ! { IO }
+```chelis-surf
+def relu_on_cpu[n](x: tensor[n, f32]) -> tensor[n, f32] = with device("cpu") { relu(x) }
 ```
 
-In Deep the effect set is `eff` metadata on the function type:
-
-```chelis-deep-fragment
-(t-fn {eff: (effects {} io)}
-  (t-tensor {} (d-var {} n) (t-prim {} f32))
-  (t-unit {}))
-```
-
-## Handlers
-
-A handler is a `with` block, and `with device(...)` is the one user handler. It takes a
-string literal naming the device.
-
-The core host-C build accepts only exact `with device("cpu")`. Any labeled CPU,
-accelerator, unknown, or malformed selector—including `cpu:worker_0`, `cuda:0`,
-`metal`, an empty string, or `cpu:`—produces a `BuildTargetMismatch` before
-`chelis build --target c` writes artifacts. Device-label vocabulary, placement,
-and transfer semantics remain experimental; a device request is never treated
-as permission to run the region on host C.
-
-A draw inside a device region takes its key like any other:
-
-```chelis-surf-fragment
-with device("gpu:0") {
-  dropout(k, x, 0.5)
-}
-```
-
-The handled name is `device`. For the effect-checking details see
-`spec/04-type-system.md` and the effect-checking crates and tests.
+A C build rejects another device name with `BuildTargetMismatch` before
+writing artifacts. For other targets and device support, see [Backends](backends.md).
+The precise effect and target rules are in `spec/04-type-system.md` §7.

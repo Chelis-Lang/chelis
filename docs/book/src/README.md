@@ -1,42 +1,22 @@
-# Chelis User Book
+# Chelis Guide
 
-Chelis is a functional programming language for AI research. Surf is the readable syntax
-for humans. Deep is the canonical s-expression syntax for machines and the compiler.
+Chelis is a functional language for AI research. This guide starts with a working
+program, then introduces tensor types, effects, packages, and the compiler commands
+used to work with them.
 
-This book is the practical starting point for downstream users and shell authors. It
-covers local setup, the first program loop, CLI validation, the style gate, Reef package
-basics, examples, and the map from user docs to the authoritative specs.
+Chelis programs are usually written in Surf. Deep is the canonical representation
+used by the compiler and tooling; you can inspect it with `chelis deep`.
 
-If you are modifying Chelis itself, use the repository `AGENTS.md` and the shared
-`agent-skills/` workflows instead. This book is for using Chelis and authoring packages
-on top of it.
+## Start here
 
-## What You Should Read First
+1. [Install](install.md) the Chelis toolchain.
+2. [Write and run your first program](first-program.md).
+3. [Explore examples](examples.md) from a source checkout.
 
-- [Install](install.md)
-- [First Program](first-program.md)
-- [CLI Workflow](cli.md)
-- [Type System Basics](types.md)
-- [Reef and Packages](reef.md)
-- [Examples](examples.md)
+## Keep learning
 
-## Language Reference
-
-- [Surf Syntax Reference](surf-reference.md)
-- [Type System Reference](type-reference.md)
-- [Transforms: grad and vmap](transforms.md)
-- [Backends](backends.md)
-- [Runtime and Standard Library](stdlib.md)
-- [Reference Map](reference.md)
-
-## A Small Surf Program
-
-```chelis-surf
-def square(x: tensor[f32]) -> tensor[f32] = mul(x, x)
-```
-
-This is a complete, compiler-validated example. In this book:
-
-- `chelis-surf` and `chelis-deep` fences are full programs and are validated in CI.
-- `chelis-surf-fragment` and `chelis-deep-fragment` fences are partial snippets used to
-  teach one construct in isolation.
+- [CLI Workflow](cli.md) covers formatting, checking, evaluation, and builds.
+- [Type System Basics](types.md) introduces tensor shapes and precision.
+- [Effects and Handlers](effects.md) explains host I/O, device regions, and random keys.
+- [Reef and Packages](reef.md) covers package projects.
+- [Language Reference](reference.md) points to detailed syntax and semantics.
