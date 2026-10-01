@@ -648,6 +648,19 @@ def build_corpus(large: bool = False) -> Corpus:
         corpus.div("div_bad_scale", "1", "3", n, "RoundTiesToEven")
         corpus.div("div_bad_scale", "1", "0", n, "RoundTiesToEven")
 
+    # Several failing checks at once: each argument's own validity left to right,
+    # then RejectInexact, then the result's range. Each case is its own sampled path.
+    corpus.to_i64("failure_order", "9223372036854775808.5", "RejectInexact")
+    corpus.to_i64("failure_order", "-100000000000000000000.5", "RejectInexact")
+    corpus.div("failure_order", "5", "0", 40, "RejectInexact")
+    corpus.div("failure_order", "5", "0", I64_MIN, "RoundTiesToEven")
+    corpus.div("failure_order", "1e37", "3e-38", 0, "RejectInexact")
+    corpus.from_f64("failure_order", math.inf, 40, "RejectInexact")
+    corpus.from_f64("failure_order", math.nan, -1, "RoundTiesToEven")
+    corpus.from_f64("failure_order", 1.1, 38, "RejectInexact")
+    corpus.round("failure_order", "2.5", 39, "RejectInexact")
+    corpus.fixed("failure_order", "1.25", -1)
+
     # Order and equality.
     order_pairs = [("1.5", "1.50"), ("-0", "0"), ("-1", "1"), (TINY_TEXT, "0"), ("-" + TINY_TEXT, "0"),
                    (MAX_TEXT, "-" + MAX_TEXT), ("0.1", "0.10000000000000000000000000000000000001"),

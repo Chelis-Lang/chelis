@@ -644,6 +644,35 @@ class FromF64(unittest.TestCase):
             self.assertIsNone(ref.try_decimal_from_f64(x, n, "RoundTiesToEven"))
 
 
+class FailureOrder(unittest.TestCase):
+    """Each argument's own validity left to right, then RejectInexact, then the result's range."""
+
+    def test_argument_validity_left_to_right(self) -> None:
+        self.assertEqual(failure(lambda: ref.decimal_div(d("5"), d("0"), 40, "RejectInexact")).message,
+                         "decimal_div: domain: division by zero")
+        self.assertEqual(failure(lambda: ref.decimal_div(d("5"), d("0"), I64_MIN, "RoundTiesToEven")).message,
+                         "decimal_div: domain: division by zero")
+        self.assertEqual(failure(lambda: ref.decimal_from_f64(math.inf, 40, "RejectInexact")).message,
+                         "decimal_from_f64: domain: inf is not finite")
+        self.assertEqual(failure(lambda: ref.decimal_round(d("2.5"), 39, "RejectInexact")).message,
+                         "decimal_round: domain: scale 39 is outside 0..38")
+        self.assertEqual(failure(lambda: ref.decimal_to_fixed_string(d("1.25"), -1)).message,
+                         "decimal_to_fixed_string: domain: scale -1 is outside 0..38")
+
+    def test_reject_inexact_precedes_the_result_range(self) -> None:
+        error = failure(lambda: ref.decimal_to_i64(d("9223372036854775808.5"), "RejectInexact"))
+        self.assertEqual(error.message, "decimal_to_i64: domain: 9223372036854775808.5 is not a multiple of 10^-0")
+        self.assertEqual(failure(lambda: ref.decimal_to_i64(d("9223372036854775808.5"), "RoundTowardZero")).kind,
+                         "overflow")
+        self.assertEqual(ref.try_decimal_to_i64(d("9223372036854775808.5"), "RejectInexact"), None)
+        div = failure(lambda: ref.decimal_div(d("1e37"), d("3e-38"), 0, "RejectInexact"))
+        self.assertEqual((div.kind, div.reason), ("domain", "inexact"))
+        self.assertEqual(failure(lambda: ref.decimal_div(d("1e37"), d("3e-38"), 0, "RoundTowardZero")).kind, "overflow")
+        f64 = failure(lambda: ref.decimal_from_f64(1.1, 38, "RejectInexact"))
+        self.assertEqual((f64.kind, f64.reason), ("domain", "inexact"))
+        self.assertEqual(failure(lambda: ref.decimal_from_f64(1.1, 38, "RoundTowardZero")).reason, "outside")
+
+
 class Messages(unittest.TestCase):
     def test_every_failure_has_the_three_part_shape(self) -> None:
         errors = [

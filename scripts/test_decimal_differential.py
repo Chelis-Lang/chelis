@@ -269,7 +269,8 @@ class Generator(unittest.TestCase):
         counts = CORPUS.composition()["cases by category"]
         for category in ("envelope", "limbs", "removable_zeros", "i64_edges", "ties", "float_edges", "random",
                          "parse_accepted", "parse_malformed", "parse_outside", "parse_too_long", "parse_spelled",
-                         "fixed", "from_i64", "to_i64", "from_f64", "arith", "round", "div", "div_random", "order"):
+                         "fixed", "from_i64", "to_i64", "from_f64", "arith", "round", "div", "div_random", "order",
+                         "failure_order"):
             self.assertGreater(counts[category], 0, category)
         rows = CORPUS.composition()["cases by row"]
         self.assertEqual(set(rows), set(harness.ROWS))
@@ -296,6 +297,18 @@ class Generator(unittest.TestCase):
             ("decimal_div", "overflow", "overflow"), ("try_decimal_div", "overflow", "overflow"),
         }
         self.assertEqual(paths, expected)
+
+    def test_every_failure_order_witness_runs_as_a_program(self) -> None:
+        witnesses = [f for f in CORPUS.failures if f.category == "failure_order"]
+        self.assertEqual(len(witnesses), 10)
+        sampled = {p.failure.name for p in programs() if p.failure}
+        self.assertTrue({f.name for f in witnesses} <= sampled)
+        reasons = {(f.function, f.args[:2]): (f.error.kind, f.error.reason) for f in witnesses}
+        self.assertEqual(reasons[("decimal_to_i64", ("9223372036854775808.5", "RejectInexact"))], ("domain", "inexact"))
+        self.assertEqual(reasons[("decimal_div", ("5", "0"))], ("domain", "division_by_zero"))
+        self.assertEqual(reasons[("decimal_div", ("1e37", "3e-38"))], ("domain", "inexact"))
+        self.assertEqual(reasons[("decimal_from_f64", (1.1, 38))], ("domain", "inexact"))
+        self.assertEqual(reasons[("decimal_round", ("2.5", 39))], ("domain", "scale"))
 
     def test_every_case_lands_in_exactly_one_binding(self) -> None:
         for chunk, per_program in ((150, 4), (7, 3), (1000, 1)):
