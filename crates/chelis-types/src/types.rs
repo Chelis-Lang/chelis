@@ -186,9 +186,33 @@ impl TypeVarRestriction {
         }
     }
 
-    /// Whether this bound is one of §5.9's three families.
+    /// Whether this bound is one of §5.9's three families rather than an
+    /// explicit set. A value constraint is not a §5.9 bound at all, so it is
+    /// not a family either.
     pub fn is_family(self) -> bool {
-        !matches!(self, TypeVarRestriction::ActiveSet(_))
+        !matches!(self, TypeVarRestriction::ActiveSet(_)) && !self.is_value_constraint()
+    }
+
+    /// Whether this is a §5.9 declaration bound rather than an operation's
+    /// value constraint. Prefer this over listing the family variants: a gate
+    /// written as `matches!(r, ActiveFloat | ActiveInt | ActiveNumeric)` is
+    /// one a new bound form falls straight out of, which is how chelis#2443
+    /// shipped two defects of the same class.
+    pub fn is_declaration_bound(self) -> bool {
+        !self.is_value_constraint()
+    }
+
+    /// Whether every dtype this bound admits is a float. True for `Float`,
+    /// for a set of floats, and false for a mixed set.
+    pub fn admits_only_floats(self) -> bool {
+        let admitted = PrimSet::of_family(self.precision_family());
+        !admitted.is_empty() && admitted.members().all(|prim| prim.is_float())
+    }
+
+    /// Whether every dtype this bound admits is a signed integer.
+    pub fn admits_only_integers(self) -> bool {
+        let admitted = PrimSet::of_family(self.precision_family());
+        !admitted.is_empty() && admitted.members().all(|prim| prim.is_integer())
     }
 
     /// The family's membership, spelled for a diagnostic reader who has not

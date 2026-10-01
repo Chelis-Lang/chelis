@@ -1977,11 +1977,13 @@ impl Subst {
             let Type::Var(operand) = self.apply(&Type::Var(*tv)) else {
                 return true;
             };
-            let Some(
-                bound @ (TypeVarRestriction::ActiveFloat
-                | TypeVarRestriction::ActiveInt
-                | TypeVarRestriction::ActiveNumeric),
-            ) = self.tvar_restriction(operand)
+            // Any §5.9 declaration bound discharges this gate, including the
+            // explicit set form. Listing the three families rejected a
+            // set-bounded scalar `cast` that every equivalent family accepted
+            // (chelis#2443 round 2).
+            let Some(bound) = self
+                .tvar_restriction(operand)
+                .filter(|restriction| restriction.is_declaration_bound())
             else {
                 return true;
             };

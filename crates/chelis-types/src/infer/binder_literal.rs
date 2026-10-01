@@ -67,8 +67,9 @@ pub(super) fn validate_binder_literal_adoption_in_program(
                                  spec/04-type-system.md §5.6 applies the adopted literal's \
                                  range checks at `{binder}`, and [04-INF-6] makes `{binder}` \
                                  denote every admissible instantiation, so the literal must \
-                                 fit every integer member of the bound",
-                                bound_spelling(bound)
+                                 fit every integer member of the bound, including {}",
+                                bound_spelling(bound),
+                                narrowest_integer_range(bound)
                             ),
                             vec![
                                 "use an in-range literal or narrow the declaration's dtype domain"
@@ -131,4 +132,34 @@ pub(super) fn validate_binder_literal_adoption_in_program(
 /// name, or an explicit set's canonical `{d1, d2}` form.
 fn bound_spelling(bound: &chelis_deep::DtypeBound) -> String {
     bound.surf_spelling()
+}
+
+/// The narrowest integer member a bound admits, with its range, so the
+/// range-failure diagnostic stays as concrete as the family-only wording it
+/// replaced. A set may not admit `i8`, so the member is derived rather than
+/// hardcoded.
+fn narrowest_integer_range(bound: &chelis_deep::DtypeBound) -> String {
+    let narrowest = [
+        (chelis_deep::BoundDtype::I8, i8::MIN as i64, i8::MAX as i64),
+        (
+            chelis_deep::BoundDtype::I16,
+            i16::MIN as i64,
+            i16::MAX as i64,
+        ),
+        (
+            chelis_deep::BoundDtype::I32,
+            i32::MIN as i64,
+            i32::MAX as i64,
+        ),
+        (chelis_deep::BoundDtype::I64, i64::MIN, i64::MAX),
+    ]
+    .into_iter()
+    .find(|(member, _, _)| bound.admits(*member));
+    match narrowest {
+        Some((member, min, max)) => format!("{} [{min}, {max}]", member.name()),
+        // A float-only bound reaches this diagnostic only through an integer
+        // literal that every float member holds, so there is no integer
+        // member to name.
+        None => "its float members".to_string(),
+    }
 }

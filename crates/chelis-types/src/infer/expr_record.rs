@@ -1032,7 +1032,9 @@ pub(super) fn infer_cast(
             let trunc_pair_rejected = |source_is_float: bool| {
                 mode == CastMode::Trunc
                     && (!source_is_float
-                        || subst.tvar_restriction(target) != Some(TypeVarRestriction::ActiveInt))
+                        || !subst
+                            .tvar_restriction(target)
+                            .is_some_and(|restriction| restriction.admits_only_integers()))
             };
             let trunc_pair_rejection = || {
                 CheckError::new(
@@ -1418,7 +1420,10 @@ pub(crate) fn bounded_scalar_cast_result(
         if let Some(error) = trunc_pair_error(None, new_prec) {
             return Some(Err(Box::new(error)));
         }
-        if bound != TypeVarRestriction::ActiveFloat {
+        // [05-OP-6] wants a float source at every instantiation, which is a
+        // question about what the bound admits, not about which §5.9 form
+        // spells it: `{f32, f64}` satisfies it and `{f32, i32}` does not.
+        if !bound.admits_only_floats() {
             return None;
         }
     }

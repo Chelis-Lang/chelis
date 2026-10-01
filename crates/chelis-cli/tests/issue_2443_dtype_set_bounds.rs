@@ -470,6 +470,80 @@ fn a_set_bound_accepts_every_program_its_equivalent_family_accepts() {
     }
 }
 
+/// Round 1 fixed this property for `to_tensor` only, and round 2 then found
+/// the same defect class on the `cast` surface: a gate keyed on the three
+/// family variants that an explicit set fell out of. This covers the property
+/// across surfaces rather than adding one more single-surface test, because
+/// the recurring thing is the gate shape, not the operation.
+#[test]
+fn a_set_bound_matches_its_family_across_every_scalar_surface() {
+    // Each body is legal under any numeric bound, so a set enumerating a
+    // family's exact members must behave exactly as that family does.
+    let bodies = [
+        ("scalar cast", "def g[p: BOUND](x: p) -> i32 = cast(x, i32)"),
+        (
+            "scalar cast to float",
+            "def g[p: BOUND](x: p) -> f64 = cast(x, f64)",
+        ),
+        (
+            "cast inside arithmetic",
+            "def g[p: BOUND](x: p) -> f32 = add(cast(x, f32), 1.0f32)",
+        ),
+        (
+            "tensor cast",
+            "def g[n, p: BOUND](x: tensor[n, p]) -> tensor[n, f32] = cast(x, f32)",
+        ),
+        (
+            "literal into the binder",
+            "def g[p: BOUND](x: p) -> p = add(x, cast(1, p))",
+        ),
+    ];
+    // `Float`/`Int`/`Numeric` beside sets enumerating their exact members.
+    let equivalents = [
+        ("Float", "{f32, f64, bf16, f16}"),
+        ("Int", "{i8, i16, i32, i64}"),
+        ("Numeric", "{f32, f64, bf16, f16, i8, i16, i32, i64}"),
+    ];
+    for (what, body) in bodies {
+        for (family, set) in equivalents {
+            let family_source = format!("module Probe\n{}\n", body.replace("BOUND", family));
+            let set_source = format!("module Probe\n{}\n", body.replace("BOUND", set));
+            let (_fd, family_path) = write(&family_source);
+            let (_sd, set_path) = write(&set_source);
+            let family_score = score(&check(&family_path));
+            let set_report = check(&set_path);
+            assert_eq!(
+                score(&set_report),
+                family_score,
+                "{what}: `[p: {set}]` must score exactly as `[p: {family}]` ({family_score}), \
+                 because a set restricts which dtypes are admissible, never which programs \
+                 type-check. Got:\n{}",
+                messages_and_hints(&set_report),
+            );
+        }
+    }
+}
+
+/// The other half: a set must still be REFUSED where its members genuinely
+/// fail the operation's contract, so the fix above is not blanket acceptance.
+/// `cast_trunc` wants a float source at every instantiation ([05-OP-6]).
+#[test]
+fn a_set_whose_members_fail_the_operation_is_still_refused() {
+    for bound in ["{f32, f64}", "{bf16, f16}", "Float"] {
+        assert_clean(
+            &format!("module Probe\ndef g[p: {bound}](x: p) -> i32 = cast_trunc(x, i32)\n"),
+            &format!("`cast_trunc` under the float-only `[p: {bound}]`"),
+        );
+    }
+    for bound in ["{f32, i32}", "{i32, i64}", "Int", "Numeric"] {
+        assert_rejected(
+            &format!("module Probe\ndef g[p: {bound}](x: p) -> i32 = cast_trunc(x, i32)\n"),
+            &["[05-OP-6]"],
+            &format!("`cast_trunc` under `[p: {bound}]`, which admits a non-float"),
+        );
+    }
+}
+
 /// Every diagnostic naming a bound must name it. An `ActiveSet(_) => ""` arm
 /// on `family_name()` let a set reach at least seven diagnostics as an empty
 /// name, while the family control rendered correctly. This mirrors the family
