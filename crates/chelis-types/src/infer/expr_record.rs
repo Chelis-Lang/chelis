@@ -1484,7 +1484,7 @@ pub(crate) fn require_cast_source_family(
     let hint = format!(
         "Declare the source's binder with the `{}` bound, or convert the source with `cast` \
          first ([05-OP-6])",
-        required.family_name()
+        required.bound_spelling()
     );
     match subst.apply(&Type::Var(variable)) {
         Type::Var(variable) => {
@@ -1497,10 +1497,10 @@ pub(crate) fn require_cast_source_family(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
                     "`{operation}` requires a source of dtype family `{}` ([05-OP-6]), but the \
-                     source dtype is bounded by dtype family `{}` ({}), which shares no dtype \
+                     source dtype is bounded by {} ({}), which shares no dtype \
                      with it (spec/04-type-system.md §5.9 [04-DTYPE-2])",
-                    required.family_name(),
-                    bound.family_name(),
+                    required.bound_spelling(),
+                    bound.bound_description(),
                     bound.membership_gloss(),
                 ),
                 vec![hint],
@@ -1510,7 +1510,7 @@ pub(crate) fn require_cast_source_family(
             CheckErrorKind::PrecisionMismatch,
             format!(
                 "`{operation}` requires a source of dtype family `{}` ([05-OP-6]), got `{}`",
-                required.family_name(),
+                required.bound_spelling(),
                 prim.name(),
             ),
             vec![hint],
@@ -1562,15 +1562,15 @@ fn authored_cast_source_rejection(
              outside `{}`; an authored binder must satisfy the operation at every instantiation \
              its declaration admits (spec/04-type-system.md §3.1.3 [04-INF-6], §5.9 \
              [04-DTYPE-2])",
-            required.family_name(),
-            bound.family_name(),
+            required.bound_spelling(),
+            bound.bound_spelling(),
             bound.membership_gloss(),
-            required.family_name(),
+            required.bound_spelling(),
         ),
         vec![format!(
             "Declare `{name}: {}` in the binder list, or convert the source with `cast` first \
              ([05-OP-6])",
-            required.family_name()
+            required.bound_spelling()
         )],
     ))
 }

@@ -841,10 +841,10 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     fn bounded_binder_misuse(&mut self, name: &str, position: &str) -> ErrorWitness {
         let family = self.dtype_bounds.get(name).map_or_else(
             || "a dtype bound".to_string(),
-            |restriction| restriction.bound_spelling(),
+            |restriction| restriction.bound_description(),
         );
         self.type_error(format!(
-            "binder `{name}` is bounded by `{family}` and cannot be used as {position} in {}",
+            "binder `{name}` is bounded by {family} and cannot be used as {position} in {}",
             self.use_site.label()
         ))
     }

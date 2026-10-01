@@ -82,7 +82,9 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let schema = package_schema(&root).expect("schema package must check");
     let schema_json = serde_json::to_value(schema).expect("schema must serialize");
 
-    assert_eq!(schema_json["format_version"], 3);
+    // chelis#2443 moved this to 4: the `domain` field widened from a string
+    // enum to a string-or-object union for §5.9's explicit dtype set.
+    assert_eq!(schema_json["format_version"], 4);
     assert_eq!(
         exported(&schema_json, "restricted_close", "functions")["type_variable_restrictions"],
         expected_active_float()
@@ -125,13 +127,14 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
         schema_json,
         "current package schema must round-trip without identity drift"
     );
-    for version in [2, 99] {
+    // chelis#2443: 3 joins the rejected set now that `domain` may be an object.
+    for version in [2, 3, 99] {
         let mut incompatible = schema_json.clone();
         incompatible["format_version"] = version.into();
         let error = serde_json::from_value::<PackageSchema>(incompatible)
             .expect_err("non-current package schema versions must be rejected");
         assert!(
-            error.to_string().contains("unsupported") && error.to_string().contains("expected 3"),
+            error.to_string().contains("unsupported") && error.to_string().contains("expected 4"),
             "unexpected version {version} diagnostic: {error}"
         );
     }

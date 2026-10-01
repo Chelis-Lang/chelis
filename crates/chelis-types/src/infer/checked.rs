@@ -803,7 +803,7 @@ impl InferenceProduct {
                          contract at the declaration boundary (spec/04-type-system.md §3.1)",
                         contract.subject,
                         contract.owner.as_deref().unwrap_or("<anonymous>"),
-                        required.family_name(),
+                        required.bound_spelling(),
                         subst.apply(&Type::Var(contract.variable)),
                     ),
                     vec![

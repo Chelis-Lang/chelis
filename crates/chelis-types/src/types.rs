@@ -139,14 +139,21 @@ pub enum TypeVarRestriction {
 impl TypeVarRestriction {
     /// The `spec/04-type-system.md` §5.9 family name, as diagnostics and the
     /// Surf surface spell it.
-    pub fn family_name(self) -> &'static str {
+    /// `None` for §5.9's explicit set, which is not a family and has no
+    /// family name.
+    ///
+    /// This is deliberately fallible. An infallible accessor returning `""`
+    /// let a set reach eight diagnostics as an empty name, which is the
+    /// silent-fallback class AGENTS.md's "Do Not Trust Green" section says to
+    /// audit. Returning `Option` makes every caller decide, and the compiler
+    /// enumerate them. Prefer [`TypeVarRestriction::bound_spelling`] or
+    /// [`TypeVarRestriction::bound_description`] in a diagnostic.
+    pub fn family_name(self) -> Option<&'static str> {
         match self {
-            TypeVarRestriction::ActiveFloat | TypeVarRestriction::FloatValue => "Float",
-            TypeVarRestriction::ActiveInt | TypeVarRestriction::IntValue => "Int",
-            TypeVarRestriction::ActiveNumeric | TypeVarRestriction::NumericValue => "Numeric",
-            // §5.9: a set is not a family and has no family name. Diagnostics
-            // name a bound through `bound_spelling`.
-            TypeVarRestriction::ActiveSet(_) => "",
+            TypeVarRestriction::ActiveFloat | TypeVarRestriction::FloatValue => Some("Float"),
+            TypeVarRestriction::ActiveInt | TypeVarRestriction::IntValue => Some("Int"),
+            TypeVarRestriction::ActiveNumeric | TypeVarRestriction::NumericValue => Some("Numeric"),
+            TypeVarRestriction::ActiveSet(_) => None,
         }
     }
 
@@ -155,7 +162,10 @@ impl TypeVarRestriction {
     pub fn bound_spelling(self) -> String {
         match self {
             TypeVarRestriction::ActiveSet(set) => set.spelling(),
-            family => family.family_name().to_string(),
+            family => family
+                .family_name()
+                .expect("a non-set restriction names a family")
+                .to_string(),
         }
     }
 
@@ -167,7 +177,12 @@ impl TypeVarRestriction {
     pub fn bound_description(self) -> String {
         match self {
             TypeVarRestriction::ActiveSet(set) => format!("dtype set `{}`", set.spelling()),
-            family => format!("dtype family `{}`", family.family_name()),
+            family => format!(
+                "dtype family `{}`",
+                family
+                    .family_name()
+                    .expect("a non-set restriction names a family")
+            ),
         }
     }
 
@@ -1703,7 +1718,7 @@ mod dtype_family_bound_tests {
             for prim in [Prim::Bool, Prim::String, Prim::Key, Prim::F8e4m3] {
                 assert!(
                     !restriction.admits(prim),
-                    "{} must not admit {prim:?}",
+                    "{:?} must not admit {prim:?}",
                     restriction.family_name()
                 );
             }
@@ -1754,7 +1769,7 @@ mod dtype_family_bound_tests {
                     Some(merged) => assert_eq!(admitted(merged), shared),
                     None => assert!(
                         shared.is_empty(),
-                        "{}/{} share {shared:?} but intersect to nothing",
+                        "{:?}/{:?} share {shared:?} but intersect to nothing",
                         left.family_name(),
                         right.family_name()
                     ),
@@ -1765,8 +1780,11 @@ mod dtype_family_bound_tests {
 
     #[test]
     fn family_names_match_the_surf_spelling() {
-        assert_eq!(TypeVarRestriction::ActiveFloat.family_name(), "Float");
-        assert_eq!(TypeVarRestriction::ActiveInt.family_name(), "Int");
-        assert_eq!(TypeVarRestriction::ActiveNumeric.family_name(), "Numeric");
+        assert_eq!(TypeVarRestriction::ActiveFloat.family_name(), Some("Float"));
+        assert_eq!(TypeVarRestriction::ActiveInt.family_name(), Some("Int"));
+        assert_eq!(
+            TypeVarRestriction::ActiveNumeric.family_name(),
+            Some("Numeric")
+        );
     }
 }

@@ -65,6 +65,31 @@ fn messages(report: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// Every diagnostic's message AND its suggestions. A repair hint lives in
+/// `suggestions`, so a helper that reads only `message` silently cannot see
+/// the text a repair test is about.
+fn messages_and_hints(report: &Value) -> String {
+    report["errors"]
+        .as_array()
+        .map(|errors| {
+            errors
+                .iter()
+                .flat_map(|error| {
+                    std::iter::once(error["message"].as_str().unwrap_or_default().to_string())
+                        .chain(
+                            error["suggestions"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(|hint| hint.as_str().unwrap_or_default().to_string()),
+                        )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
 fn assert_clean(source: &str, what: &str) {
     let (_dir, path) = write(source);
     let report = check(&path);
@@ -419,4 +444,89 @@ fn an_unbounded_binder_is_still_not_a_dtype_binder() {
          def use_bool(v: bool) -> bool = identity(v)\n",
         "an unbounded binder admitting a non-dtype",
     );
+}
+
+// 9. Red-team round 1 regressions. `ActiveSet` was added as a seventh
+//    `TypeVarRestriction` variant while several matches stayed keyed on the
+//    three families, so a set fell into `_` arms. The root cause was an
+//    infallible `family_name()` returning `""` for a set; it is now
+//    `Option`, which made the compiler enumerate all fifteen call sites.
+
+/// A set restricts WHICH dtypes are admissible, never which programs
+/// type-check. The `to_tensor` element-peel gate listed the three families
+/// explicitly, so a set-bounded `to_tensor` stayed suspended past the
+/// declaration boundary and was rejected where its equivalent family was
+/// accepted. The set here enumerates exactly `Float`'s current members.
+#[test]
+fn a_set_bound_accepts_every_program_its_equivalent_family_accepts() {
+    for bound in ["Float", "Numeric", "{f32, f64}", "{f32, f64, bf16, f16}"] {
+        assert_clean(
+            &format!(
+                "module Probe\n\
+                 def f[p: {bound}](xs: List[p]) -> tensor[2, p] = reshape(to_tensor(xs), [2i64])\n"
+            ),
+            &format!("`to_tensor` + `reshape` under `[p: {bound}]`"),
+        );
+    }
+}
+
+/// Every diagnostic naming a bound must name it. An `ActiveSet(_) => ""` arm
+/// on `family_name()` let a set reach at least seven diagnostics as an empty
+/// name, while the family control rendered correctly. This mirrors the family
+/// invariant at `chelis-types/tests/unresolved_operand_matrix.rs`.
+#[test]
+fn a_set_bound_is_named_in_the_rejection_not_left_empty() {
+    let (_dir, path) = write(
+        "module Probe\n\
+         def f[n, p: {f32, i32}](x: tensor[n, p]) -> tensor[n, p] = exp(x)\n",
+    );
+    let report = check(&path);
+    let text = messages(&report);
+    assert!(score(&report) < 1.0, "a mixed set must not admit `exp`");
+    assert!(
+        text.contains("dtype set `{f32, i32}`"),
+        "the rejection must name the set, not an empty family name, got:\n{text}",
+    );
+    assert!(
+        !text.contains("dtype family ``") && !text.contains("`p: `"),
+        "no diagnostic may render an empty bound name, got:\n{text}",
+    );
+}
+
+/// The literal-pattern repair chose its widest member and its f64-collision
+/// guard by matching the three family variants, so an all-integer SET was
+/// advised to compare at `f64` — advice that is false, because two distinct
+/// i64 values share one f64 — and a MIXED set skipped the guard entirely.
+/// Both now key on what the bound admits.
+#[test]
+fn the_pattern_repair_keys_on_what_the_bound_admits() {
+    let colliding = "9007199254740994";
+    // An all-integer bound, family or set, must advise i64.
+    for bound in ["Int", "{i8, i16, i32, i64}", "{i8, i64}"] {
+        let (_dir, path) = write(&format!(
+            "module Probe\ndef f[p: {bound}](x: p) -> i32 =\n  match x with {{\n    | {colliding} => 1i32\n    | _ => 0i32\n  }}\n"
+        ));
+        let text = messages_and_hints(&check(&path));
+        assert!(
+            text.contains("Compare at `i64`"),
+            "`[p: {bound}]` must advise i64, got:\n{text}",
+        );
+        assert!(
+            !text.contains("Compare at `f64`"),
+            "`[p: {bound}]` must never advise f64: two i64 values share one f64, so the \
+             suggested comparison would match a different value. Got:\n{text}",
+        );
+    }
+    // A bound admitting both an integer and a float cannot offer an exact
+    // non-trapping comparison in f64's collision range, however it is spelled.
+    for bound in ["Numeric", "{f64, i8}", "{f64, i16}"] {
+        let (_dir, path) = write(&format!(
+            "module Probe\ndef f[p: {bound}](x: p) -> i32 =\n  match x with {{\n    | {colliding} => 1i32\n    | _ => 0i32\n  }}\n"
+        ));
+        let text = messages_and_hints(&check(&path));
+        assert!(
+            text.contains("No comparison that cannot trap is exact"),
+            "`[p: {bound}]` must refuse rather than advise a lossy comparison, got:\n{text}",
+        );
+    }
 }

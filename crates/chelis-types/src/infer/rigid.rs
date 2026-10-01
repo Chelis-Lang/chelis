@@ -606,7 +606,7 @@ fn at_boundary_instantiation(
                 bound: Some(bound),
             } => Some(format!(
                 "`{name}`, declared `{name}: {}`",
-                bound.family_name()
+                bound.bound_spelling()
             )),
             BoundaryOperandKind::Authored { name, bound: None } => {
                 Some(format!("`{name}`, declared with no dtype-family bound"))
@@ -673,7 +673,7 @@ fn at_boundary_instantiation(
              tensor, collection, or string. Declare the operand with the type this operation \
              requires, such as `tensor[n, {name}]`, or narrow `{name}`'s bound to the dtypes the \
              operation admits.",
-            family = bound.family_name(),
+            family = bound.bound_spelling(),
         ),
         BoundaryOperandKind::Authored { name, bound: None } => format!(
             "`{name}` declares no dtype-family bound, so it denotes every type. Declare the \
