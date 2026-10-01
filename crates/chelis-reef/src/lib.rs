@@ -13609,15 +13609,17 @@ some-registry-lib = {{ version = "0.1.0" }}
 
     // ---- ADVERSARIAL TESTS: fast path edge cases ----
 
-    /// H: prepare_program_for_eval_file with a file that has an import but NO
-    /// reef.toml anywhere in the ancestor chain (no package root at all).
-    /// Must return Ok(None) immediately — not hang, not panic, not Err.
+    /// H: prepare_program_for_eval_file with a file that imports a module
+    /// outside chelis-std and has NO reef.toml anywhere in the ancestor chain
+    /// (no package root at all). A single-file program links against the
+    /// bundled runtime alone (chelis#2881), so the import is rejected, naming
+    /// the module and the missing manifest, immediately: no package resolver
+    /// runs.
     #[test]
-    fn adv_eval_file_no_package_root_returns_ok_none() {
+    fn adv_eval_file_no_package_root_rejects_a_non_std_import() {
         let dir = tempdir().expect("tempdir");
         // No reef.toml anywhere in this temp dir tree.
         let eval_file = dir.path().join("probe.ch");
-        // Write a file that has an import — would fail if resolver ran.
         write(
             &eval_file,
             "import NonExistent.Module (something)\ndef result() -> i32 = 42\n",
@@ -13632,17 +13634,11 @@ some-registry-lib = {{ version = "0.1.0" }}
             elapsed < Duration::from_millis(500),
             "no-package-root eval took {elapsed:?}. Should return immediately"
         );
-
-        // Must return Ok(None): no package root found, no resolution attempted.
-        match result {
-            Ok(None) => {} // correct
-            Ok(Some(_)) => panic!("expected Ok(None) without package root, got Ok(Some(...))"),
-            Err(e) => {
-                // Could also be Err if the file can't be found in a non-existent location.
-                // As long as it doesn't hang, this is acceptable.
-                eprintln!("Note: got Err (acceptable if no package root): {e}");
-            }
-        }
+        let error = result.expect_err("a non-Std import without a manifest must be rejected");
+        assert!(
+            error.contains("unresolved import `NonExistent.Module`") && error.contains("reef.toml"),
+            "{error}"
+        );
     }
 
     /// G: Fast path with a reef.lock containing a registry dep (LocalRegistry source).
