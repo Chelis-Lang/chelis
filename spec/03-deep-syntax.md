@@ -36,7 +36,7 @@ portable across Surf and Reef boundaries.
 | `type` | type-expr node | Type annotation (checked, not trusted) |
 | `loc` | `(loc file line col)` | Source location for error reporting |
 | `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
-| `dtype_bounds` | metadata map | Dtype bounds on a `defsig`'s binders; see §2.2 |
+| `dtype_bounds` | metadata map | Dtype-family bounds on a `defsig`'s binders; see §2.2 |
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
 | `effect` | `resource` | Handled effect kind on `handle-effect`; see [04-EFF-1] |
 | `literal_source` | `integer` | Integer-written literal provenance on `lit`; see §6.4 and [04-LIT-1] |

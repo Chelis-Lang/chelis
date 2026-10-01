@@ -2449,14 +2449,15 @@ family's current members is not that family.
 > variable the bounded variable is identified with, and generalization
 > re-quantifies it, so the bound survives aliases, wrappers, higher-order
 > values, imports, and recursive calls. Unifying two bounded variables SHALL
-> yield the intersection of the dtypes their bounds admit: two families
-> intersect as families, a family and an explicit set intersect as the set's
-> members the family admits, and two explicit sets intersect as their common
-> members. An intersection that no longer denotes a family is an explicit set.
+> yield the intersection of their families. Where either bound is an explicit
+> set, that intersection SHALL instead be the dtypes both bounds admit and is
+> itself an explicit set: a family and a set intersect as the set's members the
+> family admits, and two sets intersect as their common members.
 > An instantiation outside the bound
 > SHALL be a `PrecisionMismatch` naming the required bound and the offending
 > type; an empty intersection SHALL be a `PrecisionMismatch` naming both
-> bounds. A binder that declares no bound
+> families. Where either bound is an explicit set, that diagnostic SHALL name
+> both bounds. A binder that declares no bound
 > remains an unconstrained type variable admitting every type, not only a
 > dtype. A bound that is neither a family of this section nor an explicit set,
 > an explicit set that is empty, repeats a dtype, or names anything but an
