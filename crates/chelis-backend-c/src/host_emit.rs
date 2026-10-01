@@ -197,6 +197,19 @@ fn runtime_string_literal(value: &str) -> String {
         value.len()
     )
 }
+
+/// The constructor name a compiled ADT stores, and the name every tag test
+/// compares it against: the declared source spelling. A package build gives
+/// each top-level name the reef linker's private qualification
+/// (spec/04-type-system.md, "Reserved linker name format"); that identity
+/// stays inside the compiler, so every exit that renders the stored name
+/// ([05-OP-32]) prints the constructor as `chelis eval` does (chelis#2880).
+/// A data type's constructors have distinct source names, and a tag is only
+/// compared against constructors of its value's own type, so the source
+/// spelling preserves tag identity.
+fn stored_constructor_name(ctor: &str) -> String {
+    chelis_types::demangle_ident(ctor)
+}
 use crate::host_abi::{
     HostAbiBinding as HostBinding, HostAbiCallback as HostCallback,
     HostAbiCallbackKind as HostCallbackKind, HostAbiExpr as HostExpr,
@@ -314,7 +327,7 @@ pub(crate) fn emit_host_abi_program(
     // value, the checker rejects the initiating root before this emitter runs.
     // `main()` remains source ordered; the checker, not a reordered backend,
     // owns the top-level initialization frontier (chelis#1339).
-    let captured_globals = captured_global_names(program);
+    let captured_globals = chelis_ir::host::captured_global_names(program);
     if !captured_globals.is_empty() {
         body.push("// Top-level bindings captured by compiled functions (issue #352):".to_string());
         for name in &captured_globals {
@@ -3628,157 +3641,13 @@ fn emit_main(
     Ok(())
 }
 
-/// Top-level bindings referenced by name inside at least one compiled host
-/// function body (issue #352), in `program.globals` order, deduped.
-///
-/// Deliberately an over-approximation: the walk records every `Var` name
-/// without subtracting binders (params, let names, match bindings).
-/// Hoisting a binding that is shadowed inside a function body is harmless
-/// in C -- the local declaration shadows the file-scope static -- while
-/// missing a genuine capture reproduces the undeclared-identifier build
-/// break this pass exists to prevent.
-fn captured_global_names(program: &HostProgram) -> Vec<String> {
-    let mut referenced: UnordSet<String> = UnordSet::new();
-    for function in &program.functions {
-        collect_var_names(&function.body, &mut referenced);
-    }
-    let mut seen: UnordSet<String> = UnordSet::new();
-    program
-        .globals
-        .iter()
-        .flat_map(|binding| {
-            [
-                binding.name.clone(),
-                chelis_ir::LoadStoreName::top_level(&binding.name)
-                    .as_str()
-                    .to_string(),
-            ]
-            .into_iter()
-            .filter(|name| referenced.contains(name))
-        })
-        .filter(|name| seen.insert(name.clone()))
-        .collect()
-}
-
-/// Record every `Var` name referenced anywhere in `expr`, including
-/// let-binding values, match arms, and inline-callback bodies. Exhaustive
-/// over `HostExprKind` so a new variant forces this walk to be revisited.
-fn collect_var_names(expr: &HostExpr, out: &mut UnordSet<String>) {
-    match &expr.kind {
-        HostExprKind::ResultClaimScope { body, .. } => collect_var_names(body, out),
-        HostExprKind::FormalIngress { value, .. } => collect_var_names(value, out),
-        HostExprKind::Int(_)
-        | HostExprKind::Float(_)
-        | HostExprKind::Bool(_)
-        | HostExprKind::String(_)
-        | HostExprKind::Unit => {}
-        HostExprKind::Var(name, _) => {
-            out.insert(name.clone());
-        }
-        HostExprKind::List(items, _) | HostExprKind::Tuple(items, _) => {
-            for item in items {
-                collect_var_names(item, out);
-            }
-        }
-        HostExprKind::Call { args, .. }
-        | HostExprKind::Builtin { args, .. }
-        | HostExprKind::TensorCall { args, .. } => {
-            for arg in args {
-                collect_var_names(arg, out);
-            }
-        }
-        HostExprKind::SignatureEntry { args, lists, .. } => {
-            for arg in args.iter().chain(lists.iter().map(|entry| &entry.value)) {
-                collect_var_names(arg, out);
-            }
-        }
-        HostExprKind::AdtConstruct { fields, .. } => {
-            for field in fields {
-                collect_var_names(field, out);
-            }
-        }
-        HostExprKind::AdtFieldAccess { base, .. } => collect_var_names(base, out),
-        HostExprKind::If {
-            cond,
-            then_expr,
-            else_expr,
-            ..
-        } => {
-            collect_var_names(cond, out);
-            collect_var_names(then_expr, out);
-            collect_var_names(else_expr, out);
-        }
-        HostExprKind::MatchOption {
-            scrutinee,
-            some_expr,
-            none_expr,
-            ..
-        } => {
-            collect_var_names(scrutinee, out);
-            collect_var_names(some_expr, out);
-            collect_var_names(none_expr, out);
-        }
-        HostExprKind::MatchAdt {
-            scrutinee,
-            arms,
-            default_expr,
-            ..
-        } => {
-            collect_var_names(scrutinee, out);
-            for arm in arms {
-                collect_var_names(&arm.expr, out);
-            }
-            if let Some(default_expr) = default_expr {
-                collect_var_names(default_expr, out);
-            }
-        }
-        HostExprKind::Let { bindings, body, .. }
-        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
-            for binding in bindings {
-                collect_var_names(&binding.value, out);
-            }
-            collect_var_names(body, out);
-        }
-        HostExprKind::Map { callback, list, .. }
-        | HostExprKind::Filter { callback, list, .. }
-        | HostExprKind::Partition { callback, list, .. }
-        | HostExprKind::FlatMap { callback, list, .. } => {
-            collect_callback_var_names(callback, out);
-            collect_var_names(list, out);
-        }
-        HostExprKind::Fold {
-            callback,
-            init,
-            list,
-            ..
-        }
-        | HostExprKind::Scan {
-            callback,
-            init,
-            list,
-            ..
-        } => {
-            collect_callback_var_names(callback, out);
-            collect_var_names(init, out);
-            collect_var_names(list, out);
-        }
-    }
-}
-
-fn collect_callback_var_names(callback: &HostCallback, out: &mut UnordSet<String>) {
-    match &callback.kind {
-        HostCallbackKind::Named { .. } => {}
-        HostCallbackKind::Inline { body, .. } => collect_var_names(body, out),
-    }
-}
-
 /// Function names referenced from `expr` - `Call`/`Named`-callback
 /// targets plus bare `Var` references (a def passed as a value). The
 /// over-approximation direction is the safe one for the reachability
 /// gate below: an over-counted reference makes a failing wrapper a hard
 /// build error rather than a loud stub.
 fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
-    collect_var_names(expr, out);
+    chelis_ir::host::collect_host_var_names(expr, out);
     fn walk(expr: &HostExpr, out: &mut UnordSet<String>) {
         match &expr.kind {
             HostExprKind::ResultClaimScope { body, .. } => walk(body, out),
@@ -9188,7 +9057,7 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}chelis_string {ctor_value} = {};",
             self.indent,
-            runtime_string_literal(ctor)
+            runtime_string_literal(&stored_constructor_name(ctor))
         ));
         self.lines.push(format!(
             "{}{target} = chelis_adt_construct({ctor_value}, {}, {});",
@@ -9296,7 +9165,9 @@ impl<'a> HostEmitter<'a> {
             let prefix = if index == 0 { "if" } else { "else if" };
             self.lines.push(format!(
                 "{}{prefix} (chelis_host_string_eq_cstr({}, {:?})) {{",
-                self.indent, tag_var, arm.ctor
+                self.indent,
+                tag_var,
+                stored_constructor_name(&arm.ctor)
             ));
             let nested_indent = format!("{}    ", self.indent);
             let previous = std::mem::replace(&mut self.indent, nested_indent);

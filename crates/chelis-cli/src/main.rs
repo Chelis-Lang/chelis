@@ -1654,17 +1654,50 @@ fn parse_eval_target(target: Option<&str>) -> Result<chelis_types::types::Target
 fn build_root_manifest(
     checked: &chelis_types::CheckedProgram,
     target: BuildTarget,
+    entry_defs: &UnordSet<String>,
 ) -> chelis_types::manifest::RootManifest {
     let target = match target {
         BuildTarget::C => chelis_types::types::Target::C,
         BuildTarget::Hip => chelis_types::types::Target::Hip,
         BuildTarget::Metal => chelis_types::types::Target::Metal,
     };
+    owed_root_manifest(checked, target, entry_defs)
+}
+
+/// [05-OBS-7]'s owed roots for one selected program: the target-aware
+/// manifest of the checked program, restricted to the roots whose originating
+/// definition the entry program declares. A package build links chelis-std,
+/// its dependencies and its sibling modules ahead of the entry module. Those
+/// declarations are library code the entry calls, not roots it owes, exactly
+/// as `chelis eval` evaluates a package entry against its compiled library
+/// context (chelis#2624). A file outside a package is its own entry, so every
+/// root it declares is owed.
+fn owed_root_manifest(
+    checked: &chelis_types::CheckedProgram,
+    target: chelis_types::types::Target,
+    entry_defs: &UnordSet<String>,
+) -> chelis_types::manifest::RootManifest {
     let realizability = chelis_effects::realizability::infer_realizability(
         checked,
         chelis_compiler_api::target_capability::tensor_capable_prims(target),
     );
-    chelis_effects::realizability::compute_root_manifest(checked, &realizability)
+    let mut manifest =
+        chelis_effects::realizability::compute_root_manifest(checked, &realizability);
+    manifest
+        .entries
+        .retain(|entry| entry_defs.contains(entry.def_name.as_str()));
+    manifest
+}
+
+/// The definitions the entry program declares itself, as opposed to those
+/// linked in from its dependencies: every top-level `def` of `entry_exprs`,
+/// inside a module wrapper or outside one.
+fn entry_def_names(entry_exprs: &[DeepExpr]) -> UnordSet<String> {
+    let mut names = UnordSet::new();
+    for expr in entry_exprs {
+        collect_manifest_decl_names(expr, &mut names);
+    }
+    names
 }
 
 fn verified_host_codegen_program(
@@ -1702,8 +1735,9 @@ fn verified_host_execution_codegen_program(
 
 fn execution_host_requires_host_backend(
     checked: &chelis_types::CheckedProgram,
+    entry_defs: &UnordSet<String>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let manifest = build_root_manifest(checked, BuildTarget::C);
+    let manifest = build_root_manifest(checked, BuildTarget::C, entry_defs);
     let (_, host) = chelis_ir::host::try_lower_execution_program_with_manifest(checked, &manifest)
         .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     Ok(host
@@ -3966,15 +4000,20 @@ fn cmd_build(
         return Err(boxed_string_error(EMPTY_PROGRAM_MESSAGE.to_string()));
     }
     let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-    // Both consumers of the entry program below read nothing from it but its
-    // top-level names, so derive those seeds once. When the entry program is
+    // Every consumer of the entry program below reads nothing from it but its
+    // top-level names, so derive those names once: the reachability seeds and
+    // the definitions whose roots the build owes. When the entry program is
     // the whole program they come straight off `full_deep_exprs`, which is the
     // second desugar pass this removes (chelis#2331).
-    let entry_seeds = match &entry_decls {
+    let (entry_seeds, entry_defs) = match &entry_decls {
         Some(entry) => {
-            entry_seed_names(&expanded_desugared_program(entry).map_err(boxed_string_error)?)
+            let entry_exprs = expanded_desugared_program(entry).map_err(boxed_string_error)?;
+            (entry_seed_names(&entry_exprs), entry_def_names(&entry_exprs))
         }
-        None => entry_seed_names(&full_deep_exprs),
+        None => (
+            entry_seed_names(&full_deep_exprs),
+            entry_def_names(&full_deep_exprs),
+        ),
     };
     // Check the entire selected program before removing unreachable definitions.
     // A clean layered result proves the same program; failures and cache-disabled
@@ -4030,7 +4069,7 @@ fn cmd_build(
     let preserve_host_library_surface =
         prepared.is_none() && target == BuildTarget::C && pruning_fired && {
             let checked = post_drop_checked.as_ref().unwrap_or(&selected_checked);
-            execution_host_requires_host_backend(checked.program())?
+            execution_host_requires_host_backend(checked.program(), &entry_defs)?
         };
     let deep_exprs = if preserve_host_library_surface {
         eval_pruned_deep_exprs
@@ -4051,7 +4090,7 @@ fn cmd_build(
         checked_compilation_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?
     };
     let checked = checked_compilation.program();
-    let root_manifest = build_root_manifest(checked, target);
+    let root_manifest = build_root_manifest(checked, target, &entry_defs);
     let requires_main = root_manifest.requires_main();
     require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
@@ -4419,6 +4458,7 @@ fn cmd_build_deep(
     let selected_checked =
         checked_compilation_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
     let entry_seeds = entry_seed_names(&deep_exprs);
+    let entry_defs = entry_def_names(&deep_exprs);
     let pruned_deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_seeds);
     let pruning_fired = pruned_deep_exprs.len() != deep_exprs.len();
     // The backend gate must also see declarations that pruning would remove.
@@ -4434,7 +4474,7 @@ fn cmd_build_deep(
     }
     let preserve_host_library_surface = target == BuildTarget::C
         && pruning_fired
-        && execution_host_requires_host_backend(selected_checked.program())?;
+        && execution_host_requires_host_backend(selected_checked.program(), &entry_defs)?;
     let final_deep_exprs = if preserve_host_library_surface {
         deep_exprs.clone()
     } else {
@@ -4448,7 +4488,7 @@ fn cmd_build_deep(
             .map_err(|e| format!("Check errors: {e}"))?
     };
     let checked = checked_compilation.program();
-    let root_manifest = build_root_manifest(checked, target);
+    let root_manifest = build_root_manifest(checked, target, &entry_defs);
     let requires_main = root_manifest.requires_main();
     require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
@@ -11581,22 +11621,14 @@ fn manifest_root_names_from_decls(
     checked: &chelis_types::CheckedProgram,
     target: chelis_types::types::Target,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut selected_defs = UnordSet::new();
-    for expr in chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())? {
-        collect_manifest_decl_names(&expr, &mut selected_defs);
-    }
-    let realizability = chelis_effects::realizability::infer_realizability(
-        checked,
-        chelis_compiler_api::target_capability::tensor_capable_prims(target),
+    let entry_defs = entry_def_names(
+        &chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?,
     );
-    Ok(
-        chelis_effects::realizability::compute_root_manifest(checked, &realizability)
-            .entries
-            .into_iter()
-            .filter(|entry| selected_defs.contains(entry.def_name.as_str()))
-            .map(|entry| entry.name)
-            .collect(),
-    )
+    Ok(owed_root_manifest(checked, target, &entry_defs)
+        .entries
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect())
 }
 
 fn collect_manifest_decl_names(expr: &DeepExpr, names: &mut UnordSet<String>) {
