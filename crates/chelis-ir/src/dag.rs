@@ -773,7 +773,7 @@ pub enum RiscOp {
     /// Element-wise truncating division (round toward zero) — the
     /// C/Rust integer `/` quotient (chelis#178). **Integer operands
     /// only.** This is the exact quotient semantics chelis-std's
-    /// `Std.Decimal` arithmetic relies on. Non-differentiable;
+    /// `Std.Decimal` limb arithmetic relies on. Non-differentiable;
     /// `grad` rejects it. See `spec/05-risc-primitives.md` §2.1.
     TruncDiv,
     /// Exact signed remainder, with DivZero traps at the stored width

@@ -963,7 +963,7 @@ mod tests {
         assert!(is_linker_format_name("Pkg__foo__Secret"));
         assert!(is_linker_format_name("pkg__foo__forge"));
         assert!(is_linker_format_name(
-            "Pkg__chelis__std__Std__Decimal__RoundingMode"
+            "Pkg__chelis__std__Std__Rounding__Rounding"
         ));
         // Marker prefix but no stem -> not a complete mangled name.
         assert!(!is_linker_format_name("Pkg__lonely"));
