@@ -282,6 +282,18 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "crates/chelis-cli/src/lane_check.rs",
+        "archive-name",
+        lines=(
+            'argv.push("out/libchelis_runtime.a".into());',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the exact archive the preceding `chelis build --output out` staged "
+            "for this program in the same isolated directory"
+        ),
+    ),
+    Row(
         "crates/chelis-cli/tests/build_deep_ingestion.rs",
         "archive-name",
         lines=(

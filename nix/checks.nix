@@ -163,6 +163,174 @@ let
         touch "$out"
       '';
 
+  # Only native Linux produces a gate verdict.  Darwin evaluation never
+  # constructs (or attempts to run) an x86_64-linux check derivation.
+  laneCheck =
+    if !pkgs.stdenv.hostPlatform.isLinux then
+      null
+    else
+      let
+        corpus = builtins.path {
+          name = "chelis-lane-check-corpus";
+          path = root + "/tests/corpus/lane_check";
+        };
+        cc = pkgs.stdenv.cc;
+      in
+      pkgs.runCommand "chelis-lane-check"
+        {
+          nativeBuildInputs = [
+            pkgs.python311
+            pkgs.glibc.bin
+            cc
+            pkgs.openblas
+          ];
+          NIX_CFLAGS_COMPILE = "-ffp-contract=off -fno-fast-math";
+          NIX_LDFLAGS = "-L${pkgs.openblas}/lib -L${pkgs.glibc}/lib -rpath ${pkgs.openblas}/lib";
+          OMP_NUM_THREADS = "1";
+          OPENBLAS_NUM_THREADS = "1";
+        }
+        ''
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME" "$out"
+          python3 ${root}/scripts/lane_check_scope.py \
+            --source ${built.source} \
+            --compiler-source ${built.crateSource} \
+            --corpus ${corpus} \
+            --flake-lock ${root}/flake.lock \
+            --chelis ${packages.chelis} \
+            --chelis-drv ${packages.chelis.drvPath} \
+            --compiler ${cc} \
+            --compiler-drv ${cc.drvPath} \
+            --runtime-drv ${packages.chelis-runtime.drvPath} \
+            --libc ${pkgs.glibc} \
+            --libc-drv ${pkgs.glibc.drvPath} \
+            --math-provider ${pkgs.openblas} \
+            --math-provider-drv ${pkgs.openblas.drvPath} \
+            --rustc ${built.toolchain}/bin/rustc \
+            --build-target x86_64-unknown-linux-gnu \
+            --output "$TMPDIR/proof-scope.json"
+
+          # Ask the wrapper for its *effective* cc1 and linker commands, not
+          # just the outer argv: Nix cc wrappers can inject extra flags.
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          compiler = "${cc}/bin/cc"
+          environment = os.environ.copy()
+          for phase in (("-c", "probe.c", "-o", "probe.o"), ("probe.c", "-o", "probe")):
+              effective = subprocess.run(
+                  [compiler, "-###", "-O2", "-ffp-contract=off", "-fno-fast-math", *phase],
+                  env=environment, text=True, capture_output=True, check=False,
+              )
+              trace = effective.stderr
+              if effective.returncode != 0:
+                  raise SystemExit(f"cc wrapper refused reference profile: {trace}")
+              for required in ("-O2", "-ffp-contract=off", "-fno-fast-math"):
+                  if required not in trace:
+                      raise SystemExit(f"effective compiler invocation misses {required}: {trace}")
+              for forbidden in ("-march=native", "-ffast-math", "-fopenmp", "HOSTILE_LANE_CHECK"):
+                  if forbidden in trace:
+                      raise SystemExit(f"effective compiler invocation contains {forbidden}: {trace}")
+              if "-c" not in phase and "-L${pkgs.openblas}/lib" not in trace:
+                  raise SystemExit(f"effective linker lost pinned OpenBLAS path: {trace}")
+          PY
+
+          # These deliberately contradict the scoped profile; a child that
+          # inherits one rather than replacing it fails compilation/linking.
+          export CC="$TMPDIR/nonexistent-host-cc"
+          export CHELIS_CC="$TMPDIR/nonexistent-chelis-cc"
+          export CFLAGS="-funknown-chelis-gate-flag"
+          export CPPFLAGS="-DHOSTILE_LANE_CHECK=1"
+          export CXXFLAGS="-funknown-chelis-gate-flag"
+          export LDFLAGS="-Wl,--unknown-chelis-gate-linker-flag"
+          export NIX_CFLAGS_COMPILE="-funknown-chelis-gate-flag -ffast-math -march=native -fopenmp"
+          export NIX_LDFLAGS="-Wl,--unknown-chelis-gate-linker-flag"
+          export OMP_NUM_THREADS=19
+          export OPENBLAS_NUM_THREADS=19
+          export GOMP_CPU_AFFINITY=0-19
+
+          ${packages.chelis}/bin/chelis lane-check ${corpus} \
+            --json --proof-scope-input "$TMPDIR/proof-scope.json" \
+            >"$out/report.ndjson"
+          # A real derivation build executes two independent runs. Substituted
+          # or already-built outputs instead carry a prior machine's receipt.
+          # On one declared hardware tuple, the fresh reports agree bytewise.
+          ${packages.chelis}/bin/chelis lane-check ${corpus} \
+            --json --proof-scope-input "$TMPDIR/proof-scope.json" \
+            >"$TMPDIR/second-report.ndjson"
+          python3 - "$out/report.ndjson" "$TMPDIR/second-report.ndjson" ${corpus} <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          if pathlib.Path(sys.argv[1]).read_bytes() != pathlib.Path(sys.argv[2]).read_bytes():
+              raise SystemExit("two fresh locked-closure lane-check runs produced different reports")
+          report = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+          cases = sorted(pathlib.Path(sys.argv[3]).rglob("*.ch"))
+          if len(report) != len(cases) + 1:
+              raise SystemExit(f"non-vacuous gate expected {len(cases)} cases and one summary, got {len(report)} records")
+          if not all(case.stat().st_size for case in cases):
+              raise SystemExit("reference corpus contains an empty program")
+          for record in report[:-1]:
+              if record.get("record") != "program" or record.get("status") != "pass":
+                  raise SystemExit(f"program failed the strict cross-lane comparison: {record}")
+          summary = report[-1]
+          if (summary.get("record") != "summary" or summary.get("schema_version") != 1
+              or summary.get("status") != "pass" or summary.get("compared") != len(cases)
+              or summary.get("passed") != len(cases) or summary.get("errors") != 0
+              or summary.get("diverged") != 0):
+              raise SystemExit(f"unexpected lane-check summary: {summary}")
+          scope = summary.get("proof_scope", {})
+          if (scope.get("kind") != "declared-nix-closure"
+              or scope.get("corpus_sha256") is None
+              or scope.get("source_sha256") is None
+              or scope.get("compiler_source_sha256") is None
+              or len(scope.get("invocations", [])) != len(cases)):
+              raise SystemExit(f"lane-check omitted the declared closure or native invocations: {scope}")
+          if any("libc.so.6" not in row.get("loaded_libraries", {})
+                 for row in scope["invocations"]):
+              raise SystemExit(f"lane-check did not inspect actual linked native libraries: {scope}")
+          PY
+
+          # The gate must not grant a verdict to a forged/contradictory target,
+          # even when the binary, source, corpus and all other paths are valid.
+          python3 - "$TMPDIR/proof-scope.json" "$TMPDIR" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          scope = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          for name, target in (("contradictory", "not-a-linux-triple"), ("missing", "")):
+              bad = {**scope, "compiler": {**scope["compiler"], "target": target}}
+              (pathlib.Path(sys.argv[2]) / f"{name}-scope.json").write_text(
+                  json.dumps(bad, sort_keys=True, separators=(",", ":")) + "\n"
+              )
+          PY
+          for kind in contradictory missing; do
+            status=0
+            ${packages.chelis}/bin/chelis lane-check ${corpus} \
+              --json --proof-scope-input "$TMPDIR/$kind-scope.json" \
+              >"$TMPDIR/$kind-report.ndjson" 2>"$TMPDIR/$kind-stderr" || status=$?
+            if [ "$status" -ne 2 ]; then
+              echo "contradictory $kind target must exit 2, got $status" >&2
+              exit 1
+            fi
+            python3 - "$TMPDIR/$kind-report.ndjson" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          records = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+          if not records or records[-1].get("status") != "error":
+              raise SystemExit(f"contradictory compiler target did not reject proof: {records}")
+          if not any("compiler" in json.dumps(row).lower() and "target" in json.dumps(row).lower()
+                     for row in records):
+              raise SystemExit(f"missing compiler target diagnostic: {records}")
+          PY
+          done
+        '';
+
   runtimeConsumer =
     pkgs.runCommand "chelis-runtime-consumer"
       {
@@ -260,7 +428,8 @@ let
     runtimeConsumer
     runtimeCorrespondence
     runtimeShape
-  ];
+  ]
+  ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ laneCheck ];
   native = pkgs.runCommand "chelis-native-contracts" { } ''
     ${lib.concatMapStringsSep "\n" (check: "test -e ${check}") contractChecks}
     test -e ${packages.chelis}
@@ -290,3 +459,4 @@ in
   chelis-runtime = packages.chelis-runtime;
   chelisup = packages.chelisup;
 }
+// lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux { lane-check = laneCheck; }

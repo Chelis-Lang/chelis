@@ -3,6 +3,7 @@
 mod c_source_name;
 mod eval_output;
 mod eval_timeout;
+mod lane_check;
 mod prove;
 mod style_gate;
 
@@ -203,6 +204,19 @@ enum Command {
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
+    },
+    /// Compare complete evaluator and compiled-C stdout over a file or corpus.
+    LaneCheck {
+        path: PathBuf,
+        /// Emit versioned NDJSON (one row per program, then a summary).
+        #[arg(long)]
+        json: bool,
+        /// Versioned closure identity supplied by a sandboxed Nix check.
+        #[arg(long, value_name = "FILE")]
+        proof_scope_input: Option<PathBuf>,
+        /// Deadline for each eval, build, link, or run subprocess.
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        timeout: u64,
     },
     /// Report lowered IR copy cost
     Cost {
@@ -945,6 +959,17 @@ fn main() {
             // document it printed (chelis#886, chelis#1678).
             std::process::exit(cmd_check(&file, show_inferred, allow_style_violations))
         }
+        Some(Command::LaneCheck {
+            path,
+            json,
+            proof_scope_input,
+            timeout,
+        }) => std::process::exit(lane_check::run(
+            &path,
+            json,
+            proof_scope_input.as_deref(),
+            Duration::from_secs(timeout),
+        )),
         Some(Command::Cost { file, json }) => cmd_cost(&file, json),
         Some(Command::Validate {
             surf,

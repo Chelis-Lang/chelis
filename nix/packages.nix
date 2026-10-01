@@ -250,6 +250,7 @@ in
     compiler
     compilerCrate
     crate2nixVersion
+    crateSource
     generatedCargoNix
     runtime
     source

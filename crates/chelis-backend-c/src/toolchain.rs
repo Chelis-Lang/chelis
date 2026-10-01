@@ -32,6 +32,49 @@ pub fn c_compiler() -> String {
 pub fn runtime_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
     resolve_toolchain(requirements, &["CHELIS_CC"])
 }
+/// Reference profile for a caller-selected compiler. Unlike the product runtime
+/// profile, this does not resolve a compiler or incorporate ambient build flags.
+/// Callers spawning the compiler must also sanitize its inherited environment.
+pub fn strict_reference_toolchain(
+    compiler: String,
+    requirements: CodegenRequirements,
+) -> NativeToolchain {
+    let compile_flags = vec![
+        "-O2".to_string(),
+        "-ffp-contract=off".to_string(),
+        "-fno-fast-math".to_string(),
+    ];
+    let mut link_flags = vec!["-lm".to_string()];
+    if !cfg!(target_os = "macos") {
+        link_flags.push("-lpthread".to_string());
+        link_flags.push("-ldl".to_string());
+    }
+
+    // The generated math header uses Accelerate's vForce symbols on macOS
+    // even when codegen does not request BLAS.
+    let blas_provider = if cfg!(target_os = "macos") {
+        link_flags.push("-framework".to_string());
+        link_flags.push("Accelerate".to_string());
+        if requirements.needs_blas {
+            BlasProvider::Accelerate
+        } else {
+            BlasProvider::None
+        }
+    } else if requirements.needs_blas {
+        link_flags.push("-lopenblas".to_string());
+        BlasProvider::OpenBlas
+    } else {
+        BlasProvider::None
+    };
+
+    NativeToolchain {
+        compiler,
+        compile_flags,
+        link_flags,
+        openmp_enabled: false,
+        blas_provider,
+    }
+}
 
 pub fn test_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
     resolve_toolchain(requirements, &["CHELIS_TEST_CC", "CHELIS_CC"])
@@ -136,4 +179,102 @@ fn compiler_version_text(output: &std::process::Output) -> String {
         return stdout.into_owned();
     }
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_reference_uses_portable_profile_and_required_libraries() {
+        let requirements = CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: true,
+        };
+        let strict = strict_reference_toolchain("pinned-cc".into(), requirements);
+        assert_eq!(strict.compiler, "pinned-cc");
+        assert_eq!(
+            strict.compile_flags,
+            ["-O2", "-ffp-contract=off", "-fno-fast-math"]
+        );
+        assert!(!strict.openmp_enabled);
+        assert!(!strict.compile_flags.iter().any(|flag| flag == "-fopenmp"));
+        assert!(!strict.link_flags.iter().any(|flag| flag == "-fopenmp"));
+        assert!(strict.link_flags.contains(&"-lm".to_string()));
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(strict.blas_provider, BlasProvider::Accelerate);
+            assert!(
+                strict
+                    .link_flags
+                    .windows(2)
+                    .any(|flags| flags[0] == "-framework" && flags[1] == "Accelerate")
+            );
+        } else {
+            assert_eq!(strict.blas_provider, BlasProvider::OpenBlas);
+            assert!(strict.link_flags.contains(&"-lpthread".to_string()));
+            assert!(strict.link_flags.contains(&"-ldl".to_string()));
+            assert!(strict.link_flags.contains(&"-lopenblas".to_string()));
+        }
+
+        let no_blas =
+            strict_reference_toolchain("pinned-cc".into(), CodegenRequirements::default());
+        assert_eq!(no_blas.blas_provider, BlasProvider::None);
+        assert!(!no_blas.link_flags.contains(&"-lopenblas".to_string()));
+        if cfg!(target_os = "macos") {
+            assert!(
+                no_blas
+                    .link_flags
+                    .windows(2)
+                    .any(|flags| flags[0] == "-framework" && flags[1] == "Accelerate")
+            );
+        }
+    }
+
+    #[test]
+    fn strict_reference_ignores_hostile_environment() {
+        // Keep environment changes in a child process so other parallel tests
+        // cannot observe the overrides.
+        if std::env::var_os("CHELIS_STRICT_REFERENCE_TEST_CHILD").is_none() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "toolchain::tests::strict_reference_ignores_hostile_environment",
+                ])
+                .env("CHELIS_STRICT_REFERENCE_TEST_CHILD", "1")
+                .env("CHELIS_CC", "hostile-cc")
+                .env("CC", "another-hostile-cc")
+                .env("CFLAGS", "-ffast-math -march=native -fopenmp")
+                .env("LDFLAGS", "-fopenmp -lhostile")
+                .env("NIX_CFLAGS_COMPILE", "-ffast-math -march=native")
+                .env("NIX_LDFLAGS", "-lhostile")
+                .env("OMP_NUM_THREADS", "64")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let requirements = CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: false,
+        };
+        let runtime = runtime_toolchain(requirements);
+        assert_eq!(runtime.compiler, "hostile-cc");
+        assert!(runtime.compile_flags.contains(&"-march=native".to_string()));
+
+        let strict = strict_reference_toolchain("pinned-cc".into(), requirements);
+        assert_eq!(strict.compiler, "pinned-cc");
+        assert_eq!(
+            strict.compile_flags,
+            ["-O2", "-ffp-contract=off", "-fno-fast-math"]
+        );
+        assert!(!strict.openmp_enabled);
+        assert!(
+            !strict
+                .link_flags
+                .iter()
+                .any(|flag| flag == "-fopenmp" || flag == "-lhostile")
+        );
+    }
 }

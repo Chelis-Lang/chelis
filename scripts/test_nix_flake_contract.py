@@ -102,6 +102,24 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertEqual(systems, EXPECTED_SYSTEMS)
 
     @REQUIRES_NIX
+    def test_lane_check_exists_only_for_native_linux(self) -> None:
+        linux = nix_json(
+            "eval", "--json", ".#checks.x86_64-linux", "--apply", "builtins.attrNames"
+        )
+        darwin = nix_json(
+            "eval", "--json", ".#checks.aarch64-darwin", "--apply", "builtins.attrNames"
+        )
+        self.assertIn("lane-check", linux)
+        self.assertNotIn("lane-check", darwin)
+        # Forcing the Linux derivation on Darwin requires a configured Linux
+        # builder for crate2nix IFD, whereas checking the shape does not.
+        if nix_raw("eval", "--impure", "--raw", "--expr", "builtins.currentSystem") == "x86_64-linux":
+            self.assertEqual(
+                nix_raw("eval", "--raw", ".#checks.x86_64-linux.lane-check.system"),
+                "x86_64-linux",
+            )
+
+    @REQUIRES_NIX
     def test_package_names_are_exact_on_each_system(self) -> None:
         for system in EXPECTED_SYSTEMS:
             with self.subTest(system=system):
