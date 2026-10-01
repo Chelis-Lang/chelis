@@ -4,7 +4,7 @@ use predicates::prelude::*;
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{make_app, write_file};
+use common::{build_and_run_app, gcc_available, make_app, write_file};
 
 #[test]
 fn reef_std_decimal_calls_raise_issue_2778_error() {
@@ -100,59 +100,93 @@ bad_decimal = match try_decimal("x.y") with {
         .stderr(predicate::str::contains("#2778"));
 }
 
+/// A program over `Std.Datetime` whose every root is a canonical value.
+const DATETIME_ACCEPTANCE_PROGRAM: &str = r#"module Demo.Main
+import Std.Datetime (ClampToMonthEnd, Milliseconds, date, date_add_days, date_add_months, date_to_string, date_weekday, weekday_name, parse_instant, instant_to_unix_count, duration_to_string, instant_until, parse_period, period_to_string, date_period_until)
+import Std.Rounding (RoundTowardNegative)
+month_end = date_to_string(date_add_months(date(2024i64, 1i64, 31i64), 1i64, ClampToMonthEnd))
+weekday = weekday_name(date_weekday(date(2026i64, 10i64, 1i64)))
+millis = instant_to_unix_count(parse_instant("2026-10-01T09:30:00.25-04:00"), Milliseconds, RoundTowardNegative)
+elapsed = duration_to_string(instant_until(parse_instant("2026-10-01T00:00:00Z"), parse_instant("2026-10-01T01:01:01.5Z")))
+gap = period_to_string(date_period_until(date(2024i64, 1i64, 31i64), date(2025i64, 3i64, 1i64)))
+year = period_to_string(parse_period("P1Y"))
+same = eq(date(2024i64, 2i64, 29i64), date_add_days(date(2024i64, 2i64, 28i64), 1i64))
+different = eq(date(2024i64, 2i64, 29i64), date(2024i64, 3i64, 1i64))
+"#;
+
+/// chelis#2859: `Std.Datetime` replaces `Std.Time`. A program importing it
+/// type-checks and evaluates through the bundled standard library.
 #[test]
-fn reef_std_time_calls_raise_issue_2779_error() {
-    let (_dir, reef_home, app_pkg) = make_app("time-fence-2779");
-    let date = "Date { year: cast(1970, i64), month: cast(1, i64), day: cast(1, i64) }";
-    let invalid = "Date { year: cast(1970, i64), month: cast(13, i64), day: cast(1, i64) }";
-    let cases = [
-        "date(cast(1970, i64), cast(1, i64), cast(1, i64))".to_owned(),
-        "try_date(cast(1970, i64), cast(1, i64), cast(1, i64))".to_owned(),
-        "duration(cast(0, i64), cast(0, i64), cast(0, i64), cast(-1, i64))".to_owned(),
-        "is_leap_year(cast(2024, i64))".to_owned(),
-        format!("add_days({date}, cast(1, i64))"),
-        format!("sub_days({date}, cast(-9223372036854775807, i64))"),
-        format!("days_between({date}, {date})"),
-        format!("date_lt({date}, {date})"),
-        format!("date_lte({date}, {date})"),
-        format!("date_gt({date}, {date})"),
-        format!("date_gte({date}, {date})"),
-        format!("date_to_string({invalid})"),
-        "parse_date(\"+10000-01-01\")".to_owned(),
-        format!("day_of_week({date})"),
-        format!("day_of_week_name({date})"),
-        format!("day_of_year({invalid})"),
-    ];
-    for (index, expression) in cases.iter().enumerate() {
-        let source = format!(
-            "module Demo.Main\nimport Std.Time (Date, date, try_date, duration, is_leap_year, add_days, sub_days, days_between, date_lt, date_lte, date_gt, date_gte, date_to_string, parse_date, day_of_week, day_of_week_name, day_of_year)\nresult = {expression}\n"
-        );
-        let path = app_pkg.join("src/main.ch");
-        write_file(&path, &source);
-        let output = Command::cargo_bin("chelis")
-            .expect("binary")
-            .env("CHELIS_STYLE_GATE_DISABLE", "1")
-            .env("CHELIS_REEF_HOME", &reef_home)
-            .current_dir(&app_pkg)
-            .args(["eval", "--file", path.to_str().unwrap()])
-            .output()
-            .expect("eval output");
-        assert!(
-            !output.status.success(),
-            "case {index} silently succeeded: {expression}\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let rendered = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            rendered.contains("Std.Time is unavailable") && rendered.contains("#2779"),
-            "case {index} ({expression}) failed without the Time fence: {rendered}"
-        );
+fn reef_std_datetime_checks_and_evaluates() {
+    let (_dir, reef_home, app_pkg) = make_app("datetime-acceptance-2859");
+    let path = app_pkg.join("src/main.ch");
+    write_file(&path, DATETIME_ACCEPTANCE_PROGRAM);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"));
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("month_end = 2024-02-29"))
+        .stdout(predicate::str::contains("weekday = thursday"))
+        .stdout(predicate::str::contains("millis = 1790861400250"))
+        .stdout(predicate::str::contains("elapsed = PT3661.5S"))
+        .stdout(predicate::str::contains("gap = P13M1D"))
+        .stdout(predicate::str::contains("year = P12M"))
+        .stdout(predicate::str::contains("same = true"))
+        .stdout(predicate::str::contains("different = false"));
+}
+
+/// chelis#2859: the compiled C lane builds a program over `Std.Datetime` and
+/// prints exactly what `chelis eval` prints: the program's own roots and
+/// nothing from the imported modules.
+#[test]
+fn reef_std_datetime_compiled_lane_matches_eval() {
+    if !gcc_available() {
+        return;
     }
+    let (_dir, reef_home, app_pkg) = make_app("datetime-lanes-2859");
+    let path = app_pkg.join("src/main.ch");
+    write_file(&path, DATETIME_ACCEPTANCE_PROGRAM);
+    let evaluated = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("eval output");
+    assert!(
+        evaluated.status.success(),
+        "eval must succeed: {evaluated:?}"
+    );
+    let evaluated = String::from_utf8_lossy(&evaluated.stdout).into_owned();
+    let roots = DATETIME_ACCEPTANCE_PROGRAM
+        .lines()
+        .filter(|line| line.contains(" = "))
+        .count();
+    assert_eq!(
+        evaluated.trim().lines().count(),
+        roots,
+        "eval prints every root:\n{evaluated}"
+    );
+    let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
+    assert_eq!(
+        evaluated.trim(),
+        compiled.trim(),
+        "the compiled lane must print exactly the eval lane's output"
+    );
 }
 
 #[test]
