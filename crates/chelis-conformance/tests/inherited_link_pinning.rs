@@ -174,3 +174,50 @@ fn audit_stays_clean_after_sync_restamps_pinned_links() {
     let row = report.rows.iter().find(|r| r.key == "agents-md").unwrap();
     assert_eq!(row.verdict, audit::Verdict::Fail, "{}", row.diagnostic);
 }
+
+/// Shared skills carry the same link rewrite, applied by one function on both
+/// the sync and the audit side. The chelis-std skill is authored at
+/// `packages/chelis-std/SKILL.md` and links to the surface guide (materialized,
+/// so it stays relative) and to the shell contract (not materialized, so it is
+/// pinned). Sync writes the pinned body, audit accepts it, and the raw
+/// authored body in its place is drift.
+#[test]
+fn shared_skill_links_are_pinned_by_sync_and_expected_by_audit() {
+    let (_tmp, root) = shell();
+    let path = root.join("agent-skills/chelis-std/SKILL.md");
+    let skill = std::fs::read_to_string(&path).unwrap();
+    let links = destinations(&skill);
+    assert!(
+        links.contains(&pinned("spec/design/shell_repo_contract.md")),
+        "{links:?}"
+    );
+    assert!(
+        links.iter().any(|l| l == "../../docs/CHELIS_SURFACE.md"),
+        "{links:?}"
+    );
+
+    scaffold::materialize_skills(&root, VER).expect("sync skills");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), skill);
+    let vendored = |root: &Path| {
+        let report = audit::audit(root);
+        report
+            .rows
+            .iter()
+            .find(|r| r.key == "vendored-skills")
+            .unwrap()
+            .clone()
+    };
+    let row = vendored(&root);
+    assert_eq!(row.verdict, audit::Verdict::Pass, "{}", row.diagnostic);
+
+    let raw = chelis_conformance::skills::skill_body("chelis-std").unwrap();
+    assert_ne!(raw, skill, "the authored body must carry a link to rewrite");
+    std::fs::write(&path, raw).unwrap();
+    let row = vendored(&root);
+    assert_eq!(row.verdict, audit::Verdict::Fail);
+    assert!(
+        row.diagnostic.contains("chelis-std: forked/stale"),
+        "{}",
+        row.diagnostic
+    );
+}

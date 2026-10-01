@@ -45,7 +45,7 @@ pub struct Shell {
     pub kind: ShellKind,
     pub status: ShellStatus,
     /// True iff the shell links chelis compiler crates as Cargo path deps,
-    /// which triggers the contract's row-18 source-crate MUST.
+    /// which triggers the contract's row-17 source-crate MUST.
     pub links_chelis_crates: bool,
     /// Sibling shells this one needs installed, by name: the **transitive
     /// closure** of its `reef.toml` `[dependencies]` over sibling shells, not

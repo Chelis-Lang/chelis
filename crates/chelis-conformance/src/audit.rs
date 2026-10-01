@@ -599,7 +599,10 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
     // blocking or §Tracking, where the citation check below reaches it. A
     // section for items held back from filing is outside that check: its
     // entries would audit green with no issue behind them.
-    if let Some(i) = section_heading_indices(&lines, "Parked").first() {
+    if let Some(i) = lines.iter().position(|l| {
+        heading_level(l).is_some_and(|lvl| lvl <= SECTION_HEADING_MAX_LEVEL)
+            && l.to_ascii_lowercase().contains("parked")
+    }) {
         return fail(
             format!(
                 "docs/UPSTREAM_BUGS.md:{}: a Parked section holds upstream items outside the cited sections (§4)",
@@ -1060,22 +1063,16 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
                 // derives the expected managed span by applying its validated
                 // exclusions to the embedded body, then byte-checks that span.
                 let (managed, block) = crate::scaffold::split_shell_local(&live);
-                match crate::scaffold::apply_shell_local_exclusions(body, block) {
-                    Ok(expected) => {
-                        if let Some(pin) = pin {
-                            let expected = crate::links::pin_links(
-                                &expected,
-                                &skills::source_path(name),
-                                &format!("agent-skills/{name}/SKILL.md"),
-                                pin,
-                                &local,
-                            );
-                            if managed.trim_end() != expected.trim_end() {
-                                problems.push(format!("{name}: forked/stale"));
-                            }
+                // Without a pin the expected span cannot be derived; that
+                // problem is already reported above.
+                if let Some(pin) = pin {
+                    match crate::scaffold::skill_managed_span(name, body, block, pin, &local) {
+                        Ok(expected) if managed.trim_end() != expected.trim_end() => {
+                            problems.push(format!("{name}: forked/stale"));
                         }
+                        Err(why) => problems.push(format!("{name}: {why}")),
+                        Ok(_) => {}
                     }
-                    Err(why) => problems.push(format!("{name}: {why}")),
                 }
             }
         }
@@ -1122,17 +1119,30 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
         }
     }
     if !problems.is_empty() {
+        // A local skill that shadows a shared one is a declaration only the
+        // shell can change; sync cannot fix it, so the fix says so first.
+        let shadow_fix = if problems
+            .iter()
+            .any(|p| p.contains("may not name a shared skill"))
+        {
+            "remove each `[conform] local_skills` entry that names a shared skill; the shared \
+             copy replaces the local one on sync. "
+        } else {
+            ""
+        };
         return fail(
             format!(
                 "vendored skills drifted from the pinned set: {}",
                 problems.join(", ")
             ),
-            "run `chelis reef conform sync` to re-materialize agent-skills/ and restore \
+            format!(
+                "{shadow_fix}run `chelis reef conform sync` to re-materialize agent-skills/ and restore \
              the .claude/skills and .codex/skills symlinks. \
              Configure shell-owned additions with `[conform] local_skills` and embedded removals \
              with `[conform] excluded_skills`; use a trailing `<!-- shell-local:begin -->` block \
              to retain and amend a shared skill, with `shell-local:exclude` selectors for \
-             inherited sections that should be omitted.",
+             inherited sections that should be omitted."
+            ),
         );
     }
     pass()
@@ -2777,7 +2787,7 @@ mod tests {
         assert!(names("[conform]\nlocal_skills = \"x\"\n[dependencies]\nfoo = 1\n").is_empty());
         // NEW: the quoted spelling is now HONORED, not merely un-reported. The
         // two hand-rolled parsers disagreed here, so an author who wrote
-        // `'local_skills'` got a row-14 failure telling them to do what they had
+        // `'local_skills'` got a row-13 failure telling them to do what they had
         // just done.
         assert_eq!(
             names("[conform]\n'local_skills' = [\"chelis-std\"]\n"),

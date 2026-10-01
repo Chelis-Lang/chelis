@@ -667,9 +667,22 @@ fn sync_repairs_each_agent_skill_symlink() {
 fn chelis_std_is_a_shared_skill_materialized_from_its_package_source() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "stdskill");
-    let source = std::fs::read_to_string(
+    let authored = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../packages/chelis-std/SKILL.md"),
+    )
+    .unwrap();
+    assert_eq!(
+        authored,
+        chelis_conformance::skills::skill_body("chelis-std").unwrap()
+    );
+    // The authored body, with its links pinned for the shell's release.
+    let source = scaffold::skill_managed_span(
+        "chelis-std",
+        &authored,
+        None,
+        VER,
+        &chelis_conformance::links::LocalTargets::for_shell(&[]),
     )
     .unwrap();
     for surface in ["agent-skills", ".claude/skills", ".codex/skills"] {
@@ -706,10 +719,15 @@ fn a_local_chelis_std_copy_is_replaced_and_its_declaration_reported() {
     std::fs::write(&path, "# chelis-std\nHand-copied from the monorepo.\n").unwrap();
 
     scaffold::materialize_skills(&root, VER).expect("sync");
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        chelis_conformance::skills::skill_body("chelis-std").unwrap()
-    );
+    let shared = scaffold::skill_managed_span(
+        "chelis-std",
+        chelis_conformance::skills::skill_body("chelis-std").unwrap(),
+        None,
+        VER,
+        &chelis_conformance::links::LocalTargets::for_shell(&[]),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), shared);
     let report = audit::audit(&root);
     let r = row(&report, "vendored-skills");
     assert_eq!(r.verdict, Verdict::Fail);
@@ -718,6 +736,13 @@ fn a_local_chelis_std_copy_is_replaced_and_its_declaration_reported() {
             .contains("chelis-std: [conform] local_skills may not name a shared skill"),
         "{}",
         r.diagnostic
+    );
+    // Sync cannot remove a declaration, so the fix leads with the edit that can.
+    assert!(
+        r.fix
+            .starts_with("remove each `[conform] local_skills` entry that names a shared skill"),
+        "{}",
+        r.fix
     );
 
     let reef = root.join("reef.toml");
@@ -728,4 +753,28 @@ fn a_local_chelis_std_copy_is_replaced_and_its_declaration_reported() {
     )
     .unwrap();
     assert!(audit::audit(&root).ok());
+}
+
+/// A skill the toolchain newly added to the shared set (as `chelis-std` is for
+/// every shell synced before this toolchain) is announced as an addition, not
+/// as a restore of something the shell had: the previous stamp never listed it.
+#[test]
+fn a_newly_shared_skill_is_announced_as_added_not_restored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "newskill");
+    // The shell as an older toolchain left it: no chelis-std, and a stamp
+    // that does not list it.
+    std::fs::remove_dir_all(root.join("agent-skills/chelis-std")).unwrap();
+    let stamp_path = root.join("agent-skills/UPSTREAM.toml");
+    let stamp_text = std::fs::read_to_string(&stamp_path).unwrap();
+    std::fs::write(&stamp_path, stamp_text.replace("  \"chelis-std\",\n", "")).unwrap();
+
+    let notices = scaffold::materialize_skills(&root, VER).expect("sync");
+    let notice = notices
+        .iter()
+        .find(|n| n.starts_with("chelis-std:"))
+        .unwrap_or_else(|| panic!("the addition must be announced: {notices:?}"));
+    assert!(notice.contains("added"), "{notice}");
+    assert!(!notice.contains("re-materialized"), "{notice}");
+    assert!(notice.contains("excluded_skills"), "{notice}");
 }

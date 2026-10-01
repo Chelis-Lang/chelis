@@ -329,6 +329,10 @@ mod tests {
         );
     }
 
+    /// Rewriting already-rewritten text changes nothing for links into the
+    /// chelis tree. This is not claimed for the moved package skill: its shell
+    /// path (`agent-skills/chelis-std/`) is not a chelis path. Sync only ever
+    /// rewrites the raw embedded text, so it never re-reads its own output.
     #[test]
     fn the_transform_is_idempotent() {
         let once = pin(

@@ -5068,11 +5068,14 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
             for notice in notices {
                 eprintln!("note: {notice}");
             }
-            report_partial_writes(
+            let notices = report_partial_writes(
                 chelis_conformance::scaffold::sync_managed_blocks(&root, &version),
                 &written,
                 "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md and the CLAUDE.md symlink",
             )?;
+            for notice in notices {
+                eprintln!("note: {notice}");
+            }
             println!(
                 "synced managed blocks + agent links to chelis {version} at {}",
                 root.display()
@@ -5118,11 +5121,14 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
             for notice in notices {
                 eprintln!("note: {notice}");
             }
-            report_partial_writes(
+            let notices = report_partial_writes(
                 chelis_conformance::scaffold::sync_managed_blocks(&root, &version),
                 &written,
                 "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md and the CLAUDE.md symlink",
             )?;
+            for notice in notices {
+                eprintln!("note: {notice}");
+            }
             println!("restamped managed blocks + agent links to chelis {version}");
 
             // Offline gate, categorized (chelis#655). A failure on a row whose

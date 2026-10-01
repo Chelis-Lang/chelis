@@ -17,9 +17,11 @@ repository `AGENTS.md` plus the shared local skills in `agent-skills/`.
 - Ensure `chelis --help` works. From a checkout: `cargo build -p chelis-cli` and put
   `target/debug` on `PATH`.
 - Use Surf (`.ch`) for human-facing code. Use Deep (`.dp`) for canonical machine output.
-- Read `docs/CHELIS_SURFACE.md` for the complete capability inventory before designing
-  around a suspected language gap. In a shell, `chelis reef conform sync` keeps that
-  file equal to the guide of the pinned release; this skill does not repeat it.
+- Read [`docs/CHELIS_SURFACE.md`](../../docs/CHELIS_SURFACE.md) for the complete
+  capability inventory before designing around a suspected language gap. In a shell,
+  `chelis reef conform sync` keeps that file equal to the guide of the pinned release
+  ([shell contract §3](../../spec/design/shell_repo_contract.md)); this skill does not
+  repeat it.
 - Inspect current CLI commands with `chelis --help` and subcommand help, especially
   `chelis fmt --help`, `chelis check --help`, and `chelis reef --help`.
 - Read `docs/book/src/` first for onboarding. Load numbered specs only for details:

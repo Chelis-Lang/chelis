@@ -31,7 +31,8 @@ or capability request is filed as an issue in the Chelis-Lang repository where
 it originates and cited by number (`chelis#NNN`, `<repo>#NNN`). `conform audit`
 drops the `docs/issue_drafts/` row (rows after it renumber down by one), no
 longer accepts a draft path as a `docs/UPSTREAM_BUGS.md` citation, and fails a
-`docs/UPSTREAM_BUGS.md` that still has a Parked section; move its entries to
-Tracking with their issue numbers. `chelis test --expect blocked` no longer
-accepts a draft path as a sidecar citation. Shells adopt these rules when they
-bump their pin. See [#2831](https://github.com/Chelis-Lang/chelis/issues/2831).
+`docs/UPSTREAM_BUGS.md` that still has a Parked section (in any letter case);
+move its entries to Tracking with their issue numbers. `chelis test --expect
+blocked` no longer accepts a draft path as a sidecar citation. Shells adopt
+these rules when they bump their pin. See
+[#2831](https://github.com/Chelis-Lang/chelis/issues/2831).

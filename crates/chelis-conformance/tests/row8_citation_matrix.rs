@@ -213,22 +213,39 @@ fn filed_issue_number_replaces_the_stand_in() {
 // entries happen to carry numbers; the fix moves them to §Tracking.
 #[test]
 fn a_parked_section_fails_whatever_it_holds() {
-    for (label, parked) in [
-        ("empty", "(none yet)"),
-        ("uncited", "- induction tier for limit theorems, not filed"),
-        ("cited", "- induction tier for limit theorems (chelis#2831)"),
+    for (label, heading, parked) in [
+        ("empty", "## Parked upstream", "(none yet)"),
+        (
+            "uncited",
+            "## Parked upstream",
+            "- induction tier for limit theorems, not filed",
+        ),
+        (
+            "cited",
+            "## Parked upstream",
+            "- induction tier for limit theorems (chelis#2831)",
+        ),
+        (
+            "lowercase",
+            "## parked",
+            "- induction tier for limit theorems, not filed",
+        ),
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let root = stamp(tmp.path(), "parked");
         let body = format!(
             "# Upstream Bugs\n\n## Actively blocking\n\n(none yet)\n\n\
-             ## Tracking\n\n(none yet)\n\n## Parked upstream\n\n{parked}\n\n\
+             ## Tracking\n\n(none yet)\n\n{heading}\n\n{parked}\n\n\
              ## Archived\n\n(none yet)\n"
         );
         let report = audit_with_bugs(&root, &body);
         let r = row_of(&report, "upstream-bugs");
         assert_eq!(r.verdict, Verdict::Fail, "{label}: {}", r.diagnostic);
-        assert!(r.diagnostic.contains("Parked"), "{label}: {}", r.diagnostic);
+        assert!(
+            r.diagnostic.contains("Parked section"),
+            "{label}: {}",
+            r.diagnostic
+        );
         assert!(r.fix.contains("Tracking"), "{label}: {}", r.fix);
         assert!(!report.ok(), "{label}");
     }

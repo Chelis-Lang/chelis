@@ -400,6 +400,23 @@ pub fn materialize_skills(root: &Path, version: &str) -> Result<Vec<String>, Str
     // `agent-skills/` at all is being materialized for the first time, which is
     // not a restoration and gets no notice.
     let skills_dir_existed = root.join("agent-skills").is_dir();
+    // The skills the previous sync materialized, from its stamp. A retained
+    // skill absent from disk but listed there was removed by hand and is
+    // restored; one never listed is new to the shell (a skill this toolchain
+    // added to the shared set) and is announced as an addition instead.
+    let previously_materialized: Vec<String> =
+        fs::read_to_string(root.join("agent-skills/UPSTREAM.toml"))
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+            .and_then(|stamp| {
+                stamp.get("skills")?.as_array().map(|names| {
+                    names
+                        .iter()
+                        .filter_map(|n| n.as_str().map(str::to_string))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
 
     // Validate and render every retained skill before the first write. A stale
     // selector must not leave a partially synchronized skill tree.
@@ -414,15 +431,8 @@ pub fn materialize_skills(root: &Path, version: &str) -> Result<Vec<String>, Str
         let block = existing
             .as_deref()
             .and_then(|content| split_shell_local(content).1.map(str::to_string));
-        let managed = apply_shell_local_exclusions(body, block.as_deref())
+        let managed = skill_managed_span(skill_name, body, block.as_deref(), version, &local)
             .map_err(|why| format!("{skill_name}: {why}"))?;
-        let managed = pin_links(
-            &managed,
-            &skills::source_path(skill_name),
-            &rel,
-            version,
-            &local,
-        );
         planned.push((skill_name, rel, existing, block, managed));
     }
 
@@ -452,9 +462,15 @@ pub fn materialize_skills(root: &Path, version: &str) -> Result<Vec<String>, Str
         // A retained shared skill that was absent is being (re)created. Say so
         // and point to the explicit omission control.
         if existing.is_none() && skills_dir_existed {
-            notices.push(format!(
-                "{skill_name}: re-materialized; add it to [conform] excluded_skills to omit it on sync"
-            ));
+            notices.push(if previously_materialized.iter().any(|s| s == skill_name) {
+                format!(
+                    "{skill_name}: re-materialized; add it to [conform] excluded_skills to omit it on sync"
+                )
+            } else {
+                format!(
+                    "{skill_name}: added, a shared skill this shell did not have before; add it to [conform] excluded_skills to omit it on sync"
+                )
+            });
         }
         let content = match &block {
             Some(b) => format!(
@@ -494,6 +510,28 @@ pub fn materialize_skills(root: &Path, version: &str) -> Result<Vec<String>, Str
     symlink_file(root, "../agent-skills", ".claude/skills")?;
     symlink_file(root, "../agent-skills", ".codex/skills")?;
     Ok(notices)
+}
+
+/// The toolchain-owned span of shared skill `name` in a shell: the embedded
+/// `body` minus the selectors in the shell's trailing shell-local `block`, with
+/// its repo-relative links pinned to `version` (see [`crate::links`]). `sync`
+/// writes this span and `audit` compares against it, so the two cannot apply
+/// different transforms.
+pub fn skill_managed_span(
+    name: &str,
+    body: &str,
+    block: Option<&str>,
+    version: &str,
+    local: &LocalTargets,
+) -> Result<String, String> {
+    let managed = apply_shell_local_exclusions(body, block)?;
+    Ok(pin_links(
+        &managed,
+        &skills::source_path(name),
+        &format!("agent-skills/{name}/SKILL.md"),
+        version,
+        local,
+    ))
 }
 
 /// Remove any content under `agent-skills/` that the pinned embedded set does
@@ -678,8 +716,10 @@ pub fn preflight_failure_message(verb: &str, root: &Path, gaps: &[PreflightGap])
 /// Regenerate every managed block in the shell's documents to `version` (the
 /// document half of `conform sync`), and restore the `CLAUDE.md -> AGENTS.md`
 /// symlink. Only fenced regions are touched, so shell-owned text and exclusion
-/// selectors outside them survive.
-pub fn sync_managed_blocks(root: &Path, version: &str) -> Result<(), String> {
+/// selectors outside them survive. Returns notices for the caller to surface:
+/// a `CLAUDE.md` that was a regular file or a directory is replaced by the
+/// symlink, and its content would otherwise vanish without a word.
+pub fn sync_managed_blocks(root: &Path, version: &str) -> Result<Vec<String>, String> {
     // The materialized skill set decides which inherited links stay local.
     let excluded = match fs::read_to_string(root.join("reef.toml")) {
         Ok(text) => {
@@ -723,7 +763,23 @@ pub fn sync_managed_blocks(root: &Path, version: &str) -> Result<(), String> {
     fs::write(&agents_path, agents_updated)
         .map_err(|e| format!("write {}: {e}", agents_path.display()))?;
     write(root, "docs/CHELIS_SURFACE.md", &surface_updated)?;
-    symlink_file(root, "AGENTS.md", "CLAUDE.md")
+    let mut notices = Vec::new();
+    if let Ok(meta) = fs::symlink_metadata(root.join("CLAUDE.md"))
+        && !meta.file_type().is_symlink()
+    {
+        let kind = if meta.is_dir() {
+            "a directory"
+        } else {
+            "a regular file"
+        };
+        notices.push(format!(
+            "CLAUDE.md: replaced {kind} with the symlink to AGENTS.md (contract §1); recover any \
+             shell-specific text from version control and keep it in AGENTS.md outside the \
+             managed block"
+        ));
+    }
+    symlink_file(root, "AGENTS.md", "CLAUDE.md")?;
+    Ok(notices)
 }
 
 /// `document` with its `block_id` managed block regenerated from the embedded
@@ -736,6 +792,11 @@ fn render_inherited_document(
     anchor: managed_block::Anchor,
 ) -> Result<String, String> {
     let body = inherited_block_body(block_id, document, version, excluded_skills)?;
+    // A document sync creates holds the block alone, byte for byte what
+    // `init` writes; upserting into empty text would add a blank line.
+    if document.is_empty() {
+        return Ok(managed_block::render(block_id, version, &body));
+    }
     Ok(managed_block::upsert(
         document, block_id, version, &body, anchor,
     ))

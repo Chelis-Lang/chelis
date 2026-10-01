@@ -263,17 +263,24 @@ fn sync_replaces_the_legacy_surface_header_in_place() {
 /// each broken state first, so the repair is observable.
 #[test]
 fn sync_restores_the_claude_symlink() {
-    for (name, breakage) in [
-        ("missing", None),
-        ("regular file", Some("copy")),
-        ("misdirected link", Some("link")),
+    // `notice` is the kind of content sync must announce replacing; a link
+    // carries no content of its own and a missing file has none to lose.
+    for (name, breakage, notice) in [
+        ("missing", None, None),
+        ("regular file", Some("copy"), Some("a regular file")),
+        ("directory", Some("dir"), Some("a directory")),
+        ("misdirected link", Some("link"), None),
     ] {
         let (_tmp, root) = green_shell();
         let claude = root.join("CLAUDE.md");
         std::fs::remove_file(&claude).unwrap();
         match breakage {
             Some("copy") => {
-                std::fs::copy(root.join("AGENTS.md"), &claude).unwrap();
+                std::fs::write(&claude, "shell-specific claude notes\n").unwrap();
+            }
+            Some("dir") => {
+                std::fs::create_dir(&claude).unwrap();
+                std::fs::write(claude.join("notes.md"), "kept here\n").unwrap();
             }
             Some(_) => std::os::unix::fs::symlink("README.md", &claude).unwrap(),
             None => {}
@@ -287,7 +294,16 @@ fn sync_restores_the_claude_symlink() {
             r.diagnostic
         );
 
-        scaffold::sync_managed_blocks(&root, VER).expect("sync");
+        let notices = scaffold::sync_managed_blocks(&root, VER).expect("sync");
+        match notice {
+            Some(kind) => assert!(
+                notices
+                    .iter()
+                    .any(|n| n.starts_with("CLAUDE.md: replaced") && n.contains(kind)),
+                "{name}: replacing shell content must be announced: {notices:?}"
+            ),
+            None => assert!(notices.is_empty(), "{name}: {notices:?}"),
+        }
         let meta = std::fs::symlink_metadata(&claude).unwrap();
         assert!(meta.file_type().is_symlink(), "{name}");
         assert_eq!(
@@ -297,6 +313,17 @@ fn sync_restores_the_claude_symlink() {
         );
         assert!(audit::audit(&root).ok(), "{name}");
     }
+}
+
+/// A surface document sync creates is byte for byte the one `init` writes.
+#[test]
+fn a_created_surface_document_matches_the_scaffolded_bytes() {
+    let (_tmp, root) = green_shell();
+    let path = root.join("docs/CHELIS_SURFACE.md");
+    let scaffolded = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    scaffold::sync_managed_blocks(&root, VER).expect("sync");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), scaffolded);
 }
 
 /// The surface document is fully generated, so sync creates it in a shell that

@@ -715,6 +715,6 @@ crates as Cargo path deps and therefore trigger §2's conditional source-crate
 MUST: **hydronnx** (`=0.8.0`; `chelis-ir` + `chelis-types`) and **calcify**
 (`=0.7.21`; `chelis-types`). Both currently resolve `../chelis` to the same
 real monorepo working tree, so neither is yet conformant — adopting
-`[chelis-src]` + `chelis reef src` is their row-18 retrofit. (The earlier
+`[chelis-src]` + `chelis reef src` is their row-17 retrofit. (The earlier
 claim that hydronnx was the only crate-linking shell is superseded by calcify.)
 All other shells are pure-Chelis and never trigger row 17.
