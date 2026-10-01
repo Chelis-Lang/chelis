@@ -335,7 +335,6 @@ in the table above, confirming the bugs are real.
 
 ## References
 
-- Plan: `.claude/plans/build-up-a-plan-mossy-meteor.md` Agent 2 (F + H).
 - Item 5 architecture: `docs/archive/investigations/redundant_linearity_autofix_architecture.md`.
 - Item 2b sibling sweep: `docs/archive/investigations/parser_pipe_bare_keyword_diagnosis.md`
   (the three findings here appear in its "Sibling sweep" table).

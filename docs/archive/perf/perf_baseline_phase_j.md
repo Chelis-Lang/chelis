@@ -63,6 +63,7 @@ stdout/stderr tails + parsed pass/fail counts, and emits a JSON summary. Invocat
 python3 scripts/bench_phase_j.py \
   --binary <post-cache worktree>/target/release/chelis \
   --label post \
+  --coral-dir <coral checkout> \
   --chelis-repo <post-cache worktree> \
   --out /tmp/chelis-bench/post.json
 ```
@@ -266,6 +267,7 @@ Automated harness (one binary at a time, captures everything to JSON):
 python3 scripts/bench_phase_j.py \
   --binary /path/to/target/release/chelis \
   --label post \
+  --coral-dir <coral checkout> \
   --chelis-repo <post-cache worktree> \
   --out /tmp/chelis-bench/post.json
 ```

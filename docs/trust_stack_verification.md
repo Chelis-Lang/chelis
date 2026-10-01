@@ -10,7 +10,7 @@ and where it sits in the Chelis trust stack.
 │  Specification Consumption (chelis-prove)                │
 │  @property → Tier A/B/C dispatch → proof artifact       │
 ├─────────────────────────────────────────────────────────┤
-│  Per-Program Runtime Verification (chelis prove fuzz)   │
+│  Per-Program Runtime Verification (--tier fuzz-only)    │
 │  @property → randomized testing → statistical confidence│
 └─────────────────────────────────────────────────────────┘
 ```
@@ -24,8 +24,8 @@ pipeline does not depend on where they came from.
 properties and dispatches them through three verification tiers:
 
 - **Tier A (Type System):** Structural validation via the existing Chelis type
-  checker. Catches ill-formed properties. Positively discharges dimension-type,
-  effect-row, and linearity properties without runtime cost.
+  checker. Rejects ill-formed properties and passes every other property on to
+  Tier B. Tier A does not positively discharge properties.
 
 - **Tier B (SMT):** Lowers predicates to SMT terms and solves them with cvc5
   (the `smt` feature), with Z3 as an optional second engine (the `z3` feature)
@@ -63,12 +63,7 @@ admit it.
 - **Solver abstraction**: each solver is a discharge engine behind a shared
   interface, so engines can be added or swapped without architectural change.
 
-## Relationship to the Type System
-
-The Chelis type system (dimensions, effects, linearity) provides Tier A's
-positive-discharge capability. Properties that the type system can prove are
-certified at compile time with no runtime cost, which is strictly stronger than
-SMT proof for the cases it handles.
+## Relationship to Compiler Correctness
 
 Compiler correctness is a separate layer: differential testing of the compiler
 against a reference checker and evaluator asks whether the compiler implements

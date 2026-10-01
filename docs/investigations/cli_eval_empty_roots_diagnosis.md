@@ -8,8 +8,6 @@ Cross-references:
 
 - Sweep findings: `docs/archive/investigations/item2_sibling_sweep_findings.md`
   section **G7**, sub-bug 2 (eval-side silent no-output).
-- Orchestrator plan: `.claude/plans/build-up-a-plan-mossy-meteor.md`
-  (workstream context for the G7 CLI dispatch).
 - Pinning test: `crates/chelis-cli/tests/cli.rs`
   `eval_def_only_emits_warning_on_stderr` (commit `5128031`).
 

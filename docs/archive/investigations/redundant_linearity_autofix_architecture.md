@@ -243,8 +243,6 @@ This investigation deliberately does **not**:
 
 ## References
 
-- Plan: `.claude/plans/build-up-a-plan-mossy-meteor.md` §"Item 5 —
-  `redundant-linearity-call` autofix re-enable"
 - Item 1 diagnosis: `docs/archive/investigations/var_rhs_let_fanout_diagnosis.md`
 - Disabled stub: `crates/chelis-lint/src/rules/redundant_linearity_call.rs:80-82`
 - Original autofix: commit `85e4248` (PR #19)
