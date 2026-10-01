@@ -21,6 +21,96 @@ pub struct TypeVar(pub u32);
 /// scheme itself. Instantiation installs it on the fresh inference variable,
 /// ordinary unification propagates it through aliases, and generalization
 /// re-quantifies it on wrappers and higher-order values.
+/// `spec/04-type-system.md` §5.9's explicit dtype set, as a bitmask over the
+/// eight active numeric dtypes of §1.1 in declaration order.
+///
+/// A bitmask rather than a collection so [`TypeVarRestriction`] stays `Copy`,
+/// and so [04-DTYPE-2]'s intersection is a bitwise `and` that cannot
+/// disagree with itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PrimSet(u8);
+
+impl PrimSet {
+    /// The §1.1 declaration order the bits follow, and spec/03 §6.2's
+    /// canonical member order.
+    pub const ORDER: [Prim; 8] = [
+        Prim::F32,
+        Prim::F64,
+        Prim::Bf16,
+        Prim::F16,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+    ];
+
+    /// The empty set. [04-DTYPE-2] makes an empty bound a declaration error,
+    /// so this exists to be rejected, never to be installed.
+    pub const EMPTY: PrimSet = PrimSet(0);
+
+    fn bit(prim: Prim) -> Option<u8> {
+        PrimSet::ORDER
+            .iter()
+            .position(|candidate| *candidate == prim)
+            .map(|index| 1u8 << index)
+    }
+
+    /// Build a set from members, ignoring any dtype §1.1 admits into no
+    /// family. The caller rejects an empty or non-numeric member list.
+    pub fn from_members(members: impl IntoIterator<Item = Prim>) -> PrimSet {
+        let mut bits = 0u8;
+        for prim in members {
+            if let Some(bit) = PrimSet::bit(prim) {
+                bits |= bit;
+            }
+        }
+        PrimSet(bits)
+    }
+
+    /// Whether `prim` is a member.
+    pub fn contains(self, prim: Prim) -> bool {
+        PrimSet::bit(prim).is_some_and(|bit| self.0 & bit != 0)
+    }
+
+    /// Whether the set admits nothing.
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The members, in §1.1 declaration order.
+    pub fn members(self) -> impl Iterator<Item = Prim> {
+        PrimSet::ORDER
+            .into_iter()
+            .filter(move |prim| self.contains(*prim))
+    }
+
+    /// [04-DTYPE-2]'s intersection of two sets.
+    pub fn intersect(self, other: PrimSet) -> PrimSet {
+        PrimSet(self.0 & other.0)
+    }
+
+    /// The set a family admits, so a family can be intersected with a set
+    /// without duplicating §1.1 membership here.
+    pub fn of_family(family: TypeVarRestriction) -> PrimSet {
+        PrimSet::from_members(
+            PrimSet::ORDER
+                .into_iter()
+                .filter(|prim| family.admits(*prim)),
+        )
+    }
+
+    /// The §5.9 spelling, `{d1, d2}` in canonical order.
+    pub fn spelling(self) -> String {
+        format!(
+            "{{{}}}",
+            self.members()
+                .map(|prim| prim.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TypeVarRestriction {
     /// `spec/04-type-system.md` §5.9 `Float`: the variable may instantiate
@@ -40,6 +130,10 @@ pub enum TypeVarRestriction {
     IntValue,
     /// An operation argument is a scalar or tensor with numeric precision.
     NumericValue,
+    /// §5.9's explicit dtype set: the variable may instantiate only at a
+    /// listed member. Unlike a family, this does not widen when §1.1
+    /// activates a dtype.
+    ActiveSet(PrimSet),
 }
 
 impl TypeVarRestriction {
@@ -50,6 +144,18 @@ impl TypeVarRestriction {
             TypeVarRestriction::ActiveFloat | TypeVarRestriction::FloatValue => "Float",
             TypeVarRestriction::ActiveInt | TypeVarRestriction::IntValue => "Int",
             TypeVarRestriction::ActiveNumeric | TypeVarRestriction::NumericValue => "Numeric",
+            // §5.9: a set is not a family and has no family name. Diagnostics
+            // name a bound through `bound_spelling`.
+            TypeVarRestriction::ActiveSet(_) => "",
+        }
+    }
+
+    /// The §5.9 spelling a diagnostic should name: a family name, or the
+    /// set's canonical `{d1, d2}` form.
+    pub fn bound_spelling(self) -> String {
+        match self {
+            TypeVarRestriction::ActiveSet(set) => set.spelling(),
+            family => family.family_name().to_string(),
         }
     }
 
@@ -63,6 +169,7 @@ impl TypeVarRestriction {
             TypeVarRestriction::FloatValue => "float scalars or tensors",
             TypeVarRestriction::IntValue => "signed integer scalars or tensors",
             TypeVarRestriction::NumericValue => "numeric scalars or tensors",
+            TypeVarRestriction::ActiveSet(_) => "the dtypes the bound lists",
         }
     }
 
@@ -78,9 +185,13 @@ impl TypeVarRestriction {
             TypeVarRestriction::ActiveFloat => prim.is_float(),
             TypeVarRestriction::ActiveInt => prim.is_integer(),
             TypeVarRestriction::ActiveNumeric => prim.is_float() || prim.is_integer(),
+            // A set lists its members, so it does not consult §1.1
+            // membership and does not widen when §1.1 does.
+            TypeVarRestriction::ActiveSet(set) => set.contains(prim),
             _ => unreachable!("precision_family returns a primitive dtype family"),
         }
     }
+
 
     pub(crate) fn is_value_constraint(self) -> bool {
         matches!(self, Self::FloatValue | Self::IntValue | Self::NumericValue)
@@ -100,19 +211,45 @@ impl TypeVarRestriction {
             Self::ActiveFloat => Self::FloatValue,
             Self::ActiveInt => Self::IntValue,
             Self::ActiveNumeric => Self::NumericValue,
+            // A set has no value-constraint counterpart: §5.9 bounds a
+            // declaration's binder, not an operation's operand.
+            set @ Self::ActiveSet(_) => set,
             _ => unreachable!("precision_family returns a primitive dtype family"),
         }
     }
 
     /// The family both bounds admit, or `None` when they share no dtype.
     ///
+    /// Whether every dtype this bound admits is also admitted by `wider`.
+    ///
+    /// [04-INF-9] requires a generic body's necessary restriction to follow
+    /// from the declared contract, so a declaration satisfies its body when
+    /// its bound is at least as narrow as the body's requirement. Exact
+    /// equality was sufficient while every bound was one of three families;
+    /// §5.9's set form makes the subset relation the operative one, since
+    /// `{f32, f64}` satisfies a `Float` requirement without equalling it.
+    pub fn is_at_least_as_narrow_as(self, wider: TypeVarRestriction) -> bool {
+        let mine = PrimSet::of_family(self.precision_family());
+        let theirs = PrimSet::of_family(wider.precision_family());
+        !mine.is_empty() && mine.intersect(theirs) == mine
+    }
+
     /// [04-DTYPE-2]: unifying two bounded variables yields the intersection
-    /// of their families. `Numeric` is the join of the other two, so every
-    /// non-empty intersection is itself one of the three families and the
-    /// only empty case is `Float` against `Int`.
+    /// of the dtypes their bounds admit. Between families, `Numeric` is the
+    /// join of the other two, so every non-empty intersection is itself one
+    /// of the three families and the only empty case is `Float` against
+    /// `Int`. With §5.9's explicit set on either side the result is a set,
+    /// since an intersection that no longer denotes a family is a set.
     pub fn intersect(self, other: TypeVarRestriction) -> Option<TypeVarRestriction> {
-        use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
-        let family = match (self.precision_family(), other.precision_family()) {
+        use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric, ActiveSet};
+        let (lhs, rhs) = (self.precision_family(), other.precision_family());
+        if matches!(lhs, ActiveSet(_)) || matches!(rhs, ActiveSet(_)) {
+            let members = PrimSet::of_family(lhs).intersect(PrimSet::of_family(rhs));
+            // A set has no value-constraint counterpart, so `for_value` is
+            // not applied here: §5.9 bounds a declaration's binder.
+            return (!members.is_empty()).then_some(ActiveSet(members));
+        }
+        let family = match (lhs, rhs) {
             (ActiveFloat, ActiveFloat) => Some(ActiveFloat),
             (ActiveInt, ActiveInt) => Some(ActiveInt),
             (ActiveNumeric, ActiveNumeric) => Some(ActiveNumeric),

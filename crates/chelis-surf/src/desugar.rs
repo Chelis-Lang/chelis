@@ -175,13 +175,13 @@ struct DesugarCtx {
     next_destructure_temp: std::cell::Cell<usize>,
     /// Each declaration's inline or standalone-signature binders. `None`
     /// marks a declared but unbounded binder, which cannot adopt a literal.
-    declared_type_binders: UnordMap<String, UnordMap<String, Option<DtypeFamily>>>,
+    declared_type_binders: UnordMap<String, UnordMap<String, Option<chelis_deep::DtypeBound>>>,
     /// Binder scope installed while one declaration body is desugared.
-    current_type_binders: std::cell::RefCell<UnordMap<String, Option<DtypeFamily>>>,
+    current_type_binders: std::cell::RefCell<UnordMap<String, Option<chelis_deep::DtypeBound>>>,
 }
 
 impl DesugarCtx {
-    fn current_type_binder(&self, name: &str) -> Option<Option<DtypeFamily>> {
+    fn current_type_binder(&self, name: &str) -> Option<Option<chelis_deep::DtypeBound>> {
         // spec/02 §P4b: a quantifier list overrides the lexical
         // type-variable case split, not active primitive or rejected dtype
         // spellings. Keep that category decision at the body lookup as well
@@ -190,7 +190,7 @@ impl DesugarCtx {
         if canonical_primitive_name(name).is_some() || is_reserved_dtype_name(name) {
             return None;
         }
-        self.current_type_binders.borrow().get(name).copied()
+        self.current_type_binders.borrow().get(name).cloned()
     }
 
     fn desugar_body_annotation_type(&self, ty: &TypeExpr) -> deep::Expr {
@@ -1267,9 +1267,9 @@ fn internal_node(tag: &str, children: Vec<deep::Expr>) -> deep::Expr {
 /// (`spec/03-deep-syntax.md` §1.1). A list with no bound leaves the node
 /// untouched, so canonical Deep for an unbounded declaration is unchanged.
 fn with_dtype_bounds(expr: deep::Expr, binders: &[TypeBinder]) -> deep::Expr {
-    let bounds: Vec<(String, DtypeFamily)> = binders
+    let bounds: Vec<(String, chelis_deep::DtypeBound)> = binders
         .iter()
-        .filter_map(|binder| binder.bound.map(|family| (binder.name.clone(), family)))
+        .filter_map(|binder| binder.bound.clone().map(|bound| (binder.name.clone(), bound)))
         .collect();
     if bounds.is_empty() {
         return expr;
@@ -1735,7 +1735,7 @@ fn for_each_decl(decl: &Decl, visit: &mut impl FnMut(&Decl)) {
 /// Merge inline and standalone-signature binders by declaration name.
 fn collect_declared_type_binders(
     decl: &Decl,
-    out: &mut UnordMap<String, UnordMap<String, Option<DtypeFamily>>>,
+    out: &mut UnordMap<String, UnordMap<String, Option<chelis_deep::DtypeBound>>>,
 ) {
     let (name, type_binders) = match decl {
         Decl::FunDef {
@@ -1753,7 +1753,7 @@ fn collect_declared_type_binders(
     for binder in type_binders {
         let slot = entry.entry(binder.name.clone()).or_insert(None);
         if slot.is_none() {
-            *slot = binder.bound;
+            *slot = binder.bound.clone();
         }
     }
     if entry.is_empty() {
@@ -2675,6 +2675,10 @@ impl DesugarCtx {
                 // make the truncating cast a type error on its own
                 // argument.
                 let binder = self.current_type_binder(prec);
+                // `binder` is consulted again below for the unbounded case, so
+                // the bound is cloned out rather than moved.
+                let binder_is_unbounded = matches!(binder, Some(None));
+                let binder_is_declared = binder.is_some();
                 let binder_bound = binder.flatten();
                 let inner = match e.as_ref() {
                     _ if *mode == CastMode::Trunc => {
@@ -2690,7 +2694,7 @@ impl DesugarCtx {
                         // it proves the narrow literal-source rejection for an
                         // unbounded binder. Ordinary suffixed casts keep their
                         // authored unary-minus application shape.
-                        let needs_signed_literal = unsuffixed || matches!(binder, Some(None));
+                        let needs_signed_literal = unsuffixed || binder_is_unbounded;
                         let ordinary = needs_signed_literal
                             .then(|| canonical_signed_cast_literal(other))
                             .flatten()
@@ -2720,7 +2724,7 @@ impl DesugarCtx {
                 };
                 // Every declared binder is a `t-var`; only a bound permits
                 // literal adoption. The checker rejects unbounded targets.
-                let target = if binder.is_some() {
+                let target = if binder_is_declared {
                     node(DeepTag::TVar, vec![sym(prec)])
                 } else {
                     // A name that is not a primitive is passed through, so
@@ -3106,13 +3110,13 @@ fn is_unsuffixed_surf_numeric_literal(expr: &Expr) -> bool {
 /// adopt and remain checker-rejected cast targets under [04-DTYPE-2].
 fn scalar_literal_source_adopts_binder_target(
     source: LiteralSource<'_>,
-    bound: Option<DtypeFamily>,
+    bound: Option<chelis_deep::DtypeBound>,
     unsuffixed: bool,
 ) -> bool {
     unsuffixed
-        && bound.is_some_and(|family| {
+        && bound.is_some_and(|bound| {
             matches!(
-                source.family_fit(family),
+                source.bound_fit(&bound),
                 LiteralFamilyFit::Fits | LiteralFamilyFit::IntegerOutOfRange
             )
         })

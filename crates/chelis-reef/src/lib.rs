@@ -10031,6 +10031,9 @@ fn canonical_shell_scheme(
             TypeVarRestriction::FloatValue => TypeVariableDomain::FloatValue,
             TypeVarRestriction::IntValue => TypeVariableDomain::IntValue,
             TypeVarRestriction::NumericValue => TypeVariableDomain::NumericValue,
+            TypeVarRestriction::ActiveSet(set) => TypeVariableDomain::ActiveSet(
+                set.members().map(|prim| prim.name().to_string()).collect(),
+            ),
         };
         restrictions.push((
             canonical.0,

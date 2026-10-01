@@ -3124,9 +3124,9 @@ fn merge_tvar_restrictions(
     existing.intersect(incoming).ok_or_else(|| TypeError {
         kind: TypeErrorKind::DtypeFamilyMismatch,
         message: format!(
-            "dtype families `{}` and `{}` share no active dtype, so the type variables they bound cannot be the same type",
-            existing.family_name(),
-            incoming.family_name()
+            "dtype bounds `{}` and `{}` share no active dtype, so the type variables they bound cannot be the same type",
+            existing.bound_spelling(),
+            incoming.bound_spelling()
         ),
     })
 }
@@ -3691,7 +3691,7 @@ fn ensure_tvar_restriction(
     ty: &Type,
     subst: &Subst,
 ) -> Result<(), TypeError> {
-    let family = restriction.family_name();
+    let family = restriction.bound_spelling();
     let gloss = restriction.membership_gloss();
     match ty {
         Type::Ref(inner) if restriction.is_value_constraint() => {
@@ -3718,14 +3718,14 @@ fn ensure_tvar_restriction(
         Type::Prim(prim) => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,
             message: format!(
-                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{}`",
+                "type variable bounded by `{family}` ({gloss}) cannot be instantiated at `{}`",
                 prim.name()
             ),
         }),
         other => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,
             message: format!(
-                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{other}`"
+                "type variable bounded by `{family}` ({gloss}) cannot be instantiated at `{other}`"
             ),
         }),
     }

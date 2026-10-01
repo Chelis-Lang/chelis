@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::lexer::{self, LexError};
 use crate::token::{Token, TokenKind};
-use chelis_deep::{DtypeFamily, Span};
+use chelis_deep::{BoundDtype, DtypeBound, DtypeFamily, Span};
 use chelis_unord::UnordSet;
 use thiserror::Error;
 
@@ -997,27 +997,84 @@ impl Parser {
         Ok(binders)
     }
 
-    /// One binder: `name`, or `name: Family` for a dtype-family bound.
+    /// One binder: `name`, `name: Family`, or `name: {d1, d2}` for
+    /// `spec/02-surf-syntax.md` §P4c's two dtype-bound forms.
     ///
-    /// The bound position admits only the three closed family names, so an
-    /// ADT name written there is a parse error rather than a silently
-    /// accepted bound.
+    /// The bound position admits only the three closed family names and a
+    /// braced set of active dtype spellings, so an ADT name written there is
+    /// a parse error rather than a silently accepted bound. A bare dtype
+    /// without braces stays a parse error: §P4c makes a one-member bound
+    /// `{f64}`, not a type ascription.
     fn parse_type_binder(&mut self) -> Result<TypeBinder, ParseError> {
         let (name, _) = self.expect_ident_or_type_ident()?;
         if *self.peek() != TokenKind::Colon {
             return Ok(TypeBinder::unbounded(name));
         }
         self.advance();
+        if *self.peek() == TokenKind::LBrace {
+            return self.parse_dtype_set_bound(name);
+        }
         let offset = self.current_offset();
         let (family, _) = self.expect_ident_or_type_ident()?;
         match DtypeFamily::from_surf_name(&family) {
-            Some(family) => Ok(TypeBinder::bounded(name, family)),
+            Some(family) => Ok(TypeBinder::bounded(name, DtypeBound::Family(family))),
             None => Err(ParseError::Expected {
-                expected: "a dtype family `Float`, `Int`, or `Numeric`".into(),
+                expected: "a dtype family `Float`, `Int`, or `Numeric`, or a dtype set `{...}`"
+                    .into(),
                 found: family,
                 offset,
             }),
         }
+    }
+
+    /// §P4c's explicit dtype set: `{d1, d2}`, non-empty, no repeats, members
+    /// drawn from `spec/04-type-system.md` §1.1's active dtypes.
+    fn parse_dtype_set_bound(&mut self, name: String) -> Result<TypeBinder, ParseError> {
+        let open = self.current_offset();
+        self.advance();
+        let mut members = std::collections::BTreeSet::new();
+        loop {
+            if *self.peek() == TokenKind::RBrace {
+                break;
+            }
+            let offset = self.current_offset();
+            let (spelling, _) = self.expect_ident_or_type_ident()?;
+            let Some(member) = BoundDtype::from_name(&spelling) else {
+                return Err(ParseError::Expected {
+                    expected: "an active dtype spelling in a dtype set".into(),
+                    found: spelling,
+                    offset,
+                });
+            };
+            if !members.insert(member) {
+                return Err(ParseError::Expected {
+                    expected: "a dtype set without a repeated member".into(),
+                    found: spelling,
+                    offset,
+                });
+            }
+            if *self.peek() == TokenKind::Comma {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        if *self.peek() != TokenKind::RBrace {
+            return Err(ParseError::Expected {
+                expected: "`}` closing a dtype set".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            });
+        }
+        self.advance();
+        if members.is_empty() {
+            return Err(ParseError::Expected {
+                expected: "a non-empty dtype set".into(),
+                found: "{}".into(),
+                offset: open,
+            });
+        }
+        Ok(TypeBinder::bounded(name, DtypeBound::Set(members)))
     }
 
     // ---------------------------------------------------------------------------

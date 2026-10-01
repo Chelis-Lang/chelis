@@ -327,9 +327,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .dtype_bounds
                 .get(&name)
                 .expect("the unused name came from this map")
-                .family_name();
+                .bound_spelling();
             return Err(self.type_error(format!(
-                "binder `{name}` is bounded by dtype family `{family}` but does not occur in {}",
+                "binder `{name}` is bounded by `{family}` but does not occur in {}",
                 self.use_site.label()
             )));
         }
@@ -842,9 +842,12 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         let family = self
             .dtype_bounds
             .get(name)
-            .map_or("a dtype family", |restriction| restriction.family_name());
+            .map_or_else(
+                || "a dtype bound".to_string(),
+                |restriction| restriction.bound_spelling(),
+            );
         self.type_error(format!(
-            "binder `{name}` is bounded by dtype family `{family}` and cannot be used as {position} in {}",
+            "binder `{name}` is bounded by `{family}` and cannot be used as {position} in {}",
             self.use_site.label()
         ))
     }

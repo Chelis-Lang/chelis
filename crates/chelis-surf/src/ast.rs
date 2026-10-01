@@ -1,4 +1,4 @@
-use chelis_deep::{DtypeFamily, Span};
+use chelis_deep::{DtypeBound, DtypeFamily, Span};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// One entry of a declaration's bracketed binder list
@@ -13,7 +13,7 @@ pub struct TypeBinder {
     /// The declared binder name.
     pub name: String,
     /// The declared dtype family, when the binder carries a bound.
-    pub bound: Option<DtypeFamily>,
+    pub bound: Option<DtypeBound>,
 }
 
 impl TypeBinder {
@@ -26,18 +26,24 @@ impl TypeBinder {
         }
     }
 
-    /// A binder bounded by `family`.
-    pub fn bounded(name: impl Into<String>, family: DtypeFamily) -> TypeBinder {
+    /// A binder carrying either `spec/02-surf-syntax.md` §P4c bound form.
+    pub fn bounded(name: impl Into<String>, bound: DtypeBound) -> TypeBinder {
         TypeBinder {
             name: name.into(),
-            bound: Some(family),
+            bound: Some(bound),
         }
     }
 
-    /// The canonical Surf spelling: `name` or `name: Family`.
+    /// A binder bounded by a dtype family.
+    pub fn bounded_by_family(name: impl Into<String>, family: DtypeFamily) -> TypeBinder {
+        TypeBinder::bounded(name, DtypeBound::Family(family))
+    }
+
+    /// The canonical Surf spelling: `name`, `name: Family`, or
+    /// `name: {d1, d2}` with members in §1.1 declaration order (§P4c).
     pub fn render(&self) -> String {
-        match self.bound {
-            Some(family) => format!("{}: {}", self.name, family.surf_name()),
+        match &self.bound {
+            Some(bound) => format!("{}: {}", self.name, bound.surf_spelling()),
             None => self.name.clone(),
         }
     }

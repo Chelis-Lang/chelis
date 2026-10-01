@@ -9,7 +9,10 @@ pub const SHELL_MAGIC: &[u8; 8] = b"CHELCHB\0";
 // adds checked collection-operation relations. Positional bincode cannot read
 // either change as an absent field without changing the programs an export
 // admits, so both require exact version rejection.
-pub const SHELL_FORMAT_VERSION: u32 = 5;
+/// Bumped to 6 for chelis#2443: [`TypeVariableDomain`] gained an
+/// `ActiveSet` variant, so a shell published by this compiler can carry a
+/// domain a version-5 reader cannot decode.
+pub const SHELL_FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPackage {
@@ -151,7 +154,10 @@ pub struct TypeVariableRestriction {
 /// The §5.9 primitive dtype bounds and §3.1 inferred operation-value
 /// restrictions from `spec/04-type-system.md`, kept distinct in published
 /// metadata. A new semantic domain requires a spec and shell format change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+// Not `Copy`: §5.9's set form publishes its member spellings, so the domain
+// carries a `Vec`. A published format names its dtypes rather than encoding
+// them as bits, which a shell consumer would have to decode.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TypeVariableDomain {
     /// §5.9 `Float`.
@@ -166,6 +172,10 @@ pub enum TypeVariableDomain {
     IntValue,
     /// An inferred operation operand is a numeric scalar or tensor.
     NumericValue,
+    /// §5.9's explicit dtype set, as the member spellings it admits in §1.1
+    /// declaration order. Unlike a family, this does not widen when §1.1
+    /// activates a dtype, so the members are published rather than a name.
+    ActiveSet(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

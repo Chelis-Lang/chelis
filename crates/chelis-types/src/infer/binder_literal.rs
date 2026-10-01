@@ -42,19 +42,19 @@ pub(super) fn validate_binder_literal_adoption_in_program(
                 format!(
                     "cast target `{binder}` in `{name}` does not name an active primitive dtype: \
                      [04-DTYPE-1] permits a type binder here only when its declaration has a \
-                     Float, Int, or Numeric bound"
+                     Float, Int, Numeric, or explicit dtype-set bound"
                 ),
                 vec![format!(
-                    "declare `{binder}` with a dtype-family bound before using it as a cast target"
+                    "declare `{binder}` with a dtype bound before using it as a cast target"
                 )],
             )),
             BinderLiteralUse::Literal { binder, source, adopting_binder }
                 if sig.is_some_and(|sig| sig.binders.contains(binder)) => {
-                    let family = bounds.and_then(|bounds| bounds.get(binder)).copied();
+                    let bound = bounds.and_then(|bounds| bounds.get(binder));
                     if adopting_binder == Some(binder)
-                        && let (Some(source), Some(family)) = (source, family)
+                        && let (Some(source), Some(bound)) = (source, bound)
                         && source.has_exact_unsuffixed_style()
-                        && source.family_fit(family) == LiteralFamilyFit::IntegerOutOfRange
+                        && source.bound_fit(bound) == LiteralFamilyFit::IntegerOutOfRange
                     {
                         let value = match source.numeric_atom() {
                             Some(Atom::Int(value)) => *value,
@@ -67,8 +67,8 @@ pub(super) fn validate_binder_literal_adoption_in_program(
                                  spec/04-type-system.md §5.6 applies the adopted literal's \
                                  range checks at `{binder}`, and [04-INF-6] makes `{binder}` \
                                  denote every admissible instantiation, so the literal must \
-                                 fit every member of the family, including i8 [-128, 127]",
-                                family.surf_name()
+                                 fit every integer member of the bound",
+                                bound_spelling(bound)
                             ),
                             vec![
                                 "use an in-range literal or narrow the declaration's dtype domain"
@@ -76,11 +76,11 @@ pub(super) fn validate_binder_literal_adoption_in_program(
                             ],
                         ));
                     } else if adopting_binder == Some(binder)
-                        && let (Some(source), Some(family)) = (source, family)
-                        && source.admitted_by(family)
+                        && let (Some(source), Some(bound)) = (source, bound)
+                        && source.admitted_by_bound(bound)
                         && let Some(atom) = source.numeric_atom()
                         && let Some(member) = super::literal_width::non_finite_float_member(
-                            super::declared_type::restriction_for_family(family),
+                            super::declared_type::restriction_for_bound(bound),
                             atom,
                         )
                     {
@@ -95,28 +95,28 @@ pub(super) fn validate_binder_literal_adoption_in_program(
                                  instantiation, and at {} the literal rounds to infinity, \
                                  which no literal denotes (spec/04-type-system.md [04-LIT-2], \
                                  section 5.6)",
-                                family.surf_name(),
+                                bound_spelling(bound),
                                 member.name(),
                             ),
                             vec![format!(
-                                "use a value finite at every member of the family, narrow the \
+                                "use a value finite at every member of the bound, narrow the \
                                  declaration's dtype domain, or cast a finite `f64` value \
                                  (`cast({literal}f64, {binder})`) if an infinity is intended"
                             )],
                         ));
                     } else if !source.is_some_and(|source| {
                         adopting_binder == Some(binder)
-                            && family.is_some_and(|family| source.admitted_by(family))
+                            && bound.is_some_and(|bound| source.admitted_by_bound(bound))
                     }) {
                         errors.push(CheckError::new(
                             CheckErrorKind::TypeMismatch,
                             format!(
                                 "literal in `{name}` cannot bind directly to rigid type variable `{binder}`: \
                                  [04-INF-6] permits this only as the direct operand of \
-                                 `cast(literal, {binder})` with a compatible dtype-family bound"
+                                 `cast(literal, {binder})` with a compatible dtype bound"
                             ),
                             vec![format!(
-                                "write `cast(<literal>, {binder})` under a dtype-family bound, or let the literal keep its §5.3 default"
+                                "write `cast(<literal>, {binder})` under a dtype bound, or let the literal keep its §5.3 default"
                             )],
                         ));
                     }
@@ -125,4 +125,10 @@ pub(super) fn validate_binder_literal_adoption_in_program(
         }
         });
     }
+}
+
+/// The `spec/04-type-system.md` §5.9 spelling a diagnostic names: a family
+/// name, or an explicit set's canonical `{d1, d2}` form.
+fn bound_spelling(bound: &chelis_deep::DtypeBound) -> String {
+    bound.surf_spelling()
 }

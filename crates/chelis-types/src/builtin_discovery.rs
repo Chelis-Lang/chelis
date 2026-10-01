@@ -102,7 +102,10 @@ impl BuiltinDecl {
                     Some(
                         TypeVarRestriction::ActiveFloat
                         | TypeVarRestriction::ActiveInt
-                        | TypeVarRestriction::ActiveNumeric,
+                        | TypeVarRestriction::ActiveNumeric
+                        // §5.9's set form bounds the same scalar binder a
+                        // family does, so it answers this question the same.
+                        | TypeVarRestriction::ActiveSet(_),
                     ) => true,
                     None
                     | Some(

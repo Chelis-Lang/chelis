@@ -4203,10 +4203,10 @@ fn resugar_dtype_bound_binders(
             bound: bounds
                 .iter()
                 .find(|(binder, _)| binder == name)
-                .map(|(_, family)| *family),
+                .map(|(_, bound)| bound.clone()),
         })
         .collect();
-    for (binder, _family) in bounds {
+    for (binder, _bound) in bounds {
         if !binders.iter().any(|existing| existing.name == binder) {
             return Err(ResugarError::InvalidSurfaceMetadata {
                 key: "dtype_bounds".to_string(),
@@ -4219,7 +4219,7 @@ fn resugar_dtype_bound_binders(
 
 fn decode_resugar_dtype_bounds(
     meta: &Metadata,
-) -> Result<Vec<(String, DtypeFamily)>, ResugarError> {
+) -> Result<Vec<(String, chelis_deep::DtypeBound)>, ResugarError> {
     Ok(decode_dtype_bounds(meta))
 }
 
@@ -4229,7 +4229,7 @@ fn decode_resugar_dtype_bounds(
 fn validate_binder_literal_adoption(
     expr: &DeepExpr,
     declared_binders: &[String],
-    dtype_bounds: &[(String, DtypeFamily)],
+    dtype_bounds: &[(String, chelis_deep::DtypeBound)],
 ) -> Result<(), ResugarError> {
     let mut invalid = None;
     chelis_deep::visit_binder_literal_uses(expr, &mut |usage| {
@@ -4248,8 +4248,8 @@ fn validate_binder_literal_adoption(
                 || !source.is_some_and(|source| {
                     dtype_bounds
                         .iter()
-                        .find_map(|(name, family)| (name == binder).then_some(*family))
-                        .is_some_and(|family| source.admitted_by(family))
+                        .find_map(|(name, bound)| (name == binder).then_some(bound))
+                        .is_some_and(|bound| source.admitted_by_bound(bound))
                 }) =>
             {
                 binder

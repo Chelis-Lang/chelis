@@ -164,8 +164,8 @@ fn instantiation_at_a_set_member_is_accepted() {
     assert_clean(
         "module Probe\n\
          def widen[p: {f32, f64}](x: p) -> p = x\n\
-         def use_f32(v: f32) -> f32 = widen(v)\n\
-         def use_f64(v: f64) -> f64 = widen(v)\n",
+         def single(v: f32) -> f32 = widen(v)\n\
+         def double(v: f64) -> f64 = widen(v)\n",
         "instantiation at each member of `{f32, f64}`",
     );
 }
@@ -196,12 +196,30 @@ fn instantiation_at_a_non_numeric_is_a_precision_mismatch() {
 //    set with set. An empty intersection names both bounds.
 
 #[test]
-fn a_set_intersected_with_a_family_it_sits_inside_stays_usable() {
-    assert_clean(
+fn a_float_declaration_cannot_call_a_narrower_set_callee() {
+    // [04-INF-9]: the body requires `{f32, f64}` while the signature promises
+    // every `Float`, including f16, so the declaration is too WIDE for its
+    // body. The intersection is `{f32, f64}`; the violation is that the
+    // declared bound is not at least as narrow as what the body needs.
+    assert_rejected(
         "module Probe\n\
          def narrow[p: {f32, f64}](x: p) -> p = x\n\
          def wide[p: Float](x: p) -> p = narrow(x)\n",
-        "`Float` intersected with `{f32, f64}` yields `{f32, f64}`",
+        &["`p`", "{f32, f64}"],
+        "a `Float` declaration whose body requires `{f32, f64}`",
+    );
+}
+
+#[test]
+fn a_set_declaration_may_call_a_wider_family_callee() {
+    // The sound direction: a `{f32, f64}` declaration satisfies a `Float`
+    // body requirement without equalling it, which is why [04-INF-9] is a
+    // subset relation rather than equality.
+    assert_clean(
+        "module Probe\n\
+         def anyfloat[p: Float](x: p) -> p = x\n\
+         def narrow[p: {f32, f64}](x: p) -> p = anyfloat(x)\n",
+        "a `{f32, f64}` declaration calling a `Float` callee",
     );
 }
 
@@ -244,7 +262,7 @@ fn an_empty_set_is_a_declaration_error() {
     assert_rejected(
         "module Probe\n\
          def widen[p: {}](x: p) -> p = x\n",
-        &["`p`", "empty"],
+        &["non-empty dtype set"],
         "an empty dtype set",
     );
 }
