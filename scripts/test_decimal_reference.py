@@ -240,11 +240,17 @@ class Grammar(unittest.TestCase):
         self.assertIsNone(ref.try_decimal(over))
         self.assertEqual(failure(lambda: d("0e" + "0" * 999)).detail, "number text has 1001 characters, more than 1000")
 
-    def test_long_malformed_text_reads_as_malformed(self) -> None:
-        # Literal reading: text that is not a token fails as "other text"; the
-        # length message is for a well-formed token longer than the bound.
-        text = "1." + "0" * 998 + "x"
-        self.assertEqual(failure(lambda: d(text)).detail, f'malformed number text "{text[:40]}..."')
+    def test_the_length_bound_is_checked_before_the_grammar(self) -> None:
+        for text in ("1." + "0" * 998 + "x", "-" * 1001, " " * 5000, "x" * 1001, '"' * 1001, "1\n" * 501):
+            with self.subTest(length=len(text)):
+                error = failure(lambda: d(text))
+                self.assertEqual(error.message, f"decimal: domain: number text has {len(text)} characters, more than 1000")
+                self.assertEqual(error.reason, "too_long")
+                self.assertIsNone(ref.try_decimal(text))
+        # Scalar values, not bytes: 1000 two-byte characters are within the bound and malformed.
+        self.assertEqual(failure(lambda: d("\u0661" * 1000)).reason, "malformed")
+        self.assertEqual(failure(lambda: d("\u0661" * 1001)).reason, "too_long")
+        self.assertEqual(failure(lambda: d("x" * 1000)).reason, "malformed")
 
     def test_huge_exponents_are_decided_without_materialising_them(self) -> None:
         started = time.monotonic()

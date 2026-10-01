@@ -220,12 +220,16 @@ def malformed(function: str, text: str) -> DecimalError:
 
 
 def decimal(text: str, function: str = "decimal") -> Decimal:
-    """`decimal(text)`: one RFC 8259 number token of at most 1000 scalar values."""
+    """`decimal(text)`: one RFC 8259 number token of at most 1000 scalar values.
+
+    The length bound is the cost guard, so it is checked first, for every text,
+    before the grammar.
+    """
+    if len(text) > TEXT_LIMIT:
+        raise domain(function, "too_long", f"number text has {len(text)} characters, more than {TEXT_LIMIT}")
     match = TOKEN.fullmatch(text)
     if match is None:
         raise malformed(function, text)
-    if len(text) > TEXT_LIMIT:
-        raise domain(function, "too_long", f"number text has {len(text)} characters, more than {TEXT_LIMIT}")
     sign, whole, fraction, exponent_text = match.groups()
     fraction = fraction or ""
     digits = (whole + fraction).lstrip("0")
