@@ -3038,7 +3038,9 @@ exact ADT identity by [05-OP-34].
 > `datetime::*` identities of the [05-OP-34] and [05-OP-35] registries: the
 > opaque value types `Date`, `Time`, `DateTime`, `Instant`, `Offset`,
 > `OffsetDateTime`, `Duration`, `Period`, `Dates[n]`, and `Instants[n]`, and
-> the callables over them. Its plain enums are `Weekday` (`Monday` through
+> the callables over them, together with the module's one callable that
+> reaches no numeric value and so has no registry row, `weekday_name`. Its
+> plain enums are `Weekday` (`Monday` through
 > `Sunday`), `DayOverflow` (`ClampToMonthEnd`, `RejectInvalidDay`), and
 > `TimeUnit` (`Hours`, `Minutes`, `Seconds`, `Milliseconds`, `Microseconds`,
 > `Nanoseconds`); every enum constructor is a valid value. A callable that drops
@@ -3068,17 +3070,25 @@ exact ADT identity by [05-OP-34].
 > `tensor[n,i64]` columns of in-range unix seconds and nanoseconds; columns
 > have no missing-value sentinel.
 >
-> Every callable is pure and total on its stated domain. A failure is
-> [05-OP-60]'s `fail` with the message `<function>: <kind>: <detail>`, where
-> `<function>` is the exported callable's name and `<detail>` names the
-> offending value. `<kind>` is `domain` for an argument, count, or text that
+> Every callable is pure and total on its stated domain. A failing call
+> reports through [05-OP-60]'s failure channel with the message
+> `<function>: <kind>: <detail>`, where `<function>` is the exported callable's
+> name and `<detail>` names the offending value. `<kind>` is `domain` for an argument, count, or text that
 > denotes no value of its type (an invalid field; a year, epoch day, offset,
 > instant, duration, or period outside its range; text outside the profile
 > below) and for a `Reject` policy that fires. It is `overflow` only when a
 > result computed by adding, subtracting, negating, or multiplying these
 > values, including reading a civil value at an offset, leaves its type, and
-> when a count conversion's integer leaves i64. When a call could fail both
-> ways, the range check runs first. Every range and validity check precedes the
+> when a count conversion's integer leaves i64. Checks run in the order the
+> defining computation produces the quantity each one checks, so a call that
+> could fail both ways reports the earlier check: `date_add_months` checks the
+> target year-month's range and then the day under its policy;
+> `date_add_period` and `datetime_add_period` do so for the month step and then
+> check the day step's range; `duration_to_count` applies its rounding policy
+> and then checks representability; `instant_round_to` checks the increment,
+> then its rounding policy, then the result's range; and the Easter computuses
+> check the year before the result's range. Every range and validity check
+> precedes the
 > arithmetic it protects, so no [04-NUM-9] trap of a primitive escapes a call
 > for any i64 arguments. A `try_` callable takes its twin's arguments, returns
 > `Some` of the twin's result, returns `None` exactly where the twin fails

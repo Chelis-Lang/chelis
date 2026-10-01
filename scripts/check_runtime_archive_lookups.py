@@ -1147,6 +1147,17 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "scripts/datetime_differential.py",
+        "archive-name",
+        lines=(
+            '"out/libchelis_runtime.a", *self.toolchain.link_flags, "-o", "out/case"], app)',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build --output out` staged in the case's output directory, by its exact path"
+        ),
+    ),
+    Row(
         "scripts/installed_artifact_canary.py",
         "archive-name",
         lines=(

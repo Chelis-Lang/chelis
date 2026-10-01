@@ -18,9 +18,10 @@ use common::{make_app, write_file};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const IMPORTS: &str = "import Std.Datetime (Weekday, Monday, Sunday, ClampToMonthEnd, RejectInvalidDay, Hours, Minutes, Seconds, Milliseconds, Microseconds, Nanoseconds, Date, Duration, Period, is_leap_year, days_in_year, days_in_month, weekday_from_iso_number, date, date_from_epoch_day, date_iso_week, date_day_of_year, date_from_iso_week, date_add_days, date_add_months, try_date_add_months, date_add_period, try_date_add_period, date_period_until, parse_date, nth_weekday_in_month, last_weekday_in_month, weekday_on_or_after, weekday_on_or_before, easter_sunday_gregorian, easter_sunday_orthodox, time, time_from_nanosecond_of_day, time_add_duration, datetime, datetime_add_duration, datetime_add_period, datetime_until, parse_time, parse_datetime, offset_from_seconds, parse_offset, instant_from_unix, instant_from_unix_count, instant_to_unix_count, instant_add_duration, instant_until, instant_round_to, instant_to_datetime_at, datetime_to_instant_at, parse_instant, parse_offset_datetime, duration, duration_from_count, duration_to_count, duration_to_seconds_f64, duration_add, duration_sub, duration_negate, duration_mul, parse_duration, try_parse_duration, period, period_negate, period_mul, parse_period, try_parse_period, dates_from_epoch_days, instants_from_unix)\nimport Std.Rounding (RoundTowardNegative, RoundTowardPositive, RoundTowardZero, RoundAwayFromZero, RoundTiesToEven, RoundTiesToAway, RejectInexact)";
+const IMPORTS: &str = "import Std.Datetime (Weekday, Monday, Sunday, ClampToMonthEnd, RejectInvalidDay, Hours, Minutes, Seconds, Milliseconds, Microseconds, Nanoseconds, Date, Duration, Period, is_leap_year, days_in_year, days_in_month, weekday_from_iso_number, date, date_from_epoch_day, date_iso_week, date_day_of_year, date_from_iso_week, date_add_days, date_add_months, try_date_add_months, date_add_period, try_date_add_period, date_period_until, parse_date, nth_weekday_in_month, last_weekday_in_month, weekday_on_or_after, weekday_on_or_before, easter_sunday_gregorian, easter_sunday_orthodox, time, time_from_nanosecond_of_day, time_add_duration, datetime, datetime_add_duration, datetime_add_period, try_datetime_add_period, datetime_until, parse_time, parse_datetime, offset_from_seconds, parse_offset, instant_from_unix, instant_from_unix_count, instant_to_unix_count, instant_add_duration, instant_until, instant_round_to, instant_to_datetime_at, datetime_to_instant_at, parse_instant, parse_offset_datetime, duration, duration_from_count, duration_to_count, duration_to_seconds_f64, duration_add, duration_sub, duration_negate, duration_mul, parse_duration, try_parse_duration, period, period_negate, period_mul, parse_period, try_parse_period, dates_from_epoch_days, instants_from_unix)\nimport Std.Rounding (RoundTowardNegative, RoundTowardPositive, RoundTowardZero, RoundAwayFromZero, RoundTiesToEven, RoundTiesToAway, RejectInexact)";
 
-/// (test name, expression, exact failure message).
+/// (test name, expression, exact failure message). The `order_*` rows pin
+/// [05-OP-73]'s check order for every callable that could fail both ways.
 const EXACT_FAILURES: &[(&str, &str, &str)] = &[
     (
         "days_in_month_month",
@@ -441,6 +442,66 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
         "instants_element",
         "instants_from_unix(to_tensor([0i64, 1i64]), to_tensor([0i64, 1000000000i64]))",
         "instants_from_unix: domain: element 1: nanosecond 1000000000 is outside 0..999999999",
+    ),
+    (
+        "order_date_add_months_range_before_policy",
+        "date_add_months(date(9999i64, 1i64, 31i64), 13i64, RejectInvalidDay)",
+        "date_add_months: overflow: 9999-01-31 plus 13 months is outside the supported date range",
+    ),
+    (
+        "order_try_date_add_months_range_before_policy",
+        "try_date_add_months(date(9999i64, 1i64, 31i64), 13i64, RejectInvalidDay)",
+        "try_date_add_months: overflow: 9999-01-31 plus 13 months is outside the supported date range",
+    ),
+    (
+        "order_date_add_period_range_before_policy",
+        "date_add_period(date(9999i64, 1i64, 31i64), period(13i64, 0i64), RejectInvalidDay)",
+        "date_add_period: overflow: 9999-01-31 plus 13 months is outside the supported date range",
+    ),
+    (
+        "order_try_date_add_period_range_before_policy",
+        "try_date_add_period(date(9999i64, 1i64, 31i64), period(13i64, 0i64), RejectInvalidDay)",
+        "try_date_add_period: overflow: 9999-01-31 plus 13 months is outside the supported date range",
+    ),
+    (
+        "order_date_add_period_policy_before_day_range",
+        "date_add_period(date(2024i64, 1i64, 31i64), period(1i64, 4000000i64), RejectInvalidDay)",
+        "date_add_period: domain: day 31 is outside 1..29 for 2024-02",
+    ),
+    (
+        "order_datetime_add_period_range_before_policy",
+        "datetime_add_period(datetime(date(9999i64, 1i64, 31i64), time(0i64, 0i64, 0i64, 0i64)), period(13i64, 0i64), RejectInvalidDay)",
+        "datetime_add_period: overflow: 9999-01-31 plus 13 months is outside the supported date range",
+    ),
+    (
+        "order_try_datetime_add_period_range_before_policy",
+        "try_datetime_add_period(datetime(date(9999i64, 1i64, 31i64), time(0i64, 0i64, 0i64, 0i64)), period(13i64, 0i64), RejectInvalidDay)",
+        "try_datetime_add_period: overflow: 9999-01-31 plus 13 months is outside the supported date range",
+    ),
+    (
+        "order_datetime_add_period_policy_before_day_range",
+        "datetime_add_period(datetime(date(2024i64, 1i64, 31i64), time(0i64, 0i64, 0i64, 0i64)), period(1i64, 4000000i64), RejectInvalidDay)",
+        "datetime_add_period: domain: day 31 is outside 1..29 for 2024-02",
+    ),
+    (
+        "order_duration_to_count_policy_before_range",
+        "duration_to_count(duration(9223372036854775807i64, 1i64), Milliseconds, RejectInexact)",
+        "duration_to_count: domain: PT9223372036854775807.000000001S is not a whole number of milliseconds",
+    ),
+    (
+        "order_instant_round_to_increment_before_range",
+        "instant_round_to(instant_from_unix(253402214400i64, 1i64), duration(7i64, 0i64), RoundTowardPositive)",
+        "instant_round_to: domain: increment PT7S does not divide one day",
+    ),
+    (
+        "order_easter_gregorian_year_before_range",
+        "easter_sunday_gregorian(10000i64)",
+        "easter_sunday_gregorian: domain: year 10000 is outside -9999..9999",
+    ),
+    (
+        "order_easter_orthodox_year_before_range",
+        "easter_sunday_orthodox(10000i64)",
+        "easter_sunday_orthodox: domain: year 10000 is outside -9999..9999",
     ),
 ];
 

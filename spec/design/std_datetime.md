@@ -12,8 +12,8 @@ wins and this document has a bug.
 
 ## 1. Why
 
-`Std.Time` has been fenced since #2803: each of its 16 callables fails with #2779. The
-code it replaced had several defects:
+`Std.Time`, which this design replaces, was fenced by #2803: each of its 16 callables
+failed with #2779. The code the fence replaced had several defects:
 - duration normalization was not Euclidean;
 - parsing accepted only four-digit years;
 - `sub_days` negated `i64::MIN`;
@@ -181,8 +181,22 @@ exceptions to it:
   `overflow`, and nothing else does. That arithmetic is adding, subtracting, negating or
   multiplying dates, times, instants, durations and periods, including reading a civil
   value at an offset (`dt − o`). `period_mul` and `duration_mul` are such arithmetic.
-- When an operation could fail both ways, the range check runs first, so `overflow` wins
-  over a coverage `domain`.
+- Between a range failure and a coverage failure, the range check runs first, so
+  `overflow` wins over a coverage `domain`.
+- Within one call, checks run in the order the defining computation produces the
+  quantity each one checks, so a call that could fail both ways reports the earlier
+  check:
+  - `date_add_months`: the target year-month's range, then the day under the policy;
+  - `date_add_period` and `datetime_add_period`: the month step as above, then the day
+    step's range, so `try_date_add_period(date(2024, 1, 31), period(1, 4000000),
+    RejectInvalidDay)` returns `None` before the day step could overflow;
+  - `duration_to_count`: the rounding policy, then representability in i64;
+  - `instant_round_to`: the increment, then the rounding policy, then the result's range;
+  - `easter_sunday_gregorian` and `easter_sunday_orthodox`: the year, then the result's
+    range.
+  No other S1 callable can fail both ways for one input; `instant_to_unix_count` follows
+  the same order as `duration_to_count`, but only its nanosecond counts can leave i64,
+  and those are always exact.
 
 **No primitive trap escapes.** Every range and validity check runs before the arithmetic
 it protects, so no primitive numeric trap ever escapes a `Std.Datetime` call. A test
@@ -890,8 +904,11 @@ and extends [05-HOST-2]'s list of host operations with them.
 
 **Release.** Removing `Std.Time` removes census rows, which the remediation roadmap's
 invariant 7 makes 0.19 payload by default. S1 ships in a 0.18.x patch rather than
-waiting for 0.19, by release decision, as 0.18.4 did for its ABI change. The removal breaks
-no working program, because every `Std.Time` callable already fails.
+waiting for 0.19, by release decision, as 0.18.4 did for its ABI change. Every `Std.Time`
+callable already fails, so the removal stops no running computation. A program that only
+builds `Std.Time` records or names its types still type-checks against the fenced module
+and breaks when the module is removed. The known importers are Shoals and hello-chelis,
+whose cut-overs are S6 and S8.
 
 ## 16. Stages
 

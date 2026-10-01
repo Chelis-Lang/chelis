@@ -125,7 +125,8 @@ def test_date_add_months_reject() -> unit ! { Test } = {
 def test_date_add_period() -> unit ! { Test } = {
   _ = assert_eq(date_to_string(date_add_period(date(2024i64, 1i64, 31i64), period(1i64, 1i64), ClampToMonthEnd)), "2024-03-01", "months then days")
   _ = assert_eq(date_to_string(date_add_period(date(2024i64, 3i64, 1i64), period(-1i64, -1i64), ClampToMonthEnd)), "2024-01-31", "negative period")
-  assert_true(is_none_date(try_date_add_period(date(2024i64, 1i64, 31i64), period(1i64, 1i64), RejectInvalidDay)), "reject fires on the month step")
+  _ = assert_true(is_none_date(try_date_add_period(date(2024i64, 1i64, 31i64), period(1i64, 1i64), RejectInvalidDay)), "reject fires on the month step")
+  assert_true(is_none_date(try_date_add_period(date(2024i64, 1i64, 31i64), period(1i64, 4000000i64), RejectInvalidDay)), "the month step's policy runs before the day step could overflow")
 }
 def test_date_period_until() -> unit ! { Test } = {
   _ = assert_eq(period_to_string(date_period_until(date(2024i64, 1i64, 31i64), date(2024i64, 3i64, 1i64))), "P1M1D", "January 31 to March 1")
@@ -142,6 +143,12 @@ def test_date_equality() -> unit ! { Test } = {
   _ = assert_true(eq(date(2024i64, 2i64, 29i64), parse_date("2024-02-29")), "equal dates are eq")
   _ = assert_false(eq(date(2024i64, 2i64, 29i64), date(2024i64, 3i64, 1i64)), "different dates are not eq")
   assert_true(neq(date(2024i64, 2i64, 29i64), date(2024i64, 3i64, 1i64)), "different dates are neq")
+}
+def test_check_order_in_try_forms() -> unit ! { Test } = {
+  noon = time(12i64, 0i64, 0i64, 0i64)
+  _ = assert_true(is_none_date(try_date_add_period(date(2024i64, 1i64, 31i64), period(1i64, 4000000i64), RejectInvalidDay)), "the month step's policy runs before the day step's range")
+  _ = assert_eq(try_datetime_add_period(datetime(date(2024i64, 1i64, 31i64), noon), period(1i64, 4000000i64), RejectInvalidDay), None, "the datetime month step's policy runs first")
+  assert_eq(try_duration_to_count(duration(9223372036854775807i64, 1i64), Milliseconds, RejectInexact), None, "the rounding policy runs before representability")
 }
 def test_date_comparisons() -> unit ! { Test } = {
   a = date(2024i64, 1i64, 1i64)

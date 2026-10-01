@@ -28,7 +28,7 @@ use tempfile::tempdir;
 /// Floor on the retained chelis-std self-test corpus, set below the measured
 /// 117 passing tests after the Time and Decimal suites moved to explicit
 /// rejection checks in std_package_acceptance.
-const MIN_PASSED: u32 = 165;
+const MIN_PASSED: u32 = 166;
 
 fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
