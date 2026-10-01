@@ -428,7 +428,8 @@ let
     runtimeConsumer
     runtimeCorrespondence
     runtimeShape
-  ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ laneCheck ];
+  ]
+  ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ laneCheck ];
   native = pkgs.runCommand "chelis-native-contracts" { } ''
     ${lib.concatMapStringsSep "\n" (check: "test -e ${check}") contractChecks}
     test -e ${packages.chelis}
