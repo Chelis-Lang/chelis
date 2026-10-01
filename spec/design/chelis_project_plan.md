@@ -517,8 +517,10 @@ since moved to `School.Nn.Generate` / `School.Optim` / `School.Schedule` in chel
   RFC 3339-based text forms under [05-OP-73], and the shared `Std.Rounding` modes
   under [05-OP-74]. It succeeds `Std.Time` (#2859); zones, business calendars, and
   the clock are later stages of `spec/design/std_datetime.md`.
-- **`Std.Decimal`:** Fixed-point exact arithmetic. Configurable precision, banker's
-  rounding. Host-value type, not tensor dtype.
+- **`Std.Decimal`:** Opaque exact decimals of at most 38 significant and 38 fractional
+  digits under [05-OP-76]: exact arithmetic that fails rather than rounds, explicit
+  `Std.Rounding` modes wherever digits are dropped, and a named lossy boundary to f64
+  and f32. Host-value type, not tensor dtype.
 - **`Std.Nn.Generate`:** Autoregressive generation with KV cache management. Greedy and
   sampled generation (temperature, top-k, top-p) via record-config APIs. `KVCache` is
   precision-polymorphic so mixed-precision inference does not force an `f32` cache
@@ -554,7 +556,8 @@ Prerequisite gate for both `nautilus` and `coral`. Not itself a shell.
   `cargo test -p chelis-cli --test std_package_acceptance` (the original
   `std_nn_build_acceptance` suite was removed when the `Std.Nn`/`Std.Loss`/`Std.Optim` ML
   surface moved to the downstream School library in chelis-std 0.4.0, #331; the in-repo
-  oracle covers `Std.Decimal` and `Std.Datetime`)
+  oracle covers `Std.Decimal` and `Std.Datetime`), and `std_decimal_oracle` compares
+  `Std.Decimal` on the evaluator and in compiled C with an exact-rational reference
 
 ### 3j: Nautilus — Numerical Methods, Statistics, and Optimization
 
