@@ -24,8 +24,6 @@ Kache acceptance requires byte-identical restored entries and an actual local ca
 
 The canary permits only the private cache endpoints. Its child environments exclude ambient App, GitHub, AWS, and OIDC credentials.
 
-The cache endpoints, bucket, region, Nix signing key, and runner instance are deployment configuration, not source. The workflow passes them from the repository variables `SHARED_CACHE_NIX_URL`, `SHARED_CACHE_KACHE_URL`, `SHARED_CACHE_KACHE_BUCKET`, `SHARED_CACHE_KACHE_REGION`, `SHARED_CACHE_SIGNING_KEY_NAME`, `SHARED_CACHE_PUBLIC_KEY`, and `SHARED_RUNNER_INSTANCE_ID`. A missing or malformed value fails the run before any probe starts; there is no default.
-
 Cleanup removes only probe-owned local state. No probe deletes remote objects. Bucket lifecycle rules own remote cleanup.
 
 A passing receipt must identify the actual run and source revision. It must also identify the existing EC2 and its current system closure. Failed commands, missing entries, altered bytes, absent or invalid signatures, and missing cache hits must fail the run.

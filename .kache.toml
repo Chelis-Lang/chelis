@@ -10,7 +10,15 @@ key_env_vars = [
   "NIX_BUILD_ID_STYLE",
 ]
 
-# Keep local_store and runtime_dir machine-local; CI supplies job-owned paths
-# and its own remote store. This file configures no remote cache.
+# Keep local_store and runtime_dir machine-local; CI supplies job-owned paths.
 remote_readonly = false
 s3_concurrency = 4
+
+# Access requires Tunnet membership. Signing placeholders are supplied at runtime,
+# not AWS credentials; see README.md for developer setup.
+[cache.remote]
+type = "s3"
+bucket = "sand-dollar-kache-production-010928226848"
+region = "us-east-2"
+endpoint = "https://kache.mesh.cproof.ai"
+prefix = ""

@@ -147,7 +147,15 @@ Devenv also provides `chelis-reap-orphans` for stale build processes,
 `chelis-z3-test` for the Linux solver gate, and `chelis-hip-test` for the
 Linux HIP manual gate.
 
-The tracked `.kache.toml` configures Kache, Devenv's compiler cache, as a local
-cache: it names no remote store, and its `ignore_env` setting stops environment
-variables from adding one. The [manual gates](manual_gates.md) document the
-Devenv and Kache smoke tests.
+Devenv's shared Kache cache requires access to the trusted Tunnet mesh. When
+connected, supply the gateway's public placeholders:
+
+```sh
+export KACHE_S3_ACCESS_KEY=tunnet-anonymous
+export KACHE_S3_SECRET_KEY=tunnet-anonymous
+```
+
+These are not AWS credentials. Without mesh access, remote cache requests
+fall back to local compilation. For an offline shell, set `KACHE_CONFIG` to
+a separate config with `[cache] local_only = true` after activation. The
+[manual gates](manual_gates.md) document the Devenv and Kache smoke tests.
