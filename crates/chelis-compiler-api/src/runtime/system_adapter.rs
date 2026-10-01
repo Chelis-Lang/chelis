@@ -1,10 +1,15 @@
-//! Default host adapter for the eight covered evaluator filesystem and process
-//! operations. Their policy wrapper checks permission before calling this adapter.
+//! Default host adapter for the covered evaluator filesystem, process, and
+//! clock operations. Their policy wrapper checks permission before calling
+//! this adapter.
 
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use super::system::{EvalProcessOutput, EvalSystem, EvalSystemError, EvalSystemOperation};
+use super::system::{
+    EvalClockReading, EvalProcessOutput, EvalSystem, EvalSystemError, EvalSystemOperation,
+};
 
 pub(super) struct DefaultEvalSystem;
 
@@ -110,6 +115,27 @@ impl EvalSystem for DefaultEvalSystem {
             exit_status: output.status.code(),
             stdout: output.stdout,
             stderr: output.stderr,
+        })
+    }
+
+    fn read_wall_clock(&mut self) -> Result<EvalClockReading, EvalSystemError> {
+        // One host read; the sign split is the host's own representation.
+        Ok(match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(after) => EvalClockReading::AtOrAfterOrigin(after),
+            Err(before) => EvalClockReading::BeforeOrigin(before.duration()),
+        })
+    }
+
+    fn read_monotonic_clock(&mut self) -> Result<EvalClockReading, EvalSystemError> {
+        // `Instant` exposes no absolute value, so the origin is the first
+        // reading this process takes. It is fixed before `now` is read, and
+        // `Instant` never runs backwards, so the distance is exact.
+        static ORIGIN: OnceLock<Instant> = OnceLock::new();
+        let origin = *ORIGIN.get_or_init(Instant::now);
+        let now = Instant::now();
+        Ok(match now.checked_duration_since(origin) {
+            Some(after) => EvalClockReading::AtOrAfterOrigin(after),
+            None => EvalClockReading::BeforeOrigin(origin.duration_since(now)),
         })
     }
 }

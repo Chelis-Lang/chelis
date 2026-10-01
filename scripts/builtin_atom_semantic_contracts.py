@@ -76,6 +76,9 @@ CLAUSES = {
          "the new axis last"),
     72: ("consumes the key `k`", "`derive(derive(k, 2), n)`", "negative ones included, is valid",
          "with no broadcasting"),
+    75: ("Both halves come from one host reading", "`nanoseconds` lies in `0..999999999`",
+         "`seconds` lies in `-377705030401..253402214400`", "never runs backwards",
+         "`<operation>: io: <detail>`", "No default, zero, clamped, or wrapped reading"),
 }
 
 # Cross-chapter domain contradictions caught during semantic review. Requiring

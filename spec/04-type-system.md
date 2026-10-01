@@ -2815,8 +2815,10 @@ Built-in effect vocabulary in the type layer:
 
 - `Accum` -- internal-only hook for associative gradient accumulation
 - `IO` -- host-side effects such as `print` and `debug`,
-  the file builtins (`read_file`, `write_file`, ...), and subprocess exec via
-  `process_run`; `IO` is the single effect for host-side observable interaction
+  the file builtins (`read_file`, `write_file`, ...), subprocess exec via
+  `process_run`, and the clock reads `clock_wall_read` and
+  `clock_monotonic_read`; `IO` is the single effect for host-side observable
+  interaction
 - `Test` -- assertions whose failure is observed by the Chelis test runner
 - `Resource(Device)` -- allocation / placement region on a concrete device
 
@@ -2853,7 +2855,8 @@ Inference and checking obey these rules:
   contribute no effect; [04-LIN-9] makes each key single-use
 - `print(x)` and `debug(x)` are `IO` sources, alongside
   the file builtins (`read_file`, `write_file`, `read_lines`, `read_bytes`,
-  `file_exists`, `list_dir`, `mmap_file`) and `process_run` (subprocess exec).
+  `file_exists`, `list_dir`, `mmap_file`), `process_run` (subprocess exec),
+  and the clock reads `clock_wall_read` and `clock_monotonic_read` ([05-OP-75]).
   Compiled host execution preserves these effects and their order under
   spec/05-risc-primitives.md [05-HOST-1..2]
 - `with device(device) { ... }` marks a resource region that is validated against the

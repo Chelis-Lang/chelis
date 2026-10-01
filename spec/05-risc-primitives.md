@@ -1698,6 +1698,9 @@ exact ADT identity by [05-OP-34].
 > legal host-runtime operations in every language execution mode. Pure parsing,
 > projection, serialization, and rounding retain their stated purity; file and
 > process operations retain their declared `IO` effect and observable order.
+> The clock reads `clock_wall_read` and `clock_monotonic_read` ([05-OP-75])
+> are likewise legal host-runtime operations in every language execution mode
+> and retain their declared `IO` effect and observable order.
 > A compiled host execution SHALL produce the same typed result or language
 > trap as evaluation. A device-only kernel may not perform `IO`, but that
 > effect-boundary fact SHALL NOT be represented as a language-wide rejection,
@@ -4001,6 +4004,38 @@ path even though bare `round` under `grad` remains a structural
 >
 > Accumulator: None; all returned byte counts and offsets are exact checked
 > i64.
+
+#### Host clocks
+
+> **[05-OP-75]** Signature: `clock_wall_read()->(i64,i64)!{IO}` and
+> `clock_monotonic_read()->(i64,i64)!{IO}` are the host clock reads. Each
+> takes no argument and returns `(seconds, nanoseconds)`.
+>
+> Domain: The result types and the `IO` effect are exact. A result denotes
+> the exact time `seconds + nanoseconds / 10^9` seconds in Euclidean form:
+> `nanoseconds` lies in `0..999999999`, so a reading before the clock's
+> origin has negative `seconds` and a nonnegative remainder. `seconds` lies
+> in `-377705030401..253402214400`, the unix seconds whose civil reading
+> at every UTC offset of magnitude under one day falls in years -9999
+> through 9999.
+>
+> Result: Both halves come from one host reading, so a result never
+> combines parts of two readings. `clock_wall_read` reads the host wall
+> clock on the POSIX timescale: the time since 1970-01-01T00:00:00 UTC, in
+> which every day is exactly 86400 seconds long. `clock_monotonic_read`
+> reads a host clock that never runs backwards: within one execution, no
+> read is less, in `(seconds, nanoseconds)` order, than an earlier read.
+> Its origin is unspecified, and nothing relates it to a wall reading.
+>
+> Failure: A host clock error, or a reading whose `seconds` lies outside
+> the domain above, fails loudly with the message
+> `<operation>: io: <detail>`, where the detail names the host error or the
+> reading. No default, zero, clamped, or wrapped reading substitutes for a
+> failure, and no unused-result optimization may erase a read.
+>
+> Adjoint: Clock reads are outside AD under the effect rules.
+>
+> Accumulator: None; both halves are exact i64 values.
 
 #### CSV text structure
 

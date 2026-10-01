@@ -3321,6 +3321,9 @@ fn host_program_call_name_sites<T>(
 /// gates cannot drift (chelis#891 review finding 13).
 pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
     "process_run",
+    // [05-OP-75] clock reads: compiled host execution is chelis#1297.
+    "clock_wall_read",
+    "clock_monotonic_read",
     "round_to",
     // Host-lane CSV I/O (chelis#903): the compiler-owned text-table
     // carrier is evaluator-only. Compiled structured I/O lives in the
@@ -4997,6 +5000,8 @@ const HOST_ONLY_BUILTINS: &[&str] = &[
     "mmap_read",
     "mmap_len",
     "process_run",
+    "clock_wall_read",
+    "clock_monotonic_read",
     "round_to",
     "parse_csv",
     "to_csv",
@@ -20203,6 +20208,11 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             HostTypeTerm::Int64,
             HostTypeTerm::String,
             HostTypeTerm::String,
+        ])),
+        // [05-OP-75]: `(seconds, nanoseconds)`; eval/test-only like `process_run`.
+        "clock_wall_read" | "clock_monotonic_read" => Some(HostTypeTerm::Tuple(vec![
+            HostTypeTerm::Int64,
+            HostTypeTerm::Int64,
         ])),
         "parse_csv" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Dict(
             Box::new(HostTypeTerm::String),
