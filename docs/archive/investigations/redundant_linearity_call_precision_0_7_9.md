@@ -50,7 +50,7 @@ There is no way to satisfy the lint without breaking the program.
 
 Nautilus reports 137+ such false positives in `src/linalg.ch` against
 0.7.8 (verified by running `chelis lint --check
-/home/jeff/Documents/scratch/nautilus/src/linalg.ch | grep -c
+<nautilus checkout>/src/linalg.ch | grep -c
 redundant-linearity-call`).
 
 ## Bug shape 2: 2-arg list primitive in pipe form (Item 3)

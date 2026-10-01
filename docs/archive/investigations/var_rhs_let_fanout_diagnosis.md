@@ -1,6 +1,6 @@
 # var-RHS let consume fan-out diagnosis (Item 1 corrected)
 
-Workstream: 0.7.6 toolchain hygiene, plan `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`.
+Workstream: 0.7.6 toolchain hygiene (unpublished plan).
 Branch: `fix/cross-statement-fanout-v2`.
 Fixtures: `crates/chelis-ir/tests/cross_statement_fanout.rs`.
 

@@ -6,7 +6,7 @@ template Agent B (PRs 2-4) follows for each site, and pins the bool
 and i32 routing convention that the orchestrator decision on PR #79
 established.
 
-Owning plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`,
+Owning plan: an unpublished workstream plan,
 W2 PR 1 brief.
 
 Spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md` Contract
@@ -362,7 +362,7 @@ No new emergent coupling found; the plan's scope estimate stands.
 
 ## References
 
-* Plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`,
+* Plan: an unpublished workstream plan,
   W2 PR 1 section.
 * Spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`
   Contract 2 (trait surface) and Contract 3 (op enumeration).

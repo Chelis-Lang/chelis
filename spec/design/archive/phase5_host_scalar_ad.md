@@ -208,6 +208,6 @@ Implementation outline (not a commitment):
 - Unresolved-call detector: `crates/chelis-ir/src/host.rs:538`
   (`host_program_unresolved_call_sites`).
 - Tensor-lane AD definition: `spec/06-transformations.md` §2.
-- Coral's tracking entry: `/home/jeff/Documents/scratch/coral/docs/UPSTREAM_BUGS.md`
+- Coral's tracking entry: `docs/UPSTREAM_BUGS.md` in the coral repository
   ("Upstream blocker (v0.1.21, still present v0.2.0, still present v0.2.1):
   `grad` type-checks but fails to build").

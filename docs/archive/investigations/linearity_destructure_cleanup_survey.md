@@ -1,6 +1,6 @@
 # Wave 2 cascade — tuple-destructure linearity corpus survey
 
-Owning plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`,
+Owning plan: an unpublished workstream plan,
 "Wave 2 — Linearity cascade cleanup" (sections W2-cascade.1 / .2 / .3).
 
 Phase 0 spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`
@@ -117,7 +117,7 @@ upgrade to a chelis release that includes this cascade.
 
 ## References
 
-- Plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`
+- Plan: an unpublished workstream plan
 - Phase 0 spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`
 - W1 diagnosis: `docs/archive/investigations/linearity_typed_consumekind_diagnosis.md`
 - F3 closeout reference: `docs/archive/investigations/linearity_f3_pr2_closeout.md`

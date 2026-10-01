@@ -1,7 +1,7 @@
 # Parser pipe bare-keyword pipe stage — diagnosis
 
 Diagnoses Item 2b (G11) of the 0.7.6 toolchain hygiene workstream
-(`/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`,
+(an unpublished workstream plan,
 `docs/archive/investigations/item2_sibling_sweep_findings.md` G11).
 
 ## Bug shape (confirmed empirically)

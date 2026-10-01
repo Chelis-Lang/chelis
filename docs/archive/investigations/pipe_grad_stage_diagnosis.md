@@ -1,7 +1,7 @@
 # Pipe `grad` / `vmap(grad)` stage lowering — diagnosis
 
 Diagnoses the failure mode for Item 2 of the 0.7.6 toolchain hygiene
-workstream (`/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`).
+workstream (an unpublished workstream plan).
 Recommends a fix that reuses the existing non-pipe lowering.
 
 ## Bug shape (confirmed)

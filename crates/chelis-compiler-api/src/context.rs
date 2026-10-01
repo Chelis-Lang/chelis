@@ -27,9 +27,6 @@
 //! Then, it restores that proof. The provisional `TypeResolutionEnv` is serde-skipped.
 //! A later stacked check reconstructs it from validated ADT and alias definitions.
 //! Rejected declaration headers cannot persist in either compiler cache.
-//!
-//! See `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`
-//! for the full plan.
 
 use chelis_deep::DeepTag;
 use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
