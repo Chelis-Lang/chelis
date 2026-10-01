@@ -1,5 +1,5 @@
 //! [05-OP-6] `cast_trunc` acceptance matrix
-//! (`spec/05-risc-primitives.md` §3.8; `spec/design/named_truncating_cast.md`
+//! (`spec/05-risc-primitives.md` §3.8; `spec/design/archive/named_truncating_cast.md`
 //! §8; the chelis#759 ladder's float-to-integer rung, which unblocks the
 //! chelis#1091 ecosystem break).
 //!

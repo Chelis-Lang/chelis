@@ -1,6 +1,5 @@
 # Verification Stack: Coarse Dependency Map and Scope Inventory
 
-Intended location: `spec/design/verification_stack_dependency_map.md` (chelis repo).
 Companion documents: the master plan (`spec/design/verification_stack_master_plan.md`), the whole-stack sketch (`spec/design/verification_stack_sketch.md`), the Beacon engine plan (`spec/design/beacon_plan.md`), and the VNN-LIB front-end placeholder (`spec/design/vnnlib_frontend_placeholder.md`).
 
 This is the dependency structure and relative complexity of the total buildout, partitioned by where each chunk lives. The ordering shown is **dependency-implied only**: "X before Y" means Y consumes X's output, not a prescribed schedule. Sequencing and timeboxing beyond what dependencies force are yours to set. Each chunk is tagged with its master-plan work item (WI-N) or Beacon work item (WI-B1 through WI-B9); the master plan's Appendix dependency summary is the WI-numbered version of the tiers at the end of this document.

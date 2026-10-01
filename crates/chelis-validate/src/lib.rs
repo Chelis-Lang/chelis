@@ -27,7 +27,7 @@ pub enum ValidationError {
 }
 
 pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
-    // Phase 1f (spec/design/phase1f_executable_grammar.md): the pest
+    // Phase 1f (spec/design/archive/phase1f_executable_grammar.md): the pest
     // grammar is an independent second implementation and is explicitly
     // "not a replacement for the parser" — the hand-written compiler
     // parser is the acceptance authority, and validator/compiler

@@ -600,7 +600,6 @@ crates/chelis-effects/src/lib.rs    -- validate_build_target arm for "metal"
 spec/08-backends.md                 -- new "Phase M: Metal Backend" top-level section
 spec/12-roadmap.md                  -- add Phase M row
 docs/manual_gates.md                -- register M6 manual oracle
-docs/phase_oracles.md               -- register M1-M7 phase oracles
 .github/workflows/ci.yml            -- append metal compile/link step to macos-workspace-shard job (shard 2) in macos-nightly.yml (daily or manual, not per PR)
 ```
 

@@ -378,7 +378,7 @@ fn hof_argument_sig_desugars_to_nested_t_fn() {
 // keywords taking additional arguments (`grad`, `vmap`, `cast`, `jit`,
 // `with`) keep their existing arg-form behavior, and the structural forms
 // (`if`, `match`, `fn`, `par`) keep their existing rejection — see
-// `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`.
+// `docs/archive/investigations/parser_pipe_bare_keyword_diagnosis.md`.
 
 #[test]
 fn bare_realize_as_pipe_stage_parses() {
@@ -540,7 +540,7 @@ fn unsupported_structural_keyword_pipe_stage_still_rejected() {
 // The pipe-stage fix in Item 2b (`parse_pipe_stage` synthesizes a lambda
 // for `x |> realize` / `x |> copy`) intentionally left three sibling
 // surfaces out of scope; see the "Sibling sweep" table in
-// `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`:
+// `docs/archive/investigations/parser_pipe_bare_keyword_diagnosis.md`:
 //
 // H1: top-level bare unary-builtin reference, e.g. `f = realize`.
 // H2: bare unary-builtin keyword as juxtaposition argument, e.g.
@@ -549,7 +549,7 @@ fn unsupported_structural_keyword_pipe_stage_still_rejected() {
 //     per spec §3.6 ≡ `cast(x, f32)`.
 //
 // These three fixtures pin the failures. They flip to running in the
-// fix commit (see `docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
+// fix commit (see `docs/archive/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
 
 #[test]
 fn top_level_bare_unary_builtin_reference_parses() {
@@ -688,7 +688,7 @@ fn with_device_desugars_to_handle_effect() {
 // The fix changes the formatter's emit path for multi-stage pipes so the
 // chosen layout survives a parse/emit cycle. These tests flip to running in
 // the fix commit; see
-// `docs/investigations/fmt_pipe_idempotency_diagnosis.md`.
+// `docs/archive/investigations/fmt_pipe_idempotency_diagnosis.md`.
 
 /// `fmt(fmt(src))` must equal `fmt(src)`. Asserts a fixed point of the Surf
 /// formatter for the given Surf source.

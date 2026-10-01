@@ -150,7 +150,7 @@ plan's W1.2 step). The two viable shapes are:
   shape; `resolve_alias_chain(name)` walks until a non-alias name is found.
 
 Either is compatible with Contract 1. W1 PR 1 picks one and pins it in
-`docs/investigations/linearity_typed_consumekind_diagnosis.md`.
+`docs/archive/investigations/linearity_typed_consumekind_diagnosis.md`.
 
 ---
 

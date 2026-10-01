@@ -46,7 +46,7 @@
 //! can't handle ascription."
 //!
 //! Tracking: chelis#159 (sub-issue (B) of chelis#143)
-//! Diagnosis: docs/investigations/issue_143b_let_ascription_no_propagation_diagnosis.md
+//! Diagnosis: docs/archive/investigations/issue_143b_let_ascription_no_propagation_diagnosis.md
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;

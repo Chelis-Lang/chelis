@@ -59,7 +59,7 @@ fn accepts_t_ref_compound_tag() {
 /// closed vocabulary. `t-dims` is intentionally excluded: it appears in
 /// the plan's enumeration table but is not in `VALID_TAGS` and is not
 /// emitted by any current path — see the diagnosis note for
-/// `docs/investigations/deep_compound_tag_allowlist_diagnosis.md`.
+/// `docs/archive/investigations/deep_compound_tag_allowlist_diagnosis.md`.
 #[test]
 fn accepts_all_emitted_compound_tags() {
     // Each line exercises a distinct hyphenated compound tag from the

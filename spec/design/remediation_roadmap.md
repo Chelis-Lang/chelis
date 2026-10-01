@@ -71,7 +71,7 @@ issue that took it:
 None carries a wave assignment; they are not sequenced against the waves.
 
 Supporting: [`capability_table.md`](capability_table.md) (schema; rides [#729] Phase 4),
-[`docs/agent_quality_architecture.md`](../../docs/agent_quality_architecture.md) ([#740]), the seeded atoms
+[`docs/archive/agent_quality_architecture.md`](../../docs/archive/agent_quality_architecture.md) ([#740]), the seeded atoms
 (spec/04 §9-§10, spec/05 §7-§8), and [PR #696](https://github.com/Chelis-Lang/chelis/pull/696) (the acceptance surface).
 
 ## Global sequencing

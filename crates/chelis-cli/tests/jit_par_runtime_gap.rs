@@ -12,7 +12,7 @@
 //! `crates/chelis-compiler-api/src/runtime/eval.rs::eval_list` or the C-backend's
 //! `lower_host_expr_kind` in `crates/chelis-ir/src/host.rs`. This branch's
 //! fix commit added the missing arms in both layers. See
-//! `docs/investigations/jit_par_runtime_gaps_diagnosis.md` for the
+//! `docs/archive/investigations/jit_par_runtime_gaps_diagnosis.md` for the
 //! historical diagnosis. The checker now fences every `par` use until its
 //! execution semantics are implemented consistently.
 //!

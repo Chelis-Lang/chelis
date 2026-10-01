@@ -31,7 +31,7 @@ below.
 | **0g** | `grad` transformation (reverse-mode AD on DAG) | ✅ Complete |
 | **0h** | End-to-end: MNIST on CPU + spec test suite | ✅ Complete |
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
-| **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | HIP backend and validator available; [target gates](../../docs/phase_oracles.md) |
+| **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | HIP backend and validator available; [target gates](../../docs/manual_gates.md) |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
 | **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, file I/O, CSV/JSON, `Std.Time`/`Std.Decimal`, SKILL.md v2 |  |
 | **4** | Agent coding research: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
@@ -147,7 +147,7 @@ validation tooling.
 device memory planning, segmented and staged reductions, and hipBLAS-backed
 specialization for contiguous rank ≥ 2 `f32` matmul. `chelis validate` provides
 executable grammar validation. Backend correctness is exercised through the
-target-specific tests and manual gates in [`docs/phase_oracles.md`](../../docs/phase_oracles.md).
+target-specific tests and manual gates in [`docs/manual_gates.md`](../../docs/manual_gates.md).
 
 **Backend limitations:**
 
@@ -702,7 +702,7 @@ nothing from Shoals. Octant is a notation adapter, **not** a CAS — no symbolic
 integration, no simplification, no equation solving. The intelligence is in the
 coding model (for the LLM-assisted lowering path that lands in `3o`) and the
 compiler (for type verification and provenance tracking). Full design in
-`chelis_octant_design.md`; executable sub-phase contract in `phase3n_octant.md`.
+`chelis_octant_design.md`; executable sub-phase contract in `archive/phase3n_octant.md`.
 
 Octant uses Python (sympy / latex2sympy2) as the external oracle for LaTeX parsing correctness: parse the same LaTeX in both Octant and sympy, compare expression trees. That is a parity test against an external oracle — same pattern as Nautilus vs scipy. Chelis-native tests cover tokenizer correctness, parser crash safety, provenance span accuracy, and parse→pretty-print round-trips.
 

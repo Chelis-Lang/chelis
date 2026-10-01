@@ -30,7 +30,7 @@
 //! deterministically regardless of the test harness default stack size (which
 //! can be as small as 2 MiB).
 //!
-//! See docs/investigations/wi1_infer_recursion_depth.md and the
+//! See docs/archive/investigations/wi1_infer_recursion_depth.md and the
 //! `STACK_RED_ZONE_BYTES` doc-comment in crates/chelis-types/src/infer.rs.
 
 use chelis_deep::DeepTag;
@@ -232,7 +232,7 @@ fn moderate_depth_chain_does_not_trip_stack_guard() {
 /// internal names and references each export once rather than re-inlining
 /// bodies, so it adds breadth, not unbounded depth, and `infer_app` recurses
 /// only on strictly-smaller subtrees of a finite AST (see
-/// docs/investigations/wi1_infer_recursion_depth.md).
+/// docs/archive/investigations/wi1_infer_recursion_depth.md).
 ///
 /// This is the negative of `deep_app_chain_yields_stack_budget_diagnostic_not_sigsegv`:
 /// that test SHRINKS the grown segment so depth 4000 overflows it and asserts

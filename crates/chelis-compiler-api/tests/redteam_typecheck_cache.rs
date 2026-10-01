@@ -1,5 +1,5 @@
 //! Red-team adversarial coverage for the post-#130 compiled-context
-//! cache (`docs/investigations/compiled_context_cache_package_identity_diagnosis.md`).
+//! cache (`docs/archive/investigations/compiled_context_cache_package_identity_diagnosis.md`).
 //!
 //! A stale or wrong cache hit is a silent miscompilation, the worst bug
 //! class in a compiler. RT-1's original adversarial file (#128, reverted

@@ -186,7 +186,7 @@ pub trait Rule: Send + Sync {
     /// replacement is silently dropped.
     ///
     /// Architectural choice documented in
-    /// `docs/investigations/redundant_linearity_autofix_architecture.md`
+    /// `docs/archive/investigations/redundant_linearity_autofix_architecture.md`
     /// (Path 1B): the gate lives in the CLI driver so `chelis-lint` stays
     /// dep-pure.
     fn fix_requires_typed_pipeline_check(&self) -> bool {
@@ -214,7 +214,7 @@ pub trait Rule: Send + Sync {
     /// declines to propose an unsafe transformation).
     ///
     /// Architectural rationale in
-    /// `docs/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
+    /// `docs/archive/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
     fn check_mirrors_fix(&self) -> bool {
         false
     }

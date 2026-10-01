@@ -33,7 +33,7 @@ use super::*;
 /// chain overflows is build- and stack-profile dependent -- the same
 /// `var`-only chain overflows around depth ~27 (debug / 2 MiB) through
 /// ~6090 (release / 32 MiB), a >200x spread (measured; see
-/// docs/investigations/wi1_infer_recursion_depth.md). A static depth
+/// docs/archive/investigations/wi1_infer_recursion_depth.md). A static depth
 /// constant is a tuning treadmill: it drifts with per-frame size and
 /// assumes a fixed thread stack. `stacker::remaining_stack()` measures the
 /// actual resource, so the guard stays correct under any build profile and
@@ -70,7 +70,7 @@ pub(super) const FALLBACK_MAX_DEPTH: usize = 20;
 /// thousands -- a finite source property: the reef linker concatenates each
 /// module's decls under mangled internal names and references every export
 /// once rather than re-inlining bodies, so linking adds breadth, not unbounded
-/// depth; see docs/investigations/wi1_infer_recursion_depth.md). The
+/// depth; see docs/archive/investigations/wi1_infer_recursion_depth.md). The
 /// investigation measured a 512 MiB thread completing the real pricer, and
 /// every recursive pass over the tree (inference, the validate / annotate
 /// passes, plus the `deep::Expr` clones and the final drop) runs inside this

@@ -271,7 +271,7 @@ RUNTIME_SRC_DIR = Path("crates/chelis-runtime/src")
 # `chelis_format_shortest(value, dtype, buf, cap)` both receive an
 # ALREADY-DECODED element, so neither can catch it.
 #
-# ENFORCEMENT RUNG (docs/agent_quality_architecture.md, chelis#740): this
+# ENFORCEMENT RUNG (docs/archive/agent_quality_architecture.md, chelis#740): this
 # table is a TRIPWIRE TEST, the third rung, and the standing rule is to
 # push every rule as far up the ladder as it can go. The justification for
 # not taking a higher rung HERE: the compile-error rung for this class is

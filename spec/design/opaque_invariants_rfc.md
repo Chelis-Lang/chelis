@@ -1,7 +1,7 @@
 # RFC: Opaque Types With Declared Invariants (Option 1.5)
 
 Version: 7 (frozen). Survey evidence:
-[`opaque_invariants_survey.md`](opaque_invariants_survey.md).
+[`opaque_invariants_survey.md`](archive/opaque_invariants_survey.md).
 Decisions carry stable IDs (`D-*`) for citation in workstream briefs,
 commits, and red-team reports. Changing a frozen decision requires a
 version bump and an explicit note in the owning PR.

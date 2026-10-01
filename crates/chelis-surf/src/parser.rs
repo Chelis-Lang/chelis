@@ -347,7 +347,7 @@ fn validate_property_names(decls: &[Decl]) -> Result<(), ParseError> {
 /// form per `spec/01-nomenclature.md` §3.6. Used by
 /// `synthesize_bare_unary_builtin_lambda` to η-expand `realize`/`copy`
 /// in non-call position (H1/H2 of the pipe-autofix-extras workstream;
-/// see `docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
+/// see `docs/archive/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
 #[derive(Copy, Clone)]
 enum BareUnaryBuiltinKind {
     Realize,
@@ -2030,7 +2030,7 @@ impl Parser {
     /// Other reserved keywords (`grad`, `vmap`, `jit`, `with`, `par`,
     /// `if`, `match`, `fn`) have no spec-meaningful bare-pipe-stage
     /// form — see
-    /// `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`.
+    /// `docs/archive/investigations/parser_pipe_bare_keyword_diagnosis.md`.
     fn parse_pipe_stage(&mut self) -> Result<Expr, ParseError> {
         if self.at_eof() {
             return Err(ParseError::UnexpectedEof);

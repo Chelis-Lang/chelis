@@ -725,8 +725,8 @@ fn eval_rejects_unbound_runtime_names() {
 // `def` declarations with no top-level evaluable expression must
 // surface a stderr warning so humans don't get a silent "success".
 // Exit code stays 0 to preserve backward compat for scripted
-// consumers. See `docs/investigations/item2_sibling_sweep_findings.md`
-// §G7 and `docs/investigations/cli_eval_empty_roots_diagnosis.md`.
+// consumers. See `docs/archive/investigations/item2_sibling_sweep_findings.md`
+// §G7 and `docs/archive/investigations/cli_eval_empty_roots_diagnosis.md`.
 #[test]
 fn eval_def_only_emits_warning_on_stderr() {
     let dir = tempdir().expect("tempdir");
@@ -3047,7 +3047,7 @@ fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
 // backend. The pipe form is currently rejected by
 // `host_program_unresolved_call_sites` (`crates/chelis-ir/src/host.rs:1314`)
 // because the host-lane summarizer doesn't recognize pipe-lowered function
-// bodies as inlinable. See `docs/investigations/c_backend_grad_piped_body_diagnosis.md`.
+// bodies as inlinable. See `docs/archive/investigations/c_backend_grad_piped_body_diagnosis.md`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Control fixture: `grad(named_fn)(theta)` where `named_fn`'s body is
@@ -7673,7 +7673,7 @@ fn lint_fix_redundant_linearity_call_strips_when_typed_pipeline_accepts() {
     // the autofix, `chelis lint --fix` strips a redundant `copy()` from a
     // valid program. The CLI fix driver verifies the post-strip candidate
     // against the typed pipeline before writing (see
-    // `docs/investigations/redundant_linearity_autofix_architecture.md`).
+    // `docs/archive/investigations/redundant_linearity_autofix_architecture.md`).
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("rewrite_valid.ch");
     write_file(
@@ -7723,7 +7723,7 @@ fn lint_fix_prefer_pipe_operator_keeps_when_typed_pipeline_rejects() {
     // The `prefer-pipe-operator` autofix is re-enabled (Agent 2 / F),
     // gated on the typed-pipeline accepting the post-rewrite source
     // (Path 1B per
-    // `docs/investigations/redundant_linearity_autofix_architecture.md`).
+    // `docs/archive/investigations/redundant_linearity_autofix_architecture.md`).
     // This program references undefined `outer`, `inner`, `scale`, so the
     // pre-rewrite source already fails the typed pipeline. The candidate
     // post-rewrite source fails for the same reason. The Path 1B gate

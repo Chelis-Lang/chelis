@@ -2854,7 +2854,7 @@ fn cmd_check_one(file: &Path, show_inferred: bool, allow_style_violations: bool)
     // deeply-nested but finite reef-linked program (the Shoals pricer) would
     // otherwise SIGSEGV in one of those derived-recursive passes even though
     // the type checker itself is now safe. One grow at this boundary covers
-    // them all uniformly. See docs/investigations/wi1_infer_recursion_depth.md.
+    // them all uniformly. See docs/archive/investigations/wi1_infer_recursion_depth.md.
     chelis_types::run_on_grown_stack(|| {
         cmd_check_one_on_grown_stack(file, show_inferred, allow_style_violations)
     })
@@ -12140,7 +12140,7 @@ mod issue_1125_e5e_outer_reader_tests {
 /// requires the type and linearity pipeline, not source-text matching".
 ///
 /// Architectural rationale in
-/// `docs/investigations/redundant_linearity_autofix_architecture.md`
+/// `docs/archive/investigations/redundant_linearity_autofix_architecture.md`
 /// (Path 1B).
 fn typed_pipeline_accepts_surf(source: &str) -> bool {
     matches!(
@@ -12505,7 +12505,7 @@ fn apply_lint_fixes(
 
             // Per-replacement typed-pipeline gate for rules that opted in
             // (Path 1B per
-            // docs/investigations/redundant_linearity_autofix_architecture.md).
+            // docs/archive/investigations/redundant_linearity_autofix_architecture.md).
             // We test each verification-required replacement independently
             // by applying it to the original source and running the typed
             // pipeline. Independent verification preserves the maximum set

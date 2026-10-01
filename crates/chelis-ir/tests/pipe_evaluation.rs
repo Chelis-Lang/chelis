@@ -346,7 +346,7 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixture 6 (Item 2-extended target) — `x |> f` where `f` is a function-valued
 // parameter. Reproduces the G9/G10 gap from the Item 2 sibling sweep
-// (`docs/investigations/item2_sibling_sweep_findings.md`).
+// (`docs/archive/investigations/item2_sibling_sweep_findings.md`).
 //
 // The bug: `resolve_callable_expr_inner` returns `None` when the pipe stage
 // resolves to a `(var {} f)` for a function-typed parameter, because the name

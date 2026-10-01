@@ -23,8 +23,7 @@ against `4e200061` wherever this revision changes it. The command is
 named where the number matters. Three figures are *not* independent
 measurements and are attributed in place: the changelog drift numbers are PR
 #1199's own, #847's non-reproducing disposition is PR #1178's, and the 8/1-8/2
-review-debt count comes from the sprint audit
-(`docs/investigations/sprint_audit_2026_08_908_912_729.md`). The other
+review-debt count comes from a 2026-08-03 audit of the GitHub record. The other
 standing sources are the five plan docs under `spec/design/` and the class
 trackers' live GitHub sub-issue graphs.
 

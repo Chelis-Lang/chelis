@@ -616,7 +616,7 @@ statement that the current issue list is empty.
 [profile-partition]: ../../../scripts/test_nextest_profile_partition.py
 [config-closure]: ../../../scripts/check_configuration_closure.py
 [smt-ci]: ../../../.github/workflows/smt-full-prove.yml
-[quality]: ../../agent_quality_architecture.md
+[quality]: ../../archive/agent_quality_architecture.md
 [provenance]: ../../../spec/design/spec_provenance.md
 [check-report]: ../../../crates/chelis-compiler-api/src/check_report.rs
 [unsupported]: ../../../crates/chelis-types/src/unsupported.rs

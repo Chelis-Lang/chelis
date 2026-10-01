@@ -16,7 +16,7 @@ MCP and HTTP tools are `chelis_replace_function_body`,
 - `spec/design/chelis_canonical_reference.md` §4 (Deep), §12 (Agent Coding Assistance) — architectural framing
 - `spec/03-deep-syntax.md` §1.3 — Deep as an editing target
 - `spec/design/chelis_span_survival.md` — provenance dependency for diff display
-- `spec/design/chelis_deep_authoring_handover.md` — handover state and extension seams
+- `spec/design/archive/chelis_deep_authoring_handover.md` — handover state and extension seams
 
 ---
 
@@ -154,7 +154,7 @@ The L0 tool sits on language and compiler invariants that must fail closed:
   If idiomatic decompile output cannot parse or format, that is a
   decompiler-vs-formatter divergence to fix, not a documentation fallback.
 
-**Acceptance oracle:** see `docs/phase_oracles.md` for the Deep substrate
+**Acceptance oracle:** see `docs/archive/phase_oracles.md` for the Deep substrate
 hardening campaign row.
 
 ---

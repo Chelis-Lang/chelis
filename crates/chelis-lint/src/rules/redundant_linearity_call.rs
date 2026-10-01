@@ -84,7 +84,7 @@ impl Rule for RedundantLinearityCall {
         // var-RHS let-bindings, the broad class of programs the lint targets
         // is safe to rewrite, but the CLI fix driver still verifies each
         // candidate against the typed pipeline before writing. See
-        // `docs/investigations/redundant_linearity_autofix_architecture.md`
+        // `docs/archive/investigations/redundant_linearity_autofix_architecture.md`
         // for the architectural decision (Path 1B).
         true
     }
@@ -115,7 +115,7 @@ impl Rule for RedundantLinearityCall {
         // when no safe rewrite is on offer; legitimate diagnostics
         // (where the strip would type-check) continue to fire with a
         // `[fix]` marker. See
-        // `docs/investigations/redundant_linearity_call_precision_0_7_9.md`.
+        // `docs/archive/investigations/redundant_linearity_call_precision_0_7_9.md`.
         true
     }
 

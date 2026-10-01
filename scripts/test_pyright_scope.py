@@ -19,7 +19,6 @@ EXPECTED_INCLUDES = {
     "docs/archive/mascot",
     "bindings/python",
     "crates/chelis-cli/tests/fixtures/pseudo_nautilus/parity",
-    "docs/investigations/ci_diet_2026_09",
     "docs/investigations/probes",
     "py/src",
     "py/tests",
