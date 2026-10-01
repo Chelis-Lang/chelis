@@ -8054,9 +8054,17 @@ fn lint_fix_does_not_rewrite_sibling_argument_pipe_candidates() {
     let original = "def f() -> f32 = beta(cast(2.0, f32), cast(3.0, f32))\n";
     write_file(&path, original);
 
+    // The casts are the sibling calls under test, so `prefer-typed-literal`,
+    // which would rewrite them to suffixed literals, is not selected.
     Command::cargo_bin("chelis")
         .expect("binary")
-        .args(["lint", "--fix", path.to_str().unwrap()])
+        .args([
+            "lint",
+            "--fix",
+            "--rule",
+            "prefer-pipe-operator",
+            path.to_str().unwrap(),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("[fix]").not());
