@@ -15,8 +15,8 @@
 #   chelisup-<slug>   with slug in { darwin-arm64, darwin-x86_64, linux-x86_64 }
 # attached to each GitHub release (no version in the name, no tarball).
 #
-# With `gh` on PATH the download uses it, which also works for a private
-# fork; without it, the public release URL is fetched with curl.
+# With `gh` on PATH the download uses `gh release download`; without it,
+# the public release URL is fetched with curl.
 set -eu
 
 repo="Chelis-Lang/chelis"

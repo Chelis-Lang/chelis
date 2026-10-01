@@ -348,7 +348,7 @@ enum Command {
         /// Override bridge span manifest for a single `.dp` input
         #[clap(long)]
         spans: Option<PathBuf>,
-        /// Verification tier: auto (type check, then SMT, then sampling), fuzz-only, smt-only, induction-only, type-only, beacon-only
+        /// Verification tier: auto (type check, then induction for a property that calls a recursive function, otherwise SMT, then sampling), fuzz-only, smt-only, induction-only, type-only, beacon-only
         #[clap(long, default_value = "auto")]
         tier: String,
         /// SMT solver timeout in milliseconds (default 5000)

@@ -1,9 +1,13 @@
 Illustrative Chelis examples: programs that show a language form or a design
 pattern but sit outside the executable corpus.
 
-Every `.ch` file directly under `examples/` belongs to the executable corpus.
-The parity test (`crates/chelis-cli/tests/parity.rs`) checks each one, runs it
-in the evaluator, builds it to C, and requires the two outputs to agree.
+Every `.ch` file directly under `examples/` belongs to the executable corpus,
+and the parity test (`crates/chelis-cli/tests/parity.rs`) checks each one. For
+most, it runs the program in the evaluator, builds and runs it through C, and
+requires the two outputs to agree. A program with nothing to print, such as
+`linreg.ch`, has its C built as an object and must print nothing in the
+evaluator. `annotated_concat_softmax.ch` is the exception: the test pins its
+evaluator output and the C build's rejection instead.
 
 Every `.ch` file in this directory passes `chelis fmt --check` and
 `chelis check`, but is not held to that parity run. Each is here for one of

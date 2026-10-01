@@ -682,8 +682,14 @@ fn fmt_check_accepts_canonical_executable_examples() {
     }
 }
 
+/// `examples/illustrative/README.md` promises that every file there passes
+/// both `chelis fmt --check` and `chelis check`. The check runs on a copy of
+/// the tree because checking a package source writes its `reef.lock`.
 #[test]
-fn fmt_check_accepts_canonical_illustrative_examples() {
+fn fmt_check_and_check_accept_illustrative_examples() {
+    let illustrative_root = example_path("../../examples/illustrative");
+    let dir = tempdir().expect("tempdir");
+    copy_dir_recursive(&illustrative_root, dir.path());
     for path in illustrative_examples() {
         Command::cargo_bin("chelis")
             .expect("binary")
@@ -691,6 +697,26 @@ fn fmt_check_accepts_canonical_illustrative_examples() {
             .args(["fmt", path.to_str().unwrap(), "--check"])
             .assert()
             .success();
+
+        let copy = dir.path().join(
+            path.strip_prefix(&illustrative_root)
+                .expect("illustrative example should stay under root"),
+        );
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["check", copy.to_str().unwrap()])
+            .output()
+            .expect("run chelis check");
+        assert!(output.status.success(), "{path:?}");
+        let json: Value = serde_json::from_slice(&output.stdout).expect("check output is json");
+        assert_eq!(json["score"].as_f64().unwrap(), 1.0, "{path:?}");
+        assert_eq!(json["errors"].as_array().unwrap().len(), 0, "{path:?}");
+        assert_eq!(
+            json["unresolved_names"].as_array().unwrap().len(),
+            0,
+            "{path:?}"
+        );
     }
 }
 

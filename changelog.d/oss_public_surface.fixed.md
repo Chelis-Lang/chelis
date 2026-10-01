@@ -12,6 +12,5 @@ does, and `chelis build` lists Metal. The `chelis` shim no longer suggests
 redundant-`copy()` lint use plain wording, and the guide's and skill's Surf
 examples are canonically formatted, with a test that keeps them so.
 
-`chelis reef install --bootstrap` with no explicit entries installs only the
-public shells (Nautilus, Coral, and Shoals); its default list no longer
-includes a repository a public user cannot read.
+The default list for `chelis reef install --bootstrap` no longer names a
+private repository.

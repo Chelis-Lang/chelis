@@ -5414,10 +5414,10 @@ impl std::fmt::Display for LockfileInstallError {
 /// in the bootstrap input list is rejected with a typed runtime
 /// error (see [`install_bootstrap`]).
 ///
-/// Every entry must be a publicly readable shell repository: the default
-/// bootstrap runs for any user, and one unreadable entry fails the whole
-/// install. This list is **hand-maintained**. Bump each entry's tag whenever a shell publishes a new release that
-/// should be the default-fetched version. The bootstrap installer reads
+/// Every entry must be a publicly readable shell repository, because one
+/// unreadable entry fails the whole install. This list is
+/// **hand-maintained**. Bump each entry's tag whenever a shell publishes a
+/// new release that should be the default-fetched version. The bootstrap installer reads
 /// each archive's `reef.toml` to discover dependencies; entries not
 /// present in this list whose `reef.toml` references them surface a
 /// [`BootstrapError::MissingDependency`] error rather than silently
