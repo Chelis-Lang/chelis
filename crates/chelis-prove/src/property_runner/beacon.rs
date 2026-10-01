@@ -102,7 +102,7 @@ fn tensor_operand(expr: &Expr) -> Option<Cow<'_, Expr>> {
             Some(if earlier.is_empty() {
                 Cow::Borrowed(seed.as_ref())
             } else {
-                Cow::Owned(Expr::Pipe(seed.clone(), earlier.to_vec(), span.clone()))
+                Cow::Owned(Expr::Pipe(seed.clone(), earlier.to_vec(), *span))
             })
         }
         _ => None,
