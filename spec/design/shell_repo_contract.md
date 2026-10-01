@@ -32,7 +32,9 @@ not a hypothetical.
 ## 1. Identity & inheritance (MUST)
 
 - The shell has a repo-local `AGENTS.md`; `CLAUDE.md` is a **symlink** to it
-  so Claude-style and Codex-style entry points cannot drift.
+  so Claude-style and Codex-style entry points cannot drift. `conform sync`
+  restores the symlink, and `conform audit` rejects a missing or
+  non-symlinked `CLAUDE.md`.
 - `AGENTS.md` carries the pinned toolchain's complete root Chelis `AGENTS.md`
   inside the `agents-inheritance` managed block: a generated,
   HTML-comment-fenced region stamped `chelis@X.Y.Z (sha256:…)` and regenerated
@@ -275,17 +277,24 @@ profile trigger and concurrency equality under ci#5 RWF-015.
 
 ## 3. Capability surface doc — `docs/CHELIS_SURFACE.md` (MUST)
 
-An inventory of what chelis + chelis-std **actually provide to this shell**,
-with two-state version markers:
+The shell's `docs/CHELIS_SURFACE.md` carries the pinned toolchain's complete
+root Chelis `docs/CHELIS_SURFACE.md` inside the `chelis-surface` managed block,
+stamped and regenerated exactly as §1 describes for the `agents-inheritance`
+block. The root document is the authored source; an embedded byte copy ships
+with the toolchain, and the same freshness guard that covers the agent contract
+prevents the two from drifting. `chelis reef conform sync` and `conform bump`
+regenerate the block from the pin, and `conform audit` fails when its stamp
+falls behind the reef pin or its body differs from the pinned text after the
+shell's declared exclusions. The surface a shell reads is therefore the surface
+of the toolchain it pins, by construction: the inherited text needs no
+hand-maintained version markers, dated header, or per-bump refresh.
 
-- the primitive/builtin families the shell's domain touches (with AD-adjoint
-  status wherever the shell uses `grad`), rank-polymorphism status,
-  grad-lane rules, type-system limits relevant to the shell's architecture,
-  the chelis-std module surface, and a where-to-read-more table into the
-  chelis numbered specs and design docs;
-- every capability row marked **`@pin`** (usable today) vs **`@upstream`**
-  (next bump); header carries pinned version, latest upstream version, and
-  last-refreshed date; refreshed at every pin bump (§7 step 5).
+Everything outside the managed fences is the shell's own and `sync` never
+touches it; a shell adds domain notes there (how its own surface uses the
+inherited capabilities, for example). A shell may omit inherited sections with
+one `shell-local:exclude` selector span outside the managed block, under the
+same structural matching, validation, and restoration rules as the
+`AGENTS.md` selectors in §1.
 
 The binding rule this doc carries: **read it before designing around a
 suspected language gap.** The School audit's first cause was exactly this
@@ -293,24 +302,28 @@ visibility gap — contributors wrote recursive list-walks in a tensor-first
 language and froze parameters out of training because nobody could see the
 real surface or the upstream roadmap.
 
-School exemplar: [`docs/CHELIS_SURFACE.md`](https://github.com/Chelis-Lang/school/blob/main/docs/CHELIS_SURFACE.md).
-
 ## 4. Upstream-issue discipline (MUST)
 
 - **`docs/UPSTREAM_BUGS.md`** (this exact name) with sections
-  §Actively blocking / §Tracking / §Parked / §Archived and a stated
-  per-section re-probe cadence. Entries carry: minimal reproducer, affected
-  shell surface, workaround taken, and an explicit re-probe trigger.
-- **File upstream; cite by number.** Suspected chelis bugs and capability
-  gaps are filed in `Chelis-Lang/chelis` — or parked as a ready-to-file
-  draft under `docs/issue_drafts/` with the filing condition stated — and
-  are thereafter cited as `chelis#NNN` (or the draft path), **never by a
-  prose name**. A prose-name citation is invisible to every mechanical
-  audit: School carried a "generic-callback-unification limit" through
-  three docs and a shipped PR while the fix (chelis#293 → PR #297) was
-  already in the pin the PR was built on. Before filing, search the
-  upstream tracker by symptom keywords — the same incident also nearly
-  produced a duplicate filing.
+  §Actively blocking / §Tracking / §Archived and a stated per-section
+  re-probe cadence. Entries carry: minimal reproducer, affected shell
+  surface, workaround taken, and an explicit re-probe trigger. §Actively
+  blocking holds filed issues the shell works around today; §Tracking holds
+  filed issues that do not block it now; §Archived holds resolved entries.
+- **File where it originates; cite by number.** Every suspected bug or
+  capability gap is filed as an issue in the Chelis-Lang repository where it
+  originates: a compiler, runtime, or `chelis-std` defect in
+  `Chelis-Lang/chelis`, a sibling shell's defect in that shell. It is filed
+  when it is found, and is thereafter cited by its issue number, as
+  `chelis#NNN` or `<repo>#NNN`, **never by a prose name** and never by a
+  local file standing in for the issue. A prose-name citation is invisible
+  to every mechanical audit: School carried a "generic-callback-unification
+  limit" through three docs and a shipped PR while the fix (chelis#293 →
+  PR #297) was already in the pin the PR was built on. Before filing, search
+  the owning tracker by symptom keywords — the same incident also nearly
+  produced a duplicate filing. A gap that is not worth fixing soon is still
+  filed; the issue records that judgement where every sibling shell and the
+  maintainers can see and dedupe it.
 - **A sibling-shell blocker cites the sibling.** When the blocking artifact
   is another shell's issue or PR rather than a compiler defect, cite it as
   `<repo>#NNN` for any repo in the shell-ecosystem registry — `nautilus#43`,
@@ -327,31 +340,26 @@ School exemplar: [`docs/CHELIS_SURFACE.md`](https://github.com/Chelis-Lang/schoo
   was meant.
   A cascade wave makes sibling blockage the common case rather than an edge
   (seven of eleven registry shells were blocked on one sibling release
-  during the 0.18.5 wave), so do **not** manufacture a `docs/issue_drafts/`
-  file whose only content is a pointer at a sibling PR: a draft is
-  pre-filing staging for an issue that will be filed, not a citation
-  costume.
+  during the 0.18.5 wave), which is why the sibling's own tracker, not a
+  restatement in the blocked shell, is the citation.
 - **Narrowing-citation rule.** Any narrowing in shell code or spec — a
   `fail(...)` guard on a config the reference accepts, a frozen/untrained
   parameter, a fixed shape, a per-rank verb copy, a forward-only verb —
   cites, **at the narrowing site**, either `chelis#NNN` / a registry
-  sibling's `<repo>#NNN` / a parked draft, or a dated deferral slot in the
-  shell's own plan. "Implementation convenience" is not a citable reason.
-  An uncited narrowing is invisible to de-narrowing and will outlive its
-  justification.
+  sibling's `<repo>#NNN`, or a dated deferral slot in the shell's own plan.
+  "Implementation convenience" is not a citable reason. An uncited narrowing
+  is invisible to de-narrowing and will outlive its justification.
 - **Surface loudly; never silently work around.** Hitting a suspected
   upstream bug mid-build means, in the same change set as the workaround:
-  minimal reproducer → upstream-tracker dedup search → file (or park a
-  draft) → cite at the site → UPSTREAM_BUGS entry.
+  minimal reproducer → dedup search in the owning tracker → file the issue
+  there → cite its number at the site → UPSTREAM_BUGS entry.
 - **Staleness audit.** A stdlib-only script scans the repo for
   `chelis#NNN` / `<sibling>#NNN` citations and flags issues that are CLOSED
   upstream but still cited from code. Resolved-upstream-but-still-worked-around
   is the default failure state, not the exception. Run at every bump (§7 step 3);
   the offline pin check from §2 lives in the same script.
 
-School exemplars: [`docs/UPSTREAM_BUGS.md`](https://github.com/Chelis-Lang/school/blob/main/docs/UPSTREAM_BUGS.md),
-[`docs/issue_drafts/`](https://github.com/Chelis-Lang/school/tree/main/docs/issue_drafts),
-[`scripts/audit_workarounds.py`](https://github.com/Chelis-Lang/school/blob/main/scripts/audit_workarounds.py).
+School exemplar: [`scripts/audit_workarounds.py`](https://github.com/Chelis-Lang/school/blob/main/scripts/audit_workarounds.py).
 
 ## 5. Upstream-blocker probes — `tests_blocked/` (conditional MUST)
 
@@ -436,11 +444,9 @@ every bump runs all of it in one change set:
    (School's 0.7.23 lesson: a "fixed" issue unblocked exactly two of the
    verbs it nominally covered). Blockers the probe suite cannot express
    are re-probed manually here.
-5. Refresh `docs/CHELIS_SURFACE.md`: header versions and every
-   `@pin`/`@upstream` column.
-6. Promote UPSTREAM_BUGS entries per the re-probe verdicts (→ §Archived,
+5. Promote UPSTREAM_BUGS entries per the re-probe verdicts (→ §Archived,
    or back to §Tracking with the residue).
-7. Run the complete local gate before pushing — fmt + lint + **the
+6. Run the complete local gate before pushing — fmt + lint + **the
    package build** (`chelis reef build` catches package-context borrow/
    linearity errors that per-file lint+test miss) + tests + negative
    tests + blocked probes + the parity gate where one exists (§9).
@@ -475,7 +481,7 @@ toolchain selected explicitly, then audit every item below:
   precedes any `chelis test` or `chelis prove` step that reads the committed
   lock.
 - Re-run `conform audit` and repair every live `docs/UPSTREAM_BUGS.md` entry to
-  carry its own `chelis#NNN` or `docs/issue_drafts/<file>` citation. Nested
+  carry its own `chelis#NNN` or `<repo>#NNN` citation. Nested
   detail bullets must not accidentally parse as uncited independent entries.
 - Verify a claimed acceptance command by opening the workflow and locating the
   exact step. If the authoritative campaign is expensive, compare a bounded
@@ -639,25 +645,24 @@ self-audit.
 | 4 | Offline pin-consistency CI guard | MUST | §2 | `audit_workarounds.py --pins-only` (ci.yml guard) |
 | 5 | Toolchain installer + pin-resolving launcher (no global-default side effects) | MUST | §2 | first-party `chelisup` (bootstrap + shim; do not copy School's pre-chelisup `scripts/install_chelis_toolchain.py`) |
 | 6 | uv-only Python (stdlib scripts; uv projects for dep-bearing harnesses) | MUST | §2 | `parity/pyproject.toml` |
-| 7 | `docs/CHELIS_SURFACE.md` (domain-relevant subset, @pin/@upstream) | MUST | §3 | `docs/CHELIS_SURFACE.md` |
+| 7 | `docs/CHELIS_SURFACE.md` carrying the pinned surface guide in a managed block | MUST | §3 | generated by `conform sync` |
 | 8 | `docs/UPSTREAM_BUGS.md` (sections + cadence) | MUST | §4 | `docs/UPSTREAM_BUGS.md` |
 | 9 | Citation staleness audit script | MUST | §4 | `scripts/audit_workarounds.py` |
-| 10 | `docs/issue_drafts/` convention for parked filings | SHOULD | §4 | `docs/issue_drafts/README.md` |
-| 11 | `tests_neg/` + runner, in CI | MUST | §6 | `tests_neg/`, `scripts/run_negative_tests.py` |
-| 12 | `tests_blocked/` + runner, in CI | MUST once a blocker exists | §5 | `tests_blocked/`, `scripts/run_blocked_probes.py` |
-| 13 | Pin Bump Checklist in AGENTS.md | MUST | §7 | `AGENTS.md` §Pin Bump Checklist |
-| 14 | Declared shared-skill subset + validated local additions/section exclusions + agent skill symlinks + mirrored commands | MUST | §8 | `reef.toml [conform]`, `agent-skills/`, `.claude/skills`, `.codex/skills` |
-| 15 | Parity harness (own uv project, checked-in goldens, oracle guards) | MUST if external oracles | §9 | `parity/` |
-| 16 | ≥2-config acceptance for new public surface | MUST | §9 | `spec/vision.md` amendments |
-| 17 | Scaffolding Drift Rule in AGENTS.md | MUST | §10 | `AGENTS.md` §Scaffolding Drift Rule |
-| 18 | `[chelis-src]` + `chelis reef src` store/symlink + local drift guard | MUST *if* the shell links chelis crates as Cargo path deps | §2 | hydronnx, calcify (the crate-linking shells; see appendix) |
+| 10 | `tests_neg/` + runner, in CI | MUST | §6 | `tests_neg/`, `scripts/run_negative_tests.py` |
+| 11 | `tests_blocked/` + runner, in CI | MUST once a blocker exists | §5 | `tests_blocked/`, `scripts/run_blocked_probes.py` |
+| 12 | Pin Bump Checklist in AGENTS.md | MUST | §7 | `AGENTS.md` §Pin Bump Checklist |
+| 13 | Declared shared-skill subset + validated local additions/section exclusions + agent skill symlinks + mirrored commands | MUST | §8 | `reef.toml [conform]`, `agent-skills/`, `.claude/skills`, `.codex/skills` |
+| 14 | Parity harness (own uv project, checked-in goldens, oracle guards) | MUST if external oracles | §9 | `parity/` |
+| 15 | ≥2-config acceptance for new public surface | MUST | §9 | `spec/vision.md` amendments |
+| 16 | Scaffolding Drift Rule in AGENTS.md | MUST | §10 | `AGENTS.md` §Scaffolding Drift Rule |
+| 17 | `[chelis-src]` + `chelis reef src` store/symlink + local drift guard | MUST *if* the shell links chelis crates as Cargo path deps | §2 | hydronnx, calcify (the crate-linking shells; see appendix) |
 
 Bootstrap order for a brand-new shell: stamp from School → rename
 `module_prefix` + manifest + module tree → wire pins + CI guards (rows
-2–5) → write the intent statement and a CHELIS_SURFACE covering the
-domain-relevant subset (rows 1, 7) → land `tests_neg/`/`tests_blocked/`
-wired-but-small with their runners (rows 11–12; the first real blocker
-populates row 12) → vendor skills (row 14) → run the full local gate.
+2–5) → write the intent statement (row 1) → land `tests_neg/`/`tests_blocked/`
+wired-but-small with their runners (rows 10–11; the first real blocker
+populates row 11) → `conform sync` to materialize the inherited agent contract,
+capability surface, and skills (rows 1, 7, 13) → run the full local gate.
 
 ### Appendix: conformance snapshot (verified on-disk, 2026-06-10)
 
@@ -679,11 +684,11 @@ retrofit work list. Retrofit tracking belongs in each shell's own issue
 tracker (per-shell umbrella issue mirroring this table), prioritized by the
 pin-freshness row — a 13–15-release-stale pin compounds every other gap.
 
-**Source-crate class (row 18), verified 2026-06-29.** Two shells link chelis
+**Source-crate class (row 17), verified 2026-06-29.** Two shells link chelis
 crates as Cargo path deps and therefore trigger §2's conditional source-crate
 MUST: **hydronnx** (`=0.8.0`; `chelis-ir` + `chelis-types`) and **calcify**
 (`=0.7.21`; `chelis-types`). Both currently resolve `../chelis` to the same
 real monorepo working tree, so neither is yet conformant — adopting
 `[chelis-src]` + `chelis reef src` is their row-18 retrofit. (The earlier
 claim that hydronnx was the only crate-linking shell is superseded by calcify.)
-All other shells are pure-Chelis and never trigger row 18.
+All other shells are pure-Chelis and never trigger row 17.

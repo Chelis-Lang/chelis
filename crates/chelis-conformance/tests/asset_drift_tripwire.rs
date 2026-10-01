@@ -80,6 +80,23 @@ fn embedded_skills_match_repo() {
     }
 }
 
+/// chelis#2831: shells inherit the complete `docs/CHELIS_SURFACE.md`, so the
+/// embedded `chelis-surface` body is a generated copy of that one authored
+/// file, never a second hand-maintained description of the surface.
+#[test]
+fn embedded_surface_guide_matches_repo() {
+    let root = repo_root();
+    let path = root.join("docs/CHELIS_SURFACE.md");
+    let live = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let embedded = chelis_conformance::canonical::body("chelis-surface")
+        .expect("chelis-surface canonical body");
+    assert_eq!(
+        embedded, live,
+        "the embedded chelis-surface body must be regenerated from docs/CHELIS_SURFACE.md; \
+         run `python3 scripts/regenerate_conformance_assets.py`"
+    );
+}
+
 #[test]
 fn embedded_agents_contract_and_documented_skill_list_match_repo() {
     let root = repo_root();

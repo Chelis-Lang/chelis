@@ -74,10 +74,10 @@ impl Sidecar {
     }
 }
 
-/// A citation is auditable iff it names `chelis#NNN`, a parked draft under
-/// `docs/issue_drafts/`, or the `docs/UPSTREAM_BUGS.md` tracker.
+/// A citation is auditable iff it names `chelis#NNN` or the
+/// `docs/UPSTREAM_BUGS.md` tracker.
 pub fn is_blocker_citation(line: &str) -> bool {
-    if line.contains("docs/issue_drafts/") || line.contains("docs/UPSTREAM_BUGS.md") {
+    if line.contains("docs/UPSTREAM_BUGS.md") {
         return true;
     }
     // `chelis#<digits>` anywhere in the line.
@@ -185,7 +185,7 @@ pub fn classify(mode: ExpectMode, outcome: &FileOutcome, sidecar: Option<&Sideca
     if mode == ExpectMode::Blocked && !sidecar.has_blocker_citation() {
         return Verdict::ConfigError {
             reason: "tests_blocked sidecar has no auditable blocker citation \
-                     (chelis#NNN, docs/issue_drafts/, or docs/UPSTREAM_BUGS.md)"
+                     (chelis#NNN or docs/UPSTREAM_BUGS.md)"
                 .to_string(),
         };
     }
@@ -268,7 +268,9 @@ mod tests {
     #[test]
     fn blocker_citation_forms() {
         assert!(is_blocker_citation("blocked on chelis#293"));
-        assert!(is_blocker_citation("see docs/issue_drafts/foo.md"));
+        // A local file standing in for an unfiled issue is not a citation
+        // (contract §4: file the issue where it originates, cite its number).
+        assert!(!is_blocker_citation("see docs/issue_drafts/foo.md"));
         assert!(is_blocker_citation(
             "docs/UPSTREAM_BUGS.md §Actively blocking"
         ));

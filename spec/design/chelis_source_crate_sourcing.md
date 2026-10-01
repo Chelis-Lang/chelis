@@ -4,7 +4,7 @@
 shell that links chelis compiler crates as Cargo path dependencies. This is
 the monorepo home of the convention; per the Scaffolding Drift Rule
 ([`shell_repo_contract.md`](shell_repo_contract.md) §10) it lands here first
-and each crate-linking shell then conforms (contract §2, conformance row 18).
+and each crate-linking shell then conforms (contract §2, conformance row 17).
 
 > This doc supersedes the per-shell draft that previously lived in
 > `hydronnx/docs/chelis_source_pinning.md`.

@@ -246,7 +246,6 @@ fn check_row(row: &ContractRow, ctx: &Ctx) -> RowResult {
         "chelis-surface" => check_chelis_surface(ctx),
         "upstream-bugs" => check_upstream_bugs(ctx),
         "staleness-audit" => check_narrowing_coverage(ctx),
-        "issue-drafts" => check_issue_drafts(ctx),
         "tests-neg" => check_tests_neg(ctx),
         "tests-blocked" => check_tests_blocked(ctx),
         "pin-bump-checklist" => check_agents_heading(ctx, "Pin Bump Checklist"),
@@ -346,7 +345,11 @@ fn check_agents_md(ctx: &Ctx) -> Check {
     // The managed inheritance block must be present, stamped to the pin, and
     // untampered.
     let canonical = canonical::body("agents-inheritance").expect("embedded AGENTS contract");
-    let expected = match crate::scaffold::apply_agents_exclusions(canonical, agents) {
+    let expected = match crate::scaffold::apply_document_exclusions(
+        canonical,
+        agents,
+        "agents-inheritance",
+    ) {
         Ok(expected) => expected,
         Err(why) => {
             return fail(
@@ -500,6 +503,11 @@ fn check_uv_python(ctx: &Ctx) -> Check {
     pass()
 }
 
+/// Row 7 (§3): `docs/CHELIS_SURFACE.md` carries the pinned toolchain's complete
+/// surface guide in the `chelis-surface` managed block, after the shell's own
+/// exclusion selectors. Everything outside the fences is shell-owned, so the row
+/// checks nothing there: the inherited text is current by construction and the
+/// shell has no hand-maintained markers left to audit.
 fn check_chelis_surface(ctx: &Ctx) -> Check {
     let Some(surface) = ctx.read("docs/CHELIS_SURFACE.md") else {
         return fail(
@@ -507,27 +515,35 @@ fn check_chelis_surface(ctx: &Ctx) -> Check {
             "run `chelis reef conform init` / `sync`",
         );
     };
-    if !surface.contains("@pin") || !surface.contains("@upstream") {
-        return fail(
-            "docs/CHELIS_SURFACE.md lacks @pin/@upstream capability markers",
-            "mark each capability row @pin (usable now) or @upstream (next bump)",
-        );
-    }
+    let canonical = canonical::body("chelis-surface").expect("embedded surface guide");
+    let expected = match crate::scaffold::apply_document_exclusions(
+        canonical,
+        &surface,
+        "chelis-surface",
+    ) {
+        Ok(expected) => expected,
+        Err(why) => {
+            return fail(
+                format!("docs/CHELIS_SURFACE.md has an invalid shell-local exclusion block: {why}"),
+                "fix or remove the shell-owned exclusion block, then run `chelis reef conform sync`",
+            );
+        }
+    };
     check_managed_block(
         ctx,
         &surface,
-        "chelis-surface-header",
+        "chelis-surface",
         "docs/CHELIS_SURFACE.md",
-        None,
+        Some(&expected),
     )
 }
 
-/// Row 8 (§4): `docs/UPSTREAM_BUGS.md` exists, carries the four required
+/// Row 8 (§4): `docs/UPSTREAM_BUGS.md` exists, carries the three required
 /// sections, and — the cite-by-number machine check added for chelis#739 —
-/// every confidently parsed entry under §Actively blocking / §Tracking /
-/// §Parked cites its bug as `chelis#NNN`, as a registry sibling's `<repo>#NNN`
-/// (chelis#1270), or as a `docs/issue_drafts/<name>` draft path, never a prose
-/// name. §4 makes this a MUST ("cite by number … never by a
+/// every confidently parsed entry under §Actively blocking / §Tracking cites
+/// its bug by the number of the issue filed where it originates: `chelis#NNN`,
+/// or a registry sibling's `<repo>#NNN` (chelis#1270), never a prose name or a
+/// local stand-in file. §4 makes this a MUST ("cite by number … never by a
 /// prose name"): a prose-name citation is invisible to every mechanical audit,
 /// which is the exact failure the contract's own §4 rationale cites (School
 /// carried a "generic-callback-unification limit" through three docs and a
@@ -566,7 +582,7 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
     //     green while rendering as a normal section to a human. A duplicated
     //     required section is a malformed doc; fail it here.
     let lines: Vec<&str> = bugs.lines().collect();
-    let required = ["Actively blocking", "Tracking", "Parked", "Archived"];
+    let required = ["Actively blocking", "Tracking", "Archived"];
     let mut missing: Vec<&str> = Vec::new();
     let mut duplicated: Vec<&str> = Vec::new();
     for s in required {
@@ -594,12 +610,25 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
             "each required section must appear exactly once; a duplicated heading orphans the second body from the citation check, so merge them",
         );
     }
+    // Every live upstream item is a filed issue, so it belongs under §Actively
+    // blocking or §Tracking, where the citation check below reaches it. A
+    // section for items held back from filing is outside that check: its
+    // entries would audit green with no issue behind them.
+    if let Some(i) = section_heading_indices(&lines, "Parked").first() {
+        return fail(
+            format!(
+                "docs/UPSTREAM_BUGS.md:{}: a Parked section holds upstream items outside the cited sections (§4)",
+                i + 1
+            ),
+            "file each entry as an issue in the repository where it originates, move it to §Tracking (or §Actively blocking) with its `chelis#NNN` / `<repo>#NNN` citation and re-probe trigger, and remove the section",
+        );
+    }
 
     // §4 cite-by-number check over the three *live* sections (§Archived exempt).
     let mut uncited: Vec<String> = Vec::new();
     let mut manual_sections: Vec<&str> = Vec::new();
     let mut manual_evidence: Vec<String> = Vec::new();
-    for section in ["Actively blocking", "Tracking", "Parked"] {
+    for section in ["Actively blocking", "Tracking"] {
         // Unreachable in practice — each live section passed the strict gate
         // above, so `section_body` resolves it here too. Kept as a fail-closed
         // guard: an unlocatable section is skipped, never silently passed.
@@ -618,9 +647,9 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
             continue;
         }
         for entry in &entries {
-            if scan_citations(&entry.text).is_empty() && !cites_issue_draft(&entry.text) {
+            if scan_citations(&entry.text).is_empty() {
                 uncited.push(format!(
-                    "docs/UPSTREAM_BUGS.md:{}: §{section} entry {:?} cites no chelis#NNN, no registry sibling's <repo>#NNN, and no docs/issue_drafts/ path",
+                    "docs/UPSTREAM_BUGS.md:{}: §{section} entry {:?} cites no chelis#NNN and no registry sibling's <repo>#NNN",
                     entry.line,
                     snippet(entry.head()),
                 ));
@@ -648,10 +677,10 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
         ));
         return fail_ex(
             format!(
-                "docs/UPSTREAM_BUGS.md: {n} entr{} with a prose-name citation, not chelis#NNN / <sibling>#NNN / a docs/issue_drafts/ path (§4)",
+                "docs/UPSTREAM_BUGS.md: {n} entr{} without an issue-number citation (chelis#NNN / <sibling>#NNN, §4)",
                 if n == 1 { "y" } else { "ies" },
             ),
-            "cite every entry at the entry by `chelis#NNN`, by a registry sibling's `<repo>#NNN` (e.g. `nautilus#43`), or by a `docs/issue_drafts/<name>` draft path, never by a prose name (contract §4)",
+            "file each item as an issue in the repository where it originates and cite it at the entry by `chelis#NNN` or a registry sibling's `<repo>#NNN` (e.g. `nautilus#43`), never by a prose name (contract §4)",
             evidence,
         );
     }
@@ -666,7 +695,7 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
                     "ve"
                 },
             ),
-            "structure each bug as a top-level list item or sub-heading citing chelis#NNN / a registry sibling's <repo>#NNN / a draft path so the §4 cite-by-number rule is machine-checkable",
+            "structure each bug as a top-level list item or sub-heading citing chelis#NNN / a registry sibling's <repo>#NNN so the §4 cite-by-number rule is machine-checkable",
             manual_evidence,
         );
     }
@@ -812,20 +841,6 @@ fn is_top_list_item(line: &str) -> bool {
     false
 }
 
-/// Whether `text` cites a parked issue draft by path — a reference to a file
-/// under `docs/issue_drafts/`, the §4-sanctioned alternative to a `chelis#NNN`
-/// number for a not-yet-filed bug. The directory prefix must be followed by a
-/// filename character, so a bare mention of the directory itself does not count.
-fn cites_issue_draft(text: &str) -> bool {
-    const PREFIX: &str = "docs/issue_drafts/";
-    text.match_indices(PREFIX).any(|(i, _)| {
-        text[i + PREFIX.len()..]
-            .chars()
-            .next()
-            .is_some_and(|c| !c.is_whitespace() && !matches!(c, ')' | ']' | '/'))
-    })
-}
-
 /// A one-line, length-capped snippet of `line` for an evidence message.
 fn snippet(line: &str) -> String {
     let t = line.trim();
@@ -916,18 +931,6 @@ fn coverage_evidence(token: &str, blocked: &str, upstream: &str, readme: &str) -
             "no note"
         },
     )
-}
-
-fn check_issue_drafts(ctx: &Ctx) -> Check {
-    if ctx.exists("docs/issue_drafts") {
-        pass()
-    } else {
-        // SHOULD: a Fail here does not gate (see must_failures).
-        fail(
-            "docs/issue_drafts/ convention not present (SHOULD)",
-            "add docs/issue_drafts/README.md for parked filings",
-        )
-    }
 }
 
 fn check_tests_neg(ctx: &Ctx) -> Check {
@@ -1156,7 +1159,7 @@ fn check_parity_harness(ctx: &Ctx) -> Check {
 fn check_chelis_src(ctx: &Ctx) -> Check {
     // Prefer the registry's authoritative `links_chelis_crates` flag when the
     // shell is known (its name matches a registry entry). The registry is the
-    // source of truth for whether row 18 applies; the Cargo.toml substring scan
+    // source of truth for whether row 17 applies; the Cargo.toml substring scan
     // is only a fallback for shells not yet registered (freshly scaffolded, new,
     // or under test).
     let links = match ctx.shell_name.as_deref().and_then(registry::shell) {
@@ -2609,27 +2612,12 @@ mod tests {
     }
 
     #[test]
-    fn issue_draft_path_is_cited() {
-        assert!(cites_issue_draft(
-            "parked as docs/issue_drafts/foo.md until filed"
-        ));
-        assert!(cites_issue_draft(
-            "see (docs/issue_drafts/callback-unif.md)"
-        ));
-        // A bare directory mention (no filename after the slash) is not a cite.
-        assert!(!cites_issue_draft(
-            "filed under docs/issue_drafts/ somewhere"
-        ));
-        assert!(!cites_issue_draft("no draft reference at all"));
-    }
-
-    #[test]
     fn section_body_stops_at_next_same_level_heading() {
-        let doc = "# T\n\n## Tracking\n\n- a\n### sub of a\ntext\n\n## Parked\n\n(none yet)\n";
+        let doc = "# T\n\n## Tracking\n\n- a\n### sub of a\ntext\n\n## Archived\n\n(none yet)\n";
         let lines: Vec<&str> = doc.lines().collect();
         let body = section_body(&lines, "Tracking").unwrap();
         // The `### sub of a` is *inside* Tracking (deeper than `##`); the body
-        // ends at `## Parked`.
+        // ends at `## Archived`.
         let joined = body.iter().map(|(_, l)| *l).collect::<Vec<_>>().join("|");
         assert_eq!(joined, "|- a|### sub of a|text|");
     }

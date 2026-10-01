@@ -3,9 +3,9 @@
 
 The `chelis-conformance` crate embeds canonical content into the chelis binary
 at compile time (`include_str!`), mirroring `chelis-std-bundle`. The repo files
-under `agent-skills/` and the root `AGENTS.md` are the source of truth for the
-*content*; the committed
-copies under `crates/chelis-conformance/assets/` are generated copies.
+under `agent-skills/`, the root `AGENTS.md`, and `docs/CHELIS_SURFACE.md` are the
+source of truth for the *content*; the committed copies under
+`crates/chelis-conformance/assets/` are generated copies.
 `.claude/skills` and `.codex/skills` are generated symlinks to the one authored
 `agent-skills/` tree. This script rebuilds both forms so the surfaces cannot
 drift by hand.
@@ -111,18 +111,21 @@ def materialize_agent_surface_links(root: Path) -> None:
         surface.symlink_to("../agent-skills", target_is_directory=True)
 
 
+def canonical_dest_root(root: Path) -> Path:
+    return root / "crates" / "chelis-conformance" / "assets" / "canonical"
+
+
 def planned_canonical_copies(root: Path) -> list[tuple[Path, Path]]:
-    """Return canonical documents whose embedded bytes mirror repo files."""
+    """Return canonical documents whose embedded bytes mirror repo files.
+
+    Every managed-block body is generated from an authored repo document, so
+    `assets/canonical/` holds nothing else and an unplanned file there is an
+    orphan. Keep in lockstep with `chelis_conformance::canonical::CANONICAL`.
+    """
+    dest = canonical_dest_root(root)
     return [
-        (
-            root / "AGENTS.md",
-            root
-            / "crates"
-            / "chelis-conformance"
-            / "assets"
-            / "canonical"
-            / "agents-inheritance.md",
-        )
+        (root / "AGENTS.md", dest / "agents-inheritance.md"),
+        (root / "docs" / "CHELIS_SURFACE.md", dest / "chelis-surface.md"),
     ]
 
 
@@ -155,12 +158,20 @@ def main() -> int:
 
     root = repo_root()
     dest_skills = root / "crates" / "chelis-conformance" / "assets" / "skills"
+    dest_canonical = canonical_dest_root(root)
     skill_pairs = planned_skill_copies(root)
     canonical_pairs = planned_canonical_copies(root)
     pairs = skill_pairs + canonical_pairs
 
+    def stale_reasons() -> list[str]:
+        return (
+            is_stale(skill_pairs, dest_skills)
+            + is_stale(canonical_pairs, dest_canonical)
+            + agent_surface_layout_reasons(root)
+        )
+
     if args.check:
-        reasons = is_stale(pairs, dest_skills) + agent_surface_layout_reasons(root)
+        reasons = stale_reasons()
         if reasons:
             print("conformance assets are STALE:", file=sys.stderr)
             for r in reasons:
@@ -175,9 +186,10 @@ def main() -> int:
         return 0
 
     # Rebuild from scratch so a removed upstream file cannot linger.
-    reasons_before = is_stale(pairs, dest_skills) + agent_surface_layout_reasons(root)
-    if dest_skills.exists():
-        shutil.rmtree(dest_skills)
+    reasons_before = stale_reasons()
+    for dest_root in (dest_skills, dest_canonical):
+        if dest_root.exists():
+            shutil.rmtree(dest_root)
     for src, dest in skill_pairs:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)

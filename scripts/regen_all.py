@@ -193,7 +193,10 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
             tier=0,
             write_argv=(python, "scripts/regenerate_conformance_assets.py"),
             check_argv=(python, "scripts/regenerate_conformance_assets.py", "--check"),
-            writes=("crates/chelis-conformance/assets/skills/",),
+            writes=(
+                "crates/chelis-conformance/assets/skills/",
+                "crates/chelis-conformance/assets/canonical/",
+            ),
             needs="python",
         ),
         RegenLeg(

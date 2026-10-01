@@ -26,7 +26,6 @@ pub fn scaffold(root: &Path, name: &str, module_prefix: &str, version: &str) -> 
 
     write(root, "docs/CHELIS_SURFACE.md", &chelis_surface(version))?;
     write(root, "docs/UPSTREAM_BUGS.md", UPSTREAM_BUGS)?;
-    write(root, "docs/issue_drafts/README.md", ISSUE_DRAFTS_README)?;
 
     write(
         root,
@@ -94,11 +93,17 @@ pub(crate) fn apply_shell_local_exclusions(
     apply_heading_exclusions(upstream, selectors)
 }
 
-/// Apply standalone shell-owned heading exclusions to the canonical AGENTS.md
-/// body. Selectors live outside the managed block so sync can replace the
-/// entire upstream contract while preserving the shell's controls and prose.
-pub(crate) fn apply_agents_exclusions(upstream: &str, document: &str) -> Result<String, String> {
-    let shell_owned = match managed_block::find(document, "agents-inheritance") {
+/// Apply standalone shell-owned heading exclusions to the canonical body of
+/// the managed block `block_id` in `document` (the `agents-inheritance` block in
+/// `AGENTS.md`, the `chelis-surface` block in `docs/CHELIS_SURFACE.md`).
+/// Selectors live outside the managed block so sync can replace the entire
+/// upstream document while preserving the shell's controls and prose.
+pub(crate) fn apply_document_exclusions(
+    upstream: &str,
+    document: &str,
+    block_id: &str,
+) -> Result<String, String> {
+    let shell_owned = match managed_block::find(document, block_id) {
         Some(block) => format!("{}{}", &document[..block.span.0], &document[block.span.1..]),
         None => document.to_string(),
     };
@@ -191,7 +196,7 @@ fn apply_heading_exclusions(upstream: &str, selectors: Vec<&str>) -> Result<Stri
     Ok(filtered)
 }
 
-/// Parse the optional exclusion span used in shell-owned AGENTS.md text.
+/// Parse the optional exclusion span used in a document's shell-owned text.
 fn standalone_exclusion_selectors(document: &str) -> Result<Vec<&str>, String> {
     let begin_count = document.matches(SHELL_LOCAL_EXCLUDE_BEGIN).count();
     let end_count = document.matches(SHELL_LOCAL_EXCLUDE_END).count();
@@ -553,7 +558,7 @@ const RESTAMPED_ARTIFACTS: &[(&str, &str)] = &[
     ),
     (
         "docs/CHELIS_SURFACE.md",
-        "carries the `chelis-surface-header` managed block sync restamps",
+        "carries the `chelis-surface` managed block sync restamps",
     ),
 ];
 
@@ -646,42 +651,76 @@ pub fn preflight_failure_message(verb: &str, root: &Path, gaps: &[PreflightGap])
 }
 
 /// Regenerate every managed block in the shell's documents to `version` (the
-/// document half of `conform sync`). Only fenced regions are touched.
+/// document half of `conform sync`), and restore the `CLAUDE.md -> AGENTS.md`
+/// symlink. Only fenced regions are touched, so shell-owned text and exclusion
+/// selectors outside them survive.
 pub fn sync_managed_blocks(root: &Path, version: &str) -> Result<(), String> {
     // Render both documents before the first write. A malformed or stale
-    // AGENTS.md selector therefore cannot leave the surface document restamped.
+    // selector in either therefore cannot leave the other one restamped.
     let agents_path = root.join("AGENTS.md");
     let agents_existing = fs::read_to_string(&agents_path)
         .map_err(|e| format!("read {}: {e}", agents_path.display()))?;
-    let agents_canonical = canonical::body("agents-inheritance")
-        .ok_or_else(|| "no canonical body for block \"agents-inheritance\"".to_string())?;
-    let agents_body = apply_agents_exclusions(agents_canonical, &agents_existing)?;
-    let agents_updated = managed_block::upsert(
+    let agents_updated = render_inherited_document(
         &agents_existing,
         "agents-inheritance",
         version,
-        &agents_body,
         managed_block::Anchor::AfterHeading("## Repo Identity"),
-    );
+    )
+    .map_err(|why| format!("AGENTS.md: {why}"))?;
 
     let surface_path = root.join("docs/CHELIS_SURFACE.md");
     let surface_existing = fs::read_to_string(&surface_path)
         .map_err(|e| format!("read {}: {e}", surface_path.display()))?;
-    let surface_body = canonical::body("chelis-surface-header")
-        .ok_or_else(|| "no canonical body for block \"chelis-surface-header\"".to_string())?;
-    let surface_updated = managed_block::upsert(
-        &surface_existing,
-        "chelis-surface-header",
+    let surface_updated = render_inherited_document(
+        &replace_legacy_surface_header(&surface_existing),
+        "chelis-surface",
         version,
-        surface_body,
         managed_block::Anchor::Top,
-    );
+    )
+    .map_err(|why| format!("docs/CHELIS_SURFACE.md: {why}"))?;
 
     fs::write(&agents_path, agents_updated)
         .map_err(|e| format!("write {}: {e}", agents_path.display()))?;
     fs::write(&surface_path, surface_updated)
         .map_err(|e| format!("write {}: {e}", surface_path.display()))?;
-    Ok(())
+    symlink_file(root, "AGENTS.md", "CLAUDE.md")
+}
+
+/// `document` with its `block_id` managed block regenerated from the embedded
+/// canonical body, after the document's own exclusion selectors are applied.
+fn render_inherited_document(
+    document: &str,
+    block_id: &str,
+    version: &str,
+    anchor: managed_block::Anchor,
+) -> Result<String, String> {
+    let canonical = canonical::body(block_id)
+        .ok_or_else(|| format!("no canonical body for block {block_id:?}"))?;
+    let body = apply_document_exclusions(canonical, document, block_id)?;
+    Ok(managed_block::upsert(
+        document, block_id, version, &body, anchor,
+    ))
+}
+
+/// Turn the superseded `chelis-surface-header` block into an empty
+/// `chelis-surface` block at the same position, so the following upsert writes
+/// the complete surface guide where the old header stood instead of leaving the
+/// header behind with a stale stamp. A document that already carries a
+/// `chelis-surface` block keeps it, and the legacy block is simply dropped.
+fn replace_legacy_surface_header(document: &str) -> String {
+    let Some(legacy) = managed_block::find(document, canonical::LEGACY_SURFACE_HEADER) else {
+        return document.to_string();
+    };
+    let replacement = if managed_block::find(document, "chelis-surface").is_some() {
+        String::new()
+    } else {
+        managed_block::render("chelis-surface", &legacy.version, "")
+    };
+    format!(
+        "{}{replacement}{}",
+        &document[..legacy.span.0],
+        &document[legacy.span.1..]
+    )
 }
 
 // ---------------------------------------------------------------- templates
@@ -726,28 +765,20 @@ fn agents_md(name: &str, version: &str) -> String {
 }
 
 fn chelis_surface(version: &str) -> String {
-    let block = managed_block::render(
-        "chelis-surface-header",
+    managed_block::render(
+        "chelis-surface",
         version,
-        canonical::body("chelis-surface-header").expect("embedded canonical body"),
-    );
-    format!(
-        "# Chelis Capability Surface (this shell)\n\n\
-         {block}\n\
-         ## Capabilities\n\n\
-         | Capability | Status |\n\
-         |---|---|\n\
-         | (fill in the primitive/builtin families this shell's domain touches) | `@pin` |\n\
-         | (capabilities landing next bump) | `@upstream` |\n"
+        canonical::body("chelis-surface").expect("embedded canonical body"),
     )
 }
 
 const UPSTREAM_BUGS: &str = "# Upstream Bugs\n\n\
-    Track suspected chelis bugs and capability gaps here. File upstream and cite by\n\
-    `chelis#NNN` (never a prose name). Re-probe at every pin bump.\n\n\
+    Track suspected bugs and capability gaps in other Chelis-Lang repositories here.\n\
+    File each as an issue in the repository where it originates and cite it by number\n\
+    (`chelis#NNN`, or `<repo>#NNN` for a sibling shell), never by a prose name.\n\
+    Re-probe at every pin bump.\n\n\
     ## Actively blocking\n\n(none yet)\n\n\
     ## Tracking\n\n(none yet)\n\n\
-    ## Parked\n\n(none yet)\n\n\
     ## Archived\n\n(none yet)\n";
 
 /// Shell-driven scheduled bump PR. Detects a newer chelis release, runs
@@ -793,10 +824,6 @@ jobs:
             checklist (conform audit + blocked/negative probes); do not merge red.
           commit-message: "chore: bump chelis pin to ${{ steps.latest.outputs.version }}"
 "#;
-
-const ISSUE_DRAFTS_README: &str = "# Parked upstream issue drafts\n\n\
-    Ready-to-file `chelis#` drafts with their filing condition. Cite the draft path\n\
-    at the narrowing site until it is filed and gets a number.\n";
 
 const TESTS_BLOCKED_README: &str = "# Blocked-probe suite\n\n\
     One expected-to-fail reproducer per open upstream blocker\n\

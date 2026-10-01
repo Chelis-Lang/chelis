@@ -565,7 +565,7 @@ CLI test that cannot construct the unreachable cases.
 `chelis test <path> --expect neg|blocked` classifies each `.ch` file against
 its same-stem `.expect` sidecar. Line 1 pins the required diagnostic
 substring. `blocked` additionally requires an auditable citation
-(`chelis#NNN`, `docs/issue_drafts/`, or `docs/UPSTREAM_BUGS.md`). Each file is
+(`chelis#NNN` or `docs/UPSTREAM_BUGS.md`). Each file is
 isolated and yields one verdict record plus the final mode-specific summary.
 
 The expected-failure adapter consumes both ordinary failing `test_*` rows and

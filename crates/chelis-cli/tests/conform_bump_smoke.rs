@@ -36,6 +36,10 @@ fn conform_sync_help_explains_skill_additions_and_removals() {
             "complete pinned root Chelis contract",
         ))
         .stdout(predicate::str::contains(".claude/skills"))
+        .stdout(predicate::str::contains(
+            "complete pinned capability surface guide",
+        ))
+        .stdout(predicate::str::contains("CLAUDE.md -> AGENTS.md"))
         .stdout(predicate::str::contains("outside managed regions"))
         .stdout(predicate::str::contains("standalone Markdown comments"));
 
@@ -48,6 +52,7 @@ fn conform_sync_help_explains_skill_additions_and_removals() {
         .stdout(predicate::str::contains("excluded_skills"))
         .stdout(predicate::str::contains("shell-local:exclude"))
         .stdout(predicate::str::contains("complete pinned root contract"))
+        .stdout(predicate::str::contains("complete pinned surface guide"))
         .stdout(predicate::str::contains("symlink"))
         .stdout(predicate::str::contains("standalone Markdown comments"));
 }
@@ -87,6 +92,46 @@ fn conform_sync_applies_skill_additions_and_removals_together() {
     );
     assert!(!root.join(".claude/skills/cli-surface").exists());
     assert!(!root.join(".codex/skills/cli-surface").exists());
+    assert!(chelis_conformance::audit::audit(&root).ok());
+}
+
+/// chelis#2831: `conform sync` propagates the inherited agent surface in full.
+/// Starting from a shell with no `CLAUDE.md` and a surface doc that holds only
+/// shell-owned notes, sync writes the complete pinned surface guide in its
+/// managed block, keeps the notes, and restores the symlink.
+#[test]
+fn conform_sync_restores_the_surface_guide_and_claude_symlink() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("shell");
+    init_shell(&root);
+
+    std::fs::remove_file(root.join("CLAUDE.md")).unwrap();
+    let surface = root.join("docs/CHELIS_SURFACE.md");
+    let notes = "## Shell Domain Notes\nOnly shell-owned text here.\n";
+    std::fs::write(&surface, notes).unwrap();
+    assert!(!chelis_conformance::audit::audit(&root).ok());
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["reef", "conform", "sync", "--path"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let text = std::fs::read_to_string(&surface).unwrap();
+    let block = chelis_conformance::managed_block::find(&text, "chelis-surface")
+        .expect("sync writes the chelis-surface block");
+    assert_eq!(
+        chelis_conformance::managed_block::normalize_body(&block.body),
+        chelis_conformance::managed_block::normalize_body(
+            chelis_conformance::canonical::body("chelis-surface").unwrap()
+        )
+    );
+    assert!(text.contains(notes.trim()));
+    assert_eq!(
+        std::fs::read_link(root.join("CLAUDE.md")).unwrap(),
+        Path::new("AGENTS.md")
+    );
     assert!(chelis_conformance::audit::audit(&root).ok());
 }
 

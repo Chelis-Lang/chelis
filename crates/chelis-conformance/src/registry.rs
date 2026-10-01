@@ -178,8 +178,8 @@ pub const UPSTREAM_REPO: &str = "chelis";
 /// live and checkable as an upstream one. What the rule keeps out is a reference
 /// nobody can resolve without guessing: a bare `#NNN` (which tracker?) or an
 /// arbitrary repo name. Before this, a cascade wave forced shells to invent a
-/// `docs/issue_drafts/` file whose only content was a pointer at a sibling PR,
-/// which satisfied the grammar while defeating it.
+/// local file whose only content was a pointer at a sibling PR, which satisfied
+/// the grammar while defeating it.
 pub fn is_citable_repo(name: &str) -> bool {
     name == UPSTREAM_REPO || REGISTRY.iter().any(|s| s.name == name)
 }
