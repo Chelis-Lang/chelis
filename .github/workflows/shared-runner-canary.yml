@@ -27,4 +27,12 @@ jobs:
       - name: Check the canary contracts
         run: .venv/bin/python -m unittest scripts.test_shared_runner_canary
       - name: Check member cache writes and readback
+        env:
+          SHARED_CACHE_NIX_URL: ${{ vars.SHARED_CACHE_NIX_URL }}
+          SHARED_CACHE_KACHE_URL: ${{ vars.SHARED_CACHE_KACHE_URL }}
+          SHARED_CACHE_KACHE_BUCKET: ${{ vars.SHARED_CACHE_KACHE_BUCKET }}
+          SHARED_CACHE_KACHE_REGION: ${{ vars.SHARED_CACHE_KACHE_REGION }}
+          SHARED_CACHE_SIGNING_KEY_NAME: ${{ vars.SHARED_CACHE_SIGNING_KEY_NAME }}
+          SHARED_CACHE_PUBLIC_KEY: ${{ vars.SHARED_CACHE_PUBLIC_KEY }}
+          SHARED_RUNNER_INSTANCE_ID: ${{ vars.SHARED_RUNNER_INSTANCE_ID }}
         run: .venv/bin/python scripts/shared_runner_canary.py

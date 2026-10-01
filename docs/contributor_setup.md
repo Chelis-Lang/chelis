@@ -147,34 +147,7 @@ Devenv also provides `chelis-reap-orphans` for stale build processes,
 `chelis-z3-test` for the Linux solver gate, and `chelis-hip-test` for the
 Linux HIP manual gate.
 
-Devenv's shared Kache cache requires access to the trusted Tunnet mesh. When
-connected, supply the gateway's public placeholders:
-
-```sh
-export KACHE_S3_ACCESS_KEY=tunnet-anonymous
-export KACHE_S3_SECRET_KEY=tunnet-anonymous
-```
-
-These are not AWS credentials. Without mesh access, remote cache requests
-fall back to local compilation. For an offline shell, set `KACHE_CONFIG` to
-a separate config with `[cache] local_only = true` after activation. The
-[manual gates](manual_gates.md) document the Devenv and Kache smoke tests.
-
-## OpenSpec planning
-
-Planning documents live in the separate `Chelis-Lang/openspec` repository.
-Register its checkout once before validating a plan; the local `openspec/`
-directory only declares and pins that store:
-
-```sh
-git clone git@github.com:Chelis-Lang/openspec.git /absolute/path/to/openspec
-openspec store register /absolute/path/to/openspec --id chelis-plans --json
-openspec doctor --json
-```
-
-`openspec doctor` must identify `chelis-plans` as a declared store. Author
-planning changes in a dedicated worktree of that store, and validate there
-with `openspec validate chelis-<change> --strict --no-interactive`. The
-consumer's `openspec/store.lock.yaml` pins the revision used by CI; registration
-alone does not enforce it. The [agent contract](../AGENTS.md#openspec) owns
-the review order and document-only acceptance boundary.
+The tracked `.kache.toml` configures Kache, Devenv's compiler cache, as a local
+cache: it names no remote store, and its `ignore_env` setting stops environment
+variables from adding one. The [manual gates](manual_gates.md) document the
+Devenv and Kache smoke tests.

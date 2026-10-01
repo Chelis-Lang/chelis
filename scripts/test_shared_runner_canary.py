@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import json
 import os
@@ -19,6 +20,22 @@ from scripts import shared_runner_canary as canary
 SHA = "a" * 40
 STORE_PATH = "/nix/store/" + "a" * 32 + "-shared-runner-probe"
 NAR_HASH = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+INFRA = canary.Infrastructure(
+    nix_url="https://nix-cache.example.test",
+    kache_url="https://kache.example.test",
+    bucket="fixture-bucket",
+    region="xx-fixture-1",
+    signing_key="fixture-cache-1",
+    public_key="fixture-cache-1:" + base64.b64encode(bytes(32)).decode(),
+    instance_id="i-0123456789abcdef0",
+)
+
+
+def infrastructure_environment():
+    return {
+        name: getattr(INFRA, field)
+        for field, name in canary.INFRASTRUCTURE_VARIABLES.items()
+    }
 
 
 def environment():
@@ -80,6 +97,50 @@ class CanaryTests(unittest.TestCase):
             self.assertNotEqual(canary.main(), 0)
             probe.assert_not_called()
 
+    def test_infrastructure_is_parsed_from_the_environment(self):
+        self.assertEqual(
+            canary.Infrastructure.parse(infrastructure_environment()), INFRA
+        )
+
+    def test_missing_or_malformed_infrastructure_fails_closed(self):
+        for name in canary.INFRASTRUCTURE_VARIABLES.values():
+            with (
+                self.subTest(missing=name),
+                self.assertRaisesRegex(canary.ProbeError, "incomplete"),
+            ):
+                values = infrastructure_environment()
+                del values[name]
+                canary.Infrastructure.parse(values)
+        other_key = "other-cache-1:" + base64.b64encode(bytes(32)).decode()
+        for name, value in {
+            "SHARED_CACHE_NIX_URL": "http://nix-cache.example.test",
+            "SHARED_CACHE_KACHE_URL": "https://kache.example.test/path",
+            "SHARED_CACHE_KACHE_BUCKET": "Fixture_Bucket",
+            "SHARED_CACHE_KACHE_REGION": "fixture",
+            "SHARED_CACHE_SIGNING_KEY_NAME": "fixture cache",
+            "SHARED_CACHE_PUBLIC_KEY": other_key,
+            "SHARED_RUNNER_INSTANCE_ID": "host-1",
+        }.items():
+            with (
+                self.subTest(name=name, value=value),
+                self.assertRaises(canary.ProbeError),
+            ):
+                canary.Infrastructure.parse(infrastructure_environment() | {name: value})
+        short_key = "fixture-cache-1:" + base64.b64encode(bytes(16)).decode()
+        with self.assertRaises(canary.ProbeError):
+            canary.Infrastructure.parse(
+                infrastructure_environment() | {"SHARED_CACHE_PUBLIC_KEY": short_key}
+            )
+
+    def test_missing_infrastructure_stops_before_the_probe(self):
+        with (
+            patch.dict(canary.os.environ, environment(), clear=True),
+            patch.object(canary.sys, "argv", ["shared_runner_canary.py"]),
+            patch("scripts.shared_runner_canary.probe") as probe,
+        ):
+            self.assertNotEqual(canary.main(), 0)
+            probe.assert_not_called()
+
     def test_child_environment_cannot_inherit_credentials(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
@@ -93,19 +154,21 @@ class CanaryTests(unittest.TestCase):
                     "NIX_CONFIG": "require-sigs = false",
                 },
             ):
-                env = canary.child_environment(work)
+                env = canary.child_environment(work, INFRA)
             self.assertNotIn("sentinel", env.values())
             self.assertNotIn("NIX_CONFIG", env)
             self.assertNotIn("AWS_PROFILE", env)
             self.assertEqual(env["AWS_CONFIG_FILE"], "/dev/null")
             self.assertEqual(env["KACHE_S3_ACCESS_KEY"], "tunnet-member")
-            self.assertEqual(env["KACHE_S3_ENDPOINT"], "https://kache.mesh.cproof.ai")
+            self.assertEqual(env["KACHE_S3_ENDPOINT"], INFRA.kache_url)
+            self.assertEqual(env["KACHE_S3_BUCKET"], INFRA.bucket)
+            self.assertEqual(env["KACHE_S3_REGION"], INFRA.region)
 
     def test_nar_record_requires_valid_hash_and_exact_store_path(self):
         info = {
             STORE_PATH: {
                 "narHash": NAR_HASH,
-                "signatures": [canary.SIGNING_KEY + ":fixture"],
+                "signatures": [INFRA.signing_key + ":fixture"],
             }
         }
         self.assertEqual(
@@ -122,8 +185,8 @@ class CanaryTests(unittest.TestCase):
 
     def test_readback_requires_hash_parity_and_reviewed_signature(self):
         before = canary.NarRecord(NAR_HASH, ())
-        after = canary.NarRecord(NAR_HASH, (canary.SIGNING_KEY + ":fixture",))
-        canary.require_readback(before, after)
+        after = canary.NarRecord(NAR_HASH, (INFRA.signing_key + ":fixture",))
+        canary.require_readback(before, after, INFRA.signing_key)
         for invalid in (
             canary.NarRecord(NAR_HASH, ()),
             canary.NarRecord(
@@ -132,7 +195,7 @@ class CanaryTests(unittest.TestCase):
             canary.NarRecord(NAR_HASH, ("other:fixture",)),
         ):
             with self.assertRaises(canary.ProbeError):
-                canary.require_readback(before, invalid)
+                canary.require_readback(before, invalid, INFRA.signing_key)
 
     def test_entry_inventory_is_nonempty_and_detects_changed_bytes(self):
         with tempfile.TemporaryDirectory() as root:
@@ -185,14 +248,15 @@ class CanaryTests(unittest.TestCase):
             "/nix/store/" + "a" * 32 + "-nixos-system-chelis-ci-warm-amazon-fixture"
         )
         self.assertEqual(
-            canary.Host.parse("i-0f07f7850a4551b01", system).system, system
+            canary.Host.parse(INFRA.instance_id, system, INFRA.instance_id).system,
+            system,
         )
         for instance, path in (
-            ("i-0c39d151b53a7698e", system),
-            ("i-0f07f7850a4551b01", "/tmp/system"),
+            ("i-0fedcba9876543210", system),
+            (INFRA.instance_id, "/tmp/system"),
         ):
             with self.assertRaises(canary.ProbeError):
-                canary.Host.parse(instance, path)
+                canary.Host.parse(instance, path, INFRA.instance_id)
 
     def test_nix_orchestration_requires_tokenless_push_and_checked_readback(self):
         before = json.dumps({STORE_PATH: {"narHash": NAR_HASH, "signatures": []}})
@@ -200,7 +264,7 @@ class CanaryTests(unittest.TestCase):
             {
                 STORE_PATH: {
                     "narHash": NAR_HASH,
-                    "signatures": [canary.SIGNING_KEY + ":fixture"],
+                    "signatures": [INFRA.signing_key + ":fixture"],
                 }
             }
         )
@@ -215,14 +279,14 @@ class CanaryTests(unittest.TestCase):
                 work = Path(directory)
                 if accepted:
                     receipt = canary.nix_probe(
-                        "123-1-abc", canary.child_environment(work), work
+                        "123-1-abc", canary.child_environment(work, INFRA), work, INFRA
                     )
                     self.assertTrue(receipt["readback_hash_identical"])
                     push = run.call_args_list[2].args[0]
                     self.assertIn("--tunnet", push)
                     self.assertNotIn("--auth-token-script", push)
                     copied = run.call_args_list[3].args[0]
-                    self.assertIn(canary.PUBLIC_KEY, copied)
+                    self.assertIn(INFRA.public_key, copied)
                     self.assertNotIn("--no-check-sigs", copied)
                     self.assertIn("require-sigs", copied)
                     verified = run.call_args_list[4].args[0]
@@ -238,7 +302,7 @@ class CanaryTests(unittest.TestCase):
                             "1",
                             "--option",
                             "trusted-public-keys",
-                            canary.PUBLIC_KEY,
+                            INFRA.public_key,
                             "--option",
                             "substituters",
                             "",
@@ -252,7 +316,10 @@ class CanaryTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(canary.ProbeError, "signature"):
                         canary.nix_probe(
-                            "123-1-abc", canary.child_environment(work), work
+                            "123-1-abc",
+                            canary.child_environment(work, INFRA),
+                            work,
+                            INFRA,
                         )
 
     def test_failed_signature_verification_cannot_emit_success(self):
@@ -260,7 +327,7 @@ class CanaryTests(unittest.TestCase):
             {
                 STORE_PATH: {
                     "narHash": NAR_HASH,
-                    "signatures": [canary.SIGNING_KEY + ":forged"],
+                    "signatures": [INFRA.signing_key + ":forged"],
                 }
             }
         )
@@ -285,7 +352,9 @@ class CanaryTests(unittest.TestCase):
         ):
             work = Path(directory)
             with self.assertRaisesRegex(canary.ProbeError, "signature verification"):
-                canary.nix_probe("123-1-abc", canary.child_environment(work), work)
+                canary.nix_probe(
+                    "123-1-abc", canary.child_environment(work, INFRA), work, INFRA
+                )
         self.assertEqual(operations[-1], "Nix signature verification")
         self.assertNotIn("Nix readback metadata", operations)
 
@@ -340,12 +409,18 @@ class CanaryTests(unittest.TestCase):
                             canary.ProbeError, "restored cache bytes"
                         ):
                             canary.kache_probe(
-                                "123-1-abc", canary.child_environment(work), work
+                                "123-1-abc",
+                                canary.child_environment(work, INFRA),
+                                work,
+                                INFRA,
                             )
                         self.assertNotIn("second Rust build", operations)
                     else:
                         receipt = canary.kache_probe(
-                            "123-1-abc", canary.child_environment(work), work
+                            "123-1-abc",
+                            canary.child_environment(work, INFRA),
+                            work,
+                            INFRA,
                         )
                         self.assertEqual(receipt["local_hits"], 1)
                         self.assertEqual(
@@ -399,6 +474,8 @@ class CanaryTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("github.event.repository.private", workflow)
         self.assertIn(".venv/bin/python scripts/shared_runner_canary.py", workflow)
+        for name in canary.INFRASTRUCTURE_VARIABLES.values():
+            self.assertIn(f"{name}: ${{{{ vars.{name} }}}}", workflow)
         for denied in (
             "secrets.",
             "id-token:",
@@ -461,7 +538,7 @@ class NixSignatureTests(unittest.TestCase):
                     "key",
                     "generate-secret",
                     "--key-name",
-                    canary.SIGNING_KEY,
+                    INFRA.signing_key,
                 ]
             )
         )
@@ -533,12 +610,13 @@ class NixSignatureTests(unittest.TestCase):
         work.mkdir()
         with (
             patch.object(canary, "BIN", Path(self.nix).parent),
-            patch.object(canary, "NIX_URL", self.cache.as_uri()),
-            patch.object(canary, "PUBLIC_KEY", self.public_key),
             patch.object(canary, "probe_expression", return_value="fixture"),
             patch.object(canary, "run", side_effect=run),
         ):
-            return canary.nix_probe("123-1-abc", self.env, work)
+            infra = dataclasses.replace(
+                INFRA, nix_url=self.cache.as_uri(), public_key=self.public_key
+            )
+            return canary.nix_probe("123-1-abc", self.env, work, infra)
 
     def test_real_reviewed_signature_passes_before_receipt(self):
         receipt = self.exercise()
@@ -554,7 +632,7 @@ class NixSignatureTests(unittest.TestCase):
 
     def test_forged_signature_with_reviewed_name_is_rejected(self):
         forged = base64.b64encode(b"A" * 64).decode()
-        self.info.write_text(self.unsigned + f"Sig: {canary.SIGNING_KEY}:{forged}\n")
+        self.info.write_text(self.unsigned + f"Sig: {INFRA.signing_key}:{forged}\n")
         with self.assertRaisesRegex(canary.ProbeError, "signature verification"):
             self.exercise()
         self.assertEqual(self.operations[-1], "Nix signature verification")
@@ -573,7 +651,7 @@ class NixSignatureTests(unittest.TestCase):
                 "key",
                 "generate-secret",
                 "--key-name",
-                canary.SIGNING_KEY,
+                INFRA.signing_key,
             ]
         )
         self.public_key = (

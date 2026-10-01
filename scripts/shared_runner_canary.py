@@ -19,11 +19,6 @@ import time
 from uuid import uuid4
 
 BIN = Path("/run/current-system/sw/bin")
-NIX_URL = "https://cache.mesh.cproof.ai"
-KACHE_URL = "https://kache.mesh.cproof.ai"
-BUCKET = "sand-dollar-kache-production-010928226848"
-SIGNING_KEY = "sand-dollar-niks3"
-PUBLIC_KEY = "sand-dollar-niks3:NIdyQjpputnL1N5Utmm+4ve1/ugXmLLB6RSN1xnzBtI="
 STORE_PATH = re.compile(
     r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._-]{1,160}"
 )
@@ -110,6 +105,73 @@ class Job:
         return cls(run_id, attempt, sha, temp)
 
 
+# The cache endpoints and host identity are deployment configuration, not
+# source: the workflow supplies them from repository variables. No default
+# exists, so a missing or malformed value fails before any probe runs.
+INFRASTRUCTURE_VARIABLES = {
+    "nix_url": "SHARED_CACHE_NIX_URL",
+    "kache_url": "SHARED_CACHE_KACHE_URL",
+    "bucket": "SHARED_CACHE_KACHE_BUCKET",
+    "region": "SHARED_CACHE_KACHE_REGION",
+    "signing_key": "SHARED_CACHE_SIGNING_KEY_NAME",
+    "public_key": "SHARED_CACHE_PUBLIC_KEY",
+    "instance_id": "SHARED_RUNNER_INSTANCE_ID",
+}
+
+
+@dataclass(frozen=True)
+class Infrastructure:
+    nix_url: str
+    kache_url: str
+    bucket: str
+    region: str
+    signing_key: str
+    public_key: str
+    instance_id: str
+
+    @classmethod
+    def parse(cls, env: dict[str, str]) -> Infrastructure:
+        values = {
+            field: env.get(name, "") for field, name in INFRASTRUCTURE_VARIABLES.items()
+        }
+        require(
+            all(values.values()), "The shared cache configuration is incomplete."
+        )
+        for field in ("nix_url", "kache_url"):
+            require(
+                re.fullmatch(r"https://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?", values[field])
+                is not None,
+                "A shared cache endpoint is invalid.",
+            )
+        require(
+            re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", values["bucket"])
+            is not None,
+            "The shared cache bucket is invalid.",
+        )
+        require(
+            re.fullmatch(r"[a-z]{2}(-[a-z]+)+-[0-9]", values["region"]) is not None,
+            "The shared cache region is invalid.",
+        )
+        require(
+            re.fullmatch(r"[A-Za-z0-9._-]{1,64}", values["signing_key"]) is not None,
+            "The shared cache signing key name is invalid.",
+        )
+        name, _, key = values["public_key"].partition(":")
+        try:
+            raw = base64.b64decode(key, validate=True)
+        except ValueError:
+            raw = b""
+        require(
+            name == values["signing_key"] and len(raw) == 32,
+            "The shared cache public key is invalid.",
+        )
+        require(
+            re.fullmatch(r"i-[0-9a-f]{8,17}", values["instance_id"]) is not None,
+            "The runner instance identifier is invalid.",
+        )
+        return cls(**values)
+
+
 @dataclass(frozen=True)
 class NarRecord:
     nar_hash: str
@@ -155,11 +217,11 @@ class NarRecord:
         return cls(nar_hash, tuple(signatures))
 
 
-def require_readback(before: NarRecord, after: NarRecord) -> None:
+def require_readback(before: NarRecord, after: NarRecord, signing_key: str) -> None:
     require(before.nar_hash == after.nar_hash, "The Nix readback hash differs.")
     # Metadata is not signature proof. nix_probe requires Nix verification first.
     require(
-        any(item.startswith(SIGNING_KEY + ":") for item in after.signatures),
+        any(item.startswith(signing_key + ":") for item in after.signatures),
         "The Nix readback lacks the reviewed signature.",
     )
 
@@ -170,9 +232,9 @@ class Host:
     system: str
 
     @classmethod
-    def parse(cls, instance: str, system: str) -> Host:
+    def parse(cls, instance: str, system: str, expected_instance: str) -> Host:
         require(
-            instance == "i-0f07f7850a4551b01", "The canary is on another EC2 instance."
+            instance == expected_instance, "The canary is on another EC2 instance."
         )
         require(
             re.fullmatch(
@@ -185,17 +247,17 @@ class Host:
         return cls(instance, system)
 
 
-def host_identity() -> Host:
+def host_identity(expected_instance: str) -> Host:
     instance = Path("/sys/devices/virtual/dmi/id/board_asset_tag").read_text().strip()
     system = Path("/run/current-system").resolve(strict=True)
     require(
         system == Path("/nix/var/nix/profiles/system").resolve(strict=True),
         "The active system differs from the boot profile.",
     )
-    return Host.parse(instance, str(system))
+    return Host.parse(instance, str(system), expected_instance)
 
 
-def child_environment(work: Path) -> dict[str, str]:
+def child_environment(work: Path, infra: Infrastructure) -> dict[str, str]:
     return {
         "PATH": str(BIN),
         "HOME": str(work / "home"),
@@ -215,9 +277,9 @@ def child_environment(work: Path) -> dict[str, str]:
         "KACHE_CONFIG": str(work / "kache.toml"),
         "KACHE_EVENT_ROOT": str(work / "project"),
         "KACHE_DAEMON_IDLE_TIMEOUT": "0",
-        "KACHE_S3_ENDPOINT": KACHE_URL,
-        "KACHE_S3_BUCKET": BUCKET,
-        "KACHE_S3_REGION": "us-east-2",
+        "KACHE_S3_ENDPOINT": infra.kache_url,
+        "KACHE_S3_BUCKET": infra.bucket,
+        "KACHE_S3_REGION": infra.region,
         "KACHE_S3_PREFIX": "",
         "KACHE_S3_ACCESS_KEY": "tunnet-member",
         "KACHE_S3_SECRET_KEY": "tunnet-member",
@@ -281,7 +343,9 @@ def probe_expression(identity: str, python: str) -> str:
     )
 
 
-def nix_probe(identity: str, env: dict[str, str], work: Path) -> dict:
+def nix_probe(
+    identity: str, env: dict[str, str], work: Path, infra: Infrastructure
+) -> dict:
     expression = probe_expression(
         identity, str(Path(sys.executable).resolve(strict=True))
     )
@@ -300,7 +364,7 @@ def nix_probe(identity: str, env: dict[str, str], work: Path) -> dict:
         path,
     )
     run(
-        [str(BIN / "niks3"), "push", "--server-url", NIX_URL, "--tunnet", path],
+        [str(BIN / "niks3"), "push", "--server-url", infra.nix_url, "--tunnet", path],
         env,
         work,
         "Nix upload",
@@ -313,7 +377,7 @@ def nix_probe(identity: str, env: dict[str, str], work: Path) -> dict:
             str(BIN / "nix"),
             "copy",
             "--from",
-            NIX_URL,
+            infra.nix_url,
             "--to",
             store,
             "--option",
@@ -321,7 +385,7 @@ def nix_probe(identity: str, env: dict[str, str], work: Path) -> dict:
             "true",
             "--option",
             "trusted-public-keys",
-            PUBLIC_KEY,
+            infra.public_key,
             path,
         ],
         env,
@@ -339,7 +403,7 @@ def nix_probe(identity: str, env: dict[str, str], work: Path) -> dict:
             "1",
             "--option",
             "trusted-public-keys",
-            PUBLIC_KEY,
+            infra.public_key,
             "--option",
             "substituters",
             "",
@@ -361,15 +425,15 @@ def nix_probe(identity: str, env: dict[str, str], work: Path) -> dict:
         ),
         path,
     )
-    require_readback(before, after)
+    require_readback(before, after, infra.signing_key)
     return {
-        "endpoint": NIX_URL,
+        "endpoint": infra.nix_url,
         "path": path,
         "nar_hash": after.nar_hash,
         "without_bearer": True,
         "readback_hash_identical": True,
         "signature_checked_by_nix": True,
-        "signing_key": SIGNING_KEY,
+        "signing_key": infra.signing_key,
     }
 
 
@@ -483,19 +547,23 @@ class Daemon:
             self.log = None
 
 
-def kache_config(*, local_only: bool) -> str:
+def kache_config(infra: Infrastructure, *, local_only: bool) -> str:
     return (
         "[cache]\nignore_env = true\nlocal_only = "
         + str(local_only).lower()
         + '\n\n[cache.remote]\ntype = "s3"\nbucket = "'
-        + BUCKET
-        + '"\nregion = "us-east-2"\nprefix = ""\nendpoint = "'
-        + KACHE_URL
+        + infra.bucket
+        + '"\nregion = "'
+        + infra.region
+        + '"\nprefix = ""\nendpoint = "'
+        + infra.kache_url
         + '"\n'
     )
 
 
-def kache_probe(identity: str, env: dict[str, str], work: Path) -> dict:
+def kache_probe(
+    identity: str, env: dict[str, str], work: Path, infra: Infrastructure
+) -> dict:
     crate = "shared_runner_" + identity.replace("-", "_")
     project, cache = work / "project", work / "cache"
     (project / "src").mkdir(parents=True, mode=0o700)
@@ -505,7 +573,7 @@ def kache_probe(identity: str, env: dict[str, str], work: Path) -> dict:
     (project / "src/lib.rs").write_text(
         "pub fn probe() -> &'static str { \"" + identity + '" }\n'
     )
-    (work / "kache.toml").write_text(kache_config(local_only=False))
+    (work / "kache.toml").write_text(kache_config(infra, local_only=False))
     daemon = Daemon(env, project, work)
     try:
         daemon.start()
@@ -530,7 +598,7 @@ def kache_probe(identity: str, env: dict[str, str], work: Path) -> dict:
         )
         require(entry_digests(cache) == before, "The restored cache bytes differ.")
         # Local-only compilation proves reuse of the pulled bytes, not a remote fallback.
-        (work / "kache.toml").write_text(kache_config(local_only=True))
+        (work / "kache.toml").write_text(kache_config(infra, local_only=True))
         daemon = Daemon(env, project, work)
         daemon.start()
         run(
@@ -563,8 +631,8 @@ def kache_probe(identity: str, env: dict[str, str], work: Path) -> dict:
         require(hits is not None, "The Kache probe did not produce a local cache hit.")
         daemon.stop()
         return {
-            "endpoint": KACHE_URL,
-            "bucket": BUCKET,
+            "endpoint": infra.kache_url,
+            "bucket": infra.bucket,
             "crate": crate,
             "entry_digests": before,
             "without_aws_credentials": True,
@@ -577,7 +645,7 @@ def kache_probe(identity: str, env: dict[str, str], work: Path) -> dict:
         daemon.stop()
 
 
-def probe(job: Job) -> dict:
+def probe(job: Job, infra: Infrastructure) -> dict:
     require(
         platform.system() == "Linux" and platform.machine() == "x86_64",
         "The canary requires the Linux x64 host.",
@@ -596,7 +664,7 @@ def probe(job: Job) -> dict:
         "kache-daemon",
     ):
         require(os.access(BIN / tool, os.X_OK), "A reviewed host tool is absent.")
-    host = host_identity()
+    host = host_identity(infra.instance_id)
     identity = f"{job.run_id}-{job.attempt}-{uuid4().hex}"
     with tempfile.TemporaryDirectory(
         prefix="shared-runner-", dir=job.temp
@@ -604,9 +672,9 @@ def probe(job: Job) -> dict:
         work = Path(directory)
         for name in ("home", "config", "xdg-cache", "runtime", "cargo", "cache"):
             (work / name).mkdir(mode=0o700)
-        env = child_environment(work)
-        nix = nix_probe(identity, env, work)
-        kache = kache_probe(identity, env, work)
+        env = child_environment(work, infra)
+        nix = nix_probe(identity, env, work, infra)
+        kache = kache_probe(identity, env, work, infra)
         return {
             "schema": "chelis-shared-runner-canary/v1",
             "result": "pass",
@@ -628,7 +696,8 @@ def main() -> int:
     try:
         require(len(sys.argv) == 1, "The canary accepts no arguments.")
         job = Job.parse(dict(os.environ))
-        receipt = probe(job)
+        infra = Infrastructure.parse(dict(os.environ))
+        receipt = probe(job, infra)
         encoded = json.dumps(receipt, indent=2, sort_keys=True)
         with (job.temp / "shared-runner-canary.json").open(
             "x", encoding="utf-8"
