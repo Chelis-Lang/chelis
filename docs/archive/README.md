@@ -12,9 +12,7 @@ the project as it was when written, not current behavior. The numbered chapters 
 - Historical plans: [July execution](chelis_plan_execution.md) and [completed maintenance schedule](maintenance_schedule.md); current sequence is in [`chelis_project_plan.md`](../../spec/design/chelis_project_plan.md).
 - [Phase 1e benchmark capture](perf/phase1e/RESULTS.md) — point-in-time comparison.
 - [Retired mascot](mascot/README.md): replaced by the line art in [`docs/assets/brand/`](../assets/brand/).
-- [Phase oracle index](phase_oracles.md) — the per-phase acceptance commands as recorded during development; live manual gates are in [`manual_gates.md`](../manual_gates.md).
-- [Agent quality architecture](agent_quality_architecture.md) — July 2026 guidance on enforcement rungs for agent-written changes.
 
-Other archives: [`investigations/`](investigations/README.md) (resolved bug diagnoses and review notes), `perf/` (dated performance reports, including the retired [performance baseline](perf/perf_baseline.md)), `rca/` (incident analysis),
+Other archives: [`investigations/`](investigations/README.md) (resolved bug diagnoses and review notes), `perf/` (dated performance reports), `rca/` (incident analysis),
 `red-team/` (review records), `reports/` (one-off reports), `snapshots/`
 (repository archaeology), and `mascot/` (retired art).

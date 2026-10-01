@@ -467,7 +467,7 @@ fn bare_atom_expression_position_scores_below_one() {
 ///
 /// `bare_atom_expression_position_scores_below_one` above is the check-rung
 /// guard (score < 1.0). The #885 domain split moved the defect class up the
-/// `docs/archive/agent_quality_architecture.md` ladder: a bare atom in expression
+/// `docs/agent_quality_architecture.md` ladder: a bare atom in expression
 /// position is an INGRESS rejection (`spec/03-deep-syntax.md` [03-ROLE-2]
 /// for a bare identifier; the §8.1 metadata-key rule for a bare `:keyword`),
 /// identified per [03-PROG-2] discipline. Every member must exit 2 with the

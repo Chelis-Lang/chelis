@@ -1447,8 +1447,8 @@ class ManifestTests(unittest.TestCase):
             self.assertNotIn(banned, source)
 
     def test_phase_index_names_the_authoritative_continuous_command(self) -> None:
-        design = (REPO_ROOT / "spec/design/runtime_representation.md").read_text(encoding="utf-8")
-        self.assertIn("scripts/runtime_representation_oracle.py --phase 0", design)
+        index = (REPO_ROOT / "docs/phase_oracles.md").read_text(encoding="utf-8")
+        self.assertIn("scripts/runtime_representation_oracle.py --phase 0", index)
         self.assertIn("RUNTIME REPRESENTATION PHASE 0: PASS", Path(oracle.__file__).read_text())
 
     @mock.patch("runtime_representation_oracle.subprocess.run")

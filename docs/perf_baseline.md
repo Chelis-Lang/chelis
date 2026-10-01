@@ -1,13 +1,13 @@
 # Performance Baseline
 
 This is the current active index for performance baselines and manual performance gates.
-Detailed point-in-time measurements live under [`archive/perf/`](./).
+Detailed point-in-time measurements live under [`archive/perf/`](archive/perf/).
 
 ## Phase J Compiled Artifact Caching
 
-Current historical baseline: [`archive/perf/perf_baseline_phase_j.md`](perf_baseline_phase_j.md).
+Current historical baseline: [`archive/perf/perf_baseline_phase_j.md`](archive/perf/perf_baseline_phase_j.md).
 
-Investigation detail: [`archive/perf/perf_baseline_investigation.md`](perf_baseline_investigation.md).
+Investigation detail: [`archive/perf/perf_baseline_investigation.md`](archive/perf/perf_baseline_investigation.md).
 
 Summary of the Phase J measurement:
 
@@ -19,7 +19,7 @@ Summary of the Phase J measurement:
   plus compiled-context serialization and decode overhead.
 
 The reproducible manual gate remains `phase4_perf_baseline` in
-[`manual_gates.md`](../../manual_gates.md). Update this file only with concise current status;
+[`manual_gates.md`](manual_gates.md). Update this file only with concise current status;
 move long dated measurement logs into `archive/perf/`.
 
 ## Node-Local Test Parallelism
@@ -50,7 +50,7 @@ After a property verdict, `chelis prove` checks every declaration in the
 selected entry module and follows linker-resolved references transitively.
 Unreachable declarations elsewhere in an installed shell are not rechecked.
 The manual Shoals cold/warm oracle is recorded in
-[`manual_gates.md`](../../manual_gates.md).
+[`manual_gates.md`](manual_gates.md).
 
 On 2026-07-30, the final development binary for the chelis#924 change
 (including complete source-inventory and mutation-race hardening) completed

@@ -11,7 +11,7 @@ precise, and the original tool of the trade.
 SDE / Monte Carlo / yield curve lowering).
 
 **Status:** Planned for Phase 3 as sub-phases `3n` (Part A) and `3o` (Part B), with
-document ingestion parked as a post-Phase-3 stub. See `archive/phase3n_octant.md` for the
+document ingestion parked as a post-Phase-3 stub. See `phase3n_octant.md` for the
 executable sub-phase plan.
 
 ---
@@ -381,7 +381,7 @@ Rationale for the split:
   expression subset, and no Phase 3 user workflow depends on it.
 
 The executable sub-phase contracts (acceptance oracles, test plans, non-silent
-deferrals, infrastructure decisions) live in `archive/phase3n_octant.md`.
+deferrals, infrastructure decisions) live in `phase3n_octant.md`.
 
 ---
 
@@ -392,7 +392,7 @@ deferrals, infrastructure decisions) live in `archive/phase3n_octant.md`.
    (like potential future nalgebra), (c) existing Rust LaTeX parser crate (for
    example `pulldown-latex`, `latex2mathml` internals). Option (c) is pragmatic
    for `3n`; option (a) is the long-term if Chelis's string processing matures
-   enough. This decision is owned by `archive/phase3n_octant.md` and must be confirmed
+   enough. This decision is owned by `phase3n_octant.md` and must be confirmed
    with the user before `3n` coding starts.
 
 2. **How does LLM-assisted lowering integrate?** The coding model needs to see

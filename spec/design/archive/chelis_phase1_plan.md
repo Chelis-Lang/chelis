@@ -1,7 +1,7 @@
 # Phase 1: Futhark-Style GPU Backend — Expanded Plan
 
 Historical plan only. Current backend gates are indexed in
-[`docs/archive/phase_oracles.md`](../../../docs/archive/phase_oracles.md); the Phase 1e
+[`docs/phase_oracles.md`](../../../docs/phase_oracles.md); the Phase 1e
 fixed-workload runner has been retired.
 
 ## Context

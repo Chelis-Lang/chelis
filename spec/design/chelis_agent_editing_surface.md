@@ -154,7 +154,7 @@ The L0 tool sits on language and compiler invariants that must fail closed:
   If idiomatic decompile output cannot parse or format, that is a
   decompiler-vs-formatter divergence to fix, not a documentation fallback.
 
-**Acceptance oracle:** see `docs/archive/phase_oracles.md` for the Deep substrate
+**Acceptance oracle:** see `docs/phase_oracles.md` for the Deep substrate
 hardening campaign row.
 
 ---

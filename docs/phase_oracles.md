@@ -16,7 +16,7 @@ Status legend:
   daily at 03:17 UTC or by manual dispatch. Its combined workspace/dtype pass
   includes all non-ignored default-feature tests, including those also run on PRs.
 - **manual gate** — requires `#[ignore]` plus a documented prerequisite; see
-  [`manual_gates.md`](../manual_gates.md)
+  [`manual_gates.md`](manual_gates.md)
 - **dedicated nightly gate** — runs as its own extended-validation worker; its
   result feeds the nightly failure report, not a required PR status context
 - **aspirational** — oracle is named in the owning spec but not yet implemented as
@@ -40,7 +40,7 @@ Status legend:
 
 | Phase | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
-| 1a | `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/archive/phase1a_kernel_codegen.md` §Acceptance Oracle | manual gate (HIP hardware; locally runnable per [`local_hip_environment.md`](../local_hip_environment.md)) |
+| 1a | `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/archive/phase1a_kernel_codegen.md` §Acceptance Oracle | manual gate (HIP hardware; locally runnable per [`local_hip_environment.md`](local_hip_environment.md)) |
 | 1b | `cargo test --workspace` (plus rerun the 1a HIP manual oracle) | `spec/design/phase1b_fusion.md` §Acceptance Oracle | default gate (with HIP rerun as supplement) |
 | 1c | `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/phase1c_memory_planning.md` §Acceptance Oracle | manual gate (HIP hardware) |
 | 1d | `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/phase1d_flattening.md` §Acceptance Oracle | manual gate (HIP hardware) |
@@ -79,8 +79,8 @@ Status legend:
 | 3k | `cargo test -p chelis-cli --test coral_prerequisites -- --ignored --nocapture` | `spec/design/chelis_phase3_plan.md` §3k Acceptance Oracle | manual gate (Coral prerequisite/regression acceptance); downstream Coral-owned oracle still future work |
 | 3l | `cargo test -p chelis-cli --test shoals_oracle phase3l_shoals_oracle -- --ignored --exact --nocapture` | `spec/design/chelis_phase3_plan.md` §3l Acceptance Oracle | manual gate (Shoals finance oracle; ~5 minutes locally). Focused grad-property lower/type-check smoke: `cargo test -p chelis-cli --test shoals_oracle phase3l_shoals_oracle_grad_greeks_match_analytic -- --ignored --exact --nocapture` |
 | 3m | `cargo test -p chelis-cli phase3m_rust_runtime_acceptance_oracle -- --nocapture` | `spec/design/phase3m_rust_runtime_rewrite.md` §Acceptance Oracle | default gate (HIP variant `phase3m_rust_runtime_hip_manual_gate` is `#[ignore]`d) |
-| 3n | `cargo test -p chelis-cli phase3n_octant_oracle -- --exact` | `spec/design/archive/phase3n_octant.md` §1.5 Acceptance oracle | aspirational (named, not yet implemented) |
-| 3o | `cargo test -p chelis-cli phase3o_octant_oracle -- --exact` | `spec/design/archive/phase3n_octant.md` §2.5 Acceptance oracle | aspirational (named, not yet implemented) |
+| 3n | `cargo test -p chelis-cli phase3n_octant_oracle -- --exact` | `spec/design/phase3n_octant.md` §1.5 Acceptance oracle | aspirational (named, not yet implemented) |
+| 3o | `cargo test -p chelis-cli phase3o_octant_oracle -- --exact` | `spec/design/phase3n_octant.md` §2.5 Acceptance oracle | aspirational (named, not yet implemented) |
 | 3t | `chelis test tests/` exits 0 on the migrated Nautilus and Coral test suites; `parity/run_parity.py` continues to pass for the scipy/pandas comparison subset (in-repo: `test_command_smoke.rs` covers the default smoke path; exhaustive Std.Test, Decimal fence, build-path, and pseudo-Nautilus suites are manual gates) | `spec/design/chelis_phase3_plan.md` §3t Acceptance Oracle + `chelis_native_testing_plan.md` | default gate (smoke) + manual gates (exhaustive/std/pseudo suites) + aspirational (downstream test migration) |
 
 ## Cross-Phase Closure Campaigns
@@ -90,7 +90,7 @@ Status legend:
 | Runtime representation hardening · Phase 0 | `uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0` | `spec/design/runtime_representation.md` §Phase 0 | delivered and directly runnable; inherited by the later composites |
 | Runtime representation hardening · Phase 1 | `uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 1` | `spec/design/runtime_representation.md` §Phase 1 | delivered and inherited by Phase 2; Phase 0 inventory/mutations plus frozen host/C execution receipts |
 | Runtime representation hardening · Phase 2 | `uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 2` | `spec/design/runtime_representation.md` §Phase 2 | dedicated nightly gate under the stable `runtime-representation-phase0-oracle` job identity; runs Phase 1 first, then frozen generated-ABI, metadata-plan, HIP owner, Python/DLPack, hermetic HIP-header census, and Metal enrollment receipts; needs `clang` on PATH |
-| Runtime bundle identity (#1354) | `.venv/bin/python scripts/runtime_bundle_oracle.py` from a clean committed head; inspect `target/runtime-bundle/receipt.json` for every mandatory row and the tested SHA | `spec/08-backends.md` §2.1 and `spec/11-ffi.md` §2 | manual exact-head integration gate (CLI/Python native calls, mutations, sealed Nix packages, wheel, and source-free relocation); PR `script-unit` runs only its stdlib contract tests. HIP/Metal device execution remains separate in [`manual_gates.md`](../manual_gates.md); rerun this full command on final merged `main` before closure. |
+| Runtime bundle identity (#1354) | `.venv/bin/python scripts/runtime_bundle_oracle.py` from a clean committed head; inspect `target/runtime-bundle/receipt.json` for every mandatory row and the tested SHA | `spec/08-backends.md` §2.1 and `spec/11-ffi.md` §2 | manual exact-head integration gate (CLI/Python native calls, mutations, sealed Nix packages, wheel, and source-free relocation); PR `script-unit` runs only its stdlib contract tests. HIP/Metal device execution remains separate in [`manual_gates.md`](manual_gates.md); rerun this full command on final merged `main` before closure. |
 | Integer dtype spelling migration | `.venv/bin/python scripts/integer_dtype_spelling_oracle.py` (final line `INTEGER DTYPE SPELLING ORACLE: PASS`) | `spec/design/archive/integer_dtype_spelling.md` | delivered and locally runnable; canonical Surf/Deep, explicit v0.18 migrations, corpus closure, and unchanged external interchange vocabulary |
 | Deep substrate handover | `cargo test -p chelis-compiler-api --test deep_authoring` + `cargo test -p chelis-tide --test mcp replace_function_body` + `cargo test -p chelis-tide --test mcp add_function` + `cargo test -p chelis-tide --test api replace_function_body` + `cargo test -p chelis-tide --test api add_function` + `cargo test -p chelis-types duplicate_defsig` + `cargo test -p chelis-validate duplicate_defsig` + `cargo test -p chelis-cli --test surf_round_trip` | `spec/design/chelis_agent_editing_surface.md` | default gate |
 | Deep authoring L2 query/cascade + `.dp` SMT parity | `cargo test -p chelis-deep --test authoring` + `cargo test -p chelis-compiler-api --test deep_authoring` + `cargo test -p chelis-tide --test mcp deep_query_and_rename_tools_are_model_facing_contracts` + `cargo test -p chelis-tide --test api deep_query_and_rename_http_endpoints_lock_preimage_contract` + `cargo test -p chelis-prove --features smt property_runner::tests::f7_deep -- --nocapture` + `cargo test -p chelis-tide --features smt --test mcp deep_user_property_proves_at_smt_tier_through_tide -- --nocapture` | `spec/design/chelis_agent_editing_surface.md` + `spec/design/archive/chelis_deep_authoring_handover.md` | default gate plus SMT feature gate |
@@ -183,10 +183,10 @@ Track) are post-v1 extensions and do not appear here.
 
 ## Also See
 
-- [`manual_gates.md`](../manual_gates.md) — every `#[ignore]`'d test with its manual command and prerequisite
-- [`/AGENTS.md`](../../AGENTS.md) / [`/CLAUDE.md`](../../CLAUDE.md) — the agent contract that makes this index mandatory
-- [`local_hip_environment.md`](../local_hip_environment.md) — local ROCm/HIP runbook for HIP manual gates
-- [`local_macos_environment.md`](../local_macos_environment.md) — macOS first-exec (syspolicyd) wedge runbook; preflight probe `scripts/preflight_exec_probe.py`
-- [`spec/design/chelis_project_plan.md`](../../spec/design/chelis_project_plan.md) — top-level phase ledger
-- [`spec/design/chelis_phase3_plan.md`](../../spec/design/chelis_phase3_plan.md) — detailed Phase 3 implementation plan
-- [`spec/design/chelis_metal_backend_plan.md`](../../spec/design/chelis_metal_backend_plan.md) — Phase M Metal backend
+- [`manual_gates.md`](manual_gates.md) — every `#[ignore]`'d test with its manual command and prerequisite
+- [`/AGENTS.md`](../AGENTS.md) / [`/CLAUDE.md`](../CLAUDE.md) — the agent contract that makes this index mandatory
+- [`local_hip_environment.md`](local_hip_environment.md) — local ROCm/HIP runbook for HIP manual gates
+- [`local_macos_environment.md`](local_macos_environment.md) — macOS first-exec (syspolicyd) wedge runbook; preflight probe `scripts/preflight_exec_probe.py`
+- [`spec/design/chelis_project_plan.md`](../spec/design/chelis_project_plan.md) — top-level phase ledger
+- [`spec/design/chelis_phase3_plan.md`](../spec/design/chelis_phase3_plan.md) — detailed Phase 3 implementation plan
+- [`spec/design/chelis_metal_backend_plan.md`](../spec/design/chelis_metal_backend_plan.md) — Phase M Metal backend

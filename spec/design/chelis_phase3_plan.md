@@ -1425,13 +1425,13 @@ integrals). Does **not** depend on `3k` or `3l`, so `3n` runs **in parallel with
 
 Full architectural spec: `chelis_octant_design.md`. Executable sub-phase contract
 (test plans, acceptance oracles, non-silent deferrals, infrastructure decisions):
-`archive/phase3n_octant.md`.
+`phase3n_octant.md`.
 
 ### Modules (Part A)
 
 | Module | Contents | Key Dependencies |
 |---|---|---|
-| `Octant.Parse` | LaTeX subset parser — arithmetic, unary functions, powers/roots, transcendentals, special functions (`erf`, `\Phi`, `\Gamma`, `B`), derivatives (`\partial`), integrals, sums/products, piecewise, matrix notation, subscript/superscript conventions. Out-of-scope LaTeX produces clean diagnostic errors, never silent drops. | Rust LaTeX parser crate via runtime FFI (infrastructure decision owned by `archive/phase3n_octant.md`) |
+| `Octant.Parse` | LaTeX subset parser — arithmetic, unary functions, powers/roots, transcendentals, special functions (`erf`, `\Phi`, `\Gamma`, `B`), derivatives (`\partial`), integrals, sums/products, piecewise, matrix notation, subscript/superscript conventions. Out-of-scope LaTeX produces clean diagnostic errors, never silent drops. | Rust LaTeX parser crate via runtime FFI (infrastructure decision owned by `phase3n_octant.md`) |
 | `Octant.Symbolic` | The ~30-node `SymExpr` AST. | `chelis-std` |
 | `Octant.Lower` (deterministic path) | SymExpr → Deep for every form where the LaTeX uniquely determines the computation. Special functions route through `Nautilus.Special` / `Nautilus.Distributions`; integrals through `Nautilus.Integrate`; matrix ops through `Nautilus.LinAlg`. | `Nautilus.Special`, `Nautilus.Distributions`, `Nautilus.LinAlg`, `Nautilus.Integrate` |
 | `Octant.Render` | Deep → LaTeX with type overlays (named tensor dims → subscripts, effect markers, `grad` → partial-derivative notation). Excludes the Greek pattern matches that need Shoals context (deferred to 3o). | typed Deep from the compiler |
@@ -1450,7 +1450,7 @@ Full architectural spec: `chelis_octant_design.md`. Executable sub-phase contrac
   rendering decoration, not part of the in-scope parser grammar) → **re-parse
   the stripped output and assert the re-parsed `SymExpr` is structurally
   equal to the original modulo whitespace, bracket normalization, and
-  floating-point formatting** (the `archive/phase3n_octant.md §3.4` determinism invariant, not a
+  floating-point formatting** (the `phase3n_octant.md §3.4` determinism invariant, not a
   brittle byte-for-byte LaTeX comparison) and walk the lowered Deep asserting
   every node carries a `provenance` span whose fragment is a substring of the
   original LaTeX.
@@ -1512,7 +1512,7 @@ extends to cover the new node kinds using the `3n` contract.
 yield curve / day count lowering path, not only a transitive dep through
 `shoals`), **and** `3n` (octant Part A) green.
 
-Full design: `chelis_octant_design.md`. Sub-phase contract: `archive/phase3n_octant.md`.
+Full design: `chelis_octant_design.md`. Sub-phase contract: `phase3n_octant.md`.
 
 ### Modules (Part B)
 

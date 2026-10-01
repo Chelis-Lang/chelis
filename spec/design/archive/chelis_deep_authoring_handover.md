@@ -144,7 +144,7 @@ preserving the same per-edit oracle shape for Deep-authored properties.
 ## Handover Oracle
 
 The named milestone oracle is the `Deep authoring L2 query/cascade + .dp SMT
-parity` row in `docs/archive/phase_oracles.md`, plus the full `scripts/gate.py` run
+parity` row in `docs/phase_oracles.md`, plus the full `scripts/gate.py` run
 before merge.
 The focused suite covers:
 

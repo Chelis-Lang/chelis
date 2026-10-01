@@ -71,7 +71,7 @@ implementation never turns an already binding semantic rule into future work.
 
 The account complements the existing
 [pipeline inventory](compiler_pipeline_inventory.md),
-[quality architecture](../archive/agent_quality_architecture.md), and
+[quality architecture](../agent_quality_architecture.md), and
 [spec-provenance design](../../spec/design/spec_provenance.md). It does not create a
 second provenance engine, activate proposed governance, or change repository gates.
 Conflicting authorities and missing decisions are findings to resolve at their
