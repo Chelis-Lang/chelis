@@ -554,7 +554,7 @@ Prerequisite gate for both `nautilus` and `coral`. Not itself a shell.
 
 ### 3j: Nautilus — Numerical Methods, Statistics, and Optimization
 
-A reef package. The scipy competitor for Chelis. The name references the chambered
+A reef package. The scipy analogue for Chelis. The name references the chambered
 nautilus — nature's logarithmic spiral, mathematical precision. Depends on `chelis-std`
 + 3h primitives + `3j-pre`. Pure Chelis where natural; **nalgebra** as the linear
 algebra backend (pure Rust, BLAS/LAPACK when available, no Fortran dependency). Because
@@ -740,7 +740,7 @@ Three further shells (and one Octant sub-scope) are named and reserved but scope
 as stubs beyond Phase 3. They are listed here so the ecosystem story is explicit,
 but no Phase 3 sub-phase implements them.
 
-- **`school`** — classical ML (scikit-learn competitor). Regression, decision trees,
+- **`school`** — classical ML (the scikit-learn analogue). Regression, decision trees,
   SVMs, clustering, pipelines, cross-validation. Depends on `chelis-std` + `nautilus` +
   `coral`.
 - **`darwin`** — evolutionary algorithms. Genetic algorithms, genetic programming over
@@ -914,7 +914,8 @@ completes in under 200ms with Nautilus imported. `chelis test` is a thin layer o
 **Stability labels on shell APIs.** Mark each exported function in every SKILL.md as
 `stable` or `alpha`. Agents and human users both need to know which functions they
 can rely on: stable functions will not break between releases; alpha functions carry
-an explicit warning that their signatures may change. Convention: add a `Stability` column to the API surface tables
+an explicit warning that their signatures may change. Seed-corpus curation (4a) includes
+stable functions and excludes or down-weights alpha ones. Convention: add a `Stability` column to the API surface tables
 in each shell's SKILL.md. Nautilus v0.1.0 candidates for `stable`: all of Special, all
 of Distributions (pdf/cdf/inv_cdf). Candidates for `alpha`: CurveFit, SDE (API may
 change when keyed sampling lands). Apply the same convention to Coral and

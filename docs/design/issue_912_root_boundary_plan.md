@@ -76,7 +76,7 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
 4. **`Target` enum in `chelis-types`. Capability mapping in `compiler-api`.**
    The mapping is a wildcard-free enum match — adding a `Target` variant without
    a capability arm fails to compile. Lives in compiler-api because that is where
-   the pipeline is driven and where library consumers (the c-note notebook, etc.)
+   the pipeline is driven and where library consumers (for example a notebook front end)
    obtain manifests.
 
 5. **`ManifestedProgram` carries `Target`.**

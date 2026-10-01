@@ -259,12 +259,11 @@ The strategic question is whether to commit. Arguments for:
 
 - The substrate is mostly there. Chelis already has the structural commitments a differentiable language needs. The work is real but bounded; this spec scopes it concretely.
 - The audience is underserved. Existing options (Dex, partial-JAX, Julia/Zygote, Enzyme) each have meaningful limitations. Chelis with this work shipped is meaningfully better.
-- The competitive landscape is sparser than for tensor frameworks. PyTorch and JAX are entrenched in mainstream ML; differentiable-language territory is smaller and less defended.
 - The work composes with the trust stack. Verified gradient-behavior properties, differentiability as a type-level claim, dimension types extending into gradient code — all of these reinforce the broader Chelis positioning.
 
 Arguments against:
 
-- The audience is smaller. Differentiable-language users number in the thousands, not the millions. Mainstream ML user count is orders of magnitude larger.
+- The audience is smaller than for mainstream ML.
 - The work is real. Even with the substrate in place, the phases above are a significant commitment.
 - Some of the work depends on §5 entries that are currently deferred. Committing to this direction means those entries become required, not optional.
 

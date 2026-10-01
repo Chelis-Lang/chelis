@@ -314,4 +314,4 @@ The six-phase structure decomposes the work into independent, testable milestone
 
 Dependencies on other Chelis workstreams are limited and clearly specified. Hydronnx composes with those workstreams as they ship rather than blocking on them.
 
-This is the on-ramp story for Chelis adoption. Users with existing models in the PyTorch/JAX ecosystem can move to Chelis without rewriting from scratch. The verifiability and trust-stack proposition becomes accessible to that audience without requiring framework commitment.
+Users with existing models in the PyTorch/JAX ecosystem can bring them into Chelis without rewriting them, and check them with Chelis's dimension types and properties.

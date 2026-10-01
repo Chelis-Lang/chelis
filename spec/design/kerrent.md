@@ -189,7 +189,7 @@ The addendums divide into priority tiers:
 
 **Lower priority.** Addendum D (MLIR direct), Addendum E (verified kernels), Addendum F (additional platforms) are larger investments with longer payoff windows. Each is real strategic value but each is substantial work. Schedule when other priorities clear.
 
-The v1 effort plus Addendum A together is the right scope to plan against. v1 produces the kernel authorship capability. Addendum A produces the AD-through-kernels capability that no other framework offers. The combination is what makes Kerrent strategically distinctive rather than just performance-competitive.
+The v1 effort plus Addendum A together is the right scope to plan against. v1 produces the kernel authorship capability. Addendum A produces the AD-through-kernels capability that no other framework offers.
 
 ## Net
 

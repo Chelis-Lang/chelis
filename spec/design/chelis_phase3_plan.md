@@ -1025,7 +1025,7 @@ released shell referenced by the canonical ecosystem table. `chelis v0.1.7` clea
 last documented core blockers for the first Nautilus shell release.
 
 **Goal:** A reef package providing the numerical methods that sit between raw tensor
-primitives and domain applications. The scipy competitor for Chelis — `scipy.stats` +
+primitives and domain applications. The scipy analogue for Chelis — `scipy.stats` +
 `scipy.optimize` + `scipy.integrate` + `scipy.linalg` + `scipy.special` under one shell.
 
 **Prerequisite:** 3h (core numeric primitives), 3i (`Std.Time` for time-series stats),
@@ -1700,7 +1700,7 @@ specifications above, not deferred post-phase work. The tier structure is:
 
 Three further shells are named and reserved but scoped as stubs beyond Phase 3:
 
-- `school` — classical ML (scikit-learn competitor). Depends on `chelis-std` + `nautilus`
+- `school` — classical ML (the scikit-learn analogue). Depends on `chelis-std` + `nautilus`
   + `coral`.
 - `darwin` — evolutionary algorithms (GA, genetic programming over the Deep AST, ES,
   PBT, NAS). Depends on `chelis-std` + `nautilus`; optionally uses `coral` for evolving
@@ -1723,7 +1723,7 @@ Three further shells are named and reserved but scoped as stubs beyond Phase 3:
 
 `chelis prove` scope has expanded from a CLI-flag property testing tool to first-class
 executable properties with `@property` annotations. See `chelis_trust_stack.md` for the
-full design.
+full design. The design is locked.
 
 ---
 
@@ -1872,7 +1872,7 @@ unshipped shell. `3l` depends on `3j` and `3k`. `3n` can proceed against `3j`, w
 `3f` goes truly last because it must cover the complete ecosystem including the domain
 shells.
 
-`school` (classical ML, sklearn competitor), `darwin` (evolutionary algorithms), `hull`
+`school` (classical ML, the scikit-learn analogue), `darwin` (evolutionary algorithms), `hull`
 (executable language specification), `hydrostatic` (automated static analysis on the
 tensor DAG), and `beacon` (IR-native bound-propagation verification) are post-Phase-3
 shell stubs and do not appear as Phase 3 sub-phases.
