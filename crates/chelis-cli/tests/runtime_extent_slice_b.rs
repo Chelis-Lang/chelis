@@ -5786,7 +5786,15 @@ fn a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds() {
         String::from_utf8_lossy(&before.stderr)
     );
 
-    let fixed = styled(&["lint", "--fix", path.to_str().unwrap()]);
+    // Only the pipe rule is under test; `prefer-typed-literal` would also
+    // rewrite the fixture's `cast(0, i32)` literals.
+    let fixed = styled(&[
+        "lint",
+        "--fix",
+        "--rule",
+        "prefer-pipe-operator",
+        path.to_str().unwrap(),
+    ]);
     assert!(
         String::from_utf8_lossy(&fixed.stdout).contains("fixed 1 replacement"),
         "the fix rewrites exactly the shape read: {}{}",
