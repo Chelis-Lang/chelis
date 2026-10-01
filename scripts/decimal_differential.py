@@ -721,10 +721,18 @@ def representative_failures(failures: list[Failure], per_path: int) -> list[Fail
     return sorted(chosen, key=lambda f: f.name)
 
 
-def make_programs(corpus: Corpus, chunk: int, per_program: int, failures_per_path: int) -> list[Program]:
+# Rows a run leaves out unless asked: `==` on the opaque Decimal needs
+# chelis#2587's structural equality.
+OPTIONAL_ROWS = {"row_eq": "--structural-equality"}
+
+
+def make_programs(corpus: Corpus, chunk: int, per_program: int, failures_per_path: int,
+                  include: frozenset[str] = frozenset()) -> list[Program]:
     programs = []
     by_row: dict[str, list[Case]] = {}
     for case in corpus.cases:
+        if case.row in OPTIONAL_ROWS and case.row not in include:
+            continue
         by_row.setdefault(case.row, []).append(case)
     for row_name, cases in by_row.items():
         bindings = [Binding(f"{row_name}_{k // chunk:04d}", row_name, tuple(cases[k:k + chunk]))
@@ -954,6 +962,21 @@ def check_failure(failure: Failure, results: list[LaneResult], report: Report) -
     report.failures_checked += 1
 
 
+ROOT_LINE = re.compile(r"([a-z_][a-z0-9_]*)(?:\.[A-Za-z0-9_]+)* = .*")
+
+
+def dependency_root(line: str, own: set[str]) -> bool:
+    """A root another package defines, which compiled C prints and eval does not (chelis#2624).
+
+    Compiled C also prints a dependency's zero-argument definitions, such as
+    Std.Decimal's constants, as roots. Only the program's own roots are
+    compared on that lane; eval prints only the program's roots, so every
+    other line there is still a disagreement.
+    """
+    match = ROOT_LINE.fullmatch(line)
+    return match is not None and match.group(1) not in own
+
+
 def check_program(program: Program, results: list[LaneResult], report: Report) -> None:
     if program.failure is not None:
         check_failure(program.failure, results, report)
@@ -966,6 +989,8 @@ def check_program(program: Program, results: list[LaneResult], report: Report) -
         printed, stray = parse_bindings(result.stdout)
         expected_names = {binding.name for binding in program.bindings}
         stray += [f"{name} = {value[:200]}" for name, value in printed.items() if name not in expected_names]
+        if result.lane == "c":
+            stray = [line for line in stray if not dependency_root(line, expected_names)]
         if stray:
             report.problem("stray-output", f"{program.name} [{result.lane}]: unexpected output lines: {stray[:10]}")
         for binding in program.bindings:
@@ -1040,6 +1065,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--work", type=Path, help="keep generated programs here instead of a temporary directory")
     parser.add_argument("--list", action="store_true", help="print the corpus composition and exit")
     parser.add_argument("--only", help="diagnosis: run only programs whose name matches this regular expression")
+    parser.add_argument("--structural-equality", action="store_true",
+                        help="also run the `==` row, which needs chelis#2587's structural equality")
     args = parser.parse_args(argv)
 
     lanes = args.lanes.split(",")
@@ -1047,7 +1074,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--lanes is a comma-separated subset of eval,c")
     corpus = build_corpus(args.large)
     per_path = args.failures_per_path or (12 if args.large else 3)
-    programs = make_programs(corpus, args.chunk, args.per_program, per_path)
+    include = frozenset({"row_eq"} if args.structural_equality else ())
+    programs = make_programs(corpus, args.chunk, args.per_program, per_path, include)
     if args.only:
         programs = [p for p in programs if re.search(args.only, p.name)]
     if args.list:
