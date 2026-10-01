@@ -526,12 +526,22 @@ class HarnessLogic(unittest.TestCase):
                 continue  # the 1900-2100 sweep is checked by the C-only test below
             self.assertIsInstance(grid.resolve(), list, grid.name)
 
+    def test_day_coverage_counts_a_union(self) -> None:
+        coverage = harness.DayCoverage()
+        coverage.add_range(0, 10)
+        coverage.add_range(5, 15)
+        coverage.update([3, 20, 21])
+        self.assertEqual(len(coverage), 17)
+        self.assertIn(20, coverage)
+        self.assertNotIn(16, coverage)
+
     def test_lanes_and_day_coverage(self) -> None:
         corpus = harness.build_ci_corpus()
         lanes = {grid.name.split("_", 1)[1]: grid.lanes for grid in corpus.bulk}
         self.assertEqual(lanes["days_1900_2100"], harness.C_ONLY)
         self.assertEqual(lanes["days_first_400"], harness.BOTH)
-        self.assertTrue(set(range(harness.FIRST_1900, harness.LAST_2100 + 1)) <= corpus.days)
+        self.assertTrue(corpus.days.covers(harness.FIRST_1900, harness.LAST_2100 + 1))
+        self.assertFalse(corpus.days.covers(harness.FIRST_1900 - 1, harness.LAST_2100 + 1))
         self.assertIn(ref.MIN_EPOCH_DAY, corpus.days)
         self.assertIn(ref.MAX_EPOCH_DAY, corpus.days)
         exhaustive = harness.build_exhaustive_corpus()

@@ -518,12 +518,46 @@ def text_axis(var: str, values: Sequence[str]) -> Axis:
     return Axis(var, "string", "[" + ", ".join(text_lit(v) for v in values) + "]", tuple(values))
 
 
+class DayCoverage:
+    """The days a corpus puts through `day_row`, kept as ranges so 7.3 million days stay small."""
+
+    def __init__(self) -> None:
+        self.ranges: list[tuple[int, int]] = []
+        self.singles: set[int] = set()
+
+    def add_range(self, low: int, high: int) -> None:
+        self.ranges.append((low, high))
+
+    def update(self, days) -> None:
+        self.singles.update(days)
+
+    def merged(self) -> list[tuple[int, int]]:
+        merged: list[tuple[int, int]] = []
+        for low, high in sorted(self.ranges):
+            if merged and low <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+            else:
+                merged.append((low, high))
+        return merged
+
+    def __contains__(self, day: int) -> bool:
+        return day in self.singles or any(low <= day < high for low, high in self.ranges)
+
+    def __len__(self) -> int:
+        merged = self.merged()
+        inside = sum(1 for day in self.singles if any(low <= day < high for low, high in merged))
+        return sum(high - low for low, high in merged) + len(self.singles) - inside
+
+    def covers(self, low: int, high: int) -> bool:
+        return any(a <= low and high <= b for a, b in self.merged())
+
+
 @dataclass
 class Corpus:
     values: list[Value] = field(default_factory=list)
     failures: list[Failure] = field(default_factory=list)
     bulk: list[Value] = field(default_factory=list)
-    days: set[int] = field(default_factory=set)
+    days: DayCoverage = field(default_factory=DayCoverage)
 
     def value(self, label: str, expr: str, expected: object, float_bits: bool = False) -> None:
         self.values.append(Value(f"v{len(self.values):05d}_{label}", expr, expected, float_bits))
@@ -579,7 +613,7 @@ def period_row(a: int, b: int) -> list[int]:
 
 
 def day_range(corpus: Corpus, label: str, low: int, high: int, lanes: tuple[str, ...]) -> None:
-    corpus.days.update(range(low, high))
+    corpus.days.add_range(low, high)
     corpus.grid(label, [range_axis("n", low, high)], "day_row(n)", day_row, lanes)
 
 
