@@ -180,9 +180,8 @@ normative in [`shell_repo_contract.md`](shell_repo_contract.md), mechanized by
 The **machine-readable** shell registry is `chelis_conformance::registry::REGISTRY`
 (the `chelis-conformance` crate), ground-truthed to the
 `.github/workflows/ecosystem-drift.yml` canary matrix by the
-`registry_matches_drift_matrix` tripwire. The active set it tracks (nautilus,
-coral, shoals, school, hull, whale, octant, calcify, c-earchin, hydronnx,
-hello-chelis) is the authority for the live ecosystem; the prose table below is
+`registry_matches_drift_matrix` tripwire. The active set it tracks is the
+authority for the live ecosystem; the prose table below is
 a narrative view and may lag it (reconciling the two into a single generated
 table is tracked follow-up).
 
@@ -251,17 +250,17 @@ stay in `chelis-std` because every domain needs dates and exact arithmetic.
 
 ### Cross-Cutting Design Decisions
 
-**Stability labels on exported APIs.** Every function in every shell's SKILL.md API surface table carries a stability label: `stable` (signature will not change between releases — safe for AI training corpus inclusion) or `alpha` (signature may change — exclude from training data or down-weight). This serves the AI coding pipeline: the RLVR training loop (Phase 4) needs to know which functions are safe to teach the model. It also serves human consumers: a function marked `alpha` comes with an explicit warning that the API may change.
+**Stability labels on exported APIs.** Every function in every shell's SKILL.md API surface table carries a stability label: `stable` (signature will not change between releases) or `alpha` (signature may change). Agents that write Chelis need to know which functions they can rely on, and so do human consumers: a function marked `alpha` comes with an explicit warning that the API may change.
 
 **Persistent data structures for frame-like containers.** Coral's DataFrame uses a persistent dictionary (HAMT) for the column map, so that operations like `with_column`, `drop_column`, and `rename` produce new frames sharing column references with the original via structural sharing. This is a performance requirement for AD through frame pipelines: `grad(fn_with_10_frame_ops)` produces intermediate frames on the backward pass, and structural sharing keeps memory cost at O(num_operations) rather than O(num_columns * num_operations). Pure-Chelis HAMT preferred over Rust-side HAMT for AD compatibility (the persistent dict must be transparent to the AD system).
 
 **Instruments as dicts in Shoals, not closed ADTs.** Financial instruments are open-ended (new payoff structures are invented continuously). Representing instruments as `Dict[String, f32]` lets new instrument types be added as data without code changes. The pricing function dispatches on a key, not a pattern match over a closed enum. This also makes instrument definitions AI-friendly: an agent writes a dict literal (within current LLM capability), not a new ADT variant (requires understanding the type system's extension points).
 
-**Fast `chelis eval` as a pre-Phase 4 investment.** The RLVR training pipeline needs sub-second program evaluation with package-aware imports. `chelis eval` must resolve reef package imports and return results in under 200ms for the training loop to be practical. This also serves agent-driven development (sub-second feedback during Coral/Shoals/Octant construction).
+**Fast `chelis eval`.** Agent-driven development needs sub-second program evaluation with package-aware imports. `chelis eval` must resolve reef package imports and return results in under 200ms so an agent's write-check-repair loop stays interactive.
 
-**Verified error messages with per-property explanations.** Compiler diagnostics explain which property the rejection protects and suggest a fix. Not "type mismatch" but "mul requires dimension-wise equality: expected [batch, hidden] got [hidden, batch] — did you mean permute(b, [1, 0])?" Directly improves the RLVR reward signal: better errors = more informative feedback = faster agent repair = faster training convergence. Does not require Lean — the existing type checker has the information, it just needs better formatting.
+**Verified error messages with per-property explanations.** Compiler diagnostics explain which property the rejection protects and suggest a fix. Not "type mismatch" but "mul requires dimension-wise equality: expected [batch, hidden] got [hidden, batch] — did you mean permute(b, [1, 0])?" Better errors give an agent more informative feedback and faster repair. Does not require Lean — the existing type checker has the information, it just needs better formatting.
 
-**Structured fitness score with per-property components.** The 0-1 fitness score is broken into components in the fitness JSON: dimension score, effect score, linearity score, differentiability score, syntax score. Agents see which property failed and focus repair on that specific issue. The aggregate score is still computed for RLVR reward; the components are exposed for agent introspection and trajectory analysis.
+**Structured fitness score with per-property components.** The 0-1 fitness score is broken into components in the fitness JSON: dimension score, effect score, linearity score, differentiability score, syntax score. Agents see which property failed and focus repair on that specific issue. The aggregate score is still computed; the components are exposed for agent introspection and trajectory analysis.
 
 **Reproducibility manifests.** `chelis manifest program.ch` extracts every random draw from the typed AST into a structured JSON report: which operations draw, which key each consumes and the `key_from_seed` root it derives from, and whether the computation is fully reproducible. `chelis manifest --check` exits 0/1 for CI gating. It serves model validation in finance. Full design: `chelis_reproducibility_manifests.md`.
 
@@ -335,7 +334,7 @@ archive uses lexical UTF-8 member order, normalized regular-file metadata
 canonical archive SHA-256. See `spec/design/reef_distribution.md` for the
 complete artifact contract.
 
-`chelis manifest` and `chelis prove` are demo-blocking for the first commercial CProof prospect. Full CLI surface and JSON schemas: `chelis_manifest_spec.md`, `chelis_property_spec.md`.
+Full CLI surface and JSON schemas for `chelis manifest` and `chelis prove`: `chelis_manifest_spec.md`, `chelis_property_spec.md`.
 
 This is the intended stable surface for project-level documentation.
 `chelis deep` defaults to canonical pretty Deep; `--flat` is the explicit flat-output

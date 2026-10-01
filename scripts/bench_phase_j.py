@@ -10,8 +10,8 @@ Usage:
     python3 scripts/bench_phase_j.py \\
         --binary /path/to/target/release/chelis \\
         --label post \\
-        --coral-dir /home/jeff/Documents/scratch/coral \\
-        --chelis-repo /home/jeff/Documents/scratch/chelis/.claude/worktrees/agent-ac1369283ad281583 \\
+        --coral-dir /path/to/coral \\
+        --chelis-repo /path/to/chelis \\
         --out /tmp/chelis-bench/post.json
 
 Two runs are recommended: one against the post-cache build (this branch's
@@ -194,11 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", type=Path, required=True)
     ap.add_argument("--label", required=True, help="post | pre | other tag")
-    ap.add_argument(
-        "--coral-dir",
-        type=Path,
-        default=Path("/home/jeff/Documents/scratch/coral"),
-    )
+    ap.add_argument("--coral-dir", type=Path, required=True)
     ap.add_argument("--chelis-repo", type=Path, required=True)
     ap.add_argument("--nautilus-dir", type=Path, default=None)
     ap.add_argument("--out", type=Path, required=True)

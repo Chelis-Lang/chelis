@@ -12,11 +12,11 @@ construct and are not standalone programs.
 ## Modules
 
 One module per file. The `module` declaration is the first non-comment line. Module names
-are PascalCase and dot-separated. In a package with `module_prefix = "School"`,
-`src/nn/linear.ch` declares:
+are PascalCase and dot-separated. In a package with `module_prefix = "Shoals"`,
+`src/pricing/options.ch` declares:
 
 ```chelis-surf-fragment
-module School.Nn.Linear
+module Shoals.Pricing.Options
 ```
 
 A script or snippet can omit `module`. Package source must declare the name fixed by its

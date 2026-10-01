@@ -9,8 +9,6 @@
 //! allowlist rejects on the same file. These fixtures pin that gap.
 //!
 //! References:
-//! - plan: `/home/<user>/.claude/plans/build-up-a-plan-mossy-meteor.md`,
-//!   Item 3 §3.1
 //! - rule: `crates/chelis-lint/src/rules/deep_user_symbol_charset.rs`
 //! - canonical vocabulary: `crates/chelis-deep/src/validate.rs`
 

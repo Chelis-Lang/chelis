@@ -154,7 +154,7 @@ The NDJSON contract (`{kind:"property"}` records + one
 144-155) and locked by `crates/chelis-cli/tests/prove.rs:91`. In-repo
 consumers: the CLI test suite and the tide MCP wrapper (which emits
 its own envelope around `ProofArtifact`, not the NDJSON records).
-External consumers: the FlukeBall admission parser (strict about the
+External consumers: strict downstream admission parsers (strict about the
 record set it reads — release notes must call out the additive
 `kind:"obligation"` records so its pin-time update is deliberate) and
 any Hull-side tooling reading prove output (none found in the vendored

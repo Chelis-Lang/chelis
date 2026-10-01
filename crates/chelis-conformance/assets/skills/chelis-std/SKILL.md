@@ -342,7 +342,7 @@ flows.
 
 - `chelis-std` is the bundled runtime. It ships inside the compiler and is not installed
   with `chelis reef install`.
-- Shell packages such as `nautilus`, `coral`, `shoals`, and `octant` are Reef
+- Shell packages such as `nautilus`, `coral`, and `shoals` are Reef
   dependencies and can be installed or bootstrapped.
 - `reef.toml` pins the compiler exactly and declares a module prefix. `chelis reef init`
   writes the pin for the toolchain that runs it; `X.Y.Z` below stands for that version:

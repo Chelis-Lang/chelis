@@ -1,6 +1,6 @@
 //! Host-lane JSON I/O acceptance (chelis#890).
 //!
-//! The QFBench-shaped end-to-end contract: a `.ch` program reads a JSON
+//! The benchmark-shaped end-to-end contract: a `.ch` program reads a JSON
 //! input file, computes with tensor builtins, rounds with `round_to`,
 //! assembles a nested output document, and writes it with `write_file` --
 //! no host-language glue anywhere in the loop. The output must be

@@ -3135,6 +3135,42 @@ reason = "The shared runner contract suite executes in script-unit."
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/bench_phase_j.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs test_checkout_arguments, which imports this manual benchmark and checks that its Coral checkout is a required argument"
+tracking_issue = "chelis#2833"
+
+[[path_rule]]
+prefix = "scripts/build_wrapped_spans_sidecar.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs test_checkout_arguments, which imports this manual generator and checks that its Octant paths derive from the required checkout argument"
+tracking_issue = "chelis#2833"
+
+[[path_rule]]
+prefix = "scripts/test_checkout_arguments.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit discovers and runs this suite"
+tracking_issue = "chelis#2833"
+
+[[path_rule]]
+prefix = "scripts/test_reap_orphans.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit discovers and runs this suite"
+tracking_issue = "chelis#2833"
+
+[[path_rule]]
 prefix = "scripts/test_nextest_profile_partition.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"

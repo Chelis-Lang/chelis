@@ -15,9 +15,6 @@
 //!    inside `cmd_eval` actually routes through the new API and that
 //!    `format_eval_result` formats the output the same way the legacy
 //!    `try_eval` did.
-//!
-//! See `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`
-//! Phase H for the owning plan.
 
 use assert_cmd::Command;
 use chelis_compiler_api::{compile_reef_context, eval_in_context};

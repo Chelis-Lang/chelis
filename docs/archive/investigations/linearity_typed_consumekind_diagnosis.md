@@ -1,6 +1,6 @@
 # Linearity-F1 / F2 / AliasedConsume-F1 — diagnosis (W1 PR 1)
 
-Owning plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`,
+Owning plan: an unpublished workstream plan,
 "W1 — Linearity layer correctness, PR 1".
 
 Phase 0 spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`.
@@ -310,7 +310,7 @@ warning channel to cover them.
 
 ## References
 
-- Plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`
+- Plan: an unpublished workstream plan
 - Phase 0 spec lock: `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md`
 - §5 entries: `docs/archive/reports/gap_synthesis.md` rows for `Linearity-F1`,
   `Linearity-F2`, `Linearity-AliasedConsume-F1`

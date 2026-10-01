@@ -201,16 +201,16 @@ profile trigger and concurrency equality under ci#5 RWF-015.
   consume the released tarball (CI auth via a `CHELIS_RELEASE_TOKEN`-style
   PAT with `contents: read` on every private dep the shell consumes).
 - **Optional Nix verification job (MAY).** A shell MAY add one CI job that
-  rebuilds the shell with atoll's
-  [`chelis2nix`](https://github.com/Chelis-Lang/atoll/tree/main/pkgs/by-name/chelis2nix)
+  rebuilds the shell with the project's `chelis2nix` Nix packaging
   and compares the result with its chelisup lane. The released-tarball rule
   above yields to this job only while the job meets every condition:
   - The chelisup lane stays and remains the gate. The job runs only on
     `push` to `main` and is never a required check.
-  - The job takes the compiler only by substitution from the CProof mesh
-    cache, signed by that cache, and fails rather than build it. The
+  - The job takes the compiler only by substitution from the project's
+    Nix cache, signed by that cache, and fails rather than build it. The
     compiler is the Chelis flake's `packages.<system>.chelis` at the pinned
-    release tag's commit, as atoll's reviewed toolchain table records it.
+    release tag's commit, as the Nix packaging's reviewed toolchain table
+    records it.
   - The `<name>-<version>.tar.zst` and `<name>-<version>.chb` it builds equal,
     byte for byte, the files that the chelisup lane's `chelis reef build`
     wrote in the same workflow run. Otherwise the job fails and names both
@@ -219,15 +219,16 @@ profile trigger and concurrency equality under ci#5 RWF-015.
     `contents: read` on the repositories each step reads. No credential
     enters a Nix build or the Nix store.
   - Its workflow carries the `CHELIS_TAG`/`CHELIS_VERSION` pair above. Before
-    the shell bumps its pin, atoll's toolchain table gains the new version.
+    the shell bumps its pin, the Nix packaging's toolchain table gains the new
+    version.
   - The shell lists the job under its `AGENTS.md` Scaffolding Drift Rule
     section as a recorded per-repo divergence (§10), with a link to this
     clause. Other shells need not mirror it.
 
   Rationale: the Nix-built compiler is not the released binary, yet Nix
   builds of published shell releases reproduced them byte for byte, and
-  atoll's tests check those rebuilds on every push. The comparison on every
-  merge extends that evidence to the shell's own code.
+  the Nix packaging's tests check those rebuilds on every push. The comparison
+  on every merge extends that evidence to the shell's own code.
 - **Per-repo toolchain resolution; installs have no machine-global side
   effects.** Toolchains install side-by-side in a version-keyed store
   (first-party: `$CHELIS_HOME/toolchains/<ver>`, default `~/.chelis/`;
@@ -347,8 +348,8 @@ real surface or the upstream roadmap.
   in it is exactly the liveness the cite-by-number rule buys: the reference
   resolves in the org, dedupes across sibling shells, and can be re-probed
   at the next bump. Write a sibling citation **tight**: `coral#27`, with no
-  space around the `#`. Four shells are also ordinary English nouns
-  (`school`, `hull`, `coral`, `whale`), so the spaced form would make prose
+  space around the `#`. Several shells are also ordinary English nouns
+  (`school`, `hull`, `coral`), so the spaced form would make prose
   such as "the school #1 priority" scan as a citation; only `chelis` keeps
   the older spaced spellings. A **bare `#NNN`** and a repo **outside** the
   registry stay rejected — neither resolves without guessing which tracker

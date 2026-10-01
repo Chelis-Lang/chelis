@@ -1,6 +1,6 @@
 //! Host-lane CSV I/O acceptance (chelis#903).
 //!
-//! The QFBench-shaped end-to-end contract, one step past `json_io.rs`: a
+//! The benchmark-shaped end-to-end contract, one step past `json_io.rs`: a
 //! `.ch` program reads TWO CSV input files (one LF, one CRLF, one quoted
 //! field with an embedded comma) plus a JSON params file, computes with
 //! tensor builtins, rounds with `round_to`, and writes BOTH a nested

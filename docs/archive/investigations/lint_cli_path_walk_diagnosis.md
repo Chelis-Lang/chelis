@@ -78,7 +78,7 @@ absolute path (via `std::fs::canonicalize`) before invoking
 `chelis_lint::lint`. Absolute paths always include the canonical
 ancestor directory segments, so the `/docs/`, `/spec/`, and
 `/spec/design/` substring checks fire uniformly whether the user typed
-`.`, `./docs`, `docs`, or `/home/user/repo/docs`.
+`.`, `./docs`, `docs`, or an absolute path ending in `/repo/docs`.
 
 This fixes the entire bug class for any current or future rule that does
 path-substring classification, not just `doc-filename-convention`.

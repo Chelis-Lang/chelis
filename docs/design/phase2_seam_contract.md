@@ -1,8 +1,7 @@
 # Phase 2 seam contract: the five surfaces Beacon pins against
 
-Status: SIGNED OFF by the Beacon shell agent (`Chelis-Lang/beacon`,
-`~/Documents/scratch/beacon-bakeoff`) with one correction to ① (recorded
-below). Surfaces 1, 3, 4 confirmed usable as shipped; surface 2 (`IrHandle`)
+Status: SIGNED OFF by the Beacon shell agent (`Chelis-Lang/beacon`) with one
+correction to ① (recorded below). Surfaces 1, 3, 4 confirmed usable as shipped; surface 2 (`IrHandle`)
 is now frozen at the hash-addressed exact-version `WireDag` v9 shape the correction
 specified, and WI-3 populates against it.
 

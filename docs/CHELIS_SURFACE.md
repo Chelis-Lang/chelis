@@ -691,8 +691,8 @@ expose the two source representations.
 
 `chelis-std` ships with the selected compiler toolchain. Its module
 exports are the `export` declarations under `packages/chelis-std/src/`.
-Concrete calls depend on their target execution mode. The `school` shell
-owns neural-network layers, losses, optimizers, and training loops
+Concrete calls depend on their target execution mode. Neural-network layers,
+losses, optimizers, and training loops live in a shell, not in `chelis-std`
 (`spec/design/chelis_canonical_reference.md` §8.5).
 
 | Module | Key exports |

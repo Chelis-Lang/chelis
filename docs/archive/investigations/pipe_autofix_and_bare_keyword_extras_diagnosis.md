@@ -1,7 +1,7 @@
 # Pipe autofix re-enable + bare-keyword sibling-sweep extras — diagnosis
 
 Diagnoses Agent 2's bundled fix (F + H) on the 0.7.6 toolchain hygiene
-workstream (`/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`):
+workstream (an unpublished workstream plan):
 
 - **F**: re-enable the `prefer-pipe-operator` autofix that 477bd0d
   disabled, reusing the Path 1B mechanism from Item 5 (PR #34).
@@ -335,7 +335,6 @@ in the table above, confirming the bugs are real.
 
 ## References
 
-- Plan: `.claude/plans/build-up-a-plan-mossy-meteor.md` Agent 2 (F + H).
 - Item 5 architecture: `docs/archive/investigations/redundant_linearity_autofix_architecture.md`.
 - Item 2b sibling sweep: `docs/archive/investigations/parser_pipe_bare_keyword_diagnosis.md`
   (the three findings here appear in its "Sibling sweep" table).

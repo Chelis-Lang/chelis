@@ -527,11 +527,11 @@ AST contract. `spec/02-surf-syntax.md` §0.1 is the authority.
 
 ## The Chelis-Lang Repositories
 
-One line each, as of 2026-09-21; `gh repo list Chelis-Lang` is the live set, and the
-conformance `REGISTRY` in `crates/chelis-conformance` is the authority on which shells
-the conformance tooling binds. Every shell consumes the compiler-bundled `chelis-std`
-runtime and is bound by the shell contract; the registry records whether it does so
-through reef, a Cargo workspace, or Docker.
+The public repositories, one line each. The conformance `REGISTRY` in
+`crates/chelis-conformance` is the authority on which shells the conformance tooling
+binds. Every shell consumes the compiler-bundled `chelis-std` runtime and is bound by
+the shell contract; the registry records whether it does so through reef, a Cargo
+workspace, or Docker.
 
 | Repository | Contains |
 |---|---|
@@ -539,33 +539,9 @@ through reef, a Cargo workspace, or Docker.
 | `nautilus` | Shell: numerical methods, statistics, linear algebra, optimization, ODE/SDE solvers, special functions. The scipy analogue. |
 | `coral` | Shell: typed dataframes whose numeric columns are tensors. The pandas analogue. |
 | `shoals` | Shell: quantitative finance on nautilus and coral: pricing, risk, curves, stochastic processes. |
-| `school` | Shell: machine learning, sole home of the NN surface (layers, losses, optimizers, training loop, model zoo). Reference implementation of the shell contract. |
-| `octant` | Shell: LaTeX-to-Chelis bridge with provenance tracking; a notation adapter, not a CAS. |
-| `c-earchin` | Shell: EARS requirements-to-Chelis bridge with property-witness metadata. |
-| `calcify` | Shell: Python-to-Chelis translation. |
-| `hydronnx` | Shell: ONNX import into Chelis IR. |
-| `whale` | Shell: reusable betting models. |
-| `hull` | Shell: the executable language specification, a self-hosted reference checker and evaluator differential-tested against the compiler. |
 | `hello-chelis` | Example programs; the smallest conforming shell. |
-| `beacon` | Shell, early and not yet registered: sound bound-propagation verification over lowered RISC DAGs. |
-| `LaCaDiLE` | Lean development of the typing rules: tensor derivatives, ownership, randomness and resource protocols. Supports the soundness work; does not certify the compiler. |
-| `buoy` | Rust tracer from normative requirement atoms to evidence, models, proofs, and implementation sites. |
-| `sonar` | Neural-network verification in C Note: reconnaissance, corpus, decision briefs. |
 | `economoist` | Verified economic and dynamic-programming models in Chelis. |
-| `c-note` | The verified-computing web notebook for finance, built on the Chelis stack. |
-| `ci` | Reusable CI/CD workflows and pinned actions consumed by every repository. |
-| `barnacle` | Standalone Dylint lint libraries maintained by the project. |
 | `arb-sys` | Rust bindings to the Arb arbitrary-precision library. |
-| `sand-dollar` | S3 cache configuration. |
-| `openspec` | Shared OpenSpec planning store, including Chelis's `chelis-*` domain; no compiler or numbered-spec authority. |
-| `.github` | Default community health files for the organization. |
-| `website` | Astro monorepo for chelis.ch and cproof.ai. |
-| `gtm` | C Proof go-to-market: brand, content, sales deck, talk tooling. |
-| `Voyage` | Agent-authoring benchmark: quantitative-finance program tasks against shoals. |
-| `Benchmarking-grading` | Answer keys for the benchmark, kept out of the solver-visible task repo. |
-| `ref-check` | Source-backed bibliography imports and offline LaTeX reference gates. |
-| `school-bootstrap` | Clean-room typed-Python references for sklearn algorithms, translated via calcify and vendored into school. |
-| `flukeball`, `flukeball_2`, `flukeball_house` | Private betting-model experiments; `_house` is the orchestrator side holding results the authoring agents must not see. |
 
 ## Pointers
 

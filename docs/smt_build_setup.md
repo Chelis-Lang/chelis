@@ -274,7 +274,7 @@ something new; make it deliberately.
 
 ## Downstream Impact
 
-Shell repos consuming the chelis workspace (Shoals, Coral, Nautilus, Hull) do
+Shell repos consuming the chelis workspace (Shoals, Coral, Nautilus) do
 NOT transitively pull cvc5 unless they explicitly enable the `smt` feature.
 Default workspace builds are unaffected.
 

@@ -7,7 +7,7 @@
 Status: Phase 0 deliverable. Pins three contracts so Wave 1 agents (W1, W2 PR 1,
 W3) work against stable targets. Not a canonical spec — this is a
 workstream-scoped design contract under `docs/design/`. The owning plan is
-`/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`.
+an unpublished workstream plan.
 
 Closes the diagnosis ambiguity for five `docs/archive/reports/gap_synthesis.md` §5 entries:
 
@@ -528,7 +528,7 @@ Recorded for awareness — not under Phase 0's authority:
 
 ## References
 
-- Plan: `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md`
+- Plan: an unpublished workstream plan
 - `docs/archive/reports/gap_synthesis.md` §5 — Linearity-F1/F2/AliasedConsume-F1,
   CRuntime-F32Coupling, HostEval-ScalarFn-F1
 - `crates/chelis-types/src/linearity.rs` — `BindingState`, `ConsumeSite`,

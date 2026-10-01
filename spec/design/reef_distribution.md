@@ -548,8 +548,8 @@ Items 6-9 deliver and verify *source* packages (a `.tar.zst` archive plus a
 component in the ecosystem — the toolchain, nautilus, shoals, and octant's
 translator — therefore distributes its binary out of band through a GitHub
 release tarball, and every consumer hand-rolls download-by-tag plus SHA
-verification (octant's `docs/src/consuming.md`; C Note's verify-in-Dockerfile
-step). reef does the source half; an informal channel does the binary half, and
+verification (octant's `docs/src/consuming.md`; downstream verify-in-Dockerfile
+steps). reef does the source half; an informal channel does the binary half, and
 the integrity work reef would own is reimplemented per consumer. Item 11 folds
 that verb into the resolver and the lockfile.
 
@@ -599,8 +599,8 @@ new mechanism is host-platform / target-triple selection.
 - The binary dependency and its SHA are recorded in the lockfile.
 - A hybrid package (octant) declares both its source shell and its binary, and a
   consumer obtains both through one dependency set.
-- octant's `consuming.md` workaround and C Note's download-and-verify Dockerfile
-  step retire in favor of the reef path.
+- octant's `consuming.md` workaround and downstream download-and-verify
+  Dockerfile steps retire in favor of the reef path.
 
 **Toolchain note.** The chelis toolchain itself is binary-bearing, but its
 installer of record is `chelisup` (chelis#164), not `reef install` — see

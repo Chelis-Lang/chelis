@@ -1,7 +1,7 @@
 # `jit` and `par` spec-impl mismatch diagnosis
 
 Diagnosis pass for the bundled fix dispatched by
-`/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md` (Agent 1 —
+an unpublished workstream plan (Agent 1 —
 D+E). Cross-references:
 
 Current status: chelis#2388 superseded the old `par` acceptance claim. The

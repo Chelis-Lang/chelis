@@ -492,7 +492,7 @@ contains the type in a produced position.
   exit-code meanings unchanged. `ProofArtifact` gains
   `obligation: Option<ObligationMeta{obligation_kind, source_type,
   producer}>` (serde-additive). Release notes call out the new
-  record kind for strict downstream admission parsers (FlukeBall).
+  record kind for strict downstream admission parsers.
 
 ## 10. D-PARITY: one verifier across surfaces
 
