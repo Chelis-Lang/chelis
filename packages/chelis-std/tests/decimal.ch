@@ -337,7 +337,8 @@ def test_div_rejects_domain_failures() -> unit ! { Test } = {
   _ = assert_eq(divided("1", "3", 39i64, RoundTiesToEven), "none", "scale 39")
   _ = assert_eq(divided("1", "3", -1i64, RoundTiesToEven), "none", "scale -1")
   _ = assert_eq(divided("1", "3", i64_minimum(), RoundTiesToEven), "none", "the i64 minimum scale")
-  assert_eq(divided("1", "3", 2i64, RejectInexact), "none", "an inexact quotient")
+  _ = assert_eq(divided("1", "3", 2i64, RejectInexact), "none", "an inexact quotient")
+  assert_eq(divided("99999999999999999999999999999999999999", "0.7", 0i64, RejectInexact), "none", "an inexact quotient outside the range is reported as inexact")
 }
 -- Order.
 def test_order_is_exact() -> unit ! { Test } = {
