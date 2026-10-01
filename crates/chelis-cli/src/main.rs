@@ -1979,8 +1979,15 @@ fn cmd_eval_inner(
             }
             // Raw `--file foo.ch` outside any reef package, or a reef
             // package whose graph the new context-builder can't yet
-            // hash: fall back to the legacy `prepare_eval` path.
-            let (decls, entry_decls) = load_eval_decls(path)?;
+            // hash: fall back to the legacy `prepare_eval` path. A
+            // single-file program that imports is linked against the bundled
+            // chelis-std (chelis#2881), so it too evaluates linker output.
+            let EvalDecls {
+                decls,
+                entry_decls,
+                linked,
+            } = load_eval_decls(path)?;
+            let _single_file_linked_guard = linked.then(chelis_types::install_linked_program_guard);
             let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
             let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
             let source = chelis_surf::format::format_program(&decls);
@@ -10504,16 +10511,34 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
     out
 }
 
-fn load_eval_decls(file: &Path) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::error::Error>> {
+/// The program `chelis eval --file` evaluates.
+struct EvalDecls {
+    /// The whole program.
+    decls: Vec<Decl>,
+    /// The evaluated file's own declarations.
+    entry_decls: Vec<Decl>,
+    /// Whether the reef linker produced `decls`.
+    linked: bool,
+}
+
+fn load_eval_decls(file: &Path) -> Result<EvalDecls, Box<dyn std::error::Error>> {
     let current_dir = env::current_dir()?;
     if let Some(prepared) = chelis_reef::prepare_program_for_eval_file(file, &current_dir)
         .map_err(boxed_string_error)?
     {
-        return Ok((prepared.decls, prepared.entry_decls));
+        return Ok(EvalDecls {
+            decls: prepared.decls,
+            entry_decls: prepared.entry_decls,
+            linked: true,
+        });
     }
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
-    Ok((decls.clone(), decls))
+    Ok(EvalDecls {
+        entry_decls: decls.clone(),
+        decls,
+        linked: false,
+    })
 }
 
 fn cmd_validate(

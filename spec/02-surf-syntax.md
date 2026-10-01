@@ -205,6 +205,8 @@ def forward(x, w, b) = add(matmul(x, w), b)
 
 Qualified access (`Foo.Bar.baz`) is always available after any import form. Selective import additionally brings names into unqualified scope.
 
+A source file that belongs to no reef package resolves its imports against the compiler-bundled `chelis-std` runtime under the same binding, visibility, and shadowing rules as a package module, and an import of a module it cannot reach that way, including every module outside `chelis-std`, is a `chelis check` error that names the module.
+
 A qualified reference names the module path followed by the exported name. The
 trailing name may be a value or a **constructor**, and the whole reference may
 be applied:

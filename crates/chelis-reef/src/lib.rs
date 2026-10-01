@@ -485,7 +485,9 @@ pub struct RegistryVersion {
 pub struct PreparedProgram {
     pub decls: Vec<Decl>,
     pub entry_decls: Vec<Decl>,
-    pub package_root: PathBuf,
+    /// The reef package the program belongs to, or `None` for a single-file
+    /// program outside every package (chelis#2881).
+    pub package_root: Option<PathBuf>,
     /// The chelis-std-only slice of `decls`, in the same relative order.
     /// The cross-process chelis-std typecheck cache content-addresses
     /// this. Empty when the package and entry reach no chelis-std module
@@ -1786,6 +1788,16 @@ impl PreparedReefGraph {
         self.stdlib_source_digest
     }
 
+    /// Whether this graph links a single-file program outside every reef
+    /// package (chelis#2881). Such a graph has no package root: its
+    /// `package_root` is empty and names no directory.
+    fn is_single_file(&self) -> bool {
+        self.graph
+            .packages
+            .get(&self.graph.root_package)
+            .is_some_and(|root| matches!(root.source, LoadedSourceKind::SingleFile))
+    }
+
     /// The chelis-std modules this graph links (chelis#2558). They are the
     /// only chelis-std modules with an entry in `internal_maps`, so a
     /// decoded graph answers from its own data.
@@ -1871,14 +1883,21 @@ impl PreparedReefGraph {
     ) -> Result<Vec<SourceDigest>, String> {
         let mut digests = Vec::new();
         for package in self.graph.packages.values() {
-            match package.source.filesystem_root() {
-                Some(source_root) => Self::push_filesystem_source_digests(
+            match &package.source {
+                LoadedSourceKind::Root { root }
+                | LoadedSourceKind::Path { root, .. }
+                | LoadedSourceKind::LocalRegistry { root } => Self::push_filesystem_source_digests(
                     package,
-                    source_root,
+                    root,
                     validate_graph_against_snapshot,
                     &mut digests,
                 )?,
-                None => push_bundled_runtime_source_digests(package, &mut digests)?,
+                LoadedSourceKind::Bundled => {
+                    push_bundled_runtime_source_digests(package, &mut digests)?
+                }
+                // A single-file program's implicit root has no sources of its
+                // own: its file is the entry, which no graph digest covers.
+                LoadedSourceKind::SingleFile => {}
             }
             for (module_name, identity) in [
                 (
@@ -1917,8 +1936,9 @@ impl PreparedReefGraph {
                 sha256: hasher.finalize().into(),
             });
         }
+        // A single-file program has no package root, so no lockfile.
         let lock_path = self.package_root.join("reef.lock");
-        if lock_path.exists() {
+        if !self.is_single_file() && lock_path.exists() {
             let lock_bytes = fs::read(&lock_path)
                 .map_err(|e| format!("read lockfile `{}`: {e}", lock_path.display()))?;
             digests.push(SourceDigest {
@@ -2235,16 +2255,22 @@ enum LoadedSourceKind {
     /// graph or a cache that embeds one (chelis#2616); its source bytes are
     /// the embedded archive's.
     Bundled,
+    /// The implicit root of a program outside every reef package
+    /// (chelis#2881). It has no manifest file, no modules, and no location:
+    /// the program's own file is linked as the entry, and its only
+    /// dependency is the bundled runtime.
+    SingleFile,
 }
 
 impl LoadedSourceKind {
-    /// The package root on disk, or `None` for the bundled runtime.
+    /// The package root on disk, or `None` for the bundled runtime and the
+    /// implicit root of a single-file program.
     fn filesystem_root(&self) -> Option<&Path> {
         match self {
             Self::Root { root } | Self::Path { root, .. } | Self::LocalRegistry { root } => {
                 Some(root)
             }
-            Self::Bundled => None,
+            Self::Bundled | Self::SingleFile => None,
         }
     }
 }
@@ -2373,9 +2399,20 @@ fn find_package_root_from_dir(mut dir: PathBuf) -> Result<Option<PathBuf>, Strin
     }
 }
 
+/// Link the Surf program at `file` with its reef package, or, when `file`
+/// is outside every package, as a single-file program
+/// ([`prepare_single_file_program`]). `Ok(None)` means there is nothing to
+/// link: `file` is outside every package and imports nothing, or it cannot
+/// be read or parsed as Surf, which the caller reports in its own shape.
 pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, String> {
     let Some(root) = find_package_root_for_input(file)? else {
-        return Ok(None);
+        let Ok(source) = fs::read_to_string(file) else {
+            return Ok(None);
+        };
+        let Ok(decls) = chelis_surf::parser::parse_str(&source) else {
+            return Ok(None);
+        };
+        return prepare_single_file_program(&file.display().to_string(), &decls);
     };
     let lock_path = root.join("reef.lock");
     let graph = match prepare_reef_graph_cached(&root) {
@@ -2426,7 +2463,7 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
     Ok(Some(PreparedProgram {
         decls: graph.linked_library_decls.clone(),
         entry_decls,
-        package_root: root,
+        package_root: Some(root),
         stdlib_decls: graph.linked_stdlib_decls.clone(),
         stdlib_source_digest: graph.stdlib_source_digest(),
         non_stdlib_decls: graph.linked_non_stdlib_library_decls.clone(),
@@ -2445,7 +2482,174 @@ pub fn prepare_program_for_eval_file(
     if matches!(decls.as_slice(), [Decl::Module { .. }]) {
         return prepare_program_for_file(file);
     }
+    if find_package_root_for_dir(context_dir)?.is_none() {
+        return prepare_single_file_program(&file.display().to_string(), &decls);
+    }
     prepare_program_for_eval_source(context_dir, &decls)
+}
+
+/// The graph name of a single-file program's implicit root package
+/// (chelis#2881). The angle brackets keep it outside the package-name
+/// grammar, so no manifest can declare a package that collides with it.
+const SINGLE_FILE_PACKAGE_NAME: &str = "<single-file>";
+
+/// Link a Surf program outside every reef package against the
+/// compiler-bundled chelis-std (chelis#2881).
+///
+/// Every Chelis program depends on the bundled runtime the way a Rust
+/// program depends on `core`, so a single-file program's imports resolve
+/// against it through the name resolver a package module uses, under the
+/// same binding, visibility, and shadowing rules. With no manifest the
+/// program can name no other package, so an import of a module outside the
+/// runtime is rejected, and the diagnostic says a manifest is needed.
+///
+/// `source_label` names a program that has no `module` declaration in
+/// diagnostics. `Ok(None)` means there is nothing to link: the program
+/// imports nothing, so its own declarations are the whole program.
+pub fn prepare_single_file_program(
+    source_label: &str,
+    decls: &[Decl],
+) -> Result<Option<PreparedProgram>, String> {
+    let (module_name, decls) = match decls {
+        [Decl::Module { name, decls, .. }] => (name.as_str(), decls.as_slice()),
+        _ => (source_label, decls),
+    };
+    if module_imports(decls).next().is_none() {
+        return Ok(None);
+    }
+    let mut packages = BTreeMap::from([(
+        SINGLE_FILE_PACKAGE_NAME.to_string(),
+        single_file_root_package(),
+    )]);
+    insert_implicit_runtime(&mut packages)?;
+    let graph = PackageGraph {
+        root_package: SINGLE_FILE_PACKAGE_NAME.to_string(),
+        packages,
+    };
+    for import in module_imports(decls) {
+        if find_imported_module(&graph, SINGLE_FILE_PACKAGE_NAME, import).is_err() {
+            return Err(single_file_unresolved_import(&graph, import));
+        }
+    }
+    let roots = stdlib_imports_of(&graph, SINGLE_FILE_PACKAGE_NAME, module_imports(decls))
+        .collect::<BTreeSet<_>>();
+    // The program has no package root. This graph never leaves this
+    // function except inside the returned program, whose `package_root` is
+    // `None`, and `is_single_file` keeps the lockfile digest off the empty
+    // path.
+    let graph = prepare_graph_from_loaded(PathBuf::new(), graph, &roots)?;
+    let entry_decls = rewrite_single_file_decls(&graph, module_name, decls)?;
+    Ok(Some(assemble_rewritten_entry_program(&graph, &entry_decls)))
+}
+
+/// The implicit root package of a single-file program: no manifest file,
+/// no dependency beyond the bundled runtime, and no modules, because the
+/// program's file is linked as the entry.
+fn single_file_root_package() -> LoadedPackage {
+    LoadedPackage {
+        id: PackageId {
+            name: SINGLE_FILE_PACKAGE_NAME.to_string(),
+            version: String::new(),
+        },
+        manifest: ReefManifest {
+            package: ManifestPackage {
+                name: SINGLE_FILE_PACKAGE_NAME.to_string(),
+                version: String::new(),
+                compiler: CURRENT_COMPILER_VERSION.to_string(),
+                module_prefix: String::new(),
+                additional_sources: vec![],
+                metadata: PackageMetadata::default(),
+            },
+            dependencies: BTreeMap::new(),
+            chelis_src: None,
+            conform: None,
+            artifacts: BTreeMap::new(),
+        },
+        resolver: package_versioning::ResolverVersion::One,
+        modules: BTreeMap::new(),
+        source: LoadedSourceKind::SingleFile,
+        archive_sha256: None,
+        shell_sha256: None,
+        shell: None,
+        remote_origin: None,
+    }
+}
+
+/// The diagnostic for an import a single-file program cannot resolve. A
+/// module under the runtime's prefix does not exist in the bundled
+/// chelis-std; any other module could come only from a package that a
+/// manifest declares.
+fn single_file_unresolved_import(graph: &PackageGraph, module: &str) -> String {
+    let runtime_prefix = graph
+        .packages
+        .get(CHELIS_STD_PACKAGE_NAME)
+        .map(|runtime| runtime.manifest.package.module_prefix.as_str())
+        .unwrap_or_default();
+    let in_runtime = module
+        .strip_prefix(runtime_prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'));
+    let mut message = if in_runtime {
+        format!(
+            "unresolved import `{module}`: the compiler-bundled `{CHELIS_STD_PACKAGE_NAME}` \
+             has no module `{module}`"
+        )
+    } else {
+        format!(
+            "unresolved import `{module}`: a program outside a reef package imports only \
+             from the compiler-bundled `{CHELIS_STD_PACKAGE_NAME}` (`{runtime_prefix}.*`), \
+             so importing `{module}` needs a `reef.toml` package manifest"
+        )
+    };
+    if let Some(note) = builtin_module_note(module) {
+        message.push_str(&note);
+    }
+    message
+}
+
+/// Rewrite a single-file program's declarations against its graph. The
+/// program's own names keep their spelling, as an eval entry's do, but they
+/// enter the resolver as the module's own names, so a declaration shadows
+/// an import of the same name exactly as it does in a package module.
+/// `export` declarations stay, as they do when the file is checked without
+/// linking.
+fn rewrite_single_file_decls(
+    graph: &PreparedReefGraph,
+    module_name: &str,
+    decls: &[Decl],
+) -> Result<Vec<Decl>, String> {
+    validate_source_signature_pairs(decls, module_name)?;
+    let symbols = collect_symbol_kinds(decls);
+    let mut internal_maps = graph.internal_maps.clone();
+    internal_maps.insert(
+        (graph.graph.root_package.clone(), module_name.to_string()),
+        symbols
+            .keys()
+            .map(|name| (name.clone(), name.clone()))
+            .collect(),
+    );
+    let module = ModuleSource {
+        package_name: graph.graph.root_package.clone(),
+        module_name: module_name.to_string(),
+        decls: decls.to_vec(),
+        file_rel: PathBuf::from(module_name),
+        source_root: String::new(),
+        exports: compute_exports(decls),
+        symbols,
+    };
+    let resolver = build_name_resolver(&module, &graph.graph, &internal_maps, &graph.dep_shells)?;
+    let mut out = Vec::new();
+    for decl in decls {
+        reject_linker_format_binding(decl)?;
+        match decl {
+            Decl::Import { .. } => {}
+            Decl::Module { .. } => {
+                return Err(format!("nested module declaration in {module_name}"));
+            }
+            _ => out.push(rewrite_eval_decl(decl, &resolver)),
+        }
+    }
+    drain_qualified_failures(&resolver)?;
+    Ok(out)
 }
 
 /// Resolve, link, and cache the reef package graph rooted at (or above)
@@ -3138,7 +3342,7 @@ fn assemble_rewritten_entry_program(
     PreparedProgram {
         decls,
         entry_decls: rewritten_entry_decls.to_vec(),
-        package_root: graph.package_root.clone(),
+        package_root: (!graph.is_single_file()).then(|| graph.package_root.clone()),
         stdlib_decls: graph.linked_stdlib_decls.clone(),
         stdlib_source_digest: graph.stdlib_source_digest(),
         non_stdlib_decls,
@@ -3487,7 +3691,10 @@ pub fn prepare_program_for_eval_source(
 ) -> Result<Option<PreparedProgram>, String> {
     // Convenience wrapper: preserved for existing callers (chelis eval, the
     // CLI --file path, Deep/IR integration tests) that want the single-shot
-    // preparation and expect `Ok(None)` when there is no reef package.
+    // preparation and expect `Ok(None)` when there is no reef package. A
+    // caller that then runs the decls links them with
+    // `prepare_single_file_program`, as `prepare_program_for_eval_file` does,
+    // so their imports are never dropped (chelis#2881).
     // `chelis test` takes the split-path route (prepare_reef_graph +
     // compile_with_reef_graph) to share the expensive graph across files.
     let Some(_) = find_package_root_for_dir(context_dir)? else {
@@ -7676,7 +7883,7 @@ fn validate_resolved_graph_with_local_resolver(graph: &PackageGraph) -> Result<(
                         }),
                     }
                 }
-                LoadedSourceKind::Root { .. } => continue,
+                LoadedSourceKind::Root { .. } | LoadedSourceKind::SingleFile => continue,
                 LoadedSourceKind::Bundled => {
                     return Err(format!(
                         "only `{CHELIS_STD_PACKAGE_NAME}` can come from the compiler bundle, not `{raw_name}`"
@@ -8718,14 +8925,16 @@ fn build_lockfile(graph: &PackageGraph) -> ReefLock {
                 LoadedSourceKind::LocalRegistry { .. } => LockSource::LocalRegistry {
                     remote_origin: package.remote_origin.clone(),
                 },
-                // `Root` is a defensive fallback for the build-lockfile
-                // path: the root package is not normally a dependency.
-                // If it ever shows up here, treat it as an unrecorded
-                // local-registry source so the lockfile stays well-
-                // formed.
-                LoadedSourceKind::Root { .. } => LockSource::LocalRegistry {
-                    remote_origin: None,
-                },
+                // `Root` and `SingleFile` are defensive fallbacks for the
+                // build-lockfile path: a root package is not normally a
+                // dependency. If one ever shows up here, treat it as an
+                // unrecorded local-registry source so the lockfile stays
+                // well-formed.
+                LoadedSourceKind::Root { .. } | LoadedSourceKind::SingleFile => {
+                    LockSource::LocalRegistry {
+                        remote_origin: None,
+                    }
+                }
             };
             let archive_sha256 = package
                 .shell
@@ -10687,14 +10896,7 @@ fn rewrite_eval_module_decls(
         // entry path passes through, before these decls combine with the
         // linked library. This is flag-independent: user entry decls are
         // never linker output.
-        if let Some(name) = entry_decl_binding_name(decl)
-            && chelis_types::is_linker_format_name(name)
-        {
-            return Err(format!(
-                "`{name}` uses the reef package-linker's reserved internal-name format \
-                 (`Pkg__`/`pkg__`...), which only the linker may produce; rename the declaration"
-            ));
-        }
+        reject_linker_format_binding(decl)?;
         match decl {
             Decl::Import { .. } | Decl::Export { .. } => {}
             Decl::Module { .. } => unreachable!("module wrappers already stripped"),
@@ -10703,6 +10905,18 @@ fn rewrite_eval_module_decls(
     }
     drain_qualified_failures(&resolver)?;
     Ok(out)
+}
+
+/// Reject a user-authored entry declaration whose name uses the linker's
+/// reserved internal-name format (RFC v6).
+fn reject_linker_format_binding(decl: &Decl) -> Result<(), String> {
+    match entry_decl_binding_name(decl) {
+        Some(name) if chelis_types::is_linker_format_name(name) => Err(format!(
+            "`{name}` uses the reef package-linker's reserved internal-name format \
+             (`Pkg__`/`pkg__`...), which only the linker may produce; rename the declaration"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The top-level binding name a declaration introduces, for the
@@ -10759,15 +10973,19 @@ fn find_imported_module<'a>(
             return Ok((package_name.clone(), module));
         }
     }
-    // If the module name itself matches a builtin, the user probably meant
-    // to call it directly without importing.
+    Err(format!(
+        "unresolved import `{module_name}`{}",
+        builtin_module_note(module_name).unwrap_or_default()
+    ))
+}
+
+/// If an unresolved import's module name matches a builtin, the user
+/// probably meant to call it directly without importing.
+fn builtin_module_note(module_name: &str) -> Option<String> {
     let lower = module_name.to_ascii_lowercase();
-    if chelis_types::BUILTIN_NAMES.contains(&lower.as_str()) {
-        return Err(format!(
-            "unresolved import `{module_name}`. Note: `{lower}` is a Chelis built-in function; call it directly without importing"
-        ));
-    }
-    Err(format!("unresolved import `{module_name}`"))
+    chelis_types::BUILTIN_NAMES.contains(&lower.as_str()).then(|| {
+        format!(". Note: `{lower}` is a Chelis built-in function; call it directly without importing")
+    })
 }
 
 struct NameResolver {
@@ -15340,7 +15558,7 @@ module_prefix = "RegistryLib"
         let prepared = PreparedProgram {
             decls,
             entry_decls,
-            package_root: PathBuf::new(),
+            package_root: None,
             stdlib_decls: Vec::new(),
             stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
@@ -15380,7 +15598,7 @@ module_prefix = "RegistryLib"
         let invariant_program = PreparedProgram {
             decls: invariant_decls,
             entry_decls: invariant_entry,
-            package_root: PathBuf::new(),
+            package_root: None,
             stdlib_decls: Vec::new(),
             stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
@@ -15414,7 +15632,7 @@ module_prefix = "RegistryLib"
         let macro_program = PreparedProgram {
             decls: macro_decls,
             entry_decls: macro_entry,
-            package_root: PathBuf::new(),
+            package_root: None,
             stdlib_decls: Vec::new(),
             stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
