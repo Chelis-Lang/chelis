@@ -152,10 +152,34 @@ and returns `(exit_code, stdout, stderr)`. `run_chelis(args)` invokes the
 testing. The language specifies compiled host process execution too, but
 `chelis build` rejects these calls.
 
+### Dates and times
+
+`Std.Datetime` provides civil dates (`Date`), times of day (`Time`), civil
+datetimes (`DateTime`), instants on the POSIX timescale (`Instant`), fixed
+offsets (`Offset`), instants with their written offset (`OffsetDateTime`),
+exact durations (`Duration`), calendar periods (`Period`), and the column types
+`Dates[n]` and `Instants[n]`. Years run from -9999 through 9999. Every type is
+opaque: obtain a value from a validating producer such as `date(y, m, d)`,
+`parse_date(text)`, `instant_from_unix(s, ns)`, `duration(s, ns)`, or
+`period(months, days)`, never from a record literal.
+
+Where a library would choose silently, the caller states the policy:
+`date_add_months(d, n, ClampToMonthEnd)` or `RejectInvalidDay` for 31 January
+plus one month, and a `Rounding` from `Std.Rounding` for every conversion that
+drops precision, such as `instant_to_unix_count(i, Milliseconds,
+RoundTowardNegative)`; `RejectInexact` fails instead of rounding. Text forms
+follow one RFC 3339-based profile (`2026-10-01T09:30:00-04:00`, `PT3661S`,
+`P14M3D`). A failure reports `<function>: domain: <detail>` for an invalid
+input or `<function>: overflow: <detail>` for a result outside its type's
+range; each `try_` form returns `None` where its twin fails `domain`. `eq` and
+`neq` compare values, and the `*_lt`, `*_lte`, `*_gt`, and `*_gte` functions
+order them. The module is pure and runs under `chelis eval`, `chelis test`, and
+generated C.
+
 ### Exported but unavailable
 
-`Std.Decimal` and `Std.Time` export types and callable names, but calling
-their arithmetic and calendar functions fails. `Std.Io.Parquet`
-and `Std.Io.Safetensors` also export names whose calls fail. Use the modules
-above for runnable programs; the [operation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md)
-records the intended contracts for Decimal and Time.
+`Std.Decimal` exports types and callable names, but calling its arithmetic
+functions fails. `Std.Io.Parquet` and `Std.Io.Safetensors` also export names
+whose calls fail. Use the modules above for runnable programs; the
+[operation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md)
+records the intended contract for Decimal.

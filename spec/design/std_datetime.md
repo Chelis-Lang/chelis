@@ -163,7 +163,7 @@ message grammar so that every failure is deterministic and machine-readable:
 | Kind | Meaning | `try_` form |
 |---|---|---|
 | `domain` | An input is outside the operation's value set: an invalid field, a year outside the range, malformed text, a query outside a calendar's horizon, a `Reject…` policy firing. | returns `None` |
-| `overflow` | An arithmetic result leaves the type's range. | still fails, as Decimal's `try_` forms do for unrepresentable results |
+| `overflow` | An arithmetic result leaves the type's range. | still fails |
 | `io` | The host could not supply a clock reading (`Std.Datetime.Clock` only, §12). | no `try_` form |
 
 The one exception is `try_instant_to_unix_count` and `try_duration_to_count`. Their only
@@ -195,10 +195,9 @@ enforces this (§17).
 
 Each type below is `@opaque`. "Equality" is what structural `eq` ([05-OP-36]) means
 outside the module. It always compares the representation, and the representation is
-canonical, so equal representations mean equal values. (#2587 tracks the checker's
-rejection of `eq` on ADT values, which [05-OP-36] admits. Until it closes, equality
-composes through the accessors, for example `eq(date_epoch_day(a), date_epoch_day(b))`.
-No per-type equality function is added.)
+canonical, so equal representations mean equal values. Structural `eq` and `neq`
+([05-OP-36]) are the equality of every value type, and no per-type equality function is
+added.
 
 | Type | Meaning | Representation | Equality |
 |---|---|---|---|
@@ -271,8 +270,8 @@ There is no roll-over option for month arithmetic. 31 January + 1 month rolling 
 `Rounding` from `Std.Rounding`, a small module that S1 introduces and that `Std.Decimal`
 adopts when it is redesigned, so the standard library has one rounding vocabulary. Its
 variants use IEEE 754's attribute names, which spec/05 already uses for `round`, wherever
-IEEE 754 has one; `RoundAwayFromZero` has no IEEE 754 counterpart. For an exact value `v` and
-a positive quantum `q`, each returns a multiple `k·q`:
+IEEE 754 has one; `RoundAwayFromZero` and `RejectInexact` have no IEEE 754 counterpart.
+For an exact value `v` and a positive quantum `q`, each returns a multiple `k·q`:
 - `RoundTowardNegative`: the largest `k·q ≤ v`.
 - `RoundTowardPositive`: the smallest `k·q ≥ v`.
 - `RoundTowardZero`: whichever of those two is nearer zero.
@@ -280,6 +279,8 @@ a positive quantum `q`, each returns a multiple `k·q`:
   a multiple.
 - `RoundTiesToEven`: the nearest multiple; an exact tie takes the even `k`.
 - `RoundTiesToAway`: the nearest multiple; an exact tie takes the one farther from zero.
+- `RejectInexact`: `v` itself, which must already be a multiple; otherwise the callable
+  fails `domain` and its `try_` twin returns `None`.
 
 On the instant and duration line, rounding toward the past is `RoundTowardNegative` and
 rounding toward the future is `RoundTowardPositive`; for times before 1970 these differ
@@ -492,8 +493,13 @@ independently.
   likewise with `try_instants_from_unix(...) -> (Instants[n], tensor[n, bool])`.
 - `instants_unix_seconds(is) -> tensor[n, i64]` and `instants_nanoseconds(is) -> tensor[n, i64]`.
 
-Each signature's ownership form (borrowing or consuming the column) follows spec/04's
-rules for ADTs holding tensors. The S1 PR records it here.
+Ownership follows spec/04's rules for tensor-carrying ADTs:
+- The constructors and their masked `try_` forms consume their tensors, which become the
+  column's storage, because a borrow cannot be stored in an aggregate (spec/04 §8).
+- The accessors `dates_epoch_days`, `instants_unix_seconds` and `instants_nanoseconds`
+  consume the column and return its storage. An owned tensor-carrying ADT is linear
+  (spec/04 §8.4), and a borrowing accessor would have to copy, because a borrow cannot be
+  returned. A caller that uses a column again receives implicit linearity's inserted copy.
 
 ### 8.8 Text profile
 
@@ -853,8 +859,7 @@ holiday tables.
   in `spec/registry/stdlib_adt_identities.md` under [05-OP-34].
 
 [05-OP-35] gains one sentence routing their semantics to a new atom, "`datetime::*`
-identities follow [05-OP-N]", as JSON access already follows [05-OP-2..5]. `N` is the
-next free atom number on `main` when S1 lands. The capacity
+identities follow [05-OP-73]", as JSON access already follows [05-OP-2..5]. The capacity
 census, the frozen-contract oracle (`scripts/dtype_phase4b_oracle.py`) and the registry
 bijection test then need no new structure.
 
@@ -863,8 +868,8 @@ stage adding the paragraphs for the identities it exports. The atom is the contr
 "exactly" the registered identities, so prose about identities not yet registered would
 contradict it. This document holds the rest of the decided design until then.
 
-**Rounding atom.** S1 also adds one short atom defining the six `Std.Rounding` modes for
-an exact value and a positive quantum (§7). The datetime atom cites it, and so does
+**Rounding atom.** S1 also adds [05-OP-74], one short atom defining the seven
+`Std.Rounding` modes for an exact value and a positive quantum (§7). The datetime atom cites it, and so does
 `Std.Decimal`'s atom when Decimal adopts the shared type.
 
 **S1 also amends the existing atoms.**

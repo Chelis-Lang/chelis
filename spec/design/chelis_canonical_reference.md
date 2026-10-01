@@ -222,7 +222,7 @@ LaTeX document ingestion, Octant Phase 4).
 
 | Package | Kind | Depends On | Status | Contents |
 |---|---|---|---|---|
-| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active | `Std.Io` (files, mmap, safetensors, CSV, JSON), `Std.Tensor` (including `Std.Tensor.Mask`), `Std.Index`, `Std.Scan`, `Std.Sort`, `Std.Process`, `Std.Time` (callables fenced; #2779), `Std.Decimal` (callables fenced; #2778), `Std.Test` (assertion functions for Chelis-native tests). |
+| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active | `Std.Io` (files, mmap, safetensors, CSV, JSON), `Std.Tensor` (including `Std.Tensor.Mask`), `Std.Index`, `Std.Scan`, `Std.Sort`, `Std.Process`, `Std.Datetime` (dates, times, instants, durations, periods, and their columns), `Std.Rounding` (shared rounding modes), `Std.Decimal` (callables fenced; #2778), `Std.Test` (assertion functions for Chelis-native tests). |
 | `nautilus` | Shell | `chelis-std` | Active (`v0.5.0` released) | Numerical methods — stats, distributions, linear algebra (nalgebra-backed with hand-written AD adjoints), convex optimization, ODE/SDE solvers, roots, integration, interpolation, special functions (`erf`, `log_gamma`, …), distances. The scipy analogue. `Nautilus.Signal` stubbed until complex numbers (Phase 5f). |
 | `coral` | Shell | `chelis-std` | Phase 3k | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, rolling windows, NaN handling built into `Coral.Frame`, Parquet I/O via `parquet2`, DataFrame-aware CSV/JSON. The pandas analogue. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
 | `shoals` | Shell | `chelis-std` + `nautilus` + `coral` | Phase 3l | Options pricing, risk measures, yield curves, stochastic processes, order books |
@@ -430,7 +430,7 @@ The practical compiler/runtime foundations that now ship are:
   the compiled host-value ABI before more host/library work lands
 - data-loading and tokenization support that removes the mandatory Python
   preprocessing step
-- standard-library host modules such as `Std.Time` and `Std.Decimal`
+- standard-library host modules such as `Std.Datetime` and `Std.Decimal`
 
 The remaining active Phase 3 work is shell ecosystem and test-surface work: Coral,
 Shoals, Octant Part A/B, Chelis-native testing, and the final SKILL.md v2 refresh.
@@ -553,7 +553,7 @@ Runtime contents:
 
 - data loading utilities
 - basic I/O (tensor serialization, checkpoint save/load)
-- time/date helpers (`Std.Time`; callables fenced by #2779)
+- dates, times, instants, durations, and periods (`Std.Datetime`)
 - `Std.Decimal` types; its callables currently fail with #2778
 
 The neural-network building blocks (such as `School.Nn.Embedding`), optimizers beyond
@@ -744,7 +744,7 @@ The full-surface `SKILL.md` v2 refresh belongs to late Phase 3, after the shippe
 public Surf idiom and the remaining language-completeness surfaces are stabilized:
 pipe-first chains, short-form block bindings, scalar/string code, collections,
 iteration, core numeric primitives, tokenization/data-loading workflows, and the later
-`Std.Time` / `Std.Decimal` host-program surfaces.
+`Std.Datetime` / `Std.Decimal` host-program surfaces.
 
 Current validation result:
 
