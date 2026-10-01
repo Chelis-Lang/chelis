@@ -1,10 +1,24 @@
-Illustrative Chelis examples that are useful for syntax and design discussion
-but are not part of the executable Phase 0 example corpus.
+Illustrative Chelis examples: programs that show a language form or a design
+pattern but sit outside the executable corpus.
 
-Files in the top-level `examples/` directory are expected to survive `chelis fmt`
-and `chelis check` with Phase 0 semantics. Files in this directory are allowed to
-exercise broader language forms that are not yet executable on the Phase 0 path.
+Every `.ch` file directly under `examples/` belongs to the executable corpus.
+The parity test (`crates/chelis-cli/tests/parity.rs`) checks each one, runs it
+in the evaluator, builds it to C, and requires the two outputs to agree.
 
-Package-backed illustrative examples may appear as subdirectories with their own
-`reef.toml` and fixture data when a phase needs a durable acceptance artifact that is
-broader than the top-level executable corpus.
+Every `.ch` file in this directory passes `chelis fmt --check` and
+`chelis check`, but is not held to that parity run. Each is here for one of
+these reasons:
+
+- It only declares functions and has no top-level expression to evaluate, so
+  it shows signatures and shapes rather than output, as the attention-block
+  files and `mlp.ch` do.
+- It uses a form that `chelis eval` accepts but `chelis build --target c`
+  rejects, such as host subprocesses in `process_run_chelis_version.ch`, a
+  non-`cpu` device region in `effects_handlers.ch`, or differentiation through
+  functions stored in constructor or record payloads in
+  `grad_selector_provenance.ch`.
+- A compiler test reads it as a fixture, as its header comment says.
+
+Subdirectories are complete Reef packages with their own `reef.toml` and data.
+`io_pipeline/` reads its CSV and JSON inputs with `chelis eval --file src/main.ch`
+run from the package directory.
