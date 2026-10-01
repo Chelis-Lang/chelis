@@ -4964,8 +4964,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                                  selectors; pass each `<ORG>/<REPO>@<TAG>` after `--bootstrap`"
                             .into());
                     }
-                    // Empty list = use the built-in default. The list is
-                    // hand-maintained for the pre-launch dev team; see
+                    // Empty list = use the built-in default; see the
                     // `chelis_reef::DEFAULT_BOOTSTRAP_LIST` rustdoc.
                     let raw_specs: Vec<String> = if bootstrap_args.is_empty() {
                         chelis_reef::DEFAULT_BOOTSTRAP_LIST

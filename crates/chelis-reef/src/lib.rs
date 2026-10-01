@@ -5414,8 +5414,9 @@ impl std::fmt::Display for LockfileInstallError {
 /// in the bootstrap input list is rejected with a typed runtime
 /// error (see [`install_bootstrap`]).
 ///
-/// This list is **hand-maintained** for the pre-launch dev team. Bump
-/// each entry's tag whenever a shell publishes a new release that
+/// Every entry must be a publicly readable shell repository: the default
+/// bootstrap runs for any user, and one unreadable entry fails the whole
+/// install. This list is **hand-maintained**. Bump each entry's tag whenever a shell publishes a new release that
 /// should be the default-fetched version. The bootstrap installer reads
 /// each archive's `reef.toml` to discover dependencies; entries not
 /// present in this list whose `reef.toml` references them surface a
@@ -5429,7 +5430,6 @@ pub const DEFAULT_BOOTSTRAP_LIST: &[(&str, &str)] = &[
     ("nautilus", "v0.6.1"),
     ("coral", "v0.6.1"),
     ("shoals", "v0.3.1"),
-    ("octant", "v0.4.2"),
 ];
 
 /// Distinct error categories surfaced by the bootstrap install path.
@@ -11679,6 +11679,18 @@ fn checked_library_with_effects(
 
 #[cfg(test)]
 mod tests {
+    /// The default bootstrap set names only the public shells. A private
+    /// repository here fails `reef install --bootstrap` for every user who
+    /// cannot read it.
+    #[test]
+    fn default_bootstrap_list_names_only_public_shells() {
+        let repos: Vec<&str> = super::DEFAULT_BOOTSTRAP_LIST
+            .iter()
+            .map(|(repo, _)| *repo)
+            .collect();
+        assert_eq!(repos, ["nautilus", "coral", "shoals"]);
+    }
+
     use super::*;
     use tempfile::tempdir;
 
