@@ -10,11 +10,12 @@
 //! strict reference toolchain the `lane-check` gate uses, then holds the
 //! harness to its pass line.
 //!
-//! The default test is the CI profile: the range edges, every day from
-//! 1900-01-01 through 2100-12-31, seeded samples across the whole range, every
-//! policy branch, every year's Easter, and the valid and invalid text corpus.
-//! The ignored test is the manual gate in `docs/manual_gates.md`: every day of
-//! the range in compiled C.
+//! The default test is the CI profile: the range edges, seeded samples across
+//! the whole range, every policy branch, every year's Easter, and the valid and
+//! invalid text corpus on both lanes, plus every day from 1900-01-01 through
+//! 2100-12-31 in compiled C. The ignored test is the manual gate in
+//! `docs/manual_gates.md`: every day of the range in compiled C, and every day
+//! from 1900 through 2100 on `chelis eval`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -87,8 +88,11 @@ fn std_datetime_agrees_with_the_reference_on_eval_and_c() {
 }
 
 #[test]
-#[ignore = "manual gate (docs/manual_gates.md, Std.Datetime S1): every day of the range in compiled C. Run `cargo nextest run -p chelis-cli --test std_datetime_oracle --run-ignored only`."]
+#[ignore = "manual gate (docs/manual_gates.md, Std.Datetime S1): every day of the range in compiled C and 1900-2100 on eval. Run `cargo nextest run -p chelis-cli --test std_datetime_oracle --run-ignored only`."]
 fn std_datetime_every_day_of_the_range_in_compiled_c() {
-    let stdout = run_harness("exhaustive", "c");
-    assert!(stdout.contains("on lanes c"), "{stdout}");
+    let stdout = run_harness("exhaustive", "eval,c");
+    assert!(
+        stdout.contains("on lanes eval+c; 7304484 days in day rows"),
+        "{stdout}"
+    );
 }

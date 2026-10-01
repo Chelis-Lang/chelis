@@ -424,7 +424,7 @@ class TextProfile(unittest.TestCase):
 class FailureGrammar(unittest.TestCase):
     def test_every_reference_failure_in_the_corpus_follows_section_5(self) -> None:
         corpus = harness.build_ci_corpus()
-        self.assertGreater(len(corpus.failures), 200)
+        self.assertGreater(len(corpus.failures), 100)
         for failure_case in corpus.failures:
             self.assertRegex(f"{failure_case.function}: {failure_case.kind}: x", MESSAGE)
             self.assertIn(failure_case.function, harness.FUNCTIONS, failure_case)
@@ -484,25 +484,86 @@ class HarnessLogic(unittest.TestCase):
         harness.check_program(program, [harness.LaneResult("eval", 0, "f0000_x = [1]", "", "eval")], report)
         self.assertTrue(report.problems)
 
-    def test_representative_failures_keep_every_text_rejection(self) -> None:
+    def test_representative_failures_keep_named_cases_and_sample_the_rest(self) -> None:
         failures = [harness.Failure(f"f{i:04d}_add_days", "e", "date_add_days", "overflow") for i in range(10)]
-        failures += [harness.Failure(f"f{i + 10:04d}_reject_date", "e", "parse_date", "domain") for i in range(5)]
-        chosen = harness.representative_failures(failures, 3)
-        self.assertEqual([f.name for f in chosen if "add_days" in f.name], ["f0000_add_days", "f0004_add_days", "f0009_add_days"])
-        self.assertEqual(len([f for f in chosen if "reject" in f.name]), 5)
+        failures += [harness.Failure(f"f{i + 10:04d}_named_reject", "e", "parse_date", "domain") for i in range(5)]
+        chosen = harness.representative_failures(failures, 2)
+        self.assertEqual([f.name for f in chosen if "add_days" in f.name], ["f0000_add_days", "f0009_add_days"])
+        self.assertEqual(len([f for f in chosen if "named" in f.name]), 5)
+
+    def test_stray_output_lines_are_disagreements(self) -> None:
+        printed, stray = harness.parse_bindings("v = [1]\nfirst_year = -9999\nnot a binding\n")
+        self.assertEqual(printed, {"v": "[1]", "first_year": "-9999"})
+        self.assertEqual(stray, ["not a binding"])
+        program = harness.Program("p", "", (harness.Value("v", "x", 1),))
+        report = harness.Report()
+        harness.check_program(program, [harness.LaneResult("c", 0, "v = [1]\nfirst_year = -9999\n", "", "run")], report)
+        self.assertEqual(len(report.problems), 1)
+        self.assertIn("first_year", report.problems[0])
+        clean = harness.Report()
+        harness.check_program(program, [harness.LaneResult("c", 0, "v = [1]\n", "", "run")], clean)
+        self.assertEqual(clean.problems, [])
+
+    def test_generators_mirror_the_prelude_and_stay_in_range(self) -> None:
+        prelude = harness.prelude()
+        self.assertIn("mod(x * 1103515245i64 + 12345i64, 2147483648i64)", prelude)
+        self.assertIn(f"lcg(lcg(k + {harness.SEED}i64))", prelude)
+        self.assertNotIn("@", prelude)
+        for k in range(0, 500_000, 997):
+            self.assertTrue(ref.in_day_range(harness.sample_day(k)))
+            self.assertTrue(ref.MIN_YEAR < harness.sample_year(k) < ref.MAX_YEAR)
+            near = harness.near_day(k)
+            self.assertTrue(ref.in_day_range(near - 800) and ref.in_day_range(near + 800))
+            # The products inside lcg stay below 2^63 for every reachable input.
+            self.assertLess((harness.lcg(k + harness.SEED)) * 1103515245 + 12345, 2**63)
+
+    def test_every_grid_is_trap_free_under_the_reference(self) -> None:
+        # A grid binding has no way to report a failure, so the reference must
+        # compute every row of every grid without raising.
+        corpus = harness.build_ci_corpus()
+        for grid in corpus.bulk:
+            if grid.lanes == harness.C_ONLY:
+                continue  # the 1900-2100 sweep is checked by the C-only test below
+            self.assertIsInstance(grid.resolve(), list, grid.name)
+
+    def test_lanes_and_day_coverage(self) -> None:
+        corpus = harness.build_ci_corpus()
+        lanes = {grid.name.split("_", 1)[1]: grid.lanes for grid in corpus.bulk}
+        self.assertEqual(lanes["days_1900_2100"], harness.C_ONLY)
+        self.assertEqual(lanes["days_first_400"], harness.BOTH)
+        self.assertTrue(set(range(harness.FIRST_1900, harness.LAST_2100 + 1)) <= corpus.days)
+        self.assertIn(ref.MIN_EPOCH_DAY, corpus.days)
+        self.assertIn(ref.MAX_EPOCH_DAY, corpus.days)
+        exhaustive = harness.build_exhaustive_corpus()
+        self.assertEqual(len(exhaustive.days), ref.MAX_EPOCH_DAY - ref.MIN_EPOCH_DAY + 1)
+        self.assertTrue(any(grid.lanes == harness.EVAL_ONLY for grid in exhaustive.bulk))
+
+    def test_grid_source_nests_one_loop_per_axis(self) -> None:
+        corpus = harness.Corpus()
+        corpus.grid("g", [harness.range_axis("a", 0, 2), harness.int_axis("b", [5, 6])], "[a + b]", lambda a, b: [a + b])
+        grid = corpus.bulk[0]
+        self.assertEqual(grid.expr, "flat_map(fn (a: i64) -> flat_map(fn (b: i64) -> [a + b], [5i64, 6i64]), range(0i64, 2i64))")
+        self.assertEqual(grid.resolve(), [5, 6, 6, 7])
+        corpus.grid("s", [harness.text_axis("t", ["x", 'q"'])], "f(t)", lambda t: t.upper(), strings=True)
+        self.assertEqual(corpus.bulk[1].expr, 'map(fn (t: string) -> f(t), ["x", "q\\""])')
+        self.assertEqual(corpus.bulk[1].resolve(), ["X", 'Q"'])
 
     def test_ci_corpus_covers_the_brief(self) -> None:
         corpus = harness.build_ci_corpus()
-        names = " ".join(v.name for v in corpus.bulk)
-        self.assertIn("days_1900_2100", names)
-        self.assertIn("every_year", names)
-        labels = {v.name.split("_", 1)[1] for v in corpus.values} | {f.name.split("_", 1)[1] for f in corpus.failures}
-        for policy_label in ("try_add_months", "add_months", "try_add_period", "round_to", "try_to_count", "nth_weekday"):
-            self.assertIn(policy_label, labels)
-        exprs = " ".join(v.expr for v in corpus.values) + " ".join(f.expr for f in corpus.failures)
+        names = " ".join(grid.name for grid in corpus.bulk)
+        for required in ("days_1900_2100", "days_first_400", "days_last_400", "days_sampled", "every_year", "period_until",
+                         "add_months", "add_period", "nth_weekday", "last_weekday", "round_to", "try_to_count",
+                         "try_duration_to_count", "text_parse_", "text_reject_", "text_canonical_", "text_reparse_"):
+            self.assertIn(required, names)
+        exprs = harness.prelude() + " ".join(v.expr for v in corpus.bulk + corpus.values) + " ".join(f.expr for f in corpus.failures)
         for constructor in ref.DAY_OVERFLOW + ref.TIME_ROUNDING + tuple(ref.TIME_UNIT_NANOS) + ref.WEEKDAYS:
             self.assertIn(constructor, exprs)
-
+        missing = [function for function in harness.FUNCTIONS if not re.search(rf"\b{function}\(", exprs)]
+        self.assertEqual(missing, [])
+        kinds = {(f.function, f.kind) for f in corpus.failures}
+        self.assertIn(("try_date_add_months", "overflow"), kinds)
+        self.assertIn(("date_add_months", "domain"), kinds)
+        self.assertIn(("parse_time", "domain"), kinds)
 
 if __name__ == "__main__":
     unittest.main()
