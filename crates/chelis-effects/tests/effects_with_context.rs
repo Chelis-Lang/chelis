@@ -12,6 +12,7 @@
 use chelis_deep::ast::Expr;
 use chelis_effects::{EffectError, EffectErrorKind, check_effects_with_context, check_program};
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
+use chelis_types::types::Effect;
 use chelis_types::{
     CheckedProgram, TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context,
 };
@@ -497,4 +498,166 @@ def my_op(x: i64) -> unit ! {IO, Test} = {
     let text = chelis_deep::printer::print_canonical(new_with_effects.annotated_exprs());
     assert!(text.contains("io"), "must inherit io, got:\n{text}");
     assert!(text.contains("test"), "must inherit test, got:\n{text}");
+}
+
+// ── chelis#606: the reported row is the enforced row ─────────────────────
+//
+// Enforcement was already right across a package boundary: a caller of an
+// imported Io helper that declares `! {}` is rejected. Reporting was not.
+// `def_effect_rows` re-inferred over the extension ALONE, so a callee
+// defined in the library was an unknown name and contributed nothing, and
+// `chelis check --show-inferred --json` published an empty row for a
+// function that reads the host filesystem.
+//
+// spec/04-type-system.md §7.1 states one inferred set per function -- the
+// union of the effects of the operations in its body, inherited through
+// calls -- with no package-relative qualification. So the two paths must
+// agree, and these tests pin the agreement rather than the two spellings.
+
+/// The library stands in for `chelis-std`: `lib_load` wraps the `read_file`
+/// Io builtin the way `Std.Io.Json.load_json` does, and `lib_pure` gives
+/// the negative control an imported callee that really is pure.
+const IMPORTED_IO_LIBRARY: &str = r#"
+def lib_read(path: string) -> string = read_file(path)
+def lib_load(path: string) -> string = lib_read(path)
+def lib_pure(x: i64) -> i64 = add(x, 1i64)
+"#;
+
+/// The five shapes the issue names, in one extension: direct Io, an
+/// imported wrapper, a transitive same-package helper that reaches Io only
+/// through the import, and two pure controls (one calling nothing, one
+/// calling an imported pure def).
+const IMPORTED_IO_EXTENSION: &str = r#"
+def direct_io(path: string) -> string = read_file(path)
+def via_wrapper(path: string) -> string = lib_load(path)
+def via_local_helper(path: string) -> string = via_wrapper(path)
+def pure_local(x: i64) -> i64 = add(x, 1i64)
+def pure_via_import(x: i64) -> i64 = lib_pure(x)
+"#;
+
+fn imported_io_rows() -> chelis_effects::DefEffectRows {
+    let (typeenv, lib_checked) = build_library_pair(IMPORTED_IO_LIBRARY);
+    let new_checked = build_new_code_checked(&typeenv, IMPORTED_IO_EXTENSION);
+    chelis_effects::def_effect_rows_in_context(Some(&lib_checked), &new_checked)
+}
+
+fn row_names(rows: &chelis_effects::DefEffectRows, name: &str) -> Vec<String> {
+    rows.get(name)
+        .unwrap_or_else(|| panic!("`{name}` must have an effect row"))
+        .iter()
+        .map(|effect| format!("{effect:?}"))
+        .collect()
+}
+
+/// The filed witness: an imported wrapper's Io must reach the reported row.
+#[test]
+fn reported_row_carries_io_through_an_imported_wrapper() {
+    let rows = imported_io_rows();
+    assert!(
+        rows["via_wrapper"].contains(&Effect::Io),
+        "an imported Io wrapper must report Io, got {:?}",
+        row_names(&rows, "via_wrapper")
+    );
+    assert_eq!(
+        rows["via_wrapper"],
+        rows["direct_io"],
+        "the imported wrapper and the direct builtin describe the same \
+         host access, so their reported rows must match: {:?} vs {:?}",
+        row_names(&rows, "via_wrapper"),
+        row_names(&rows, "direct_io")
+    );
+}
+
+/// Two levels of indirection, one of them same-package, still reach Io.
+#[test]
+fn reported_row_carries_io_through_a_transitive_local_helper() {
+    let rows = imported_io_rows();
+    assert!(
+        rows["via_local_helper"].contains(&Effect::Io),
+        "a local helper calling an imported Io wrapper must report Io, got {:?}",
+        row_names(&rows, "via_local_helper")
+    );
+}
+
+/// Negative parity: the fix must not stain pure defs. A pure local and a
+/// caller of an imported PURE def both keep a present-and-empty row, which
+/// is what lets a consumer tell "pure" from "unknown".
+#[test]
+fn reported_rows_stay_empty_for_pure_defs_across_the_boundary() {
+    let rows = imported_io_rows();
+    for name in ["pure_local", "pure_via_import"] {
+        assert!(
+            rows.contains_key(name),
+            "`{name}` must be present in the reported rows"
+        );
+        assert!(
+            rows[name].is_empty(),
+            "`{name}` is pure and must report an empty row, got {:?}",
+            row_names(&rows, name)
+        );
+    }
+    assert!(
+        !rows.contains_key("lib_load"),
+        "reporting covers the extension's defs, not the library's"
+    );
+}
+
+/// The reported row must equal the row the discharge check uses. This is
+/// the invariant the issue's August update is about, so it is asserted
+/// directly instead of being inferred from the two tests above: an
+/// extension caller declaring `! {}` is rejected exactly when the reported
+/// row is non-empty.
+#[test]
+fn reported_row_agrees_with_enforcement_on_an_explicit_empty_declaration() {
+    let (typeenv, lib_checked) = build_library_pair(IMPORTED_IO_LIBRARY);
+
+    let rejected_src = r#"
+def claims_pure(path: string) -> string ! {} = lib_load(path)
+"#;
+    let rejected = build_new_code_checked(&typeenv, rejected_src);
+    let errors = check_effects_with_context(&lib_checked, &rejected)
+        .expect_err("`! {}` over an imported Io wrapper must be rejected");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.kind == EffectErrorKind::UnhandledEffect),
+        "expected an unhandled-effect rejection, got {errors:?}"
+    );
+    assert!(
+        !chelis_effects::def_effect_rows_in_context(Some(&lib_checked), &rejected)["claims_pure"]
+            .is_empty(),
+        "the row that was enforced against must also be the row reported"
+    );
+
+    let accepted_src = r#"
+def declares_io(path: string) -> string ! {IO} = lib_load(path)
+def declares_pure(x: i64) -> i64 ! {} = lib_pure(x)
+"#;
+    let accepted = build_new_code_checked(&typeenv, accepted_src);
+    check_effects_with_context(&lib_checked, &accepted)
+        .expect("`! {IO}` over the wrapper and `! {}` over a pure import are both honest");
+    let rows = chelis_effects::def_effect_rows_in_context(Some(&lib_checked), &accepted);
+    assert!(rows["declares_io"].contains(&Effect::Io));
+    assert!(rows["declares_pure"].is_empty());
+}
+
+/// The context-free entry point is unchanged: over a WHOLE program it
+/// still reports the same rows. `def_effect_rows` is not deprecated; it is
+/// wrong only when handed a package extension, which is why the seam that
+/// holds an extension now passes its library.
+#[test]
+fn context_free_rows_match_the_context_rows_on_the_whole_program() {
+    let combined = parse_then_desugar(&format!("{IMPORTED_IO_LIBRARY}\n{IMPORTED_IO_EXTENSION}"));
+    let combined_checked = check_ir_program(&combined).expect("monolithic IR check");
+    let monolithic = chelis_effects::def_effect_rows(&combined_checked);
+    let contextual = imported_io_rows();
+
+    for (name, row) in &contextual {
+        assert_eq!(
+            monolithic.get(name),
+            Some(row),
+            "`{name}` must report the same row whether the library is a \
+             separate context or part of one program"
+        );
+    }
 }

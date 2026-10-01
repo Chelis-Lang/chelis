@@ -34,7 +34,7 @@
 //!   workload; the error path stays correct by deferring to the
 //!   existing checker.
 
-use chelis_effects::EffectError;
+use chelis_effects::{DefEffectRows, EffectError};
 use chelis_types::errors::CheckError;
 use chelis_types::{CheckedProgram, FitnessReport, InferStats, StructuralStats};
 
@@ -65,23 +65,43 @@ fn profile_context_bail(reason: &str) {
 ///     effect_errors: Vec::new(),
 ///     linearity_errors: Vec::new(),
 ///     typed_program: todo!(),
+///     effect_rows: None,
 /// };
 /// ```
 pub enum LayeredCheck {
     Clean {
         fitness: FitnessReport,
         typed_program: CheckedProgram,
+        effect_rows: Option<DefEffectRows>,
     },
     EffectRejected {
         fitness: FitnessReport,
         effect_errors: Vec<EffectError>,
         typed_program: CheckedProgram,
+        effect_rows: Option<DefEffectRows>,
     },
     LinearityRejected {
         fitness: FitnessReport,
         linearity_errors: Vec<CheckError>,
         typed_program: CheckedProgram,
+        effect_rows: Option<DefEffectRows>,
     },
+}
+
+/// Whether a layered check must also report the inferred effect rows of
+/// its `typed_program`.
+///
+/// `typed_program` is the chelis-std-EXTENSION program, so its rows are
+/// only correct when they are inferred against the chelis-std context the
+/// extension was checked against; a caller cannot recover them from the
+/// program alone (chelis#606). Rows are therefore produced here, and only
+/// when asked: computing them costs one extra inference pass over
+/// chelis-std, which every check would otherwise pay for a member only
+/// `--show-inferred` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectRowReporting {
+    Requested,
+    Skipped,
 }
 
 /// Run the layered `chelis check` front-end.
@@ -103,6 +123,7 @@ pub fn check_layered(
     stdlib_decls: &[chelis_surf::ast::Decl],
     stdlib_source_digest: [u8; 32],
     non_stdlib_decls: &[chelis_surf::ast::Decl],
+    effect_rows: EffectRowReporting,
 ) -> Result<Option<LayeredCheck>, CompilerError> {
     // RFC v5 (RT-1 F2 bypass): both `stdlib_decls` and `non_stdlib_decls`
     // are reef-linker output (internal-name-mangled), so the reserved
@@ -139,43 +160,63 @@ pub fn check_layered(
         analysis.analysis().program(),
     );
     let typed_program = analysis.analysis().program().clone();
+    let (typed_program, rows) =
+        pick_typed_program_and_rows(&stdlib_ctx, typed_program, effect_rows);
 
     // Effects + linearity use the canonical context-aware stage order.
     match crate::pipeline::complete_context_checks(analysis) {
         Ok(_) => Ok(Some(LayeredCheck::Clean {
             fitness,
-            typed_program: pick_typed_program(&stdlib_ctx, typed_program),
+            typed_program,
+            effect_rows: rows,
         })),
         Err(crate::pipeline::SemanticRejection::Effects {
             errors: effect_errors,
         }) => Ok(Some(LayeredCheck::EffectRejected {
             fitness,
             effect_errors,
-            typed_program: pick_typed_program(&stdlib_ctx, typed_program),
+            typed_program,
+            effect_rows: rows,
         })),
         Err(crate::pipeline::SemanticRejection::Linearity {
             errors: linearity_errors,
         }) => Ok(Some(LayeredCheck::LinearityRejected {
             fitness,
             linearity_errors,
-            typed_program: pick_typed_program(&stdlib_ctx, typed_program),
+            typed_program,
+            effect_rows: rows,
         })),
     }
 }
 
-/// Pick the `CheckedProgram` the CLI reads for `--show-inferred`: the
+/// Pick the `CheckedProgram` the CLI reads for `--show-inferred` -- the
 /// `_with_context`-checked non-chelis-std program, unless there are no
 /// non-chelis-std decls (a chelis-std file), in which case the cached
-/// chelis-std library `CheckedProgram` is the whole program.
-fn pick_typed_program(
+/// chelis-std library `CheckedProgram` is the whole program -- together
+/// with the inferred effect rows for it.
+///
+/// The two are picked together because the row's correctness depends on
+/// which program was picked: an extension's rows must be inferred against
+/// the chelis-std library it imports, while a chelis-std file IS the whole
+/// program and has no outer context to resolve against. Splitting the
+/// choice is what let the reported row drop imported IO (chelis#606).
+fn pick_typed_program_and_rows(
     stdlib_ctx: &StdLibContext,
     non_stdlib_checked: CheckedProgram,
-) -> CheckedProgram {
-    if non_stdlib_checked.exprs().is_empty() {
-        stdlib_ctx.library_checked().clone()
+    reporting: EffectRowReporting,
+) -> (CheckedProgram, Option<DefEffectRows>) {
+    let (program, library) = if non_stdlib_checked.exprs().is_empty() {
+        (stdlib_ctx.library_checked().clone(), None)
     } else {
-        non_stdlib_checked
-    }
+        (non_stdlib_checked, Some(stdlib_ctx.library_checked()))
+    };
+    let rows = match reporting {
+        EffectRowReporting::Requested => Some(chelis_effects::def_effect_rows_in_context(
+            library, &program,
+        )),
+        EffectRowReporting::Skipped => None,
+    };
+    (program, rows)
 }
 
 /// Reconstitute the whole-program fitness report for a clean program by
@@ -396,8 +437,12 @@ mod artifact_outcome_tests {
     use super::*;
 
     fn check(source: &str) -> LayeredCheck {
+        check_with(source, EffectRowReporting::Skipped)
+    }
+
+    fn check_with(source: &str, reporting: EffectRowReporting) -> LayeredCheck {
         let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
-        check_layered(&[], [0; 32], &decls)
+        check_layered(&[], [0; 32], &decls, reporting)
             .expect("empty library context")
             .expect("the fixture must pass type analysis")
     }
@@ -423,6 +468,50 @@ mod artifact_outcome_tests {
                 ..
             } if !linearity_errors.is_empty()
         ));
+    }
+
+    fn effect_rows_of(outcome: &LayeredCheck) -> &Option<DefEffectRows> {
+        match outcome {
+            LayeredCheck::Clean { effect_rows, .. }
+            | LayeredCheck::EffectRejected { effect_rows, .. }
+            | LayeredCheck::LinearityRejected { effect_rows, .. } => effect_rows,
+        }
+    }
+
+    /// Rows are reported only when asked for, and a caller that asks gets
+    /// them on every outcome -- including a rejected one, because
+    /// `chelis check --show-inferred --json` still emits its report there
+    /// (chelis#606, chelis#886 [04-FIT-12]).
+    #[test]
+    fn effect_rows_are_reported_only_on_request() {
+        let source = "def logged(msg: string) -> string = debug(msg)\n";
+        assert!(
+            effect_rows_of(&check_with(source, EffectRowReporting::Skipped)).is_none(),
+            "a caller that did not ask for rows must not pay for them"
+        );
+
+        let requested = check_with(source, EffectRowReporting::Requested);
+        let rows = effect_rows_of(&requested)
+            .as_ref()
+            .expect("requested rows must be reported");
+        assert!(
+            rows["logged"].contains(&chelis_types::types::Effect::Io),
+            "`debug` is an IO source, got {}",
+            rows["logged"]
+        );
+
+        let rejected = check_with(
+            "def claims_pure(msg: string) -> string ! { } = debug(msg)\n",
+            EffectRowReporting::Requested,
+        );
+        assert!(matches!(rejected, LayeredCheck::EffectRejected { .. }));
+        assert!(
+            !effect_rows_of(&rejected)
+                .as_ref()
+                .expect("a rejected check still reports rows")["claims_pure"]
+                .is_empty(),
+            "the row the rejection was raised from must be the row reported"
+        );
     }
 }
 

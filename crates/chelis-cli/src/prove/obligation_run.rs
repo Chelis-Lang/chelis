@@ -109,7 +109,13 @@ pub(super) fn check_linked_decls(
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
-    match chelis_compiler_api::check_layered(stdlib_decls, stdlib_source_digest, non_stdlib_decls) {
+    match chelis_compiler_api::check_layered(
+        stdlib_decls,
+        stdlib_source_digest,
+        non_stdlib_decls,
+        // `prove` reads the check's verdict, not its inferred rows.
+        chelis_compiler_api::EffectRowReporting::Skipped,
+    ) {
         Ok(Some(_)) => Status::Passed,
         Ok(None) => {
             let mut decls = stdlib_decls.to_vec();

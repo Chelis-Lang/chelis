@@ -70,6 +70,40 @@ pub struct EffectError {
     pub suggestions: Vec<String>,
 }
 
+/// The inferred effect row of every top-level `def`, keyed by def name.
+pub type DefEffectRows = BTreeMap<String, EffectSet>;
+
+/// The one inferred-effect result for `program`, optionally extended with
+/// an outer library scope.
+///
+/// Enforcement ([`check_program`], [`check_effects_with_context`]) and
+/// reporting ([`def_effect_rows`], [`def_effect_rows_in_context`]) both
+/// route through here, so a reported row is the row the discharge check
+/// used. They differ only in what they do afterwards: enforcement
+/// validates and annotates, reporting returns the rows.
+///
+/// `library` is the already-checked outer program a caller's imports
+/// resolve against. Passing `None` infers over `program` alone, which is
+/// correct only when `program` is the whole program: a def whose callee
+/// lives in an omitted library would otherwise be inferred pure
+/// (chelis#606).
+fn infer_def_effects(
+    library: Option<&CheckedProgram>,
+    program: &CheckedProgram,
+) -> (DefEffectRows, BTreeSet<String>) {
+    let Some(library) = library else {
+        return infer_program_effects(program.annotated_exprs());
+    };
+    // The library was already validated by its own check; re-inferring
+    // here only surfaces the rows new code inherits when it calls in.
+    let (library_effects, library_callables) = infer_program_effects(library.annotated_exprs());
+    infer_program_effects_with_context(
+        program.annotated_exprs(),
+        &library_effects,
+        &library_callables,
+    )
+}
+
 /// Compute the inferred effect row for every top-level `def` in a
 /// checked program, keyed by def name.
 ///
@@ -83,13 +117,35 @@ pub struct EffectError {
 /// which joins these effect rows with the type-level signature
 /// inference so a machine consumer (Hull) can reconstruct each
 /// function's `(Type, EffectRow)` without re-parsing a printer.
-pub fn def_effect_rows(program: &CheckedProgram) -> std::collections::BTreeMap<String, EffectSet> {
-    let (effects_by_def, _top_level_callables) = infer_program_effects(program.annotated_exprs());
-    effects_by_def.into_iter().collect()
+///
+/// `program` must be the whole program. A caller holding only a package
+/// extension must use [`def_effect_rows_in_context`] and pass the
+/// library the extension was checked against; see chelis#606.
+pub fn def_effect_rows(program: &CheckedProgram) -> DefEffectRows {
+    def_effect_rows_in_context(None, program)
+}
+
+/// The reporting counterpart to [`check_effects_with_context`]: the
+/// inferred effect rows of `program`, resolved against `library`.
+///
+/// An imported callee's effects propagate to its caller exactly as a
+/// same-package callee's do (spec/04-type-system.md §7.1: a function's
+/// inferred effect set is the union of the effects of the operations in
+/// its body, and stdlib helpers inherit effects through calls). Nothing
+/// in that rule is package-relative, so the row a package boundary
+/// reports must equal the row enforcement discharges.
+pub fn def_effect_rows_in_context(
+    library: Option<&CheckedProgram>,
+    program: &CheckedProgram,
+) -> DefEffectRows {
+    let mut rows = infer_def_effects(library, program).0;
+    let owned_definitions = top_level_def_bodies(program.annotated_exprs());
+    rows.retain(|name, _| owned_definitions.contains_key(name));
+    rows
 }
 
 pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<EffectError>> {
-    let (effects_by_def, top_level_callables) = infer_program_effects(program.annotated_exprs());
+    let (effects_by_def, top_level_callables) = infer_def_effects(None, program);
     let annotated_exprs: Vec<Expr> = program
         .annotated_exprs()
         .iter()
@@ -144,21 +200,14 @@ pub fn check_effects_with_context(
     library_program: &CheckedProgram,
     new_program: &CheckedProgram,
 ) -> Result<CheckedProgram, Vec<EffectError>> {
-    // Pre-compute library effect map from library bodies. Library was
-    // already validated by check_program; we only re-infer to surface
-    // effect rows that new code can inherit when it references library
-    // callables. We do NOT re-run validation on the library.
-    let (library_effects, library_callables) =
-        infer_program_effects(library_program.annotated_exprs());
-
-    // Iterative fixed-point inference for new-code defs, seeded with
-    // library effects. Library callables stay reachable as call targets;
-    // new-code defs of the same name shadow on the inner pass.
-    let (effects_by_def, top_level_callables) = infer_program_effects_with_context(
-        new_program.annotated_exprs(),
-        &library_effects,
-        &library_callables,
-    );
+    // Iterative fixed-point inference for new-code defs, seeded with the
+    // library's effect rows. Library callables stay reachable as call
+    // targets; new-code defs of the same name shadow on the inner pass.
+    // This is the same `infer_def_effects` result
+    // `def_effect_rows_in_context` reports, so enforcement and reporting
+    // cannot disagree (chelis#606).
+    let (effects_by_def, top_level_callables) =
+        infer_def_effects(Some(library_program), new_program);
 
     // Annotate ONLY new-code exprs, but with effect/callable maps that
     // include library entries so cross-context calls resolve.
