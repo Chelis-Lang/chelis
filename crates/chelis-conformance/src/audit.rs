@@ -246,7 +246,6 @@ fn check_row(row: &ContractRow, ctx: &Ctx) -> RowResult {
         "chelis-surface" => check_chelis_surface(ctx),
         "upstream-bugs" => check_upstream_bugs(ctx),
         "staleness-audit" => check_narrowing_coverage(ctx),
-        "issue-drafts" => check_issue_drafts(ctx),
         "tests-neg" => check_tests_neg(ctx),
         "tests-blocked" => check_tests_blocked(ctx),
         "pin-bump-checklist" => check_agents_heading(ctx, "Pin Bump Checklist"),
@@ -345,23 +344,32 @@ fn check_agents_md(ctx: &Ctx) -> Check {
     }
     // The managed inheritance block must be present, stamped to the pin, and
     // untampered.
-    let canonical = canonical::body("agents-inheritance").expect("embedded AGENTS contract");
-    let expected = match crate::scaffold::apply_agents_exclusions(canonical, agents) {
-        Ok(expected) => expected,
-        Err(why) => {
-            return fail(
-                format!("AGENTS.md has an invalid shell-local exclusion block: {why}"),
-                "fix or remove the shell-owned exclusion block, then run `chelis reef conform sync`",
-            );
-        }
+    check_inherited_block(ctx, agents, "agents-inheritance", "AGENTS.md")
+}
+
+/// An inherited managed block's check: the expected body is the one `sync`
+/// writes for the block's stamped version (exclusions applied, links pinned to
+/// that version), so pinned links never read as drift. The stamp itself is
+/// checked against the reef pin by [`check_managed_block`].
+fn check_inherited_block(ctx: &Ctx, doc: &str, id: &str, file: &str) -> Check {
+    let expected = match managed_block::find(doc, id) {
+        Some(block) => match crate::scaffold::inherited_block_body(
+            id,
+            doc,
+            &block.version,
+            ctx.excluded_skills(),
+        ) {
+            Ok(expected) => Some(expected),
+            Err(why) => {
+                return fail(
+                    format!("{file} has an invalid shell-local exclusion block: {why}"),
+                    "fix or remove the shell-owned exclusion block, then run `chelis reef conform sync`",
+                );
+            }
+        },
+        None => None,
     };
-    check_managed_block(
-        ctx,
-        agents,
-        "agents-inheritance",
-        "AGENTS.md",
-        Some(&expected),
-    )
+    check_managed_block(ctx, doc, id, file, expected.as_deref())
 }
 
 fn check_reef_pin(ctx: &Ctx) -> Check {
@@ -500,6 +508,11 @@ fn check_uv_python(ctx: &Ctx) -> Check {
     pass()
 }
 
+/// Row 7 (§3): `docs/CHELIS_SURFACE.md` carries the pinned toolchain's complete
+/// surface guide in the `chelis-surface` managed block, after the shell's own
+/// exclusion selectors. Everything outside the fences is shell-owned, so the row
+/// checks nothing there: the inherited text is current by construction and the
+/// shell has no hand-maintained markers left to audit.
 fn check_chelis_surface(ctx: &Ctx) -> Check {
     let Some(surface) = ctx.read("docs/CHELIS_SURFACE.md") else {
         return fail(
@@ -507,27 +520,15 @@ fn check_chelis_surface(ctx: &Ctx) -> Check {
             "run `chelis reef conform init` / `sync`",
         );
     };
-    if !surface.contains("@pin") || !surface.contains("@upstream") {
-        return fail(
-            "docs/CHELIS_SURFACE.md lacks @pin/@upstream capability markers",
-            "mark each capability row @pin (usable now) or @upstream (next bump)",
-        );
-    }
-    check_managed_block(
-        ctx,
-        &surface,
-        "chelis-surface-header",
-        "docs/CHELIS_SURFACE.md",
-        None,
-    )
+    check_inherited_block(ctx, &surface, "chelis-surface", "docs/CHELIS_SURFACE.md")
 }
 
-/// Row 8 (§4): `docs/UPSTREAM_BUGS.md` exists, carries the four required
+/// Row 8 (§4): `docs/UPSTREAM_BUGS.md` exists, carries the three required
 /// sections, and — the cite-by-number machine check added for chelis#739 —
-/// every confidently parsed entry under §Actively blocking / §Tracking /
-/// §Parked cites its bug as `chelis#NNN`, as a registry sibling's `<repo>#NNN`
-/// (chelis#1270), or as a `docs/issue_drafts/<name>` draft path, never a prose
-/// name. §4 makes this a MUST ("cite by number … never by a
+/// every confidently parsed entry under §Actively blocking / §Tracking cites
+/// its bug by the number of the issue filed where it originates: `chelis#NNN`,
+/// or a registry sibling's `<repo>#NNN` (chelis#1270), never a prose name or a
+/// local stand-in file. §4 makes this a MUST ("cite by number … never by a
 /// prose name"): a prose-name citation is invisible to every mechanical audit,
 /// which is the exact failure the contract's own §4 rationale cites (School
 /// carried a "generic-callback-unification limit" through three docs and a
@@ -566,7 +567,7 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
     //     green while rendering as a normal section to a human. A duplicated
     //     required section is a malformed doc; fail it here.
     let lines: Vec<&str> = bugs.lines().collect();
-    let required = ["Actively blocking", "Tracking", "Parked", "Archived"];
+    let required = ["Actively blocking", "Tracking", "Archived"];
     let mut missing: Vec<&str> = Vec::new();
     let mut duplicated: Vec<&str> = Vec::new();
     for s in required {
@@ -594,12 +595,28 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
             "each required section must appear exactly once; a duplicated heading orphans the second body from the citation check, so merge them",
         );
     }
+    // Every live upstream item is a filed issue, so it belongs under §Actively
+    // blocking or §Tracking, where the citation check below reaches it. A
+    // section for items held back from filing is outside that check: its
+    // entries would audit green with no issue behind them.
+    if let Some(i) = lines.iter().position(|l| {
+        heading_level(l).is_some_and(|lvl| lvl <= SECTION_HEADING_MAX_LEVEL)
+            && l.to_ascii_lowercase().contains("parked")
+    }) {
+        return fail(
+            format!(
+                "docs/UPSTREAM_BUGS.md:{}: a Parked section holds upstream items outside the cited sections (§4)",
+                i + 1
+            ),
+            "file each entry as an issue in the repository where it originates, move it to §Tracking (or §Actively blocking) with its `chelis#NNN` / `<repo>#NNN` citation and re-probe trigger, and remove the section",
+        );
+    }
 
     // §4 cite-by-number check over the three *live* sections (§Archived exempt).
     let mut uncited: Vec<String> = Vec::new();
     let mut manual_sections: Vec<&str> = Vec::new();
     let mut manual_evidence: Vec<String> = Vec::new();
-    for section in ["Actively blocking", "Tracking", "Parked"] {
+    for section in ["Actively blocking", "Tracking"] {
         // Unreachable in practice — each live section passed the strict gate
         // above, so `section_body` resolves it here too. Kept as a fail-closed
         // guard: an unlocatable section is skipped, never silently passed.
@@ -618,9 +635,9 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
             continue;
         }
         for entry in &entries {
-            if scan_citations(&entry.text).is_empty() && !cites_issue_draft(&entry.text) {
+            if scan_citations(&entry.text).is_empty() {
                 uncited.push(format!(
-                    "docs/UPSTREAM_BUGS.md:{}: §{section} entry {:?} cites no chelis#NNN, no registry sibling's <repo>#NNN, and no docs/issue_drafts/ path",
+                    "docs/UPSTREAM_BUGS.md:{}: §{section} entry {:?} cites no chelis#NNN and no registry sibling's <repo>#NNN",
                     entry.line,
                     snippet(entry.head()),
                 ));
@@ -648,10 +665,10 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
         ));
         return fail_ex(
             format!(
-                "docs/UPSTREAM_BUGS.md: {n} entr{} with a prose-name citation, not chelis#NNN / <sibling>#NNN / a docs/issue_drafts/ path (§4)",
+                "docs/UPSTREAM_BUGS.md: {n} entr{} without an issue-number citation (chelis#NNN / <sibling>#NNN, §4)",
                 if n == 1 { "y" } else { "ies" },
             ),
-            "cite every entry at the entry by `chelis#NNN`, by a registry sibling's `<repo>#NNN` (e.g. `nautilus#43`), or by a `docs/issue_drafts/<name>` draft path, never by a prose name (contract §4)",
+            "file each item as an issue in the repository where it originates and cite it at the entry by `chelis#NNN` or a registry sibling's `<repo>#NNN` (e.g. `nautilus#43`), never by a prose name (contract §4)",
             evidence,
         );
     }
@@ -666,7 +683,7 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
                     "ve"
                 },
             ),
-            "structure each bug as a top-level list item or sub-heading citing chelis#NNN / a registry sibling's <repo>#NNN / a draft path so the §4 cite-by-number rule is machine-checkable",
+            "structure each bug as a top-level list item or sub-heading citing chelis#NNN / a registry sibling's <repo>#NNN so the §4 cite-by-number rule is machine-checkable",
             manual_evidence,
         );
     }
@@ -812,20 +829,6 @@ fn is_top_list_item(line: &str) -> bool {
     false
 }
 
-/// Whether `text` cites a parked issue draft by path — a reference to a file
-/// under `docs/issue_drafts/`, the §4-sanctioned alternative to a `chelis#NNN`
-/// number for a not-yet-filed bug. The directory prefix must be followed by a
-/// filename character, so a bare mention of the directory itself does not count.
-fn cites_issue_draft(text: &str) -> bool {
-    const PREFIX: &str = "docs/issue_drafts/";
-    text.match_indices(PREFIX).any(|(i, _)| {
-        text[i + PREFIX.len()..]
-            .chars()
-            .next()
-            .is_some_and(|c| !c.is_whitespace() && !matches!(c, ')' | ']' | '/'))
-    })
-}
-
 /// A one-line, length-capped snippet of `line` for an evidence message.
 fn snippet(line: &str) -> String {
     let t = line.trim();
@@ -916,18 +919,6 @@ fn coverage_evidence(token: &str, blocked: &str, upstream: &str, readme: &str) -
             "no note"
         },
     )
-}
-
-fn check_issue_drafts(ctx: &Ctx) -> Check {
-    if ctx.exists("docs/issue_drafts") {
-        pass()
-    } else {
-        // SHOULD: a Fail here does not gate (see must_failures).
-        fail(
-            "docs/issue_drafts/ convention not present (SHOULD)",
-            "add docs/issue_drafts/README.md for parked filings",
-        )
-    }
 }
 
 fn check_tests_neg(ctx: &Ctx) -> Check {
@@ -1044,6 +1035,16 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             ));
         }
     }
+    // Materialized skill links are pinned to the shell's version, so the
+    // expected span needs the pin; without one it cannot be derived.
+    let pin = ctx.reef_pin.as_deref().map(|p| p.trim_start_matches('='));
+    if pin.is_none() {
+        problems.push(
+            "no readable reef pin, so the pinned links of the shared skills cannot be derived"
+                .to_string(),
+        );
+    }
+    let local = crate::links::LocalTargets::for_shell(ctx.excluded_skills());
     for (name, body) in skills::EMBEDDED_SKILLS {
         let skill_dir = skills_dir.join(name);
         let path = skill_dir.join("SKILL.md");
@@ -1062,12 +1063,16 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
                 // derives the expected managed span by applying its validated
                 // exclusions to the embedded body, then byte-checks that span.
                 let (managed, block) = crate::scaffold::split_shell_local(&live);
-                match crate::scaffold::apply_shell_local_exclusions(body, block) {
-                    Ok(expected) if managed.trim_end() != expected.trim_end() => {
-                        problems.push(format!("{name}: forked/stale"));
+                // Without a pin the expected span cannot be derived; that
+                // problem is already reported above.
+                if let Some(pin) = pin {
+                    match crate::scaffold::skill_managed_span(name, body, block, pin, &local) {
+                        Ok(expected) if managed.trim_end() != expected.trim_end() => {
+                            problems.push(format!("{name}: forked/stale"));
+                        }
+                        Err(why) => problems.push(format!("{name}: {why}")),
+                        Ok(_) => {}
                     }
-                    Err(why) => problems.push(format!("{name}: {why}")),
-                    Ok(_) => {}
                 }
             }
         }
@@ -1114,17 +1119,30 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
         }
     }
     if !problems.is_empty() {
+        // A local skill that shadows a shared one is a declaration only the
+        // shell can change; sync cannot fix it, so the fix says so first.
+        let shadow_fix = if problems
+            .iter()
+            .any(|p| p.contains("may not name a shared skill"))
+        {
+            "remove each `[conform] local_skills` entry that names a shared skill; the shared \
+             copy replaces the local one on sync. "
+        } else {
+            ""
+        };
         return fail(
             format!(
                 "vendored skills drifted from the pinned set: {}",
                 problems.join(", ")
             ),
-            "run `chelis reef conform sync` to re-materialize agent-skills/ and restore \
+            format!(
+                "{shadow_fix}run `chelis reef conform sync` to re-materialize agent-skills/ and restore \
              the .claude/skills and .codex/skills symlinks. \
              Configure shell-owned additions with `[conform] local_skills` and embedded removals \
              with `[conform] excluded_skills`; use a trailing `<!-- shell-local:begin -->` block \
              to retain and amend a shared skill, with `shell-local:exclude` selectors for \
-             inherited sections that should be omitted.",
+             inherited sections that should be omitted."
+            ),
         );
     }
     pass()
@@ -1156,7 +1174,7 @@ fn check_parity_harness(ctx: &Ctx) -> Check {
 fn check_chelis_src(ctx: &Ctx) -> Check {
     // Prefer the registry's authoritative `links_chelis_crates` flag when the
     // shell is known (its name matches a registry entry). The registry is the
-    // source of truth for whether row 18 applies; the Cargo.toml substring scan
+    // source of truth for whether row 17 applies; the Cargo.toml substring scan
     // is only a fallback for shells not yet registered (freshly scaffolded, new,
     // or under test).
     let links = match ctx.shell_name.as_deref().and_then(registry::shell) {
@@ -2609,27 +2627,12 @@ mod tests {
     }
 
     #[test]
-    fn issue_draft_path_is_cited() {
-        assert!(cites_issue_draft(
-            "parked as docs/issue_drafts/foo.md until filed"
-        ));
-        assert!(cites_issue_draft(
-            "see (docs/issue_drafts/callback-unif.md)"
-        ));
-        // A bare directory mention (no filename after the slash) is not a cite.
-        assert!(!cites_issue_draft(
-            "filed under docs/issue_drafts/ somewhere"
-        ));
-        assert!(!cites_issue_draft("no draft reference at all"));
-    }
-
-    #[test]
     fn section_body_stops_at_next_same_level_heading() {
-        let doc = "# T\n\n## Tracking\n\n- a\n### sub of a\ntext\n\n## Parked\n\n(none yet)\n";
+        let doc = "# T\n\n## Tracking\n\n- a\n### sub of a\ntext\n\n## Archived\n\n(none yet)\n";
         let lines: Vec<&str> = doc.lines().collect();
         let body = section_body(&lines, "Tracking").unwrap();
         // The `### sub of a` is *inside* Tracking (deeper than `##`); the body
-        // ends at `## Parked`.
+        // ends at `## Archived`.
         let joined = body.iter().map(|(_, l)| *l).collect::<Vec<_>>().join("|");
         assert_eq!(joined, "|- a|### sub of a|text|");
     }
@@ -2784,7 +2787,7 @@ mod tests {
         assert!(names("[conform]\nlocal_skills = \"x\"\n[dependencies]\nfoo = 1\n").is_empty());
         // NEW: the quoted spelling is now HONORED, not merely un-reported. The
         // two hand-rolled parsers disagreed here, so an author who wrote
-        // `'local_skills'` got a row-14 failure telling them to do what they had
+        // `'local_skills'` got a row-13 failure telling them to do what they had
         // just done.
         assert_eq!(
             names("[conform]\n'local_skills' = [\"chelis-std\"]\n"),

@@ -23,6 +23,7 @@ pub mod bump;
 pub mod canonical;
 pub mod conform;
 pub mod expect;
+pub mod links;
 pub mod managed_block;
 pub mod manifest;
 pub mod registry;

@@ -5,9 +5,10 @@
 //! asserts the exact row-8 verdict + diagnostic. It exercises the laundering
 //! vectors a headings-only check missed — prose-name entries, per-entry citation
 //! partitioning (a cite must not bleed across entries), citation spacing
-//! variants, draft-path vs bare-`#NNN`, nested vs top-level list items,
-//! sub-heading entries, the honest-`Manual` fallback, §Archived exemption, and
-//! the malformed-heading fail-closed case (the MEDIUM the red team found).
+//! variants, bare-`#NNN` and local-file stand-ins, nested vs top-level list
+//! items, sub-heading entries, the honest-`Manual` fallback, §Archived
+//! exemption, the malformed-heading fail-closed case (the MEDIUM the red team
+//! found), and the retired section for unfiled items (chelis#2831).
 
 use std::path::{Path, PathBuf};
 
@@ -41,14 +42,13 @@ fn audit_with_bugs(root: &Path, doc: &str) -> audit::AuditReport {
     audit::audit(root)
 }
 
-/// A canonical 4-section doc with caller-supplied section bodies (Actively
-/// blocking / Tracking / Parked / Archived), all headings well-formed.
-fn doc(active: &str, tracking: &str, parked: &str, archived: &str) -> String {
+/// A canonical 3-section doc with caller-supplied section bodies (Actively
+/// blocking / Tracking / Archived), all headings well-formed.
+fn doc(active: &str, tracking: &str, archived: &str) -> String {
     format!(
         "# Upstream Bugs\n\nintro line\n\n\
          ## Actively blocking\n\n{active}\n\n\
          ## Tracking\n\n{tracking}\n\n\
-         ## Parked\n\n{parked}\n\n\
          ## Archived\n\n{archived}\n"
     )
 }
@@ -60,10 +60,7 @@ fn preamble_citation_does_not_rescue_uncited_entry() {
     let root = stamp(tmp.path(), "preamble");
     let tracking = "Filed under chelis#293 (this is preamble prose, not an entry).\n\n\
                     - the actual bug, prose name only";
-    let report = audit_with_bugs(
-        &root,
-        &doc("(none yet)", tracking, "(none yet)", "(none yet)"),
-    );
+    let report = audit_with_bugs(&root, &doc("(none yet)", tracking, "(none yet)"));
     assert_eq!(
         verdict_of(&report, "upstream-bugs"),
         Verdict::Fail,
@@ -71,7 +68,8 @@ fn preamble_citation_does_not_rescue_uncited_entry() {
     );
     let r = row_of(&report, "upstream-bugs");
     assert!(
-        r.diagnostic.contains("1 entry with a prose-name"),
+        r.diagnostic
+            .contains("1 entry without an issue-number citation"),
         "diag: {}",
         r.diagnostic
     );
@@ -90,14 +88,12 @@ fn per_entry_partition_a_cited_b_uncited() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "partition");
     let tracking = "- entry A is fine (chelis#293)\n- entry B has only a prose name";
-    let report = audit_with_bugs(
-        &root,
-        &doc("(none yet)", tracking, "(none yet)", "(none yet)"),
-    );
+    let report = audit_with_bugs(&root, &doc("(none yet)", tracking, "(none yet)"));
     let r = row_of(&report, "upstream-bugs");
     assert_eq!(r.verdict, Verdict::Fail);
     assert!(
-        r.diagnostic.contains("1 entry with a prose-name"),
+        r.diagnostic
+            .contains("1 entry without an issue-number citation"),
         "exactly one uncited entry expected; diag: {}",
         r.diagnostic
     );
@@ -120,12 +116,7 @@ fn spacing_variant_hash_space() {
     let root = stamp(tmp.path(), "sp1");
     let report = audit_with_bugs(
         &root,
-        &doc(
-            "(none yet)",
-            "- spaced cite chelis #316",
-            "(none yet)",
-            "(none yet)",
-        ),
+        &doc("(none yet)", "- spaced cite chelis #316", "(none yet)"),
     );
     assert_eq!(
         verdict_of(&report, "upstream-bugs"),
@@ -141,12 +132,7 @@ fn spacing_variant_hash_space_number() {
     let root = stamp(tmp.path(), "sp2");
     let report = audit_with_bugs(
         &root,
-        &doc(
-            "(none yet)",
-            "- widely spaced chelis # 316",
-            "(none yet)",
-            "(none yet)",
-        ),
+        &doc("(none yet)", "- widely spaced chelis # 316", "(none yet)"),
     );
     assert_eq!(
         verdict_of(&report, "upstream-bugs"),
@@ -166,7 +152,6 @@ fn bare_hash_number_is_not_a_citation() {
             "(none yet)",
             "- see #316 for details (no chelis prefix)",
             "(none yet)",
-            "(none yet)",
         ),
     );
     assert_eq!(
@@ -176,42 +161,122 @@ fn bare_hash_number_is_not_a_citation() {
     );
 }
 
-// A `docs/issue_drafts/<name>` path is the sanctioned alternative and passes.
+// A local file standing in for an unfiled issue is not a citation (§4: file
+// the issue where it originates and cite its number), whatever directory it
+// lives in. Before chelis#2831 a `docs/issue_drafts/<name>` path passed here.
 #[test]
-fn draft_path_plural_passes() {
+fn local_stand_in_file_is_not_a_citation() {
+    for entry in [
+        "- parked as docs/issue_drafts/foo.md until filed",
+        "- see docs/issue_draft/foo.md (singular dir)",
+        "- drafted in notes/upstream/callback-unification.md",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "standin");
+        let report = audit_with_bugs(&root, &doc("(none yet)", entry, "(none yet)"));
+        let r = row_of(&report, "upstream-bugs");
+        assert_eq!(
+            r.verdict,
+            Verdict::Fail,
+            "{entry:?} must not count as a citation"
+        );
+        assert!(
+            r.diagnostic
+                .contains("1 entry without an issue-number citation"),
+            "{entry:?} must fail as an uncited entry: {}",
+            r.diagnostic
+        );
+        assert!(!report.ok());
+    }
+}
+
+// The same entry passes once it carries the number of the filed issue: the
+// positive control for the stand-in rejection above.
+#[test]
+fn filed_issue_number_replaces_the_stand_in() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = stamp(tmp.path(), "draftok");
+    let root = stamp(tmp.path(), "filed");
     let report = audit_with_bugs(
         &root,
         &doc(
             "(none yet)",
-            "- parked as docs/issue_drafts/foo.md until filed",
-            "(none yet)",
+            "- callback unification, filed as chelis#2831",
             "(none yet)",
         ),
     );
     assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
 }
 
-// The singular `docs/issue_draft/` directory is not the sanctioned path.
+// chelis#2831: every live upstream item is a filed issue under §Actively
+// blocking or §Tracking. A section for items held back from filing sits outside
+// the citation check, so its presence fails even when it is empty or its
+// entries happen to carry numbers; the fix moves them to §Tracking.
 #[test]
-fn draft_path_singular_does_not_count() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = stamp(tmp.path(), "draftbad");
-    let report = audit_with_bugs(
-        &root,
-        &doc(
-            "(none yet)",
-            "- parked as docs/issue_draft/foo.md (singular dir, wrong)",
-            "(none yet)",
-            "(none yet)",
+fn a_parked_section_fails_whatever_it_holds() {
+    for (label, heading, parked) in [
+        ("empty", "## Parked upstream", "(none yet)"),
+        (
+            "uncited",
+            "## Parked upstream",
+            "- induction tier for limit theorems, not filed",
         ),
-    );
-    assert_eq!(
-        verdict_of(&report, "upstream-bugs"),
-        Verdict::Fail,
-        "docs/issue_draft/ (singular) is not the sanctioned docs/issue_drafts/ path"
-    );
+        (
+            "cited",
+            "## Parked upstream",
+            "- induction tier for limit theorems (chelis#2831)",
+        ),
+        (
+            "lowercase",
+            "## parked",
+            "- induction tier for limit theorems, not filed",
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "parked");
+        let body = format!(
+            "# Upstream Bugs\n\n## Actively blocking\n\n(none yet)\n\n\
+             ## Tracking\n\n(none yet)\n\n{heading}\n\n{parked}\n\n\
+             ## Archived\n\n(none yet)\n"
+        );
+        let report = audit_with_bugs(&root, &body);
+        let r = row_of(&report, "upstream-bugs");
+        assert_eq!(r.verdict, Verdict::Fail, "{label}: {}", r.diagnostic);
+        assert!(
+            r.diagnostic.contains("Parked section"),
+            "{label}: {}",
+            r.diagnostic
+        );
+        assert!(r.fix.contains("Tracking"), "{label}: {}", r.fix);
+        assert!(!report.ok(), "{label}");
+    }
+}
+
+// Negative parity for the rule above: a word that merely contains the retired
+// name in an entry, or a deeper entry sub-heading, is not the section.
+#[test]
+fn parked_inside_an_entry_is_not_the_retired_section() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "parkedword");
+    let tracking = "### Parked-car detector regression (chelis#12)\nre-probe at 0.19";
+    let report = audit_with_bugs(&root, &doc("(none yet)", tracking, "(none yet)"));
+    assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
+}
+
+// The required sections no longer include the retired one, so a doc without it
+// is complete, and a doc missing §Tracking still fails closed.
+#[test]
+fn the_three_sections_are_required() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "three");
+    let report = audit_with_bugs(&root, &doc("(none yet)", "(none yet)", "(none yet)"));
+    assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
+
+    let missing = "# Upstream Bugs\n\n## Actively blocking\n\n(none yet)\n\n\
+                   ## Archived\n\n(none yet)\n";
+    let report = audit_with_bugs(&root, missing);
+    let r = row_of(&report, "upstream-bugs");
+    assert_eq!(r.verdict, Verdict::Fail);
+    assert!(r.diagnostic.contains("Tracking"), "{}", r.diagnostic);
 }
 
 // A 4-space-indented item is nested (part of its parent entry), not its own.
@@ -220,10 +285,7 @@ fn four_space_indented_item_travels_with_parent() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "nested");
     let tracking = "- parent bug (chelis#293)\n    - nested detail, no cite of its own";
-    let report = audit_with_bugs(
-        &root,
-        &doc("(none yet)", tracking, "(none yet)", "(none yet)"),
-    );
+    let report = audit_with_bugs(&root, &doc("(none yet)", tracking, "(none yet)"));
     assert_eq!(
         verdict_of(&report, "upstream-bugs"),
         Verdict::Pass,
@@ -243,7 +305,6 @@ fn four_space_indented_item_alone_is_manual_not_fail() {
             "(none yet)",
             "    - deeply nested only, prose name",
             "(none yet)",
-            "(none yet)",
         ),
     );
     assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Manual);
@@ -255,10 +316,7 @@ fn subheading_entry_is_checked_and_can_fail() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "subhead");
     let tracking = "### generic-callback-unification limit\nblocks the training loop";
-    let report = audit_with_bugs(
-        &root,
-        &doc("(none yet)", tracking, "(none yet)", "(none yet)"),
-    );
+    let report = audit_with_bugs(&root, &doc("(none yet)", tracking, "(none yet)"));
     let r = row_of(&report, "upstream-bugs");
     assert_eq!(
         r.verdict,
@@ -277,10 +335,7 @@ fn subheading_entry_cited_passes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "subheadok");
     let tracking = "### generic-callback limit (chelis#293)\nblocks the training loop";
-    let report = audit_with_bugs(
-        &root,
-        &doc("(none yet)", tracking, "(none yet)", "(none yet)"),
-    );
+    let report = audit_with_bugs(&root, &doc("(none yet)", tracking, "(none yet)"));
     assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
     // A clean Pass carries no diagnostic (locks the cited-pass path).
     assert!(row_of(&report, "upstream-bugs").diagnostic.is_empty());
@@ -298,7 +353,6 @@ fn duplicated_section_heading_fails_closed() {
         ## Actively blocking\n\n(none yet)\n\n\
         ## Tracking\n\n- cited entry (chelis#1)\n\n\
         ## Tracking\n\n- generic-callback-unification limit blocks training (prose, uncited)\n\n\
-        ## Parked\n\n(none yet)\n\n\
         ## Archived\n\n(none yet)\n";
     let report = audit_with_bugs(&root, body);
     let r = row_of(&report, "upstream-bugs");
@@ -325,7 +379,6 @@ fn archived_uncited_is_exempt() {
         &doc(
             "(none yet)",
             "(none yet)",
-            "(none yet)",
             "- long-closed prose-name bug, no number at all",
         ),
     );
@@ -343,7 +396,6 @@ fn prose_only_section_is_manual_with_diagnostic() {
         &doc(
             "(none yet)",
             "We are tracking a suspected miscompile but have not filed it yet.",
-            "(none yet)",
             "(none yet)",
         ),
     );
@@ -367,7 +419,6 @@ fn malformed_no_space_heading_fails_closed() {
     let body = "# Upstream Bugs\n\nintro\n\n\
         ##Actively blocking\n\n- generic-callback-unification limit blocks training (prose name)\n\n\
         ## Tracking\n\n(none yet)\n\n\
-        ## Parked\n\n(none yet)\n\n\
         ## Archived\n\n(none yet)\n";
     let report = audit_with_bugs(&root, body);
     let r = row_of(&report, "upstream-bugs");
@@ -398,7 +449,6 @@ fn prose_paragraph_bug_is_non_gating_manual() {
             "The generic-callback-unification limit blocks the training loop; no number filed.",
             "(none yet)",
             "(none yet)",
-            "(none yet)",
         ),
     );
     let r = row_of(&report, "upstream-bugs");
@@ -421,15 +471,13 @@ fn trailing_blanket_citation_only_covers_last_entry() {
     let root = stamp(tmp.path(), "blanket");
     let tracking =
         "- bug one, prose name\n- bug two, prose name\n\nAll of the above filed as chelis#999.";
-    let report = audit_with_bugs(
-        &root,
-        &doc("(none yet)", tracking, "(none yet)", "(none yet)"),
-    );
+    let report = audit_with_bugs(&root, &doc("(none yet)", tracking, "(none yet)"));
     let r = row_of(&report, "upstream-bugs");
     assert_eq!(r.verdict, Verdict::Fail);
     // Only bug one remains uncited (bug two absorbs the trailing citation line).
     assert!(
-        r.diagnostic.contains("1 entry with a prose-name"),
+        r.diagnostic
+            .contains("1 entry without an issue-number citation"),
         "trailing blanket cite should rescue only the last entry; diag: {}",
         r.diagnostic
     );
@@ -442,12 +490,7 @@ fn ordered_list_uncited_entry_fails() {
     let root = stamp(tmp.path(), "ordered");
     let report = audit_with_bugs(
         &root,
-        &doc(
-            "(none yet)",
-            "1. prose-named ordered bug",
-            "(none yet)",
-            "(none yet)",
-        ),
+        &doc("(none yet)", "1. prose-named ordered bug", "(none yet)"),
     );
     assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Fail);
 }
@@ -457,9 +500,8 @@ fn ordered_list_uncited_entry_fails() {
 // The §4 grammar accepts a registry sibling's `<repo>#NNN`. Before this, the
 // literal blocking artifact of the 0.18.5 cascade (`nautilus#43`) failed row 8
 // as a prose-name citation, and the shell that hit it had to manufacture a
-// `docs/issue_drafts/` file whose only content was a pointer at that PR: a
-// citation handle wearing a draft's costume, which satisfies the grammar while
-// defeating its purpose. What the rule is actually buying is a live, checkable,
+// local file whose only content was a pointer at that PR, which satisfies the
+// grammar while defeating its purpose. What the rule is actually buying is a live, checkable,
 // dedupable reference, and registry membership supplies exactly that.
 
 #[test]
@@ -470,7 +512,6 @@ fn sibling_repo_citation_passes() {
         &root,
         &doc(
             "- blocked on the sibling release: nautilus#43",
-            "(none yet)",
             "(none yet)",
             "(none yet)",
         ),
@@ -491,10 +532,7 @@ fn every_registry_shell_is_an_accepted_citation() {
         let tmp = tempfile::tempdir().unwrap();
         let root = stamp(tmp.path(), "regshell");
         let entry = format!("- blocked on {}#7", shell.name);
-        let report = audit_with_bugs(
-            &root,
-            &doc(&entry, "(none yet)", "(none yet)", "(none yet)"),
-        );
+        let report = audit_with_bugs(&root, &doc(&entry, "(none yet)", "(none yet)"));
         assert_eq!(
             verdict_of(&report, "upstream-bugs"),
             Verdict::Pass,
@@ -514,7 +552,6 @@ fn org_qualified_sibling_citation_passes() {
             "- blocked on Chelis-Lang/coral#27",
             "(none yet)",
             "(none yet)",
-            "(none yet)",
         ),
     );
     assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
@@ -532,7 +569,7 @@ fn an_arbitrary_repo_reference_is_still_rejected() {
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let root = stamp(tmp.path(), "arbitrary");
-        let report = audit_with_bugs(&root, &doc(entry, "(none yet)", "(none yet)", "(none yet)"));
+        let report = audit_with_bugs(&root, &doc(entry, "(none yet)", "(none yet)"));
         let r = row_of(&report, "upstream-bugs");
         assert_eq!(
             r.verdict,
@@ -555,13 +592,13 @@ fn the_uncited_diagnostic_names_the_sibling_form() {
             "- blocked on the nautilus release, no number",
             "(none yet)",
             "(none yet)",
-            "(none yet)",
         ),
     );
     let r = row_of(&report, "upstream-bugs");
     assert_eq!(r.verdict, Verdict::Fail);
     assert!(
-        r.diagnostic.contains("1 entry with a prose-name"),
+        r.diagnostic
+            .contains("1 entry without an issue-number citation"),
         "diag: {}",
         r.diagnostic
     );

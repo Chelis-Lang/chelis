@@ -12,6 +12,7 @@ use std::path::Path;
 
 use pulldown_cmark::{Event, Parser, Tag};
 
+use crate::links::{LocalTargets, pin_links};
 use crate::{canonical, managed_block, skills};
 
 /// Write a fully-conformant shell tree rooted at `root`, pinned to `version`.
@@ -26,7 +27,6 @@ pub fn scaffold(root: &Path, name: &str, module_prefix: &str, version: &str) -> 
 
     write(root, "docs/CHELIS_SURFACE.md", &chelis_surface(version))?;
     write(root, "docs/UPSTREAM_BUGS.md", UPSTREAM_BUGS)?;
-    write(root, "docs/issue_drafts/README.md", ISSUE_DRAFTS_README)?;
 
     write(
         root,
@@ -55,7 +55,7 @@ pub fn scaffold(root: &Path, name: &str, module_prefix: &str, version: &str) -> 
     write(root, ".github/workflows/ci.yml", &ci_yml(version))?;
     write(root, ".github/workflows/bump-pr.yml", BUMP_PR_YML)?;
 
-    materialize_skills(root)?;
+    materialize_skills(root, version)?;
 
     Ok(())
 }
@@ -94,11 +94,17 @@ pub(crate) fn apply_shell_local_exclusions(
     apply_heading_exclusions(upstream, selectors)
 }
 
-/// Apply standalone shell-owned heading exclusions to the canonical AGENTS.md
-/// body. Selectors live outside the managed block so sync can replace the
-/// entire upstream contract while preserving the shell's controls and prose.
-pub(crate) fn apply_agents_exclusions(upstream: &str, document: &str) -> Result<String, String> {
-    let shell_owned = match managed_block::find(document, "agents-inheritance") {
+/// Apply standalone shell-owned heading exclusions to the canonical body of
+/// the managed block `block_id` in `document` (the `agents-inheritance` block in
+/// `AGENTS.md`, the `chelis-surface` block in `docs/CHELIS_SURFACE.md`).
+/// Selectors live outside the managed block so sync can replace the entire
+/// upstream document while preserving the shell's controls and prose.
+pub(crate) fn apply_document_exclusions(
+    upstream: &str,
+    document: &str,
+    block_id: &str,
+) -> Result<String, String> {
+    let shell_owned = match managed_block::find(document, block_id) {
         Some(block) => format!("{}{}", &document[..block.span.0], &document[block.span.1..]),
         None => document.to_string(),
     };
@@ -191,7 +197,7 @@ fn apply_heading_exclusions(upstream: &str, selectors: Vec<&str>) -> Result<Stri
     Ok(filtered)
 }
 
-/// Parse the optional exclusion span used in shell-owned AGENTS.md text.
+/// Parse the optional exclusion span used in a document's shell-owned text.
 fn standalone_exclusion_selectors(document: &str) -> Result<Vec<&str>, String> {
     let begin_count = document.matches(SHELL_LOCAL_EXCLUDE_BEGIN).count();
     let end_count = document.matches(SHELL_LOCAL_EXCLUDE_END).count();
@@ -348,7 +354,8 @@ fn atx_heading_level(line: &str) -> Option<usize> {
 
 /// Materialize `agent-skills/` from the embedded pinned skill set and point
 /// `.claude/skills` and `.codex/skills` at that one tree. Shared by `init` and
-/// `sync`.
+/// `sync`. `version` is the shell's pin: each skill's repo-relative links are
+/// rewritten for it (see [`crate::links`]).
 ///
 /// Preserves any trailing shell-local block in each retained shared `SKILL.md`
 /// (chelis#653), repo-local domain skills declared in `[conform] local_skills`
@@ -356,7 +363,7 @@ fn atx_heading_level(line: &str) -> Option<usize> {
 /// Returns human-readable notices for the caller to surface: an upstream body
 /// that changed underneath a shell-local override, an explicitly removed shared
 /// skill, and any undeclared local skill it pruned.
-pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
+pub fn materialize_skills(root: &Path, version: &str) -> Result<Vec<String>, String> {
     // The `[conform]` skill-set controls, read from the PARSED manifest so
     // `sync` and `audit` cannot disagree about what the shell declared
     // (chelis#1262). An absent reef.toml declares nothing; a PRESENT one that
@@ -393,9 +400,27 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
     // `agent-skills/` at all is being materialized for the first time, which is
     // not a restoration and gets no notice.
     let skills_dir_existed = root.join("agent-skills").is_dir();
+    // The skills the previous sync materialized, from its stamp. A retained
+    // skill absent from disk but listed there was removed by hand and is
+    // restored; one never listed is new to the shell (a skill this toolchain
+    // added to the shared set) and is announced as an addition instead.
+    let previously_materialized: Vec<String> =
+        fs::read_to_string(root.join("agent-skills/UPSTREAM.toml"))
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+            .and_then(|stamp| {
+                stamp.get("skills")?.as_array().map(|names| {
+                    names
+                        .iter()
+                        .filter_map(|n| n.as_str().map(str::to_string))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
 
     // Validate and render every retained skill before the first write. A stale
     // selector must not leave a partially synchronized skill tree.
+    let local = LocalTargets::for_shell(&excluded_skills);
     let mut planned = Vec::new();
     for &(skill_name, body) in skills::EMBEDDED_SKILLS {
         if excluded_skills.iter().any(|s| s == skill_name) {
@@ -406,7 +431,7 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
         let block = existing
             .as_deref()
             .and_then(|content| split_shell_local(content).1.map(str::to_string));
-        let managed = apply_shell_local_exclusions(body, block.as_deref())
+        let managed = skill_managed_span(skill_name, body, block.as_deref(), version, &local)
             .map_err(|why| format!("{skill_name}: {why}"))?;
         planned.push((skill_name, rel, existing, block, managed));
     }
@@ -437,9 +462,15 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
         // A retained shared skill that was absent is being (re)created. Say so
         // and point to the explicit omission control.
         if existing.is_none() && skills_dir_existed {
-            notices.push(format!(
-                "{skill_name}: re-materialized; add it to [conform] excluded_skills to omit it on sync"
-            ));
+            notices.push(if previously_materialized.iter().any(|s| s == skill_name) {
+                format!(
+                    "{skill_name}: re-materialized; add it to [conform] excluded_skills to omit it on sync"
+                )
+            } else {
+                format!(
+                    "{skill_name}: added, a shared skill this shell did not have before; add it to [conform] excluded_skills to omit it on sync"
+                )
+            });
         }
         let content = match &block {
             Some(b) => format!(
@@ -479,6 +510,28 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
     symlink_file(root, "../agent-skills", ".claude/skills")?;
     symlink_file(root, "../agent-skills", ".codex/skills")?;
     Ok(notices)
+}
+
+/// The toolchain-owned span of shared skill `name` in a shell: the embedded
+/// `body` minus the selectors in the shell's trailing shell-local `block`, with
+/// its repo-relative links pinned to `version` (see [`crate::links`]). `sync`
+/// writes this span and `audit` compares against it, so the two cannot apply
+/// different transforms.
+pub fn skill_managed_span(
+    name: &str,
+    body: &str,
+    block: Option<&str>,
+    version: &str,
+    local: &LocalTargets,
+) -> Result<String, String> {
+    let managed = apply_shell_local_exclusions(body, block)?;
+    Ok(pin_links(
+        &managed,
+        &skills::source_path(name),
+        &format!("agent-skills/{name}/SKILL.md"),
+        version,
+        local,
+    ))
 }
 
 /// Remove any content under `agent-skills/` that the pinned embedded set does
@@ -538,24 +591,28 @@ fn remove_path(path: &Path) -> Result<(), String> {
 }
 
 /// The documents `conform sync` / `conform bump` **restamp in place** and
-/// therefore cannot create: each is read, edited, and written back. Distinct
-/// from `agent-skills/`, which the write path *materializes* from the embedded
-/// set, so its absence is normal work rather than a missing prerequisite.
+/// therefore cannot create: each carries shell-authored content the write path
+/// edits around. Distinct from `agent-skills/` and `docs/CHELIS_SURFACE.md`,
+/// which the write path *materializes* from the embedded set, so their absence
+/// is normal work rather than a missing prerequisite.
 ///
 /// `reef.toml` is listed because [`crate::bump::rewrite_pins`] reads its
 /// `compiler` pin before rewriting anything, and because both verbs derive the
-/// version they stamp from that pin.
+/// version they stamp from that pin. `AGENTS.md` is listed because its Repo
+/// Identity is hand-authored and anchors the inherited block.
 const RESTAMPED_ARTIFACTS: &[(&str, &str)] = &[
     ("reef.toml", "the compiler pin `conform bump` rewrites"),
     (
         "AGENTS.md",
         "carries the `agents-inheritance` managed block sync restamps",
     ),
-    (
-        "docs/CHELIS_SURFACE.md",
-        "carries the `chelis-surface-header` managed block sync restamps",
-    ),
 ];
+
+/// Generated documents the write path creates when absent. Their absence is not
+/// a gap, but something other than a regular file at the path is: the write
+/// would fail after earlier steps had already written, which is the partial
+/// application chelis#1263 closed.
+const MATERIALIZED_DOCUMENTS: &[&str] = &["docs/CHELIS_SURFACE.md"];
 
 /// One prerequisite the write path cannot proceed without.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -567,8 +624,8 @@ pub struct PreflightGap {
 }
 
 /// Preflight the write path on a shell root: every artifact `sync`/`bump`
-/// restamps must already exist, and `reef.toml` must carry a pin they can read
-/// (chelis#1263).
+/// restamps must already exist, `reef.toml` must carry a pin they can read, and
+/// no generated document's path may be occupied by a non-file (chelis#1263).
 ///
 /// **Why this is a separate pass rather than better error handling.** `bump`'s
 /// edit sequence is repin -> materialize skills -> restamp blocks, and each step
@@ -619,6 +676,17 @@ pub fn preflight_restamp_targets(root: &Path) -> Result<(), Vec<PreflightGap>> {
             }
         }
     }
+    for rel in MATERIALIZED_DOCUMENTS.iter().copied() {
+        let path = root.join(rel);
+        if fs::symlink_metadata(&path).is_ok() && !path.is_file() {
+            gaps.push(PreflightGap {
+                rel,
+                reason: "exists but is not a regular file, so sync cannot write the generated \
+                         document there"
+                    .to_string(),
+            });
+        }
+    }
     if gaps.is_empty() { Ok(()) } else { Err(gaps) }
 }
 
@@ -646,42 +714,137 @@ pub fn preflight_failure_message(verb: &str, root: &Path, gaps: &[PreflightGap])
 }
 
 /// Regenerate every managed block in the shell's documents to `version` (the
-/// document half of `conform sync`). Only fenced regions are touched.
-pub fn sync_managed_blocks(root: &Path, version: &str) -> Result<(), String> {
+/// document half of `conform sync`), and restore the `CLAUDE.md -> AGENTS.md`
+/// symlink. Only fenced regions are touched, so shell-owned text and exclusion
+/// selectors outside them survive. Returns notices for the caller to surface:
+/// a `CLAUDE.md` that was a regular file or a directory is replaced by the
+/// symlink, and its content would otherwise vanish without a word.
+pub fn sync_managed_blocks(root: &Path, version: &str) -> Result<Vec<String>, String> {
+    // The materialized skill set decides which inherited links stay local.
+    let excluded = match fs::read_to_string(root.join("reef.toml")) {
+        Ok(text) => {
+            crate::conform::parse(&text)
+                .map_err(|e| format!("reef.toml does not parse as TOML: {e}"))?
+                .excluded_skills
+        }
+        Err(_) => Vec::new(),
+    };
     // Render both documents before the first write. A malformed or stale
-    // AGENTS.md selector therefore cannot leave the surface document restamped.
+    // selector in either therefore cannot leave the other one restamped.
     let agents_path = root.join("AGENTS.md");
     let agents_existing = fs::read_to_string(&agents_path)
         .map_err(|e| format!("read {}: {e}", agents_path.display()))?;
-    let agents_canonical = canonical::body("agents-inheritance")
-        .ok_or_else(|| "no canonical body for block \"agents-inheritance\"".to_string())?;
-    let agents_body = apply_agents_exclusions(agents_canonical, &agents_existing)?;
-    let agents_updated = managed_block::upsert(
+    let agents_updated = render_inherited_document(
         &agents_existing,
         "agents-inheritance",
         version,
-        &agents_body,
+        &excluded,
         managed_block::Anchor::AfterHeading("## Repo Identity"),
-    );
+    )
+    .map_err(|why| format!("AGENTS.md: {why}"))?;
 
+    // The surface document is fully generated, so a shell that lacks it gets
+    // one; any other read failure stops the sync before the first write.
     let surface_path = root.join("docs/CHELIS_SURFACE.md");
-    let surface_existing = fs::read_to_string(&surface_path)
-        .map_err(|e| format!("read {}: {e}", surface_path.display()))?;
-    let surface_body = canonical::body("chelis-surface-header")
-        .ok_or_else(|| "no canonical body for block \"chelis-surface-header\"".to_string())?;
-    let surface_updated = managed_block::upsert(
-        &surface_existing,
-        "chelis-surface-header",
+    let surface_existing = match fs::read_to_string(&surface_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("read {}: {e}", surface_path.display())),
+    };
+    let surface_updated = render_inherited_document(
+        &replace_legacy_surface_header(&surface_existing),
+        "chelis-surface",
         version,
-        surface_body,
+        &excluded,
         managed_block::Anchor::Top,
-    );
+    )
+    .map_err(|why| format!("docs/CHELIS_SURFACE.md: {why}"))?;
 
     fs::write(&agents_path, agents_updated)
         .map_err(|e| format!("write {}: {e}", agents_path.display()))?;
-    fs::write(&surface_path, surface_updated)
-        .map_err(|e| format!("write {}: {e}", surface_path.display()))?;
-    Ok(())
+    write(root, "docs/CHELIS_SURFACE.md", &surface_updated)?;
+    let mut notices = Vec::new();
+    if let Ok(meta) = fs::symlink_metadata(root.join("CLAUDE.md"))
+        && !meta.file_type().is_symlink()
+    {
+        let kind = if meta.is_dir() {
+            "a directory"
+        } else {
+            "a regular file"
+        };
+        notices.push(format!(
+            "CLAUDE.md: replaced {kind} with the symlink to AGENTS.md (contract §1); recover any \
+             shell-specific text from version control and keep it in AGENTS.md outside the \
+             managed block"
+        ));
+    }
+    symlink_file(root, "AGENTS.md", "CLAUDE.md")?;
+    Ok(notices)
+}
+
+/// `document` with its `block_id` managed block regenerated from the embedded
+/// canonical body (see [`inherited_block_body`]).
+fn render_inherited_document(
+    document: &str,
+    block_id: &str,
+    version: &str,
+    excluded_skills: &[String],
+    anchor: managed_block::Anchor,
+) -> Result<String, String> {
+    let body = inherited_block_body(block_id, document, version, excluded_skills)?;
+    // A document sync creates holds the block alone, byte for byte what
+    // `init` writes; upserting into empty text would add a blank line.
+    if document.is_empty() {
+        return Ok(managed_block::render(block_id, version, &body));
+    }
+    Ok(managed_block::upsert(
+        document, block_id, version, &body, anchor,
+    ))
+}
+
+/// The body of inherited managed block `block_id` for a shell document: the
+/// embedded canonical text, minus the document's own exclusion selectors, with
+/// its repo-relative links pinned to `version` (see [`crate::links`]). `sync`
+/// writes this and `audit` compares against it, so the two cannot disagree.
+pub(crate) fn inherited_block_body(
+    block_id: &str,
+    document: &str,
+    version: &str,
+    excluded_skills: &[String],
+) -> Result<String, String> {
+    let canonical = canonical::body(block_id)
+        .ok_or_else(|| format!("no canonical body for block {block_id:?}"))?;
+    let path = canonical::document_path(block_id)
+        .ok_or_else(|| format!("no document path for block {block_id:?}"))?;
+    let body = apply_document_exclusions(canonical, document, block_id)?;
+    Ok(pin_links(
+        &body,
+        path,
+        path,
+        version,
+        &LocalTargets::for_shell(excluded_skills),
+    ))
+}
+
+/// Turn the superseded `chelis-surface-header` block into an empty
+/// `chelis-surface` block at the same position, so the following upsert writes
+/// the complete surface guide where the old header stood instead of leaving the
+/// header behind with a stale stamp. A document that already carries a
+/// `chelis-surface` block keeps it, and the legacy block is simply dropped.
+fn replace_legacy_surface_header(document: &str) -> String {
+    let Some(legacy) = managed_block::find(document, canonical::LEGACY_SURFACE_HEADER) else {
+        return document.to_string();
+    };
+    let replacement = if managed_block::find(document, "chelis-surface").is_some() {
+        String::new()
+    } else {
+        managed_block::render("chelis-surface", &legacy.version, "")
+    };
+    format!(
+        "{}{replacement}{}",
+        &document[..legacy.span.0],
+        &document[legacy.span.1..]
+    )
 }
 
 // ---------------------------------------------------------------- templates
@@ -702,7 +865,8 @@ fn agents_md(name: &str, version: &str) -> String {
     let block = managed_block::render(
         "agents-inheritance",
         version,
-        canonical::body("agents-inheritance").expect("embedded canonical body"),
+        &inherited_block_body("agents-inheritance", "", version, &[])
+            .expect("embedded canonical body"),
     );
     format!(
         "# {name}, a Chelis shell\n\n\
@@ -726,28 +890,20 @@ fn agents_md(name: &str, version: &str) -> String {
 }
 
 fn chelis_surface(version: &str) -> String {
-    let block = managed_block::render(
-        "chelis-surface-header",
+    managed_block::render(
+        "chelis-surface",
         version,
-        canonical::body("chelis-surface-header").expect("embedded canonical body"),
-    );
-    format!(
-        "# Chelis Capability Surface (this shell)\n\n\
-         {block}\n\
-         ## Capabilities\n\n\
-         | Capability | Status |\n\
-         |---|---|\n\
-         | (fill in the primitive/builtin families this shell's domain touches) | `@pin` |\n\
-         | (capabilities landing next bump) | `@upstream` |\n"
+        &inherited_block_body("chelis-surface", "", version, &[]).expect("embedded canonical body"),
     )
 }
 
 const UPSTREAM_BUGS: &str = "# Upstream Bugs\n\n\
-    Track suspected chelis bugs and capability gaps here. File upstream and cite by\n\
-    `chelis#NNN` (never a prose name). Re-probe at every pin bump.\n\n\
+    Track suspected bugs and capability gaps in other Chelis-Lang repositories here.\n\
+    File each as an issue in the repository where it originates and cite it by number\n\
+    (`chelis#NNN`, or `<repo>#NNN` for a sibling shell), never by a prose name.\n\
+    Re-probe at every pin bump.\n\n\
     ## Actively blocking\n\n(none yet)\n\n\
     ## Tracking\n\n(none yet)\n\n\
-    ## Parked\n\n(none yet)\n\n\
     ## Archived\n\n(none yet)\n";
 
 /// Shell-driven scheduled bump PR. Detects a newer chelis release, runs
@@ -793,10 +949,6 @@ jobs:
             checklist (conform audit + blocked/negative probes); do not merge red.
           commit-message: "chore: bump chelis pin to ${{ steps.latest.outputs.version }}"
 "#;
-
-const ISSUE_DRAFTS_README: &str = "# Parked upstream issue drafts\n\n\
-    Ready-to-file `chelis#` drafts with their filing condition. Cite the draft path\n\
-    at the narrowing site until it is filed and gets a number.\n";
 
 const TESTS_BLOCKED_README: &str = "# Blocked-probe suite\n\n\
     One expected-to-fail reproducer per open upstream blocker\n\

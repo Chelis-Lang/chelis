@@ -795,8 +795,10 @@ enum ConformCommand {
     },
     /// Regenerate the managed blocks and re-materialize the skill set from the
     /// pinned toolchain, restamping to the reef pin. The AGENTS.md block receives
-    /// the complete pinned root Chelis contract. Touches only managed regions,
-    /// `agent-skills/`, `.claude/skills/`, and `.codex/skills/`. Refuses, before writing anything, on
+    /// the complete pinned root Chelis contract and the docs/CHELIS_SURFACE.md
+    /// block the complete pinned capability surface guide. Touches only managed
+    /// regions, `agent-skills/`, `.claude/skills/`, `.codex/skills/`, and the
+    /// `CLAUDE.md -> AGENTS.md` symlink. Refuses, before writing anything, on
     /// a repo missing an artifact it restamps in place; run `conform init` first.
     /// Shell-owned text outside managed regions is preserved. In `reef.toml`,
     /// `[conform] local_skills = [...]` preserves shell-owned skill additions and
@@ -804,8 +806,9 @@ enum ConformCommand {
     /// Within a retained skill's trailing `shell-local` block, comment-wrapped
     /// headings between `<!-- shell-local:exclude:begin -->` and
     /// `<!-- shell-local:exclude:end -->` remove inherited sections.
-    /// The same standalone selector span outside AGENTS.md's managed block
-    /// removes exact inherited AGENTS.md sections. Removing a selector restores
+    /// The same standalone selector span outside the managed block of AGENTS.md
+    /// or docs/CHELIS_SURFACE.md removes exact inherited sections of that
+    /// document. Removing a selector restores
     /// the current upstream section on the next sync; selecting the root
     /// `# Chelis Agent Contract` heading omits the whole inherited body. Full
     /// inheritance is the default, and each shell should keep the inherited and
@@ -831,10 +834,12 @@ enum ConformCommand {
     /// `excluded_skills = [...]` for named embedded removals.
     /// A retained skill's `shell-local:exclude` heading selectors are also
     /// reapplied while its local block is preserved. Standalone AGENTS.md
-    /// selectors are applied to the complete pinned root contract in the same
-    /// way. Selector control markers must be standalone Markdown comments,
-    /// outside code fences and enclosing HTML blocks. `.claude/skills` and
-    /// `.codex/skills` are restored as `../agent-skills` symlinks.
+    /// selectors are applied to the complete pinned root contract, and
+    /// docs/CHELIS_SURFACE.md selectors to the complete pinned surface guide, in
+    /// the same way. Selector control markers must be standalone
+    /// Markdown comments, outside code fences and enclosing HTML blocks.
+    /// `.claude/skills` and `.codex/skills` are restored as `../agent-skills`
+    /// symlinks, and `CLAUDE.md` as a symlink to `AGENTS.md`.
     Bump {
         /// Target chelis version (bare `X.Y.Z`).
         version: String,
@@ -5107,7 +5112,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 })?;
             let mut written: Vec<String> = Vec::new();
             let notices = report_partial_writes(
-                chelis_conformance::scaffold::materialize_skills(&root),
+                chelis_conformance::scaffold::materialize_skills(&root, &version),
                 &written,
                 "agent-skills/, .claude/skills/, and .codex/skills/",
             )?;
@@ -5116,13 +5121,16 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
             for notice in notices {
                 eprintln!("note: {notice}");
             }
-            report_partial_writes(
+            let notices = report_partial_writes(
                 chelis_conformance::scaffold::sync_managed_blocks(&root, &version),
                 &written,
-                "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md",
+                "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md and the CLAUDE.md symlink",
             )?;
+            for notice in notices {
+                eprintln!("note: {notice}");
+            }
             println!(
-                "synced managed blocks + skill links to chelis {version} at {}",
+                "synced managed blocks + agent links to chelis {version} at {}",
                 root.display()
             );
         }
@@ -5157,7 +5165,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 written.push(rel);
             }
             let notices = report_partial_writes(
-                chelis_conformance::scaffold::materialize_skills(&root),
+                chelis_conformance::scaffold::materialize_skills(&root, &version),
                 &written,
                 "agent-skills/, .claude/skills/, and .codex/skills/",
             )?;
@@ -5166,12 +5174,15 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
             for notice in notices {
                 eprintln!("note: {notice}");
             }
-            report_partial_writes(
+            let notices = report_partial_writes(
                 chelis_conformance::scaffold::sync_managed_blocks(&root, &version),
                 &written,
-                "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md",
+                "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md and the CLAUDE.md symlink",
             )?;
-            println!("restamped managed blocks + skill links to chelis {version}");
+            for notice in notices {
+                eprintln!("note: {notice}");
+            }
+            println!("restamped managed blocks + agent links to chelis {version}");
 
             // Offline gate, categorized (chelis#655). A failure on a row whose
             // artifact the bump itself writes (its pins/managed-block stamps/

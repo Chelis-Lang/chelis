@@ -48,7 +48,10 @@ fn pin_rewrite_without_sync_is_caught_then_fixed() {
         stale.diagnostic
     );
 
-    // The bump completes by restamping (what `conform bump` does after rewrite).
+    // The bump completes by re-materializing the skills (their links are
+    // pinned to the release) and restamping, which is what `conform bump`
+    // does after the rewrite.
+    scaffold::materialize_skills(&root, "0.15.0").expect("materialize");
     scaffold::sync_managed_blocks(&root, "0.15.0").expect("sync");
     assert!(
         audit::audit(&root).ok(),

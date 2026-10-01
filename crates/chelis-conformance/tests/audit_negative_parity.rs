@@ -105,6 +105,44 @@ fn deleting_chelis_surface_fails_row_7() {
     assert!(diagnostic_of(&report, "chelis-surface").contains("CHELIS_SURFACE.md"));
 }
 
+/// chelis#2831: every upstream item is filed where it originates, so the
+/// contract neither requires nor checks a local folder of issue drafts. A
+/// scaffold writes none, no row reports on one, and adding one changes no
+/// verdict.
+#[test]
+fn issue_draft_folder_is_neither_required_nor_checked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "nodrafts");
+    assert!(!root.join("docs/issue_drafts").exists());
+
+    let without = audit::audit(&root);
+    let fails: Vec<_> = without
+        .rows
+        .iter()
+        .filter(|r| r.verdict == Verdict::Fail)
+        .map(|r| format!("row {} ({}): {}", r.row, r.key, r.diagnostic))
+        .collect();
+    assert!(fails.is_empty(), "no row of any tier may fail: {fails:?}");
+    assert!(
+        without
+            .rows
+            .iter()
+            .all(|r| !r.key.contains("draft") && !r.diagnostic.contains("issue_drafts")),
+        "no row may report on an issue-draft folder"
+    );
+
+    std::fs::create_dir_all(root.join("docs/issue_drafts")).unwrap();
+    std::fs::write(root.join("docs/issue_drafts/README.md"), "# drafts\n").unwrap();
+    let with = audit::audit(&root);
+    let verdicts = |r: &audit::AuditReport| {
+        r.rows
+            .iter()
+            .map(|row| (row.key, row.verdict))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(verdicts(&without), verdicts(&with));
+}
+
 #[test]
 fn editing_workflow_pin_fails_row_3() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1342,7 +1380,7 @@ fn sync_prunes_extra_skill_content() {
     std::fs::write(root.join("agent-skills/spec-sync/EXTRA.md"), "x\n").unwrap();
     assert!(!audit::audit(&root).ok(), "drift must be present first");
 
-    scaffold::materialize_skills(&root).unwrap();
+    scaffold::materialize_skills(&root, VER).unwrap();
     assert!(
         !root.join("agent-skills/rogue").exists(),
         "rogue skill dir must be pruned"
@@ -1389,7 +1427,7 @@ fn every_manifest_key_hits_a_real_arm() {
     );
 }
 
-/// M3: row 18 applicability is driven by the registry's authoritative
+/// M3: row 17 applicability is driven by the registry's authoritative
 /// `links_chelis_crates` flag, not a Cargo.toml guess.
 #[test]
 fn chelis_src_trigger_comes_from_registry() {
@@ -1401,7 +1439,7 @@ fn chelis_src_trigger_comes_from_registry() {
     assert_eq!(
         verdict_of(&audit::audit(&octant), "chelis-src"),
         Verdict::Fail,
-        "a registry crate-linking shell without [chelis-src] must fail row 18"
+        "a registry crate-linking shell without [chelis-src] must fail row 17"
     );
 
     // `school` is a Reef shell (registry flag false), so it is NA even when its

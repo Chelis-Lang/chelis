@@ -61,7 +61,7 @@ fn sync_restores_green_and_preserves_shell_content() {
     assert!(!broken.ok(), "tampered shell must fail the audit");
 
     // Sync fixes it.
-    scaffold::materialize_skills(&root).expect("materialize skills");
+    scaffold::materialize_skills(&root, VER).expect("materialize skills");
     scaffold::sync_managed_blocks(&root, VER).expect("sync blocks");
 
     let fixed = audit::audit(&root);

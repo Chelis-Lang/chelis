@@ -38,9 +38,18 @@ fn scaffold_materializes_the_complete_pinned_agents_contract() {
     )
     .unwrap();
 
+    // The complete contract, with its repo-relative links pinned to the
+    // shell's release (contract §1).
+    const PATH: &str = "AGENTS.md";
     assert_eq!(
         managed_block::normalize_body(&block.body),
-        managed_block::normalize_body(&upstream)
+        managed_block::normalize_body(&chelis_conformance::links::pin_links(
+            &upstream,
+            PATH,
+            PATH,
+            VER,
+            &chelis_conformance::links::LocalTargets::for_shell(&[]),
+        ))
     );
     for skill in chelis_conformance::skills::SHARED_SKILLS {
         assert!(

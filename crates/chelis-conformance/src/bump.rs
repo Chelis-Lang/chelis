@@ -25,7 +25,7 @@ use crate::audit::{is_installable_version, parse_compiler_pin};
 /// - pins: [`rewrite_pins`] rewrites `reef.toml` + every workflow env/install;
 /// - managed-block stamps: [`crate::scaffold::sync_managed_blocks`] restamps the
 ///   `agents-inheritance` block (in `AGENTS.md`, row `agents-md`) and the
-///   `chelis-surface-header` block (in `docs/CHELIS_SURFACE.md`, row
+///   `chelis-surface` block (in `docs/CHELIS_SURFACE.md`, row
 ///   `chelis-surface`) — and *only* those two blocks;
 /// - skills: [`crate::scaffold::materialize_skills`] re-materializes the shared
 ///   set (row `vendored-skills`).
@@ -37,7 +37,7 @@ use crate::audit::{is_installable_version, parse_compiler_pin};
 ///
 /// The check is coarse (keyed on the whole row): rows `agents-md`,
 /// `chelis-surface`, and `vendored-skills` also cover author-owned content (a
-/// Repo-Identity heading, `@pin` markers, a shell-local block), so a post-bump
+/// Repo-Identity heading, an exclusion selector, a shell-local block), so a post-bump
 /// failure here is treated as blocking without asserting the bump itself
 /// malfunctioned. See the caller's report wording.
 ///

@@ -94,7 +94,7 @@ fn sync_restores_a_pruned_shared_skill_and_says_so() {
     let root = stamp(tmp.path(), "restored");
     std::fs::remove_dir_all(root.join("agent-skills/cli-surface")).unwrap();
 
-    let notices = scaffold::materialize_skills(&root).expect("materialize");
+    let notices = scaffold::materialize_skills(&root, VER).expect("materialize");
     assert!(
         root.join("agent-skills/cli-surface/SKILL.md").is_file(),
         "sync restores the pruned skill"
@@ -118,7 +118,7 @@ fn a_fresh_init_does_not_report_its_own_skills_as_restored() {
     // once would make every skill after the first report itself.)
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "fresh");
-    let notices = scaffold::materialize_skills(&root).expect("materialize");
+    let notices = scaffold::materialize_skills(&root, VER).expect("materialize");
     assert!(
         notices.is_empty(),
         "a re-sync of an intact tree is silent: {notices:?}"
@@ -126,7 +126,7 @@ fn a_fresh_init_does_not_report_its_own_skills_as_restored() {
 
     let bare = tmp.path().join("bare");
     std::fs::create_dir_all(&bare).unwrap();
-    let notices = scaffold::materialize_skills(&bare).expect("materialize");
+    let notices = scaffold::materialize_skills(&bare, VER).expect("materialize");
     assert!(
         notices.is_empty(),
         "first-time materialization is not a restore: {notices:?}"
@@ -149,7 +149,10 @@ fn sync_removes_declared_shared_skills_and_audit_accepts_the_result() {
         Verdict::Fail,
         "declared exclusions must take effect before the tree is conformant"
     );
-    scaffold::materialize_skills(&root).expect("materialize exclusions");
+    scaffold::materialize_skills(&root, VER).expect("materialize exclusions");
+    // An excluded skill has no local copy, so the inherited AGENTS.md links to
+    // it are re-pinned to the release by the document half of sync.
+    scaffold::sync_managed_blocks(&root, VER).expect("sync blocks");
     assert!(
         !root.join("agent-skills/cli-surface").exists()
             && !root.join("agent-skills/backend-numerics").exists(),
@@ -179,7 +182,7 @@ fn audit_rejects_any_materialized_directory_for_an_excluded_shared_skill() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "excluded-directory");
     append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"cli-surface\"]\n");
-    scaffold::materialize_skills(&root).expect("materialize exclusions");
+    scaffold::materialize_skills(&root, VER).expect("materialize exclusions");
 
     let excluded_dir = root.join("agent-skills/cli-surface");
     std::fs::create_dir_all(&excluded_dir).unwrap();
@@ -201,7 +204,7 @@ fn removing_an_exclusion_restores_the_current_embedded_skill() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "restored-exclusion");
     append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"cli-surface\"]\n");
-    scaffold::materialize_skills(&root).expect("exclude");
+    scaffold::materialize_skills(&root, VER).expect("exclude");
     assert!(
         !root.join("agent-skills/cli-surface").exists(),
         "precondition: exclusion removed the skill"
@@ -217,7 +220,7 @@ fn removing_an_exclusion_restores_the_current_embedded_skill() {
         ),
     )
     .unwrap();
-    scaffold::materialize_skills(&root).expect("restore");
+    scaffold::materialize_skills(&root, VER).expect("restore");
 
     let restored = std::fs::read_to_string(root.join("agent-skills/cli-surface/SKILL.md"))
         .expect("restored skill");
@@ -244,7 +247,7 @@ fn an_unknown_excluded_skill_fails_audit_and_sync_before_writing() {
         "diag: {}",
         r.diagnostic
     );
-    let err = scaffold::materialize_skills(&root).unwrap_err();
+    let err = scaffold::materialize_skills(&root, VER).unwrap_err();
     assert!(err.contains("cli-surfaec"), "sync error: {err}");
     assert_eq!(
         std::fs::read_to_string(root.join("agent-skills/UPSTREAM.toml")).unwrap(),
@@ -274,7 +277,7 @@ fn exclusion_aliases_are_rejected_in_favor_of_the_one_documented_key() {
             "diag: {}",
             r.diagnostic
         );
-        let err = scaffold::materialize_skills(&root).unwrap_err();
+        let err = scaffold::materialize_skills(&root, VER).unwrap_err();
         assert!(err.contains(key), "sync error: {err}");
         assert!(err.contains("excluded_skills"), "sync error: {err}");
     }
@@ -486,7 +489,7 @@ fn a_non_canonical_spelling_of_local_skills_is_honored_not_just_tolerated() {
         // Plant the repo-local domain skill only `local_skills` can legitimize.
         std::fs::create_dir_all(root.join("agent-skills/domain")).unwrap();
         std::fs::write(root.join("agent-skills/domain/SKILL.md"), "# domain\n").unwrap();
-        scaffold::materialize_skills(&root).expect("mirror declared local skill");
+        scaffold::materialize_skills(&root, VER).expect("mirror declared local skill");
 
         let report = audit::audit(&root);
         assert_eq!(
@@ -497,7 +500,7 @@ fn a_non_canonical_spelling_of_local_skills_is_honored_not_just_tolerated() {
         );
 
         // And `sync` must agree: the declared skill survives materialization.
-        scaffold::materialize_skills(&root).expect("materialize");
+        scaffold::materialize_skills(&root, VER).expect("materialize");
         assert!(
             root.join("agent-skills/domain/SKILL.md").is_file(),
             "the {label} spelling must also be honored by sync"
@@ -533,14 +536,14 @@ fn the_recognized_conform_key_still_passes() {
     // repo-local skill dir.
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "local");
-    append_conform_table(&root, "\n[conform]\nlocal_skills = [\"chelis-std\"]\n");
-    std::fs::create_dir_all(root.join("agent-skills/chelis-std")).unwrap();
+    append_conform_table(&root, "\n[conform]\nlocal_skills = [\"shell-domain\"]\n");
+    std::fs::create_dir_all(root.join("agent-skills/shell-domain")).unwrap();
     std::fs::write(
-        root.join("agent-skills/chelis-std/SKILL.md"),
-        "# chelis-std\n",
+        root.join("agent-skills/shell-domain/SKILL.md"),
+        "# shell-domain\n",
     )
     .unwrap();
-    scaffold::materialize_skills(&root).expect("mirror declared local skill");
+    scaffold::materialize_skills(&root, VER).expect("mirror declared local skill");
 
     let report = audit::audit(&root);
     assert_eq!(row(&report, "vendored-skills").verdict, Verdict::Pass);
@@ -574,13 +577,13 @@ fn recording_non_applicability_with_a_shell_local_block_passes_and_survives_sync
     let body = std::fs::read_to_string(&skill).unwrap();
     let note = "<!-- shell-local:begin -->\nNot applicable: this shell has no Chelis CLI surface.\n<!-- shell-local:end -->\n";
     std::fs::write(&skill, format!("{body}\n{note}")).unwrap();
-    scaffold::materialize_skills(&root).expect("mirror shell-local skill edit");
+    scaffold::materialize_skills(&root, VER).expect("mirror shell-local skill edit");
 
     assert!(
         audit::audit(&root).ok(),
         "the sanctioned way to record non-applicability must audit green"
     );
-    scaffold::materialize_skills(&root).expect("materialize");
+    scaffold::materialize_skills(&root, VER).expect("materialize");
     let after = std::fs::read_to_string(&skill).unwrap();
     assert!(
         after.contains("Not applicable: this shell has no Chelis CLI surface."),
@@ -643,7 +646,7 @@ fn sync_repairs_each_agent_skill_symlink() {
         audit::Verdict::Fail
     );
 
-    scaffold::materialize_skills(&root).expect("repair skill symlinks");
+    scaffold::materialize_skills(&root, VER).expect("repair skill symlinks");
     assert!(audit::audit(&root).ok());
     for rel in [".claude/skills", ".codex/skills"] {
         let surface = root.join(rel);
@@ -654,4 +657,124 @@ fn sync_repairs_each_agent_skill_symlink() {
             "{rel}"
         );
     }
+}
+
+/// Addendum to chelis#2831: the downstream-authoring skill, authored once at
+/// `packages/chelis-std/SKILL.md`, reaches every shell as a shared skill that
+/// Claude and Codex discover through the skill links, and a shell may still
+/// omit it.
+#[test]
+fn chelis_std_is_a_shared_skill_materialized_from_its_package_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "stdskill");
+    let authored = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/chelis-std/SKILL.md"),
+    )
+    .unwrap();
+    assert_eq!(
+        authored,
+        chelis_conformance::skills::skill_body("chelis-std").unwrap()
+    );
+    // The authored body, with its links pinned for the shell's release.
+    let source = scaffold::skill_managed_span(
+        "chelis-std",
+        &authored,
+        None,
+        VER,
+        &chelis_conformance::links::LocalTargets::for_shell(&[]),
+    )
+    .unwrap();
+    for surface in ["agent-skills", ".claude/skills", ".codex/skills"] {
+        let path = root.join(surface).join("chelis-std/SKILL.md");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source, "{surface}");
+    }
+    let stamp_file = std::fs::read_to_string(root.join("agent-skills/UPSTREAM.toml")).unwrap();
+    assert!(stamp_file.contains("\"chelis-std\""), "{stamp_file}");
+
+    // A fork of the shared copy is drift, like any shared skill.
+    let path = root.join("agent-skills/chelis-std/SKILL.md");
+    std::fs::write(&path, format!("{source}\nforked\n")).unwrap();
+    assert_eq!(
+        row(&audit::audit(&root), "vendored-skills").verdict,
+        Verdict::Fail
+    );
+
+    // Omission goes through the existing control.
+    append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"chelis-std\"]\n");
+    scaffold::materialize_skills(&root, VER).expect("exclude chelis-std");
+    assert!(!root.join("agent-skills/chelis-std").exists());
+    assert!(audit::audit(&root).ok());
+}
+
+/// School and hydronnx carried a hand-copied `chelis-std` as a repo-local
+/// skill. Once the skill is shared, sync replaces the copy with the authored
+/// one and the audit names the now-shadowing declaration until it is removed.
+#[test]
+fn a_local_chelis_std_copy_is_replaced_and_its_declaration_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "localstd");
+    append_conform_table(&root, "\n[conform]\nlocal_skills = [\"chelis-std\"]\n");
+    let path = root.join("agent-skills/chelis-std/SKILL.md");
+    std::fs::write(&path, "# chelis-std\nHand-copied from the monorepo.\n").unwrap();
+
+    scaffold::materialize_skills(&root, VER).expect("sync");
+    let shared = scaffold::skill_managed_span(
+        "chelis-std",
+        chelis_conformance::skills::skill_body("chelis-std").unwrap(),
+        None,
+        VER,
+        &chelis_conformance::links::LocalTargets::for_shell(&[]),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), shared);
+    let report = audit::audit(&root);
+    let r = row(&report, "vendored-skills");
+    assert_eq!(r.verdict, Verdict::Fail);
+    assert!(
+        r.diagnostic
+            .contains("chelis-std: [conform] local_skills may not name a shared skill"),
+        "{}",
+        r.diagnostic
+    );
+    // Sync cannot remove a declaration, so the fix leads with the edit that can.
+    assert!(
+        r.fix
+            .starts_with("remove each `[conform] local_skills` entry that names a shared skill"),
+        "{}",
+        r.fix
+    );
+
+    let reef = root.join("reef.toml");
+    let manifest = std::fs::read_to_string(&reef).unwrap();
+    std::fs::write(
+        &reef,
+        manifest.replace("\n[conform]\nlocal_skills = [\"chelis-std\"]\n", ""),
+    )
+    .unwrap();
+    assert!(audit::audit(&root).ok());
+}
+
+/// A skill the toolchain newly added to the shared set (as `chelis-std` is for
+/// every shell synced before this toolchain) is announced as an addition, not
+/// as a restore of something the shell had: the previous stamp never listed it.
+#[test]
+fn a_newly_shared_skill_is_announced_as_added_not_restored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "newskill");
+    // The shell as an older toolchain left it: no chelis-std, and a stamp
+    // that does not list it.
+    std::fs::remove_dir_all(root.join("agent-skills/chelis-std")).unwrap();
+    let stamp_path = root.join("agent-skills/UPSTREAM.toml");
+    let stamp_text = std::fs::read_to_string(&stamp_path).unwrap();
+    std::fs::write(&stamp_path, stamp_text.replace("  \"chelis-std\",\n", "")).unwrap();
+
+    let notices = scaffold::materialize_skills(&root, VER).expect("sync");
+    let notice = notices
+        .iter()
+        .find(|n| n.starts_with("chelis-std:"))
+        .unwrap_or_else(|| panic!("the addition must be announced: {notices:?}"));
+    assert!(notice.contains("added"), "{notice}");
+    assert!(!notice.contains("re-materialized"), "{notice}");
+    assert!(notice.contains("excluded_skills"), "{notice}");
 }

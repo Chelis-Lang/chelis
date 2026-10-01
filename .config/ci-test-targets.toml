@@ -316,6 +316,15 @@ cadence = "pull_request and push"
 reason = "script-unit runs the compiler-pin updater's consistency, argument, and mutation tests"
 tracking_issue = "chelis#1824"
 
+[[path_rule]]
+prefix = "scripts/test_bump_compiler_pins.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the compiler-pin updater's own unit tests"
+tracking_issue = "chelis#1824"
+
 # The completion runner consumes these exact runtime-extent corpus inputs.
 [[path_rule]]
 prefix = "scripts/runtime_extent_oracle.py"

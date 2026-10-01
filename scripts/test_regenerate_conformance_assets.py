@@ -4,12 +4,15 @@ Run via: `python3 -m unittest scripts.test_regenerate_conformance_assets` from
 repo root, or through the CI `unittest discover -s scripts` step.
 
 Locked here:
-  (a) SHARED_SKILLS matches the live `agent-skills/` directory (the Python
-      mirror of the Rust `skills::SHARED_SKILLS` tripwire);
+  (a) REPO_SKILLS matches the live `agent-skills/` directory, and
+      SHARED_SKILLS is exactly the repo skills plus the package skills (the
+      Python mirror of the Rust `skills::SHARED_SKILLS` tripwire);
   (b) planned_skill_copies enumerates one dest per real source file, under the
       crate's assets/skills/ tree;
   (c) is_stale detects missing, differing, and orphaned embedded copies;
-  (d) a real regenerate makes --check pass (round-trip idempotence).
+  (d) a real regenerate makes --check pass (round-trip idempotence);
+  (e) every managed-block body, the capability surface guide included, is a
+      generated copy of an authored repo document (chelis#2831).
 """
 
 import importlib.util
@@ -33,23 +36,44 @@ ROOT = regen.repo_root()
 
 
 class SharedSkillsListTests(unittest.TestCase):
-    def test_shared_skills_matches_agent_skills_dir(self):
+    def test_repo_skills_matches_agent_skills_dir(self):
         on_disk = {
             p.name for p in (ROOT / "agent-skills").iterdir() if p.is_dir()
         }
         self.assertEqual(
-            set(regen.SHARED_SKILLS),
+            set(regen.REPO_SKILLS),
             on_disk,
-            "SHARED_SKILLS in regenerate_conformance_assets.py disagrees with "
+            "REPO_SKILLS in regenerate_conformance_assets.py disagrees with "
             "agent-skills/; update it (and the Rust skills::SHARED_SKILLS mirror).",
         )
+
+    def test_shared_skills_are_repo_plus_package_skills(self):
+        package = [name for name, _ in regen.PACKAGE_SKILLS]
+        self.assertEqual(regen.SHARED_SKILLS, sorted(regen.REPO_SKILLS + package))
+        self.assertIn("chelis-std", package)
+        self.assertFalse(set(package) & set(regen.REPO_SKILLS))
 
 
 class PlannedCopiesTests(unittest.TestCase):
     def test_one_dest_per_source_file(self):
         pairs = regen.planned_skill_copies(ROOT)
-        # At least one file per shared skill.
-        self.assertGreaterEqual(len(pairs), len(regen.SHARED_SKILLS))
+        # Exactly one SKILL.md per shared skill, the package skill included.
+        self.assertEqual(
+            sorted(dest.parent.name for _, dest in pairs), regen.SHARED_SKILLS
+        )
+        self.assertIn(
+            (
+                ROOT / "packages" / "chelis-std" / "SKILL.md",
+                ROOT
+                / "crates"
+                / "chelis-conformance"
+                / "assets"
+                / "skills"
+                / "chelis-std"
+                / "SKILL.md",
+            ),
+            pairs,
+        )
         dest_root = ROOT / "crates" / "chelis-conformance" / "assets" / "skills"
         for src, dest in pairs:
             self.assertTrue(src.is_file(), f"source missing: {src}")
@@ -58,13 +82,27 @@ class PlannedCopiesTests(unittest.TestCase):
                 f"dest escapes assets/skills/: {dest}",
             )
 
-    def test_agents_contract_is_an_embedded_canonical_copy(self):
+    def test_managed_block_bodies_are_embedded_canonical_copies(self):
         pairs = regen.planned_canonical_copies(ROOT)
-        self.assertEqual(len(pairs), 1)
-        self.assertEqual(pairs[0][0], ROOT / "AGENTS.md")
-        self.assertTrue(
-            str(pairs[0][1]).endswith("assets/canonical/agents-inheritance.md")
+        dest_root = regen.canonical_dest_root(ROOT)
+        self.assertEqual(
+            pairs,
+            [
+                (ROOT / "AGENTS.md", dest_root / "agents-inheritance.md"),
+                (
+                    ROOT / "docs" / "CHELIS_SURFACE.md",
+                    dest_root / "chelis-surface.md",
+                ),
+            ],
         )
+
+    def test_canonical_dir_holds_only_generated_bodies(self):
+        # Every committed canonical body has an authored source. A hand-written
+        # body (the retired `chelis-surface-header.md` was one) is an orphan.
+        dest_root = regen.canonical_dest_root(ROOT)
+        planned = {dest for _, dest in regen.planned_canonical_copies(ROOT)}
+        on_disk = {p for p in dest_root.iterdir() if p.is_file()}
+        self.assertEqual(on_disk, planned)
 
     def test_agent_surfaces_must_link_to_the_authored_tree(self):
         with tempfile.TemporaryDirectory() as td:
@@ -107,6 +145,22 @@ class IsStaleTests(unittest.TestCase):
         pairs = [(src, dest_root / "spec-sync" / "SKILL.md")]
         return pairs, dest_root
 
+    def test_hand_written_canonical_body_is_an_orphan(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            src = tmp / "AGENTS.md"
+            src.write_text("contract\n")
+            dest_root = tmp / "assets" / "canonical"
+            dest_root.mkdir(parents=True)
+            pairs = [(src, dest_root / "agents-inheritance.md")]
+            shutil.copyfile(src, pairs[0][1])
+            self.assertEqual(regen.is_stale(pairs, dest_root), [])
+
+            (dest_root / "chelis-surface-header.md").write_text("authored here\n")
+            reasons = regen.is_stale(pairs, dest_root)
+            self.assertEqual(len(reasons), 1, reasons)
+            self.assertIn("orphaned", reasons[0])
+
     def test_missing_then_clean_then_diff_then_orphan(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -139,13 +193,12 @@ class RoundTripTests(unittest.TestCase):
         # The committed assets must already be up to date: the regenerate script
         # in --check mode is a CI-safe guard, and this asserts the checked-in
         # tree matches the live agent-skills/.
-        pairs = (
-            regen.planned_skill_copies(ROOT)
-            + regen.planned_canonical_copies(ROOT)
-        )
         dest_root = ROOT / "crates" / "chelis-conformance" / "assets" / "skills"
         self.assertEqual(
-            regen.is_stale(pairs, dest_root),
+            regen.is_stale(regen.planned_skill_copies(ROOT), dest_root)
+            + regen.is_stale(
+                regen.planned_canonical_copies(ROOT), regen.canonical_dest_root(ROOT)
+            ),
             [],
             "committed conformance assets are stale; run "
             "`python3 scripts/regenerate_conformance_assets.py`.",
@@ -167,25 +220,25 @@ class MultiFileSkillRejectedTests(unittest.TestCase):
     def test_extra_file_in_skill_dir_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = self._one_skill_root(Path(td), "SKILL.md", "EXTRA.md")
-            saved = regen.SHARED_SKILLS
-            regen.SHARED_SKILLS = ["spec-sync"]
+            saved = (regen.REPO_SKILLS, regen.PACKAGE_SKILLS)
+            regen.REPO_SKILLS, regen.PACKAGE_SKILLS = ["spec-sync"], []
             try:
                 with self.assertRaises(SystemExit):
                     regen.planned_skill_copies(root)
             finally:
-                regen.SHARED_SKILLS = saved
+                regen.REPO_SKILLS, regen.PACKAGE_SKILLS = saved
 
     def test_single_file_skill_is_accepted(self):
         with tempfile.TemporaryDirectory() as td:
             root = self._one_skill_root(Path(td), "SKILL.md")
-            saved = regen.SHARED_SKILLS
-            regen.SHARED_SKILLS = ["spec-sync"]
+            saved = (regen.REPO_SKILLS, regen.PACKAGE_SKILLS)
+            regen.REPO_SKILLS, regen.PACKAGE_SKILLS = ["spec-sync"], []
             try:
                 pairs = regen.planned_skill_copies(root)
                 self.assertEqual(len(pairs), 1)
                 self.assertTrue(str(pairs[0][0]).endswith("spec-sync/SKILL.md"))
             finally:
-                regen.SHARED_SKILLS = saved
+                regen.REPO_SKILLS, regen.PACKAGE_SKILLS = saved
 
 
 if __name__ == "__main__":

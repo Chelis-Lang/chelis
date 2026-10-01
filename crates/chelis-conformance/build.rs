@@ -23,6 +23,7 @@ use std::path::PathBuf;
 /// three-way agreement.
 const SHARED_SKILLS: &[&str] = &[
     "backend-numerics",
+    "chelis-std",
     "cli-surface",
     "example-corpus",
     "issue-resolution",
@@ -52,11 +53,11 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    // Managed-block canonical bodies live under assets/canonical/. The agents
-    // body is generated from root AGENTS.md; other bodies are authored there.
-    // Guard existence so a missing body surfaces before include_str! expansion.
+    // Managed-block canonical bodies live under assets/canonical/, generated
+    // from root AGENTS.md and docs/CHELIS_SURFACE.md. Guard existence so a
+    // missing body surfaces before include_str! expansion.
     let canonical = manifest_dir.join("assets").join("canonical");
-    for id in ["agents-inheritance", "chelis-surface-header"] {
+    for id in ["agents-inheritance", "chelis-surface"] {
         let path = canonical.join(format!("{id}.md"));
         if !path.exists() {
             panic!("conformance canonical body missing at {}", path.display());

@@ -45,7 +45,7 @@ pub struct Shell {
     pub kind: ShellKind,
     pub status: ShellStatus,
     /// True iff the shell links chelis compiler crates as Cargo path deps,
-    /// which triggers the contract's row-18 source-crate MUST.
+    /// which triggers the contract's row-17 source-crate MUST.
     pub links_chelis_crates: bool,
     /// Sibling shells this one needs installed, by name: the **transitive
     /// closure** of its `reef.toml` `[dependencies]` over sibling shells, not
@@ -178,8 +178,8 @@ pub const UPSTREAM_REPO: &str = "chelis";
 /// live and checkable as an upstream one. What the rule keeps out is a reference
 /// nobody can resolve without guessing: a bare `#NNN` (which tracker?) or an
 /// arbitrary repo name. Before this, a cascade wave forced shells to invent a
-/// `docs/issue_drafts/` file whose only content was a pointer at a sibling PR,
-/// which satisfied the grammar while defeating it.
+/// local file whose only content was a pointer at a sibling PR, which satisfied
+/// the grammar while defeating it.
 pub fn is_citable_repo(name: &str) -> bool {
     name == UPSTREAM_REPO || REGISTRY.iter().any(|s| s.name == name)
 }
