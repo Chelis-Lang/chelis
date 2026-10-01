@@ -33,7 +33,10 @@ accepted and rejected spellings, and seeded random values); `--large` adds
 many more seeded random cases and failure samples for the manual gate of
 `docs/manual_gates.md`.
 
-The binary under test comes from `--chelis` or the `CHELIS_BIN` environment
+The supported entry point is `crates/chelis-cli/tests/std_decimal_oracle.rs`,
+which supplies the freshly built binary, a published standard library and the
+strict reference toolchain (`chelis_backend_c::toolchain`). Run directly, the
+binary under test comes from `--chelis` or the `CHELIS_BIN` environment
 variable. Without `--reef-home`, each program is a single file whose
 `Std.*` imports resolve against the binary's own standard library; with a reef
 home that has `chelis-std` published, each program is a package depending on
@@ -1003,9 +1006,9 @@ def run_all(runner, programs: list[Program], lanes: Sequence[str], jobs: int, lo
     return report
 
 
-def summary(report: Report, lanes: Sequence[str]) -> str:
+def summary(report: Report, lanes: Sequence[str], profile: str = "default") -> str:
     detail = (f"{report.cases} cases ({report.elements} elements) and {report.failures_checked} failure programs "
-              f"on lanes {'+'.join(lanes)}")
+              f"on lanes {'+'.join(lanes)}; {profile} corpus")
     if report.problems:
         classes = ", ".join(f"{kind} {count}" for kind, count in sorted(report.classes.items()))
         return f"{FAIL_MARKER} ({len(report.problems)} problems: {classes}; {detail})"
@@ -1079,7 +1082,7 @@ def main(argv: list[str] | None = None) -> int:
         print(problem)
     if len(report.problems) > 200:
         print(f"... {len(report.problems) - 200} more problems")
-    print(summary(report, lanes))
+    print(summary(report, lanes, "large" if args.large else "default"))
     return 1 if report.problems else 0
 
 

@@ -118,7 +118,10 @@ class Comparator(unittest.TestCase):
         self.assertEqual(report.problems, [])
         self.assertEqual(report.cases, len(CORPUS.cases))
         self.assertEqual(report.failures_checked, sum(1 for p in programs() if p.failure))
-        self.assertTrue(harness.summary(report, ("eval", "c")).startswith(harness.PASS_MARKER))
+        line = harness.summary(report, ("eval", "c"))
+        self.assertTrue(line.startswith(harness.PASS_MARKER))
+        self.assertTrue(line.endswith("on lanes eval+c; default corpus)"))
+        self.assertTrue(harness.summary(report, ("c",), "large").endswith("on lanes c; large corpus)"))
 
     def test_a_wrong_text_element_names_its_case(self) -> None:
         program = first_program("row_add")

@@ -127,27 +127,19 @@ cadence = "pull_request and push"
 reason = "script-unit executes the reference's positive and negative rows and the harness comparison logic"
 tracking_issue = "chelis#2859"
 
-# chelis#2778: the Std.Decimal reference and differential harness.
+# chelis#2778: the Std.Decimal reference and differential harness. The
+# chelis-cli `std_decimal_oracle` target runs both against eval and native C;
 # script-unit runs the reference's tests and the harness's generator and
-# comparator tests on every pull request; the run against a chelis binary is
-# the manual gate in docs/manual_gates.md.
+# comparator tests on every pull request.
 [[path_rule]]
 prefix = "scripts/decimal_reference.py"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "script-unit executes the reference through its own tests and the harness tests"
-tracking_issue = "chelis#2778"
+disposition = "packages"
+packages = ["chelis-cli"]
 
 [[path_rule]]
 prefix = "scripts/decimal_differential.py"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "script-unit executes the harness's generator and comparator against a fake runner"
-tracking_issue = "chelis#2778"
+disposition = "packages"
+packages = ["chelis-cli"]
 
 [[path_rule]]
 prefix = "scripts/test_decimal_reference.py"
