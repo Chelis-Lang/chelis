@@ -90,6 +90,21 @@ fn messages_and_hints(report: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// Every diagnostic's `kind`, in order. Two programs that differ only in how
+/// their bound is spelled must fail for the same reasons, and a score can
+/// collide across different reasons.
+fn error_kinds(report: &Value) -> Vec<String> {
+    report["errors"]
+        .as_array()
+        .map(|errors| {
+            errors
+                .iter()
+                .map(|error| error["kind"].as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn assert_clean(source: &str, what: &str) {
     let (_dir, path) = write(source);
     let report = check(&path);
@@ -510,8 +525,9 @@ fn a_set_bound_matches_its_family_across_every_scalar_surface() {
             let set_source = format!("module Probe\n{}\n", body.replace("BOUND", set));
             let (_fd, family_path) = write(&family_source);
             let (_sd, set_path) = write(&set_source);
-            let family_score = score(&check(&family_path));
+            let family_report = check(&family_path);
             let set_report = check(&set_path);
+            let family_score = score(&family_report);
             assert_eq!(
                 score(&set_report),
                 family_score,
@@ -519,6 +535,18 @@ fn a_set_bound_matches_its_family_across_every_scalar_surface() {
                  because a set restricts which dtypes are admissible, never which programs \
                  type-check. Got:\n{}",
                 messages_and_hints(&set_report),
+            );
+            // Score parity alone would admit a gate that rejects for a
+            // different reason at the same score, so compare the diagnostic
+            // kinds as well. The bound's own spelling legitimately differs -
+            // §5.9 makes the forms distinct - so only the kinds are compared.
+            assert_eq!(
+                error_kinds(&set_report),
+                error_kinds(&family_report),
+                "{what}: `[p: {set}]` must fail (or pass) for the same reasons as \
+                 `[p: {family}]`. Set got:\n{}\nFamily got:\n{}",
+                messages_and_hints(&set_report),
+                messages_and_hints(&family_report),
             );
         }
     }

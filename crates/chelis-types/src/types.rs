@@ -171,9 +171,12 @@ impl TypeVarRestriction {
 
     /// How a diagnostic names this bound's *kind* and spelling together.
     ///
-    /// The family rendering is byte-identical to the wording that predates
-    /// §5.9's set form, so the canonical diagnostics pinned across the test
-    /// corpus do not churn for a feature that does not change them.
+    /// The family rendering of this value is byte-identical to the wording
+    /// that predates §5.9's set form. That is not the same as the composed
+    /// MESSAGE being byte-identical: a sentence that hoists "dtype families"
+    /// as a shared plural across two operands churns if each operand
+    /// describes itself. `unify.rs::describe_bound_clash` is the one such
+    /// site, and it keeps the original plural for the all-families case.
     pub fn bound_description(self) -> String {
         match self {
             TypeVarRestriction::ActiveSet(set) => format!("dtype set `{}`", set.spelling()),
