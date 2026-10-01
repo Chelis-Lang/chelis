@@ -2,14 +2,12 @@
 //!
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
 //! exercise chelis-std's own available modules (Std.Tensor, Std.Io,
-//! Std.Sort, Std.Scan, Std.Process, Std.Test, Std.Datetime). Std.Decimal
-//! is fenced under #2778; School provides
-//! the neural-network, loss, optimizer, and scheduling libraries. The corpus
-//! runs via `chelis test packages/chelis-std/tests/`; the default
-//! `cargo test --workspace` gate does not exercise it, so regressions here
-//! otherwise surface only when somebody invokes the CLI manually.
-//! The Std.Decimal success tests were removed with its fence;
-//! `std_package_acceptance` checks the errors.
+//! Std.Sort, Std.Scan, Std.Process, Std.Test, Std.Datetime, Std.Decimal).
+//! School provides the neural-network, loss, optimizer, and scheduling
+//! libraries. The corpus runs via `chelis test packages/chelis-std/tests/`;
+//! the default `cargo test --workspace` gate does not exercise it, so
+//! regressions here otherwise surface only when somebody invokes the CLI
+//! manually.
 //!
 //! This test wires the corpus into the default workspace gate. It stages
 //! chelis-std into a tempdir, points CHELIS_REEF_HOME at a tempdir reef home
@@ -26,9 +24,9 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 /// Floor on the retained chelis-std self-test corpus, set below the measured
-/// 117 passing tests after the Time and Decimal suites moved to explicit
-/// rejection checks in std_package_acceptance.
-const MIN_PASSED: u32 = 171;
+/// 219 passing tests, of which 56 are the Std.Datetime suite, 4 the
+/// Std.Datetime.Clock suite, and 42 the Std.Decimal suite.
+const MIN_PASSED: u32 = 213;
 
 fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
