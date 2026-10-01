@@ -323,6 +323,10 @@ def test_div_long_quotients() -> unit ! { Test } = {
   _ = assert_eq(divided("1", "999999999999999999999", 38i64, RoundTiesToEven), "0.000000000000000000001", "a three-limb divisor")
   _ = assert_eq(divided("99999999999999999999999999999999999999", "99999999999999999999", 18i64, RoundTiesToEven), "1000000000000000000.01", "a long divisor")
   _ = assert_eq(divided("99999999999999999999999999999999999999", "1000000000000000000000000000000000001", 36i64, RoundTowardZero), "99.999999999999999999999999999999999899", "a five-limb divisor")
+  _ = assert_eq(divided("440918321037564607897474984", "500000049999999074", 0i64, RoundTowardZero), "881836553", "a quotient limb estimated two too high")
+  _ = assert_eq(divided("440918321037564607897474984", "500000049999999074", 0i64, RoundTowardPositive), "881836554", "the same quotient rounded up")
+  _ = assert_eq(divided("375270389798487538356409535", "500000813999999184", 0i64, RoundTowardZero), "750539557", "another estimate two too high")
+  _ = assert_eq(divided("440918321037564607897474984", "500000049999999074", 18i64, RoundTiesToEven), "881836553.891475459808701794", "a two-correction quotient at scale 18")
   _ = assert_eq(divided("99999999999999999999999999999999999999", "99999999999999999999999999999999999999", 0i64, RejectInexact), "1", "the maximum by itself")
   _ = assert_eq(divided("1e-38", "99999999999999999999999999999999999999", 38i64, RoundTowardZero), "0", "the smallest by the largest, toward zero")
   assert_eq(divided("1e-38", "99999999999999999999999999999999999999", 38i64, RoundAwayFromZero), "0.00000000000000000000000000000000000001", "the smallest by the largest, away")
@@ -368,6 +372,9 @@ def test_to_f32_rounds_once() -> unit ! { Test } = {
   _ = assert_eq(single("-16777217"), neg(16777216.0f64), "-(2^24 + 1)")
   _ = assert_eq(single("1.000000178813934326171875"), 1.000000238418579f64, "an exact tie to even")
   _ = assert_eq(single("1.000000059604644775390625000001"), 1.0000001192092896f64, "just above a tie")
+  _ = assert_eq(single("16777215.4999999999"), 16777215.0f64, "just below a tie under 2^24")
+  _ = assert_eq(single("16777215.99999999999999"), 16777216.0f64, "just below 2^24")
+  _ = assert_eq(single("33554431.99999999999999999"), 33554432.0f64, "just below 2^25")
   _ = assert_eq(single("99999999999999999999999999999999999999"), 9.999999680285692e37f64, "the maximum")
   _ = assert_eq(single("1e-38"), 9.999999350456404e-39f64, "10^-38 is subnormal")
   _ = assert_eq(single("-1e-38"), neg(9.999999350456404e-39f64), "-10^-38 is subnormal")
@@ -376,7 +383,9 @@ def test_to_f32_rounds_once() -> unit ! { Test } = {
 }
 def test_to_f32_differs_from_double_rounding() -> unit ! { Test } = {
   _ = assert_eq(cast(decimal_to_f64(decimal("1.000000059604644775390625000001")), f32), cast(1.0f64, f32), "through f64 the value lands on a tie")
-  assert_false(eq(single("1.000000059604644775390625000001"), 1.0f64), "the direct rounding is not 1")
+  _ = assert_false(eq(single("1.000000059604644775390625000001"), 1.0f64), "the direct rounding is not 1")
+  _ = assert_eq(cast(decimal_to_f64(decimal("16777215.4999999999")), f32), cast(16777216.0f64, f32), "through f64 a value below a tie lands on it")
+  assert_false(eq(single("16777215.4999999999"), 16777216.0f64), "the direct rounding stays below")
 }
 def test_from_f64_is_exact_then_rounded() -> unit ! { Test } = {
   _ = assert_eq(ingested(0.1f64, 2i64, RoundTiesToEven), "0.1", "0.1 to cents")

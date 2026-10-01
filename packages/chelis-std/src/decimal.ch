@@ -382,18 +382,17 @@ def decimal_to_f64(x: Decimal) -> f64 =
     | None => fail(dec_failure("decimal_to_f64", "domain", dec_joined(["canonical text \"", decimal_to_string(x), "\" is not float text"])))
   }
 -- The exact value rounded once to f32 with ties to even. The f64 nearest the
--- magnitude fixes the binary exponent to within one; the 24-bit significand
--- q = round(c * 2^-shift / 10^s) is then formed exactly in limbs, with the
--- shift clamped at -149 for subnormal results, and q * 2^shift is exact in
--- f64 and in f32.
+-- magnitude v has binary exponent p = floor(log2 v), or p + 1 when it rounded
+-- up to 2^(p+1); v then lies within 2^(p-53) of 2^(p+1), so rounding on that
+-- one-bit-coarser grid also gives 2^(p+1), the f32 result. The significand
+-- q = round(c * 2^-shift / 10^s) is formed exactly in limbs, with the shift
+-- clamped at -149 for subnormal results, so q * 2^shift is exact in f64 and
+-- in f32 and the final cast does not round.
 def decimal_to_f32(x: Decimal) -> f32 =
   if dec_is_zero(x) then 0.0f32 else {
     magnitude = dec_magnitude(x)
     nearest = false |> dec_value(magnitude, x.scale) |> decimal_to_f64
-    first = dec_binary_parts(nearest).1 |> add(29i64) |> dec_max(-149i64)
-    first_fraction = dec_binary_fraction(magnitude, x.scale, first)
-    short = lt(dec_cmp(dec_divmod(first_fraction.0, first_fraction.1).0, [8388608i64]), 0i64)
-    shift = if and(short, gt(first, -149i64)) then sub(first, 1i64) else first
+    shift = dec_binary_parts(nearest).1 |> add(29i64) |> dec_max(-149i64)
     fraction = dec_binary_fraction(magnitude, x.scale, shift)
     rounded = dec_round_quotient(fraction.0, fraction.1, false, RoundTiesToEven).0
     significand = cast(add(mul(dec_limb(rounded, 1i64), dec_base()), dec_limb(rounded, 0i64)), f64)
