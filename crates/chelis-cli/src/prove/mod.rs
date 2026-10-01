@@ -41,9 +41,10 @@ pub struct ProveOptions<'a> {
     pub beacon_budget: std::time::Duration,
     #[cfg_attr(not(feature = "chelis-prove"), allow(dead_code))]
     pub beacon_deadline: Option<std::time::Instant>,
-    /// Floor for invariant rejection-sampling acceptance rate before the
-    /// starvation classifier fires (RFC D-STARVE). `0.0` disables the
-    /// classifier and preserves the legacy exhaustion => Error path.
+    /// Minimum acceptance rate when sampling inputs that must satisfy an
+    /// opaque type's invariant; below it the property is unsupported
+    /// (generator starvation). `0.0` disables the floor, and an exhausted
+    /// generator is then an error.
     #[allow(dead_code)]
     pub invariant_min_rate: f64,
     /// Explicit reef package root for import resolution.

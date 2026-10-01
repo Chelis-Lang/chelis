@@ -44,8 +44,10 @@ multiply before anything runs. The error from its JSON report:
 ## Install a release toolchain
 
 Chelis releases include `chelisup`, which installs toolchains and selects the
-version used by each project. Access to the private repository and an
-authenticated [GitHub CLI](https://cli.github.com) are currently required.
+version used by each project. `chelisup` downloads release assets through the
+authenticated GitHub REST API, so it needs a GitHub token even though the
+releases are public; an authenticated [GitHub CLI](https://cli.github.com)
+provides one.
 
 ```sh
 gh auth login
@@ -66,7 +68,7 @@ explains the project workflow.
 
 ## Start here
 
-- [User book](docs/book/src/README.md): first program, CLI, properties, and Reef.
+- [Chelis Guide](docs/book/src/README.md): first program, CLI, properties, and Reef.
 - [Examples](examples/): executable Chelis programs.
 - [Language spec](spec/00-context.md) and the
   [canonical project reference](spec/design/chelis_canonical_reference.md).
