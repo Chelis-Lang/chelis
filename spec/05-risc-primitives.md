@@ -2764,7 +2764,7 @@ exact ADT identity by [05-OP-34].
 > access, owner flag, or free-style path; it has no accumulator and is outside
 > AD.
 >
-> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the five
+> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the twelve
 > exported stdlib ADT identities enumerated in the normative registry
 > `spec/registry/stdlib_adt_identities.md`, which this atom incorporates by
 > reference, and no structurally similar successor.
@@ -2773,7 +2773,10 @@ exact ADT identity by [05-OP-34].
 > arithmetic, conversion, or float funnel. An ordinary public ADT constructor
 > accepts every representable declared field tuple; validation and
 > normalization belong to named stdlib functions, not a module-name
-> special-case in generic ADT construction. A public signature is numeric when
+> special-case in generic ADT construction. A registered identity declared
+> opaque (spec/04 §2.5) has no constructor outside its defining module: that
+> module's exported validating producers are its only construction path, so
+> every value a program holds satisfies the identity's governing atom. A public signature is numeric when
 > any reachable field of an admitted ADT, tuple, `List`, `Dict`, `Option`, or
 > tensor is an active numeric primitive. The reachability computation expands
 > nominal ADT definitions recursively to a fixed point and visits a recursive
@@ -2786,8 +2789,9 @@ exact ADT identity by [05-OP-34].
 > integer/float source distinction. `JsonBigInt` carries the exact decimal
 > spelling of an integer-form source token outside i64 range ([05-OP-2]);
 > it is source-faithful text, never a float funnel, and its string field
-> compares and renders byte-exactly. Decimal, date, and duration invariants
-> are checked by the named [05-OP-35] operations before use. There is no second prelude JSON
+> compares and renders byte-exactly. Decimal invariants are checked by the
+> named [05-OP-35] operations before use; the opaque `datetime::*` identities
+> hold [05-OP-73]'s invariants by construction. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
 > ordinary constructor and the executed matching arm preserve the recursive
 > cotangent shape: differentiable float fields receive their corresponding
@@ -2797,7 +2801,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the seventy-three final exported stdlib numeric definitions enumerated in the
+> the one hundred ninety-five final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
@@ -2807,7 +2811,7 @@ exact ADT identity by [05-OP-34].
 > Every primitive-width intermediate in a graph whose contract names a dtype
 > executes and finalizes at [04-NUM-8]'s declared width; integer primitive
 > arithmetic is checked and a composed trap propagates at its first specified
-> operation. Decimal rational and calendar ordinal computations explicitly
+> operation. Decimal rational computations explicitly
 > named as mathematical below use an exact internal domain; only their named
 > i64 input and final-representation boundaries can trap `Overflow`, and no
 > host integer width becomes observable. JSON access follows [05-OP-2..5]: an
@@ -2816,7 +2820,7 @@ exact ADT identity by [05-OP-34].
 > refuses `JsonFloat` and `JsonBigInt`, `json_bigint` is [05-OP-3]'s exact
 > big-integer projection, while `json_float` performs [05-OP-3]'s named
 > i64-to-f64 widening, refuses `JsonBigInt`, and returns a stored f64
-> unchanged. Index wrappers
+> unchanged. The `datetime::*` identities follow [05-OP-73]. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
 > For a differentiable element type, `list_index(xs,i)` returns an input
@@ -3006,37 +3010,6 @@ exact ADT identity by [05-OP-34].
 > or that reported error. Neither operation substitutes zero or an empty value
 > for an error or promises detection of a mutation that the host did not report.
 >
-> Date operations use the proleptic Gregorian calendar with astronomical
-> i64 years. `try_date` returns `None` for an invalid month/day and otherwise
-> the exact fields; `date` traps `Domain` for the same invalid input. Every
-> operation accepting `Date` validates it first. With `ordinal` and
-> `from_ordinal` denoting the exact proleptic-Gregorian bijection,
-> `add_days(d,n) = from_ordinal(ordinal(d) + n)`,
-> `sub_days(d,n) = from_ordinal(ordinal(d) - n)`, and
-> `days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`. This mathematical
-> ordinal arithmetic traps `Overflow` only if its final Date year or i64
-> day difference is unrepresentable; `sub_days` treats
-> `i64::MIN` mathematically rather than negating it at width. `duration`
-> forms the exact mathematical component total and applies Euclidean division
-> by 86400: `days` is the floor quotient and the nonnegative remainder supplies
-> hours in `0..23` and minutes/seconds in `0..59`. It traps `Overflow` exactly
-> when that final normalized `days` field has no i64 representation. Valid
-> date comparisons are lexicographic on `(year, month, day)`.
-> `day_of_year` is one-based; `day_of_week` fixes `1970-01-01` as Thursday
-> and returns Monday through Sunday in calendar order, while
-> `day_of_week_name` returns the corresponding lowercase ASCII name.
->
-> Date text has one canonical form. Years `0000` through `9999` use exactly
-> four digits. A negative year uses `-` followed by exactly
-> `max(4, digits(|year|))` decimal digits, where `|year|` is the exact
-> mathematical magnitude rather than an i64 `abs`, with leading zeros to that width;
-> a year above 9999 uses `+` plus its unpadded decimal digits.
-> Month and day are two digits, separated as `year-MM-DD`.
-> `date_to_string` emits that form for a valid Date and traps `Domain` for an
-> invalid raw constructor value. `parse_date` accepts only that canonical form
-> and returns `None` for a syntax error, an i64-unrepresentable year, or an
-> invalid calendar date.
->
 > IO and process functions introduce their registry-declared `IO` effect.
 > Process calls
 > pass the executable and argument vector directly without invoking a shell,
@@ -3052,7 +3025,7 @@ exact ADT identity by [05-OP-34].
 > `run_chelis: no valid Chelis executable configured`. Both
 > inherit the current working directory and environment. They are `IO`
 > operations under [05-HOST-2] in every language execution mode. IO and process
-> operations are outside AD. Pure constructors, time values, and decimal
+> operations are outside AD. Pure constructors and decimal
 > values have no cotangent unless their governing atom explicitly
 > defines one. Comparison predicates and assertions contribute zero cotangent
 > to differentiable leaves; an assertion's `Test` effect is preserved.
@@ -3060,6 +3033,207 @@ exact ADT identity by [05-OP-34].
 > explicit adjoint or forward-only rule above; no blanket
 > host-family rule overrides a float adjoint. No callable derives authority
 > from its implementation body or age.
+
+> **[05-OP-73]** `datetime(arguments...) -> result` governs exactly the
+> `datetime::*` identities of the [05-OP-34] and [05-OP-35] registries: the
+> opaque value types `Date`, `Time`, `DateTime`, `Instant`, `Offset`,
+> `OffsetDateTime`, `Duration`, `Period`, `Dates[n]`, and `Instants[n]`, and
+> the callables over them. Its plain enums are `Weekday` (`Monday` through
+> `Sunday`), `DayOverflow` (`ClampToMonthEnd`, `RejectInvalidDay`), and
+> `TimeUnit` (`Hours`, `Minutes`, `Seconds`, `Milliseconds`, `Microseconds`,
+> `Nanoseconds`); every enum constructor is a valid value. A callable that drops
+> precision takes a [05-OP-74] `Rounding`.
+>
+> The calendar is proleptic Gregorian with astronomical year numbering, so
+> year 0 exists. The timescale is POSIX: every day has exactly 86 400 seconds
+> and no leap second is representable. The supported years are -9999 through
+> 9999, so a date's epoch day (its day count from 1970-01-01) lies in
+> -4 371 587..2 932 896. An offset is a whole number of seconds in
+> -86 399..86 399. An instant's unix second lies in
+> -377 705 030 401..253 402 214 400, the civil range shrunk by the largest
+> offset at each end, so every instant has a civil reading under every offset.
+>
+> Each value type is opaque (spec/04 §2.5): outside its module the exported
+> producers below are its only construction path. Every produced value is
+> canonical, so [05-OP-36] equality of two values is equality of what they
+> denote. A `Date` is its epoch day. A `Time` is its nanosecond of day in
+> `[0, 86 400·10^9)`. A `DateTime` is a date and a time with no zone. An
+> `Instant` is a unix second and a nanosecond in `[0, 10^9)`. An `Offset` is
+> its seconds. An `OffsetDateTime` is an instant with the offset it was written
+> in, so two values for one instant with different offsets are unequal. A
+> `Duration` is an exact length as a Euclidean-normalized second, spanning all
+> of i64, and nanosecond in `[0, 10^9)`. A `Period` is months and days never of
+> mixed sign; a year is 12 months, and a period has no order. `Dates[n]` holds
+> one `tensor[n,i64]` of in-range epoch days and `Instants[n]` holds
+> `tensor[n,i64]` columns of in-range unix seconds and nanoseconds; columns
+> have no missing-value sentinel.
+>
+> Every callable is pure and total on its stated domain. A failure is
+> [05-OP-60]'s `fail` with the message `<function>: <kind>: <detail>`, where
+> `<function>` is the exported callable's name and `<detail>` names the
+> offending value. `<kind>` is `domain` for an argument, count, or text that
+> denotes no value of its type (an invalid field; a year, epoch day, offset,
+> instant, duration, or period outside its range; text outside the profile
+> below) and for a `Reject` policy that fires. It is `overflow` only when a
+> result computed by adding, subtracting, negating, or multiplying these
+> values, including reading a civil value at an offset, leaves its type, and
+> when a count conversion's integer leaves i64. When a call could fail both
+> ways, the range check runs first. Every range and validity check precedes the
+> arithmetic it protects, so no [04-NUM-9] trap of a primitive escapes a call
+> for any i64 arguments. A `try_` callable takes its twin's arguments, returns
+> `Some` of the twin's result, returns `None` exactly where the twin fails
+> `domain`, and fails exactly where the twin fails `overflow`;
+> `try_instant_to_unix_count` and `try_duration_to_count` also return `None`
+> where the integer leaves i64. The masked column forms below never fail.
+>
+> `is_leap_year`, `days_in_year`, and `days_in_month` are total over every i64
+> year; `days_in_month` fails `domain` unless the month is 1..12.
+> `weekday_iso_number` numbers Monday 1 through Sunday 7,
+> `weekday_from_iso_number` is its inverse, and `weekday_name` is the
+> lowercase ASCII name. `date(y,m,d)` fails `domain` for an invalid field or a
+> year outside the range. `date_year`, `date_month`, `date_day`,
+> `date_epoch_day`, `date_weekday` (1970-01-01 is a Thursday), and
+> `date_day_of_year` (numbered from 1) read a date, and `date_from_epoch_day`
+> inverts `date_epoch_day`. `date_iso_week` is the ISO 8601 week-year and week
+> 1..53, and the week-year lies in -9999..9999 because -9999-01-01 is a Monday
+> and 9999-12-31 a Friday. `date_from_iso_week` fails `domain` for a week-year
+> outside that range, a week its week-year lacks, or a result outside the
+> range. `date_add_days(d,n)` accepts every i64 `n` and
+> fails `overflow` when the result leaves the range; `date_days_until(a,b)` is
+> `epoch_day(b) - epoch_day(a)`. `date_add_months(d,n,policy)` moves the total
+> month count `12·year + month - 1` by `n`, keeps the day when the target
+> month has it, and otherwise takes that month's last day under
+> `ClampToMonthEnd` or fails `domain` under `RejectInvalidDay`; it fails
+> `overflow` when the target year leaves the range. `date_add_period(d,p,policy)`
+> applies `date_add_months` with `p`'s months and then `date_add_days` with its
+> days. `date_period_until(a,b)` is the single-sign period whose months have
+> the largest magnitude such that `date_add_period(a, result, ClampToMonthEnd)`
+> is `b`. `date_lt`, `date_lte`, `date_gt`, and `date_gte` order by epoch day.
+>
+> `nth_weekday_in_month(y,m,w,n)` is the `n`-th `w` of the month, or `None`
+> when the month has fewer, and fails `domain` for `n <= 0`, an invalid month,
+> or a year outside the range; `last_weekday_in_month(y,m,w)` is the month's
+> last `w` with the same month and year failures. `weekday_on_or_after` and
+> `weekday_on_or_before` return the nearest `w` on that side, the day itself
+> included, and fail `overflow` at the range edges.
+> `easter_sunday_gregorian(y)` is the anonymous Gregorian computus in Meeus's
+> form, and `easter_sunday_orthodox(y)` is the Julian computus in Meeus's form
+> converted to its proleptic Gregorian date. Both use floor division and
+> Euclidean remainders, so negative years follow the same rule, and both fail
+> `domain` for a year outside the range.
+>
+> `time(h,m,s,ns)` admits 0..23, 0..59, 0..59, and 0..999 999 999; there is no
+> 24:00 and no second 60. `time_hour`, `time_minute`, `time_second`,
+> `time_nanosecond`, and `time_nanosecond_of_day` read a time, and
+> `time_from_nanosecond_of_day` inverts the last. `time_add_duration(t,d)` is
+> the whole days carried, possibly negative, and the time of day reached.
+> `time_until(a,b)` is `b - a` within one day. `datetime(d,t)`,
+> `datetime_date`, and `datetime_time` are total. `datetime_add_duration` adds
+> exactly, every civil day being 86 400 seconds, and fails `overflow` when the
+> date leaves the range; `datetime_add_period` changes only the date, as
+> `date_add_period` does; `datetime_until` is exact and never fails. Time and
+> datetime comparisons order by date and then time of day.
+>
+> `offset_from_seconds` fails `domain` outside -86 399..86 399, and
+> `offset_seconds` reads it. `instant_from_unix(s,ns)` fails `domain` for a
+> nanosecond outside `[0, 10^9)` or a unix second outside the range, and
+> `instant_unix_second` and `instant_nanosecond` read it.
+> `instant_from_unix_count(c,unit)` is the instant `c` units after the unix
+> epoch and fails `domain` outside the range. `instant_to_unix_count(i,unit,r)`
+> is the exact count of units from the epoch to `i` rounded to an integer by
+> `r` with a quantum of one unit; it fails `domain` when `RejectInexact` meets
+> a count that is not whole and `overflow` when the integer is outside i64.
+> `instant_add_duration` fails `overflow` outside the range, and
+> `instant_until` is exact and never fails. `instant_round_to(i,inc,r)` rounds
+> `i` by `r` to an integer multiple of `inc` counted from the epoch; it fails
+> `domain` unless `inc` is positive and divides 86 400 seconds exactly, `domain`
+> when `RejectInexact` meets an instant that is not such a multiple, and
+> `overflow` when the result leaves the range. Instant comparisons order by unix second and then nanosecond.
+> `instant_to_datetime_at(i,o)` is the civil reading of `i` at `o` and is
+> total; `datetime_to_instant_at(dt,o)` is its inverse and fails `overflow`
+> outside the range. `offset_datetime(i,o)` is total,
+> `offset_datetime_instant` and `offset_datetime_offset` read it, and
+> `offset_datetime_local` is its civil reading.
+>
+> `duration(s,ns)` normalizes the exact total `s + ns/10^9` and fails `domain`
+> when the normalized second leaves i64; `duration_from_count(c,unit)` is `c`
+> units with the same failure; `duration_second` and `duration_nanosecond` read
+> the normalized pair; and `duration_to_count` follows `instant_to_unix_count`.
+> `duration_to_seconds_f64(d)` is the named lossy boundary that first splits
+> `d` into a whole part `w` and a fraction `f` of the same sign, `(second,
+> nanosecond)` when `second >= 0` or `nanosecond = 0` and `(second + 1,
+> nanosecond - 10^9)` otherwise, and then computes `f64(w) + f64(f) / 1e9`,
+> each conversion and operation rounded to nearest-even at f64 under
+> [04-NUM-14]. `duration_add`,
+> `duration_sub`, `duration_negate`, and `duration_mul(d,k)` are exact and fail
+> `overflow` exactly when the result is unrepresentable, so negation fails only
+> for the second `i64::MIN` with nanosecond 0. Duration comparisons order by
+> length. `period(months,days)` fails `domain` for mixed signs, `period_months`
+> and `period_days` read it, and `period_negate` and `period_mul(p,k)` fail
+> `overflow` when a component leaves i64.
+>
+> `dates_from_epoch_days(t)` and `instants_from_unix(s,ns)` consume their
+> tensors as the column's storage and fail `domain` naming the lowest
+> offending element index. `try_dates_from_epoch_days` and
+> `try_instants_from_unix` return the column with a `tensor[n,bool]` validity
+> mask, and an invalid position holds the unix epoch. `dates_epoch_days`,
+> `instants_unix_seconds`, and `instants_nanoseconds` consume the column and
+> return its storage.
+>
+> Every text form follows one profile built on RFC 3339 and RFC 9557, with this
+> case-sensitive grammar:
+>
+> ```
+> year     = 4DIGIT / ("+" / "-") 6DIGIT
+> date     = year "-" 2DIGIT "-" 2DIGIT
+> time     = 2DIGIT ":" 2DIGIT ":" 2DIGIT [ "." 1*9DIGIT ]
+> datetime = date ( "T" / "t" / " " ) time
+> offset   = "Z" / "z" / ( "+" / "-" ) 2DIGIT ":" 2DIGIT [ ":" 2DIGIT ]
+> instant  = datetime offset
+> duration = [ "-" ] "PT" [ 1*DIGIT "H" ] [ 1*DIGIT "M" ] [ 1*DIGIT [ "." 1*9DIGIT ] "S" ]
+> period   = [ "-" ] "P" [ 1*DIGIT "Y" ] [ 1*DIGIT "M" ] [ 1*DIGIT "W" ] [ 1*DIGIT "D" ]
+> ```
+>
+> `-000000` is not a year. After the grammar matches, fields are checked as
+> their producers check them, and an offset's hour, minute, and second admit
+> 0..23, 0..59, and 0..59. A duration or period has at least one component;
+> `Y` counts 12 months and `W` counts 7 days. `parse_date`, `parse_time`,
+> `parse_datetime`, `parse_offset`, `parse_instant`, `parse_offset_datetime`,
+> `parse_duration`, and `parse_period` accept exactly the texts of their
+> grammar rule that pass these checks and denote a value of their type, judged
+> as a whole value rather than component by component, without rounding. Every
+> other text fails `domain`, including a parsed instant outside the range and a
+> duration or period whose value lies outside its type.
+> `parse_instant` converts any offset exactly, and `parse_offset_datetime`
+> keeps the written offset, `Z` and `-00:00` being offset zero. Each
+> `*_to_string` emits its value's one canonical text: years 0..9999 as four
+> digits and negative years as `-` and six digits; `T` as the separator; a
+> fraction with trailing zeros removed and omitted when zero; offset zero as
+> `Z` and any other offset as `±HH:MM`, with `:SS` only when nonzero;
+> `instant_to_string` at offset zero; a duration as its total seconds
+> (`PT3661S`, `-PT0.5S`, `PT0S`); and a period as months and days with zero
+> parts dropped (`P14M3D`, `-P1M`, `P0D`). Parsing a value's canonical text
+> returns that value.
+>
+> Every datetime callable is outside AD and has no accumulator.
+
+> **[05-OP-74]** `rounding_mode(value, quantum) -> multiple` governs exactly
+> the seven constructors of the standard-library plain enum `Rounding`:
+> `RoundTowardNegative`, `RoundTowardPositive`, `RoundTowardZero`,
+> `RoundAwayFromZero`, `RoundTiesToEven`, `RoundTiesToAway`, and
+> `RejectInexact`. A callable that takes a `Rounding` applies it once to an
+> exact value `v` and a positive quantum `q` that the callable names, with no
+> intermediate rounding, and selects an integer multiple `k·q`:
+> `RoundTowardNegative` the largest `k·q <= v`; `RoundTowardPositive` the
+> smallest `k·q >= v`; `RoundTowardZero` whichever of those two is nearer
+> zero; `RoundAwayFromZero` whichever is farther from zero, which is `v` itself
+> when `v` is a multiple; `RoundTiesToEven` the nearest multiple, an exact tie
+> taking the even `k`; and `RoundTiesToAway` the nearest multiple, an exact tie
+> taking the one farther from zero. `RejectInexact` selects `v` when it is a
+> multiple and otherwise rejects; the callable states that rejection as a
+> `domain` failure, and its `try_` twin returns `None` there. No mode is a
+> default. A mode carries no numeric value, has no cotangent, and has no
+> accumulator.
 
 ---
 
