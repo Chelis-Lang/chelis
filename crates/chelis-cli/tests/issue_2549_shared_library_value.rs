@@ -15,7 +15,7 @@
 mod common;
 
 use assert_cmd::Command;
-use common::{gcc_available, link_generated, parse_tensor_data};
+use common::{gcc_available, link_generated};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
@@ -151,11 +151,9 @@ fn three_importers_and_a_second_import_path_evaluate_and_build() {
         .expect("compiled binary should run");
     let native = String::from_utf8(run.stdout).expect("UTF-8 stdout");
     assert!(run.status.success(), "compiled d failed: {native}");
-    assert_eq!(
-        parse_tensor_data(&native, "main"),
-        parse_tensor_data(&stdout, "main"),
-        "compiled C must print eval's `main`; native stdout: {native}"
-    );
+    // The library value `sampled` and nullary `again` are not roots of App.D
+    // (chelis#2624), so compiled C prints exactly eval's observations.
+    assert_eq!(native, stdout, "compiled C must print eval's observations");
 }
 
 #[test]
