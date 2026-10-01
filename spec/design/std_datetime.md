@@ -70,6 +70,7 @@ knowledge belongs in external libraries.
 | Piece | Home |
 |---|---|
 | Civil dates and times, instants, durations, periods, fixed offsets, text forms | `Std.Datetime` |
+| Rounding modes shared with `Std.Decimal` | `Std.Rounding` |
 | Business calendar values, rolls, business-day offsets and counts | `Std.Datetime.Business` |
 | Vectorized date and instant columns | `Std.Datetime.Columns` |
 | Zone rules as values; zone-aware conversion | `Std.Datetime.Zone` |
@@ -254,7 +255,6 @@ as `Reject` would silently change meaning.
 | Type | Variants | Used by |
 |---|---|---|
 | `DayOverflow` | `ClampToMonthEnd`, `RejectInvalidDay` | month arithmetic: 31 January + 1 month |
-| `TimeRounding` | `RoundTowardPast`, `RoundTowardFuture`, `RoundTowardZero`, `RoundNearestTiesEven` | every conversion that drops precision |
 | `TimeUnit` | `Hours`, `Minutes`, `Seconds`, `Milliseconds`, `Microseconds`, `Nanoseconds` | counts of exact time |
 | `BusinessDayRoll` | `Unadjusted`, `Following`, `Preceding`, `ModifiedFollowing`, `ModifiedPreceding` | §9 |
 | `NonBusinessStart` | `RejectNonBusinessStart`, `RollStartForward`, `RollStartBackward` | §9 |
@@ -267,8 +267,24 @@ the table is reserved from S1 on.
 There is no roll-over option for month arithmetic. 31 January + 1 month rolling over to
 2 or 3 March is `date_add_days` applied to a clamped result, so it composes.
 
-`TimeRounding` is a separate type from Decimal's `RoundingMode`. Decimal's `RoundDown`
-rounds toward zero. That is the wrong default for flooring a time before 1970.
+**Rounding is shared, not time-specific.** Every conversion that drops precision takes a
+`Rounding` from `Std.Rounding`, a small module that S1 introduces and that `Std.Decimal`
+adopts when it is redesigned, so the standard library has one rounding vocabulary. Its
+variants use IEEE 754's attribute names, which spec/05 already uses for `round`, wherever
+IEEE 754 has one; `RoundAwayFromZero` has no IEEE 754 counterpart. For an exact value `v` and
+a positive quantum `q`, each returns a multiple `k·q`:
+- `RoundTowardNegative`: the largest `k·q ≤ v`.
+- `RoundTowardPositive`: the smallest `k·q ≥ v`.
+- `RoundTowardZero`: whichever of those two is nearer zero.
+- `RoundAwayFromZero`: whichever is farther from zero, or `v` itself when it is already
+  a multiple.
+- `RoundTiesToEven`: the nearest multiple; an exact tie takes the even `k`.
+- `RoundTiesToAway`: the nearest multiple; an exact tie takes the one farther from zero.
+
+On the instant and duration line, rounding toward the past is `RoundTowardNegative` and
+rounding toward the future is `RoundTowardPositive`; for times before 1970 these differ
+from `RoundTowardZero`. The mode meanings are defined once, in their own spec/05 atom
+that both the datetime and decimal atoms cite (§15).
 
 ## 8. `Std.Datetime` (stage S1)
 
@@ -399,7 +415,7 @@ never as a single nanosecond count.
 - Accessors `instant_unix_second`, `instant_nanosecond`.
 - `instant_from_unix_count(count: i64, unit: TimeUnit) -> Instant` and its `try_` form
   read, for example, a millisecond timestamp column.
-- `instant_to_unix_count(i, unit, rounding: TimeRounding) -> i64`.
+- `instant_to_unix_count(i, unit, rounding: Rounding) -> i64`.
   - Seconds, milliseconds and microseconds always fit in i64 over the range.
   - Nanoseconds fit only within about ±292 years of 1970; outside that this fails
     `overflow`.
@@ -618,7 +634,7 @@ or builtin is introduced.
   ingestion path. Also `dates_to_strings`.
 - For instants:
   - `instants_from_unix_count` and `instants_to_unix_count` take a `TimeUnit` and a
-    `TimeRounding`;
+    `Rounding`;
   - `instants_add_duration` and `instants_until`;
   - `instants_round_to` buckets instants for resampling;
   - `instants_to_dates_at(is, o: Offset)`;
@@ -847,6 +863,10 @@ stage adding the paragraphs for the identities it exports. The atom is the contr
 "exactly" the registered identities, so prose about identities not yet registered would
 contradict it. This document holds the rest of the decided design until then.
 
+**Rounding atom.** S1 also adds one short atom defining the six `Std.Rounding` modes for
+an exact value and a positive quantum (§7). The datetime atom cites it, and so does
+`Std.Decimal`'s atom when Decimal adopts the shared type.
+
 **S1 also amends the existing atoms.**
 - In [05-OP-34]:
   - admit opaque standard-library ADTs whose only construction path is exported
@@ -873,7 +893,7 @@ no working program, because every `Std.Time` callable already fails.
 | Stage | Repository | Delivers | Needs |
 |---|---|---|---|
 | S0 | chelis | this document; the prior-art survey; tracker issues | nothing |
-| S1 (#2859) | chelis | `Std.Datetime` (§8); atom amendments and registries; `Std.Time` deleted | S0 |
+| S1 (#2859) | chelis | `Std.Datetime` (§8) and `Std.Rounding` (§7); atom amendments and registries; `Std.Time` deleted | S0 |
 | S2 (#2860) | chelis | `Std.Datetime.Business` (§9) | S1 |
 | S3 (#2861) | chelis | `Std.Datetime.Columns` (§10) | S1 |
 | S4a (#2862) | chelis | `Std.Datetime.Zone` (§11) | S1 |
