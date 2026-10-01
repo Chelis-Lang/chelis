@@ -67,6 +67,7 @@ fn a_pipe_with_a_grad_selector_checks_evaluates_and_builds_like_direct_applicati
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 path.to_str().unwrap(),
                 "--target",
                 "c",

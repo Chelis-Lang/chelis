@@ -1266,6 +1266,7 @@ fn build_c_runs_key_builtin_aliases_and_matches_eval_output() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -1312,6 +1313,7 @@ fn build_c_runs_list_foundation_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -1356,6 +1358,7 @@ fn build_c_runs_dict_foundation_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -1397,6 +1400,7 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -1501,6 +1505,7 @@ fn build_c_runs_tensor_structural_ops_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -1550,6 +1555,7 @@ fn build_c_runs_top_level_tensor_add_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1602,6 +1608,7 @@ fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1692,6 +1699,7 @@ fn build_c_user_defined_exports_remain_linkable_when_main_is_emitted() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1746,6 +1754,7 @@ fn build_c_tuple_return_header_supports_driver_extraction() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1837,6 +1846,7 @@ fn build_c_multidef_tensor_entry_renames_source_main_for_driver_compatibility() 
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1998,6 +2008,7 @@ fn build_c_nested_float_builtins_do_not_emit_int_temps() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2053,6 +2064,7 @@ fn build_c_fold_tuple_tensor_accumulator_specializes_callback_types() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2095,6 +2107,7 @@ fn build_c_map_tensor_grad_specializes_callback_item_type() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2158,6 +2171,7 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2213,6 +2227,7 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2268,6 +2283,7 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2402,6 +2418,7 @@ fn build_c_scalar_grad_builds_and_is_numerically_correct() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2477,6 +2494,7 @@ fn build_c_scalar_grad_multi_param_wrt_builds_and_is_numerically_correct() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2545,6 +2563,7 @@ fn build_c_scalar_grad_rejects_container_wrt() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2578,6 +2597,7 @@ fn build_run_scalar_grad(stem: &str, source: &str) -> f64 {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2639,6 +2659,7 @@ fn build_c_scalar_grad_recursive_callee_fails_closed() {
         .timeout(std::time::Duration::from_secs(60))
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2807,6 +2828,7 @@ fn build_c_grad_named_fn_multi_param_wrt_builds_and_is_numerically_correct() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2871,6 +2893,7 @@ fn build_c_grad_locally_bound_alias_form_lowers() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -2924,6 +2947,7 @@ fn build_c_grad_locally_bound_alias_form_matches_inline_form_output() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 source_path.to_str().unwrap(),
                 "--target",
                 "c",
@@ -3031,6 +3055,7 @@ fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3096,6 +3121,7 @@ fn build_c_grad_over_named_fn_with_nested_call_body_builds() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3155,6 +3181,7 @@ fn build_c_grad_over_named_fn_with_pipe_body_builds() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3207,6 +3234,7 @@ fn build_c_recursive_tensor_function_stays_on_host_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3253,6 +3281,7 @@ fn build_c_tensor_fold_callback_with_if_stays_on_host_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3296,6 +3325,7 @@ fn build_c_tensor_fold_let_binding_with_if_stays_on_host_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3336,6 +3366,7 @@ fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3415,6 +3446,7 @@ fn build_c_preserves_generic_unreachable_tensor_defs_without_raw_dim_symbols() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3502,6 +3534,7 @@ def main(
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--output",
             out_dir.to_str().unwrap(),
@@ -3555,6 +3588,7 @@ fn build_c_runs_round_and_scatter_elements_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3637,6 +3671,7 @@ def softplus(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3771,6 +3806,7 @@ def apply(
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -3855,6 +3891,7 @@ fn build_hip_accepts_dict_foundation_host_program() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -3881,6 +3918,7 @@ fn build_hip_accepts_iter_foundation_host_program() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -3910,6 +3948,7 @@ fn build_c_runs_scalar_string_foundation_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -3958,6 +3997,7 @@ fn phase3m_rust_runtime_acceptance_oracle() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -4043,6 +4083,7 @@ fn build_c_emits_host_function_for_mixed_tensor_scalar_program() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -4097,6 +4138,7 @@ result = match sample with {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -4142,6 +4184,7 @@ fn build_hip_runs_scalar_string_foundation_and_matches_eval_output() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -4200,6 +4243,7 @@ fn build_rejects_chelis_runtime_dir_before_writing_outputs() {
             .env("CHELIS_RUNTIME_DIR", &runtime_dir)
             .args([
                 "build",
+                "--emit-c",
                 mnist_example().to_str().unwrap(),
                 "--target",
                 target,
@@ -4239,6 +4283,7 @@ fn build_c_rejects_reduce_window_over_runtime_symbolic_axis() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -4276,6 +4321,7 @@ fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -4309,6 +4355,7 @@ fn build_device_targets_reject_host_reduce_window_max_without_c_fallback() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 path.to_str().unwrap(),
                 "--target",
                 target,
@@ -4340,6 +4387,7 @@ fn build_hip_host_rejects_unimplemented_window_dtype_cleanly() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -4381,6 +4429,7 @@ fn build_stages_the_carried_runtime_not_newer_archives_nearby() {
         .env_remove("CHELIS_RUNTIME_DIR")
         .args([
             "build",
+            "--emit-c",
             mnist_example().to_str().unwrap(),
             "--target",
             "c",
@@ -4485,6 +4534,7 @@ fn phase3m_rust_runtime_hip_manual_gate() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -5100,6 +5150,7 @@ def main(
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--output",
             out_dir.to_str().unwrap(),
@@ -5370,6 +5421,7 @@ fn build_creates_missing_output_directory() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             mnist_example().to_str().unwrap(),
             "--output",
             out_dir.to_str().unwrap(),
@@ -5399,6 +5451,7 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5431,6 +5484,7 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -5448,6 +5502,7 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5501,6 +5556,7 @@ fn build_hip_accepts_symbolic_softmax() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5533,6 +5589,7 @@ fn build_hip_accepts_symbolic_row_sum() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5564,6 +5621,7 @@ fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5590,7 +5648,13 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+        ])
         .assert()
         .failure()
         // Inherited CI unblock: the PR base and current main still expected
@@ -5619,6 +5683,7 @@ fn build_hip_rejects_pad_host_fallback() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -5633,6 +5698,7 @@ fn build_hip_rejects_pad_host_fallback() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5684,6 +5750,7 @@ fn build_hip_ignores_unselected_movement_helpers() {
                 .env("CHELIS_STYLE_GATE_DISABLE", "1")
                 .args([
                     "build",
+                    "--emit-c",
                     path.to_str().unwrap(),
                     "--target",
                     "hip",
@@ -5718,6 +5785,7 @@ fn build_hip_rejects_shrink_host_fallback() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -5732,6 +5800,7 @@ fn build_hip_rejects_shrink_host_fallback() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5768,6 +5837,7 @@ fn build_hip_emits_pad_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5804,6 +5874,7 @@ fn build_hip_emits_shrink_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5835,6 +5906,7 @@ fn build_hip_emits_sparse_gather_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5864,6 +5936,7 @@ fn build_c_emits_sparse_gather_loop_for_int32_indices() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -5899,7 +5972,13 @@ fn build_hip_rejects_sparse_gather_with_non_load_cast_indices() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -5926,6 +6005,7 @@ fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5963,6 +6043,7 @@ fn build_hip_admitted_sum_program_emits_fused_kernel_and_launch() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -5999,6 +6080,7 @@ fn build_hip_multidef_tensor_entry_uses_single_entry_abi() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "hip",
@@ -6040,6 +6122,7 @@ fn build_hip_matmul_surfaces_hipblas_link_flag_when_specialized() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -6069,6 +6152,7 @@ fn build_hip_unbound_observation_root_fails_before_writing_an_artifact() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "hip",
@@ -6338,7 +6422,7 @@ fn build_rejects_gpu_device_region_for_c_target() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "c"])
+        .args(["build", "--emit-c", path.to_str().unwrap(), "--target", "c"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot satisfy resource region"));
@@ -6828,6 +6912,7 @@ fn deep_build_rejects_selected_orphan_signature_before_pruning() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 valid.to_str().unwrap(),
                 "--target",
                 target,
@@ -6842,6 +6927,7 @@ fn deep_build_rejects_selected_orphan_signature_before_pruning() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 invalid.to_str().unwrap(),
                 "--target",
                 target,
@@ -6914,6 +7000,7 @@ fn target_metal_emits_mm_header_and_runtime_artifacts() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "metal",
@@ -6964,7 +7051,13 @@ fn target_metal_unknown_target_message_lists_metal() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "vulkan"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "vulkan",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -6990,6 +7083,7 @@ fn target_metal_emits_pad_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7025,6 +7119,7 @@ fn target_metal_emits_shrink_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7053,7 +7148,7 @@ fn target_metal_rejects_f64_precision() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "metal"])
+        .args(["build", "--emit-c", path.to_str().unwrap(), "--target", "metal"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -7080,6 +7175,7 @@ fn target_metal_admits_f16_add() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7110,6 +7206,7 @@ fn target_metal_admits_bf16_add() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7144,6 +7241,7 @@ fn target_metal_admits_i32_add() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7174,6 +7272,7 @@ fn target_metal_admits_i64_add() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -7206,6 +7305,7 @@ fn target_metal_link_line_includes_metal_performance_shaders() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "metal",
@@ -7233,7 +7333,13 @@ fn target_metal_rejects_cpu_resource_region() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "metal"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "metal",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot satisfy resource region"));
@@ -7317,6 +7423,7 @@ fn run_activation_parity(name: &str, source_body: &str) -> (Vec<u8>, Vec<u8>) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             build_path.to_str().unwrap(),
             "--target",
             "c",
@@ -7563,6 +7670,7 @@ fn target_metal_accepts_gpu_resource_region() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "metal",
@@ -8662,6 +8770,7 @@ fn eval_grad_wrapper_form_matches_c_backend_within_tolerance() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -9722,6 +9831,7 @@ fn build_link_run(src: &Path, out_dir: &Path, binary: &str) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",
@@ -9813,6 +9923,7 @@ fn build_c_keyed_draw_does_not_block_a_sibling_build() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             plain_path.to_str().unwrap(),
             "--target",
             "c",
@@ -9832,6 +9943,7 @@ fn build_c_keyed_draw_does_not_block_a_sibling_build() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             keyed_path.to_str().unwrap(),
             "--target",
             "c",
@@ -9943,6 +10055,7 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
         Command::cargo_bin("chelis")
             .unwrap()
             .arg("build")
+            .arg("--emit-c")
             .arg(&source)
             .args(["--target", "c", "--output"])
             .arg(&out)
@@ -10031,6 +10144,7 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
     Command::cargo_bin("chelis")
         .unwrap()
         .arg("build")
+        .arg("--emit-c")
         .arg(&source)
         .arg("--output")
         .arg(&out)
@@ -10058,6 +10172,7 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
         .unwrap()
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .arg("build")
+        .arg("--emit-c")
         .arg(&source)
         .arg("--output")
         .arg(&runtime_rate)
@@ -10081,6 +10196,7 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
     Command::cargo_bin("chelis")
         .unwrap()
         .arg("build")
+        .arg("--emit-c")
         .arg(&source)
         .arg("--output")
         .arg(&runtime_rate)
@@ -10109,6 +10225,7 @@ result = keep(key_from_seed(7i64), to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",
@@ -10151,6 +10268,7 @@ loss_value = loss_tail(logits, labels)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",
@@ -10237,6 +10355,7 @@ fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -10335,6 +10454,7 @@ fn build_c_linreg_insert_singleton_bias_keeps_rank2_shape() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -10396,6 +10516,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -10485,6 +10606,7 @@ fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -10561,6 +10683,7 @@ fn build_c_pipe_into_user_defined_unary_tensor_fn_matches_nested_call() {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -10632,6 +10755,7 @@ fn build_c_higher_order_def_with_unused_fn_param_keeps_its_kernel() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -10700,6 +10824,7 @@ fn build_c_mixed_module_keeps_working_roots_and_drops_only_the_rootless_grad() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -10770,6 +10895,7 @@ fn build_c_grad_program_keeps_both_named_roots() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -10884,6 +11010,7 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -11028,6 +11155,7 @@ fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -11149,6 +11277,7 @@ fn build_c_program_using_std_io_serializers_emits_exact_documents() {
         .current_dir(&proj)
         .args([
             "build",
+            "--emit-c",
             "src/main.ch",
             "--output",
             out_dir.to_str().unwrap(),
@@ -11249,6 +11378,7 @@ fn assert_built_c_has_zero_definitely_lost(name: &str, source: &str, expected_st
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",

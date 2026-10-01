@@ -1316,6 +1316,7 @@ fn build_compile_run(source: &str, name: &str) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",
@@ -1378,6 +1379,7 @@ fn build_expecting_failure(source: &str, name: &str) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",
@@ -1409,6 +1411,7 @@ fn build_c_source(source: &str, name: &str) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",

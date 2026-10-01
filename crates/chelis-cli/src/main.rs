@@ -4,6 +4,7 @@ mod c_source_name;
 mod eval_output;
 mod eval_timeout;
 mod lane_check;
+mod native_build;
 mod prove;
 mod style_gate;
 
@@ -245,7 +246,7 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
     },
-    /// Compile to C (default), HIP, or Metal code
+    /// Build a native executable or static library for C, HIP, or Metal
     ///
     /// Auto-detects the input language from the file extension: `.dp`
     /// inputs are routed through the Deep ingestion path; everything else
@@ -275,6 +276,9 @@ enum Command {
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
+        /// Emit C-family sources and runtime support without native compilation.
+        #[arg(long, action = ArgAction::SetTrue)]
+        emit_c: bool,
     },
     /// Write the runtime this chelis build carries
     Runtime {
@@ -987,6 +991,7 @@ fn main() {
             output,
             target,
             deep,
+            emit_c,
             allow_style_violations,
         }) => cmd_build_dispatch(
             &file,
@@ -994,6 +999,7 @@ fn main() {
             &target,
             deep,
             allow_style_violations,
+            emit_c,
         ),
         Some(Command::Reef { command }) => cmd_reef(command),
         Some(Command::Runtime { command }) => cmd_runtime(command),
@@ -3864,6 +3870,7 @@ fn cmd_build_dispatch(
     target: &str,
     deep_flag: bool,
     allow_style_violations: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = BuildTarget::try_from(target).map_err(boxed_string_error)?;
     // Every build target stages the runtime this chelis carries. A runtime
@@ -3871,6 +3878,7 @@ fn cmd_build_dispatch(
     // since this build, is an error reported before any output is written
     // (spec/08-backends.md §2.1).
     chelis_runtime_bundle::preflight()?;
+    native_build::protect_input(file, output, target.as_str())?;
     let extension_is_dp = file
         .extension()
         .and_then(|s| s.to_str())
@@ -3901,9 +3909,9 @@ fn cmd_build_dispatch(
                 );
             }
         }
-        cmd_build_deep(file, output, target, allow_style_violations)
+        cmd_build_deep(file, output, target, allow_style_violations, emit_c)
     } else {
-        cmd_build(file, output, target, allow_style_violations)
+        cmd_build(file, output, target, allow_style_violations, emit_c)
     }
 }
 
@@ -3912,6 +3920,7 @@ fn cmd_build(
     output: Option<&std::path::Path>,
     target: BuildTarget,
     allow_style_violations: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(source) = fs::read_to_string(file) {
         style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
@@ -4143,7 +4152,14 @@ fn cmd_build(
                     )?
                 };
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
-                cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
+                cmd_build_c_result(
+                    result,
+                    &c_name,
+                    output,
+                    &symbolic_dims,
+                    requires_main,
+                    emit_c,
+                )
             } else {
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
@@ -4154,7 +4170,14 @@ fn cmd_build(
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                cmd_build_c(fused, &c_name, output, &symbolic_dims, &root_manifest)
+                cmd_build_c(
+                    fused,
+                    &c_name,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                    emit_c,
+                )
             }
         }
         BuildTarget::Hip => {
@@ -4224,7 +4247,7 @@ fn cmd_build(
                 )?;
                 let result =
                     chelis_backend_hip::codegen_hip_host_program(&verified, func_name, helpers)?;
-                cmd_build_hip_host(result, func_name, output, requires_main)
+                cmd_build_hip_host(result, func_name, output, requires_main, emit_c)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -4248,10 +4271,10 @@ fn cmd_build(
                 cmd_build_hip(
                     fused,
                     func_name,
-                    file,
                     output,
                     &symbolic_dims,
                     &root_manifest,
+                    emit_c,
                 )
             }
         }
@@ -4315,7 +4338,7 @@ fn cmd_build(
                 && host_requires_host_backend
                 && let Some(result) = validated_host
             {
-                cmd_build_metal_host(result, func_name, output, requires_main)
+                cmd_build_metal_host(result, func_name, output, requires_main, emit_c)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -4343,7 +4366,14 @@ fn cmd_build(
                 // boundary; this typed gate owns the public early diagnostic.
                 chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
                 let fused = chelis_ir::fuse::fuse(&metal_dag);
-                cmd_build_metal(fused, func_name, file, output, &symbolic_dims)
+                cmd_build_metal(
+                    fused,
+                    func_name,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                    emit_c,
+                )
             }
         }
     }
@@ -4368,6 +4398,7 @@ fn cmd_build_deep(
     output: Option<&std::path::Path>,
     target: BuildTarget,
     allow_style_violations: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
@@ -4500,7 +4531,14 @@ fn cmd_build_deep(
                     )?
                 };
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
-                cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
+                cmd_build_c_result(
+                    result,
+                    &c_name,
+                    output,
+                    &symbolic_dims,
+                    requires_main,
+                    emit_c,
+                )
             } else {
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
@@ -4511,7 +4549,14 @@ fn cmd_build_deep(
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                cmd_build_c(fused, &c_name, output, &symbolic_dims, &root_manifest)
+                cmd_build_c(
+                    fused,
+                    &c_name,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                    emit_c,
+                )
             }
         }
         BuildTarget::Hip => {
@@ -4576,7 +4621,7 @@ fn cmd_build_deep(
                 )?;
                 let result =
                     chelis_backend_hip::codegen_hip_host_program(&verified, func_name, helpers)?;
-                cmd_build_hip_host(result, func_name, output, requires_main)
+                cmd_build_hip_host(result, func_name, output, requires_main, emit_c)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -4600,10 +4645,10 @@ fn cmd_build_deep(
                 cmd_build_hip(
                     fused,
                     func_name,
-                    file,
                     output,
                     &symbolic_dims,
                     &root_manifest,
+                    emit_c,
                 )
             }
         }
@@ -4662,7 +4707,7 @@ fn cmd_build_deep(
                 && host_requires_host_backend
                 && let Some(result) = validated_host
             {
-                cmd_build_metal_host(result, func_name, output, requires_main)
+                cmd_build_metal_host(result, func_name, output, requires_main, emit_c)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -4687,7 +4732,14 @@ fn cmd_build_deep(
                 // Deep get the same f64 rejection behavior.
                 chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
                 let fused = chelis_ir::fuse::fuse(&metal_dag);
-                cmd_build_metal(fused, func_name, file, output, &symbolic_dims)
+                cmd_build_metal(
+                    fused,
+                    func_name,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                    emit_c,
+                )
             }
         }
     }
@@ -10508,6 +10560,7 @@ fn cmd_build_c(
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
     root_manifest: &chelis_types::manifest::RootManifest,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let func_name = c_name.symbol();
     let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
@@ -10532,7 +10585,14 @@ fn cmd_build_c(
             .push_str(&tensor_manifest_observation_driver(func_name, &root_names));
         result.reseal_artifact(func_name)?;
     }
-    cmd_build_c_result(result, c_name, output, &symbolic_dims, requires_main)
+    cmd_build_c_result(
+        result,
+        c_name,
+        output,
+        &symbolic_dims,
+        requires_main,
+        emit_c,
+    )
 }
 
 fn cmd_build_c_result(
@@ -10541,6 +10601,7 @@ fn cmd_build_c_result(
     output: Option<&std::path::Path>,
     symbolic_dims: &[String],
     requires_main: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -10573,25 +10634,16 @@ fn cmd_build_c_result(
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
-    if requires_main {
-        println!(
-            "Compile: {} -O2 {} {} {} {} -o {}",
-            toolchain.compiler,
-            toolchain.compile_flags.join(" "),
-            c_path.display(),
-            staged.archive.display(),
-            toolchain.link_flags.join(" "),
-            c_path.with_extension("").display()
-        );
-    } else {
-        println!(
-            "Compile object: {} -O2 {} -c {}",
-            toolchain.compiler,
-            toolchain.compile_flags.join(" "),
-            c_path.display()
-        );
+    native_build::NativeBuild {
+        target: "c",
+        compiler: toolchain.compiler.into(),
+        sources: vec![c_path],
+        compile_flags: toolchain.compile_flags,
+        link_flags: toolchain.link_flags,
+        runtime_archive: staged.archive,
+        requires_main,
     }
-    Ok(())
+    .finish(emit_c)
 }
 
 fn cmd_build_hip_host(
@@ -10599,6 +10651,7 @@ fn cmd_build_hip_host(
     func_name: &str,
     output: Option<&std::path::Path>,
     requires_main: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -10664,36 +10717,19 @@ fn cmd_build_hip_host(
             }
         }
     }
-    let mut support_sources = helper_paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    support_sources.push(
-        runtime_dir
-            .join("chelis_device_owner.cpp")
-            .display()
-            .to_string(),
-    );
-    let support_sources = support_sources.join(" ");
-    if requires_main {
-        println!(
-            "Compile: hipcc {} {} {} {} -lpthread -ldl {} -o {}",
-            compile_flags.join(" "),
-            c_path.display(),
-            support_sources,
-            staged.archive.display(),
-            link_flags.join(" "),
-            c_path.with_extension("").display()
-        );
-    } else {
-        println!(
-            "Compile objects: hipcc {} -c {} {}",
-            compile_flags.join(" "),
-            c_path.display(),
-            support_sources
-        );
+    let mut sources = vec![c_path.clone()];
+    sources.extend(helper_paths);
+    sources.push(runtime_dir.join("chelis_device_owner.cpp"));
+    native_build::NativeBuild {
+        target: "hip",
+        compiler: native_build::compiler_override("CHELIS_HIPCC", "hipcc"),
+        sources,
+        compile_flags,
+        link_flags,
+        runtime_archive: staged.archive,
+        requires_main,
     }
-    Ok(())
+    .finish(emit_c)
 }
 
 fn cmd_build_metal_host(
@@ -10701,6 +10737,7 @@ fn cmd_build_metal_host(
     func_name: &str,
     output: Option<&std::path::Path>,
     requires_main: bool,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -10769,30 +10806,18 @@ fn cmd_build_metal_host(
             link_flags.extend(helper.result.link_flags.iter().cloned());
         }
     }
-    let helper_sources = helper_paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if requires_main {
-        println!(
-            "Compile: clang++ {} -O2 {} {} {} {} -o {}",
-            compile_flags.join(" "),
-            mm_path.display(),
-            helper_sources,
-            staged.archive.display(),
-            link_flags.join(" "),
-            mm_path.with_extension("").display()
-        );
-    } else {
-        println!(
-            "Compile objects: clang++ {} -O2 -c {} {}",
-            compile_flags.join(" "),
-            mm_path.display(),
-            helper_sources
-        );
+    let mut sources = vec![mm_path];
+    sources.extend(helper_paths);
+    native_build::NativeBuild {
+        target: "metal",
+        compiler: native_build::compiler_override("CHELIS_METAL_CXX", "clang++"),
+        sources,
+        compile_flags,
+        link_flags,
+        runtime_archive: staged.archive,
+        requires_main,
     }
-    Ok(())
+    .finish(emit_c)
 }
 
 fn tensor_manifest_observation_driver(func_name: &str, root_names: &[String]) -> String {
@@ -10944,10 +10969,10 @@ fn tensor_manifest_root_names(
 fn cmd_build_hip(
     dag: chelis_ir::dag::Dag,
     func_name: &str,
-    _file: &std::path::Path,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
     root_manifest: &chelis_types::manifest::RootManifest,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
     let selected = chelis_backend_hip::prepare_dag_for_codegen(dag);
@@ -11018,45 +11043,44 @@ fn cmd_build_hip(
     if let Some(bytes) = result.peak_device_bytes_estimate {
         println!("Estimated peak device memory: {}", human_bytes(bytes));
     }
-    let mut flags: Vec<&str> = result
-        .compile_flags
-        .iter()
-        .chain(result.link_flags.iter())
-        .map(|s| s.as_str())
-        .collect();
-    flags.sort();
-    flags.dedup();
-    if requires_main {
-        println!(
-            "Compile: hipcc {} {} {} {} -lpthread -ldl -o {}",
-            flags.join(" "),
-            c_path.display(),
-            runtime_dir.join("chelis_device_owner.cpp").display(),
-            staged.archive.display(),
-            c_path.with_extension("").display()
-        );
-    } else {
-        println!(
-            "Compile object: hipcc {} -c {} {}",
-            flags.join(" "),
-            c_path.display(),
-            runtime_dir.join("chelis_device_owner.cpp").display()
-        );
+    let mut link_flags = result.link_flags;
+    link_flags.extend(["-lpthread".into(), "-ldl".into()]);
+    native_build::NativeBuild {
+        target: "hip",
+        compiler: native_build::compiler_override("CHELIS_HIPCC", "hipcc"),
+        sources: vec![c_path.clone(), runtime_dir.join("chelis_device_owner.cpp")],
+        compile_flags: result.compile_flags,
+        link_flags,
+        runtime_archive: staged.archive,
+        requires_main,
     }
-    Ok(())
+    .finish(emit_c)
 }
 
 fn cmd_build_metal(
     dag: chelis_ir::dag::Dag,
     func_name: &str,
-    _file: &std::path::Path,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
+    root_manifest: &chelis_types::manifest::RootManifest,
+    emit_c: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
     let verified = verified_dag_codegen_program(dag)?;
     let plan = chelis_backend_metal::plan_metal(verified);
-    let result = chelis_backend_metal::codegen_metal(plan, func_name)?;
+    let mut result = chelis_backend_metal::codegen_metal(plan, func_name)?;
+    let requires_main = root_manifest.requires_main();
+    if requires_main {
+        let root_names = tensor_manifest_root_names(
+            &result.output_labels,
+            root_manifest,
+            BuildTarget::Metal,
+            "Metal",
+        )?;
+        result
+            .mm_source
+            .push_str(&tensor_manifest_observation_driver(func_name, &root_names));
+    }
 
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -11111,22 +11135,16 @@ fn cmd_build_metal(
     if let Some(bytes) = result.peak_device_bytes_estimate {
         println!("Estimated peak device memory: {}", human_bytes(bytes));
     }
-    // Preserve the (-framework, NAME) pair ordering — sorting would split
-    // them. Compile flags first, then link flags, in their declared order.
-    let flags: Vec<&str> = result
-        .compile_flags
-        .iter()
-        .chain(result.link_flags.iter())
-        .map(|s| s.as_str())
-        .collect();
-    println!(
-        "Compile: clang++ {} -O2 {} {} -o {}",
-        flags.join(" "),
-        mm_path.display(),
-        staged.archive.display(),
-        mm_path.with_extension("").display()
-    );
-    Ok(())
+    native_build::NativeBuild {
+        target: "metal",
+        compiler: native_build::compiler_override("CHELIS_METAL_CXX", "clang++"),
+        sources: vec![mm_path],
+        compile_flags: result.compile_flags,
+        link_flags: result.link_flags,
+        runtime_archive: staged.archive,
+        requires_main,
+    }
+    .finish(emit_c)
 }
 
 fn human_bytes(bytes: usize) -> String {

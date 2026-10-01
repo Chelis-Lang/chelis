@@ -53,6 +53,7 @@ fn build_dp_extension_auto_detects_deep_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             wrapped_dp().to_str().unwrap(),
             "--target",
             "c",
@@ -88,6 +89,7 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             wrapped_dp().to_str().unwrap(),
             "--target",
             "c",
@@ -101,6 +103,7 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             wrapped_dp().to_str().unwrap(),
             "--deep",
             "--target",
@@ -150,6 +153,7 @@ fn build_replaces_a_read_only_stale_runtime_archive() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             wrapped_dp().to_str().unwrap(),
             "--target",
             "c",
@@ -180,6 +184,7 @@ fn build_ch_with_deep_flag_routes_through_deep_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             dp_with_ch_extension.to_str().unwrap(),
             "--deep",
             "--target",
@@ -224,6 +229,7 @@ fn build_ch_without_deep_flag_takes_the_surf_path() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -271,6 +277,7 @@ fn build_span_free_deep_matches_surf_shape() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             dp_path.to_str().unwrap(),
             "--target",
             "c",
@@ -307,6 +314,7 @@ fn build_deep_emitted_c_compiles_via_gcc() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             wrapped_dp().to_str().unwrap(),
             "--target",
             "c",
@@ -356,6 +364,7 @@ fn build_deep_hip_target_emits_spans_in_cpp_and_kernel_strings() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             wrapped_dp().to_str().unwrap(),
             "--deep",
             "--target",
@@ -389,6 +398,7 @@ fn build_deep_audit_chain_is_recoverable_from_emitted_c() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             wrapped_dp().to_str().unwrap(),
             "--deep",
             "--target",

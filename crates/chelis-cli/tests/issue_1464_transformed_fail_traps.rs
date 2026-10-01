@@ -76,6 +76,7 @@ fn build_c(source: &str, stem: &str) -> (TempDir, PathBuf) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().expect("UTF-8 source path"),
             "--target",
             "c",

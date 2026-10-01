@@ -71,6 +71,7 @@ fn c_build_outcome(program: &str, name: &str) -> (bool, String, Option<String>) 
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -121,6 +122,7 @@ fn c_ubsan_run(program: &str, name: &str) -> std::process::Output {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

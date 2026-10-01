@@ -39,6 +39,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -299,6 +300,7 @@ fn build_hip_and_count(source: &str, name: &str) -> HipCounts {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "hip",

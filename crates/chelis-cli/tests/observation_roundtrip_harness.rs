@@ -130,6 +130,7 @@ fn c_stdout(program: &str, name: &str) -> Result<String, String> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

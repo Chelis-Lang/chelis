@@ -127,6 +127,7 @@ fn c_lane_outcome(program: &str, ext: &str, name: &str) -> CLane {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

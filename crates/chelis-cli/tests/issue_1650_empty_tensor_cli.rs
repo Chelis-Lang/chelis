@@ -87,6 +87,7 @@ fn run_native_observation(
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -228,6 +229,7 @@ fn generated_c_rejects_an_unresolved_empty_tensor_dtype() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",

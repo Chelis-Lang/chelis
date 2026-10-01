@@ -29,7 +29,7 @@ fn run_build_in(dir: &Path, source: &Path) -> std::process::Output {
     StdCommand::new(bin)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(dir)
-        .args(["build", source.to_str().unwrap()])
+        .args(["build", "--emit-c", source.to_str().unwrap()])
         .output()
         .expect("spawn chelis build")
 }

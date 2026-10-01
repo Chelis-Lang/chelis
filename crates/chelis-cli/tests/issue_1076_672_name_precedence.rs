@@ -471,7 +471,7 @@ fn ordinary_def_cannot_collide_with_standard_prelude_macro() {
         if command == "eval" {
             invocation.args(["eval", "--file", source.to_str().unwrap()]);
         } else {
-            invocation.args(["build", source.to_str().unwrap()]);
+            invocation.args(["build", "--emit-c", source.to_str().unwrap()]);
         }
         let output = invocation.output().expect("run lane");
         assert!(!output.status.success(), "{command} must reject");

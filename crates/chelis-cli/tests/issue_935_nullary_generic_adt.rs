@@ -35,6 +35,7 @@ fn build(source: &str, stem: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -451,6 +452,7 @@ out = print(Empty)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

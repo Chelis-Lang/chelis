@@ -255,6 +255,7 @@ fn run_c_lane(dir: &Path, source: &str) -> String {
         .expect("binary")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

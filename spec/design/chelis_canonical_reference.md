@@ -288,6 +288,7 @@ The planned user-facing command set is:
 chelis build app.ch
 chelis build app.ch --target hip
 chelis build app.ch --target metal
+chelis build app.ch --emit-c               # source-only output, any target
 chelis check app.ch                         # fitness report (JSON) with per-property components
 chelis deep app.ch
 chelis deep --flat app.ch

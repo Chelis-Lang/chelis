@@ -274,6 +274,7 @@ fn the_compiled_c_lane_reports_the_same_rejection() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

@@ -66,6 +66,7 @@ fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",

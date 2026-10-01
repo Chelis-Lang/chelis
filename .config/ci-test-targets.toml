@@ -2541,6 +2541,15 @@ reason = "the macOS workspace shard's Metal smoke builds a Metal host with cheli
 tracking_issue = "chelis#1354"
 
 [[path_rule]]
+prefix = ".github/scripts/smoke_macos_manifested_callable.py"
+disposition = "owner"
+workflow = "macos-nightly.yml"
+job = "macos-workspace-shard"
+cadence = "daily 04:17 UTC and workflow_dispatch"
+reason = "the macOS workspace shard runs the manifested callable smoke against the generated C ABI with positive execution and negative admission probes"
+tracking_issue = "chelis#2828"
+
+[[path_rule]]
 prefix = "scripts/test_glibc231_workflows.py"
 disposition = "owner"
 workflow = "ci.yml"

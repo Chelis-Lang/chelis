@@ -272,6 +272,7 @@ fn build_app(
         .current_dir(&app_root)
         .args([
             "build",
+            "--emit-c",
             entry.to_str().unwrap(),
             "--target",
             "c",
@@ -671,6 +672,7 @@ fn build_single_package(modules: &[(&str, &str)], entry: &str) -> (TempDir, Path
         .current_dir(&package_root)
         .args([
             "build",
+            "--emit-c",
             entry_path.to_str().unwrap(),
             "--target",
             "c",

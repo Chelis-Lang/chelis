@@ -164,6 +164,7 @@ fn c_lane_str(expr: &str, ret_ty: &str, name: &str) -> Result<String, String> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1206,6 +1207,7 @@ fn int64_scalar_abs_min_traps_in_the_compiled_host_lane() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1409,6 +1411,7 @@ fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             cpath.to_str().unwrap(),
             "--target",
             "c",
@@ -1505,6 +1508,7 @@ fn zeroed_abs_does_not_silently_poison_downstream_arithmetic() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1554,6 +1558,7 @@ fn f32_tensor_abs_is_correct_and_unaffected_by_the_placeholder() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1629,6 +1634,7 @@ fn static_int_condition_does_not_delete_the_correct_branch() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1690,6 +1696,7 @@ fn pad_sequences_preserves_int64_ids_above_i32_max() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

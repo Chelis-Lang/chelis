@@ -232,6 +232,7 @@ out = grad(loss)(to_tensor([1.0f32, 2.0f32]))
         } else {
             command
                 .arg("build")
+                .arg("--emit-c")
                 .arg(&path)
                 .args(["--target", "c", "--output"])
                 .arg(dir.path().join("out"));
@@ -314,6 +315,7 @@ fn captured_cotangent_keeps_the_false_forward_range_claim() {
         .unwrap()
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .arg("build")
+        .arg("--emit-c")
         .arg(&path)
         .args(["--target", "c", "--output"])
         .arg(&out)

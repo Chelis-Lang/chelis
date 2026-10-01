@@ -7,9 +7,8 @@
 //!
 //! Architectural decision: the Metal backend is **pure string emission** in
 //! Rust. There is no `metal-rs` / `objc` / `cocoa` crate dep. Apple-SDK
-//! integration happens later when the user runs
-//! `clang++ -fobjc-arc -framework Metal -framework Foundation` against the
-//! emitted `.mm`. This keeps the crate platform-portable (it builds on
+//! integration happens when the CLI invokes `clang++` against the emitted `.mm`
+//! (or downstream tooling compiles the `--emit-c` output). This keeps the crate platform-portable (it builds on
 //! Linux unchanged) and mirrors HIP exactly.
 //!
 //! See `spec/design/chelis_metal_backend_plan.md` and

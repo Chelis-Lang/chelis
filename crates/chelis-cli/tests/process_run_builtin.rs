@@ -174,6 +174,7 @@ fn build_rejects_process_run_program_with_clear_message() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",

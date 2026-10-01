@@ -22,6 +22,7 @@ fn build(source: &str, stem: &str, target: &str) -> assert_cmd::assert::Assert {
     let mut command = Command::cargo_bin("chelis").expect("chelis binary");
     command.env("CHELIS_STYLE_GATE_DISABLE", "1").args([
         "build",
+        "--emit-c",
         source_path.to_str().expect("utf-8 source path"),
         "--target",
         target,
@@ -40,6 +41,7 @@ fn build_deep(source: &str, stem: &str, target: &str) -> assert_cmd::assert::Ass
     let mut command = Command::cargo_bin("chelis").expect("chelis binary");
     command.env("CHELIS_STYLE_GATE_DISABLE", "1").args([
         "build",
+        "--emit-c",
         source_path.to_str().expect("utf-8 source path"),
         "--deep",
         "--target",

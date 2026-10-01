@@ -76,6 +76,7 @@ def filter_bools(mask: tensor[4, bool], indices: tensor[2, i64]) -> tensor[2, bo
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",
@@ -170,6 +171,7 @@ all_true_idx = where_indices(all_true)
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",

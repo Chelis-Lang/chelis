@@ -105,6 +105,7 @@ fn zero_extent_is_check_clean_and_evaluates_to_empty_tensor() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",
@@ -225,6 +226,7 @@ fn bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "-o",
@@ -332,6 +334,7 @@ fn vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",
@@ -406,6 +409,7 @@ fn build_c(path: &Path, out_dir: &Path) -> std::process::Output {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",

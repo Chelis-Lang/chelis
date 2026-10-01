@@ -804,15 +804,18 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
-        "crates/chelis-cli/tests/parity.rs",
+        "crates/chelis-cli/tests/native_build.rs",
         "archive-name",
         lines=(
-            "//!       4. `gcc <name>.c libchelis_runtime.a -o <name>` -> binary",
-            'cmd.arg("libchelis_runtime.a");',
+            '.arg(out.join("libchelis_runtime.a"))',
+            '.arg(out.join("libchelis_runtime.a"))',
+            'assert!(argv.contains("libchelis_runtime.a\\n"), "{argv}");',
+            'let output = dir.path().join("out/libchelis_runtime.a.c");',
+            'let runtime = fs::read(dir.path().join("out/libchelis_runtime.a")).unwrap();',
         ),
         disposition="not-lookup",
         reason=(
-            "documents and links the archive `chelis build` staged in the output directory it compiles in"
+            "links the exact archive staged by the tested CLI in out, checks its path in native compiler argv, and probes a forbidden artifact collision before checking the carried digest; none selects a runtime from another location"
         ),
     ),
     Row(

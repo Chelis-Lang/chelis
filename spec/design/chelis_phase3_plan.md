@@ -421,6 +421,8 @@ more C-side ownership risk exactly where the language is getting broader.
 
 - `chelis build` emits generated source/header plus `chelis_runtime.h` and
   `libchelis_runtime.a`
+- It invokes the native toolchain for an executable or static library;
+  `--emit-c` selects source-only emission (`spec/08-backends.md` §7).
 - `chelis_runtime.c` stops being an emitted build artifact
 - `chelis build` stages the runtime the CLI carries and rejects a set
   `CHELIS_RUNTIME_DIR` (`spec/08-backends.md` §2.1; chelis#1354 replaced the

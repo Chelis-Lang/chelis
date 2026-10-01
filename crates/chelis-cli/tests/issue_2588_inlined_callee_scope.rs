@@ -211,7 +211,14 @@ fn assert_evaluator_only(source: &str, expected: &str) {
     let output = Command::cargo_bin("chelis")
         .expect("chelis")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+        ])
         .arg(dir.path().join("out"))
         .output()
         .expect("build");
@@ -367,7 +374,14 @@ out = {\n  v = g(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n  y: tensor[2, f32] = pad
     let build = Command::cargo_bin("chelis")
         .expect("chelis")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+        ])
         .arg(&out)
         .output()
         .expect("build");

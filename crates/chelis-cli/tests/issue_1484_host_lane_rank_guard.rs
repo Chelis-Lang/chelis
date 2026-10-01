@@ -95,6 +95,7 @@ fn build_link_run(source: &str, stem: &str) -> Option<std::process::Output> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

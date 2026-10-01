@@ -79,3 +79,17 @@ explains the project workflow.
 ## License
 
 MIT
+
+### Build a native program
+
+```sh
+chelis build app.ch --output out/
+./out/app
+```
+
+`build` invokes the native compiler and links the runtime carried by this compiler.
+Definitions-only modules produce static libraries. Sources and headers remain
+available; `--emit-c` keeps source-only builds. CPU is the primary acceptance lane;
+HIP and Metal are prerelease targets with known imperfections. See the
+[backend guide](docs/book/src/backends.md) for tool requirements, artifact names,
+compiler overrides, and library linking.

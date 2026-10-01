@@ -20,6 +20,7 @@ fn build_count_entry(target: &str, generated_suffix: &str) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().expect("UTF-8 example path"),
             "--target",
             target,

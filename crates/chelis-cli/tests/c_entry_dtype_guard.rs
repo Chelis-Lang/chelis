@@ -99,7 +99,7 @@ fn build_source(dir: &Path, source: &str) -> Result<std::path::PathBuf, String> 
     let built = Command::cargo_bin("chelis")
         .expect("chelis")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", "--allow-style-violations"])
+        .args(["build", "--emit-c", "--allow-style-violations"])
         .arg(&path)
         .args(["--target", "c", "-o"])
         .arg(&out)

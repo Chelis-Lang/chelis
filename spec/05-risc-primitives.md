@@ -4693,8 +4693,8 @@ lie. Rendering never repairs, rounds, or rejects stored values.
 > admitted to the Tensor lane because another target supports that dtype.
 
 > **[05-OBS-11]** A non-empty root manifest SHALL require an executable
-> observation entry point; an empty manifest SHALL produce an object without
-> one. Every successful eval result and build artifact SHALL realize every
+> observation entry point; an empty manifest SHALL produce a library artifact
+> without one. Every successful eval result and build artifact SHALL realize every
 > selected manifest entry in manifest order. If an assigned lane cannot
 > produce an owed root, the whole operation SHALL fail through [05-UNS-1]
 > before returning a partial result or artifact, naming the root, lane, and

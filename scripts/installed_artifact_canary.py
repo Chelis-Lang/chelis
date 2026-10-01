@@ -309,7 +309,7 @@ def execute(args: argparse.Namespace, report: dict) -> None:
     source = root / "manifested_callable.ch"
     source.write_text(fixture.ADD_PROGRAM)
     output = root / "generated"
-    runner.run("build", [shim, "build", source, "--output", output])
+    runner.run("build", [shim, "build", "--emit-c", source, "--output", output])
     require_staged_runtime(output, inventory)
     # Quoted includes search the source directory first. Move only generated C
     # into a header-free directory, then explicitly use shipped include/lib.

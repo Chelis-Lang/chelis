@@ -184,7 +184,7 @@ fn build_c(source: &str) -> CBuild {
     let file = dir.path().join("prog.ch");
     std::fs::write(&file, source).unwrap();
     let out = Command::new(chelis_bin())
-        .args(["build", "--target", "c"])
+        .args(["build", "--emit-c", "--target", "c"])
         .arg(&file)
         .arg("--allow-style-violations")
         .current_dir(dir.path())
@@ -225,7 +225,7 @@ fn build_hip(source: &str) -> HipBuild {
     let file = dir.path().join("prog.ch");
     std::fs::write(&file, source).unwrap();
     let out = Command::new(chelis_bin())
-        .args(["build", "--target", "hip"])
+        .args(["build", "--emit-c", "--target", "hip"])
         .arg(&file)
         .arg("--allow-style-violations")
         .current_dir(dir.path())

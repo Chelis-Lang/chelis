@@ -1,11 +1,12 @@
 # Backends
 
-`chelis build` generates native source and the files needed to compile it. It does not
-run a C, HIP, or Objective-C++ compiler. Choose a target with `--target`; `c` is the
-default:
+`chelis build` invokes the selected native toolchain and produces an executable
+for a program with observable roots, or a static library for a module of callable
+definitions. C is the default target:
 
 ```sh
-chelis build app.ch --target c --output out/
+chelis build app.ch --output out/
+./out/app
 ```
 
 For a program supported by a GPU target, use `--target hip` or `--target metal`
@@ -31,13 +32,51 @@ kernels. Fusion, storage planning, and supported operations depend on the target
 The output also includes a generated header, the bundled native runtime archive
 `libchelis_runtime.a`, `chelis_runtime.h`, a runtime receipt, and target-specific
 support files such as `chelis_hip_runtime.h` or `chelis_metal_runtime.h`.
-The build prints the files it wrote and a `Compile:`, `Compile object:`, or
-`Compile objects:` command. Use that command for the generated program:
-required flags and extra sources vary by target and by the operations selected.
-For example, eligible HIP
-matrix multiplication uses hipBLAS and adds `-lhipblas`; Metal matrix
-multiplication may need `MetalPerformanceShaders`. HIP kernels compile at runtime
-through `hiprtc`, and Metal kernels through `newLibraryWithSource`.
+The native artifact uses the generated source stem: `app`, `app_hip`, or
+`app_metal` for an executable, and `libapp.a`, `libapp_hip.a`, or
+`libapp_metal.a` for a static library. The output directory defaults to the
+current directory. An explicit source filename passed to `--output` determines
+the artifact's filename, while the module's generated symbols retain their
+source identity. Generated sources stay in the output directory for inspection.
+
+To emit sources without native compilation, use:
+
+```sh
+chelis build app.ch --emit-c --output out/
+chelis build app.ch --target metal --emit-c --output out/
+```
+
+`--emit-c` applies to all C-family outputs, including HIP C++ and Metal
+Objective-C++. It stages the runtime and prints native compile guidance; no
+native compiler or archiver is required. This also permits source generation
+on a host without the target SDK.
+
+Normal builds own their required flags and support sources. Eligible HIP matrix
+multiplication adds hipBLAS; Metal matrix multiplication uses
+MetalPerformanceShaders. HIP kernels still compile at runtime through `hiprtc`,
+and Metal kernels through `newLibraryWithSource`. A native build does not execute
+the program or require a GPU to be present at build time.
+
+C compiler selection honors `CHELIS_CC`, then available platform compilers.
+HIP honors `CHELIS_HIPCC` and otherwise uses `hipcc`; Metal honors
+`CHELIS_METAL_CXX` and otherwise uses `clang++`. Static libraries use
+`CHELIS_AR` or `ar`. Each override is one executable name or path, without
+embedded arguments. An invalid explicit override fails rather than choosing
+another tool. Host compilation uses `-O2 -ffp-contract=off` and the target's
+other required flags.
+
+Static libraries contain module and support objects, with no process entry.
+Consumers include the generated header, link the module archive followed by the
+staged `libchelis_runtime.a`, and add the native dependencies reported by the
+build. For example, an ordinary scalar C library on macOS can be used with:
+
+```sh
+clang driver.c out/libfunctions.a out/libchelis_runtime.a -lm -framework Accelerate -o driver
+```
+
+Use the build's reported dependencies for the actual target and operations.
+Native tool failures fail the build and preserve the previous native artifact;
+generated sources and runtime files may already have been refreshed.
 
 For C, the generated header declares each authored export using its actual C
 parameter and result types. Tensor-only entries can use the four-argument
@@ -50,6 +89,18 @@ concrete estimate when sizes are known. The C build and GPU builds that emit
 host wrappers do not promise that report.
 
 ## Numerical behavior and availability
+
+CPU is the primary delivery and acceptance lane. HIP and Metal are prerelease
+and have known imperfections; native compilation does not imply full backend
+coverage. The native-build acceptance suite covers CPU execution and local
+Metal cases. HIP command construction is tested, while HIP execution validation
+is deferred to a host with ROCm and a compatible AMD GPU.
+
+Host wrappers containing C tensor helpers can fail HIP/Metal C++ compilation
+at the existing [restrict qualifier gap](https://github.com/Chelis-Lang/chelis/issues/2595).
+The CLI reports that native compiler failure instead of reporting a successful
+source-only build. Scalar host programs and the sampled Metal tensor-library
+path have separate native-build coverage.
 
 The [numeric rules](https://github.com/Chelis-Lang/chelis/blob/main/spec/04-type-system.md) define results for every
 target. The C backend is a practical reference for comparing implementations;
@@ -68,3 +119,26 @@ been compared across targets.
 Use `chelis eval --file app.ch` to execute locally without generating native
 source. It evaluates host code and tensor operations through the compiler's
 evaluation paths. For syntax validation, see the [CLI workflow](cli.md).
+
+## Native build validation
+
+The CPU acceptance oracle is `cargo test -p chelis-cli --test native_build`.
+`cargo test -p chelis-cli --test parity` also checks the executable example corpus
+against eval using the actual native products. On a Mac with a real Metal device,
+run the ignored `native_build` suite as documented in [Manual gates](https://github.com/Chelis-Lang/chelis/blob/main/docs/manual_gates.md).
+The selected Metal library kernel and host executable have local execution coverage;
+this is not a claim that the prerelease Metal backend is complete.
+
+HIP runtime validation for this change is deferred. On the ROCm host, a first
+smoke check is to build `examples/native_program.ch` and run its host result:
+
+```sh
+chelis build examples/native_program.ch --target hip --output target/native-hip/
+./target/native-hip/native_program_hip
+```
+
+That scalar program checks the native HIP toolchain path without exercising a GPU
+kernel. Follow it with the existing HIP hardware suites through
+`scripts/hip_test.py`, which supplies the reconciled ROCm environment. The native
+`hip_and_metal_build_commands_include_support_and_ordered_flags` test checks HIP
+compiler argv and static-library staging without claiming GPU execution.

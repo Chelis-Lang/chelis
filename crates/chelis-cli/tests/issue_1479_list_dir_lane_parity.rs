@@ -221,6 +221,7 @@ fn both_lanes_reject_invalid_list_dir_names_without_a_partial_list() {
             .unwrap()
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .arg("build")
+            .arg("--emit-c")
             .arg(&path)
             .args(["--target", "c", "--output"])
             .arg(&out)

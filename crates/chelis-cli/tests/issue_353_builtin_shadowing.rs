@@ -180,7 +180,7 @@ fn issue_353_lane_consistency_check_eval_build_all_reject() {
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(outdir.path())
-        .args(["build", path])
+        .args(["build", "--emit-c", path])
         .output()
         .expect("run chelis build");
     let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
@@ -224,7 +224,7 @@ fn issue_353_bypass_flags_do_not_unlock_shadowing() {
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(outdir.path())
-        .args(["build", "--allow-style-violations", path])
+        .args(["build", "--emit-c", "--allow-style-violations", path])
         .output()
         .expect("run chelis build");
     assert!(
@@ -283,7 +283,7 @@ fn issue_353_near_miss_names_check_eval_build_clean() {
             .expect("binary")
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .current_dir(outdir.path())
-            .args(["build", path])
+            .args(["build", "--emit-c", path])
             .output()
             .expect("run chelis build");
         assert!(

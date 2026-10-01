@@ -2925,6 +2925,7 @@ fn issue_923_non_float_results_are_never_proven_and_do_not_build() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 path.to_str().unwrap(),
                 "--target",
                 "c",
@@ -2995,6 +2996,7 @@ out = conditional_derivative(2.0)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -3058,6 +3060,7 @@ out = cast_derivative(2.0)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
