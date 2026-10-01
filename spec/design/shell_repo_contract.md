@@ -60,6 +60,20 @@ not a hypothetical.
   standalone Markdown comments; sync and audit reject markers inside a code
   fence or an enclosing HTML block rather than interpreting quoted examples as
   configuration.
+- **Inherited links resolve in the shell.** The inherited documents are
+  authored in the monorepo, so their repo-relative Markdown links name
+  monorepo files. When `sync` materializes inherited text (the
+  `agents-inheritance` block, the `chelis-surface` block of §3, and the shared
+  skills of §8), it resolves each repo-relative link against its source file's
+  directory in the monorepo. A link whose target `sync` also materializes
+  (`AGENTS.md`, `CLAUDE.md`, `docs/CHELIS_SURFACE.md`, a retained shared skill)
+  stays relative, recomputed from the file's location in the shell; every
+  other one becomes an absolute URL into the release the shell pins,
+  `https://github.com/Chelis-Lang/chelis/blob/vX.Y.Z/<path>`. Anchors are
+  kept; absolute URLs and in-page anchors are left alone. The embedded copies
+  stay the authored bytes, since the pin is known only at sync time, and
+  `conform audit` derives the body it expects with the same transform, so a
+  pinned link is never drift.
 - `AGENTS.md` contains at minimum these sections: **Repo Identity**,
   **Toolchain Policy**, **Pin Bump Checklist** (§7), an **Upstream Bugs**
   pointer (§4), and the **Scaffolding Drift Rule** (§10). The
@@ -520,7 +534,10 @@ toolchain selected explicitly, then audit every item below:
   propagation-safe controls cover the shell's own additions, exclusions, and
   skill-specific overrides, described below. A thin
   `agent-skills/UPSTREAM.toml` records the stamp. This replaces the older
-  hand-vendored copy, which drifted silently.
+  hand-vendored copy, which drifted silently. The toolchain-owned span carries
+  the §1 link rewrite for the shell's pin, and audit derives the same
+  rewritten span; an excluded skill has no local copy, so links to it in the
+  other inherited text point at the pinned release.
 - `.claude/skills` and `.codex/skills` are `../agent-skills` symlinks to the one
   materialized skill tree;
   `.claude/commands/` and `.codex/commands/` wrappers stay mirrored; the

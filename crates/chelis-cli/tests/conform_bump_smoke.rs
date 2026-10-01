@@ -123,9 +123,13 @@ fn conform_sync_restores_the_surface_guide_and_claude_symlink() {
         .expect("sync writes the chelis-surface block");
     assert_eq!(
         chelis_conformance::managed_block::normalize_body(&block.body),
-        chelis_conformance::managed_block::normalize_body(
-            chelis_conformance::canonical::body("chelis-surface").unwrap()
-        )
+        chelis_conformance::managed_block::normalize_body(&chelis_conformance::links::pin_links(
+            chelis_conformance::canonical::body("chelis-surface").unwrap(),
+            "docs/CHELIS_SURFACE.md",
+            "docs/CHELIS_SURFACE.md",
+            chelis_compiler_api::COMPILER_VERSION,
+            &chelis_conformance::links::LocalTargets::for_shell(&[]),
+        ))
     );
     assert!(text.contains(notes.trim()));
     assert_eq!(

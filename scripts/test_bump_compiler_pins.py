@@ -548,5 +548,72 @@ class CompileFailFixtureLockTests(unittest.TestCase):
         self.assertIn("does-not-exist", str(caught.exception))
 
 
+class ConformanceAssetRegenerationTests(unittest.TestCase):
+    """Category 9: a release PR must embed the agent surface its sources say."""
+
+    def _run_main(self, *extra):
+        """Run `main` with every other step stubbed; return the stubbed runner."""
+        stubs = {
+            "bump_workspace_cargo_toml": None,
+            "bump_compiler_pin": None,
+            "bump_json_compiler_pin": None,
+            "bump_hull_manifest_pin": None,
+        }
+        order = []
+        with mock.patch.multiple(
+            bump_mod,
+            **{name: mock.Mock(return_value=value) for name, value in stubs.items()},
+            regenerate_compile_fail_fixture_locks=mock.Mock(),
+            rebuild_chelis_std_dist=mock.Mock(side_effect=lambda _dry: order.append("dist")),
+        ), mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            side_effect=lambda argv, **_: order.append(argv)
+            or subprocess.CompletedProcess(argv, 0),
+        ) as runner:
+            bump_mod.main(["0.18.12", *extra])
+        return runner, order
+
+    def test_main_regenerates_the_conformance_assets_after_the_std_rebuild(self):
+        runner, order = self._run_main()
+        argv = [call.args[0] for call in runner.call_args_list]
+        self.assertIn(
+            [sys.executable, str(bump_mod.REGEN_CONFORMANCE_ASSETS_SCRIPT)], argv
+        )
+        # The chelis-std rebuild may touch the package skill, so the assets
+        # are regenerated after it.
+        self.assertLess(order.index("dist"), order.index(argv[-1]))
+
+    def test_the_step_runs_without_the_dist_rebuild(self):
+        runner, _ = self._run_main("--no-rebuild-dist")
+        argv = [call.args[0] for call in runner.call_args_list]
+        self.assertIn(
+            [sys.executable, str(bump_mod.REGEN_CONFORMANCE_ASSETS_SCRIPT)], argv
+        )
+
+    def test_dry_run_prints_the_step_without_running_it(self):
+        with mock.patch.object(bump_mod.subprocess, "run") as runner, mock.patch(
+            "builtins.print"
+        ) as printed:
+            bump_mod.regenerate_conformance_assets(dry_run=True)
+        runner.assert_not_called()
+        text = " ".join(str(c.args[0]) for c in printed.call_args_list)
+        self.assertIn("[dry-run] would regenerate crates/chelis-conformance/assets/", text)
+        self.assertIn("regenerate_conformance_assets.py", text)
+
+    def test_nonzero_exit_is_fatal(self):
+        with mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 1),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                bump_mod.regenerate_conformance_assets(dry_run=False)
+        self.assertIn("regenerate_conformance_assets.py", str(caught.exception))
+
+    def test_the_script_it_runs_exists(self):
+        self.assertTrue(bump_mod.REGEN_CONFORMANCE_ASSETS_SCRIPT.is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

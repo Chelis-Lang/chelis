@@ -81,6 +81,16 @@ changes, seven categories of files must change with it:
    across machines and no longer asserted, and the leg that reads them is
    `#[ignore]`d pending chelis#1198.
 
+9. The conformance assets under `crates/chelis-conformance/assets/`: the
+   embedded copies of the root `AGENTS.md`, `docs/CHELIS_SURFACE.md`, and the
+   shared skills (`agent-skills/*/SKILL.md` and `packages/chelis-std/SKILL.md`)
+   that `chelis reef conform sync` materializes into shells. They carry no
+   version (the link pinning happens in `sync`, against the shell's pin), but
+   a release ships whatever bytes are embedded, so a release PR whose sources
+   moved since the last regeneration would ship a stale agent surface to every
+   shell. `regenerate_conformance_assets.py` rebuilds them from their sources;
+   `asset_drift_tripwire.rs` is the guard.
+
 This script is the single, scriptable entry point for the release bump.
 These tripwires fail loudly when the categories drift, pointing future
 operators at this script:
@@ -137,6 +147,10 @@ CHELIS_STD_DIST = CHELIS_STD_DIR / "dist"
 # lockstep with CHELIS_STD_DIST via the canonical bundle pipeline.
 BUNDLE_DIST = REPO_ROOT / "crates/chelis-std-bundle/dist"
 REGEN_BUNDLE_SCRIPT = REPO_ROOT / "scripts/regenerate_chelis_std_bundle.py"
+
+# Category 9: the conformance assets the binary embeds for `conform sync`.
+REGEN_CONFORMANCE_ASSETS_SCRIPT = REPO_ROOT / "scripts/regenerate_conformance_assets.py"
+CONFORMANCE_ASSETS = REPO_ROOT / "crates/chelis-conformance/assets"
 
 # The Hull conformance corpus manifest (category 6): its
 # `chelis_version_pinned` feeds the gate's STALE CORPUS check against the
@@ -397,6 +411,32 @@ def regenerate_compile_fail_fixture_locks(dry_run: bool) -> None:
             )
 
 
+def regenerate_conformance_assets(dry_run: bool) -> None:
+    """Rebuild the embedded conformance assets from their sources (category 9).
+
+    Runs after the chelis-std rebuild, which may touch the package skill, and
+    even under `--no-rebuild-dist`: it copies files and needs no `chelis`
+    binary. It is version-independent; shells get pinned links at sync time.
+    """
+    if dry_run:
+        print(
+            f"[dry-run] would regenerate {CONFORMANCE_ASSETS.relative_to(REPO_ROOT)}/ "
+            f"via {REGEN_CONFORMANCE_ASSETS_SCRIPT.relative_to(REPO_ROOT)}"
+        )
+        return
+    print(f"Regenerating {CONFORMANCE_ASSETS.relative_to(REPO_ROOT)}/ ...")
+    rc = subprocess.run(
+        [sys.executable, str(REGEN_CONFORMANCE_ASSETS_SCRIPT)],
+        cwd=REPO_ROOT,
+    ).returncode
+    if rc != 0:
+        sys.exit(
+            f"error: {REGEN_CONFORMANCE_ASSETS_SCRIPT.relative_to(REPO_ROOT)} exited {rc}. "
+            "The release would embed a stale AGENTS.md, CHELIS_SURFACE.md, or shared "
+            "skill set for `chelis reef conform sync`."
+        )
+
+
 def find_chelis_binary() -> Path | None:
     """Look for a `chelis` binary in standard target dirs.
 
@@ -552,6 +592,8 @@ def main(argv: list[str]) -> int:
         print("(skipped chelis-std dist rebuild. Pass without --no-rebuild-dist to regenerate)")
     else:
         rebuild_chelis_std_dist(args.dry_run)
+
+    regenerate_conformance_assets(args.dry_run)
 
     if args.dry_run:
         print("(dry-run: no files written)")

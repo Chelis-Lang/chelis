@@ -5059,7 +5059,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 })?;
             let mut written: Vec<String> = Vec::new();
             let notices = report_partial_writes(
-                chelis_conformance::scaffold::materialize_skills(&root),
+                chelis_conformance::scaffold::materialize_skills(&root, &version),
                 &written,
                 "agent-skills/, .claude/skills/, and .codex/skills/",
             )?;
@@ -5109,7 +5109,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 written.push(rel);
             }
             let notices = report_partial_writes(
-                chelis_conformance::scaffold::materialize_skills(&root),
+                chelis_conformance::scaffold::materialize_skills(&root, &version),
                 &written,
                 "agent-skills/, .claude/skills/, and .codex/skills/",
             )?;

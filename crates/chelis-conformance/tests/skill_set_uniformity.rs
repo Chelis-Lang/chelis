@@ -94,7 +94,7 @@ fn sync_restores_a_pruned_shared_skill_and_says_so() {
     let root = stamp(tmp.path(), "restored");
     std::fs::remove_dir_all(root.join("agent-skills/cli-surface")).unwrap();
 
-    let notices = scaffold::materialize_skills(&root).expect("materialize");
+    let notices = scaffold::materialize_skills(&root, VER).expect("materialize");
     assert!(
         root.join("agent-skills/cli-surface/SKILL.md").is_file(),
         "sync restores the pruned skill"
@@ -118,7 +118,7 @@ fn a_fresh_init_does_not_report_its_own_skills_as_restored() {
     // once would make every skill after the first report itself.)
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "fresh");
-    let notices = scaffold::materialize_skills(&root).expect("materialize");
+    let notices = scaffold::materialize_skills(&root, VER).expect("materialize");
     assert!(
         notices.is_empty(),
         "a re-sync of an intact tree is silent: {notices:?}"
@@ -126,7 +126,7 @@ fn a_fresh_init_does_not_report_its_own_skills_as_restored() {
 
     let bare = tmp.path().join("bare");
     std::fs::create_dir_all(&bare).unwrap();
-    let notices = scaffold::materialize_skills(&bare).expect("materialize");
+    let notices = scaffold::materialize_skills(&bare, VER).expect("materialize");
     assert!(
         notices.is_empty(),
         "first-time materialization is not a restore: {notices:?}"
@@ -149,7 +149,10 @@ fn sync_removes_declared_shared_skills_and_audit_accepts_the_result() {
         Verdict::Fail,
         "declared exclusions must take effect before the tree is conformant"
     );
-    scaffold::materialize_skills(&root).expect("materialize exclusions");
+    scaffold::materialize_skills(&root, VER).expect("materialize exclusions");
+    // An excluded skill has no local copy, so the inherited AGENTS.md links to
+    // it are re-pinned to the release by the document half of sync.
+    scaffold::sync_managed_blocks(&root, VER).expect("sync blocks");
     assert!(
         !root.join("agent-skills/cli-surface").exists()
             && !root.join("agent-skills/backend-numerics").exists(),
@@ -179,7 +182,7 @@ fn audit_rejects_any_materialized_directory_for_an_excluded_shared_skill() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "excluded-directory");
     append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"cli-surface\"]\n");
-    scaffold::materialize_skills(&root).expect("materialize exclusions");
+    scaffold::materialize_skills(&root, VER).expect("materialize exclusions");
 
     let excluded_dir = root.join("agent-skills/cli-surface");
     std::fs::create_dir_all(&excluded_dir).unwrap();
@@ -201,7 +204,7 @@ fn removing_an_exclusion_restores_the_current_embedded_skill() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "restored-exclusion");
     append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"cli-surface\"]\n");
-    scaffold::materialize_skills(&root).expect("exclude");
+    scaffold::materialize_skills(&root, VER).expect("exclude");
     assert!(
         !root.join("agent-skills/cli-surface").exists(),
         "precondition: exclusion removed the skill"
@@ -217,7 +220,7 @@ fn removing_an_exclusion_restores_the_current_embedded_skill() {
         ),
     )
     .unwrap();
-    scaffold::materialize_skills(&root).expect("restore");
+    scaffold::materialize_skills(&root, VER).expect("restore");
 
     let restored = std::fs::read_to_string(root.join("agent-skills/cli-surface/SKILL.md"))
         .expect("restored skill");
@@ -244,7 +247,7 @@ fn an_unknown_excluded_skill_fails_audit_and_sync_before_writing() {
         "diag: {}",
         r.diagnostic
     );
-    let err = scaffold::materialize_skills(&root).unwrap_err();
+    let err = scaffold::materialize_skills(&root, VER).unwrap_err();
     assert!(err.contains("cli-surfaec"), "sync error: {err}");
     assert_eq!(
         std::fs::read_to_string(root.join("agent-skills/UPSTREAM.toml")).unwrap(),
@@ -274,7 +277,7 @@ fn exclusion_aliases_are_rejected_in_favor_of_the_one_documented_key() {
             "diag: {}",
             r.diagnostic
         );
-        let err = scaffold::materialize_skills(&root).unwrap_err();
+        let err = scaffold::materialize_skills(&root, VER).unwrap_err();
         assert!(err.contains(key), "sync error: {err}");
         assert!(err.contains("excluded_skills"), "sync error: {err}");
     }
@@ -486,7 +489,7 @@ fn a_non_canonical_spelling_of_local_skills_is_honored_not_just_tolerated() {
         // Plant the repo-local domain skill only `local_skills` can legitimize.
         std::fs::create_dir_all(root.join("agent-skills/domain")).unwrap();
         std::fs::write(root.join("agent-skills/domain/SKILL.md"), "# domain\n").unwrap();
-        scaffold::materialize_skills(&root).expect("mirror declared local skill");
+        scaffold::materialize_skills(&root, VER).expect("mirror declared local skill");
 
         let report = audit::audit(&root);
         assert_eq!(
@@ -497,7 +500,7 @@ fn a_non_canonical_spelling_of_local_skills_is_honored_not_just_tolerated() {
         );
 
         // And `sync` must agree: the declared skill survives materialization.
-        scaffold::materialize_skills(&root).expect("materialize");
+        scaffold::materialize_skills(&root, VER).expect("materialize");
         assert!(
             root.join("agent-skills/domain/SKILL.md").is_file(),
             "the {label} spelling must also be honored by sync"
@@ -540,7 +543,7 @@ fn the_recognized_conform_key_still_passes() {
         "# shell-domain\n",
     )
     .unwrap();
-    scaffold::materialize_skills(&root).expect("mirror declared local skill");
+    scaffold::materialize_skills(&root, VER).expect("mirror declared local skill");
 
     let report = audit::audit(&root);
     assert_eq!(row(&report, "vendored-skills").verdict, Verdict::Pass);
@@ -574,13 +577,13 @@ fn recording_non_applicability_with_a_shell_local_block_passes_and_survives_sync
     let body = std::fs::read_to_string(&skill).unwrap();
     let note = "<!-- shell-local:begin -->\nNot applicable: this shell has no Chelis CLI surface.\n<!-- shell-local:end -->\n";
     std::fs::write(&skill, format!("{body}\n{note}")).unwrap();
-    scaffold::materialize_skills(&root).expect("mirror shell-local skill edit");
+    scaffold::materialize_skills(&root, VER).expect("mirror shell-local skill edit");
 
     assert!(
         audit::audit(&root).ok(),
         "the sanctioned way to record non-applicability must audit green"
     );
-    scaffold::materialize_skills(&root).expect("materialize");
+    scaffold::materialize_skills(&root, VER).expect("materialize");
     let after = std::fs::read_to_string(&skill).unwrap();
     assert!(
         after.contains("Not applicable: this shell has no Chelis CLI surface."),
@@ -643,7 +646,7 @@ fn sync_repairs_each_agent_skill_symlink() {
         audit::Verdict::Fail
     );
 
-    scaffold::materialize_skills(&root).expect("repair skill symlinks");
+    scaffold::materialize_skills(&root, VER).expect("repair skill symlinks");
     assert!(audit::audit(&root).ok());
     for rel in [".claude/skills", ".codex/skills"] {
         let surface = root.join(rel);
@@ -686,7 +689,7 @@ fn chelis_std_is_a_shared_skill_materialized_from_its_package_source() {
 
     // Omission goes through the existing control.
     append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"chelis-std\"]\n");
-    scaffold::materialize_skills(&root).expect("exclude chelis-std");
+    scaffold::materialize_skills(&root, VER).expect("exclude chelis-std");
     assert!(!root.join("agent-skills/chelis-std").exists());
     assert!(audit::audit(&root).ok());
 }
@@ -702,7 +705,7 @@ fn a_local_chelis_std_copy_is_replaced_and_its_declaration_reported() {
     let path = root.join("agent-skills/chelis-std/SKILL.md");
     std::fs::write(&path, "# chelis-std\nHand-copied from the monorepo.\n").unwrap();
 
-    scaffold::materialize_skills(&root).expect("sync");
+    scaffold::materialize_skills(&root, VER).expect("sync");
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         chelis_conformance::skills::skill_body("chelis-std").unwrap()

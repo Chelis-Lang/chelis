@@ -34,6 +34,18 @@ fn row<'a>(report: &'a audit::AuditReport, key: &str) -> &'a audit::RowResult {
     report.rows.iter().find(|r| r.key == key).unwrap()
 }
 
+/// The surface guide as sync writes it for a shell with every shared skill:
+/// the embedded text with its repo-relative links pinned to `VER`.
+fn pinned_guide() -> String {
+    chelis_conformance::links::pin_links(
+        canonical::body("chelis-surface").unwrap(),
+        "docs/CHELIS_SURFACE.md",
+        "docs/CHELIS_SURFACE.md",
+        VER,
+        &chelis_conformance::links::LocalTargets::for_shell(&[]),
+    )
+}
+
 fn surface_block(root: &std::path::Path) -> managed_block::ManagedBlock {
     let text = std::fs::read_to_string(root.join("docs/CHELIS_SURFACE.md")).unwrap();
     managed_block::find(&text, "chelis-surface").expect("chelis-surface block")
@@ -47,7 +59,7 @@ fn last_section() -> (String, String) {
     let start = lines.iter().rposition(|l| l.starts_with("## ")).unwrap();
     let sentinel = lines[start + 1..]
         .iter()
-        .find(|l| l.trim().len() > 20 && !l.starts_with('#'))
+        .find(|l| l.trim().len() > 20 && !l.starts_with('#') && !l.contains("]("))
         .expect("section has body text");
     (lines[start].to_string(), sentinel.to_string())
 }
@@ -59,9 +71,10 @@ fn scaffold_materializes_the_complete_pinned_surface_guide() {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/CHELIS_SURFACE.md"),
     )
     .unwrap();
+    assert_eq!(upstream, canonical::body("chelis-surface").unwrap());
     assert_eq!(
         managed_block::normalize_body(&surface_block(&root).body),
-        managed_block::normalize_body(&upstream)
+        managed_block::normalize_body(&pinned_guide())
     );
 }
 
@@ -297,7 +310,7 @@ fn sync_creates_the_surface_document_when_it_is_missing() {
     scaffold::sync_managed_blocks(&root, VER).expect("sync creates the surface document");
     assert_eq!(
         managed_block::normalize_body(&surface_block(&root).body),
-        managed_block::normalize_body(canonical::body("chelis-surface").unwrap())
+        managed_block::normalize_body(&pinned_guide())
     );
     let report = audit::audit(&root);
     assert_eq!(row(&report, "chelis-surface").verdict, audit::Verdict::Pass);

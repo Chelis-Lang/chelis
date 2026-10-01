@@ -344,27 +344,32 @@ fn check_agents_md(ctx: &Ctx) -> Check {
     }
     // The managed inheritance block must be present, stamped to the pin, and
     // untampered.
-    let canonical = canonical::body("agents-inheritance").expect("embedded AGENTS contract");
-    let expected = match crate::scaffold::apply_document_exclusions(
-        canonical,
-        agents,
-        "agents-inheritance",
-    ) {
-        Ok(expected) => expected,
-        Err(why) => {
-            return fail(
-                format!("AGENTS.md has an invalid shell-local exclusion block: {why}"),
-                "fix or remove the shell-owned exclusion block, then run `chelis reef conform sync`",
-            );
-        }
+    check_inherited_block(ctx, agents, "agents-inheritance", "AGENTS.md")
+}
+
+/// An inherited managed block's check: the expected body is the one `sync`
+/// writes for the block's stamped version (exclusions applied, links pinned to
+/// that version), so pinned links never read as drift. The stamp itself is
+/// checked against the reef pin by [`check_managed_block`].
+fn check_inherited_block(ctx: &Ctx, doc: &str, id: &str, file: &str) -> Check {
+    let expected = match managed_block::find(doc, id) {
+        Some(block) => match crate::scaffold::inherited_block_body(
+            id,
+            doc,
+            &block.version,
+            ctx.excluded_skills(),
+        ) {
+            Ok(expected) => Some(expected),
+            Err(why) => {
+                return fail(
+                    format!("{file} has an invalid shell-local exclusion block: {why}"),
+                    "fix or remove the shell-owned exclusion block, then run `chelis reef conform sync`",
+                );
+            }
+        },
+        None => None,
     };
-    check_managed_block(
-        ctx,
-        agents,
-        "agents-inheritance",
-        "AGENTS.md",
-        Some(&expected),
-    )
+    check_managed_block(ctx, doc, id, file, expected.as_deref())
 }
 
 fn check_reef_pin(ctx: &Ctx) -> Check {
@@ -515,27 +520,7 @@ fn check_chelis_surface(ctx: &Ctx) -> Check {
             "run `chelis reef conform init` / `sync`",
         );
     };
-    let canonical = canonical::body("chelis-surface").expect("embedded surface guide");
-    let expected = match crate::scaffold::apply_document_exclusions(
-        canonical,
-        &surface,
-        "chelis-surface",
-    ) {
-        Ok(expected) => expected,
-        Err(why) => {
-            return fail(
-                format!("docs/CHELIS_SURFACE.md has an invalid shell-local exclusion block: {why}"),
-                "fix or remove the shell-owned exclusion block, then run `chelis reef conform sync`",
-            );
-        }
-    };
-    check_managed_block(
-        ctx,
-        &surface,
-        "chelis-surface",
-        "docs/CHELIS_SURFACE.md",
-        Some(&expected),
-    )
+    check_inherited_block(ctx, &surface, "chelis-surface", "docs/CHELIS_SURFACE.md")
 }
 
 /// Row 8 (§4): `docs/UPSTREAM_BUGS.md` exists, carries the three required
@@ -1047,6 +1032,16 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             ));
         }
     }
+    // Materialized skill links are pinned to the shell's version, so the
+    // expected span needs the pin; without one it cannot be derived.
+    let pin = ctx.reef_pin.as_deref().map(|p| p.trim_start_matches('='));
+    if pin.is_none() {
+        problems.push(
+            "no readable reef pin, so the pinned links of the shared skills cannot be derived"
+                .to_string(),
+        );
+    }
+    let local = crate::links::LocalTargets::for_shell(ctx.excluded_skills());
     for (name, body) in skills::EMBEDDED_SKILLS {
         let skill_dir = skills_dir.join(name);
         let path = skill_dir.join("SKILL.md");
@@ -1066,11 +1061,21 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
                 // exclusions to the embedded body, then byte-checks that span.
                 let (managed, block) = crate::scaffold::split_shell_local(&live);
                 match crate::scaffold::apply_shell_local_exclusions(body, block) {
-                    Ok(expected) if managed.trim_end() != expected.trim_end() => {
-                        problems.push(format!("{name}: forked/stale"));
+                    Ok(expected) => {
+                        if let Some(pin) = pin {
+                            let expected = crate::links::pin_links(
+                                &expected,
+                                &skills::source_path(name),
+                                &format!("agent-skills/{name}/SKILL.md"),
+                                pin,
+                                &local,
+                            );
+                            if managed.trim_end() != expected.trim_end() {
+                                problems.push(format!("{name}: forked/stale"));
+                            }
+                        }
                     }
                     Err(why) => problems.push(format!("{name}: {why}")),
-                    Ok(_) => {}
                 }
             }
         }

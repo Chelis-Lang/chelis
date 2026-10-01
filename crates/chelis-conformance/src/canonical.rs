@@ -28,6 +28,16 @@ pub const CANONICAL: &[(&str, &str)] = &[
 /// block, so the superseded header does not linger with a stale stamp.
 pub const LEGACY_SURFACE_HEADER: &str = "chelis-surface-header";
 
+/// The repository path of the document a block id inherits, which is also its
+/// path in the shell. Inherited links resolve against it (see [`crate::links`]).
+pub fn document_path(id: &str) -> Option<&'static str> {
+    match id {
+        "agents-inheritance" => Some("AGENTS.md"),
+        "chelis-surface" => Some("docs/CHELIS_SURFACE.md"),
+        _ => None,
+    }
+}
+
 /// The canonical body for a managed-block id, if known.
 pub fn body(id: &str) -> Option<&'static str> {
     CANONICAL.iter().find(|(k, _)| *k == id).map(|(_, v)| *v)

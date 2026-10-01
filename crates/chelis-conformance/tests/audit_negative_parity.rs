@@ -1380,7 +1380,7 @@ fn sync_prunes_extra_skill_content() {
     std::fs::write(root.join("agent-skills/spec-sync/EXTRA.md"), "x\n").unwrap();
     assert!(!audit::audit(&root).ok(), "drift must be present first");
 
-    scaffold::materialize_skills(&root).unwrap();
+    scaffold::materialize_skills(&root, VER).unwrap();
     assert!(
         !root.join("agent-skills/rogue").exists(),
         "rogue skill dir must be pruned"

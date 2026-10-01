@@ -18,6 +18,14 @@ it, and `[conform] excluded_skills` can omit it. A shell that declared its own
 copy in `[conform] local_skills` removes that entry; the audit reports it as
 shadowing a shared skill until then.
 
+Inherited text keeps working links. When sync materializes the `AGENTS.md` and
+`docs/CHELIS_SURFACE.md` blocks and the shared skills, each repo-relative link
+resolves against its source file in the chelis repository: a link to a file
+sync also materializes stays relative, and any other becomes an absolute URL
+pinned to the shell's release, such as
+`https://github.com/Chelis-Lang/chelis/blob/v0.18.12/docs/local_gate.md`. The
+audit expects the same rewritten text, so pinned links are not drift.
+
 The shell contract no longer has an issue-drafts convention. Every upstream bug
 or capability request is filed as an issue in the Chelis-Lang repository where
 it originates and cited by number (`chelis#NNN`, `<repo>#NNN`). `conform audit`
