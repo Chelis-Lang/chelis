@@ -81,27 +81,31 @@ therefore leave the set two ways:
 significant digits sum to at most 38 and their scales sum to at most 38, which covers
 `round(amount * rate, 2)` for a 9-digit amount and an 11-digit rate.
 
-**Why 38 digits.** 38 is the precision ceiling of SQL `DECIMAL` in the major engines and
-of Arrow `decimal128` (prior art §9, §10), so every `decimal128(p, s)` value with
-`0 <= s <= 38` is a `Decimal`. It holds 18-decimal crypto amounts and the exact product of
+**Why 38 digits.** 38 is the precision ceiling of SQL Server, Snowflake, BigQuery `NUMERIC`
+and DuckDB decimals and of Arrow `decimal128` (prior art §9, §10; PostgreSQL's `numeric` is
+unbounded), so every `decimal128` value whose exact value has at most 38 significant digits
+and 38 fractional digits is a `Decimal`. It holds 18-decimal crypto amounts and the exact product of
 any two values that fit an i64 coefficient with scales summing to at most 38. An 18-digit
 envelope (the old coefficient width, Arrow `decimal64`) overflows on ordinary rate
 arithmetic; a 76-digit envelope (`decimal256`) doubles the cost of every operation for
 range no surveyed workload needs.
 
-**Why bounded, not arbitrary precision.** Every arbitrary-precision library in the survey
-had to add length, exponent or time limits after resource-exhaustion advisories (prior
-art §12). Once such limits exist the type is bounded anyway, with a bound chosen by an
-incident rather than a design. Without them, repeated squaring or a large requested
+**Why bounded, not arbitrary precision.** Arbitrary-precision decimals and their parsers
+have a long resource-exhaustion record: Ruby, Go, Jackson, Haskell's `Data.Scientific` and
+PostgreSQL added exponent, length or growth limits after advisories, `apd` bounds
+exponents by design, and the rest leave the exposure to callers (prior art §12). Once such
+limits exist the type is bounded anyway, with a bound chosen by an incident rather than a
+design. Without them, repeated squaring or a large requested
 division scale makes a result's cost, and whether it completes at all, depend on host
 memory, which the determinism contract forbids: for fixed program text and declared
 inputs, every result must be a function of those inputs. A bounded value also gives
 `chelis prove` a linear range constraint to state.
 
 **Why the scale lives in the value.** Systems that put precision and scale in the type
-must derive a result type for every operation, cap it, and then round or truncate
-silently at the cap; none defines a natural scale for division (prior art §9). That
-needs type-level arithmetic over naturals and still ends in implicit narrowing. A
+must derive a result type for every operation and cap it; at the cap they either round or
+truncate silently (SQL Server, Snowflake) or fail (Arrow compute, DuckDB), and none defines
+a natural scale for division (prior art §9). That needs type-level arithmetic over
+naturals and still ends in implicit narrowing or in a failure the type did not predict. A
 value-level scale with exact `+ - *` and an explicit scale on every rounding operation
 says the same thing without type machinery. A property such as "`decimal_scale(x) <= 2`"
 states what a type-level scale would.
@@ -144,21 +148,29 @@ name and `<detail>` names the offending value. `<kind>` is:
   decimal narrowed to i64 leaves i64.
 
 Every range and validity check precedes the arithmetic it guards, so no [04-NUM-9] trap
-of a primitive escapes a call for any arguments. When several checks fail, they are
-reported left to right by argument, so the message is deterministic.
+of a primitive escapes a call for any arguments. When several checks fail, the first in
+this order is reported, so the message is deterministic: the arguments' own validity left
+to right (text, scale, divisor, finiteness), then `RejectInexact`, then the result's
+range.
 
 A `try_` callable takes its twin's arguments and returns `Some` of the twin's result, or
-`None` exactly where the twin fails `domain`; `try_decimal_to_i64`, whose twin can also
-fail `overflow`, returns `None` for both. Twins exist only where the failure depends on
-data and does not compose from other callables: parsing, narrowing to i64, division and
-float ingress. `decimal_round` needs none, because its exactness test is
-`decimal_scale(x) <= s`.
+`None` exactly where the twin fails `domain`. A twin exists for each callable with a
+`domain` failure that a caller cannot rule out beforehand by composing other callables:
+text that may be malformed or out of range (`decimal`), a float that may be non-finite,
+out of range or inexact at the scale (`decimal_from_f64`), and a quotient that may be
+inexact under `RejectInexact` (`decimal_div`). `decimal_round`'s and
+`decimal_to_fixed_string`'s `domain` failures need none, because `decimal_scale(x) <= s`
+decides them. `try_decimal_to_i64` also returns `None` where its twin fails `overflow`:
+narrowing to i64 fails on ordinary data, as `to_int` returns `None` for out-of-range text.
+Arithmetic overflow has no twin. A result beyond 38 digits is a program error, like i64
+overflow, and fails in every form.
 
 ## 5. Rounding
 
 Every rounding callable takes a `Rounding` from `Std.Rounding`, the rounding vocabulary
-Std.Datetime shares, defined once by [05-OP-74]. Each mode maps an exact value `v` and a
-quantum `q` to an integer multiple `k·q`:
+Std.Datetime shares, whose modes one atom, [05-OP-74], defines for every callable that
+takes them. Each mode maps an exact value `v` and a quantum `q` to an integer multiple
+`k·q`:
 
 | Variant | Result |
 |---|---|
@@ -196,10 +208,10 @@ never by subtraction, so `1e-9223372036854775808` fails `domain` without an i64 
 
 **Length bound.** A token longer than 1000 characters fails `domain`. Every canonical
 decimal needs at most 41 characters, so a longer token differs from some short one only
-by zeros. Without a bound, parsing is quadratic in token length in every lane (the
-evaluator's `string_slice` copies its input), the CVE-2020-10735 class; Python bounds
-integer text at 4300 digits and Jackson numbers at 1000 characters for the same reason
-(prior art §12).
+by zeros. Without a bound, parsing is quadratic in token length in the evaluator, whose
+`string_slice` copies its input, which is the CVE-2020-10735 class; the bound fixes the
+worst-case cost in every lane. Python bounds integer text at 4300 digits and Jackson
+numbers at 1000 characters for the same reason (prior art §12).
 
 **Rendering.** `decimal_to_string` emits the unique canonical plain form: an optional
 `-`, at least one integer digit with no leading zero, and a `.` followed by exactly
@@ -276,17 +288,21 @@ float-to-exact conversions ([05-OP-6]).
 
 The `decimal128` and `decimal256` dtype names stay reserved for the Arrow and Parquet
 boundary (spec/04 §1.1.1). The boundary rule is a language decision, so it belongs in
-spec/04: a `decimal128` or `decimal256` value whose scale is 0..38 and whose canonical
-form has at most 38 significant digits ingests as the exact `Decimal`; any other value
-fails `domain`, never rounds; and export to a declared `(p, s)` rounds only by an explicit
+spec/04: a `decimal128` or `decimal256` value whose exact value lies in the value set
+(whatever its declared scale) ingests as that exact `Decimal`; any other value fails
+`domain` and is never rounded; and export to a declared `(p, s)` rounds only by an explicit
 `Rounding`. `Std.Io.Parquet` is a stub, so no conversion function is defined here.
 
 ## 11. What is absent, and where it lives
 
 - **Composes without loss:** negation and absolute value (`decimal_sub` from zero and a
-  comparison), minimum and maximum, integer division and remainder (`decimal_div` at scale
-  0 with `RoundTowardNegative`, then `decimal_sub` and `decimal_mul`), and f32 ingress
-  (exact widening to f64).
+  comparison), minimum and maximum, integer division (`decimal_div` at scale 0 with
+  `RoundTowardNegative`, whose failure is correct because such a quotient is outside the
+  value set), and f32 ingress (exact widening to f64).
+- **Composes except near the envelope:** a remainder `a - q·b` from that quotient. When
+  `q·b` leaves the value set the composition fails although the remainder itself is
+  representable (for `a = -(10^38 - 1)` and `b = 10^38 - 2`, `q·b` is about `-2·10^38`).
+  A dedicated remainder is additive later if a consumer meets that edge.
 - **Inexact by nature:** square roots, powers with fractional exponents, logarithms and
   exponentials; they go through `decimal_to_f64`.
 - **Additive later if a consumer needs it:** a fused multiply-then-round for products
@@ -312,7 +328,15 @@ fails `domain`, never rounds; and export to a declared `(p, s)` rounds only by a
 - [05-OP-35] loses its Decimal paragraphs and its "Decimal rational computations … exact
   internal domain" sentence and gains "The `decimal::*` identities follow [05-OP-76]"; its
   count changes.
-- [05-OP-34] covers `Decimal` with the opaque-identity sentence Std.Datetime adds.
+- [05-OP-34]'s sentence "Decimal invariants are checked by the named [05-OP-35] operations
+  before use" is replaced: `decimal::Decimal` joins the opaque identities that hold their
+  governing atom's invariants by construction, using the opaque-identity sentence
+  Std.Datetime adds.
+- [05-OP-74] defines all seven `Rounding` modes, `RejectInexact` included, and [05-OP-73]
+  states what each Std.Datetime callable that takes a `Rounding` does under
+  `RejectInexact` (a `domain` failure when the value is not a whole number of units or
+  increments). Std.Datetime's first stage carries both; if it lands without them, the
+  Decimal implementation adds them.
 - `stdlib_numeric_manifest.md` replaces the 14 `decimal::*` rows; `stdlib_adt_identities.md`
   reshapes `decimal::Decimal`.
 - spec/04 §1.1.1 states the interchange rule (§10) and drops "built on `trunc_div` scale
@@ -327,9 +351,9 @@ fails `domain`, never rounds; and export to a declared `(p, s)` rounds only by a
   fixed-iteration quotient-digit search, shifts by powers of ten, trailing-zero count.
   Intermediates stay within a dozen limbs.
 - **Loops.** Every loop is a `fold`, `scan`, `map`, `zip` or `enumerate` over a
-  precomputed `range`. Nothing recurses over limbs or digits: the evaluator's frame limit
-  is near a thousand, and a self-recursive helper routes any `chelis prove` property
-  touching it to the induction lane. There is no early exit, so data-dependent loops run
+  precomputed `range`. Nothing recurses over limbs or digits: the evaluator overflows its
+  native stack at a modest recursion depth (#2471), and a self-recursive helper routes any
+  `chelis prove` property touching it to the induction lane. There is no early exit, so data-dependent loops run
   to a precomputed bound.
 - **Parsing** checks the length bound first and validates characters before trusting
   `to_int`, which trims whitespace and accepts signs.
@@ -366,7 +390,9 @@ Three changes:
    differential driver, the tests, the guard artifacts and the documentation.
 
 The third depends on the first two and on Std.Datetime's first stage, which adds
-`Std.Rounding` and the [05-OP-34] opaque-identity sentence.
+`Std.Rounding` with its seven modes, their [05-OP-74] definition and Datetime's
+`RejectInexact` behaviour in [05-OP-73], and the [05-OP-34] opaque-identity sentence (§12
+says what the Decimal implementation adds if that stage lands without the seventh mode).
 
 The only code consumer is hello-chelis's decimal example, which constructs
 `Decimal { coefficient, scale }` directly and stops compiling under opacity; it is

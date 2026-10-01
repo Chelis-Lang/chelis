@@ -232,9 +232,10 @@ remainder as a sticky bit, then ties-to-even.
 | BigQuery | `NUMERIC` (38, 9), `BIGNUMERIC` scale 38 | | | rounds half away from zero ([docs](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/conversion_functions)) |
 
 So in SQL Server `0.0000009 × 1.0` at `decimal(30,10)` yields `0.000001`. Every system
-with precision and scale in the type has to derive a result type per operation, caps it,
-and then rounds or truncates silently at the cap; none gives division a natural scale,
-and DuckDB sidesteps it by leaving exact arithmetic.
+with precision and scale in the type has to derive a result type per operation and cap
+it; at the cap SQL Server and Snowflake round or truncate silently while Arrow compute and
+DuckDB fail. None gives division a natural scale, and DuckDB sidesteps it by leaving exact
+arithmetic.
 
 - **Ada** decimal fixed point (`delta 10.0**(-N) digits D`) truncates toward zero on
   conversion, `S'Round` rounds ties away from zero, and fixed × fixed must be converted to
@@ -327,18 +328,22 @@ advisory history:
 - PostgreSQL bounded repeated squaring in `power_var_int` after it produced "ridiculously
   enormous intermediate values"
   ([commit message](https://www.postgresql.org/message-id/E1XSHa1-00086a-2A%40gemulon.postgresql.org)).
-- Python: `int(Decimal("1e1234567890"))` builds the whole digit string
-  ([cpython#96589](https://github.com/python/cpython/issues/96589)); int/str conversion is
-  limited to 4300 digits by default since CVE-2020-10735.
+- Python: int/str conversion is limited to 4300 digits by default since CVE-2020-10735,
+  because the conversion is quadratic in digit count
+  ([docs](https://docs.python.org/3/library/stdtypes.html)); the limit covers `int`, and
+  conversions between `int` and the pure-Python `decimal` implementation interact with it
+  ([cpython#96589](https://github.com/python/cpython/issues/96589)).
 - Lean's JSON number parser panicked on `3E9999999993` because it built 10^e
   ([lean4#13987](https://github.com/leanprover/lean4/issues/13987)).
-- `rust_decimal`'s recursive parser overflowed the stack on about five thousand leading
-  zeros ([rust-decimal#840](https://github.com/paupino/rust-decimal/issues/840)).
+- `rust_decimal`'s recursive parser overflows the stack on a long run of leading zeros
+  (about 27,000 on an 8 MiB stack, fewer on a smaller thread stack)
+  ([rust-decimal#840](https://github.com/paupino/rust-decimal/issues/840)).
 - `apd` states its design goal as operations that "will produce an error if they will be
   slow" ([repo](https://github.com/cockroachdb/apd)).
 
-Every arbitrary-precision library in this survey added length, exponent or time bounds
-after the fact. TC39 chose decimal128 over an arbitrary-precision BigDecimal partly
+Ruby, Go, Jackson, Haskell's `Data.Scientific` and PostgreSQL added exponent, length or
+growth bounds after advisories; `apd` bounds exponents by design; the remaining
+arbitrary-precision libraries leave the exposure to callers. TC39 chose decimal128 over an arbitrary-precision BigDecimal partly
 because unbounded division needs a mandatory rounding parameter
 ([proposal](https://github.com/tc39/proposal-decimal)).
 
