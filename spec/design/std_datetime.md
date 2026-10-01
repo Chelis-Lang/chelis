@@ -86,8 +86,9 @@ knowledge belongs in external libraries.
   cannot exist outside the module. This closes #2779's unvalidated-constructor class by
   construction. No type carries `@invariant` (§18).
 - **Required policies, never defaults.** Every point where the surveyed libraries choose
-  silently is a required argument here. Every such default traces back to legacy
-  compatibility (prior art §5, §6), which Chelis does not need. This covers:
+  silently is a required argument here. Where a surveyed library justifies its default
+  at all, the justification is compatibility with older libraries (prior art §5), which
+  Chelis does not need. This covers:
   - month-end overflow;
   - DST disambiguation;
   - offset/zone conflict;
@@ -117,7 +118,8 @@ blocks it.
 
 **Supported years are −9999 through 9999.** This replaces [05-OP-35]'s "all i64 years".
 The narrower range is chosen on its own merits:
-- It is the range of RFC 3339's four-digit year, SQL's `DATE`, and jiff (prior art §3).
+- It is the range of RFC 3339's four-digit year (0000 to 9999, extended here to negative
+  years) and of jiff (prior art §3).
 - Every intermediate of every algorithm below provably fits in checked i64, so
   correctness rests on ordinary integer arithmetic.
 - The whole domain is 7 304 484 days, few enough to check exhaustively against an
@@ -137,8 +139,9 @@ different model.
 
 **Instant range.** The instant range is the civil range shrunk by the largest offset at
 each end. Every instant therefore has a civil reading under every offset, so formatting
-and zone conversion of an instant never fail. jiff makes the same choice for the same
-reason.
+an instant and converting it under any offset never fail for lack of range. jiff makes the
+same choice for the same reason. Zone conversion can still fail where a zone's data has
+no coverage (§11).
 
 **Offset range.** An offset is less than a day in magnitude. That matches RFC 3339's
 two-digit hour and Temporal, and covers every offset in the IANA database, historical
@@ -162,10 +165,25 @@ message grammar so that every failure is deterministic and machine-readable:
 |---|---|---|
 | `domain` | An input is outside the operation's value set: an invalid field, a year outside the range, malformed text, a query outside a calendar's horizon, a `Reject…` policy firing. | returns `None` |
 | `overflow` | An arithmetic result leaves the type's range. | still fails, as Decimal's `try_` forms do for unrepresentable results |
+| `io` | The host could not supply a clock reading (`Std.Datetime.Clock` only, §12). | no `try_` form |
 
 The one exception is `try_instant_to_unix_count` and `try_duration_to_count`. Their only
 failure is that the result does not fit in i64, and they return `None` for it (§8.5,
 §8.6).
+
+**Coverage rule.** One rule decides every edge case, and per-function text states only
+exceptions to it:
+- An argument, a count or a text that denotes no value of its type fails `domain`. So
+  do `duration_from_count`, `instant_from_unix_count` and the column constructors when
+  the value their arguments denote lies outside the type.
+- Consulting data outside its coverage fails `domain`. Coverage means a calendar's
+  horizon, or a zone's transitions past the last one when its footer is empty.
+- A result computed by arithmetic on values of these types that leaves its type fails
+  `overflow`, and nothing else does. That arithmetic is adding, subtracting, negating or
+  multiplying dates, times, instants, durations and periods, including reading a civil
+  value at an offset (`dt − o`). `period_mul` and `duration_mul` are such arithmetic.
+- When an operation could fail both ways, the range check runs first, so `overflow` wins
+  over a coverage `domain`.
 
 **No primitive trap escapes.** Every range and validity check runs before the arithmetic
 it protects, so no primitive numeric trap ever escapes a `Std.Datetime` call. A test
@@ -178,7 +196,10 @@ enforces this (§17).
 
 Each type below is `@opaque`. "Equality" is what structural `eq` ([05-OP-36]) means
 outside the module. It always compares the representation, and the representation is
-canonical, so equal representations mean equal values.
+canonical, so equal representations mean equal values. (The checker currently rejects
+`eq` on ADT values although [05-OP-36] admits them, #2587; meanwhile equality composes
+through the accessors, for example `eq(date_epoch_day(a), date_epoch_day(b))`, and no
+per-type equality function is added.)
 
 | Type | Meaning | Representation | Equality |
 |---|---|---|---|
@@ -242,6 +263,9 @@ as `Reject` would silently change meaning.
 | `Disambiguation` | `EarlierInstant`, `LaterInstant`, `CompatibleInstant`, `RejectNonUniqueLocal` | §11 |
 | `OffsetConflict` | `UseWrittenOffset`, `UseZoneRules`, `RejectOffsetMismatch` | §11 |
 
+Each policy type lands with the stage whose functions use it; every constructor name in
+the table is reserved from S1 on.
+
 There is no roll-over option for month arithmetic. 31 January + 1 month rolling over to
 2 or 3 March is `date_add_days` applied to a clamped result, so it composes.
 
@@ -252,7 +276,8 @@ rounds toward zero. That is the wrong default for flooring a time before 1970.
 
 Signatures are Surf. "Fails" uses the §5 grammar. Every function is total on its stated
 domain and pure. A `try_` function has the same signature with an `Option` result, and
-returns `None` exactly where its trapping twin fails with `domain`.
+returns `None` exactly where its trapping twin fails with `domain`. The column `try_`
+forms are the exception: they return the column with a validity mask (§6).
 
 ### 8.1 Calendar queries
 
@@ -277,8 +302,8 @@ These are total over every i64 year, because their arithmetic cannot overflow.
 - `date_weekday(d) -> Weekday`.
 - `date_day_of_year(d) -> i64`, numbered from 1.
 - `date_iso_week(d) -> (i64, i64)` returns the ISO 8601 week-year and week number 1..53.
-  The week-year of the first and last few days of the range can be −10000 or 10000. It is
-  an ordinary integer and is returned as such.
+  The week-year never leaves the supported range: −9999-01-01 is a Monday and
+  9999-12-31 a Friday, so the first and last ISO weeks of the range lie inside it.
 - `date_from_iso_week(iso_year, week, weekday) -> Date` and its `try_` form. Fails
   `domain` for a week that does not exist in that week-year, or a result outside the
   range.
@@ -305,7 +330,7 @@ These are total over every i64 year, because their arithmetic cannot overflow.
 
 **Comparison:** `date_lt`, `date_lte`, `date_gt`, `date_gte`, all `(Date, Date) -> bool`.
 
-**Text:** `date_to_string`, `parse_date`, `try_parse_date` (§8.10).
+**Text:** `date_to_string`, `parse_date`, `try_parse_date` (§8.8).
 
 **Algorithms.** The conversions between epoch days and fields are Hinnant's
 `days_from_civil` and `civil_from_days` (prior art §16), written with `floor_div` and a
@@ -347,7 +372,7 @@ jurisdiction rules, so they belong to the data packages, not here.
   time. Wrapping past midnight is therefore never hidden: a caller that wants the wrapped
   time takes the second component and ignores the carry explicitly.
 - `time_until(a, b) -> Duration` is `b − a` within one day and may be negative.
-- Comparisons `time_lt`, `time_lte`, `time_gt`, `time_gte`. Text forms as in §8.10.
+- Comparisons `time_lt`, `time_lte`, `time_gt`, `time_gte`. Text forms as in §8.8.
 
 **`DateTime`:**
 - `datetime(d: Date, t: Time) -> DateTime` is total. Accessors: `datetime_date`,
@@ -397,7 +422,7 @@ never as a single nanosecond count.
 - `offset_datetime(i, o) -> OffsetDateTime` is total.
 - Accessors `offset_datetime_instant`, `offset_datetime_offset`, and
   `offset_datetime_local(odt) -> DateTime`.
-- Text forms as in §8.10.
+- Text forms as in §8.8.
 
 **Values not offered.** There is no instant-plus-calendar-unit arithmetic: "one month
 after an instant" has no meaning without a zone (§11).
@@ -405,18 +430,24 @@ after an instant" has no meaning without a zone (§11).
 ### 8.6 Duration and Period
 
 **`Duration`:**
-- `duration(second, nanosecond) -> Duration` normalizes the exact total. Fails `overflow`
-  when the normalized second leaves i64.
+- `duration(second, nanosecond) -> Duration` normalizes the exact total. Fails `domain`
+  when the denoted value lies outside the type (its normalized second leaves i64).
 - `duration_from_count(count, unit: TimeUnit) -> Duration`, plus accessors
   `duration_second` and `duration_nanosecond`.
 - `duration_to_count(d, unit, rounding) -> i64` fails `overflow` when the result does not
   fit; its `try_` form returns `None` in that case.
 - `duration_to_seconds_f64(d) -> f64` is the named lossy boundary for putting time on a
-  numerical axis. It is the fixed composition `f64(second) + f64(nanosecond) / 1e9`,
-  each step rounded to nearest-even, so every lane returns the same bits.
+  numerical axis. It is a fixed composition, each step rounded to nearest-even, so every
+  lane returns the same bits:
+  - First split the duration into a whole part `w` and a fraction `f` **of the same
+    sign**: `(w, f) = (second, nanosecond)` when `second ≥ 0` or `nanosecond = 0`, and
+    `(second + 1, nanosecond − 10^9)` otherwise. The Euclidean form would make the two
+    terms of a small negative duration cancel; −1 ns is stored as `{−1, 999 999 999}`.
+  - The result is `f64(w) + f64(f) / 1e9`.
   - Correct rounding of the exact value would need integers wider than i64.
-  - Whenever `|second| < 2^53`, the composition is within one unit in the last place,
-    and every difference of two instants satisfies that bound. §17 tests the bound.
+  - Whenever `|w| < 2^53` the two terms share a sign, so the result is within one unit
+    in the last place. Every difference of two instants satisfies `|w| < 2^53`. §17
+    tests the bound, negative sub-second durations included.
 - Arithmetic: `duration_add`, `duration_sub`, `duration_negate`, and
   `duration_mul(d, k: i64)`. Each is exact and fails `overflow`; intermediate products
   are split so that only an unrepresentable result fails.
@@ -439,11 +470,12 @@ therefore has only the units that are exact for it.
 
 S1 defines the column types, so that the business and columnar stages proceed
 independently.
-- `dates_from_epoch_days(t: tensor[n, i64]) -> Dates[n]` and its `try_` form fail
-  `domain` if any element is outside the range.
+- `dates_from_epoch_days(t: tensor[n, i64]) -> Dates[n]` fails `domain` naming the first
+  element outside the range. Its `try_` form follows §6's column rule:
+  `try_dates_from_epoch_days(t) -> (Dates[n], tensor[n, bool])`.
 - `dates_epoch_days(ds) -> tensor[n, i64]`.
-- `instants_from_unix(seconds: tensor[n, i64], nanoseconds: tensor[n, i64]) -> Instants[n]`
-  and its `try_` form.
+- `instants_from_unix(seconds: tensor[n, i64], nanoseconds: tensor[n, i64]) -> Instants[n]`,
+  likewise with `try_instants_from_unix(...) -> (Instants[n], tensor[n, bool])`.
 - `instants_unix_seconds(is) -> tensor[n, i64]` and `instants_nanoseconds(is) -> tensor[n, i64]`.
 
 Each signature's ownership form (borrowing or consuming the column) follows spec/04's
@@ -475,8 +507,21 @@ period   = [ "-" ] "P" [ 1*DIGIT "Y" ] [ 1*DIGIT "M" ] [ 1*DIGIT "W" ] [ 1*DIGIT
 - Field values are range-checked after the grammar: month 1..12, a valid day for the
   month, hour 0..23, minute and second 0..59, offset hour 0..23.
 - A duration or period needs at least one component.
-- Text the grammar admits is accepted exactly. Anything else, including more than nine
-  fractional digits, fails `domain`: there is no rounding at ingress.
+- Text the grammar admits is accepted exactly when it denotes a value of the type.
+  Anything else fails `domain`, and every `try_parse_` form returns `None` for it:
+  - text outside the grammar, including more than nine fractional digits (there is no
+    rounding at ingress);
+  - grammar-valid text whose value lies outside the type's value set: a year past
+    ±9999, a duration or period whose value lies outside its type, or an instant outside
+    the instant range of §4.
+  - Each value is judged as a whole, not component by component. So
+    `-PT9223372036854775808S` (the canonical text of the most negative duration) parses,
+    while `PT2562047788015216H`, whose components each fit in i64 but whose total does
+    not, fails.
+  `overflow` stays reserved for arithmetic results (§5).
+- The instant range excludes the last and first offset-width of civil time (§4). So
+  `9999-12-31T23:59:59Z`, a common end-of-time sentinel, fails `parse_instant` with
+  `domain`; its civil part `9999-12-31T23:59:59` parses as a `DateTime`.
 - `-00:00` and `+00:00` parse as offset zero.
 - `parse_offset_datetime("…Z")` gives offset zero.
 - A period's `Y` counts 12 months and `W` counts 7 days. A duration has no `D`, and a
@@ -511,14 +556,16 @@ does. Accessors return the weekmask, the normalized holiday list, and both horiz
 
 **Every query is answerable only inside the horizon.** A calendar has no information
 outside the dates its data covers. A query there fails `domain`, and the `try_` forms
-return `None`. Every surveyed library either errors there or silently degrades to
-weekends-only (prior art §14). Shoals' tables did the latter, and this rule closes that
-class.
+return `None`. Every operation that takes a calendar, `Unadjusted` rolls included,
+requires its date arguments inside the horizon. The one exception is
+`business_day_count`'s exclusive end, which may be the day after `valid_until`. The surveyed libraries instead error,
+silently degrade to weekends-only, or silently project their rules forward (prior
+art §14). Shoals' tables degraded silently, and this rule closes that class.
 
 **Operations:**
 - `is_business_day(cal, d) -> bool`.
 - `business_day_roll(cal, d, roll: BusinessDayRoll) -> Date`.
-  - `Unadjusted` returns `d` and consults nothing.
+  - `Unadjusted` returns `d` once `d` is inside the horizon.
   - `Following` returns the first business day on or after `d`, and `Preceding` the last
     one on or before it.
   - `ModifiedFollowing` is `Following` unless that changes the month, and then
@@ -605,25 +652,47 @@ footer, RFC 8536 §3.3).
   independent of how the data package ships the bytes (§13).
 - `time_zone_fixed(o: Offset) -> TimeZone`.
 - `time_zone_utc()`.
-- Accessors `time_zone_name` and `time_zone_offset_at(tz, i: Instant) -> Offset`. The
-  latter is total, and instants before the first transition use the initial offset
-  (RFC 8536's time type 0).
+- Accessors `time_zone_name` and `time_zone_offset_at(tz, i: Instant) -> Offset`, with a
+  `try_` form for the latter.
+  - Instants before the first transition use the initial offset (RFC 8536's time type 0).
+  - Instants after the last transition use the footer rule.
+  - A zone whose footer is empty has no information past its last transition (RFC 8536
+    §3.3). There `time_zone_offset_at` fails `domain` rather than carrying the last
+    offset forward, which would be the silent extrapolation §3 forbids.
+  - Every other instant has exactly one offset.
+  - By §5's coverage rule, every Zone operation that needs the offset at an uncovered
+    instant fails `domain`. This includes `zoned`, `zoned_from_local`,
+    `zoned_add_duration`, `zoned_add_period` and `zoned_from_text`, and they fail when
+    they construct the value, so an existing `Zoned` always has an offset. In
+    `zoned_from_local`'s candidate test, an uncovered `dt − o` fails the whole call
+    rather than excluding `o`.
 
 **`Zoned`** is opaque and holds `{ instant, zone }`. Values are immutable, so the zone is
-shared, not copied. `eq` on two zoned values compares the instant and the zone's rules.
-Two zones with the same name built from different tzdata releases are therefore unequal,
-which is the correct answer.
-- `zoned(i, tz) -> Zoned` is total.
+shared, not copied. `eq` on two zoned values compares the instant and the zone's
+representation: its name, initial offset, transitions and footer. Two encodings of the
+same rules (for example a TZif file with redundant transitions and one without) can
+therefore compare unequal. A program that means "same instant in the same named zone"
+compares `zoned_instant` and `time_zone_name`.
+- `zoned(i, tz) -> Zoned` and its `try_` form fail `domain` exactly where
+  `time_zone_offset_at` does.
 - `zoned_from_local(dt, tz, disambiguation: Disambiguation) -> Zoned` and its `try_`
   form.
-  - **Candidates.** The two candidate instants are `dt` read with the offset in force
-    just before and just after the nearest transition. They coincide when the local time
-    is unique.
-  - **Fold** (the local time occurs twice): `EarlierInstant` takes the first occurrence,
-    `LaterInstant` the second.
-  - **Gap** (the local time never occurs): `EarlierInstant` reads `dt` with the
-    post-transition offset and `LaterInstant` with the pre-transition offset. These
-    resolve to the instants before and after the gap.
+  - **Candidates.** The candidates are every instant whose local reading in `tz` is
+    `dt`: the set of `dt − o` over the zone's offsets `o` for which
+    `time_zone_offset_at(tz, dt − o) = o`. One candidate means `dt` is unique and is the
+    result under every policy.
+  - **Range edges.** A trial `dt − o` outside the instant range fails the whole call with
+    `overflow`, as `datetime_to_instant_at` does, before any coverage check. This can
+    happen only within one offset width of the civil range's ends, for example the
+    `9999-12-31T23:59:59` sentinel in any zone. The same holds for
+    `zoned_add_period`'s re-resolution and for `zoned_from_text` under `UseZoneRules`.
+  - **Fold** (two or more candidates): `EarlierInstant` takes the earliest and
+    `LaterInstant` the latest.
+  - **Gap** (no candidate): there is exactly one transition at instant `T` whose
+    pre-transition offset `o_b` and post-transition offset `o_a` satisfy
+    `T + o_b ≤ dt < T + o_a` (local times). `EarlierInstant` gives `dt − o_a` and
+    `LaterInstant` gives `dt − o_b`, the instants just before and after the gap as
+    Temporal defines them.
   - `CompatibleInstant` is earlier in a fold and later in a gap: Temporal's
     `'compatible'`, offered by name only.
   - `RejectNonUniqueLocal` fails `domain` in either case.
@@ -641,9 +710,13 @@ which is the correct answer.
     - `UseWrittenOffset` keeps the instant the text names.
     - `UseZoneRules` re-reads the local time in the zone. Its gap/fold cases fail
       `domain`; a caller wanting a policy goes through `zoned_from_local`.
-    - `RejectOffsetMismatch` fails `domain` when they disagree.
-  - A critical (`!`) zone annotation that disagrees with the offset fails `domain` under
-    `UseWrittenOffset`, as RFC 9557 requires.
+    - `RejectOffsetMismatch` accepts the written offset when `local − offset` is one of
+      `zoned_from_local`'s candidates for that local time, and fails `domain` otherwise.
+      So in a fold, a written offset that is one of the two valid offsets selects that
+      occurrence, as Temporal's `'reject'` does.
+  - A critical (`!`) zone annotation fails `domain` under `UseWrittenOffset` when the
+    written offset fails `RejectOffsetMismatch`'s test (`time_zone_offset_at(tz,
+    local − offset) ≠ offset`), as RFC 9557 requires.
   - The suffix tags `u-ca=iso8601` and `u-ca=gregory` are accepted. Other calendars are
     rejected, unknown elective tags are ignored, and unknown critical tags are rejected.
 
@@ -657,8 +730,8 @@ which is the correct answer.
   - This is the separation Go merges into one type and then documents around (prior
     art §9).
 
-**Failures.** A host reading outside the instant range fails with `IO`, naming the
-reading.
+**Failures.** A host reading outside the instant range, or a host clock error, fails
+with kind `io` (§5), naming the reading.
 
 **Builtins.**
 - Each clock is one host-lane builtin under [05-HOST-2], in the same family as
@@ -762,7 +835,8 @@ holiday tables.
 
 **Registries.** Datetime identities live in the existing registries:
 - functions in `spec/registry/stdlib_numeric_manifest.md` under [05-OP-35];
-- opaque types in `spec/registry/stdlib_adt_identities.md` under [05-OP-34].
+- every new type with a reachable numeric field, opaque or not (`ZonedText` included),
+  in `spec/registry/stdlib_adt_identities.md` under [05-OP-34].
 
 [05-OP-35] gains one sentence routing their semantics to a new atom, "`datetime::*`
 identities follow [05-OP-N]", as JSON access already follows [05-OP-2..5]. `N` is the
@@ -782,11 +856,13 @@ contradict it. This document holds the rest of the decided design until then.
   - rewrite the sentence on Decimal, date and duration invariants;
   - correct the count ("five" against four rows).
 - In [05-OP-35]:
-  - delete the calendar paragraph and its "time values" mention;
+  - delete the calendar paragraph, its "time values" mention, and the "calendar ordinal
+    computations" clause of the atom's second paragraph;
   - remove the 16 `time::*` rows;
   - correct the count.
 
-**Clock atoms.** S5 adds the clock builtins' atom next to the other host IO identities.
+**Clock atoms.** S5 adds the clock builtins' atom next to the other host IO identities,
+and extends [05-HOST-2]'s list of host operations with them.
 
 **Release.** Removing `Std.Time` removes census rows, which the remediation roadmap's
 invariant 7 makes 0.19 payload by default. Robert's release decision of 2026-10-01 ships
@@ -841,15 +917,18 @@ Shoals keeps its current date layer and its 0.18.11 pin.
   no primitive numeric trap escapes (§5).
 - **Lanes.** `chelis eval` and compiled C agree on the whole corpus.
 - **Float boundary.** `duration_to_seconds_f64` is compared with the exact rational
-  (Python `fractions`) over the corpus and must lie within one unit in the last place
-  wherever `|second| < 2^53`.
+  (Python `fractions`) over the corpus, negative sub-second durations such as −1 ns and
+  −1 µs included, and must lie within one unit in the last place wherever its whole
+  part satisfies `|w| < 2^53` (§8.6).
 - **Business days.** Differential against `numpy.busday_offset` and `busday_count`
   under matching roll modes.
 - **Zones.** Differential against Python's `zoneinfo` loaded from the same tzdata release,
   including every DST gap and fold under each `Disambiguation`.
 - **Shoals.** Day counts are checked against QuantLib and Strata reference values, with
   disputed conventions named.
-- **Removal.** Importing `Std.Time` fails with a diagnostic naming its replacement.
+- **Removal.** Importing `Std.Time` fails as an unresolved import, as the existing
+  removed-module test does for `Std.Init` and `Std.Tokenizer`. The changelog fragment
+  and docs name the replacement.
 - **Downstream.** Shoals, hello-chelis, coral and nautilus pass `chelis check` against
   each new standard-library bundle.
 
