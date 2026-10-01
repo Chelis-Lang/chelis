@@ -1,13 +1,13 @@
 xs: List[f32] = [1.0, 2.0]
 ys = concat(xs, [3.0, 4.0])
-prefix = take(ys, cast(3, i64))
-suffix = skip(ys, cast(1, i64))
+prefix = take(ys, 3i64)
+suffix = skip(ys, 1i64)
 item_count = ys |> to_tensor |> numel
 roundtrip = ys |> to_tensor |> to_list
-token_rows: List[List[i64]] = [[cast(1, i64), cast(2, i64)], [cast(3, i64)]]
+token_rows: List[List[i64]] = [[1i64, 2i64], [3i64]]
 flat_tokens = flatten(token_rows)
-token_batches = chunk(flat_tokens, cast(2, i64))
-padded = pad_sequences(token_rows, cast(0, i64))
+token_batches = chunk(flat_tokens, 2i64)
+padded = pad_sequences(token_rows, 0i64)
 report = string_concat(string_concat("len=", ys |> len |> to_string), string_concat(", items=", string_concat(to_string(item_count), string_concat(", shape=", string_concat(to_string(shape(padded, 0)), string_concat("x", padded |> shape(1) |> to_string))))))
 printed = print(report)
 prefix_view = print(prefix)

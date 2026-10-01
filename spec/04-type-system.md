@@ -1407,19 +1407,19 @@ rank-uniform-list guarantee above is unaffected.
 ```chelis
 ;; WRONG: rank-1 and rank-2 elements in the same List[tensor[k, f32]]
 ;; def make_mixed[k]() -> List[tensor[k, f32]] = {
-;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-;;   b = to_tensor([[cast(1.0, f32), cast(2.0, f32)],
-;;                  [cast(3.0, f32), cast(4.0, f32)]])
+;;   a = to_tensor([1.0f32, 2.0f32])
+;;   b = to_tensor([[1.0f32, 2.0f32],
+;;                  [3.0f32, 4.0f32]])
 ;;   [a, b]  ;; DimensionMismatch: list element rank mismatch
 ;; }
 
 ;; CORRECT: flatten the rank-2 element to rank-1 first
 ;; def make_uniform[k]() -> List[tensor[k, f32]] = {
-;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
+;;   a = to_tensor([1.0f32, 2.0f32])
 ;;   b_flat = reshape(
-;;     to_tensor([[cast(1.0, f32), cast(2.0, f32)],
-;;                [cast(3.0, f32), cast(4.0, f32)]]),
-;;     [cast(4, i64)])
+;;     to_tensor([[1.0f32, 2.0f32],
+;;                [3.0f32, 4.0f32]]),
+;;     [4i64])
 ;;   [a, b_flat]
 ;; }
 ```
