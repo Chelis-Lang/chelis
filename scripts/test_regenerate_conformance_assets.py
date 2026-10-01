@@ -4,8 +4,9 @@ Run via: `python3 -m unittest scripts.test_regenerate_conformance_assets` from
 repo root, or through the CI `unittest discover -s scripts` step.
 
 Locked here:
-  (a) SHARED_SKILLS matches the live `agent-skills/` directory (the Python
-      mirror of the Rust `skills::SHARED_SKILLS` tripwire);
+  (a) REPO_SKILLS matches the live `agent-skills/` directory, and
+      SHARED_SKILLS is exactly the repo skills plus the package skills (the
+      Python mirror of the Rust `skills::SHARED_SKILLS` tripwire);
   (b) planned_skill_copies enumerates one dest per real source file, under the
       crate's assets/skills/ tree;
   (c) is_stale detects missing, differing, and orphaned embedded copies;
@@ -35,23 +36,44 @@ ROOT = regen.repo_root()
 
 
 class SharedSkillsListTests(unittest.TestCase):
-    def test_shared_skills_matches_agent_skills_dir(self):
+    def test_repo_skills_matches_agent_skills_dir(self):
         on_disk = {
             p.name for p in (ROOT / "agent-skills").iterdir() if p.is_dir()
         }
         self.assertEqual(
-            set(regen.SHARED_SKILLS),
+            set(regen.REPO_SKILLS),
             on_disk,
-            "SHARED_SKILLS in regenerate_conformance_assets.py disagrees with "
+            "REPO_SKILLS in regenerate_conformance_assets.py disagrees with "
             "agent-skills/; update it (and the Rust skills::SHARED_SKILLS mirror).",
         )
+
+    def test_shared_skills_are_repo_plus_package_skills(self):
+        package = [name for name, _ in regen.PACKAGE_SKILLS]
+        self.assertEqual(regen.SHARED_SKILLS, sorted(regen.REPO_SKILLS + package))
+        self.assertIn("chelis-std", package)
+        self.assertFalse(set(package) & set(regen.REPO_SKILLS))
 
 
 class PlannedCopiesTests(unittest.TestCase):
     def test_one_dest_per_source_file(self):
         pairs = regen.planned_skill_copies(ROOT)
-        # At least one file per shared skill.
-        self.assertGreaterEqual(len(pairs), len(regen.SHARED_SKILLS))
+        # Exactly one SKILL.md per shared skill, the package skill included.
+        self.assertEqual(
+            sorted(dest.parent.name for _, dest in pairs), regen.SHARED_SKILLS
+        )
+        self.assertIn(
+            (
+                ROOT / "packages" / "chelis-std" / "SKILL.md",
+                ROOT
+                / "crates"
+                / "chelis-conformance"
+                / "assets"
+                / "skills"
+                / "chelis-std"
+                / "SKILL.md",
+            ),
+            pairs,
+        )
         dest_root = ROOT / "crates" / "chelis-conformance" / "assets" / "skills"
         for src, dest in pairs:
             self.assertTrue(src.is_file(), f"source missing: {src}")
@@ -198,25 +220,25 @@ class MultiFileSkillRejectedTests(unittest.TestCase):
     def test_extra_file_in_skill_dir_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = self._one_skill_root(Path(td), "SKILL.md", "EXTRA.md")
-            saved = regen.SHARED_SKILLS
-            regen.SHARED_SKILLS = ["spec-sync"]
+            saved = (regen.REPO_SKILLS, regen.PACKAGE_SKILLS)
+            regen.REPO_SKILLS, regen.PACKAGE_SKILLS = ["spec-sync"], []
             try:
                 with self.assertRaises(SystemExit):
                     regen.planned_skill_copies(root)
             finally:
-                regen.SHARED_SKILLS = saved
+                regen.REPO_SKILLS, regen.PACKAGE_SKILLS = saved
 
     def test_single_file_skill_is_accepted(self):
         with tempfile.TemporaryDirectory() as td:
             root = self._one_skill_root(Path(td), "SKILL.md")
-            saved = regen.SHARED_SKILLS
-            regen.SHARED_SKILLS = ["spec-sync"]
+            saved = (regen.REPO_SKILLS, regen.PACKAGE_SKILLS)
+            regen.REPO_SKILLS, regen.PACKAGE_SKILLS = ["spec-sync"], []
             try:
                 pairs = regen.planned_skill_copies(root)
                 self.assertEqual(len(pairs), 1)
                 self.assertTrue(str(pairs[0][0]).endswith("spec-sync/SKILL.md"))
             finally:
-                regen.SHARED_SKILLS = saved
+                regen.REPO_SKILLS, regen.PACKAGE_SKILLS = saved
 
 
 if __name__ == "__main__":

@@ -533,11 +533,11 @@ fn the_recognized_conform_key_still_passes() {
     // repo-local skill dir.
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "local");
-    append_conform_table(&root, "\n[conform]\nlocal_skills = [\"chelis-std\"]\n");
-    std::fs::create_dir_all(root.join("agent-skills/chelis-std")).unwrap();
+    append_conform_table(&root, "\n[conform]\nlocal_skills = [\"shell-domain\"]\n");
+    std::fs::create_dir_all(root.join("agent-skills/shell-domain")).unwrap();
     std::fs::write(
-        root.join("agent-skills/chelis-std/SKILL.md"),
-        "# chelis-std\n",
+        root.join("agent-skills/shell-domain/SKILL.md"),
+        "# shell-domain\n",
     )
     .unwrap();
     scaffold::materialize_skills(&root).expect("mirror declared local skill");
@@ -654,4 +654,75 @@ fn sync_repairs_each_agent_skill_symlink() {
             "{rel}"
         );
     }
+}
+
+/// Addendum to chelis#2831: the downstream-authoring skill, authored once at
+/// `packages/chelis-std/SKILL.md`, reaches every shell as a shared skill that
+/// Claude and Codex discover through the skill links, and a shell may still
+/// omit it.
+#[test]
+fn chelis_std_is_a_shared_skill_materialized_from_its_package_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "stdskill");
+    let source = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/chelis-std/SKILL.md"),
+    )
+    .unwrap();
+    for surface in ["agent-skills", ".claude/skills", ".codex/skills"] {
+        let path = root.join(surface).join("chelis-std/SKILL.md");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source, "{surface}");
+    }
+    let stamp_file = std::fs::read_to_string(root.join("agent-skills/UPSTREAM.toml")).unwrap();
+    assert!(stamp_file.contains("\"chelis-std\""), "{stamp_file}");
+
+    // A fork of the shared copy is drift, like any shared skill.
+    let path = root.join("agent-skills/chelis-std/SKILL.md");
+    std::fs::write(&path, format!("{source}\nforked\n")).unwrap();
+    assert_eq!(
+        row(&audit::audit(&root), "vendored-skills").verdict,
+        Verdict::Fail
+    );
+
+    // Omission goes through the existing control.
+    append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"chelis-std\"]\n");
+    scaffold::materialize_skills(&root).expect("exclude chelis-std");
+    assert!(!root.join("agent-skills/chelis-std").exists());
+    assert!(audit::audit(&root).ok());
+}
+
+/// School and hydronnx carried a hand-copied `chelis-std` as a repo-local
+/// skill. Once the skill is shared, sync replaces the copy with the authored
+/// one and the audit names the now-shadowing declaration until it is removed.
+#[test]
+fn a_local_chelis_std_copy_is_replaced_and_its_declaration_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "localstd");
+    append_conform_table(&root, "\n[conform]\nlocal_skills = [\"chelis-std\"]\n");
+    let path = root.join("agent-skills/chelis-std/SKILL.md");
+    std::fs::write(&path, "# chelis-std\nHand-copied from the monorepo.\n").unwrap();
+
+    scaffold::materialize_skills(&root).expect("sync");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        chelis_conformance::skills::skill_body("chelis-std").unwrap()
+    );
+    let report = audit::audit(&root);
+    let r = row(&report, "vendored-skills");
+    assert_eq!(r.verdict, Verdict::Fail);
+    assert!(
+        r.diagnostic
+            .contains("chelis-std: [conform] local_skills may not name a shared skill"),
+        "{}",
+        r.diagnostic
+    );
+
+    let reef = root.join("reef.toml");
+    let manifest = std::fs::read_to_string(&reef).unwrap();
+    std::fs::write(
+        &reef,
+        manifest.replace("\n[conform]\nlocal_skills = [\"chelis-std\"]\n", ""),
+    )
+    .unwrap();
+    assert!(audit::audit(&root).ok());
 }

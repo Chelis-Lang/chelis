@@ -8,6 +8,13 @@ replaces where it stood. Shell-owned text outside the block is kept, and a
 Pin Bump Checklist no longer has a manual surface refresh step. Sync also
 restores the `CLAUDE.md -> AGENTS.md` symlink.
 
+The `chelis-std` downstream-authoring skill, authored at
+`packages/chelis-std/SKILL.md`, is now a shared skill: sync materializes it into
+every shell's `agent-skills/`, where `.claude/skills` and `.codex/skills` expose
+it, and `[conform] excluded_skills` can omit it. A shell that declared its own
+copy in `[conform] local_skills` removes that entry; the audit reports it as
+shadowing a shared skill until then.
+
 The shell contract no longer has an issue-drafts convention. Every upstream bug
 or capability request is filed as an issue in the Chelis-Lang repository where
 it originates and cited by number (`chelis#NNN`, `<repo>#NNN`). `conform audit`

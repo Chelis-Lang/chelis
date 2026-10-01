@@ -23,6 +23,7 @@ use std::path::PathBuf;
 /// three-way agreement.
 const SHARED_SKILLS: &[&str] = &[
     "backend-numerics",
+    "chelis-std",
     "cli-surface",
     "example-corpus",
     "issue-resolution",

@@ -47,10 +47,10 @@ fn new_scaffold_uses_the_current_reef_manifest_schema() {
 fn declared_local_skill_survives_sync_and_audit() {
     let (_tmp, root) = green_shell();
     // A repo-local domain skill the shared set does not include.
-    std::fs::create_dir_all(root.join("agent-skills/chelis-std")).unwrap();
+    std::fs::create_dir_all(root.join("agent-skills/shell-domain")).unwrap();
     std::fs::write(
-        root.join("agent-skills/chelis-std/SKILL.md"),
-        "# chelis-std domain skill\nShell-authored.\n",
+        root.join("agent-skills/shell-domain/SKILL.md"),
+        "# shell-domain domain skill\nShell-authored.\n",
     )
     .unwrap();
     // Undeclared, it is drift.
@@ -62,19 +62,19 @@ fn declared_local_skill_survives_sync_and_audit() {
     // Declare it; sync preserves it and both agent symlinks expose it.
     append(
         &root.join("reef.toml"),
-        "\n[conform]\nlocal_skills = [\"chelis-std\"]\n",
+        "\n[conform]\nlocal_skills = [\"shell-domain\"]\n",
     );
     let notices = scaffold::materialize_skills(&root).unwrap();
     assert!(
-        root.join("agent-skills/chelis-std/SKILL.md").exists(),
+        root.join("agent-skills/shell-domain/SKILL.md").exists(),
         "sync must preserve a declared local skill"
     );
     assert!(
-        !notices.iter().any(|n| n.contains("chelis-std")),
+        !notices.iter().any(|n| n.contains("shell-domain")),
         "a declared local skill must not warn as pruned: {notices:?}"
     );
-    assert!(root.join(".claude/skills/chelis-std/SKILL.md").exists());
-    assert!(root.join(".codex/skills/chelis-std/SKILL.md").exists());
+    assert!(root.join(".claude/skills/shell-domain/SKILL.md").exists());
+    assert!(root.join(".codex/skills/shell-domain/SKILL.md").exists());
     assert!(audit::audit(&root).ok());
 }
 

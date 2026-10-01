@@ -503,7 +503,12 @@ toolchain selected explicitly, then audit every item below:
 
 - The shared skill set (`redteam-exec`, `spec-sync`, `phase-gate`,
   `backend-numerics`, `example-corpus`, `cli-surface`, `packaging-install`,
-  `issue-resolution`) is a **materialized pointer upstream, not a fork**. It is
+  `issue-resolution`, and `chelis-std`) is a **materialized pointer upstream,
+  not a fork**. Each skill has one authored source in the monorepo:
+  `agent-skills/<name>/SKILL.md`, or `packages/chelis-std/SKILL.md` for the
+  downstream-authoring skill, which is written beside the package it teaches
+  and points to the inherited `docs/CHELIS_SURFACE.md` (§3) for the complete
+  capability inventory rather than repeating it. The set is
   **embedded in the pinned toolchain**; `chelis reef conform sync` (and
   `reef setup`) materialize it into the shell's `agent-skills/`, and
   `conform audit` derives the expected **toolchain-owned span** of every present
@@ -531,10 +536,8 @@ toolchain selected explicitly, then audit every item below:
   `[conform] local_skills = ["<name>", ...]`. `conform sync` then preserves those
   dirs and `conform audit` §8 exempts them; an *undeclared* extra skill is still
   pruned, now with a warning rather than a silent delete. A `local_skills` entry
-  may not shadow a shared skill. New shells SHOULD vendor School's
-  downstream-authoring skill,
-  [`agent-skills/chelis-std/`](https://github.com/Chelis-Lang/school/tree/main/agent-skills/chelis-std),
-  declared this way.
+  may not shadow a shared skill, so a shell that carried its own `chelis-std`
+  copy as a local skill removes that declaration and receives the shared one.
 - **Shared-skill exclusions:** a shell MAY omit irrelevant embedded skills by
   declaring exact names in
   `[conform] excluded_skills = ["<shared-name>", ...]`. `conform sync` removes

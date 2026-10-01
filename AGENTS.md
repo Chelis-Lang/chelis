@@ -573,7 +573,9 @@ through reef, a Cargo workspace, or Docker.
   symlinks to that one authored tree, `.claude/commands/` and `.codex/commands/` stay byte-identical, and the
   `red-team` alias is wired to `redteam-exec` with its fresh-round and verify modes. The
   set: `redteam-exec`, `spec-sync`, `phase-gate`, `backend-numerics`, `example-corpus`,
-  `cli-surface`, `packaging-install`, `issue-resolution`.
+  `cli-surface`, `packaging-install`, `issue-resolution`. Shells also receive
+  `chelis-std`, the downstream-authoring skill authored at
+  `packages/chelis-std/SKILL.md`.
 - **Toolchain and packaging.** `chelisup` is the installer and pin-resolving `chelis`
   shim; `chelis reef setup` is the orchestrator. Use the
   [`packaging-install` skill](agent-skills/packaging-install/SKILL.md) for any change

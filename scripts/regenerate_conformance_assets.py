@@ -3,8 +3,8 @@
 
 The `chelis-conformance` crate embeds canonical content into the chelis binary
 at compile time (`include_str!`), mirroring `chelis-std-bundle`. The repo files
-under `agent-skills/`, the root `AGENTS.md`, and `docs/CHELIS_SURFACE.md` are the
-source of truth for the *content*; the committed copies under
+under `agent-skills/`, `packages/chelis-std/SKILL.md`, the root `AGENTS.md`, and
+`docs/CHELIS_SURFACE.md` are the source of truth for the *content*; the committed copies under
 `crates/chelis-conformance/assets/` are generated copies.
 `.claude/skills` and `.codex/skills` are generated symlinks to the one authored
 `agent-skills/` tree. This script rebuilds both forms so the surfaces cannot
@@ -31,10 +31,9 @@ import shutil
 import sys
 from pathlib import Path
 
-# The shared skill set the contract (§8) vendors downstream. Keep in lockstep
-# with `chelis_conformance::skills::SHARED_SKILLS` and the `agent-skills/`
-# directory; the `embedded_skills_match_repo` tripwire locks all three together.
-SHARED_SKILLS = [
+# The compiler repository's own agent skills, authored under `agent-skills/`
+# and discovered here through the `.claude/skills` and `.codex/skills` links.
+REPO_SKILLS = [
     "backend-numerics",
     "cli-surface",
     "example-corpus",
@@ -44,6 +43,19 @@ SHARED_SKILLS = [
     "redteam-exec",
     "spec-sync",
 ]
+
+# Downstream skills authored beside the package they teach, as
+# `(name, repo-relative SKILL.md)`. They are for shells, not for work on the
+# compiler, so they are not in `agent-skills/`; the conformance assets embed
+# them from that one source like any other shared skill.
+PACKAGE_SKILLS = [
+    ("chelis-std", "packages/chelis-std/SKILL.md"),
+]
+
+# The shared skill set the contract (§8) vendors downstream. Keep in lockstep
+# with `chelis_conformance::skills::SHARED_SKILLS`; the `embedded_skills_match_repo`
+# tripwire locks the lists, the sources, and the embedded copies together.
+SHARED_SKILLS = sorted(REPO_SKILLS + [name for name, _ in PACKAGE_SKILLS])
 
 
 def repo_root() -> Path:
@@ -55,12 +67,19 @@ def planned_skill_copies(root: Path) -> list[tuple[Path, Path]]:
     src_root = root / "agent-skills"
     dest_root = root / "crates" / "chelis-conformance" / "assets" / "skills"
     pairs: list[tuple[Path, Path]] = []
-    for skill in SHARED_SKILLS:
+    for skill, rel in PACKAGE_SKILLS:
+        # A package skill is the package's one SKILL.md; the rest of the
+        # package directory is the package, not skill content.
+        skill_md = root / rel
+        if not skill_md.is_file():
+            raise SystemExit(f"error: package skill {skill!r} has no source at {skill_md}.")
+        pairs.append((skill_md, dest_root / skill / "SKILL.md"))
+    for skill in REPO_SKILLS:
         src_dir = src_root / skill
         if not src_dir.is_dir():
             raise SystemExit(
                 f"error: shared skill {skill!r} is not a directory at {src_dir}. "
-                f"Update SHARED_SKILLS (and the Rust mirror) if the skill set changed."
+                f"Update REPO_SKILLS (and the Rust mirror) if the skill set changed."
             )
         # Lockstep with the Rust consumer: skills.rs embeds, scaffold.rs
         # materializes, and audit.rs drift-checks ONLY `SKILL.md`. If this

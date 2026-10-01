@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use chelis_conformance::skills::{EMBEDDED_SKILLS, SHARED_SKILLS};
+use chelis_conformance::skills::{EMBEDDED_SKILLS, PACKAGE_SKILLS, SHARED_SKILLS, source_path};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -33,7 +33,8 @@ fn embedded_skills_match_repo() {
         "EMBEDDED_SKILLS and SHARED_SKILLS disagree in crates/chelis-conformance/src/skills.rs"
     );
 
-    // 2. The live agent-skills/ directory contains exactly SHARED_SKILLS.
+    // 2. The live agent-skills/ directory contains exactly the shared skills
+    //    that are not authored beside a package.
     let skills_dir = root.join("agent-skills");
     let on_disk: BTreeSet<String> = std::fs::read_dir(&skills_dir)
         .unwrap_or_else(|e| panic!("read {skills_dir:?}: {e}"))
@@ -41,7 +42,11 @@ fn embedded_skills_match_repo() {
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
-    let shared_owned: BTreeSet<String> = SHARED_SKILLS.iter().map(|s| s.to_string()).collect();
+    let shared_owned: BTreeSet<String> = SHARED_SKILLS
+        .iter()
+        .filter(|s| !PACKAGE_SKILLS.iter().any(|(p, _)| p == *s))
+        .map(|s| s.to_string())
+        .collect();
     assert_eq!(
         on_disk, shared_owned,
         "agent-skills/ directory does not match SHARED_SKILLS. If the shared skill \
@@ -49,10 +54,10 @@ fn embedded_skills_match_repo() {
          script) and run `{regen}`."
     );
 
-    // 3. Every embedded body byte-equals the live source file.
+    // 3. Every embedded body byte-equals its one authored source file.
     let mut stale = Vec::new();
     for (name, body) in EMBEDDED_SKILLS {
-        let src = root.join("agent-skills").join(name).join("SKILL.md");
+        let src = root.join(source_path(name));
         let live = std::fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {src:?}: {e}"));
         if live != *body {
             stale.push(name.to_string());
