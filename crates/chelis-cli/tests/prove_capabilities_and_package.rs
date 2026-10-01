@@ -202,7 +202,10 @@ fn prove_beacon_example(beacon: Option<&std::path::Path>) -> Value {
 fn beacon_example_reaches_the_engine_without_a_binary() {
     let record = prove_beacon_example(None);
     assert_eq!(record["status"], "unsupported", "{record}");
-    assert_eq!(record["reason"], "CHELIS_BEACON_BIN is not configured", "{record}");
+    assert_eq!(
+        record["reason"], "CHELIS_BEACON_BIN is not configured",
+        "{record}"
+    );
 }
 
 #[cfg(all(feature = "chelis-prove", unix))]
@@ -224,6 +227,9 @@ fn beacon_example_dispatches_to_the_configured_engine() {
     let record = prove_beacon_example(Some(&fake_beacon));
     let arguments = std::fs::read_to_string(&invoked)
         .unwrap_or_else(|error| panic!("engine was not invoked ({error}): {record}"));
-    assert!(arguments.lines().any(|line| line == "--request"), "{arguments}");
+    assert!(
+        arguments.lines().any(|line| line == "--request"),
+        "{arguments}"
+    );
     assert_ne!(record["status"], "passed", "{record}");
 }

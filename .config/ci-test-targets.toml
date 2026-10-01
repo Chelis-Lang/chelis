@@ -1529,6 +1529,31 @@ prefix = "examples/illustrative/mlp.ch"
 disposition = "packages"
 packages = ["chelis-surf"]
 
+# Illustrative sources read by chelis-surf's integration round-trip tests and
+# fmt_idempotent_on_repo_ch_corpus, chelis-e2e::example_corpus_validate, and
+# chelis-cli's cli.rs, which walks the illustrative directory (and copies
+# pipeline.ch by name).
+[[path_rule]]
+prefix = "examples/illustrative/linear_regression.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/pattern_matching.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/pipeline.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# CLI parity, executable-example checking, and formatter corpus coverage.
+[[path_rule]]
+prefix = "examples/record_input_broadcast.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 [[path_rule]]
 prefix = "examples/rank_poly_borrow.ch"
 disposition = "packages"

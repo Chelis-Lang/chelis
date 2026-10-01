@@ -168,11 +168,7 @@ fn validate_markdown_file(path: &PathBuf, expectations: Option<MarkdownExpectati
         .filter(|block| block.lang == "chelis-surf-fragment")
     {
         if parse_surf(&block.body).is_ok() {
-            let label = format!(
-                "Surf fragment at {}:{}",
-                path.display(),
-                block.start_line
-            );
+            let label = format!("Surf fragment at {}:{}", path.display(), block.start_line);
             assert_canonical_surf(&label, &block.body);
         }
     }

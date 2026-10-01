@@ -317,7 +317,10 @@ fn documentation_surf_blocks_draw_no_lint_diagnostics() {
             linted += 1;
         }
     }
-    assert!(linted >= 30, "expected to lint the documented Surf blocks, linted {linted}");
+    assert!(
+        linted >= 30,
+        "expected to lint the documented Surf blocks, linted {linted}"
+    );
 }
 
 #[test]
