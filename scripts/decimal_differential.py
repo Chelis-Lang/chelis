@@ -37,11 +37,11 @@ The supported entry point is `crates/chelis-cli/tests/std_decimal_oracle.rs`,
 which supplies the freshly built binary, a published standard library and the
 strict reference toolchain (`chelis_backend_c::toolchain`). Run directly, the
 binary under test comes from `--chelis` or the `CHELIS_BIN` environment
-variable. Without `--reef-home`, each program is a single file whose
-`Std.*` imports resolve against the binary's own standard library; with a reef
-home that has `chelis-std` published, each program is a package depending on
-it. The C lane compiles with `--toolchain-json` when given, and otherwise with
-the command `chelis build` prints.
+variable. Each program is a package depending on `chelis-std`, the way a shell
+uses it: `--reef-home` names a reef home where it is published, and without it
+the harness publishes this checkout's `packages/chelis-std` into a fresh one
+first. The C lane compiles with `--toolchain-json` when given, and otherwise
+with the command `chelis build` prints.
 """
 
 from __future__ import annotations
@@ -782,36 +782,52 @@ def printed_compile_command(build_stdout: str) -> list[str] | None:
     return None
 
 
+def std_version() -> str:
+    manifest = tomllib.loads((REPO / "packages" / "chelis-std" / "reef.toml").read_text(encoding="utf-8"))
+    return manifest["package"]["version"]
+
+
+def publish_std(chelis: Path, work: Path) -> Path:
+    """A fresh reef home with this checkout's `chelis-std` published into it."""
+    home = work / "reef-home"
+    package = work / "chelis-std"
+    for path in (home, package):
+        if path.exists():
+            shutil.rmtree(path)
+    home.mkdir(parents=True)
+    shutil.copytree(REPO / "packages" / "chelis-std", package)
+    env = dict(os.environ, CHELIS_STYLE_GATE_DISABLE="1", CHELIS_REEF_HOME=str(home))
+    done = subprocess.run([str(chelis), "reef", "publish", str(package)], env=env, capture_output=True, text=True,
+                          check=False)
+    if done.returncode != 0:
+        raise SystemExit(f"chelis reef publish {package} failed:\n{done.stdout}{done.stderr}")
+    return home
+
+
 class Runner:
-    def __init__(self, chelis: Path, work: Path, timeout: int, toolchain: Toolchain | None = None,
-                 reef_home: Path | None = None, std_version: str | None = None, keep_artifacts: bool = False) -> None:
+    def __init__(self, chelis: Path, work: Path, timeout: int, reef_home: Path, std: str,
+                 toolchain: Toolchain | None = None, keep_artifacts: bool = False, compiler_version: str | None = None) -> None:
         self.chelis = chelis
         self.work = work
-        self.keep_artifacts = keep_artifacts
         self.timeout = timeout
-        self.toolchain = toolchain
         self.reef_home = reef_home
-        self.std_version = std_version
-        self.compiler_version = None
-        (work / "reef-home").mkdir(parents=True, exist_ok=True)
-        if reef_home is not None:
+        self.std_version = std
+        self.toolchain = toolchain
+        self.keep_artifacts = keep_artifacts
+        if compiler_version is None:
             version = subprocess.run([str(chelis), "--version"], capture_output=True, text=True, check=True)
-            self.compiler_version = version.stdout.split()[1]
+            compiler_version = version.stdout.split()[1]
+        self.compiler_version = compiler_version
 
     def env(self) -> dict[str, str]:
         env = dict(os.environ)
-        env.update({"CHELIS_STYLE_GATE_DISABLE": "1", "OMP_NUM_THREADS": "1"})
-        env["CHELIS_REEF_HOME"] = str(self.reef_home if self.reef_home is not None else self.work / "reef-home")
+        env.update({"CHELIS_STYLE_GATE_DISABLE": "1", "OMP_NUM_THREADS": "1", "CHELIS_REEF_HOME": str(self.reef_home)})
         return env
 
     def app(self, program: Program, lane: str) -> tuple[Path, str]:
         app = self.work / lane / program.name
         if app.exists():
             shutil.rmtree(app)
-        if self.reef_home is None:
-            app.mkdir(parents=True)
-            (app / "main.ch").write_text(program.source, encoding="utf-8")
-            return app, "main.ch"
         (app / "src").mkdir(parents=True)
         (app / "reef.toml").write_text(
             'schema = "1"\n\n[package]\nname = "decimal-oracle"\nversion = "0.1.0"\n'
@@ -1064,7 +1080,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lanes", default="eval,c")
     parser.add_argument("--toolchain-json", help="C toolchain {compiler, compile_flags, link_flags}; default: the "
                         "command chelis build prints")
-    parser.add_argument("--reef-home", type=Path, help="a reef home with chelis-std published; programs become packages")
+    parser.add_argument("--reef-home", type=Path, help="a reef home with chelis-std published (default: publish this "
+                        "checkout's packages/chelis-std into a fresh one)")
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--chunk", type=int, default=150, help="cases per grid binding")
     parser.add_argument("--per-program", type=int, default=4, help="grid bindings per program")
@@ -1101,11 +1118,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.toolchain_json:
         spec = json.loads(args.toolchain_json)
         toolchain = Toolchain(spec["compiler"], tuple(spec["compile_flags"]), tuple(spec["link_flags"]))
-    std_version = None
-    if args.reef_home is not None:
-        manifest = tomllib.loads((REPO / "packages" / "chelis-std" / "reef.toml").read_text(encoding="utf-8"))
-        std_version = manifest["package"]["version"]
-
     def log(text: str) -> None:
         print(text, flush=True)
 
@@ -1113,7 +1125,8 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="decimal-oracle-") as scratch:
         work = args.work or Path(scratch)
         work.mkdir(parents=True, exist_ok=True)
-        runner = Runner(chelis.resolve(), work.resolve(), args.timeout, toolchain, args.reef_home, std_version,
+        reef_home = args.reef_home or publish_std(chelis.resolve(), work.resolve())
+        runner = Runner(chelis.resolve(), work.resolve(), args.timeout, reef_home.resolve(), std_version(), toolchain,
                         args.keep_artifacts)
         report = run_all(runner, programs, lanes, args.jobs, log)
     for problem in report.problems[:200]:

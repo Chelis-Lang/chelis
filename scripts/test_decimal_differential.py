@@ -467,7 +467,8 @@ class Invocation(unittest.TestCase):
         program = programs()[0]
         for keep in (False, True):
             with harness.tempfile.TemporaryDirectory() as scratch:
-                runner = harness.Runner(Path("/bin/false"), Path(scratch), 5, keep_artifacts=keep)
+                runner = harness.Runner(Path("/bin/false"), Path(scratch), 5, Path(scratch) / "home", "0.4.0",
+                                        keep_artifacts=keep, compiler_version="9.9.9")
 
                 def fake_run(argv, cwd):
                     if argv[1:2] == ["build"]:
@@ -480,25 +481,26 @@ class Invocation(unittest.TestCase):
                 result = runner.c_lane(program)
                 app = Path(scratch) / "c" / program.name
                 self.assertEqual((result.status, result.stage), (0, "run"))
-                self.assertTrue((app / "main.ch").exists())
+                self.assertTrue((app / "src" / "main.ch").exists())
                 self.assertEqual((app / "out").exists(), keep)
 
-    def test_bare_and_package_programs(self) -> None:
+    def test_programs_are_packages_depending_on_chelis_std(self) -> None:
         program = programs()[0]
         with harness.tempfile.TemporaryDirectory() as scratch:
-            runner = harness.Runner(Path("/bin/false"), Path(scratch), 5)
-            app, main = runner.app(program, "eval")
-            self.assertEqual(main, "main.ch")
-            self.assertEqual((app / "main.ch").read_text(encoding="utf-8"), program.source)
-            self.assertFalse((app / "reef.toml").exists())
-            self.assertEqual(runner.env()["CHELIS_REEF_HOME"], str(Path(scratch) / "reef-home"))
-            runner.reef_home, runner.std_version, runner.compiler_version = Path(scratch) / "home", "0.4.0", "9.9.9"
+            home = Path(scratch) / "home"
+            runner = harness.Runner(Path("/bin/false"), Path(scratch), 5, home, "0.4.0", compiler_version="9.9.9")
             app, main = runner.app(program, "c")
             self.assertEqual(main, "src/main.ch")
+            self.assertEqual((app / "src" / "main.ch").read_text(encoding="utf-8"), program.source)
             manifest = (app / "reef.toml").read_text(encoding="utf-8")
             self.assertIn('compiler = "=9.9.9"', manifest)
             self.assertIn('chelis-std = { version = "0.4.0" }', manifest)
+            self.assertEqual(runner.env()["CHELIS_REEF_HOME"], str(home))
+        self.assertRegex(harness.std_version(), r"^\d+\.\d+\.\d+$")
 
+    def test_publishing_failure_stops_the_run(self) -> None:
+        with harness.tempfile.TemporaryDirectory() as scratch, self.assertRaises(SystemExit):
+            harness.publish_std(Path("/usr/bin/false"), Path(scratch))
 
 if __name__ == "__main__":
     unittest.main()
