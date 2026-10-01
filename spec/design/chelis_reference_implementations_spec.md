@@ -61,7 +61,7 @@ The reference is the spec. A quant can verify it by inspection in 30 seconds. Th
 - **Not "the reference is what runs in production."** References exist for verification. Production code is in `src/`.
 - **Not feature-complete.** A reference covers the standard textbook case. Edge cases, extensions, variants are in `src/`.
 - **Not a separate package.** References live inside the shell, not as a separate "shoals-references" reef package.
-- **Not for proprietary models.** Domain shells provide references for standard models (Black-Scholes, Heston, Vasicek, etc.). Customers write their own references for proprietary models in their own packages.
+- **Not for proprietary models.** Domain shells provide references for standard models (Black-Scholes, Heston, Vasicek, etc.). Users write their own references for proprietary models in their own packages.
 
 ## Required Reference Implementations Per Shell
 
@@ -100,13 +100,13 @@ import Shoals.References.BlackScholes (call_price_reference)
 
 `chelis prove src/black_scholes.ch --samples 1000` runs this property against deterministic random inputs from the binder types and verifies agreement.
 
-## Customer Workflow
+## User Workflow
 
-1. Customer installs Shoals.
-2. Customer runs `chelis prove src/` on their own pricing code that imports Shoals primitives.
+1. The user installs Shoals.
+2. The user runs `chelis prove src/` on their own pricing code that imports Shoals primitives.
 3. Shoals' canonical properties verify standard invariants (put-call parity, delta bounds, etc.) and reference correspondence (matches_textbook_reference) against Shoals' production implementations.
-4. Customer writes their own properties for proprietary aspects of their models.
-5. Customer writes their own references only for proprietary models that don't have a textbook formula.
+4. The user writes their own properties for proprietary aspects of their models.
+5. The user writes their own references only for proprietary models that don't have a textbook formula.
 6. CI gate: `chelis prove` runs on every commit. Property failures block deployment.
 
-The customer's investment in writing references scales with how proprietary their models are. For a shop using mostly standard models with custom calibration, references come from Shoals and the customer writes only properties (which are short and declarative).
+The user's investment in writing references scales with how proprietary their models are. For a shop using mostly standard models with custom calibration, references come from Shoals and the user writes only properties (which are short and declarative).

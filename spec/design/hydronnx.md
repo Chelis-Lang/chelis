@@ -15,15 +15,15 @@ Hydronnx is a Chelis shell that consumes ONNX model files and exposes them as ty
 
 Hydronnx is the on-ramp from the existing AI/ML ecosystem to Chelis. A user with an ONNX model can be running it under Chelis's type discipline and verification machinery without rewriting the model in Chelis from scratch.
 
-## Audience and value proposition
+## Audience and purpose
 
 The primary audience is users with existing ONNX models who want one or more of: cross-platform deployment from a single source, compile-time shape verification, runtime property verification, composition with verified Chelis code, AD composition through the loaded model, or the trust stack for regulated inference.
 
-The on-ramp value is the dominant near-term proposition. A user with a Hugging Face image classifier, a fine-tuned encoder, a tabular model, or an object detector can be running it in Chelis in minutes rather than reimplementing it.
+The on-ramp is the dominant near-term benefit. A user with a Hugging Face image classifier, a fine-tuned encoder, a tabular model, or an object detector can be running it in Chelis in minutes rather than reimplementing it.
 
-The performance proposition develops over time. v0.1 inference performance is constrained by the lack of fusion in Chelis's optimization pipeline. As the kernel authorship work and MLIR-as-backend work ship, the loaded models benefit automatically — same load, same call, better performance.
+Performance improves over time. v0.1 inference performance is constrained by the lack of fusion in Chelis's optimization pipeline. As the kernel authorship work and MLIR-as-backend work ship, the loaded models benefit automatically — same load, same call, better performance.
 
-The competitive framing: ONNX Runtime gives cross-platform inference today. Chelis with hydronnx gives cross-platform inference plus type discipline plus property verification plus the trust stack. For users who only want the first part, ONNX Runtime stays the right answer. For users who care about the rest, Chelis becomes accessible through their existing models.
+Relative to ONNX Runtime: ONNX Runtime gives cross-platform inference today. Chelis with hydronnx gives cross-platform inference plus type discipline plus property verification plus the trust stack. For users who only want the first part, ONNX Runtime stays the right answer. For users who care about the rest, Chelis becomes accessible through their existing models.
 
 ## Pre-locked decisions
 
@@ -314,4 +314,4 @@ The six-phase structure decomposes the work into independent, testable milestone
 
 Dependencies on other Chelis workstreams are limited and clearly specified. Hydronnx composes with those workstreams as they ship rather than blocking on them.
 
-This is the on-ramp story for Chelis adoption. Users with existing models in the PyTorch/JAX ecosystem can move to Chelis without rewriting from scratch. The verifiability and trust-stack proposition becomes accessible to that audience without requiring framework commitment.
+Users with existing models in the PyTorch/JAX ecosystem can bring them into Chelis without rewriting them, and check them with Chelis's dimension types and properties.

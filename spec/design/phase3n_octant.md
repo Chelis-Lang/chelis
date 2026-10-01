@@ -111,7 +111,7 @@ Ship a reef package `octant` that can:
 - **Provenance completeness:** a fuzz-style test that generates ten varied
   expressions from the in-scope grammar, lowers each, and asserts that no
   emitted Deep node has a missing or empty `provenance` / `source_span`
-  metadata entry. This pins the "core value proposition" invariant.
+  metadata entry. This pins the provenance-completeness invariant.
 - **Special function lowering:** positive tests for `\text{erf}(x)`,
   `\Phi(x)` (normal CDF), `\Gamma(x)`, `\log\Gamma(x)`, `B(a, b)` each
   lowering to the correct `Nautilus` call, plus a negative test that a
@@ -319,13 +319,13 @@ These invariants span both 3n and 3o and must hold on every release:
 ## 3a. Toolchain dependencies
 
 **`properties/`/`references/` layout downstream of Octant.** Octant emits
-`.dp` files from customer LaTeX inputs. Where the customer integrates
+`.dp` files from user LaTeX inputs. Where the user integrates
 those `.dp` files into their reef package layout — under `src/properties/`,
 `src/references/`, or top-level `properties/`/`references/` — is the
-customer's choice, not Octant's. As of chelis-reef v0.4.1, top-level
+user's choice, not Octant's. As of chelis-reef v0.4.1, top-level
 `properties/` and `references/` are supported via the `additional_sources`
-manifest field; customers on chelis 0.4.1+ can place Octant outputs at
-the canonical root. Customers on earlier chelis or following the Shoals
+manifest field; users on chelis 0.4.1+ can place Octant outputs at
+the canonical root. Users on earlier chelis or following the Shoals
 v0.1.0-alpha pattern will place them under `src/`. Octant's contract
 ends at emitting the `.dp`; the integration shape is downstream.
 
