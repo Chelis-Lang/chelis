@@ -105,6 +105,28 @@ cadence = "pull_request and push"
 reason = "script-unit executes this module's positive and negative parity-receipt rows"
 tracking_issue = "chelis#2102"
 
+# chelis#2859: the Std.Datetime reference and differential harness. The
+# chelis-cli `std_datetime_oracle` target runs both against eval and native C;
+# script-unit runs the reference's own tests on every pull request.
+[[path_rule]]
+prefix = "scripts/datetime_reference.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/datetime_differential.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/test_datetime_reference.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the reference's positive and negative rows and the harness comparison logic"
+tracking_issue = "chelis#2859"
+
 [[path_rule]]
 prefix = "tests/corpus/core_fragment_parity/"
 disposition = "owner"
