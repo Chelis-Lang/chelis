@@ -60,4 +60,4 @@ def double_ints[p: Int](x: p) -> p = add(x, x)
 
 For named dimensions, rank polymorphism, generic casts, ownership, and the
 corresponding Deep forms, see the [Type System Reference](type-reference.md).
-For effects in function types, continue to [Effects and Handlers](effects.md).
+For effects in function types, continue to [Effects](effects.md).

@@ -1,4 +1,4 @@
-# Opaque types with declared invariants
+# Opaque Types With Declared Invariants
 
 `@opaque` keeps a type's construction and representation inside its defining
 module. Other modules can use exported values and functions, but cannot build
@@ -70,7 +70,7 @@ the SMT result shown below. The shipped release binary has SMT support. A
 plain local `cargo build` omits it; its default prover can validate producer
 obligations by sampling and emits a warning that they were not SMT-verified.
 If the obligation engine is unavailable, a successful property run does not
-verify producer obligations. See [Proving](proving.md) for proof options,
+verify producer obligations. See [Checking Properties](proving.md) for proof options,
 exit codes, and the complete output format.
 
 For the SMT-enabled binary, the example has one property and three producer

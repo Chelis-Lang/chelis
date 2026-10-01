@@ -1,11 +1,12 @@
 # Surf Syntax Reference
 
 Surf is Chelis's source syntax. This page shows how to write its declarations and
-expressions. `spec/02-surf-syntax.md` defines the full grammar; `spec/03-deep-syntax.md`
-defines the corresponding Deep representation.
+expressions. The [Surf syntax specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/02-surf-syntax.md) defines the full
+grammar; the [Deep syntax specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/03-deep-syntax.md) defines the corresponding
+Deep representation.
 
-Fenced `chelis-surf` and `chelis-deep` blocks below are complete programs and are
-validated in CI. `chelis-surf-fragment` and `chelis-deep-fragment` blocks isolate one
+Fenced `chelis-surf` and `chelis-deep` blocks below are complete, canonically formatted
+programs and are validated in CI. `chelis-surf-fragment` and `chelis-deep-fragment` blocks isolate one
 construct and are not standalone programs.
 
 ## Modules
@@ -83,7 +84,7 @@ without a matching definition is rejected.
 There is no `let` keyword. Inside a block, `name = expr` introduces a binding; bindings are
 separated by newlines, and the final bare expression is the block's value. A block needs
 at least one binding and a final expression. For ordered expression sequencing, use
-semicolons in `do { first; second }`. `par { ... }` is reserved syntax and is currently
+semicolons in `do { first; second }`. `par { ... }` is reserved syntax and is
 rejected by the checker.
 
 ```chelis-surf-fragment
@@ -319,7 +320,7 @@ dim batch, vocab_size
 def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)
 ```
 
-## Effects and handlers
+## Effects and device regions
 
 A function's effects can be annotated with a `! { ... }` suffix on its `sig` or
 `def`. `IO` is inferred from host operations such as `print`. Random draws take
@@ -332,13 +333,13 @@ def local_region() -> i32 = with device("cpu") { 1i32 }
 
 `with device("...")` takes a string literal. For a host-C build, only the exact
 device name `"cpu"` is accepted; other names are rejected before output is written.
-See [Effects and Handlers](effects.md) for the full model.
+See [Effects](effects.md) for the full model.
 
 ## Transforms
 
 `grad` and `vmap` use call syntax but are compiler transforms. Each requires a
 function argument, and their results are functions that can be called or bound to
-a name. Transform targets that are aliases of top-level functions can currently
+a name. Transform targets that are aliases of top-level functions can
 be rejected; use a direct, unshadowed top-level function when that occurs. See
 [Transforms](transforms.md) for supported target forms.
 
@@ -360,4 +361,5 @@ for details.
   a single uppercase letter is also valid for a value binding or parameter.
 - The parser enforces identifier roles; `chelis lint` checks additional naming
   conventions, including `def` and `type` declaration names. Run `chelis fmt`
-  to format source consistently. See `spec/01-nomenclature.md` for the full rules.
+  to format source consistently. See the [nomenclature specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/01-nomenclature.md)
+  for the full rules.
