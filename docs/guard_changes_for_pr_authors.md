@@ -36,10 +36,10 @@ head in the PR body before pushing:
 Candidate-base-update: <new-head-sha> <specific conflict or semantic reason>
 ```
 
-An approved force-pushed rewrite that does not move onto a newer base uses:
+A force-pushed rewrite that does not move onto a newer base uses:
 
 ```text
-Candidate-history-rewrite: <new-head-sha> <specific approved reason>
+Candidate-history-rewrite: <new-head-sha> <specific reason>
 ```
 
 The candidate preflight rejects a missing, duplicate, empty, or stale-head

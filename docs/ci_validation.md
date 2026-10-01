@@ -56,8 +56,7 @@ base advances is a base rebase; another non-descendant update is a history
 rewrite. Base updates require one exact
 `Candidate-base-update: <head> <reason>` PR-body line, and other rewrites require
 `Candidate-history-rewrite: <head> <reason>`. The declaration records necessity;
-it does not replace review of a conflict resolution or approval for a force
-push. Classifying a force-push needs the pre-push head, which is reachable
+it does not replace review of a conflict resolution. Classifying a force-push needs the pre-push head, which is reachable
 from no ref once it is replaced, so even a `fetch-depth: 0` checkout has to
 fetch that commit by SHA before running the classifier. All three invocations
 do, and none of them hides the result.
