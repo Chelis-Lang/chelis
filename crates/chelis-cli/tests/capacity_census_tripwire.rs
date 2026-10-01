@@ -1071,7 +1071,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} i64)) (field {} scale (t-prim {} i64)))",
+        "decimal::Decimal: () (variant {} Decimal (field {} negative (t-prim {} bool)) (field {} limb0 (t-prim {} i64)) (field {} limb1 (t-prim {} i64)) (field {} limb2 (t-prim {} i64)) (field {} limb3 (t-prim {} i64)) (field {} limb4 (t-prim {} i64)) (field {} scale (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
@@ -1204,21 +1204,21 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+        "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Decimal))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_eq: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
-        &[],
+        "decimal::decimal_from_f64: (t-fn {} (t-prim {} f64) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Decimal))",
+        &["float-carrier", "numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_from_int: (t-fn {} (t-prim {} i64) (t-adt {} Decimal))",
+        "decimal::decimal_from_i64: (t-fn {} (t-prim {} i64) (t-adt {} Decimal))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1260,6 +1260,20 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
+        "decimal::decimal_round: (t-fn {} (t-adt {} Decimal) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Decimal))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_scale: (t-fn {} (t-adt {} Decimal) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
         "decimal::decimal_sub: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
         &[],
         "[05-OP-35]",
@@ -1267,8 +1281,29 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+        "decimal::decimal_to_f32: (t-fn {} (t-adt {} Decimal) (t-prim {} f32))",
         &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_f64: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_fixed_string: (t-fn {} (t-adt {} Decimal) (t-prim {} i64) (t-prim {} string))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_i64: (t-fn {} (t-adt {} Decimal) (t-adt {} Rounding) (t-prim {} i64))",
+        &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -1282,6 +1317,27 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "std-def-numeric",
         "decimal::try_decimal: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Decimal)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::try_decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Option (t-adt {} Decimal)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::try_decimal_from_f64: (t-fn {} (t-prim {} f64) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Option (t-adt {} Decimal)))",
+        &["float-carrier", "numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::try_decimal_to_i64: (t-fn {} (t-adt {} Decimal) (t-adt {} Rounding) (t-adt {} Option (t-prim {} i64)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"

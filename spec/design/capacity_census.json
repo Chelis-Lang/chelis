@@ -1524,7 +1524,7 @@
     },
     {
       "kind": "std-adt-numeric",
-      "id": "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} i64)) (field {} scale (t-prim {} i64)))",
+      "id": "decimal::Decimal: () (variant {} Decimal (field {} negative (t-prim {} bool)) (field {} limb0 (t-prim {} i64)) (field {} limb1 (t-prim {} i64)) (field {} limb2 (t-prim {} i64)) (field {} limb3 (t-prim {} i64)) (field {} limb4 (t-prim {} i64)) (field {} scale (t-prim {} i64)))",
       "flags": [
         "numeric-op"
       ]
@@ -2410,19 +2410,22 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+      "id": "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Decimal))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "decimal::decimal_eq: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
-      "flags": []
+      "id": "decimal::decimal_from_f64: (t-fn {} (t-prim {} f64) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Decimal))",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "decimal::decimal_from_int: (t-fn {} (t-prim {} i64) (t-adt {} Decimal))",
+      "id": "decimal::decimal_from_i64: (t-fn {} (t-prim {} i64) (t-adt {} Decimal))",
       "flags": [
         "numeric-op"
       ]
@@ -2454,14 +2457,49 @@
     },
     {
       "kind": "std-def-numeric",
+      "id": "decimal::decimal_round: (t-fn {} (t-adt {} Decimal) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Decimal))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_scale: (t-fn {} (t-adt {} Decimal) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
       "id": "decimal::decimal_sub: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+      "id": "decimal::decimal_to_f32: (t-fn {} (t-adt {} Decimal) (t-prim {} f32))",
       "flags": [
         "float-carrier"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_to_f64: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+      "flags": [
+        "float-carrier"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_to_fixed_string: (t-fn {} (t-adt {} Decimal) (t-prim {} i64) (t-prim {} string))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_to_i64: (t-fn {} (t-adt {} Decimal) (t-adt {} Rounding) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
       ]
     },
     {
@@ -2472,6 +2510,26 @@
     {
       "kind": "std-def-numeric",
       "id": "decimal::try_decimal: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Decimal)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::try_decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Option (t-adt {} Decimal)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::try_decimal_from_f64: (t-fn {} (t-prim {} f64) (t-prim {} i64) (t-adt {} Rounding) (t-adt {} Option (t-adt {} Decimal)))",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::try_decimal_to_i64: (t-fn {} (t-adt {} Decimal) (t-adt {} Rounding) (t-adt {} Option (t-prim {} i64)))",
       "flags": []
     },
     {
