@@ -1,6 +1,7 @@
 [package]
 name = "chelis-axis-core"
 description = "Checked ordered-axis plans for Chelis"
+build = "build.rs"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

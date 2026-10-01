@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kernel-check Chelis's production permutation gate with Vermilion/Lean."""
+"""Kernel-check Chelis's full production axis kernel with Vermilion/Lean."""
 
 from __future__ import annotations
 
@@ -57,22 +57,20 @@ def main() -> None:
     ).is_file():
         run("./scripts/build.sh", cwd=home, env=env)
 
-    source = (REPO / "crates/chelis-axis-core/src/verified.rs").read_text()
-    spec = exact_item(source, "    pub open spec fn valid_permutation")
-    function = exact_item(source, "    pub fn is_permutation")
-    if source.count(spec) != 1 or source.count(function) != 1:
-        raise SystemExit("cannot extract unique production permutation items")
-    case_dir = home / "examples/chelis-permutation"
+    source_bytes = (REPO / "crates/chelis-axis-core/src/verified.rs").read_bytes()
+    source = source_bytes.decode("utf-8")
+    case_dir = home / "examples/chelis-full"
     case_dir.mkdir(exist_ok=True)
-    comparison = case_dir / "axis_perm.rs"
-    comparison.write_text("use vstd::prelude::*;\n\nverus! {\n" + spec + "\n\n" + function + "\n}\n")
-    print(f"Chelis verified source SHA-256: {hashlib.sha256(source.encode()).hexdigest()}")
-    print(f"Vermilion permutation input SHA-256: {hashlib.sha256(comparison.read_bytes()).hexdigest()}")
+    comparison = case_dir / "verified.rs"
+    comparison.write_bytes(source_bytes)
+    print(f"Chelis verified source SHA-256: {hashlib.sha256(source_bytes).hexdigest()}")
+    print(f"Vermilion full-kernel input SHA-256: {hashlib.sha256(comparison.read_bytes()).hexdigest()}")
     sys.stdout.flush()
 
     with (case_dir / "initial-run.log").open("w") as log:
         first = subprocess.run(
-            ["./scripts/run_example.sh", str(case_dir), "axis_perm.rs", "--per-file"],
+            ["./scripts/run_example.sh", str(case_dir), "verified.rs", "--per-file",
+             "--manual-proofs", "--lib", "Vermilion"],
             cwd=home,
             env=env,
             stdout=log,
@@ -84,19 +82,23 @@ def main() -> None:
     run(
         sys.executable,
         REPO / "crates/chelis-axis-core/proofs/axis_vermilion_proofs.py",
-        case_dir / "proofs/axis_perm.lean",
+        case_dir / "proofs/verified.lean",
         cwd=REPO,
         env=env,
     )
     run(
-        "./scripts/run_example.sh", case_dir, "axis_perm.rs", "--per-file",
+        "./scripts/run_example.sh", case_dir, "verified.rs", "--per-file",
         "--manual-proofs", "--lib", "Vermilion", cwd=home, env=env,
     )
 
+    spec = exact_item(source, "    pub open spec fn valid_permutation")
+    function = exact_item(source, "    pub fn is_permutation")
+    if source.count(spec) != 1 or source.count(function) != 1:
+        raise SystemExit("cannot extract unique production permutation items")
     negative_dir = home / "examples/chelis-permutation-negative"
     negative_dir.mkdir(exist_ok=True)
     original = "valid == valid_permutation(axes@, rank)"
-    comparison_source = comparison.read_text()
+    comparison_source = "use vstd::prelude::*;\n\nverus! {\n" + spec + "\n\n" + function + "\n}\n"
     if comparison_source.count(original) != 1:
         raise SystemExit("cannot locate the exact permutation postcondition")
     (negative_dir / "axis_perm_false.rs").write_text(

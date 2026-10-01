@@ -80,29 +80,30 @@ it.
 
 `python3 crates/chelis-axis-core/proofs/verify_axis_vermilion.py` pins
 `ilyasergey/vermilion` at
-`696756d6b9bbaedd61d6cd743ec3165f2b639224`, stages the **exact**
-`valid_permutation` specification and executable `is_permutation` function
-from the production source, and runs its pinned Verus frontend and Lean
-backend. `crates/chelis-axis-core/proofs/axis_vermilion_proofs.py` supplies three hand-written Lean
-tactics for obligations its automation leaves open. It checks each obligation's
-statement hash before installing a tactic. A fresh run kernel-checked all 33
-obligations with zero `sorry`; the shared Rust source SHA-256 at this receipt
-was `6ee585b811e93abc016d80c6baa322df19fa3f38086990cf338cbbc653c19091`.
-This demonstrates the *same permutation admission algorithm and contract* in
-both verifiers. The generated Lean module and its three hand proofs are
-checked by Lean; the extraction runner does not introduce assumptions. Its
-negative control changes the accepted-result postcondition to false and
-requires a Lean postcondition rejection, not an adapter or frontend failure.
+`696756d6b9bbaedd61d6cd743ec3165f2b639224`, stages the **entire,
+byte-identical** production `verified.rs`, and runs its pinned Verus frontend
+and Lean backend. A fresh run generates 75 Lean obligations. Automation
+discharges 61; `crates/chelis-axis-core/proofs/axis_vermilion_proofs.py`
+supplies one helper lemma and 14 hand-written tactics for the rest: three
+permutation, seven signed-axis, two survivor-order, and two inverse-update
+obligations. It checks every manual obligation's statement hash before
+installing its proof. A fresh run kernel-checked all 75 with zero `sorry`;
+the shared Rust source SHA-256 was
+`6ee585b811e93abc016d80c6baa322df19fa3f38086990cf338cbbc653c19091`.
+The same four executable functions and contracts are now proved by both
+verifiers. Lean checks the complete proof twin; neither the runner nor its
+helper introduces an assumption. The negative control extracts the unchanged
+production permutation specification and function, changes the accepted-result
+postcondition to false, and requires a Lean postcondition rejection rather
+than a frontend or adapter failure.
 
-The full four-function source also passes Vermilion's frontend and adapter,
-which generated 75 Lean obligations. Its current automation discharged 53 and
-left 22 as `sorry`, chiefly around machine-width arithmetic and quantified
-vector invariants. The full axis kernel therefore has a complete **Verus**
-proof and a complete **Vermilion** comparison for permutation admission only.
-The remaining Lean obligations are a follow-up, not an equivalent full-kernel
-proof claim. The first direct translation also exposed an unsupported
-`vec![0; rank]` expansion; replacing that with an explicit fill loop in the
-shared Rust source let all four functions translate.
+The first translation exposed an unsupported `vec![0; rank]` expansion;
+replacing that with an explicit fill loop in the shared Rust source let all
+four functions translate. A later trial used `axis.rs` as its case filename;
+that namespace collided with the local `axis` parameter in generated Lean.
+Staging the same source as `verified.rs` removed eight spurious failures.
+The remaining 14 were proved interactively, without weakening the Rust
+contracts or changing their executable bodies.
 
 The Vermilion trial additionally used about 8.8 GiB for its checkout and
 Mathlib artifacts, 1.0 GiB for its Verus fork, and 2.7 GiB for Lean 4.33.0.
