@@ -6,7 +6,7 @@ reserved for a dedicated phase. This note covers the CLI half only.
 
 Cross-references:
 
-- Sweep findings: `docs/investigations/item2_sibling_sweep_findings.md`
+- Sweep findings: `docs/archive/investigations/item2_sibling_sweep_findings.md`
   section **G7**, sub-bug 2 (eval-side silent no-output).
 - Orchestrator plan: `.claude/plans/build-up-a-plan-mossy-meteor.md`
   (workstream context for the G7 CLI dispatch).

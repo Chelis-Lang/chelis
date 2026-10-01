@@ -13,7 +13,7 @@ use crate::{Context, Replacement, Rule, Severity, Surface, Violation};
 /// the brace-wrapped multi-line form without widening the replacement
 /// surface; instead, we restrict the autofix to candidates whose flat
 /// shape the formatter would also emit. See
-/// `docs/investigations/prefer_pipe_autofix_output_diagnosis.md`.
+/// `docs/archive/investigations/prefer_pipe_autofix_output_diagnosis.md`.
 const FMT_LINE_WIDTH: usize = 80;
 const FMT_FLAT_MAX_STAGES: usize = 3;
 
@@ -50,7 +50,7 @@ impl Rule for PreferPipeOperator {
         // on shape grounds. This closes one half of the V2-F3
         // trigger-emit asymmetry; the typed-pipeline half is closed
         // by the CLI driver via `check_mirrors_fix`. See
-        // `docs/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
+        // `docs/archive/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
         find_pipe_candidates(source)
             .into_iter()
             .filter(candidate_is_fmt_clean)
@@ -75,9 +75,9 @@ impl Rule for PreferPipeOperator {
         // CLI-driver gate that runs the same pipeline `chelis check` uses;
         // opting in here re-enables the autofix that 477bd0d disabled.
         // Architectural decision in
-        // `docs/investigations/redundant_linearity_autofix_architecture.md`
+        // `docs/archive/investigations/redundant_linearity_autofix_architecture.md`
         // (Path 1B). The per-rule re-enable rationale is documented in
-        // `docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`.
+        // `docs/archive/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`.
         true
     }
 
@@ -92,7 +92,7 @@ impl Rule for PreferPipeOperator {
         // mirrors the typed-pipeline gate at the warning-emit path
         // for rules that opt in here, so `--fix` reaches a fixpoint
         // for this rule. See
-        // `docs/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
+        // `docs/archive/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
         true
     }
 
@@ -107,7 +107,7 @@ impl Rule for PreferPipeOperator {
             // cannot produce inside its call-expression-only replacement
             // span. Drop the autofix; the `check()` warning still fires
             // so the user can rewrite manually. See Finding 3b at
-            // `docs/investigations/prefer_pipe_autofix_output_diagnosis.md`.
+            // `docs/archive/investigations/prefer_pipe_autofix_output_diagnosis.md`.
             return None;
         }
         Some(Replacement {
@@ -444,7 +444,7 @@ mod tests {
     fn detects_nested_first_arg_chain() {
         // The source-text walker proposes the pipe rewrite; the CLI
         // driver's Path 1B gate (see
-        // `docs/investigations/redundant_linearity_autofix_architecture.md`)
+        // `docs/archive/investigations/redundant_linearity_autofix_architecture.md`)
         // verifies safety before writing. The unit test pins the local
         // proposal shape only.
         let src = "def f(x: f32) -> f32 = outer(inner(x), scale)\n";
@@ -510,7 +510,7 @@ mod tests {
         // so the trigger drops the candidate. The CLI driver further
         // suppresses warnings whose autofix is rejected by the
         // typed-pipeline gate via `check_mirrors_fix`. See
-        // `docs/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
+        // `docs/archive/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
         let src = "def f(x: f32) -> f32 = sigmoid(relu(neg(x)))\n";
         let violations = PreferPipeOperator.check(&ctx(src));
         assert!(

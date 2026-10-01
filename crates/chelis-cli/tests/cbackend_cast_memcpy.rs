@@ -10,7 +10,7 @@
 //! precision. Result: `cast(tensor[f32], f64)` produces output bytes that
 //! are the f32 bit pattern reinterpreted as f64 -- silent data corruption.
 //!
-//! Diagnosis: `docs/investigations/cbackend_cast_memcpy_diagnosis.md`.
+//! Diagnosis: `docs/archive/investigations/cbackend_cast_memcpy_diagnosis.md`.
 //!
 //! Each test:
 //!   1. Writes a tiny `.ch` program that casts a typed-parameter tensor.

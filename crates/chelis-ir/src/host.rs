@@ -10712,7 +10712,7 @@ fn lower_tuple_get_host_expr(
 // ---------------------------------------------------------------------------
 // Host-lane scalar forward-mode AD (chelis#405).
 //
-// Per `spec/design/phase5_host_scalar_ad.md`, the locked design is
+// Per `spec/design/archive/phase5_host_scalar_ad.md`, the locked design is
 // forward-mode dual numbers. A scalar function `f: f32 -> f32` (or
 // multi-scalar-param) that lands in the host lane has no reverse-mode
 // transform, so `grad(f, wrt=p)(args)` previously rejected with the

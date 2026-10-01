@@ -24,7 +24,7 @@
 //! `grad(f, ...)`-app args as borrows fixes Shape B at the linearity
 //! level.
 //!
-//! See `docs/investigations/implicit_copy_fanout_v3_diagnosis.md` for
+//! See `docs/archive/investigations/implicit_copy_fanout_v3_diagnosis.md` for
 //! the diagnosis and chosen fix sites.
 
 use chelis_ir::dag::Dag;

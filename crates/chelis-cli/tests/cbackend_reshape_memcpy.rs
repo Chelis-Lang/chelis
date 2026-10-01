@@ -1,7 +1,7 @@
 //! C-backend host reshape helper precision-preservation pin.
 //!
 //! CBackend-ReshapeMemcpy (sibling-sweep finding from PR #64,
-//! `docs/investigations/cbackend_cast_memcpy_diagnosis.md` section
+//! `docs/archive/investigations/cbackend_cast_memcpy_diagnosis.md` section
 //! "Sibling sweep"). The host-side reshape helper at
 //! `crates/chelis-backend-c/src/host_emit.rs::append_tensor_reshape_helper`
 //! (around line 276) emits a `memcpy(out, in, n * sizeof(float))` that
@@ -11,7 +11,7 @@
 //! halves of each element are left zero-initialised; the lower halves
 //! hold half of the source element bits.
 //!
-//! Diagnosis: `docs/investigations/cbackend_reshape_memcpy_diagnosis.md`.
+//! Diagnosis: `docs/archive/investigations/cbackend_reshape_memcpy_diagnosis.md`.
 //!
 //! Each fixture:
 //!   1. Writes a minimal `.ch` program whose only operation is a

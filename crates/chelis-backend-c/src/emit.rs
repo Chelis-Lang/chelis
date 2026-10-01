@@ -8752,7 +8752,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     // implementation issued a `memcpy(dst, src, n * sizeof(float))` and was
     // wrong on every cross-precision arm (f32<->f64, f32<->i32,
     // i32<->i64, ...). See
-    // `docs/investigations/cbackend_cast_memcpy_diagnosis.md`. The host
+    // `docs/archive/investigations/cbackend_cast_memcpy_diagnosis.md`. The host
     // runtime parallel was fixed in PR #59
     // (`crates/chelis-compiler-api/src/runtime/host_ops.rs::cast_tensor_value` /
     // `convert_scalar_data`); this site mirrors those semantics in emitted
@@ -9832,7 +9832,7 @@ mod tests {
         // CBackend-CastMemcpy fix: cast no longer emits a bit-preserving
         // `memcpy`. The new shape is a strided element-wise loop with a
         // typed source read and C-level target conversion.
-        // See `docs/investigations/cbackend_cast_memcpy_diagnosis.md`.
+        // See `docs/archive/investigations/cbackend_cast_memcpy_diagnosis.md`.
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let a = dag.add_node(

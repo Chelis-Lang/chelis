@@ -5,7 +5,7 @@
 //! # Status: experimental
 //!
 //! As of V1 **no production codec consumes this entry point**. The survey
-//! (`spec/design/opaque_invariants_survey.md` §7) established -- and W5
+//! (`spec/design/archive/opaque_invariants_survey.md` §7) established -- and W5
 //! re-confirmed by direct inspection of [`crate::schema`] -- that no
 //! external-payload path materializes a typed ADT value today:
 //! `EvalRequest.bindings` is tensors-only, `ExecutionValue::Adt` is an

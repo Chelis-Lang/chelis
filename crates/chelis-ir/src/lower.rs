@@ -377,7 +377,7 @@ fn unsupported_lowering_message(tag: &str) -> String {
 /// If `expr` is exactly `(var {} name)`, return the symbol name. Used by
 /// `lower_pipe` to detect bare-var pipe stages that should be lowered as
 /// unary applications (Item 2c — see
-/// `docs/investigations/c_backend_grad_piped_body_diagnosis.md`).
+/// `docs/archive/investigations/c_backend_grad_piped_body_diagnosis.md`).
 fn bare_var_name(expr: &Expr) -> Option<String> {
     let kids = match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Var, _, children) => children,
@@ -7329,7 +7329,7 @@ struct LowerCtx<'program> {
     /// unresolvable name (`None`). Populated by `lower_fn` when a `t-fn`
     /// param is registered; saved/restored across nested `fn` scopes
     /// alongside `bindings` and `local_callables`. See
-    /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
+    /// `docs/archive/investigations/pipe_fn_param_stage_diagnosis.md`.
     fn_typed_params: UnordSet<String>,
     /// Dataflow-local completeness evidence for unresolved callable
     /// applications. Grad subcontexts record a fresh result marker for each
@@ -11207,7 +11207,7 @@ impl<'program> LowerCtx<'program> {
         // `outer(doubler, seed)` where `outer(f, x) = f(f(x))` — the
         // inner `f(x)` runs as an argument to the outer `f`, not as
         // part of the outer body, and must not trip the guard. See
-        // `docs/investigations/inlining_names_recursion_guard_diagnosis.md`.
+        // `docs/archive/investigations/inlining_names_recursion_guard_diagnosis.md`.
         let inlining_name = callable_ref_name(func).filter(|name| {
             self.local_callables.contains_key(name) || self.program_defs.contains_key(name)
         });
@@ -11362,7 +11362,7 @@ impl<'program> LowerCtx<'program> {
                 // this with the resolved callable via `local_callables`, while
                 // unresolved helper forwarding preserves the parameter until
                 // its eventual application. See
-                // `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
+                // `docs/archive/investigations/pipe_fn_param_stage_diagnosis.md`.
                 // A declaration's body names only top-level callables
                 // (chelis#2588): the current scope's locals and function
                 // parameters are the applying site's, not the declaration's.
@@ -12561,7 +12561,7 @@ impl<'program> LowerCtx<'program> {
         // pruning cannot bound (the pre-#620 refuse-on-reentry rule
         // instead fell through to `lower_app`'s silently wrong
         // return-last-arg fallback; history in
-        // `docs/investigations/inlining_names_recursion_guard_diagnosis.md`).
+        // `docs/archive/investigations/inlining_names_recursion_guard_diagnosis.md`).
         // Decrements are skipped on raise: every lowering error unwinds
         // through the per-entry `catch_lowering` and the ctx is abandoned.
         self.inlining_active += 1;
