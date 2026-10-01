@@ -1,12 +1,45 @@
 # Chelis
 
-Chelis is a functional language for AI research. It is designed for programs
-such as models, training loops, and learned functions. Surf (`.ch`) is the
-source syntax; Deep (`.dp`) is the compiler's canonical representation.
-
 <p align="center">
-  <img src="assets/mascot/chev.svg" alt="Chev Chelis, the project mascot — a turtle on a mountain bike climbing a hill" width="320"/>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/chelis-banner-dark.svg">
+    <img src="docs/assets/brand/chelis-banner-light.svg" alt="Line drawing of a green sea turtle swimming over kelp" width="100%">
+  </picture>
 </p>
+
+Chelis is a numerical computing language for code that agents write and people
+supervise. Tensors carry named dimensions and precision in their type, and a proof
+stack checks the properties you state.
+
+```chelis
+def portfolio_return(w: tensor[3, f64], r: tensor[3, 1, f64]) -> tensor[f64] = {
+  weighted = mul(w, r)
+  weighted |> sum(0)
+}
+```
+
+In numpy, returns shaped 3 by 1 stretch against three weights into a 3 by 3 grid and
+the sum comes back as a plausible wrong number. `chelis check` rejects the same
+multiply before anything runs:
+
+```json
+{"kind":"DimensionMismatch","message":"tensor rank mismatch: 1 dims vs 2 dims","span_id":"surf:94..103"}
+```
+
+- **Checked before it runs.** The compiler checks shapes, precision, effects, and
+  ownership. Dimensions match by name, `f32` and `f64` do not mix without a `cast`,
+  and randomness and I/O appear in a function's type.
+- **An agent in the loop.** `chelis check` answers in JSON with the error kind and
+  source span, and the same input always gets the same answer. `chelis tide mcp`
+  gives an agent check, eval, prove, and structural edits as MCP tools.
+- **Properties you can review.** `chelis prove` checks `@property` declarations with
+  an SMT solver, bound propagation, or seeded sampling, and each result names the
+  method behind it. Hull, a second checker written in Chelis, cross-checks the
+  compiler, and the core semantics are mechanized in Lean 4.
+- **General-purpose numerics.** Surf (`.ch`) is the readable syntax; Deep (`.dp`) is
+  the canonical form the compiler and agents use. Programs build to C. Shells,
+  installed with Reef, cover numerical methods (Nautilus), dataframes (Coral), and
+  quantitative finance (Shoals).
 
 ## Install a release toolchain
 
@@ -33,17 +66,13 @@ explains the project workflow.
 
 ## Start here
 
-- [Chelis Guide](docs/book/src/README.md): first program, language reference,
-  CLI, packages, and backends.
+- [User book](docs/book/src/README.md): first program, CLI, properties, and Reef.
 - [Examples](examples/): executable Chelis programs.
+- [Language spec](spec/00-context.md) and the
+  [canonical project reference](spec/design/chelis_canonical_reference.md).
 - [Architecture](ARCHITECTURE.md): compiler, evaluator, and code generation.
-- [Contributor setup](docs/contributor_setup.md) and [contribution guide](CONTRIBUTING.md):
-  build from source and prepare a change.
-- [Language specifications](spec/00-context.md): the detailed contracts for
-  syntax, types, operations, and targets.
-
-The toolchain bundles the `chelis-std` library and the native runtime used by
-generated code. Reef manages project dependencies.
+- [Contributor setup](docs/contributor_setup.md), the
+  [contribution guide](CONTRIBUTING.md), and the [agent contract](AGENTS.md).
 
 ## License
 

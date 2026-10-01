@@ -416,7 +416,7 @@ fn malformed_dp_forms_score_below_one() {
 /// `chelis build` then refused to lower, citing [05-UNS-1] / chelis#730:
 /// unhandled or malformed forms cannot become Unit or another value. That is
 /// a false 1.0 on the output spec/04-type-system.md §10 designates as the
-/// training signal.
+/// agent feedback.
 #[test]
 fn bare_atom_expression_position_scores_below_one() {
     let wrap_body = |body: &str| {

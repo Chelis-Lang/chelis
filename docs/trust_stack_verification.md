@@ -161,6 +161,6 @@ The three-tier architecture is demonstrated across six domains:
 is the specification; the three-tier dispatcher discharges what it can; the rest
 gets statistical validation. The audit trail is mechanical.
 
-This is evidence that the architecture is general-purpose, not domain-bespoke.
-The OOPSLA contribution claim is a generalization: "the same architecture
-verifies properties across six domains with different compliance regimes."
+This is evidence that the architecture is general-purpose, not domain-bespoke:
+the same architecture verifies properties across six domains with different
+compliance regimes.

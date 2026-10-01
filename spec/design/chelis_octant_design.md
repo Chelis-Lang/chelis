@@ -398,10 +398,7 @@ deferrals, infrastructure decisions) live in `phase3n_octant.md`.
 2. **How does LLM-assisted lowering integrate?** The coding model needs to see
    the SymExpr AST and produce Deep. This could be: (a) a `SKILL.md`-style
    prompt with the SymExpr as context, (b) a fine-tuned model that maps
-   SymExpr → Deep directly, (c) an MCP server that the notebook calls. The
-   ICLR paper's coding-model work (SSD → SDFT → RLVR pipeline) is relevant
-   here — the same pipeline that teaches LLMs to write Chelis could teach them
-   to lower SymExpr to Deep.
+   SymExpr → Deep directly, (c) an MCP server that the notebook calls.
 
 3. **Is Octant a reef package or a separate tool?** The parser and AST are
    library code (reef package). The notebook is an application. These might be
@@ -415,9 +412,6 @@ deferrals, infrastructure decisions) live in `phase3n_octant.md`.
    increases the addressable workflow. Defer unless a specific customer
    workflow requires it.
 
-5. **Interaction with the POPL paper.** The provenance annotations and type
-   overlays are a practical application of λ-CT's type safety guarantees. "The
-   type system proves your implementation matches your formula" is a strong
-   narrative for both the paper and the product. But the paper is pure theory
-   (Lean mechanization); Octant is a practical tool. Keep them separate —
-   Octant cites the paper's guarantees, the paper does not mention Octant.
+5. **Interaction with the Lean mechanization.** The provenance annotations and type
+   overlays apply the type system's guarantees to a formula. Octant cites those
+   guarantees; the mechanization does not depend on Octant.

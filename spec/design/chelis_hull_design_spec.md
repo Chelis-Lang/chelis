@@ -3,7 +3,7 @@
 **Shell name:** Hull (`chelis-lang/hull`)
 **Marine rationale:** The hull defines the shape of the vessel. The spec defines the shape of the language.
 **Depends on:** `chelis-std` (required). No other shells.
-**Status:** Stub (Hull itself is not yet built). Phase 4/5 item. Prerequisite state as of v0.7.19: the Deep parser is shipped (Phase 0b), the `chelis prove` / property-runner infrastructure Hull's generator reuses is shipped (v0.7.1), and the scalar/string foundation the Deep parser needs is shipped. The LaCaDiLE typing rules are stabilizing (the in-repo `proof/lean/LaCaDiLE` mechanization is partial; the full effort is OOPSLA-targeted). The remaining hard gate is freezing the final typing-rule set so Hull's reference checker has a stable target.
+**Status:** Stub (Hull itself is not yet built). Phase 4/5 item. Prerequisite state as of v0.7.19: the Deep parser is shipped (Phase 0b), the `chelis prove` / property-runner infrastructure Hull's generator reuses is shipped (v0.7.1), and the scalar/string foundation the Deep parser needs is shipped. The LaCaDiLE typing rules are stabilizing (the in-repo `proof/lean/LaCaDiLE` mechanization is partial). The remaining hard gate is freezing the final typing-rule set so Hull's reference checker has a stable target.
 
 ---
 
@@ -153,7 +153,7 @@ onto existing `EApp` / `ELit` / `EIf` forms.
 
 ## 3. Reference Type Checker - `Hull.Typing`
 
-Each function implements one or more typing rules from the LaCaDiLE paper. The function names correspond to rule names. Comments cite the paper section and figure.
+Each function implements one or more LaCaDiLE typing rules. The function names correspond to rule names. Comments cite the rule in the Lean development.
 
 ```chelis
 -- Main entry point: type-check an expression in a context
@@ -407,7 +407,7 @@ def check_unary_tensor_op(ctx: Ctx, e1: Expr) -> Option[(Type, EffectRow)] = {
 }
 ```
 
-Each pattern-match arm in `type_check` implements exactly one typing rule. A reviewer can read the function and check it against the paper's Figure 4 line by line. The code IS the specification.
+Each pattern-match arm in `type_check` implements exactly one typing rule. A reviewer can read the function and check it against the LaCaDiLE typing rules line by line. The code IS the specification.
 
 ### 3.1 v0.1.0 supported fragment
 
@@ -1548,7 +1548,7 @@ holds once they ship.
 
 | Prerequisite | Status | Why Hull needs it |
 |---|---|---|
-| LaCaDiLE typing rules finalized | Stabilizing (in-repo `proof/lean/LaCaDiLE` partial, OOPSLA-targeted). **Honest scope:** the rules for the v0.1.0 *supported fragment* (§3.1) — the `AdjointSupported` boundary plus the non-AD core — are stable enough to target; the linearity / Δ-capability and effect-handling rules are **not yet frozen**, which is why those constructs are out of the v0.1.0 fragment. | Hull implements these rules - they must be stable |
+| LaCaDiLE typing rules finalized | Stabilizing (in-repo `proof/lean/LaCaDiLE` partial). **Honest scope:** the rules for the v0.1.0 *supported fragment* (§3.1) — the `AdjointSupported` boundary plus the non-AD core — are stable enough to target; the linearity / Δ-capability and effect-handling rules are **not yet frozen**, which is why those constructs are out of the v0.1.0 fragment. | Hull implements these rules - they must be stable |
 | Deep syntax stable | Shipped/stable (Deep parser shipped Phase 0b; tag vocabulary in `spec/03-deep-syntax.md`) | Hull parses Deep - the grammar must not change |
 | ADTs + pattern matching in Chelis | Shipped | Hull's entire data model is ADTs |
 | Option type + `?` operator | Shipped | Hull returns `Option` from every check |
@@ -1558,7 +1558,7 @@ holds once they ship.
 | `chelis eval --json` | **In-flight** (no `--json` on `eval` as of v0.7.19) | Machine-readable values for eval-agreement (§6) |
 | Structured `chelis check --json` | **In-flight** (no `--json` on `check` as of v0.7.19) | Machine-readable type + effect row for check-agreement (§6) |
 
-**Timing:** Phase 4 or Phase 5. Not before the language-spec paper (OOPSLA-targeted) finalizes the linearity / Δ-capability rules and the ICLR pipeline establishes the AI training loop. The mechanical prerequisites for the v0.1.0 *supported fragment* are met (Deep parser, ADTs + pattern matching, `Option`/`?`, string foundation, `chelis prove`); the remaining work is the three in-flight monorepo enablement deps above (`process_run`, `eval --json`, structured `check --json`) and freezing the linearity / effect-handling rules that the out-of-fragment constructs need. Hull's value increases as the language stabilizes - building the full checker while those rules are still changing means constant maintenance, so v0.1.0 deliberately scopes to the already-stable fragment and prevents regression there.
+**Timing:** Phase 4 or Phase 5. Not before the linearity / Δ-capability rules are finalized. The mechanical prerequisites for the v0.1.0 *supported fragment* are met (Deep parser, ADTs + pattern matching, `Option`/`?`, string foundation, `chelis prove`); the remaining work is the three in-flight monorepo enablement deps above (`process_run`, `eval --json`, structured `check --json`) and freezing the linearity / effect-handling rules that the out-of-fragment constructs need. Hull's value increases as the language stabilizes - building the full checker while those rules are still changing means constant maintenance, so v0.1.0 deliberately scopes to the already-stable fragment and prevents regression there.
 
 ---
 
@@ -1567,7 +1567,7 @@ holds once they ship.
 Hull v0.1.0 is complete when the following concrete numbers and mechanisms hold:
 
 1. Every typing rule in the v0.1.0 supported fragment (§3.1) has a corresponding match
-   arm in `Hull.Typing.type_check`, annotated with the rule name and paper reference, and
+   arm in `Hull.Typing.type_check`, annotated with the rule name, and
    `scripts/coverage_report.py` shows every such arm is exercised by ≥ 1 generation
    strategy (§7.1).
 

@@ -9,7 +9,8 @@ and current status.
 - May compiler gap reports: [findings](reports/identified_gaps.md), [synthesis](reports/gap_synthesis.md), and [closure analysis](reports/initial_gap_report_closure_analysis.md).
 - Historical plans: [July execution](chelis_plan_execution.md) and [completed maintenance schedule](maintenance_schedule.md); current sequence is in [`chelis_project_plan.md`](../../spec/design/chelis_project_plan.md).
 - [Phase 1e benchmark capture](perf/phase1e/RESULTS.md) — point-in-time comparison.
+- [Retired mascot](mascot/README.md): replaced by the line art in [`docs/assets/brand/`](../assets/brand/).
 
 Other archives: `perf/` (dated performance reports), `rca/` (incident analysis),
-`red-team/` (review records), `reports/` (one-off reports), and `snapshots/`
-(repository archaeology).
+`red-team/` (review records), `reports/` (one-off reports), `snapshots/`
+(repository archaeology), and `mascot/` (retired art).

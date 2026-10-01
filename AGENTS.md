@@ -9,14 +9,18 @@ not drift.
 
 ## What Chelis Is
 
-Chelis is a functional language for AI research, built for a workflow where a coding
-agent is the primary author and a human is the supervisor, and where the programs are
-themselves AI systems: models, training loops, search spaces, learned functions. The
-bet is that a type system, representation, and compilation model designed around AI
-primitives from the start beat ones bolted onto Python or a systems language later. It
-is not a general-purpose language, a systems language, a web framework, or a Python
-replacement. `spec/00-context.md` and `spec/design/chelis_canonical_reference.md` own
-the full statement; their specifics may lag, their intent does not. When a tradeoff
+Chelis is a numerical computing language for code that agents write and people
+supervise. Tensors carry named dimensions and precision in their type; the compiler
+checks shapes, precision, effects, and ownership before anything runs, and `chelis
+prove` checks the properties an author states, naming the method behind each result.
+The bet is that numerical code an agent can reason about, and a person can review
+through its types and properties, beats code whose mistakes first surface at run time.
+Chelis is general purpose within numerical computing; the worked examples come from
+quantitative finance. Differentiation and machine-learning programs are research
+directions, not the definition of the language. It is not a systems language, a web
+framework, a deep-learning framework, or a general scripting replacement for Python.
+`spec/00-context.md` and `spec/design/chelis_canonical_reference.md` own the full
+statement; their specifics may lag, their intent does not. When a tradeoff
 appears, apply these in order:
 
 1. **Unambiguity over ergonomics.** The author is an agent. The friction a human feels

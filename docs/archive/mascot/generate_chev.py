@@ -3,8 +3,8 @@
 Generate the Chev Chelis mascot SVG.
 
 Usage:
-    python3 assets/mascot/generate_chev.py
-    python3 assets/mascot/generate_chev.py -o out.svg
+    python3 docs/archive/mascot/generate_chev.py
+    python3 docs/archive/mascot/generate_chev.py -o out.svg
 """
 from __future__ import annotations
 import argparse

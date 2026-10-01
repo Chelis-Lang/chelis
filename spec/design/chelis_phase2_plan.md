@@ -765,8 +765,8 @@ without introducing a background daemon or `salsa`.
 - Output pane: compile preview and evaluator output
 
 **Flagship feature: Surf <-> Deep live toggle.** The programmer writes in Surf and sees
-the AI's representation in Deep in real time. No other language has this. It makes the
-"written by AIs, for AIs" thesis concrete and visible.
+the agent-facing representation in Deep in real time, so a supervisor reads exactly the
+form an agent writes.
 
 ### Implementation Plan
 

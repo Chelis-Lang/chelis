@@ -2,8 +2,10 @@
 
 ## Overview
 
-Build the Chelis programming language from zero to MNIST-on-CPU and beyond.
-This plan is written for a small team working with coding agents.
+Build Chelis, a numerical computing language for code that agents write and people
+supervise (see `spec/design/chelis_canonical_reference.md` §1). The early phases used
+MNIST-on-CPU as an end-to-end milestone; the language's scope is numerical computing
+generally. This plan is written for a small team working with coding agents.
 Each phase has a concrete deliverable, verification target, and red-team checkpoint.
 
 Phase 0 provides the language and CPU foundation. Phase 1 provides the HIP
@@ -32,7 +34,7 @@ below.
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | HIP backend and validator available; [target gates](../../docs/phase_oracles.md) |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
 | **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, file I/O, CSV/JSON, `Std.Time`/`Std.Decimal`, SKILL.md v2 |  |
-| **4** | ML & AI coding: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
+| **4** | Agent coding research: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
 | **5** | Advanced backends + research: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU, sparse tensors, complex numbers, research type features, Lean formalization |  |
 
 **Red team checkpoints** after: 0a, 0d, 0h, and each major phase.
@@ -759,8 +761,7 @@ but no Phase 3 sub-phase implements them.
   Chelis functions over an ADT representation of the Deep AST. The grammar becomes ADTs
   (`type Expr = Var(String) | App(Expr, Expr) | Add(Expr, Expr) | ...`). The typing
   rules become a reference type checker (`type_check(ctx, expr) -> Option[(Type,
-  List[Effect])]`) where each pattern-match arm corresponds to one typing rule from the
-  paper. The reduction rules become a step function (`step(expr) -> Option[Expr]`).
+  List[Effect])]`) where each pattern-match arm corresponds to one LaCaDiLE typing rule. The reduction rules become a step function (`step(expr) -> Option[Expr]`).
   Because Deep is homoiconic (programs are data), Hull consumes actual Chelis programs
   parsed from Deep source strings — no translation layer and no bridge to an external
   tool.
@@ -870,9 +871,9 @@ Phase 3 success condition:
 
 **Prerequisite:** Phase 2 complete and the remaining Phase 3 language-completeness work
 through `3h`, `3m`, `3g`, `3i`, `3j-pre`, `3j`, `3k`, `3l`, and `3f` complete.
-**Deliverable:** Chelis ships with a local coding model as standard tooling and a
-reproducible benchmark proving the "designed for LLMs" thesis. The turtle carries its
-home.
+**Deliverable:** research results on agent coding: a reproducible benchmark comparing
+agent-written Chelis with agent-written Python on equivalent tasks, and a measured
+answer to whether a local coding model trained on Deep is worth shipping.
 
 ### Pre-Phase 4 Investments
 
@@ -1021,9 +1022,6 @@ training data gap.
 **Dual purpose:** ChelisBench is both a measurement tool AND a trajectory source for
 Phase 4c. Every benchmark run produces model-generated programs with compiler feedback —
 usable as training data.
-
-**Publication target:** Workshop paper or blog post. "ChelisBench: Do LLMs Write Better
-ML Code in a Language Designed for Them?"
 
 ### 4e: Local Coding Model Training
 
@@ -1227,8 +1225,8 @@ Native `complex64` / `complex128` tensor dtypes with correct AD (Wirtinger deriv
 
 ### 5g: Research Type Features
 
-Moved from Phase 3. Publication-grade type system extensions — each should be a paper
-before it's an implementation.
+Moved from Phase 3. Research type system extensions; each needs a written design before
+it gets an implementation.
 
 - **Rank polymorphism via ILP elaboration:** AUTOMAP-style, insert `expand` operations
   during type inference via integer linear programming.
@@ -1237,8 +1235,7 @@ before it's an implementation.
   coercion fallback.
 - **Distribution types:** For probabilistic models.
   `Distribution(Normal, {mean: tensor, std: tensor})`. Sampling takes an explicit key.
-- **Equivariance constraints:** Track symmetry groups through composition. Most
-  novel/publishable.
+- **Equivariance constraints:** Track symmetry groups through composition.
 - **Optimization properties:** `@convex`, `@lipschitz(1.0)`. Trusted annotations
   initially.
 - **Inference as a typed effect:** LLM calls as a typed, mockable algebraic effect
@@ -1247,7 +1244,7 @@ before it's an implementation.
 ### 5h: Mechanized Type System (Lean 4)
 
 Moved from Phase 3. Formalize Chelis's core type system in Lean 4. Prove type soundness.
-Publication target: POPL/ICFP/PLDI. The Lean formalization doubles as an executable
+The Lean formalization doubles as an executable
 reference type checker — the ultimate conformance oracle.
 
 ---
@@ -1452,7 +1449,7 @@ To keep a future `salsa` migration mechanical rather than conceptual:
 
 - **Level 1 (small, ship with next codegen pass):** `restrict` pointer annotations on all tensor parameters (leverages linearity — the type system proves no aliasing, justifying `restrict`), `const` on input pointers, aligned allocation in the runtime, compiler-appropriate SIMD pragmas (`#pragma omp simd` for gcc, `#pragma clang loop vectorize(enable)` for Apple clang). Unlocks auto-vectorization on loops currently skipped due to aliasing.
 - **Level 2 (medium, when profiling shows need):** Hand-written SIMD reduction kernels in the runtime (`sum`, `max`, `min`, `argmax`, `argmin`). AVX2 implementations for x86, NEON for ARM, scalar fallback. Reductions are where auto-vectorization is weakest.
-- **Level 3 (medium, before OOPSLA benchmarks):** Vectorized math library integration. Sleef on Linux (both x86 and ARM), Accelerate vForce on macOS (already linked). The emitter maps math ops in fused kernels to SIMD-width library functions (`expf` → `Sleef_expf8_u10` on AVX2, `vvexpf` via Accelerate on Mac). Highest impact: 3-5x additional speedup on math-heavy kernels (erf, normal_cdf) on top of existing fusion wins.
+- **Level 3 (medium, when benchmarks show math-heavy kernels dominate):** Vectorized math library integration. Sleef on Linux (both x86 and ARM), Accelerate vForce on macOS (already linked). The emitter maps math ops in fused kernels to SIMD-width library functions (`expf` → `Sleef_expf8_u10` on AVX2, `vvexpf` via Accelerate on Mac). Highest impact: 3-5x additional speedup on math-heavy kernels (erf, normal_cdf) on top of existing fusion wins.
 - **Level 4 (large, only if Levels 1-3 leave gaps):** Full SIMD-width-aware codegen as a parallel emit path. Diminishing returns if Level 3 handles math functions. Record as future option.
 
 ---

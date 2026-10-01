@@ -8,7 +8,7 @@ Phases `3b` and `3b-ii` shipped Python interop, safetensors, and direct executio
 Phase `3e` shipped the pipe-first public Surf idiom.
 
 At the start of Phase 3, Chelis still depended on Python for every non-tensor part of a
-real AI program. It could define a transformer forward pass and compute gradients, but
+real numerical program. It could define a transformer forward pass and compute gradients, but
 it still could not:
 
 - represent first-class scalar integers/floats/bools outside tensors
@@ -213,7 +213,7 @@ required for preprocessing and dataset plumbing.
 
 ### Why This Matters
 
-Real AI programs need to represent:
+Real numerical programs need to represent:
 
 - lists of token ids
 - lists of sentences with different lengths
@@ -460,7 +460,7 @@ Manual HIP mirror gate:
 
 **Status:** shipped.
 
-**Goal:** Chelis can read files and parse CSV and JSON data for AI research programs.
+**Goal:** Chelis can read files and parse CSV and JSON data for numerical programs.
 
 ### Why This Matters
 
@@ -1679,13 +1679,10 @@ Implementation: standard library functions in `Std.Test` (or documented patterns
 SKILL.md if the functions are trivial). Not a compiler change — library code plus
 documentation.
 
-### Post-POPL: Typing Rules in Documentation
+### Typing Rules in Documentation
 
-After the LaCaDiLE POPL paper is submitted and the typing rules are finalized, publish
-them as a reference appendix in the Chelis mdBook. Users can look up the precise rule
-for any construct. This falls out naturally from the POPL paper — the typing-rule
-figures are already typeset in LaTeX and can be rendered in the book. Not a separate
-work item; just a "copy the figures into the docs" step after submission.
+Once the LaCaDiLE typing rules are finalized, publish them as a reference appendix in
+the Chelis mdBook so users can look up the precise rule for any construct.
 
 ### Acceptance Oracle
 

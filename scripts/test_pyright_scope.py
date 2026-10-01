@@ -16,7 +16,7 @@ import check_pyright_scope as scope
 
 EXPECTED_INCLUDES = {
     ".github/scripts",
-    "assets/mascot",
+    "docs/archive/mascot",
     "bindings/python",
     "crates/chelis-cli/tests/fixtures/pseudo_nautilus/parity",
     "docs/investigations/ci_diet_2026_09",

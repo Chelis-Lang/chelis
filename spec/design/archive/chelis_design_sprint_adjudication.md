@@ -30,7 +30,7 @@ Both agents independently chose **explicit `app` for function application**, con
 - The tag set is closed — the parser CAN distinguish tags from function names without `app`.
 - More natural for humans inspecting Deep output.
 
-**Ruling: Accept explicit `app`/`var`/`lit`.** The thesis is "written by AIs, for AIs." The verbosity cost is real (~3-5x more tokens per expression) but acceptable because: (a) Deep is not meant for human authoring, (b) the regularity radically simplifies structural manipulation (mutation, crossover, code analysis), (c) AI context windows are large and getting larger, (d) the `.chb` binary format compresses the verbosity away for storage/transfer. **This reverses the earlier steering correction to the coding agent. The Phase 0c desugaring table must be updated.**
+**Ruling: Accept explicit `app`/`var`/`lit`.** Deep is written by agents. The verbosity cost is real (~3-5x more tokens per expression) but acceptable because: (a) Deep is not meant for human authoring, (b) the regularity radically simplifies structural manipulation (mutation, crossover, code analysis), (c) AI context windows are large and getting larger, (d) the `.chb` binary format compresses the verbosity away for storage/transfer. **This reverses the earlier steering correction to the coding agent. The Phase 0c desugaring table must be updated.**
 
 ---
 
