@@ -489,19 +489,21 @@ def nanos_of(value: tuple[int, int]) -> int:
     return value[0] * NANOS_PER_SECOND + value[1]
 
 
-def make_duration(total_nanos: int, function: str) -> tuple[int, int]:
+def make_duration(total_nanos: int, function: str, kind: str = "overflow") -> tuple[int, int]:
+    """§5's coverage rule: arithmetic that leaves the type is `overflow`; arguments that
+    denote no duration (the constructors) are `domain`."""
     second, nano = split_nanos(total_nanos)
     if not fits_i64(second):
-        raise overflow(function, f"a duration of {total_nanos} ns does not fit")
+        raise DatetimeError(function, kind, f"a duration of {total_nanos} ns does not fit")
     return second, nano
 
 
 def duration(second: int, nanosecond: int, function: str = "duration") -> tuple[int, int]:
-    return make_duration(second * NANOS_PER_SECOND + nanosecond, function)
+    return make_duration(second * NANOS_PER_SECOND + nanosecond, function, "domain")
 
 
 def duration_from_count(count: int, unit: str, function: str = "duration_from_count") -> tuple[int, int]:
-    return make_duration(count * TIME_UNIT_NANOS[unit], function)
+    return make_duration(count * TIME_UNIT_NANOS[unit], function, "domain")
 
 
 def count_in_unit(total_nanos: int, unit: str, rounding: str, function: str) -> int:

@@ -312,8 +312,9 @@ class DurationsAndPeriods(unittest.TestCase):
         self.assertEqual(ref.duration(-1, -500_000_000), (-2, 500_000_000))
         self.assertEqual(ref.duration(0, -1), (-1, 999_999_999))
         self.assertEqual(ref.duration(I64_MIN, 0), (I64_MIN, 0))
-        self.assertEqual(failure(lambda: ref.duration(I64_MAX, 1_000_000_000)).kind, "overflow")
-        self.assertEqual(failure(lambda: ref.duration(I64_MIN, -1)).kind, "overflow")
+        # The constructor's arguments denote no duration: `domain` by §5's coverage rule.
+        self.assertEqual(failure(lambda: ref.duration(I64_MAX, 1_000_000_000)).kind, "domain")
+        self.assertEqual(failure(lambda: ref.duration(I64_MIN, -1)).kind, "domain")
 
     def test_negate_fails_only_at_the_minimum(self) -> None:
         self.assertEqual(ref.duration_negate((I64_MIN, 1)), (I64_MAX, 999_999_999))
@@ -330,7 +331,9 @@ class DurationsAndPeriods(unittest.TestCase):
         self.assertEqual(failure(lambda: ref.duration_to_count((I64_MAX, 0), "Nanoseconds", "RoundTowardZero")).kind, "overflow")
         self.assertIsNone(ref.try_duration_to_count((I64_MAX, 0), "Nanoseconds", "RoundTowardZero"))
         self.assertEqual(ref.try_duration_to_count((1, 0), "Milliseconds", "RoundTowardZero"), 1000)
-        self.assertEqual(failure(lambda: ref.duration_from_count(I64_MAX, "Hours")).kind, "overflow")
+        self.assertEqual(failure(lambda: ref.duration_from_count(I64_MAX, "Hours")).kind, "domain")
+        # Arithmetic on durations is `overflow`.
+        self.assertEqual(failure(lambda: ref.duration_add((I64_MAX, 0), (1, 0))).kind, "overflow")
 
     def test_seconds_f64_is_within_one_ulp_when_the_whole_part_is_below_2_53(self) -> None:
         rng = random.Random(3)
