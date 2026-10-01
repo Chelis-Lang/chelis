@@ -146,6 +146,8 @@ active Devenv shell unless the command itself tests shell entry.
 | Manual gate | Documented command | Prerequisite | Owner |
 |---|---|---|---|
 | Keyed-draw effect check | `cargo run -q -p chelis-cli -- check $tmpdir/keyless_draw.ch` then `... keyed_draw.ch`, where the first holds `y = dropout(to_tensor([1.0f32, 1.0f32]), 0.5f32)` and the second `y = dropout(key_from_seed(42i64), to_tensor([1.0f32, 1.0f32]), 0.5f32)` | None beyond default toolchain; expected: first check reports `ArityMismatch` for the keyless draw, second reports score 1 with no errors and no effect | `spec/04-type-system.md` §7.1 |
+| Linearity buffer-reuse check | A hand-written program allocates two large tensors and consumes one to produce another; the compiler accepts it and the runtime does not double-free | None beyond the default toolchain | `spec/04-type-system.md` §8 |
+| Custom macro expansion check | Define a custom `attention(q, k, v)` macro in Surf, expand it, and verify the Deep matches the documented expansion | None beyond the default toolchain | `spec/02-surf-syntax.md` P5b |
 | MCP agent check | Connect an MCP-capable agent to `chelis tide mcp`; have the agent perform documented compiler tasks | MCP-capable agent client | `spec/09-tide.md` §8 |
 | Editor host check | Open a `.ch` file in VS Code with the Chelis extension; observe live diagnostics, hover, Deep toggle, fitness score | VS Code (or Cursor / Windsurf) + Chelis extension installed | `spec/09-tide.md` §9 |
 | `chelis cove` user check | A user (not the developer) runs `cargo run -p chelis-cli -- cove --file examples/mnist.ch`; sees Deep, edits Surf, observes live fitness/diagnostics, triggers compile/eval inside the TUI | None beyond default toolchain | `spec/09-tide.md` §10 |

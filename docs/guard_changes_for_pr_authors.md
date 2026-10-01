@@ -347,7 +347,7 @@ After changing a production `unimplemented_rejection!` citation, regenerate:
 
 Review that the issue is relevant to the missing implementation. PR validation
 is split across existing owners: `script-unit` checks privacy and source-usage
-construction, while the always-running Docs frozen-contract oracle freshly derives
+construction, while the always-running Phase 4B freeze step (`Validate the chelis#729 Phase 4B freeze` in CI) freshly derives
 compiler closure and generated-registry agreement. Neither queries GitHub. The
 scheduled canary checks every source-derived identity and rejects closed,
 missing, or pull-request references; run it manually as well before release or

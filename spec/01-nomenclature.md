@@ -985,11 +985,10 @@ when cleaning existing text:
 
 The blocking `no-em-dash-in-public-strings` rule enforces this for
 Surf, Deep, Rust, and Python string literals that are likely to reach
-users as diagnostics, log messages, or public output. The v1 fixer is
+users as diagnostics, log messages, or public output. The fixer is
 deliberately narrow: `a — b` becomes `a. B`; paired parenthetical
 dashes become commas; whitespace-asymmetric cases require manual
-review. Markdown prose enforcement is queued until the active doc
-corpus is cleaned. Do not add lint exceptions merely to preserve an em
+review. Do not add lint exceptions merely to preserve an em
 dash in current-state docs. This rule does not prohibit syntax or
 notation that is semantically meaningful in a spec, such as `->`, `|>`,
 section references, or mathematical symbols.
@@ -1171,8 +1170,8 @@ explicitly waived in the style guide (e.g., the mdBook exception in
 §8.5).
 
 The lint is the persistent artifact: it prevents drift after a
-cleanup pass. Without the lint, fixing today's outliers does not
-prevent tomorrow's. CI invokes it directly via:
+cleanup pass. Without the lint, fixing existing outliers does not
+prevent new ones. CI invokes it directly via:
 
 ```
 chelis lint --check

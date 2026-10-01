@@ -17,7 +17,7 @@ Every track builds on the language and toolchain the numbered chapters define:
 - the C reference backend and the HIP and Metal GPU backends (chapter 08)
 - Tide: the REPL, the HTTP/JSON compiler service, the MCP server, the language
   server, and the `chelis cove` terminal UI (chapter 09)
-- serialization, the Python FFI, and Reef packages (chapters 10 and 11)
+- serialization and the Python FFI (chapters 10 and 11), and Reef packages (chapter 01 §2.6)
 - `chelis prove` property verification and the bundled `chelis-std` runtime
 
 Language completeness continues inside those chapters. Each chapter states its full

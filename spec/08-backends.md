@@ -360,7 +360,7 @@ A Python smoke harness (`.github/scripts/smoke_macos_metal.py`) drives
 `clang++ -std=c++17 -fobjc-arc -O2 ... -framework Metal -framework Foundation`
 on the emitted `.mm`. The smoke is compile-and-link only:
 `MTLCreateSystemDefaultDevice` may return null on hosted macOS CI machines, so kernel
-dispatch is checked by the device gate of §4.6. The `macos-smoke` job in
+dispatch is checked by the device gate of §4.6. Shard 2 of the `macos-workspace-shard` job in
 `.github/workflows/macos-nightly.yml` runs it.
 
 ### 4.6 GPU correctness and numeric agreement
