@@ -720,7 +720,7 @@ class SummaryTests(unittest.TestCase):
 
     def test_std_path_change_appends_the_std_legs(self):
         rc, summary, launched, out, _err, _lease = self._run_main(
-            ["--fast"], diff="packages/chelis-std/src/time.ch\n"
+            ["--fast"], diff="packages/chelis-std/src/datetime.ch\n"
         )
         self.assertEqual(rc, 0)
         self.assertTrue(summary["git"]["std_changed"])

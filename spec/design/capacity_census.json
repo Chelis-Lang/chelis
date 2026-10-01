@@ -1447,6 +1447,76 @@
     },
     {
       "kind": "std-adt-numeric",
+      "id": "datetime::Date: () (variant {} Date (field {} epoch_day (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime::DateTime: () (variant {} DateTime (field {} epoch_day (t-prim {} i64)) (field {} nanosecond_of_day (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime::Dates: (n) (variant {} Dates (field {} epoch_days (t-tensor {} (d-var {} n) (t-prim {} i64))))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime::Duration: () (variant {} Duration (field {} second (t-prim {} i64)) (field {} nanosecond (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime::Instant: () (variant {} Instant (field {} unix_second (t-prim {} i64)) (field {} nanosecond (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime::Instants: (n) (variant {} Instants (field {} unix_seconds (t-tensor {} (d-var {} n) (t-prim {} i64))) (field {} nanoseconds (t-tensor {} (d-var {} n) (t-prim {} i64))))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime::Offset: () (variant {} Offset (field {} seconds (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime::OffsetDateTime: () (variant {} OffsetDateTime (field {} instant (t-adt {} Instant)) (field {} offset (t-adt {} Offset)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime::Period: () (variant {} Period (field {} months (t-prim {} i64)) (field {} days (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime::Time: () (variant {} Time (field {} nanosecond_of_day (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
       "id": "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} i64)) (field {} scale (t-prim {} i64)))",
       "flags": [
         "numeric-op"
@@ -1457,20 +1527,6 @@
       "id": "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} i64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
       "flags": [
         "float-carrier",
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "std-adt-numeric",
-      "id": "time::Date: () (variant {} Date (field {} year (t-prim {} i64)) (field {} month (t-prim {} i64)) (field {} day (t-prim {} i64)))",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "std-adt-numeric",
-      "id": "time::Duration: () (variant {} Duration (field {} days (t-prim {} i64)) (field {} hours (t-prim {} i64)) (field {} minutes (t-prim {} i64)) (field {} seconds (t-prim {} i64)))",
-      "flags": [
         "numeric-op"
       ]
     },
@@ -1499,6 +1555,826 @@
       "flags": [
         "float-carrier"
       ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_add_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_add_months: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} DayOverflow) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_add_period: (t-fn {} (t-adt {} Date) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} Date))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_day: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_days_until: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_epoch_day: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_from_epoch_day: (t-fn {} (t-prim {} i64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_from_iso_week: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Weekday) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_gt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_gte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_iso_week: (t-fn {} (t-adt {} Date) (t-tuple {} (t-prim {} i64) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_lt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_lte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_month: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_period_until: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-adt {} Period))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_to_string: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_weekday: (t-fn {} (t-adt {} Date) (t-adt {} Weekday))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::date_year: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::dates_epoch_days: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::dates_from_epoch_days: (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-adt {} Dates (t-var {} n)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime: (t-fn {} (t-adt {} Date) (t-adt {} Time) (t-adt {} DateTime))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_add_duration: (t-fn {} (t-adt {} DateTime) (t-adt {} Duration) (t-adt {} DateTime))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_add_period: (t-fn {} (t-adt {} DateTime) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} DateTime))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_date: (t-fn {} (t-adt {} DateTime) (t-adt {} Date))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_gt: (t-fn {} (t-adt {} DateTime) (t-adt {} DateTime) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_gte: (t-fn {} (t-adt {} DateTime) (t-adt {} DateTime) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_lt: (t-fn {} (t-adt {} DateTime) (t-adt {} DateTime) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_lte: (t-fn {} (t-adt {} DateTime) (t-adt {} DateTime) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_time: (t-fn {} (t-adt {} DateTime) (t-adt {} Time))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_to_instant_at: (t-fn {} (t-adt {} DateTime) (t-adt {} Offset) (t-adt {} Instant))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_to_string: (t-fn {} (t-adt {} DateTime) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::datetime_until: (t-fn {} (t-adt {} DateTime) (t-adt {} DateTime) (t-adt {} Duration))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::days_in_month: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::days_in_year: (t-fn {} (t-prim {} i64) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Duration))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_add: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-adt {} Duration))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_from_count: (t-fn {} (t-prim {} i64) (t-adt {} TimeUnit) (t-adt {} Duration))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_gt: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_gte: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_lt: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_lte: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_mul: (t-fn {} (t-adt {} Duration) (t-prim {} i64) (t-adt {} Duration))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_nanosecond: (t-fn {} (t-adt {} Duration) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_negate: (t-fn {} (t-adt {} Duration) (t-adt {} Duration))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_second: (t-fn {} (t-adt {} Duration) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_sub: (t-fn {} (t-adt {} Duration) (t-adt {} Duration) (t-adt {} Duration))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_to_count: (t-fn {} (t-adt {} Duration) (t-adt {} TimeUnit) (t-adt {} Rounding) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_to_seconds_f64: (t-fn {} (t-adt {} Duration) (t-prim {} f64))",
+      "flags": [
+        "float-carrier"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::duration_to_string: (t-fn {} (t-adt {} Duration) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::easter_sunday_gregorian: (t-fn {} (t-prim {} i64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::easter_sunday_orthodox: (t-fn {} (t-prim {} i64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_add_duration: (t-fn {} (t-adt {} Instant) (t-adt {} Duration) (t-adt {} Instant))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_from_unix: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Instant))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_from_unix_count: (t-fn {} (t-prim {} i64) (t-adt {} TimeUnit) (t-adt {} Instant))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_gt: (t-fn {} (t-adt {} Instant) (t-adt {} Instant) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_gte: (t-fn {} (t-adt {} Instant) (t-adt {} Instant) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_lt: (t-fn {} (t-adt {} Instant) (t-adt {} Instant) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_lte: (t-fn {} (t-adt {} Instant) (t-adt {} Instant) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_nanosecond: (t-fn {} (t-adt {} Instant) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_round_to: (t-fn {} (t-adt {} Instant) (t-adt {} Duration) (t-adt {} Rounding) (t-adt {} Instant))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_to_datetime_at: (t-fn {} (t-adt {} Instant) (t-adt {} Offset) (t-adt {} DateTime))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_to_string: (t-fn {} (t-adt {} Instant) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_to_unix_count: (t-fn {} (t-adt {} Instant) (t-adt {} TimeUnit) (t-adt {} Rounding) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_unix_second: (t-fn {} (t-adt {} Instant) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instant_until: (t-fn {} (t-adt {} Instant) (t-adt {} Instant) (t-adt {} Duration))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instants_from_unix: (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-adt {} Instants (t-var {} n)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instants_nanoseconds: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::instants_unix_seconds: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::is_leap_year: (t-fn {} (t-prim {} i64) (t-prim {} bool))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::last_weekday_in_month: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Weekday) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::nth_weekday_in_month: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Weekday) (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::offset_datetime: (t-fn {} (t-adt {} Instant) (t-adt {} Offset) (t-adt {} OffsetDateTime))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::offset_datetime_instant: (t-fn {} (t-adt {} OffsetDateTime) (t-adt {} Instant))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::offset_datetime_local: (t-fn {} (t-adt {} OffsetDateTime) (t-adt {} DateTime))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::offset_datetime_offset: (t-fn {} (t-adt {} OffsetDateTime) (t-adt {} Offset))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::offset_datetime_to_string: (t-fn {} (t-adt {} OffsetDateTime) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::offset_from_seconds: (t-fn {} (t-prim {} i64) (t-adt {} Offset))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::offset_seconds: (t-fn {} (t-adt {} Offset) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::offset_to_string: (t-fn {} (t-adt {} Offset) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::parse_date: (t-fn {} (t-prim {} string) (t-adt {} Date))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::parse_datetime: (t-fn {} (t-prim {} string) (t-adt {} DateTime))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::parse_duration: (t-fn {} (t-prim {} string) (t-adt {} Duration))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::parse_instant: (t-fn {} (t-prim {} string) (t-adt {} Instant))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::parse_offset: (t-fn {} (t-prim {} string) (t-adt {} Offset))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::parse_offset_datetime: (t-fn {} (t-prim {} string) (t-adt {} OffsetDateTime))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::parse_period: (t-fn {} (t-prim {} string) (t-adt {} Period))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::parse_time: (t-fn {} (t-prim {} string) (t-adt {} Time))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::period: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Period))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::period_days: (t-fn {} (t-adt {} Period) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::period_months: (t-fn {} (t-adt {} Period) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::period_mul: (t-fn {} (t-adt {} Period) (t-prim {} i64) (t-adt {} Period))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::period_negate: (t-fn {} (t-adt {} Period) (t-adt {} Period))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::period_to_string: (t-fn {} (t-adt {} Period) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Time))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_add_duration: (t-fn {} (t-adt {} Time) (t-adt {} Duration) (t-tuple {} (t-prim {} i64) (t-adt {} Time)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_from_nanosecond_of_day: (t-fn {} (t-prim {} i64) (t-adt {} Time))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_gt: (t-fn {} (t-adt {} Time) (t-adt {} Time) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_gte: (t-fn {} (t-adt {} Time) (t-adt {} Time) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_hour: (t-fn {} (t-adt {} Time) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_lt: (t-fn {} (t-adt {} Time) (t-adt {} Time) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_lte: (t-fn {} (t-adt {} Time) (t-adt {} Time) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_minute: (t-fn {} (t-adt {} Time) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_nanosecond: (t-fn {} (t-adt {} Time) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_nanosecond_of_day: (t-fn {} (t-adt {} Time) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_second: (t-fn {} (t-adt {} Time) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_to_string: (t-fn {} (t-adt {} Time) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::time_until: (t-fn {} (t-adt {} Time) (t-adt {} Time) (t-adt {} Duration))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_date_add_months: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} DayOverflow) (t-adt {} Option (t-adt {} Date)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_date_add_period: (t-fn {} (t-adt {} Date) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} Option (t-adt {} Date)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_date_from_epoch_day: (t-fn {} (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_date_from_iso_week: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Weekday) (t-adt {} Option (t-adt {} Date)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_dates_from_epoch_days: (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-tuple {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool))))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_datetime_add_period: (t-fn {} (t-adt {} DateTime) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} Option (t-adt {} DateTime)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_duration_to_count: (t-fn {} (t-adt {} Duration) (t-adt {} TimeUnit) (t-adt {} Rounding) (t-adt {} Option (t-prim {} i64)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_instant_from_unix: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Instant)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_instant_from_unix_count: (t-fn {} (t-prim {} i64) (t-adt {} TimeUnit) (t-adt {} Option (t-adt {} Instant)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_instant_to_unix_count: (t-fn {} (t-adt {} Instant) (t-adt {} TimeUnit) (t-adt {} Rounding) (t-adt {} Option (t-prim {} i64)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_instants_from_unix: (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-tensor {} (d-var {} n) (t-prim {} i64)) (t-tuple {} (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool))))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_offset_from_seconds: (t-fn {} (t-prim {} i64) (t-adt {} Option (t-adt {} Offset)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_parse_date: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Date)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_parse_datetime: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} DateTime)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_parse_duration: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Duration)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_parse_instant: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Instant)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_parse_offset: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Offset)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_parse_offset_datetime: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} OffsetDateTime)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_parse_period: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Period)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_parse_time: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Time)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_period: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Period)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_time: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Time)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_time_from_nanosecond_of_day: (t-fn {} (t-prim {} i64) (t-adt {} Option (t-adt {} Time)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::try_weekday_from_iso_number: (t-fn {} (t-prim {} i64) (t-adt {} Option (t-adt {} Weekday)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::weekday_from_iso_number: (t-fn {} (t-prim {} i64) (t-adt {} Weekday))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::weekday_iso_number: (t-fn {} (t-adt {} Weekday) (t-prim {} i64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::weekday_on_or_after: (t-fn {} (t-adt {} Date) (t-adt {} Weekday) (t-adt {} Date))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime::weekday_on_or_before: (t-fn {} (t-adt {} Date) (t-adt {} Weekday) (t-adt {} Date))",
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
@@ -1796,102 +2672,6 @@
       "kind": "std-def-numeric",
       "id": "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} i64)) (t-prim {} string) (t-unit {}))",
       "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Date))",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::date_gt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::date_gte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::date_lt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::date_lte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::date_to_string: (t-fn {} (t-adt {} Date) (t-prim {} string))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::day_of_week: (t-fn {} (t-adt {} Date) (t-adt {} DayOfWeek))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::day_of_week_name: (t-fn {} (t-adt {} Date) (t-prim {} string))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} i64))",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::duration: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Duration))",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::is_leap_year: (t-fn {} (t-prim {} i64) (t-prim {} bool))",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::parse_date: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Date)))",
-      "flags": []
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "time::try_date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
-      "flags": [
-        "numeric-op"
-      ]
     }
   ]
 }
