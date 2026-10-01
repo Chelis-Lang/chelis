@@ -1017,6 +1017,11 @@ def durations_and_periods(corpus: Corpus) -> None:
     corpus.grid("try_duration_to_count", [tuple_axis("d", COUNT_DURATIONS), ctor_axis("u", "TimeUnit", UNITS), ctor_axis("r", "Rounding", ref.ROUNDING)],
                 "row_opt_i64(try_duration_to_count(dur2(d), u, r))",
                 lambda d, u, r: (lambda v: [0, 0] if v is None else [1, v])(ref.try_duration_to_count(d, u, r)))
+    # Inexact and too large at once: the reference rounds first, so RejectInexact's
+    # `domain` comes before the fit check's `overflow`.
+    both = (I64_MAX, NANO - 1)
+    corpus.fails("named_inexact_and_too_large", f"duration_to_count({duration_src(both)}, Milliseconds, RejectInexact)",
+                 expect_error(lambda: ref.duration_to_count(both, "Milliseconds", "RejectInexact")))
     for d in COUNT_DURATIONS:
         for unit in UNITS:
             corpus.outcome("duration_count_exact", f"duration_to_count({duration_src(d)}, {unit}, RejectInexact)",
