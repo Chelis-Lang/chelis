@@ -3261,8 +3261,9 @@ exact ADT identity by [05-OP-34].
 > `RejectInexact` meeting a value that is not a multiple of its quantum), or `overflow`
 > when the exact result of arithmetic on decimals is outside the value set or a decimal
 > narrowed to i64 is outside i64. Every range and validity check precedes the arithmetic
-> it protects, so no [04-NUM-9] trap of a primitive escapes a call for any arguments, and
-> when several checks fail the first argument in order names the failure. A `try_`
+> it protects, so no [04-NUM-9] trap of a primitive escapes a call for any arguments.
+> When several checks fail, the first in this order is reported: each argument's own
+> validity from left to right, then `RejectInexact`, then the result's range. A `try_`
 > callable takes its twin's arguments, returns `Some` of the twin's result, and returns
 > `None` exactly where the twin fails `domain`; `try_decimal_to_i64` also returns `None`
 > where its twin fails `overflow`.
