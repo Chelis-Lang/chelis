@@ -88,7 +88,27 @@ pub(crate) fn scalar_root_closure(wire: &WireDag, root: u64) -> Result<(WireDag,
         .enumerate()
         .map(|(new, old)| (*old, new as u64))
         .collect();
+    // Every declaration-table row must stay some retained node's declaration,
+    // so keep only the rows the closure uses, in their original order.
+    let declaration_rows: std::collections::BTreeMap<_, _> = retained
+        .iter()
+        .map(|id| wire.nodes[*id as usize].declaration)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(new, old)| (old, new as u64))
+        .collect();
     let mut dag = wire.clone();
+    dag.declarations = declaration_rows
+        .keys()
+        .map(|row| {
+            usize::try_from(*row)
+                .ok()
+                .and_then(|row| wire.declarations.get(row))
+                .cloned()
+                .ok_or("node declaration outside the declaration table")
+        })
+        .collect::<Result<_, _>>()?;
     dag.nodes = retained
         .iter()
         .map(|id| {
@@ -96,6 +116,7 @@ pub(crate) fn scalar_root_closure(wire: &WireDag, root: u64) -> Result<(WireDag,
             node.id = mapping[id];
             node.inputs = node.inputs.iter().map(|input| mapping[input]).collect();
             node.activation = node.activation.map(|activation| mapping[&activation]);
+            node.declaration = declaration_rows[&node.declaration];
             node
         })
         .collect();

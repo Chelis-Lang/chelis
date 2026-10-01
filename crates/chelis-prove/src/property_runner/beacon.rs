@@ -6,6 +6,7 @@ use chelis_compiler_api::{compiler, schema::LowerRequest};
 use chelis_surf::ast::{LiteralSuffix, UnaryOp};
 use chelis_types::{ScalarValue, dtype_semantics::scalar_from_f64, types::Prim};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 
 fn literal(expr: &Expr) -> Result<f64, String> {
     let value = match expr {
@@ -65,24 +66,50 @@ fn scalar_box(property: &Property) -> Result<IntervalBox, String> {
 
 fn scalar_input_name(expr: &Expr) -> Option<&str> {
     match tensor_operand(expr)? {
-        Expr::Var(name, _) => Some(name),
+        Cow::Borrowed(Expr::Var(name, _)) => Some(name),
         _ => None,
     }
 }
 
-fn tensor_operand(expr: &Expr) -> Option<&Expr> {
+fn names_tensor_to_scalar(expr: &Expr) -> bool {
+    matches!(expr, Expr::Var(name, _) if name == "tensor_to_scalar")
+}
+
+/// The tensor operand of a final `tensor_to_scalar` call, in either spelling
+/// the formatter and linter accept: the call `tensor_to_scalar(e)`, or a pipe
+/// whose last stage is `tensor_to_scalar` or `tensor_to_scalar()`. The pipe
+/// spelling is what `prefer-pipe-operator` rewrites a nested call chain to, so
+/// matching only the call form would let a style fix disconnect a property
+/// from Beacon.
+fn tensor_operand(expr: &Expr) -> Option<Cow<'_, Expr>> {
     match expr {
         Expr::Apply(function, operands, _)
-            if matches!(function.as_ref(), Expr::Var(name, _) if name == "tensor_to_scalar")
-                && operands.len() == 1 =>
+            if names_tensor_to_scalar(function) && operands.len() == 1 =>
         {
-            Some(&operands[0])
+            Some(Cow::Borrowed(&operands[0]))
+        }
+        Expr::Pipe(seed, stages, span) => {
+            let (last, earlier) = stages.split_last()?;
+            let bridges = match last {
+                Expr::Apply(function, operands, _) => {
+                    names_tensor_to_scalar(function) && operands.is_empty()
+                }
+                stage => names_tensor_to_scalar(stage),
+            };
+            if !bridges {
+                return None;
+            }
+            Some(if earlier.is_empty() {
+                Cow::Borrowed(seed.as_ref())
+            } else {
+                Cow::Owned(Expr::Pipe(seed.clone(), earlier.to_vec(), span.clone()))
+            })
         }
         _ => None,
     }
 }
 
-fn upper_expression(property: &Property) -> Result<(&Expr, ScalarValue), String> {
+fn upper_expression(property: &Property) -> Result<(Cow<'_, Expr>, ScalarValue), String> {
     let Expr::Binary(op @ (BinOp::Le | BinOp::Ge), left, right, _) = &property.body else {
         return Err("Beacon property body must be a non-strict scalar upper bound".into());
     };
@@ -133,7 +160,7 @@ pub(super) fn prove(
         let mut inputs = scalar_box(property)?;
         let (expression, upper) = upper_expression(property)?;
         Goal::scalar_upper_bound(inputs.clone(), upper).map_err(|e| e.to_string())?;
-        let body = chelis_surf::format::format_expression(expression);
+        let body = chelis_surf::format::format_expression(&expression);
         let mut source = chelis_surf::format::format_program(decls);
         let mut entry = "beacon_goal_output".to_string();
         while source.contains(&entry) {

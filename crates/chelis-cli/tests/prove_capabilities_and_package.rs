@@ -165,3 +165,65 @@ fn prove_package_auto_detects_reef_toml() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// `examples/beacon_scalar_range.ch` is the documented Beacon entry point. A
+// style pass rewrote its goal into pipe form, which the Beacon route then
+// rejected before lowering, and a stale declaration table rejected the
+// lowered graph after that. Running the example pins both: without an engine
+// binary the run must stop only at the missing binary, and with one the
+// prover must dispatch to it.
+#[cfg(feature = "chelis-prove")]
+fn prove_beacon_example(beacon: Option<&std::path::Path>) -> Value {
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/beacon_scalar_range.ch");
+    let mut command = Command::cargo_bin("chelis").unwrap();
+    command.args([
+        "prove",
+        example.to_str().unwrap(),
+        "--tier",
+        "beacon-only",
+        "--json",
+    ]);
+    match beacon {
+        Some(path) => command.env("CHELIS_BEACON_BIN", path),
+        None => command.env_remove("CHELIS_BEACON_BIN"),
+    };
+    let output = command.output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let record: Value = serde_json::from_str(stdout.lines().next().expect("property record"))
+        .unwrap_or_else(|error| panic!("{error}: {stdout}"));
+    assert_eq!(record["name"], "bounded_neuron", "{stdout}");
+    assert_eq!(record["proof_tier"], "beacon", "{stdout}");
+    record
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn beacon_example_reaches_the_engine_without_a_binary() {
+    let record = prove_beacon_example(None);
+    assert_eq!(record["status"], "unsupported", "{record}");
+    assert_eq!(record["reason"], "CHELIS_BEACON_BIN is not configured", "{record}");
+}
+
+#[cfg(all(feature = "chelis-prove", unix))]
+#[test]
+fn beacon_example_dispatches_to_the_configured_engine() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir().unwrap();
+    let invoked = dir.path().join("invoked");
+    let fake_beacon = dir.path().join("chelis-beacon");
+    std::fs::write(
+        &fake_beacon,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 3\n",
+            invoked.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_beacon, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let record = prove_beacon_example(Some(&fake_beacon));
+    let arguments = std::fs::read_to_string(&invoked)
+        .unwrap_or_else(|error| panic!("engine was not invoked ({error}): {record}"));
+    assert!(arguments.lines().any(|line| line == "--request"), "{arguments}");
+    assert_ne!(record["status"], "passed", "{record}");
+}
