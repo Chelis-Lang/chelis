@@ -8,8 +8,8 @@ RHS like `to_tensor(...)` leaves its output type variable free.
 Cross-references:
 
 - Issue: `chelis#159` (this sub-issue); parent `chelis#143`
-- Sibling diagnosis: `docs/archive/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md`
-- Design note: `docs/archive/investigations/issue_143_pad_sequences_to_design_note.md`
+- Sibling diagnosis: `docs/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md`
+- Design note: `docs/investigations/issue_143_pad_sequences_to_design_note.md`
 - Pinning test: `crates/chelis-types/tests/issue_143b_let_ascription_no_propagation.rs`
   (three regression tests; the formerly-`#[ignore]` probe is now passing
   under the prototype patch — see "Prototype validation" below)

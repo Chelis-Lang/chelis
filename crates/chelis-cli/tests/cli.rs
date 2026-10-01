@@ -726,7 +726,7 @@ fn eval_rejects_unbound_runtime_names() {
 // surface a stderr warning so humans don't get a silent "success".
 // Exit code stays 0 to preserve backward compat for scripted
 // consumers. See `docs/archive/investigations/item2_sibling_sweep_findings.md`
-// §G7 and `docs/archive/investigations/cli_eval_empty_roots_diagnosis.md`.
+// §G7 and `docs/investigations/cli_eval_empty_roots_diagnosis.md`.
 #[test]
 fn eval_def_only_emits_warning_on_stderr() {
     let dir = tempdir().expect("tempdir");

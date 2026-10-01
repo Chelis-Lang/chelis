@@ -10,8 +10,8 @@ Cross-references:
 
 - Parent issue: `chelis#143`; sub-issues `chelis#158` (A) and
   `chelis#159` (B)
-- Sub-issue (A) diagnosis: `docs/archive/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md`
-- Sub-issue (B) diagnosis: `docs/archive/investigations/issue_143b_let_ascription_no_propagation_diagnosis.md`
+- Sub-issue (A) diagnosis: `docs/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md`
+- Sub-issue (B) diagnosis: `docs/investigations/issue_143b_let_ascription_no_propagation_diagnosis.md`
 - Builtin registration: `crates/chelis-types/src/builtins.rs:875-876`
   (`pad_sequences` is `generic_binop`, `pad_sequences_to` is `generic_triop`)
 - Spec: `spec/04-type-system.md` (no dim-from-int-literal rule)

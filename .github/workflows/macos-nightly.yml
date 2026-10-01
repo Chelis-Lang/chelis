@@ -188,7 +188,7 @@ jobs:
       # beforehand is redundant under Swatinem's rust-cache. nextest's
       # cross-binary parallelism keeps this job off the same ~200-binary
       # serialization bloat as the Linux workspace workers; see
-      # docs/archive/investigations/ci_integration_test_runtime_diagnosis.md.
+      # docs/investigations/ci_integration_test_runtime_diagnosis.md.
       - name: Workspace tests
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef

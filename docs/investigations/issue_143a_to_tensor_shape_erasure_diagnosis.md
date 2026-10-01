@@ -8,8 +8,8 @@ Cross-references:
 
 - Issue: `chelis#158` (this sub-issue); parent `chelis#143` ("sig dim
   variables not unified across parameters at type-check (0.7.10)")
-- Sibling diagnosis: `docs/archive/investigations/issue_143b_let_ascription_no_propagation_diagnosis.md`
-- Design note for the harder case: `docs/archive/investigations/issue_143_pad_sequences_to_design_note.md`
+- Sibling diagnosis: `docs/investigations/issue_143b_let_ascription_no_propagation_diagnosis.md`
+- Design note for the harder case: `docs/investigations/issue_143_pad_sequences_to_design_note.md`
 - Pinning test: `crates/chelis-types/tests/issue_143a_to_tensor_shape_erasure.rs`
   (one `#[ignore]` probe + two passing counter-probes; the probe
   still fails as expected after the sub-issue (B) prototype lands —

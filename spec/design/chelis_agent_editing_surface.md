@@ -16,7 +16,7 @@ MCP and HTTP tools are `chelis_replace_function_body`,
 - `spec/design/chelis_canonical_reference.md` §4 (Deep), §12 (Agent Coding Assistance) — architectural framing
 - `spec/03-deep-syntax.md` §1.3 — Deep as an editing target
 - `spec/design/chelis_span_survival.md` — provenance dependency for diff display
-- `spec/design/archive/chelis_deep_authoring_handover.md` — handover state and extension seams
+- `spec/design/chelis_deep_authoring_handover.md` — handover state and extension seams
 
 ---
 

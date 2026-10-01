@@ -94,13 +94,13 @@ The fusion pass lives in `chelis-ir` (not the HIP backend) because fusion is a D
 
 | Sub-phase | Doc | Summary |
 |---|---|---|
-| Symbolic Dimensions | [phase1_symbolic_dims.md](phase1_symbolic_dims.md) | IR supports `Concrete \| Symbolic` dims; do first to unblock GPU backend |
-| 1a: Kernel Codegen | [phase1a_kernel_codegen.md](phase1a_kernel_codegen.md) | Single RISC op → HIP kernel, runs on GPU, correct output |
+| Symbolic Dimensions | [phase1_symbolic_dims.md](../phase1_symbolic_dims.md) | IR supports `Concrete \| Symbolic` dims; do first to unblock GPU backend |
+| 1a: Kernel Codegen | [phase1a_kernel_codegen.md](../phase1a_kernel_codegen.md) | Single RISC op → HIP kernel, runs on GPU, correct output |
 | 1b: Fusion | [phase1b_fusion.md](../phase1b_fusion.md) | Adjacent DAG nodes → single kernel launches |
 | 1c: Memory Planning | [phase1c_memory_planning.md](../phase1c_memory_planning.md) | Buffer reuse, minimize host↔device transfers |
 | 1d: Optimized Reductions + hipBLAS | [phase1d_flattening.md](../phase1d_flattening.md) | Optimized reductions, hipBLAS, thread block sizing (no flattening needed) |
 | 1e: Benchmarks | [phase1e_benchmarks.md](phase1e_benchmarks.md) | Fixed MNIST + linreg + transformer workloads, recorded perf/correctness |
-| 1f: Executable Grammar | [phase1f_executable_grammar.md](phase1f_executable_grammar.md) | PEG-based `chelis validate` conformance tool |
+| 1f: Executable Grammar | [phase1f_executable_grammar.md](../phase1f_executable_grammar.md) | PEG-based `chelis validate` conformance tool |
 
 ---
 
