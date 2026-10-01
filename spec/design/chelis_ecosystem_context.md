@@ -22,10 +22,10 @@ The points to lead with:
 - structured, deterministic diagnostics an agent can act on, with suggested repairs
 - Surf for readable supervision, Deep for canonical machine-facing structure
 - executable properties as spec: `@property` functions checked by `chelis prove`,
-  with each result naming the method behind it (type checking, SMT, bound
-  propagation, or seeded sampling)
+  with each result naming the method behind it (type checking, SMT, or seeded
+  sampling)
 - Hull, a second checker that cross-checks the compiler, and a Lean 4 mechanization of
-  the core semantics
+  a core calculus of Chelis
 
 Chelis is general purpose within numerical computing. The worked examples come from
 quantitative finance because that is where a silent wrong number is most expensive,

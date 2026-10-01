@@ -45,8 +45,8 @@ Numerical code written by agents is easier to trust when its types carry the fac
 numerical errors depend on (shape, precision, effects, ownership) and when its
 toolchain can check stated properties, than when those facts first surface at run time
 in a host language.
-Differentiation and machine-learning programs are research directions inside this
-scope; they do not define it.
+Numerical computing defines the scope; `grad`, `vmap`, and `jit` are transforms within
+it (§8).
 
 ## 5. Design Principles
 

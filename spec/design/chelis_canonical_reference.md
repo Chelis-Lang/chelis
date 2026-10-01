@@ -16,11 +16,11 @@ the properties an author states about the code:
 
 - the compiler checks shapes, precision, effects, and ownership before anything runs,
   and reports structured, deterministic diagnostics an agent can act on
-- `chelis prove` checks `@property` declarations with an SMT solver, bound
-  propagation, or seeded sampling, and each result names its method and qualifiers
+- `chelis prove` checks `@property` declarations by type checking, an SMT solver, or
+  seeded sampling, and each result names its method and qualifiers
 - Hull, a second type checker and evaluator written in Chelis, cross-checks the
   compiler
-- the core semantics are mechanized in Lean 4 (LaCaDiLE)
+- a core calculus of Chelis is mechanized in Lean 4 (LaCaDiLE)
 
 Chelis is general purpose within numerical computing. The shells cover numerical
 methods, dataframes, finance, and economics, and the worked examples come from

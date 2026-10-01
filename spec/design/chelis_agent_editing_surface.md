@@ -13,7 +13,7 @@ MCP and HTTP tools are `chelis_replace_function_body`,
 
 - `spec/12-roadmap.md` — agent editing surface pointer
 - `spec/design/chelis_trust_stack.md` — Trust Stack Implications for Editing Tools
-- `spec/design/chelis_canonical_reference.md` §4 (Deep), §12 (AI Coding Assistance) — architectural framing
+- `spec/design/chelis_canonical_reference.md` §4 (Deep), §12 (Agent Coding Assistance) — architectural framing
 - `spec/03-deep-syntax.md` §1.3 — Deep as an editing target
 - `spec/design/chelis_span_survival.md` — provenance dependency for diff display
 - `spec/design/chelis_deep_authoring_handover.md` — handover state and extension seams

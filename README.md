@@ -20,10 +20,10 @@ def portfolio_return(w: tensor[3, f64], r: tensor[3, 1, f64]) -> tensor[f64] = {
 
 In numpy, returns shaped 3 by 1 stretch against three weights into a 3 by 3 grid and
 the sum comes back as a plausible wrong number. `chelis check` rejects the same
-multiply before anything runs:
+multiply before anything runs. The error from its JSON report:
 
 ```json
-{"kind":"DimensionMismatch","message":"tensor rank mismatch: 1 dims vs 2 dims","span_id":"surf:94..103"}
+{"kind":"DimensionMismatch","message":"tensor rank mismatch: 1 dims vs 2 dims","severity":0.8,"span":{"span":"point","offset":94},"span_id":"surf:94..103"}
 ```
 
 - **Checked before it runs.** The compiler checks shapes, precision, effects, and
@@ -33,9 +33,9 @@ multiply before anything runs:
   source span, and the same input always gets the same answer. `chelis tide mcp`
   gives an agent check, eval, prove, and structural edits as MCP tools.
 - **Properties you can review.** `chelis prove` checks `@property` declarations with
-  an SMT solver, bound propagation, or seeded sampling, and each result names the
+  type checking, an SMT solver, or seeded sampling, and each result names the
   method behind it. Hull, a second checker written in Chelis, cross-checks the
-  compiler, and the core semantics are mechanized in Lean 4.
+  compiler, and a core calculus of Chelis is mechanized in Lean 4.
 - **General-purpose numerics.** Surf (`.ch`) is the readable syntax; Deep (`.dp`) is
   the canonical form the compiler and agents use. Programs build to C. Shells,
   installed with Reef, cover numerical methods (Nautilus), dataframes (Coral), and
