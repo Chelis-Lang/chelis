@@ -67,7 +67,11 @@ UNIX_EPOCH_ORDINAL = 719_163  # datetime.date(1970, 1, 1).toordinal()
 
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 DAY_OVERFLOW = ("ClampToMonthEnd", "RejectInvalidDay")
-TIME_ROUNDING = ("RoundTowardPast", "RoundTowardFuture", "RoundTowardZero", "RoundNearestTiesEven")
+# `Std.Rounding`: six ways to choose a multiple of the quantum, and a seventh
+# that accepts only values that already are one.
+ROUNDING = ("RoundTowardNegative", "RoundTowardPositive", "RoundTowardZero", "RoundAwayFromZero",
+            "RoundTiesToEven", "RoundTiesToAway", "RejectInexact")
+ROUNDING_TOTAL = ROUNDING[:-1]
 TIME_UNIT_NANOS = {
     "Hours": 3_600 * NANOS_PER_SECOND,
     "Minutes": 60 * NANOS_PER_SECOND,
@@ -441,28 +445,35 @@ def easter_sunday_orthodox(year: int, function: str = "easter_sunday_orthodox") 
 
 
 # ---------------------------------------------------------------------------
-# Rounding of an exact rational quotient (TimeRounding).
+# Rounding an exact rational value v = numerator / denominator to an integer
+# number k of quanta (`Std.Rounding`).
 
 
-def round_quotient(numerator: int, denominator: int, mode: str) -> int:
+def round_quotient(numerator: int, denominator: int, mode: str, function: str) -> int:
     if denominator <= 0:
         raise ValueError("denominator must be positive")
     floor, remainder = divmod(numerator, denominator)
     if remainder == 0:
         return floor
-    if mode == "RoundTowardPast":
+    if mode == "RoundTowardNegative":
         return floor
-    if mode == "RoundTowardFuture":
+    if mode == "RoundTowardPositive":
         return floor + 1
     if mode == "RoundTowardZero":
         return floor + 1 if numerator < 0 else floor
-    if mode == "RoundNearestTiesEven":
+    if mode == "RoundAwayFromZero":
+        return floor if numerator < 0 else floor + 1
+    if mode in ("RoundTiesToEven", "RoundTiesToAway"):
         twice = 2 * remainder
         if twice < denominator:
             return floor
         if twice > denominator:
             return floor + 1
-        return floor if floor % 2 == 0 else floor + 1
+        if mode == "RoundTiesToEven":
+            return floor if floor % 2 == 0 else floor + 1
+        return floor if numerator < 0 else floor + 1
+    if mode == "RejectInexact":
+        raise domain(function, f"{numerator}/{denominator} is not a whole number of quanta")
     raise ValueError(mode)
 
 
@@ -494,7 +505,7 @@ def duration_from_count(count: int, unit: str, function: str = "duration_from_co
 
 
 def count_in_unit(total_nanos: int, unit: str, rounding: str, function: str) -> int:
-    result = round_quotient(total_nanos, TIME_UNIT_NANOS[unit], rounding)
+    result = round_quotient(total_nanos, TIME_UNIT_NANOS[unit], rounding, function)
     if not fits_i64(result):
         raise overflow(function, f"{total_nanos} ns is {result} {unit.lower()}, which does not fit in i64")
     return result
@@ -680,7 +691,7 @@ def instant_round_to(i: tuple[int, int], increment: tuple[int, int], rounding: s
     step = nanos_of(increment)
     if step <= 0 or NANOS_PER_DAY % step != 0:
         raise domain(function, f"increment {duration_to_string(increment)} is not a positive divisor of 86400 s")
-    return instant_from_nanos(round_quotient(nanos_of(i), step, rounding) * step, function)
+    return instant_from_nanos(round_quotient(nanos_of(i), step, rounding, function) * step, function)
 
 
 def instant_to_datetime_at(i: tuple[int, int], offset_seconds: int) -> tuple[int, int]:
@@ -1034,7 +1045,24 @@ def walk_every_day(report=print) -> int:
     return count
 
 
+def jan_first_by_year_lengths() -> dict[int, int]:
+    """Epoch day of 1 January of every supported year, by summing year lengths outward from 1970.
+
+    This needs nothing but the leap-year rule, so it checks the conversions for
+    years at or below 0, where `datetime.date` cannot.
+    """
+    jan_first = {1970: 0}
+    for year in range(1969, MIN_YEAR - 1, -1):
+        jan_first[year] = jan_first[year + 1] - days_in_year(year)
+    for year in range(1971, MAX_YEAR + 1):
+        jan_first[year] = jan_first[year - 1] + days_in_year(year - 1)
+    return jan_first
+
+
 def check_every_year() -> None:
+    for year, epoch_day in jan_first_by_year_lengths().items():
+        if days_from_civil(year, 1, 1) != epoch_day or civil_from_days(epoch_day) != (year, 1, 1):
+            raise AssertionError(f"year-length summation disagrees for {year}")
     for year in range(MIN_YEAR, MAX_YEAR + 1):
         if days_from_civil_by_counting(year, 1, 1) != days_from_civil(year, 1, 1):
             raise AssertionError(f"counting derivation disagrees for {year}")

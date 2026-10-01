@@ -81,9 +81,9 @@ DAY_NANOS = ref.NANOS_PER_DAY
 
 TYPES = (
     "Date", "Time", "DateTime", "Instant", "Offset", "OffsetDateTime", "Duration", "Period",
-    "Weekday", "DayOverflow", "TimeRounding", "TimeUnit", "Dates", "Instants",
+    "Weekday", "DayOverflow", "TimeUnit", "Dates", "Instants",
 )
-CONSTRUCTORS = ref.WEEKDAYS + ref.DAY_OVERFLOW + ref.TIME_ROUNDING + tuple(ref.TIME_UNIT_NANOS)
+CONSTRUCTORS = ref.WEEKDAYS + ref.DAY_OVERFLOW + tuple(ref.TIME_UNIT_NANOS)
 FUNCTIONS = (
     "is_leap_year", "days_in_year", "days_in_month", "weekday_iso_number",
     "weekday_from_iso_number", "try_weekday_from_iso_number", "weekday_name",
@@ -915,7 +915,8 @@ OFFSETS = [0, 86_399, -86_399, 3_600, -1]
 INSTANTS = [(ref.INSTANT_MIN_SECOND, 0), (ref.INSTANT_MAX_SECOND, NANO - 1), (0, 0), (-1, NANO - 1),
             (9_223_372_036, 854_775_807), (9_223_372_036, 854_775_808), (-9_223_372_037, 145_224_192),
             (-9_223_372_037, 145_224_191), (1_727_789_400, 123_456_789), (-1_000_000_000, 500_000_000)]
-INTERIOR_INSTANTS = [(0, 0), (-1, NANO - 1), (1_727_789_400, 123_456_789), (-1_000_000_000, 500_000_000), (86_399, 999_999_999), (-86_401, 1)]
+INTERIOR_INSTANTS = [(0, 0), (-1, NANO - 1), (1_727_789_400, 123_456_789), (-1_000_000_000, 500_000_000), (86_399, 999_999_999), (-86_401, 1),
+                     (2, 500_000_000), (-3, 500_000_000), (7_200, 0)]
 INSTANT_CANDIDATES = [(ref.INSTANT_MIN_SECOND - 1, 0), (ref.INSTANT_MAX_SECOND + 1, 0), (0, NANO), (0, -1), (I64_MIN, 0), (I64_MAX, 0)] + INSTANTS
 INCREMENTS = [(0, 1), (1, 0), (0, 500_000_000), (1, 500_000_000), (3_600, 0), (86_400, 0), (0, 3_125)]
 BAD_INCREMENTS = [(7, 0), (0, 0), (-1, 0), (172_800, 0), (0, 7), (I64_MAX, 0)]
@@ -941,15 +942,22 @@ def offsets_and_instants(corpus: Corpus) -> None:
             corpus.outcome("from_count", f"row_instant(instant_from_unix_count({lit(c)}, {unit}))",
                            lambda: list(ref.instant_from_unix_count(c, unit)))
     in_range = [i for i in INSTANTS if ref.in_instant_range(i[0])]
-    corpus.grid("try_to_count", [tuple_axis("i", in_range), ctor_axis("u", "TimeUnit", UNITS), ctor_axis("r", "TimeRounding", ref.TIME_ROUNDING)],
+    corpus.grid("try_to_count", [tuple_axis("i", in_range), ctor_axis("u", "TimeUnit", UNITS), ctor_axis("r", "Rounding", ref.ROUNDING)],
                 "row_opt_i64(try_instant_to_unix_count(inst2(i), u, r))",
                 lambda i, u, r: (lambda v: [0, 0] if v is None else [1, v])(ref.try_instant_to_unix_count(i, u, r)))
-    corpus.grid("to_count", [tuple_axis("i", INTERIOR_INSTANTS), ctor_axis("u", "TimeUnit", UNITS), ctor_axis("r", "TimeRounding", ref.TIME_ROUNDING)],
+    corpus.grid("to_count", [tuple_axis("i", INTERIOR_INSTANTS), ctor_axis("u", "TimeUnit", UNITS), ctor_axis("r", "Rounding", ref.ROUNDING_TOTAL)],
                 "[instant_to_unix_count(inst2(i), u, r)]", lambda i, u, r: [ref.instant_to_unix_count(i, u, r)])
     for i in in_range:
-        for rounding in ref.TIME_ROUNDING:
+        for rounding in ref.ROUNDING:
             corpus.outcome("to_count_nanos", f"instant_to_unix_count({instant_src(i)}, Nanoseconds, {rounding})",
                            lambda: ref.instant_to_unix_count(i, "Nanoseconds", rounding))
+    for i in INTERIOR_INSTANTS:
+        for unit in UNITS:
+            corpus.outcome("to_count_exact", f"instant_to_unix_count({instant_src(i)}, {unit}, RejectInexact)",
+                           lambda: ref.instant_to_unix_count(i, unit, "RejectInexact"))
+        for inc in INCREMENTS:
+            corpus.outcome("round_to_exact", f"row_instant(instant_round_to({instant_src(i)}, {duration_src(inc)}, RejectInexact))",
+                           lambda: list(ref.instant_round_to(i, inc, "RejectInexact")))
     corpus.grid("instant_add", [tuple_axis("i", INTERIOR_INSTANTS), tuple_axis("d", SAFE_DURATIONS[:9])],
                 "row_instant(instant_add_duration(inst2(i), dur2(d)))", lambda i, d: list(ref.instant_add_duration(i, d)))
     for i in in_range:
@@ -960,11 +968,11 @@ def offsets_and_instants(corpus: Corpus) -> None:
                 "concat(row_duration(instant_until(inst2(a), inst2(b))), [b2i(instant_lt(inst2(a), inst2(b))), b2i(instant_lte(inst2(a), inst2(b))), "
                 "b2i(instant_gt(inst2(a), inst2(b))), b2i(instant_gte(inst2(a), inst2(b)))])",
                 lambda a, b: [*ref.instant_until(a, b), *(int(f(ref.nanos_of(a), ref.nanos_of(b))) for f in COMPARATORS)])
-    corpus.grid("round_to", [tuple_axis("i", INTERIOR_INSTANTS), tuple_axis("inc", INCREMENTS), ctor_axis("r", "TimeRounding", ref.TIME_ROUNDING)],
+    corpus.grid("round_to", [tuple_axis("i", INTERIOR_INSTANTS), tuple_axis("inc", INCREMENTS), ctor_axis("r", "Rounding", ref.ROUNDING_TOTAL)],
                 "row_instant(instant_round_to(inst2(i), dur2(inc), r))", lambda i, inc, r: list(ref.instant_round_to(i, inc, r)))
     for i in [(0, 0), (ref.INSTANT_MAX_SECOND, 1), (ref.INSTANT_MIN_SECOND, 1)]:
         for inc in BAD_INCREMENTS + [(86_400, 0), (0, 1)]:
-            for rounding in ref.TIME_ROUNDING:
+            for rounding in ref.ROUNDING:
                 corpus.outcome("round_to_edge", f"row_instant(instant_round_to({instant_src(i)}, {duration_src(inc)}, {rounding}))",
                                lambda: list(ref.instant_round_to(i, inc, rounding)))
     corpus.grid("to_datetime_at", [tuple_axis("i", in_range), int_axis("o", OFFSETS)],
@@ -1006,12 +1014,15 @@ def durations_and_periods(corpus: Corpus) -> None:
             if c not in ok:
                 corpus.fails("duration_from_count", f"row_duration(duration_from_count({lit(c)}, {unit}))",
                              expect_error(lambda: ref.duration_from_count(c, unit)))
-    corpus.grid("try_duration_to_count", [tuple_axis("d", COUNT_DURATIONS), ctor_axis("u", "TimeUnit", UNITS), ctor_axis("r", "TimeRounding", ref.TIME_ROUNDING)],
+    corpus.grid("try_duration_to_count", [tuple_axis("d", COUNT_DURATIONS), ctor_axis("u", "TimeUnit", UNITS), ctor_axis("r", "Rounding", ref.ROUNDING)],
                 "row_opt_i64(try_duration_to_count(dur2(d), u, r))",
                 lambda d, u, r: (lambda v: [0, 0] if v is None else [1, v])(ref.try_duration_to_count(d, u, r)))
     for d in COUNT_DURATIONS:
+        for unit in UNITS:
+            corpus.outcome("duration_count_exact", f"duration_to_count({duration_src(d)}, {unit}, RejectInexact)",
+                           lambda: ref.duration_to_count(d, unit, "RejectInexact"))
         for unit in ("Nanoseconds", "Microseconds"):
-            for rounding in ref.TIME_ROUNDING:
+            for rounding in ref.ROUNDING:
                 corpus.outcome("duration_to_count", f"duration_to_count({duration_src(d)}, {unit}, {rounding})",
                                lambda: ref.duration_to_count(d, unit, rounding))
     for d in F64_DURATIONS:
@@ -1279,8 +1290,10 @@ class LaneResult:
 
 def program_source(body: list[str]) -> str:
     imports = ", ".join(TYPES + CONSTRUCTORS + FUNCTIONS)
+    rounding = ", ".join(("Rounding",) + ref.ROUNDING)
     text = "\n".join(body)
-    return "module Demo.Main\n\n" + f"import Std.Datetime ({imports})\n\n" + prelude_for(text) + "\n" + text + "\n"
+    return ("module Demo.Main\n\n" + f"import Std.Datetime ({imports})\n" + f"import Std.Rounding ({rounding})\n\n"
+            + prelude_for(text) + "\n" + text + "\n")
 
 
 def representative_failures(failures: list[Failure], per_path: int) -> list[Failure]:

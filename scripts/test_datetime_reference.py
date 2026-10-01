@@ -89,6 +89,13 @@ class CivilConversion(unittest.TestCase):
                 self.assertEqual(tuple(native.isocalendar()[:2]), ref.iso_week(n))
                 self.assertEqual(native.timetuple().tm_yday, ref.day_of_year(n))
 
+    def test_year_length_summation_for_every_year(self) -> None:
+        # Independent of Hinnant's era arithmetic: only the leap rule and addition.
+        for year, epoch_day in ref.jan_first_by_year_lengths().items():
+            self.assertEqual(ref.days_from_civil(year, 1, 1), epoch_day, year)
+            self.assertEqual(ref.civil_from_days(epoch_day - 1), (year - 1, 12, 31), year)
+        self.assertEqual(ref.jan_first_by_year_lengths()[ref.MIN_YEAR], ref.MIN_EPOCH_DAY)
+
     def test_successor_walk_across_year_zero(self) -> None:
         n = ymd(-2, 1, 1)
         expected = (-2, 1, 1)
@@ -266,19 +273,38 @@ class HolidayHelpers(unittest.TestCase):
 
 
 class Rounding(unittest.TestCase):
-    def test_modes(self) -> None:
-        table = {
-            "RoundTowardPast": (2, -3, 2, -3, 2),
-            "RoundTowardFuture": (3, -2, 3, -2, 2),
-            "RoundTowardZero": (2, -2, 2, -2, 2),
-            "RoundNearestTiesEven": (2, -2, 3, -3, 2),
-        }
-        for mode, expected in table.items():
-            got = (ref.round_quotient(5, 2, mode), ref.round_quotient(-5, 2, mode), ref.round_quotient(27, 10, mode),
-                   ref.round_quotient(-27, 10, mode), ref.round_quotient(4, 2, mode))
-            self.assertEqual(got, expected, mode)
-        self.assertEqual(ref.round_quotient(7, 2, "RoundNearestTiesEven"), 4)
-        self.assertEqual(ref.round_quotient(-7, 2, "RoundNearestTiesEven"), -4)
+    # Values v = numerator/denominator: exact ties (2.5, -2.5, 3.5, -3.5, 0.5,
+    # -0.5), inexact non-ties (2.7, -2.7) and an exact multiple (2).
+    VALUES = ((5, 2), (-5, 2), (7, 2), (-7, 2), (1, 2), (-1, 2), (27, 10), (-27, 10), (4, 2))
+    TABLE = {
+        "RoundTowardNegative": (2, -3, 3, -4, 0, -1, 2, -3, 2),
+        "RoundTowardPositive": (3, -2, 4, -3, 1, 0, 3, -2, 2),
+        "RoundTowardZero": (2, -2, 3, -3, 0, 0, 2, -2, 2),
+        "RoundAwayFromZero": (3, -3, 4, -4, 1, -1, 3, -3, 2),
+        "RoundTiesToEven": (2, -2, 4, -4, 0, 0, 3, -3, 2),
+        "RoundTiesToAway": (3, -3, 4, -4, 1, -1, 3, -3, 2),
+    }
+
+    def test_six_total_modes(self) -> None:
+        self.assertEqual(tuple(self.TABLE), ref.ROUNDING_TOTAL)
+        for mode, expected in self.TABLE.items():
+            self.assertEqual(tuple(ref.round_quotient(n, d, mode, "f") for n, d in self.VALUES), expected, mode)
+
+    def test_reject_inexact_accepts_only_multiples(self) -> None:
+        self.assertEqual(ref.round_quotient(4, 2, "RejectInexact", "f"), 2)
+        self.assertEqual(ref.round_quotient(-6, 3, "RejectInexact", "f"), -2)
+        for n, d in self.VALUES[:-1]:
+            error = failure(lambda: ref.round_quotient(n, d, "RejectInexact", "instant_round_to"))
+            self.assertEqual((error.function, error.kind), ("instant_round_to", "domain"))
+
+    def test_reject_inexact_through_the_api(self) -> None:
+        self.assertEqual(ref.duration_to_count((3, 0), "Milliseconds", "RejectInexact"), 3000)
+        error = failure(lambda: ref.duration_to_count((0, 1), "Microseconds", "RejectInexact"))
+        self.assertEqual((error.function, error.kind), ("duration_to_count", "domain"))
+        self.assertIsNone(ref.try_duration_to_count((0, 1), "Microseconds", "RejectInexact"))
+        self.assertIsNone(ref.try_instant_to_unix_count((-1, 999_999_999), "Seconds", "RejectInexact"))
+        self.assertEqual(ref.instant_round_to((7_200, 0), (3_600, 0), "RejectInexact"), (7_200, 0))
+        self.assertEqual(failure(lambda: ref.instant_round_to((7_201, 0), (3_600, 0), "RejectInexact")).kind, "domain")
 
 
 class DurationsAndPeriods(unittest.TestCase):
@@ -300,7 +326,7 @@ class DurationsAndPeriods(unittest.TestCase):
 
     def test_counts_and_their_try_forms(self) -> None:
         self.assertEqual(ref.duration_to_count((-2, 500_000_000), "Seconds", "RoundTowardZero"), -1)
-        self.assertEqual(ref.duration_to_count((-2, 500_000_000), "Seconds", "RoundTowardPast"), -2)
+        self.assertEqual(ref.duration_to_count((-2, 500_000_000), "Seconds", "RoundTowardNegative"), -2)
         self.assertEqual(failure(lambda: ref.duration_to_count((I64_MAX, 0), "Nanoseconds", "RoundTowardZero")).kind, "overflow")
         self.assertIsNone(ref.try_duration_to_count((I64_MAX, 0), "Nanoseconds", "RoundTowardZero"))
         self.assertEqual(ref.try_duration_to_count((1, 0), "Milliseconds", "RoundTowardZero"), 1000)
@@ -363,12 +389,14 @@ class InstantsAndOffsets(unittest.TestCase):
 
     def test_round_to(self) -> None:
         self.assertEqual(ref.instant_round_to((-1, 500_000_000), (1, 0), "RoundTowardZero"), (0, 0))
-        self.assertEqual(ref.instant_round_to((-1, 500_000_000), (1, 0), "RoundTowardPast"), (-1, 0))
-        self.assertEqual(ref.instant_round_to((-1, 500_000_000), (1, 0), "RoundNearestTiesEven"), (0, 0))
-        self.assertEqual(ref.instant_round_to((86_399, 0), (1, 500_000_000), "RoundTowardFuture"), (86_400, 0))
+        self.assertEqual(ref.instant_round_to((-1, 500_000_000), (1, 0), "RoundTowardNegative"), (-1, 0))
+        self.assertEqual(ref.instant_round_to((-1, 500_000_000), (1, 0), "RoundTiesToEven"), (0, 0))
+        self.assertEqual(ref.instant_round_to((-1, 500_000_000), (1, 0), "RoundTiesToAway"), (-1, 0))
+        self.assertEqual(ref.instant_round_to((-1, 500_000_000), (1, 0), "RoundAwayFromZero"), (-1, 0))
+        self.assertEqual(ref.instant_round_to((86_399, 0), (1, 500_000_000), "RoundTowardPositive"), (86_400, 0))
         for increment in ((7, 0), (0, 0), (-1, 0), (172_800, 0)):
             self.assertEqual(failure(lambda: ref.instant_round_to((0, 0), increment, "RoundTowardZero")).kind, "domain")
-        self.assertEqual(failure(lambda: ref.instant_round_to((ref.INSTANT_MAX_SECOND, 1), (86_400, 0), "RoundTowardFuture")).kind, "overflow")
+        self.assertEqual(failure(lambda: ref.instant_round_to((ref.INSTANT_MAX_SECOND, 1), (86_400, 0), "RoundTowardPositive")).kind, "overflow")
 
     def test_datetime_to_instant_edges(self) -> None:
         self.assertEqual(ref.datetime_to_instant_at((ref.MIN_EPOCH_DAY, 0), -86_399), (ref.INSTANT_MIN_SECOND, 0))
@@ -566,7 +594,7 @@ class HarnessLogic(unittest.TestCase):
                          "try_duration_to_count", "text_parse_", "text_reject_", "text_canonical_", "text_reparse_"):
             self.assertIn(required, names)
         exprs = harness.prelude() + " ".join(v.expr for v in corpus.bulk + corpus.values) + " ".join(f.expr for f in corpus.failures)
-        for constructor in ref.DAY_OVERFLOW + ref.TIME_ROUNDING + tuple(ref.TIME_UNIT_NANOS) + ref.WEEKDAYS:
+        for constructor in ref.DAY_OVERFLOW + ref.ROUNDING + tuple(ref.TIME_UNIT_NANOS) + ref.WEEKDAYS:
             self.assertIn(constructor, exprs)
         missing = [function for function in harness.FUNCTIONS if not re.search(rf"\b{function}\(", exprs)]
         self.assertEqual(missing, [])
