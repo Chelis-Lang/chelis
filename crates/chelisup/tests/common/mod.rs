@@ -73,6 +73,8 @@ pub fn build_fixture_tarball(release_dir: &Path, version: &str, build: &str) -> 
 pub struct ReleaseRuntime {
     /// `lib/libchelis_runtime.a` in the tarball.
     pub shipped_archive: Vec<u8>,
+    /// Omit the archive entirely from the release tarball when false.
+    pub ship_archive: bool,
     /// Ship `lib/libchelis_runtime.a` as a symlink to a sibling holding
     /// `shipped_archive`.
     pub archive_is_symlink: bool,
@@ -92,6 +94,11 @@ pub struct ReleaseRuntime {
     pub exported_headers: Vec<(String, Vec<u8>)>,
     /// The staging receipt the fake export writes.
     pub receipt: serde_json::Value,
+    /// Override the live export's receipt text, including ambiguous JSON
+    /// that cannot be represented by `receipt`'s parsed Value.
+    pub raw_receipt: Option<String>,
+    /// Omit the fake compiler's export receipt when false.
+    pub export_receipt: bool,
     /// The fake export's exit status; a failed export writes nothing.
     pub export_status: i32,
     /// The interpreter the fake `chelis` names. A missing one makes the
@@ -106,6 +113,16 @@ impl ReleaseRuntime {
         let archive = b"carried runtime archive".to_vec();
         let headers = vec![
             ("chelis_runtime.h".to_owned(), b"/* runtime */\n".to_vec()),
+            (
+                "chelis_runtime_views.h".to_owned(),
+                b"/* views */\n".to_vec(),
+            ),
+            (
+                "chelis_runtime_dtype.h".to_owned(),
+                b"/* dtype */\n".to_vec(),
+            ),
+            ("chelis_blas.h".to_owned(), b"/* blas */\n".to_vec()),
+            ("chelis_simd.h".to_owned(), b"/* simd */\n".to_vec()),
             ("chelis_math.h".to_owned(), b"/* math */\n".to_vec()),
         ];
         let digests: serde_json::Map<String, serde_json::Value> = headers
@@ -122,6 +139,7 @@ impl ReleaseRuntime {
         });
         Self {
             shipped_archive: archive.clone(),
+            ship_archive: true,
             archive_is_symlink: false,
             lib_is_symlink: false,
             root_is_symlink: false,
@@ -130,6 +148,8 @@ impl ReleaseRuntime {
             exported_archive_is_symlink: false,
             exported_headers: headers,
             receipt,
+            raw_receipt: None,
+            export_receipt: true,
             export_status: 0,
             chelis_interpreter: "/bin/sh",
         }
@@ -161,6 +181,13 @@ pub fn build_release_tarball(
         fs::create_dir_all(root.join(directory)).unwrap();
     }
     let chelis = root.join("bin/chelis");
+    let serialized_receipt;
+    let receipt = if let Some(raw) = runtime.raw_receipt.as_deref() {
+        raw
+    } else {
+        serialized_receipt = runtime.receipt.to_string();
+        &serialized_receipt
+    };
     fs::write(
         &chelis,
         format!(
@@ -172,15 +199,18 @@ pub fn build_release_tarball(
              \x20 if [ {status} -ne 0 ]; then echo 'error: export refused' >&2; exit {status}; fi\n\
              \x20 mkdir -p \"$3\" || exit 1\n\
              \x20 cp -R -P \"$(dirname \"$0\")/.runtime-export/.\" \"$3/\" || exit 1\n\
+             \x20 if [ {export_receipt} = true ]; then\n\
              \x20 cat > \"$3/chelis_runtime.receipt.json\" <<'RECEIPT'\n\
              {receipt}\n\
              RECEIPT\n\
+             \x20 fi\n\
              \x20 exit 0\n\
              fi\n\
              printf 'FAKE-CHELIS %s' \"$*\"\n",
             interpreter = runtime.chelis_interpreter,
             status = runtime.export_status,
-            receipt = runtime.receipt,
+            receipt = receipt,
+            export_receipt = runtime.export_receipt,
         ),
     )
     .unwrap();
@@ -204,7 +234,7 @@ pub fn build_release_tarball(
         )
         .unwrap();
         std::os::unix::fs::symlink("libchelis_runtime.real", &archive).unwrap();
-    } else {
+    } else if runtime.ship_archive {
         fs::write(&archive, &runtime.shipped_archive).unwrap();
     }
     for (name, bytes) in &runtime.shipped_headers {

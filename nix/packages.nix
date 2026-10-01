@@ -89,18 +89,15 @@ let
   '';
   # The runtime the compiler carries (spec/08-backends.md §2.1): `chelis-runtime`
   # and `chelis` ship the compiler's export, never a separately built crate.
-  runtime = pkgs.runCommand "chelis-runtime-${version}" { nativeBuildInputs = [ pkgs.jq ]; } ''
+  runtime = pkgs.runCommand "chelis-runtime-${version}" { nativeBuildInputs = [ pkgs.python311 ]; } ''
     export_dir="$TMPDIR/runtime-export"
     ${compiler}/bin/chelis runtime export "$export_dir"
-    receipt="$export_dir/chelis_runtime.receipt.json"
-    test "$(jq -r .mode "$receipt")" = sealed
     install -Dm444 "$export_dir/libchelis_runtime.a" $out/lib/libchelis_runtime.a
-    archive_sha256="$(sha256sum $out/lib/libchelis_runtime.a | cut -d ' ' -f 1)"
-    test "$archive_sha256" = "$(jq -r .archive_sha256 "$receipt")"
     mkdir -p $out/include
     ${lib.concatMapStringsSep "\n" (header: ''
       install -Dm444 "$export_dir/${header}" $out/include/${header}
     '') (import ./contracts.nix).publicRuntimeHeaders}
+    python3 ${root}/scripts/verify_runtime_package.py "$export_dir" "$out"
   '';
   chelisup = pkgs.runCommand "chelisup-${version}" { } ''
     test -x ${chelisupCrate}/bin/chelisup
@@ -232,12 +229,16 @@ let
       {
         inherit version;
         meta.mainProgram = "chelis";
+        nativeBuildInputs = [ pkgs.python311 ];
       }
       ''
         mkdir -p $out/bin $out/lib $out/include
         cp ${compiler}/bin/chelis $out/bin/chelis
         cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a
         cp ${runtime}/include/*.h $out/include/
+        export_dir="$TMPDIR/combined-export"
+        $out/bin/chelis runtime export "$export_dir"
+        python3 ${root}/scripts/verify_runtime_package.py "$export_dir" "$out"
       '';
 in
 {

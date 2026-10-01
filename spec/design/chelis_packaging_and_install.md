@@ -170,14 +170,25 @@ cold-start and routing layer reef structurally cannot be. New monorepo member
 - `chelisup install <ver>` — download the host-platform release tarball from
   `Chelis-Lang/chelis/releases/v<ver>` into `~/.chelis/toolchains/<ver>/`.
   Before placing it, chelisup runs the unpacked `chelis runtime export` and
-  refuses the release unless its `lib/` and `include/` runtime files are the
-  bytes that export reports from a sealed build of `<ver>` (chelis#1354).
+  refuses the release unless its archive and each of the six public headers
+  under `lib/` and `include/` match the sealed export's receipt for `<ver>`
+  (chelis#1354). The Nix packages, release tarballs and ecosystem container
+  check those copied bytes against each compiler's export before publication.
   Releases up to 0.18.11 predate the export and install unchecked, with a
   warning. A refused release newer than the running chelisup may use a format
   that chelisup does not know, so the refusal says how to get the latest
   chelisup. When the operating system refuses to execute the release's
   `chelis`, the error says so, without that advice; a dynamic loader that
   rejects it is reported as a failed export, with the loader's message.
+  A changed runtime requires a paired compiler rebuild and fresh export; the
+  release archive, all six headers and compiler are published and reinstalled
+  together as one versioned toolchain, never patched separately in an existing
+  install. A failed validation leaves the prior toolchain available. Roll back
+  by selecting a previously installed complete version with
+  `chelisup default <previous>`; an explicit version, environment override or
+  project pin takes precedence and must be reverted independently. The Nix
+  runtime and combined outputs must likewise come from one compiler revision,
+  not a mixed pair of store paths.
 - `chelisup default <ver>` — set the recorded default the shim falls back to.
 - `chelisup show` / `list-installed` / `which` — status.
 - `chelisup update` — self-update the installer.

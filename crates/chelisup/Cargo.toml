@@ -19,6 +19,7 @@ clap = { version = "4", features = ["derive"] }
 # Match chelis-reef's HTTP stack exactly so the resolved dependency tree
 # stays single-version: blocking client, rustls (no system OpenSSL).
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { workspace = true }
 serde_json = "1"
 # `install` hashes the shipped runtime files to compare them with the
 # staging receipt of the unpacked compiler's `chelis runtime export`.

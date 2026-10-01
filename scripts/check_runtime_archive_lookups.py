@@ -198,13 +198,12 @@ REVIEWED: tuple[Row, ...] = (
         "archive-name",
         lines=(
             'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
-            'python3 -c \'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")\' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"',
-            'cp "$tdir/lib/libchelis_runtime.a" "$ctx/libchelis_runtime.a"',
-            "COPY libchelis_runtime.a /usr/local/lib/libchelis_runtime.a",
+            'cp "$tdir/lib/libchelis_runtime.a" "$ctx/lib/"',
+            "COPY lib/libchelis_runtime.a /usr/local/lib/libchelis_runtime.a",
         ),
         disposition="not-lookup",
         reason=(
-            "copies the archive `chelis runtime export` wrote into the staged toolchain and checks it against the export's receipt; copies an installed toolchain's archive into a container image"
+            "copies the exact archive from the compiler's export into the staged toolchain; the container copies that verified package archive to its image context and checks it again against its copied compiler's export"
         ),
     ),
     Row(
@@ -212,15 +211,12 @@ REVIEWED: tuple[Row, ...] = (
         "archive-name",
         lines=(
             'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
-            'python3 -c \'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")\' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"',
             'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
-            'python3 -c \'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")\' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"',
             'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"',
-            'python3 -c \'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")\' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"',
         ),
         disposition="not-lookup",
         reason=(
-            "copies the archive `chelis runtime export` wrote into each release's staging tree and checks it against the export's receipt"
+            "copies the compiler's exact exported archive into each release tree; the package verifier checks the archive and all six headers against that sealed compiler's export"
         ),
     ),
     Row(
@@ -1002,6 +998,7 @@ REVIEWED: tuple[Row, ...] = (
             '"runtime export has no usable libchelis_runtime.a: libchelis_runtime.a is not a regular file",',
             '"no usable lib/libchelis_runtime.a: lib/libchelis_runtime.a is not a regular file",',
             '"no usable lib/libchelis_runtime.a: lib is not a directory",',
+            '"release has no usable lib/libchelis_runtime.a",',
         ),
         disposition="not-lookup",
         reason=(
@@ -1023,11 +1020,11 @@ REVIEWED: tuple[Row, ...] = (
         "nix/checks.nix",
         "archive-name",
         lines=(
-            "${packages.chelis-runtime}/lib/libchelis_runtime.a \\",
+            '"$package/lib/libchelis_runtime.a" \\',
         ),
         disposition="not-lookup",
         reason=(
-            "links the archive in the Nix runtime package, which that package's `chelis runtime export` wrote"
+            "links the exact installed archive in each of the `chelis-runtime` and `chelis` Nix packages, both verified against their compiler's export; the selected package path is not a runtime archive search"
         ),
     ),
     Row(
@@ -1049,12 +1046,11 @@ REVIEWED: tuple[Row, ...] = (
         "archive-name",
         lines=(
             'install -Dm444 "$export_dir/libchelis_runtime.a" $out/lib/libchelis_runtime.a',
-            'archive_sha256="$(sha256sum $out/lib/libchelis_runtime.a | cut -d \' \' -f 1)"',
             "cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a",
         ),
         disposition="not-lookup",
         reason=(
-            "installs the archive `chelis runtime export` wrote into the Nix runtime package and checks its digest against the export's receipt, and copies that package's archive into the toolchain"
+            "installs the archive from this compiler's exact export and copies it into the combined Nix package; both outputs verify the archive and six headers against their compiler exports"
         ),
     ),
     Row(
@@ -1146,12 +1142,13 @@ REVIEWED: tuple[Row, ...] = (
             'archive = inventory["lib/libchelis_runtime.a"]',
             'if digest(output / "libchelis_runtime.a") != archive:',
             'expected = {"schema": "chelis-runtime-staging/1", "archive": "libchelis_runtime.a",',
+            'if report["installed_export_sha256"] != inventory["lib/libchelis_runtime.a"]:',
             'installed / "lib/libchelis_runtime.a", "-lm",',
             'installed / "lib/libchelis_runtime.a", "-lm", "-o", binary])',
         ),
         disposition="not-lookup",
         reason=(
-            "the archive an installed release must ship: checked against the release inventory, against the archive and staging receipt `chelis build` wrote, and linked by exact path into the canary's callable"
+            "compares the installed archive with its compiler's exact export and the staged archive/receipt, then links the checked installed archive by path for native execution"
         ),
     ),
     Row(
@@ -1388,6 +1385,13 @@ REVIEWED: tuple[Row, ...] = (
         "archive-name",
         lines=(
             'for name in ("bin/chelis", "lib/libchelis_runtime.a", "include/chelis_runtime.h"):',
+            '(exported / "libchelis_runtime.a").write_bytes(archive)',
+            '(packaged / "lib/libchelis_runtime.a").write_bytes(archive)',
+            '"archive": "libchelis_runtime.a",',
+            '"archive_sha256": canary.digest(exported / "libchelis_runtime.a"),',
+            '(packaged / "lib/libchelis_runtime.a").write_bytes(b"!<arch>\\nwrong")',
+            'with self.assertRaisesRegex(ValueError, "libchelis_runtime.a"):',
+            '(packaged / "lib/libchelis_runtime.a").write_bytes(archive)',
             'for name in ("lib/libchelis_runtime.a", *canary.HEADERS):',
             'sealed = {"schema": "chelis-runtime-staging/1", "archive": "libchelis_runtime.a",',
             '"archive_sha256": inventory["lib/libchelis_runtime.a"], "mode": "sealed",',
@@ -1395,21 +1399,16 @@ REVIEWED: tuple[Row, ...] = (
         ),
         disposition="not-lookup",
         reason=(
-            "fixture installed and staged files, including swapped installed files and a swapped staged archive the canary must reject"
+            "constructs a coherent compiler export and package, crosses each public header and the archive to prove rejection, and tests the canary's installed/staged archive checks"
         ),
     ),
     Row(
-        "scripts/test_nix_flake_contract.py",
+        "scripts/verify_runtime_package.py",
         "archive-name",
-        lines=(
-            '\'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"\', step',
-            '\'"$staging/lib/libchelis_runtime.a"\',',
-            'self.assertNotIn("target/release/libchelis_runtime.a", release)',
-            '"cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a", packages',
-        ),
+        lines=('ARCHIVE = "libchelis_runtime.a"',),
         disposition="not-lookup",
         reason=(
-            "asserts how the release and the Nix packages copy the exported archive, and that the release no longer copies the build-tree archive"
+            "names the compiler-export archive whose receipt digest and copied package bytes the verifier compares; it never searches for a candidate"
         ),
     ),
     Row(

@@ -7,8 +7,8 @@
 //! runs the unpacked `chelis runtime export` into a scratch directory and
 //! requires the shipped files to be what that export reports. Its staging
 //! receipt must describe a sealed build of the version being installed, and
-//! the shipped archive and every header the receipt lists must have the
-//! SHA-256 it records (chelis#1354).
+//! the shipped archive and exactly the six public headers must have the
+//! SHA-256 digests that export records (chelis#1354).
 //!
 //! Releases up to [`LAST_RELEASE_WITHOUT_EXPORT`] predate
 //! `chelis runtime export`, so nothing can be checked; they install as
@@ -28,7 +28,10 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use serde_json::Value;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use serde_json::map::Entry;
+use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
 use crate::UPGRADE_ADVICE;
@@ -43,6 +46,14 @@ const CHELISUP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RECEIPT: &str = "chelis_runtime.receipt.json";
 const RECEIPT_SCHEMA: &str = "chelis-runtime-staging/1";
 const ARCHIVE: &str = "libchelis_runtime.a";
+const PUBLIC_HEADERS: [&str; 6] = [
+    "chelis_runtime.h",
+    "chelis_runtime_views.h",
+    "chelis_runtime_dtype.h",
+    "chelis_blas.h",
+    "chelis_simd.h",
+    "chelis_math.h",
+];
 
 /// What the runtime check established about a newly unpacked release.
 #[derive(Debug, PartialEq, Eq)]
@@ -109,6 +120,91 @@ fn advise_upgrade(refusal: String, version: &str, chelisup: &str) -> String {
     }
 }
 
+/// Deserialize the live export's JSON once, rejecting duplicate keys even in
+/// nested objects that the current receipt schema does not inspect.
+struct UniqueValue(Value);
+
+impl<'de> Deserialize<'de> for UniqueValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(UniqueValueVisitor)
+    }
+}
+
+struct UniqueValueVisitor;
+
+impl<'de> Visitor<'de> for UniqueValueVisitor {
+    type Value = UniqueValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(UniqueValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(UniqueValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(UniqueValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        Number::from_f64(value)
+            .map(Value::Number)
+            .map(UniqueValue)
+            .ok_or_else(|| E::custom("invalid JSON number"))
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(UniqueValue(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+        Ok(UniqueValue(Value::String(value)))
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(UniqueValue(Value::Null))
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        self.visit_unit()
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        UniqueValue::deserialize(deserializer)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
+        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0));
+        while let Some(UniqueValue(value)) = sequence.next_element::<UniqueValue>()? {
+            values.push(value);
+        }
+        Ok(UniqueValue(Value::Array(values)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut object: A) -> Result<Self::Value, A::Error> {
+        let mut values = Map::new();
+        while let Some(key) = object.next_key::<String>()? {
+            match values.entry(key) {
+                Entry::Vacant(entry) => {
+                    entry.insert(object.next_value::<UniqueValue>()?.0);
+                }
+                Entry::Occupied(entry) => {
+                    return Err(de::Error::custom(format!(
+                        "duplicate key {:?}",
+                        entry.key()
+                    )));
+                }
+            }
+        }
+        Ok(UniqueValue(Value::Object(values)))
+    }
+}
+
 /// Require `output` to report a sealed build of `version` whose exported
 /// archive and headers match the receipt and whose shipped counterparts match
 /// those same digests. Returns the archive SHA-256.
@@ -130,7 +226,8 @@ fn verify(
     let receipt: Value = fs::read(&receipt_path)
         .map_err(|e| format!("could not read {}: {e}", receipt_path.display()))
         .and_then(|bytes| {
-            serde_json::from_slice(&bytes)
+            serde_json::from_slice::<UniqueValue>(&bytes)
+                .map(|receipt| receipt.0)
                 .map_err(|e| format!("{} is not JSON: {e}", receipt_path.display()))
         })?;
     for (field, expected) in [
@@ -162,13 +259,24 @@ fn verify(
         .and_then(Value::as_object)
         .filter(|headers| !headers.is_empty())
         .ok_or_else(|| format!("the chelis {version} release's runtime export lists no headers"))?;
-    for (name, digest) in headers {
+    for name in headers.keys() {
         if !is_safe_path_component(name) {
             return Err(format!(
                 "the chelis {version} release's runtime export lists the header {name:?}, \
                  which is not a file name"
             ));
         }
+    }
+    if headers.len() != PUBLIC_HEADERS.len()
+        || PUBLIC_HEADERS
+            .iter()
+            .any(|name| !headers.contains_key(*name))
+    {
+        return Err(format!(
+            "the chelis {version} release's runtime export does not list exactly the six public headers"
+        ));
+    }
+    for (name, digest) in headers {
         let digest = digest
             .as_str()
             .filter(|digest| is_sha256_hex(digest))

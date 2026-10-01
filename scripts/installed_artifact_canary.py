@@ -26,6 +26,11 @@ import sys
 import tarfile
 import tomllib
 
+if __package__:
+    from .verify_runtime_package import verify_runtime_package
+else:
+    from verify_runtime_package import verify_runtime_package
+
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADERS = tuple(f"include/{name}.h" for name in (
@@ -33,10 +38,10 @@ HEADERS = tuple(f"include/{name}.h" for name in (
     "chelis_blas", "chelis_simd", "chelis_math",
 ))
 REQUIRED_FILES = ("bin/chelis", "lib/libchelis_runtime.a", *HEADERS)
-REQUIRED_PROCESSES = ("install", "which", "version", "unavailable-root", "build",
-                      "link", "execute-0", "execute-1", "execute-2",
-                      "link-last-coordinate", "reject-last-coordinate",
-                      "link-input", "reject-input")
+REQUIRED_PROCESSES = ("install", "which", "version", "runtime-export",
+                      "unavailable-root", "build", "link", "execute-0",
+                      "execute-1", "execute-2", "link-last-coordinate",
+                      "reject-last-coordinate", "link-input", "reject-input")
 
 
 def digest(path: Path) -> str:
@@ -115,10 +120,11 @@ def require_staged_runtime(output: Path, inventory: dict[str, str]) -> None:
     """Require `chelis build` to stage the shipped runtime from a sealed build.
 
     The staged runtime is the one the installed chelis carries, and the tarball
-    must ship those same bytes (spec/08-backends.md §2.1). A release binary must
-    also be sealed: a development build would stage here too, because this
-    runner holds the checkout it was built from, so only the staging receipt's
-    mode tells them apart.
+    must ship those same bytes (spec/08-backends.md §2.1). Its receipt must
+    bind all six staged public headers as well as the archive to those bytes.
+    A release binary must also be sealed: a development build would stage here
+    too, because this runner holds the checkout it was built from, so only the
+    staging receipt's mode tells them apart.
     """
     archive = inventory["lib/libchelis_runtime.a"]
     if digest(output / "libchelis_runtime.a") != archive:
@@ -135,6 +141,9 @@ def require_staged_runtime(output: Path, inventory: dict[str, str]) -> None:
     observed = {key: receipt.get(key) for key in expected} if isinstance(receipt, dict) else None
     if observed != expected:
         raise ValueError(f"staging receipt is not the shipped sealed runtime: {observed}")
+    expected_headers = {Path(header).name: inventory[header] for header in HEADERS}
+    if receipt.get("headers") != expected_headers:
+        raise ValueError("staging receipt headers do not match the shipped and staged headers")
 
 
 
@@ -285,6 +294,11 @@ def execute(args: argparse.Namespace, report: dict) -> None:
     version = runner.run("version", [shim, "--version"])
     if version.stdout.strip() != f"chelis {args.version}":
         raise ValueError("installed binary has an unexpected version")
+    exported = root / "runtime-export"
+    runner.run("runtime-export", [shim, "runtime", "export", exported])
+    report["installed_export_sha256"] = verify_runtime_package(exported, installed)
+    if report["installed_export_sha256"] != inventory["lib/libchelis_runtime.a"]:
+        raise ValueError("installed compiler export differs from the shipped archive")
     fixture = fixture_module()
     negative = root / "self_bound.ch"
     negative.write_text(fixture.SELF_BOUND_PROGRAM)

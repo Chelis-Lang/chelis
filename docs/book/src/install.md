@@ -35,6 +35,20 @@ installed versions with `chelisup list-installed`, inspect the active selection
 with `chelisup show`, or set another installed default with
 `chelisup default X.Y.Z`.
 
+Before placing a toolchain, `chelisup` reads the unpacked compiler's live
+`chelis runtime export` receipt and checks its sealed archive and six public
+headers against the shipped `lib/` and `include/` files. Missing or crossed
+files and malformed or ambiguous receipts (including duplicate JSON keys in
+nested objects) refuse installation before store placement. Older releases
+without an export install with a warning that their runtime files are unchecked;
+if a newer receipt format is unreadable, update `chelisup` with the bootstrap.
+
+Publish the compiler, archive, and headers together as one versioned toolchain;
+never replace only an installed archive or header. A rejected install leaves
+the previous toolchain available. To roll back, select a previously installed
+complete version with `chelisup default X.Y.Z` outside a project; explicit
+version overrides and project pins must be changed separately.
+
 ## Use a project
 
 A Reef project's `reef.toml` declares its toolchain under `[package]`, for
@@ -83,6 +97,15 @@ From the compiler checkout root, Nix provides source builds of `chelis`,
 nix build .#chelis
 nix run .#chelis -- --version
 ```
+
+Both `chelis` and `chelis-runtime` verify their copied archive and all six
+public headers against the sealed compiler's export. `nix flake check`
+rechecks both outputs against the combined package's own compiler, then links
+and runs a native C consumer separately with each output's exact include
+directory and archive path. Rebuild both outputs from the same compiler
+revision; never mix an archive or header from another derivation. A failed
+Nix-wrapper installation leaves its previous stable GC root and selected
+toolchain untouched.
 
 ### Build the Python distribution wheel
 
