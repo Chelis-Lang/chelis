@@ -438,9 +438,6 @@ implementation technique for small helpers, not the design contract.
 - `spec/design/chelis_phase2_plan.md:326` confirms the same rule on
   the linearity side as current scope: no general cross-function helper
   specialization is part of the Phase 2 completion claim.
-- `spec/design/chelis_oopsla_paper_plan.md:125` documents the perf
-  cost and now frames clang LTO as a workaround rather than the codegen
-  story for backend dispatch.
 - `spec/design/chelis_span_survival.md:97` documents one *narrow*
   inlining mechanism — `inline_top_level_host_call` for HOF
   specialization (e.g. `grad(local_fn)(theta)`), which is how AD

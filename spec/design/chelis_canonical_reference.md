@@ -9,16 +9,26 @@ Language semantics still belong in the numbered spec documents.
 
 ## 1. What Chelis Is
 
-Chelis is a functional programming language for AI research.
-It is designed for a workflow where a coding agent is the primary author and a human is
-the supervisor.
-Programs written in Chelis are themselves AI systems: models, training loops,
-evolutionary search spaces, and learned functions.
+Chelis is a numerical computing language for code that agents write and people
+supervise.
+Tensors carry named dimensions and precision in their type, and a proof stack checks
+the properties an author states about the code:
 
-Chelis is not a general-purpose language, not a systems language, not a web framework,
-and not a Python replacement.
-It targets model authoring, training, deployment, and program synthesis for AI
-workloads.
+- the compiler checks shapes, precision, effects, and ownership before anything runs,
+  and reports structured, deterministic diagnostics an agent can act on
+- `chelis prove` checks `@property` declarations by type checking, an SMT solver, or
+  seeded sampling, and each result names its method and qualifiers
+- Hull, a second type checker and evaluator written in Chelis, cross-checks the
+  compiler
+- a core calculus of Chelis is mechanized in Lean 4 (LaCaDiLE)
+
+Chelis is general purpose within numerical computing. The shells cover numerical
+methods, dataframes, finance, and economics, and the worked examples come from
+quantitative finance.
+Differentiation (`grad`) and machine-learning programs are research directions inside
+that scope; they do not define the language.
+Chelis is not a systems language, not a web framework, not a deep-learning framework,
+and not a general scripting replacement for Python.
 
 **Current status:** Phase 0 is complete. Phase 1 and Phase 2 have shipped their
 planned compiler surfaces. Phase 3 is the active language-completeness and shell
@@ -35,9 +45,12 @@ must run before a phase is declared complete.
 
 ## 2. Core Bet
 
-AI development benefits from a language whose type system, representation, and
-compilation model are designed around AI primitives instead of being bolted onto Python
-or a systems language after the fact.
+Numerical code written by agents is easier to trust when its types carry the facts
+numerical errors depend on (shape, precision, effects, ownership) and its toolchain can
+check stated properties, than when those facts first surface at run time in a host
+language.
+A person supervises by reading types and properties, not by re-deriving every line of
+generated code.
 
 ---
 
@@ -264,7 +277,7 @@ stay in `chelis-std` because every domain needs dates and exact arithmetic.
 
 **Chelis-native testing as the default.** All reef package tests are written in Chelis and run via `chelis test`, except for cross-language parity tests (comparing Chelis output against an external oracle) which use Python. This is a hard rule, not a guideline. Python test infrastructure exists only for parity verification against external libraries: scipy/numpy for Nautilus, pandas for Coral, sympy/latex2sympy2 for Octant LaTeX parsing correctness, QuantLib for Shoals if needed. `Std.Test` provides assertion functions (`assert_eq`, `assert_close`, `assert_close_tensor`, `assert_true`, `assert_false`, `fail`); `chelis test` discovers `tests/*.ch` files and runs them via the evaluator — no C compiler, no linking, no runtime library required. The `Test` effect (or runtime builtin) tracks assertion pass/fail. Reef package layout: `tests/` for Chelis-native tests, `parity/` for Python oracle comparison scripts. Full design: `chelis_native_testing_plan.md`.
 
-**SIMD support (four-level plan, future).** Level 1: `restrict` + `const` + alignment + pragmas in generated C (leverages linearity — the type system proves no aliasing, justifying `restrict`). Level 2: hand-written SIMD reductions in the runtime (sum/max/min/argmax/argmin, AVX2 + NEON). Level 3: vectorized math library integration (Sleef on Linux, Accelerate vForce on macOS) for SIMD-width math in fused kernels — highest impact item, targeted before OOPSLA benchmarks. Level 4: full SIMD-width-aware codegen (only if Levels 1-3 leave gaps). Full design: `chelis_simd_plan.md`.
+**SIMD support (four-level plan, future).** Level 1: `restrict` + `const` + alignment + pragmas in generated C (leverages linearity — the type system proves no aliasing, justifying `restrict`). Level 2: hand-written SIMD reductions in the runtime (sum/max/min/argmax/argmin, AVX2 + NEON). Level 3: vectorized math library integration (Sleef on Linux, Accelerate vForce on macOS) for SIMD-width math in fused kernels — highest impact item. Level 4: full SIMD-width-aware codegen (only if Levels 1-3 leave gaps). Full design: `chelis_simd_plan.md`.
 
 ---
 
@@ -717,9 +730,9 @@ To keep a future `salsa` migration cheap:
 
 ---
 
-## 12. AI Coding Assistance
+## 12. Agent Coding Assistance
 
-Chelis has two explicit first-party tracks for AI code generation.
+Chelis supports agent code generation on two tracks.
 
 ### Track 1: SKILL.md + Frontier Models
 
@@ -743,59 +756,19 @@ Current validation result:
 
 This means the skill file is real project infrastructure, not aspirational promptware.
 
-### Track 2: Local Model Ships With Toolchain
+### Track 2: Local Model (research direction)
 
-Chelis also requires a local coding model as a Phase 4 deliverable.
-This is not optional and not a speculative fallback.
+A small local coding model, trained on expanded Deep with compiler feedback and run on
+consumer hardware, is a research direction. Two constraints hold for any such work:
+the model generates and is trained on expanded Deep exclusively (macro invocations
+never appear in training data, generation targets, or compiler feedback sent to
+models), and the SKILL evaluation is run with and without the spec in context before
+any training, so the in-context effect is measured first.
 
-Target shape:
-
-- a local 4B-8B-class coding model
-- quantized GGUF artifacts that run on consumer hardware
-- integration with `chelis cove --assist` and related local workflows
-
-Training pipeline:
-
-1. **SSD for distributional shaping**
-2. **Trajectory collection with compiler feedback**
-   Compute `nesting_depth × operation_count` as a complexity proxy for each generated
-   program and log it.
-   Stratify by complexity band post-collection; let the ICL prerequisite measurement
-   determine the effective band rather than pre-committing.
-3. **Fine-tune, method chosen empirically**
-4. **Quantize and ship as GGUF**
-
-SSD matters because it is the cheap bridge between "model has never seen Deep" and
-"model can emit something the compiler can score."
-It uses the model's own outputs and directly targets the structural-validity gap seen
-in SKILL evaluation, where smaller or local models may reason correctly about Deep yet
-still fail to emit the canonical form.
-
-Step 3 starts with LoRA as the default.
-If forgetting is measured, switch to SDFT instead.
-RLVR remains available as an optional final polish step if the quality bar still is not
-met.
-Anti-forgetting is a hard constraint: the model must preserve PyTorch/JAX semantic
-knowledge through training.
-Before any training, measure the ICL effect by running the SKILL evaluation with and
-without the spec in context.
-That quick measurement gates whether distillation-style methods are worth trying at
-all.
-
-The local model generates and is trained on expanded Deep exclusively.
-Macro invocations never appear in training data, generation targets, or compiler
-feedback sent to models.
-
-Product framing:
-
-- a language for AIs that does not include an AI is an incomplete product
-- Track 1 is the frontier-model path
-- Track 2 is the shipped local-model path
-
-**ChelisBench:** A 50-task ML programming benchmark comparing LLM code generation in
-Chelis vs PyTorch on equivalent tasks. Measures whether a language designed for LLMs
-produces better ML code than the standard approach. Serves double duty as a measurement
-tool and a trajectory source for model training.
+**Benchmarks:** agent-written Chelis is measured against agent-written Python on
+equivalent numerical tasks, including quantitative-finance tasks. The measures are
+task success and whether failures are visible (a diagnostic or a stop) or silent (a
+wrong number).
 
 **Type-driven property testing:** the shipped surface is `chelis prove` and the
 `chelis_prove` MCP tool, which run property checks over Surf/Deep inputs using the type
@@ -810,7 +783,7 @@ current step toward it.
 
 ### Editing Surface
 
-Tracks 1 and 2 above cover code *generation*. A separate structural
+The tracks above cover code *generation*. A separate structural
 *editing* surface modifies existing Chelis source through Deep-AST operations
 rather than text patches. The shipped Tide MCP and HTTP editing tools are
 `chelis_replace_function_body`, `chelis_add_function`,

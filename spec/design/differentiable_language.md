@@ -2,7 +2,9 @@
 
 ## Goal
 
-Make Chelis a fully differentiable language: AD composes through arbitrary program structure (control flow, user-defined functions, custom data, effects, fixed points), not just tensor operations. The compiler treats AD as a first-class language transformation rather than a library feature, with type-level expression of differentiability and verified properties about gradient behavior.
+This is a research direction within Chelis's numerical computing scope (see
+`spec/design/chelis_canonical_reference.md` §1); it does not define the language.
+The long-term aim is a fully differentiable language: AD composes through arbitrary program structure (control flow, user-defined functions, custom data, effects, fixed points), not just tensor operations. The compiler treats AD as a first-class language transformation rather than a library feature, with type-level expression of differentiability and verified properties about gradient behavior.
 
 ## Audience and value proposition
 
@@ -17,7 +19,7 @@ The target audience is researchers and engineers working on problems where the s
 
 These users today work around limitations in PyTorch and JAX: rewriting simulators as tensor operations, replacing real algorithms with soft relaxations, hand-coding backward passes for non-tensor components, restructuring control flow to fit a tracing framework's constraints. A fully differentiable Chelis lets them write programs as programs and get gradients without the workarounds.
 
-The differentiator versus existing differentiable-language work (Dex, partial-JAX, Julia/Zygote, Enzyme) is the combination Chelis already commits to: dimension types from the start, effects as first-class, AD as IR transformation, verified properties. Each existing differentiable language has some of these; none has all. Chelis with this work shipped has all.
+The differentiator versus existing differentiable-language work (Dex, partial-JAX, Julia/Zygote, Enzyme) is the combination Chelis already commits to: dimension types from the start, effects as first-class, AD as IR transformation, verified properties. Each existing differentiable language has some of these; none has all.
 
 ## Pre-locked decisions
 

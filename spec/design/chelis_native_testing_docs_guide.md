@@ -76,10 +76,6 @@ Create `spec/design/chelis_native_testing_plan.md` from the downloaded draft.
 
 **Add a note in any existing testing discussion** (if one exists) that the Python-only testing model is being superseded by native Chelis testing, with Python retained only for parity verification.
 
-### 5. Edit `spec/design/chelis_oopsla_paper_plan.md`
-
-No changes needed. The native testing infrastructure is engineering, not a paper contribution.
-
 ## Verification
 
 After edits:

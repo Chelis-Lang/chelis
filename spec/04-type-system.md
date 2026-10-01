@@ -2455,7 +2455,7 @@ a bound is its §P4c; the Deep encoding is `spec/03-deep-syntax.md` §1.1.
 
 ## 6. Fitness Scoring
 
-The compiler produces a fitness report for every compilation attempt. This is the training signal for AI agents.
+The compiler produces a fitness report for every compilation attempt. This is the feedback an agent acts on.
 
 ### 6.1 Score Components
 

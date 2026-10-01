@@ -2,56 +2,51 @@
 
 **Status:** Active context memo.
 This file is for positioning, devrel, and ecosystem-facing summaries.
-It is not the language spec and it is not a historical design note.
+It is not the language spec. `spec/design/chelis_canonical_reference.md` controls
+what Chelis is; this memo explains how to talk about it.
 
 ---
 
 ## What Chelis Is
 
-Chelis is a functional programming language for AI research.
-It is designed around a workflow where coding agents write most of the code and humans
-supervise, review, and steer.
+Chelis is a numerical computing language for code that agents write and people
+supervise. Tensors carry named dimensions and precision in their type, and a proof
+stack checks the properties an author states about the code.
 
-Its core technical differentiators are:
+The points to lead with:
 
+- named tensor dimensions and explicit precision, checked before anything runs, with
+  no implicit broadcasting and no implicit precision promotion
+- effects and ownership in the type, so randomness, I/O, and aliasing are visible in a
+  signature
+- structured, deterministic diagnostics an agent can act on, with suggested repairs
 - Surf for readable supervision, Deep for canonical machine-facing structure
-- named tensor dimensions and explicit precision tracking
-- compiler feedback as graded training signal
-- a compact RISC DAG that keeps transforms and backend work tractable
-- executable properties as spec — customer-authored `@property` functions verified
-  against AI-generated implementations on random inputs (`chelis prove`)
+- executable properties as spec: `@property` functions checked by `chelis prove`,
+  with each result naming the method behind it (type checking, SMT, or seeded
+  sampling)
+- Hull, a second checker that cross-checks the compiler, and a Lean 4 mechanization of
+  a core calculus of Chelis
 
-Chelis is not trying to be a general-purpose language or a Python replacement.
-It targets the model-definition and compiler layer for AI workloads.
+Chelis is general purpose within numerical computing. The worked examples come from
+quantitative finance because that is where a silent wrong number is most expensive,
+not because the language is limited to it. Chelis is not a systems language, a web
+framework, a deep-learning framework, or a general scripting replacement for Python.
+
+Differentiation and machine-learning programs are research directions. Describe them
+in general terms, never as the purpose of the language.
 
 ---
 
 ## Executable Properties as Spec
 
-No other platform lets you write "for all valid inputs, put-call parity holds" as
-executable code and have the toolchain verify it on deterministic samples against the
-AI-generated implementation. Properties are Chelis functions annotated with
-`@property`. They define correctness. The toolchain enforces it. The customer reviews
-properties (simple, one-line domain facts), not generated code (complex, optimized,
-opaque). This directly addresses the consequential computing concern: "I can't define
-a spec and ensure it's in the generated code." The answer: "You define the spec as
-properties. We verify the code satisfies them."
+Properties are Chelis functions annotated with `@property`. They state what correct
+means ("put-call parity holds for all valid inputs"), and `chelis prove` checks the
+generated implementation against them. A supervisor reviews properties, which are
+short domain facts, instead of re-reading long optimized code.
 
-Domain shells ship reference implementations alongside properties. The customer
-doesn't write a reference for standard models — Shoals provides Black-Scholes,
-Heston, Vasicek; future vertical shells provide their domain's standard models. The
-customer writes references only for proprietary models. The toolchain proves
-optimized implementations agree with references on random inputs. The customer
-reviews properties and references (short, declarative, human-readable), not generated
-code (long, optimized, opaque).
-
-Where this fits relative to the rest of the verification stack — and how it compares
-to the prevailing alternative:
-
-| Platform | Spec verification |
-|---|---|
-| Other AI codegen platforms | None (manual review, PDF specs that rot) |
-| Chelis | Executable properties + reference implementations: shell-provided references for standard models, customer-written properties for invariants and reference-correspondence, all verified by `chelis prove` on random inputs |
+Domain shells ship reference implementations alongside properties. Shoals carries
+standard pricing models, so a user writes references only for proprietary models, and
+`chelis prove` checks that an optimized implementation agrees with its reference.
 
 Full design: `chelis_trust_stack.md`, `chelis_reference_implementations_spec.md`,
 `chelis_property_spec.md`.
@@ -60,99 +55,32 @@ Full design: `chelis_trust_stack.md`, `chelis_reference_implementations_spec.md`
 
 ## Why It Matters
 
-Chelis is built around three converging realities:
+1. Coding agents are becoming the primary authors of numerical code.
+2. Numerical bugs (a broadcast that stretches the wrong axis, a silent precision
+   change, an index that wraps) produce plausible wrong numbers instead of crashes.
+3. A person cannot re-derive every generated line, but can read types and properties.
 
-1. coding agents are becoming the primary authors of code
-2. AI research still suffers from weak shape, precision, and correctness guarantees
-3. programs-as-data matters for architecture search, program synthesis, and learned
-   systems
-
-The dual-syntax architecture and compiler feedback loop are the answer to those three
-pressures taken together.
+Chelis answers all three together: the compiler rejects the bug classes, the prover
+checks stated properties, and the diagnostics close the loop for the agent.
 
 ---
 
-## How to Talk About the Coding Capability
+## How to Talk About Agent Coding
 
-Do **not** describe the Chelis coding strategy as "just fine-tune a model."
-The current strategy has two explicit tracks:
+Agents write Chelis through a first-party `SKILL.md` and the Tide MCP server
+(`chelis tide mcp`), which exposes check, eval, prove, and structural Deep edits as
+tools. The compiler is the agent's feedback loop: every rejection names what went
+wrong and where.
 
-### Track 1
-
-Use a first-party `SKILL.md` plus the Tide MCP server with frontier models.
-This is the Phase 2 story: compiler-in-the-loop, in-context learning, validated against
-the current compiler surface.
-Then late Phase 3 rewrites that skill file for the fuller language-complete surface:
-pipe-first Surf, scalar/string code, collections, iteration, and tokenization/data-
-loading workflows.
-
-### Track 2
-
-Ship a local model with the toolchain.
-This is the Phase 4 story: SSD for distributional shaping, complexity-aware trajectory
-collection with compiler feedback, empirically chosen fine-tuning, then quantize and
-ship as GGUF.
-LoRA is the default starting point, SDFT is the anti-forgetting fallback if forgetting
-is measured, and RLVR is optional final polish if needed.
-
-The important change is that the local model is a required deliverable, not optional
-hedging.
-
----
-
-## Dependencies and Prerequisites
-
-The critical dependency for Track 1 is the Tide MCP server.
-That is the interface where the compiler-as-teacher loop runs.
-
-A second non-negotiable prerequisite is a seed corpus of 50-100 hand-written or
-supervised-interaction programs covering core Chelis patterns.
-Those programs serve as:
-
-- few-shot examples
-- trajectory seeds
-- evaluation anchors
-
-The corpus should be deliberately stratified by problem complexity (~20 single-op, ~40
-single-layer, ~30 multi-layer, ~10 full models) so that all bands are represented as
-controls when measuring the ICL effect across complexity levels.
-
-Before local-model training starts, measure the ICL effect by running the SKILL
-evaluation with and without the spec in context.
-That tells us whether distillation-style methods are even worth attempting.
-
-Anti-forgetting is the hard constraint for Track 2:
-
-- Chelis training must not erase PyTorch/JAX semantic knowledge
-
----
-
-## What Success Looks Like
-
-### Phase 1-2 Milestone
-
-Frontier models can write useful Chelis through `SKILL.md` + MCP, and that workflow is
-documented, tested, and repeatable.
-The skill path has already validated at 9/10 tasks on a local Qwen 35B MoE setup.
-
-### Longer-Term
-
-Chelis ships a first-party local coding model as part of the toolchain.
-The point is not only to prove frontier-model usability.
-The point is to make AI generation of correct Chelis code a standard product capability,
-including offline/local use.
+A small local coding model trained on Deep is a research direction, not a product
+commitment. Do not describe the coding strategy as "fine-tune a model."
 
 ---
 
 ## Positioning Notes
 
-- "First-party coding capability" is the right umbrella phrase.
-- "Compiler-as-teacher" is more accurate than "compiler-as-evaluator only."
-- "SKILL.md + MCP" is the Phase 2 story.
-- "Package system and Python interop are shipped foundations; remaining Phase 3 work is
-  language completeness" is the key sequencing story.
-- "Pipe-first examples first, then scalar/string/collection/tokenization support, then
-  `SKILL.md` v2 redo" is the Phase 3 public-surface story.
-- "Local model ships with toolchain" is the Phase 4 story.
-- "A language for AIs that doesn't include an AI is an incomplete product" is now part
-  of the core framing.
+- Lead with the premise: agents write, the compiler and prover check, people supervise.
+- Say "numerical computing language"; "tensor language" is acceptable shorthand.
+- Use quantitative finance for examples, and keep the general-purpose scope explicit.
+- Name C as the build target.
+- Do not lead with autodiff, neural networks, or model training.

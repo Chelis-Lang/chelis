@@ -2,7 +2,7 @@
 
 **Owner:** Core compiler (`chelis-lang/chelis`), primarily `crates/chelis-backend-c/` and `crates/chelis-runtime/`
 **Status:** Level 0 (zero explicit SIMD today). Auto-vectorization only via C compiler.
-**Priority:** Medium. Not blocking any shell. Becomes high priority before OOPSLA benchmarks.
+**Priority:** Medium. Not blocking any shell. Becomes high priority when published benchmarks depend on math-heavy kernels.
 
 ---
 
@@ -94,7 +94,7 @@ The toolchain resolver (from the macOS CPU support work) already knows which com
 
 **Effort:** Medium (new C functions in the runtime, platform-specific)
 **Impact:** Targeted (reductions are where auto-vectorization is weakest)
-**When:** When profiling shows reductions are a bottleneck (likely during OOPSLA benchmark preparation)
+**When:** When profiling shows reductions are a bottleneck
 
 ### What
 
@@ -175,7 +175,7 @@ float chelis_sum_f32_neon(const float* restrict data, int n) {
 
 **Effort:** Medium (build dependency + emitter mapping)
 **Impact:** Large (10-20x on math-heavy fused kernels like erf, normal_cdf)
-**When:** Before OOPSLA benchmarks. This is the highest-impact SIMD investment.
+**When:** When benchmarks show math-heavy kernels dominate. This is the highest-impact SIMD investment.
 
 ### What
 
@@ -316,7 +316,7 @@ Level 3 (vectorized math library):
 ├── Accelerate vForce on macOS
 ├── Emitter maps math ops to vectorized equivalents in fused kernels
 ├── chelis_math.h shim header
-└── Ship with: before OOPSLA benchmarks
+└── Ship with: when benchmarks show math-heavy kernels dominate
 
 Level 4 (full SIMD codegen):
 ├── Only if Levels 1-3 leave measurable gaps

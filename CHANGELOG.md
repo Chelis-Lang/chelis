@@ -7488,8 +7488,7 @@ now ships:
 - The Hull spec's `Effect` ADT now mirrors the shipped enum
   (`Random`/`Accum`/`Io`/`Test`/`Resource(String)`) instead of listing a
   non-existent `Fail` and omitting `Test`.
-- The Hull LaCaDiLE/timing notes drop the stale "POPL Jul 9" milestone in
-  favor of the OOPSLA-targeted, stabilizing status.
+- The Hull LaCaDiLE/timing notes drop a stale milestone date.
 
 ## [0.7.19] — 2026-05-26
 

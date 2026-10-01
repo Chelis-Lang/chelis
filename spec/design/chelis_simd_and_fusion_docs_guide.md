@@ -23,7 +23,7 @@ This doc covers:
 - Current state (zero explicit SIMD, auto-vectorization only)
 - Level 1: `restrict` pointers, alignment attributes, SIMD pragmas (small effort, ship with next codegen pass)
 - Level 2: Hand-written SIMD reductions in the runtime (medium effort, when profiling shows need)
-- Level 3: Sleef on Linux + Accelerate vForce on macOS for vectorized math in fused kernels (medium effort, before OOPSLA benchmarks)
+- Level 3: Sleef on Linux + Accelerate vForce on macOS for vectorized math in fused kernels (medium effort)
 - Level 4: Full SIMD-width-aware codegen (large effort, only if Levels 1-3 leave gaps)
 - Relationship to GPU backends (SIMD is CPU path; GPU backends are separate)
 
@@ -38,7 +38,6 @@ Content for the SIMD entry should cover:
 - `restrict` annotation leverages linearity (the type system has proved no aliasing)
 - Sleef on Linux, Accelerate vForce on macOS
 - Level 1 ships with the next codegen improvement pass
-- Level 3 ships before OOPSLA benchmarks
 - Level 4 only if profiling demands it
 - Full design: `spec/design/chelis_simd_plan.md`
 
@@ -70,25 +69,12 @@ However, if the Phase 3 plan has a section on performance or codegen improvement
 
 If no natural insertion point exists, don't force it. These are Phase 5 / future items, not Phase 3.
 
-### 5. Update the OOPSLA paper plan
-
-Edit `spec/design/chelis_oopsla_paper_plan.md` in place.
-
-In §4 (Compiler and Performance), the benchmark discussion should reference the SIMD plan as the path to stronger benchmark numbers:
-
-Find the benchmark results paragraph and add a note after it:
-
-> The current benchmarks use the scalar C backend with auto-vectorization only. The SIMD support plan (Levels 1-3) is expected to improve these numbers further: `restrict` annotations unlock auto-vectorization on aliased loops, and Sleef/vForce integration provides SIMD-width math functions (exp, log, sin, erf) in fused kernels. Level 3 is targeted for completion before the paper's benchmark section is finalized.
-
-Do not overstate — say "expected to improve," not "will achieve 10-20x." The benchmarks need to be run before claiming numbers.
-
 ## Verification
 
 - `rg -n "SIMD\|simd\|restrict\|Sleef\|vForce"` across all five target docs shows expected coverage
 - `rg -n "lazy.*list.*fusion\|foldr.*build\|host.*lane.*fusion"` confirms lazy list fusion is present in project plan and canonical reference
 - The standalone SIMD plan doc exists at `spec/design/chelis_simd_plan.md`
 - SIMD and lazy list fusion are never described as Phase 3 items or as active/in-progress
-- The OOPSLA paper plan references SIMD as a path to stronger benchmarks without overpromising
 
 ## Assumptions
 

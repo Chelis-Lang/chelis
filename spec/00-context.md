@@ -2,45 +2,51 @@
 
 ## 1. What Chelis Is
 
-Chelis is a functional programming language for AI research.
-It is built for a workflow where a coding agent is the primary author and a human is
-the supervisor.
-The target programs are themselves AI systems: models, training pipelines,
-architecture-search programs, and learned functions.
+Chelis is a numerical computing language for code that agents write and people
+supervise.
+Tensors carry named dimensions and precision in their type, and a proof stack checks
+the properties an author states about the code.
+Chelis is general purpose within numerical computing: numerical methods, dataframes,
+simulation, statistics, and quantitative finance are all in scope.
 
 Chelis is designed around three linked claims:
 
-1. AI workloads deserve a type system that understands tensor dimensions, precision,
-   and differentiability.
-2. AI-generated code benefits from a machine-friendly canonical syntax.
-3. Compiler feedback should be useful as training signal, not only as a pass/fail gate.
+1. Numerical code deserves a type system that understands tensor dimensions,
+   precision, effects, and ownership, and checks them before anything runs.
+2. Agent-written code benefits from a regular canonical syntax for machines and a
+   readable syntax for the people who review it.
+3. Compiler and prover feedback should be structured and deterministic enough for an
+   agent to act on, and specific enough for a person to audit.
 
 ## 2. What Chelis Is Not
 
 - Not a Python replacement for general scripting
 - Not a web or systems language
 - Not a framework embedded in another host language
-- Not "PyTorch but with different syntax"
+- Not a deep-learning framework
 
-Chelis targets the model-definition and compilation layer, not the entire surrounding
+Chelis targets the numerical core of a program, not the entire surrounding
 application stack.
 
 ## 3. Audience
 
 Primary users:
 
-- ML researchers building new architectures and training procedures
-- AI systems engineers working on correctness-sensitive tensor programs
-- agent frameworks that generate, evaluate, and repair code automatically
+- coding agents that write, check, and repair numerical code
+- engineers who supervise that code in correctness-sensitive domains such as finance
+- researchers in programming languages and verification
 
-The language is intentionally optimized for AI-native authoring rather than for
-manually writing large general-purpose applications.
+The language is intentionally optimized for agent authoring and human review rather
+than for manually writing large general-purpose applications.
 
 ## 4. Core Bet
 
-AI development benefits from a language whose representation, type system, and
-compilation strategy are designed around AI primitives from the start rather than
-retrofitted onto Python or a systems language later.
+Numerical code written by agents is easier to trust when its types carry the facts
+numerical errors depend on (shape, precision, effects, ownership) and when its
+toolchain can check stated properties, than when those facts first surface at run time
+in a host language.
+Numerical computing defines the scope; `grad`, `vmap`, and `jit` are transforms within
+it (§8).
 
 ## 5. Design Principles
 

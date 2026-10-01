@@ -131,7 +131,7 @@ Snake_case where Chelis-authored. Walked locations:
 - `chelis/scripts/`: `bench_phase_j.py`, `build_wrapped_spans_sidecar.py`, `bump_compiler_pins.py`, `nautilus_local_gate.py`, `test_bump_compiler_pins.py`.
 - `chelis/bindings/python/`: `chelis/__init__.py`, `tests/manual_phase3b.py`, `tests/manual_phase3bii.py`.
 - `chelis/benchmarks/pytorch/`: `linreg.py`, `mnist.py`, `transformer_block.py`.
-- `chelis/assets/mascot/`: `generate_chev.py`.
+- `chelis/docs/archive/mascot/`: `generate_chev.py`.
 - `nautilus/scripts/`: `bench_eval_startup.py`, `bench_vs_scipy.py`, `chelis_toolchain.py`, `extract_stability.py`, `gen_goldens.py`, `validate_book_examples.py`.
 - `coral/scripts/`: `chelis_toolchain.py`, `repro_multimodule_bare_build.py`, `run_skill_checks.py`, `run_static_checks.py`, `validate_book_examples.py`.
 - `octant/scripts/`: `corpus_smoke.py`.

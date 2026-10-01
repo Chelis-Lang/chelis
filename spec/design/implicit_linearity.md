@@ -55,7 +55,7 @@ passed once to a consuming function after any number of borrows is not fan-out a
 not receive a copy.
 
 Explicit source `copy()` lowers to the same `RiscOp::Copy` used for inserted copies.
-Cost and training signals intentionally do not distinguish explicit and inserted
+Cost and fitness signals intentionally do not distinguish explicit and inserted
 copies.
 
 ## Destructured Components

@@ -1,7 +1,7 @@
 //! Fitness scoring for Chelis programs.
 //!
 //! Produces a 0.0-1.0 fitness score measuring "how close to valid" a program
-//! is. This is the training signal for AI agents (see spec section 6).
+//! is. This is the feedback an agent acts on (see spec section 6).
 
 use crate::errors::CheckError;
 use crate::infer::{CheckedProgram, InferResult, InferStats};
