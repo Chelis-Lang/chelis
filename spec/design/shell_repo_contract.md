@@ -11,8 +11,9 @@ first and propagate to every shell per §10.
 state their trigger; once triggered they are MUST.
 
 **Reference implementation:** [`Chelis-Lang/school`](https://github.com/Chelis-Lang/school)
-satisfies every unconditional MUST as of 2026-06-10 and is the stamping
-source for new shells (§11). Each requirement links its School exemplar.
+satisfies every unconditional MUST as of 2026-06-10. New shells are stamped by
+`chelis reef conform init`, not copied from School (§11). Each requirement links
+its School exemplar.
 
 **Why this exists.** The 2026-06 School↔chelis alignment review
 (School `spec/design/generality_audit.md`) found a repeatable downstream
@@ -418,10 +419,11 @@ a raw pin edit that skips the checklist cannot land. A bump lands as a **PR**
 `main`), never a direct-to-`main` cascade.
 
 **The write verbs are all-or-nothing on their prerequisites** (chelis#1263).
-`bump` and `sync` restamp `reef.toml`, `AGENTS.md`, and
-`docs/CHELIS_SURFACE.md` **in place**, so they check all three before their first
-write and refuse, with a nonzero exit naming the whole gap and pointing at
-`conform init`, if any is absent. A repo that has never been conformed is not a
+`bump` and `sync` restamp `reef.toml` and `AGENTS.md` **in place**, so they check
+both before their first write and refuse, with a nonzero exit naming the whole
+gap and pointing at `conform init`, if either is absent. `docs/CHELIS_SURFACE.md`
+is generated (§3), so they create it when it is absent and refuse only when
+something other than a regular file occupies its path. A repo that has never been conformed is not a
 repo they partially bump: the older behavior ran the edit sequence until it
 reached the first missing artifact, leaving the pins rewritten and the skills
 materialized behind a failure, and in one measured case reporting success while
@@ -660,12 +662,16 @@ self-audit.
 | 16 | Scaffolding Drift Rule in AGENTS.md | MUST | §10 | `AGENTS.md` §Scaffolding Drift Rule |
 | 17 | `[chelis-src]` + `chelis reef src` store/symlink + local drift guard | MUST *if* the shell links chelis crates as Cargo path deps | §2 | hydronnx, calcify (the crate-linking shells; see appendix) |
 
-Bootstrap order for a brand-new shell: stamp from School → rename
-`module_prefix` + manifest + module tree → wire pins + CI guards (rows
-2–5) → write the intent statement (row 1) → land `tests_neg/`/`tests_blocked/`
-wired-but-small with their runners (rows 10–11; the first real blocker
-populates row 11) → `conform sync` to materialize the inherited agent contract,
-capability surface, and skills (rows 1, 7, 13) → run the full local gate.
+Bootstrap order for a brand-new shell: `chelis reef conform init <name>
+--module-prefix <Prefix>` stamps the shell from the toolchain's embedded
+templates, pinned to that toolchain, with the pins and CI guards wired (rows
+2–5), `tests_neg/` and `tests_blocked/` in place (rows 10–11), and the inherited
+agent contract, capability surface, and skills materialized (rows 1, 7, 13) →
+replace the template Repo Identity with the shell's intent statement (row 1) →
+grow `tests_neg/` and `tests_blocked/` as real cases arrive (the first real
+blocker populates row 11) → run `conform audit` and the full local gate. From
+then on, `conform sync`, and `conform bump` at each pin bump, keep the
+inherited surfaces current.
 
 ### Appendix: conformance snapshot (verified on-disk, 2026-06-10)
 

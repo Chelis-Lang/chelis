@@ -285,3 +285,20 @@ fn sync_restores_the_claude_symlink() {
         assert!(audit::audit(&root).ok(), "{name}");
     }
 }
+
+/// The surface document is fully generated, so sync creates it in a shell that
+/// lacks it, `docs/` included, instead of refusing (chelis#2831).
+#[test]
+fn sync_creates_the_surface_document_when_it_is_missing() {
+    let (_tmp, root) = green_shell();
+    std::fs::remove_dir_all(root.join("docs")).unwrap();
+    assert!(scaffold::preflight_restamp_targets(&root).is_ok());
+
+    scaffold::sync_managed_blocks(&root, VER).expect("sync creates the surface document");
+    assert_eq!(
+        managed_block::normalize_body(&surface_block(&root).body),
+        managed_block::normalize_body(canonical::body("chelis-surface").unwrap())
+    );
+    let report = audit::audit(&root);
+    assert_eq!(row(&report, "chelis-surface").verdict, audit::Verdict::Pass);
+}

@@ -543,24 +543,28 @@ fn remove_path(path: &Path) -> Result<(), String> {
 }
 
 /// The documents `conform sync` / `conform bump` **restamp in place** and
-/// therefore cannot create: each is read, edited, and written back. Distinct
-/// from `agent-skills/`, which the write path *materializes* from the embedded
-/// set, so its absence is normal work rather than a missing prerequisite.
+/// therefore cannot create: each carries shell-authored content the write path
+/// edits around. Distinct from `agent-skills/` and `docs/CHELIS_SURFACE.md`,
+/// which the write path *materializes* from the embedded set, so their absence
+/// is normal work rather than a missing prerequisite.
 ///
 /// `reef.toml` is listed because [`crate::bump::rewrite_pins`] reads its
 /// `compiler` pin before rewriting anything, and because both verbs derive the
-/// version they stamp from that pin.
+/// version they stamp from that pin. `AGENTS.md` is listed because its Repo
+/// Identity is hand-authored and anchors the inherited block.
 const RESTAMPED_ARTIFACTS: &[(&str, &str)] = &[
     ("reef.toml", "the compiler pin `conform bump` rewrites"),
     (
         "AGENTS.md",
         "carries the `agents-inheritance` managed block sync restamps",
     ),
-    (
-        "docs/CHELIS_SURFACE.md",
-        "carries the `chelis-surface` managed block sync restamps",
-    ),
 ];
+
+/// Generated documents the write path creates when absent. Their absence is not
+/// a gap, but something other than a regular file at the path is: the write
+/// would fail after earlier steps had already written, which is the partial
+/// application chelis#1263 closed.
+const MATERIALIZED_DOCUMENTS: &[&str] = &["docs/CHELIS_SURFACE.md"];
 
 /// One prerequisite the write path cannot proceed without.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -572,8 +576,8 @@ pub struct PreflightGap {
 }
 
 /// Preflight the write path on a shell root: every artifact `sync`/`bump`
-/// restamps must already exist, and `reef.toml` must carry a pin they can read
-/// (chelis#1263).
+/// restamps must already exist, `reef.toml` must carry a pin they can read, and
+/// no generated document's path may be occupied by a non-file (chelis#1263).
 ///
 /// **Why this is a separate pass rather than better error handling.** `bump`'s
 /// edit sequence is repin -> materialize skills -> restamp blocks, and each step
@@ -624,6 +628,17 @@ pub fn preflight_restamp_targets(root: &Path) -> Result<(), Vec<PreflightGap>> {
             }
         }
     }
+    for rel in MATERIALIZED_DOCUMENTS.iter().copied() {
+        let path = root.join(rel);
+        if fs::symlink_metadata(&path).is_ok() && !path.is_file() {
+            gaps.push(PreflightGap {
+                rel,
+                reason: "exists but is not a regular file, so sync cannot write the generated \
+                         document there"
+                    .to_string(),
+            });
+        }
+    }
     if gaps.is_empty() { Ok(()) } else { Err(gaps) }
 }
 
@@ -668,9 +683,14 @@ pub fn sync_managed_blocks(root: &Path, version: &str) -> Result<(), String> {
     )
     .map_err(|why| format!("AGENTS.md: {why}"))?;
 
+    // The surface document is fully generated, so a shell that lacks it gets
+    // one; any other read failure stops the sync before the first write.
     let surface_path = root.join("docs/CHELIS_SURFACE.md");
-    let surface_existing = fs::read_to_string(&surface_path)
-        .map_err(|e| format!("read {}: {e}", surface_path.display()))?;
+    let surface_existing = match fs::read_to_string(&surface_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("read {}: {e}", surface_path.display())),
+    };
     let surface_updated = render_inherited_document(
         &replace_legacy_surface_header(&surface_existing),
         "chelis-surface",
@@ -681,8 +701,7 @@ pub fn sync_managed_blocks(root: &Path, version: &str) -> Result<(), String> {
 
     fs::write(&agents_path, agents_updated)
         .map_err(|e| format!("write {}: {e}", agents_path.display()))?;
-    fs::write(&surface_path, surface_updated)
-        .map_err(|e| format!("write {}: {e}", surface_path.display()))?;
+    write(root, "docs/CHELIS_SURFACE.md", &surface_updated)?;
     symlink_file(root, "AGENTS.md", "CLAUDE.md")
 }
 

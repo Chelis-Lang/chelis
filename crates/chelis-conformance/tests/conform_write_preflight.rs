@@ -6,7 +6,9 @@
 //! blocks) ran until it reached the first missing artifact and left everything
 //! before that point on disk. A tree missing `AGENTS.md` came back repinned with
 //! `agent-skills/` materialized; a tree missing `docs/CHELIS_SURFACE.md` came
-//! back with all of that plus a restamped `AGENTS.md`. The wave also observed
+//! back with all of that plus a restamped `AGENTS.md`. Since chelis#2831 that
+//! document is generated, so sync creates it; only a non-file at its path is
+//! still refused. The wave also observed
 //! the same shapes reported as success by a scripted caller.
 //!
 //! These tests fix the *precondition*, which is the part a library test can own:
@@ -65,13 +67,28 @@ fn missing_agents_md_is_refused() {
     assert_eq!(missing_names(&root), vec!["AGENTS.md"]);
 }
 
+/// The c-earchin / calcify shape used to be refused here. Since chelis#2831
+/// the surface document is fully generated, so sync creates it and its absence
+/// is not a gap.
 #[test]
-fn missing_chelis_surface_is_refused() {
-    // The c-earchin / calcify shape.
+fn missing_chelis_surface_is_not_a_gap() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path());
     std::fs::remove_file(root.join("docs/CHELIS_SURFACE.md")).unwrap();
+    assert!(scaffold::preflight_restamp_targets(&root).is_ok());
+}
+
+/// What still applies of the #1263 rule to the surface path: a directory where
+/// sync must write the generated file would fail that write after the skills
+/// were materialized, so it is refused before the first write.
+#[test]
+fn a_directory_in_place_of_the_surface_document_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path());
+    std::fs::remove_file(root.join("docs/CHELIS_SURFACE.md")).unwrap();
+    std::fs::create_dir(root.join("docs/CHELIS_SURFACE.md")).unwrap();
     assert_eq!(missing_names(&root), vec!["docs/CHELIS_SURFACE.md"]);
+    assert!(gap_reason(&root, "docs/CHELIS_SURFACE.md").contains("not a regular file"));
 }
 
 #[test]
@@ -93,8 +110,9 @@ fn a_never_conformed_repo_reports_every_missing_artifact_at_once() {
     let missing = missing_names(&root);
     assert_eq!(
         missing,
-        vec!["reef.toml", "AGENTS.md", "docs/CHELIS_SURFACE.md"],
-        "all three restamp targets are reported together"
+        vec!["reef.toml", "AGENTS.md"],
+        "both restamp targets are reported together; the generated surface \
+         document is created, not required"
     );
 }
 
@@ -183,10 +201,10 @@ fn a_readable_pin_that_is_not_the_toolchain_version_still_passes() {
 fn the_refusal_message_names_the_gap_and_the_repair_verb() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path());
-    std::fs::remove_file(root.join("docs/CHELIS_SURFACE.md")).unwrap();
+    std::fs::remove_file(root.join("AGENTS.md")).unwrap();
     let gaps = scaffold::preflight_restamp_targets(&root).unwrap_err();
     let msg = scaffold::preflight_failure_message("bump", &root, &gaps);
-    assert!(msg.contains("docs/CHELIS_SURFACE.md"), "{msg}");
+    assert!(msg.contains("AGENTS.md"), "{msg}");
     assert!(msg.contains("Nothing was written"), "{msg}");
     assert!(
         msg.contains("chelis reef conform init"),

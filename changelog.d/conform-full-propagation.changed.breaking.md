@@ -6,7 +6,10 @@ replaces where it stood. Shell-owned text outside the block is kept, and a
 `shell-local:exclude` selector span outside it omits inherited sections, as in
 `AGENTS.md`. The audit no longer asks for `@pin`/`@upstream` markers, and the
 Pin Bump Checklist no longer has a manual surface refresh step. Sync also
-restores the `CLAUDE.md -> AGENTS.md` symlink.
+restores the `CLAUDE.md -> AGENTS.md` symlink. Because the surface document is
+generated, `sync` and `bump` create it when it is missing instead of refusing
+the repo; they still refuse, before writing anything, when a directory or other
+non-file occupies its path.
 
 The `chelis-std` downstream-authoring skill, authored at
 `packages/chelis-std/SKILL.md`, is now a shared skill: sync materializes it into

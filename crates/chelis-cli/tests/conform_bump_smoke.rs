@@ -392,15 +392,15 @@ fn bump_on_a_repo_without_agents_md_refuses_and_writes_nothing() {
     );
 }
 
-/// The c-earchin / calcify shape: `docs/CHELIS_SURFACE.md` absent. This one is
-/// the sharper regression lock, because the pre-fix run got FURTHER: it repinned,
-/// materialized skills, AND restamped `AGENTS.md` before failing, so the failure
-/// left a managed block stamped for a version the shell had not adopted.
+/// The c-earchin / calcify shape: `docs/CHELIS_SURFACE.md` absent. Before
+/// chelis#2831 the bump refused this repo; the surface document is now fully
+/// generated, so the bump creates it and the surface row audits green.
 #[test]
-fn bump_on_a_repo_without_chelis_surface_refuses_and_writes_nothing() {
+fn bump_on_a_repo_without_chelis_surface_creates_it() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("shell");
-    let before = pre_conformance_shell(&root, &["docs/CHELIS_SURFACE.md"]);
+    pre_conformance_shell(&root, &["docs/CHELIS_SURFACE.md"]);
+    std::fs::remove_dir_all(root.join("tests_neg/example")).unwrap();
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -413,17 +413,54 @@ fn bump_on_a_repo_without_chelis_surface_refuses_and_writes_nothing() {
         ])
         .arg(&root)
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("docs/CHELIS_SURFACE.md"))
-        .stderr(predicate::str::contains("Nothing was written"));
+        .success();
 
-    assert_unchanged(&root, &before);
-    assert!(
-        !std::fs::read_to_string(root.join("AGENTS.md"))
-            .unwrap()
-            .contains(chelis_compiler_api::COMPILER_VERSION),
-        "the AGENTS.md managed block must not have been restamped ahead of the refusal"
+    let text = std::fs::read_to_string(root.join("docs/CHELIS_SURFACE.md")).unwrap();
+    let block = chelis_conformance::managed_block::find(&text, "chelis-surface")
+        .expect("bump writes the chelis-surface block");
+    assert_eq!(block.version, chelis_compiler_api::COMPILER_VERSION);
+    // The scaffolded negative probe was dropped to skip the executable suites,
+    // so judge the surface row rather than the whole audit.
+    let report = chelis_conformance::audit::audit(&root);
+    let row = report
+        .rows
+        .iter()
+        .find(|r| r.key == "chelis-surface")
+        .unwrap();
+    assert_eq!(
+        row.verdict,
+        chelis_conformance::audit::Verdict::Pass,
+        "{}",
+        row.diagnostic
     );
+}
+
+/// What #1263 still owes the surface path: a directory where the generated file
+/// belongs would fail the write after the skills were materialized. Both verbs
+/// refuse it before the first write.
+#[test]
+fn both_verbs_refuse_a_directory_at_the_surface_path_and_write_nothing() {
+    for verb in ["bump", "sync"] {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("shell");
+        pre_conformance_shell(&root, &["docs/CHELIS_SURFACE.md"]);
+        std::fs::create_dir(root.join("docs/CHELIS_SURFACE.md")).unwrap();
+        let before = snapshot(&root);
+
+        let mut cmd = Command::cargo_bin("chelis").expect("binary");
+        cmd.args(["reef", "conform", verb]);
+        if verb == "bump" {
+            cmd.arg(chelis_compiler_api::COMPILER_VERSION);
+        }
+        cmd.arg("--path")
+            .arg(&root)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("docs/CHELIS_SURFACE.md"))
+            .stderr(predicate::str::contains("Nothing was written"));
+
+        assert_unchanged(&root, &before);
+    }
 }
 
 /// `sync` shares the restamp step and had the same partial-write shape.
@@ -431,7 +468,7 @@ fn bump_on_a_repo_without_chelis_surface_refuses_and_writes_nothing() {
 fn sync_on_a_pre_conformance_repo_refuses_and_writes_nothing() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("shell");
-    let before = pre_conformance_shell(&root, &["docs/CHELIS_SURFACE.md"]);
+    let before = pre_conformance_shell(&root, &["AGENTS.md", "CLAUDE.md"]);
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -439,7 +476,7 @@ fn sync_on_a_pre_conformance_repo_refuses_and_writes_nothing() {
         .arg(&root)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("docs/CHELIS_SURFACE.md"))
+        .stderr(predicate::str::contains("AGENTS.md"))
         .stderr(predicate::str::contains("Nothing was written"));
 
     assert_unchanged(&root, &before);
@@ -452,8 +489,11 @@ fn sync_on_a_pre_conformance_repo_refuses_and_writes_nothing() {
 fn bump_names_every_missing_artifact_in_one_refusal() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("shell");
-    let before =
-        pre_conformance_shell(&root, &["AGENTS.md", "CLAUDE.md", "docs/CHELIS_SURFACE.md"]);
+    pre_conformance_shell(&root, &["AGENTS.md", "CLAUDE.md"]);
+    // A second gap beside the missing AGENTS.md: a pin no verb can read. (The
+    // surface document is generated, so its absence is no longer a gap.)
+    std::fs::write(root.join("reef.toml"), "[package]\nname = \"shell\"\n").unwrap();
+    let before = snapshot(&root);
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -468,7 +508,7 @@ fn bump_names_every_missing_artifact_in_one_refusal() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("AGENTS.md"))
-        .stderr(predicate::str::contains("docs/CHELIS_SURFACE.md"));
+        .stderr(predicate::str::contains("reef.toml"));
 
     assert_unchanged(&root, &before);
 }
