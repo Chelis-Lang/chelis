@@ -1,0 +1,27 @@
+name: Setup portable Devenv
+description: >-
+  Install the reviewed Nix and Devenv toolchain, then expose the portable
+  workflow shell and the selective evaluation retry command.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nix
+      if: runner.environment == 'github-hosted'
+      uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      with:
+        install_url: https://releases.nixos.org/nix/nix-2.34.4/install
+
+    - name: Configure the Devenv binary cache
+      if: runner.environment == 'github-hosted'
+      uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+      with:
+        name: devenv
+        skipPush: true
+
+    - name: Install the portable Devenv environment
+      shell: bash
+      env:
+        CHELIS_SETUP_REPOSITORY: ${{ github.action_repository || github.repository }}
+        CHELIS_SETUP_REVISION: ${{ github.action_ref || github.sha }}
+      run: bash "$GITHUB_ACTION_PATH/install.sh"

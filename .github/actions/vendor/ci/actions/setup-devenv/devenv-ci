@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail_profile() {
+  printf 'devenv-profile:%s\n' "$1" >&2
+  exit 64
+}
+
+selected_profile=
+if [[ -n ${CHELIS_DEVENV_PROFILE:-} || -n ${CHELIS_ACTION_REPOSITORY:-} || -n ${CHELIS_ACTION_REVISION:-} ]]; then
+  for name in \
+    CHELIS_DEVENV_PROFILE \
+    CHELIS_ACTION_REPOSITORY \
+    CHELIS_ACTION_REVISION \
+    CHELIS_SETUP_REPOSITORY \
+    CHELIS_SETUP_REVISION; do
+    [[ -n ${!name:-} ]] || fail_profile "missing-metadata"
+  done
+
+  revision_pattern='^[0-9a-f]{40}$'
+  [[ $CHELIS_ACTION_REVISION =~ $revision_pattern ]] || fail_profile "invalid-revision"
+  [[ $CHELIS_SETUP_REVISION =~ $revision_pattern ]] || fail_profile "invalid-revision"
+  [[ $CHELIS_ACTION_REPOSITORY == "$CHELIS_SETUP_REPOSITORY" ]] || fail_profile "repository-mismatch"
+  [[ $CHELIS_ACTION_REVISION == "$CHELIS_SETUP_REVISION" ]] || fail_profile "revision-mismatch"
+
+  case "$(uname -s):$(uname -m)" in
+    Linux:x86_64) system=x86_64-linux ;;
+    Darwin:arm64 | Darwin:aarch64) system=aarch64-darwin ;;
+    *) fail_profile "unsupported-system" ;;
+  esac
+
+  case "$CHELIS_DEVENV_PROFILE" in
+    actionlint | cargo-deny | cargo-llvm-cov | cargo-machete | cargo-mutants | \
+    check-cargo-nix | check-python-types | container-image | openspec-governance | \
+    ruff | rust-lint | rust-release-binary | setup-cargo-criterion | setup-flamegraph | \
+    setup-hyperfine | typos | zizmor)
+      ;;
+    *) fail_profile "unknown-profile" ;;
+  esac
+
+  if [[ $system == aarch64-darwin ]]; then
+    case "$CHELIS_DEVENV_PROFILE" in
+      check-cargo-nix | openspec-governance | ruff) ;;
+      *) fail_profile "incompatible-profile" ;;
+    esac
+  fi
+
+  selected_profile=$CHELIS_DEVENV_PROFILE
+fi
+
+workdir=$PWD
+environment_root=${CHELIS_DEVENV_ROOT:?CHELIS_DEVENV_ROOT is not set}
+profile_record_source=
+devenv_args=(--no-tui)
+if [[ -n $selected_profile ]]; then
+  profile_record_source="$environment_root/.devenv/chelis-action-profile.json"
+  devenv_args+=(--profile "$selected_profile")
+fi
+
+cd "$environment_root"
+exec devenv "${devenv_args[@]}" shell -- \
+  bash -c '
+    profile_record_source=$1
+    workdir=$2
+    shift 2
+    if [[ -n $profile_record_source ]]; then
+      umask 077
+      profile_record=$(mktemp "$RUNNER_TEMP/chelis-ci-devenv-profile-record.XXXXXX")
+      cp -L "$profile_record_source" "$profile_record"
+      export CHELIS_DEVENV_PROFILE_RECORD="$profile_record"
+    fi
+    cd "$workdir"
+    exec "$@"
+  ' devenv-ci "$profile_record_source" "$workdir" "$@"

@@ -32,14 +32,14 @@ jobs:
       run:
         shell: chelis-ci-shell run {0}
     steps:
-      - name: Reclaim hosted runner disk space
-        if: runner.environment == 'github-hosted'
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@e7b00e437d6dc1aef7eb2093661219b298073c2c
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Reclaim hosted runner disk space
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/vendor/ci/actions/reclaim-ubuntu-runner-disk
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
+        uses: ./.github/actions/vendor/ci/actions/setup-devenv
       - name: Activate the project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: python scripts/ci_devenv.py
@@ -50,7 +50,7 @@ jobs:
       - name: Restore protected real-workload caches
         id: build-cache
         if: runner.environment != 'github-hosted'
-        uses: Chelis-Lang/ci/actions/restore-build-cache@2c21438c4308ec6e475eda7d54c5f37331965e6f
+        uses: ./.github/actions/vendor/ci/actions/restore-build-cache
         with:
           mode: read-write
           kache-binary: ${{ env.RUSTC_WRAPPER }}
@@ -68,7 +68,7 @@ jobs:
         run: python scripts/ci_nix_cache_roots.py --checks
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outcome == 'success'
-        uses: Chelis-Lang/ci/actions/publish-build-cache@2c21438c4308ec6e475eda7d54c5f37331965e6f
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
 
@@ -91,7 +91,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
+        uses: ./.github/actions/vendor/ci/actions/setup-devenv
       - name: Activate the project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: python scripts/ci_devenv.py

@@ -2438,6 +2438,15 @@ reason = "script-unit activates the project through the shared setup sequence be
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = ".github/actions/vendor/ci/"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "byte-for-byte Chelis-Lang/ci@6afc09f copy; the native Nix job runs the vendored disk reclaim, portable Devenv and build-cache actions, and openspec-store.yml runs the vendored Devenv and store actions on pull requests"
+tracking_issue = "chelis#2867"
+
+[[path_rule]]
 prefix = "scripts/ci_nix_cache_roots.py"
 disposition = "owner"
 workflow = "nix-packages.yml"
@@ -3373,6 +3382,15 @@ job = "lint-rust"
 cadence = "pull_request and push"
 reason = "Clippy policy is executed directly by the standing Rust policy job"
 tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "chelis-lint.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust policy job's lint-and-unit gate stage runs chelis lint --check ., which loads this repository traversal policy before any rule"
+tracking_issue = "chelis#2867"
 
 [[path_rule]]
 prefix = "scripts/pipeline_core_dependency_guard.py"
