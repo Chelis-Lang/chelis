@@ -520,7 +520,7 @@ def my_op(x: i64) -> unit ! {IO, Test} = {
 const IMPORTED_IO_LIBRARY: &str = r#"
 def lib_read(path: string) -> string = read_file(path)
 def lib_load(path: string) -> string = lib_read(path)
-def lib_pure(x: int64) -> int64 = add(x, 1i64)
+def lib_pure(x: i64) -> i64 = add(x, 1i64)
 "#;
 
 /// The five shapes the issue names, in one extension: direct Io, an
@@ -531,8 +531,8 @@ const IMPORTED_IO_EXTENSION: &str = r#"
 def direct_io(path: string) -> string = read_file(path)
 def via_wrapper(path: string) -> string = lib_load(path)
 def via_local_helper(path: string) -> string = via_wrapper(path)
-def pure_local(x: int64) -> int64 = add(x, 1i64)
-def pure_via_import(x: int64) -> int64 = lib_pure(x)
+def pure_local(x: i64) -> i64 = add(x, 1i64)
+def pure_via_import(x: i64) -> i64 = lib_pure(x)
 "#;
 
 fn imported_io_rows() -> chelis_effects::DefEffectRows {
@@ -631,7 +631,7 @@ def claims_pure(path: string) -> string ! {} = lib_load(path)
 
     let accepted_src = r#"
 def declares_io(path: string) -> string ! {IO} = lib_load(path)
-def declares_pure(x: int64) -> int64 ! {} = lib_pure(x)
+def declares_pure(x: i64) -> i64 ! {} = lib_pure(x)
 "#;
     let accepted = build_new_code_checked(&typeenv, accepted_src);
     check_effects_with_context(&lib_checked, &accepted)

@@ -52,7 +52,7 @@ def via_wrapper(path: string) -> Json = load_json(path)
 
 def via_local_helper(path: string) -> Json = via_wrapper(path)
 
-def pure_local(x: int64) -> int64 = add(x, 1i64)
+def pure_local(x: i64) -> i64 = add(x, 1i64)
 "#;
 
 /// Run `chelis check --show-inferred` over `source` in a fresh reef
@@ -208,7 +208,7 @@ import Std.Io.Json (Json, load_json)
 
 def declares_io(path: string) -> Json ! { IO } = load_json(path)
 
-def pure_local(x: int64) -> int64 ! { } = add(x, 1i64)
+def pure_local(x: i64) -> i64 ! { } = add(x, 1i64)
 "#;
     let (parsed, output) = check_json("issue-606-honest-io", source);
     assert!(
