@@ -472,3 +472,22 @@ fn native_artifacts_cannot_overwrite_input_or_carried_runtime() {
         chelis_runtime_bundle::carried_sha256().unwrap()
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn hard_linked_generated_source_or_header_cannot_overwrite_input() {
+    for alias in ["custom.c", "custom.h"] {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("original.ch");
+        let out = dir.path().join("out");
+        let original = b"answer = 42i64\n";
+        fs::write(&file, original).unwrap();
+        fs::create_dir(&out).unwrap();
+        fs::hard_link(&file, out.join(alias)).unwrap();
+        build(&file, &out.join("custom.c"))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("overwrite input"));
+        assert_eq!(fs::read(&file).unwrap(), original);
+    }
+}

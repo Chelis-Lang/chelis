@@ -4040,6 +4040,18 @@ prefix = "examples/grad_host_selectors.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+# Exact sources exercised by the native program/library parity cases and the
+# chelis-e2e executable example corpus.
+[[path_rule]]
+prefix = "examples/native_program.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/native_library.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
 [[path_rule]]
 prefix = ".github/workflows/secret-scan.yml"
 disposition = "owner"

@@ -277,13 +277,26 @@ pub(crate) fn protect_input(file: &Path, output: Option<&Path>, target: &str) ->
     library.push(source.file_stem().ok_or("native source has no stem")?);
     library.push(".a");
     let input = fs::canonicalize(file)?;
+    #[cfg(unix)]
+    let input_metadata = fs::metadata(&input)?;
     for candidate in [
         source.clone(),
         source.with_extension("h"),
         source.with_extension(""),
         source.with_file_name(library),
     ] {
-        if candidate.canonicalize().ok().as_ref() == Some(&input) {
+        // Canonical names resolve symlinks, but distinct hard-link names still
+        // refer to the same file. Compare filesystem identity where available.
+        #[cfg(unix)]
+        let same_input = {
+            use std::os::unix::fs::MetadataExt;
+            candidate.metadata().is_ok_and(|metadata| {
+                metadata.dev() == input_metadata.dev() && metadata.ino() == input_metadata.ino()
+            })
+        };
+        #[cfg(not(unix))]
+        let same_input = candidate.canonicalize().ok().as_ref() == Some(&input);
+        if same_input {
             return Err(format!(
                 "build output would overwrite input {}; choose a separate --output directory",
                 file.display()
