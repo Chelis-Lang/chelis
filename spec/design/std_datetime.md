@@ -1,8 +1,6 @@
 # Std.Datetime: dates, times, instants and zones
 
-Tracker: chelis#2858. Status: **decided 2026-10-01 (Robert)**: scope, the boundary rule,
-the year range, the `bed` data repository, staging, the release of the first stage, and
-the hold on downstream cut-overs.
+Tracker: chelis#2858.
 Prior art: [`datetime_prior_art.md`](../../docs/investigations/datetime_prior_art.md),
 cited below as "prior art §N".
 
@@ -196,10 +194,10 @@ enforces this (§17).
 
 Each type below is `@opaque`. "Equality" is what structural `eq` ([05-OP-36]) means
 outside the module. It always compares the representation, and the representation is
-canonical, so equal representations mean equal values. (The checker currently rejects
-`eq` on ADT values although [05-OP-36] admits them, #2587; meanwhile equality composes
-through the accessors, for example `eq(date_epoch_day(a), date_epoch_day(b))`, and no
-per-type equality function is added.)
+canonical, so equal representations mean equal values. (#2587 tracks the checker's
+rejection of `eq` on ADT values, which [05-OP-36] admits. Until it closes, equality
+composes through the accessors, for example `eq(date_epoch_day(a), date_epoch_day(b))`.
+No per-type equality function is added.)
 
 | Type | Meaning | Representation | Equality |
 |---|---|---|---|
@@ -829,7 +827,7 @@ holiday tables.
 **Fixes.** This closes shoals#87 and the audit items the planning review recorded against
 `date.ch`, `tenor.ch`, `holidaycal.ch`, and the date properties.
 
-**Pin.** Shoals moves off its 0.18.11 pin, which predates the fence.
+**Pin.** Shoals moves to the chelis release that carries S2.
 
 ## 15. Normative placement and registration
 
@@ -840,8 +838,9 @@ holiday tables.
 
 [05-OP-35] gains one sentence routing their semantics to a new atom, "`datetime::*`
 identities follow [05-OP-N]", as JSON access already follows [05-OP-2..5]. `N` is the
-next free atom number on `main` when S1 lands (72 is the highest at this writing). The capacity
-census, the phase 4B oracle and the registry bijection test then need no new structure.
+next free atom number on `main` when S1 lands. The capacity
+census, the frozen-contract oracle (`scripts/dtype_phase4b_oracle.py`) and the registry
+bijection test then need no new structure.
 
 **Atom prose lands per stage.** The new atom's prose is written stage by stage, each
 stage adding the paragraphs for the identities it exports. The atom is the contract for
@@ -865,8 +864,8 @@ contradict it. This document holds the rest of the decided design until then.
 and extends [05-HOST-2]'s list of host operations with them.
 
 **Release.** Removing `Std.Time` removes census rows, which the remediation roadmap's
-invariant 7 makes 0.19 payload by default. Robert's release decision of 2026-10-01 ships
-S1 in the next 0.18.x patch instead, as 0.18.4 did for its ABI change. The removal breaks
+invariant 7 makes 0.19 payload by default. S1 ships in a 0.18.x patch rather than
+waiting for 0.19, by release decision, as 0.18.4 did for its ABI change. The removal breaks
 no working program, because every `Std.Time` callable already fails.
 
 ## 16. Stages
@@ -880,9 +879,9 @@ no working program, because every `Std.Time` callable already fails.
 | S4a (#2862) | chelis | `Std.Datetime.Zone` (§11) | S1 |
 | S4b | bed | tzdata package (§13) | S4a's constructor |
 | S5 (#2863) | chelis | `Std.Datetime.Clock` (§12) | S1 |
-| S6 (shoals#104) | shoals | finance layer on Std (§14) | S2 and S7 released; Robert's go-ahead |
+| S6 (shoals#104) | shoals | finance layer on Std (§14) | S2 and S7 released; maintainer go-ahead |
 | S7 | bed | holidays package (§13) | S2 in a release |
-| S8 (hello-chelis#40) | hello-chelis, coral | `datetimecal` example rewritten; coral time-index issue filed | S1 released; Robert's go-ahead |
+| S8 (hello-chelis#40) | hello-chelis, coral | `datetimecal` example rewritten; coral time-index issue filed | S1 released; maintainer go-ahead |
 
 **Parallelism.** S2, S3, S4a and S5 are written in parallel once S1 merges.
 - They merge one at a time, because each touches the same registries, census, count
@@ -890,8 +889,8 @@ no working program, because every `Std.Time` callable already fails.
 - Each bundle regeneration builds the compiler, so their builds are sequenced.
 
 **Downstream hold.** The Shoals and hello-chelis cut-overs (S6, S8) wait until the chelis
-and `bed` stages are finished, or until Robert gives the go-ahead earlier. Until then
-Shoals keeps its current date layer and its 0.18.11 pin.
+and `bed` stages are finished, or until a maintainer approves an earlier cut-over. Until
+S6, Shoals keeps its own date layer.
 
 ## 17. Verification
 
