@@ -159,6 +159,23 @@ impl TypeVarRestriction {
         }
     }
 
+    /// How a diagnostic names this bound's *kind* and spelling together.
+    ///
+    /// The family rendering is byte-identical to the wording that predates
+    /// §5.9's set form, so the canonical diagnostics pinned across the test
+    /// corpus do not churn for a feature that does not change them.
+    pub fn bound_description(self) -> String {
+        match self {
+            TypeVarRestriction::ActiveSet(set) => format!("dtype set `{}`", set.spelling()),
+            family => format!("dtype family `{}`", family.family_name()),
+        }
+    }
+
+    /// Whether this bound is one of §5.9's three families.
+    pub fn is_family(self) -> bool {
+        !matches!(self, TypeVarRestriction::ActiveSet(_))
+    }
+
     /// The family's membership, spelled for a diagnostic reader who has not
     /// read §5.9.
     pub fn membership_gloss(self) -> &'static str {

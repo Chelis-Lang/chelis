@@ -327,9 +327,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .dtype_bounds
                 .get(&name)
                 .expect("the unused name came from this map")
-                .bound_spelling();
+                .bound_description();
             return Err(self.type_error(format!(
-                "binder `{name}` is bounded by `{family}` but does not occur in {}",
+                "binder `{name}` is bounded by {family} but does not occur in {}",
                 self.use_site.label()
             )));
         }

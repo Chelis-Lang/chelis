@@ -36,12 +36,13 @@ module_prefix = "Restriction"
     write(
         &root.join("src/main.ch"),
         r#"module Restriction.Main
-export (restricted_close, unrestricted_identity, integer_identity, int_bounded, numeric_bounded, measure)
+export (restricted_close, unrestricted_identity, integer_identity, int_bounded, numeric_bounded, set_bounded, measure)
 def restricted_close[n, p_float: Float](actual: &tensor[n, p_float], expected: &tensor[n, p_float], tolerance: p_float) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tolerance, "restricted")
 def unrestricted_identity[n, p](value: &tensor[n, p]) -> &tensor[n, p] = value
 def integer_identity(value: i32) -> i32 = value
 def int_bounded[q: Int](value: q) -> q = value
 def numeric_bounded[q: Numeric](value: q) -> q = value
+def set_bounded[q: {f32, f64}](value: q) -> q = value
 measure = len
 "#,
     );
@@ -68,6 +69,13 @@ fn expected_domain(domain: &str) -> Value {
     serde_json::json!([{"variable": "t0", "domain": domain}])
 }
 
+/// spec/04-type-system.md §5.9's explicit set publishes the members it admits,
+/// in §1.1 declaration order, rather than a family name it does not have
+/// (chelis#2443). A family would be a bare string here.
+fn expected_set_domain() -> Value {
+    serde_json::json!([{"variable": "t0", "domain": {"active_set": ["f32", "f64"]}}])
+}
+
 #[test]
 fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let (_directory, root) = package_fixture();
@@ -89,6 +97,11 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
             "{name} must publish its authored dtype-family bound"
         );
     }
+    assert_eq!(
+        exported(&schema_json, "set_bounded", "functions")["type_variable_restrictions"],
+        expected_set_domain(),
+        "an explicit dtype set must publish its members, not a family name"
+    );
     for name in ["unrestricted_identity", "integer_identity"] {
         assert_eq!(
             exported(&schema_json, name, "functions")["type_variable_restrictions"],
@@ -294,7 +307,12 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let shell = read_shell(&artifacts.shell_path).expect("CHB must decode");
     let shell_json = serde_json::to_value(shell).expect("CHB model must serialize");
 
-    assert_eq!(shell_json["format_version"], 5);
+    assert_eq!(shell_json["format_version"], 6);
+    assert_eq!(
+        exported(&shell_json, "set_bounded", "exports")["type_variable_restrictions"],
+        expected_set_domain(),
+        "a decoded CHB must preserve an explicit dtype set exactly"
+    );
     assert_eq!(
         exported(&shell_json, "restricted_close", "exports")["type_variable_restrictions"],
         expected_active_float()

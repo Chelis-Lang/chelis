@@ -239,13 +239,16 @@ pub(super) fn check_declared_dtype_bounds(
             && !declared_bound.is_some_and(|bound| bound.is_at_least_as_narrow_as(required))
         {
             let authored = declared_bound
-                .map(|bound| format!("the declared `{}` bound", bound.bound_spelling()))
+                .map(|bound| {
+                    let kind = if bound.is_family() { "family" } else { "set" };
+                    format!("the declared `{}` {kind}", bound.bound_spelling())
+                })
                 .unwrap_or_else(|| "an unbounded authored variable".to_string());
             errors.push(CheckError::new(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
-                    "declared type parameter {} of `{declaration}` requires dtype bound `{}` in its body, but its signature admits {authored}; an authored generic contract must satisfy its operation requirements at the definition (spec/04-type-system.md §3.1, [04-DTYPE-2])",
-                    render_declared_binder(type_names, binder), required.bound_spelling(),
+                    "declared type parameter {} of `{declaration}` requires {} in its body, but its signature admits {authored}; an authored generic contract must satisfy its operation requirements at the definition (spec/04-type-system.md §3.1, [04-DTYPE-2])",
+                    render_declared_binder(type_names, binder), required.bound_description(),
                 ),
                 vec![format!(
                     "Declare this binder with `{}: {}` in the signature's binder list.",

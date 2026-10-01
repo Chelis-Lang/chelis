@@ -649,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_encoding_has_an_explicit_v5_envelope() {
+    fn shell_encoding_has_an_explicit_v6_envelope() {
         let bytes = encode_shell(&fixture_shell()).expect("encode shell");
 
         assert_eq!(&bytes[..8], b"CHELCHB\0");
@@ -657,7 +657,7 @@ mod tests {
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             SHELL_FORMAT_VERSION
         );
-        assert_eq!(SHELL_FORMAT_VERSION, 5);
+        assert_eq!(SHELL_FORMAT_VERSION, 6);
     }
 
     #[test]
@@ -681,7 +681,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("unknown CHB version must be rejected");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 99 is unsupported; expected 5"
+            "invalid shell envelope: shell format version 99 is unsupported; expected 6"
         );
     }
 
@@ -693,7 +693,23 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("CHB v4 must not decode without relations");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 4 is unsupported; expected 5"
+            "invalid shell envelope: shell format version 4 is unsupported; expected 6"
+        );
+    }
+
+    /// chelis#2443 took the envelope to 6, because `TypeVariableDomain` gained
+    /// spec/04 §5.9's explicit dtype set and a v5 reader cannot decode it.
+    /// A v5 shell must therefore be refused rather than read as if the domain
+    /// vocabulary were unchanged.
+    #[test]
+    fn shell_decode_rejects_the_pre_dtype_set_domain_version() {
+        let mut bytes = encode_shell(&fixture_shell()).expect("encode shell");
+        bytes[8..12].copy_from_slice(&5_u32.to_le_bytes());
+
+        let error = decode_shell(&bytes).expect_err("CHB v5 predates the dtype-set domain");
+        assert_eq!(
+            error.to_string(),
+            "invalid shell envelope: shell format version 5 is unsupported; expected 6"
         );
     }
 
