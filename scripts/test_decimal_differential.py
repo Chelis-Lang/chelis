@@ -463,6 +463,26 @@ class Invocation(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             harness.main(["--list", "--lanes", "eval,hip"])
 
+    def test_c_build_outputs_are_removed_unless_kept(self) -> None:
+        program = programs()[0]
+        for keep in (False, True):
+            with harness.tempfile.TemporaryDirectory() as scratch:
+                runner = harness.Runner(Path("/bin/false"), Path(scratch), 5, keep_artifacts=keep)
+
+                def fake_run(argv, cwd):
+                    if argv[1:2] == ["build"]:
+                        (cwd / "out").mkdir()
+                        (cwd / "out" / "libchelis_runtime.a").write_bytes(b"x")
+                        return harness.subprocess.CompletedProcess(argv, 0, "Compile: cc out/main.c -o out/main\n", "")
+                    return harness.subprocess.CompletedProcess(argv, 0, "", "")
+
+                runner.run = fake_run
+                result = runner.c_lane(program)
+                app = Path(scratch) / "c" / program.name
+                self.assertEqual((result.status, result.stage), (0, "run"))
+                self.assertTrue((app / "main.ch").exists())
+                self.assertEqual((app / "out").exists(), keep)
+
     def test_bare_and_package_programs(self) -> None:
         program = programs()[0]
         with harness.tempfile.TemporaryDirectory() as scratch:

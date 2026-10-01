@@ -784,9 +784,10 @@ def printed_compile_command(build_stdout: str) -> list[str] | None:
 
 class Runner:
     def __init__(self, chelis: Path, work: Path, timeout: int, toolchain: Toolchain | None = None,
-                 reef_home: Path | None = None, std_version: str | None = None) -> None:
+                 reef_home: Path | None = None, std_version: str | None = None, keep_artifacts: bool = False) -> None:
         self.chelis = chelis
         self.work = work
+        self.keep_artifacts = keep_artifacts
         self.timeout = timeout
         self.toolchain = toolchain
         self.reef_home = reef_home
@@ -845,6 +846,10 @@ class Runner:
         if link.returncode != 0:
             return LaneResult("c", link.returncode, link.stdout, link.stderr, "link")
         done = self.run([str(app / "out" / "case")], app)
+        if not self.keep_artifacts:
+            # Each build carries its own runtime archive (about 30 MB); the
+            # program source stays beside it for reproduction.
+            shutil.rmtree(app / "out", ignore_errors=True)
         return LaneResult("c", done.returncode, done.stdout, done.stderr, "run")
 
     def lane(self, name: str, program: Program) -> LaneResult:
@@ -1066,6 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--failures-per-path", type=int, help="failure programs per category, function and kind")
     parser.add_argument("--timeout", type=int, default=1800, help="seconds per lane process")
     parser.add_argument("--work", type=Path, help="keep generated programs here instead of a temporary directory")
+    parser.add_argument("--keep-artifacts", action="store_true", help="keep each C build's out/ directory")
     parser.add_argument("--list", action="store_true", help="print the corpus composition and exit")
     parser.add_argument("--only", help="diagnosis: run only programs whose name matches this regular expression")
     parser.add_argument("--structural-equality", action="store_true",
@@ -1107,7 +1113,8 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="decimal-oracle-") as scratch:
         work = args.work or Path(scratch)
         work.mkdir(parents=True, exist_ok=True)
-        runner = Runner(chelis.resolve(), work.resolve(), args.timeout, toolchain, args.reef_home, std_version)
+        runner = Runner(chelis.resolve(), work.resolve(), args.timeout, toolchain, args.reef_home, std_version,
+                        args.keep_artifacts)
         report = run_all(runner, programs, lanes, args.jobs, log)
     for problem in report.problems[:200]:
         print(problem)
