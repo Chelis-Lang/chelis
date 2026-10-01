@@ -63,7 +63,7 @@ fn scaffold_materializes_the_complete_pinned_agents_contract() {
 fn shell_owned_heading_exclusion_filters_sync_and_removal_restores_upstream() {
     let (_tmp, root) = green_shell();
     let path = root.join("AGENTS.md");
-    let local_text = "\n## Voyage Local Rule\nKeep experiment eras immutable.\n";
+    let local_text = "\n## Shell Local Rule\nKeep experiment eras immutable.\n";
     append(&path, local_text);
     let selector = selector_block(&["### Numeric Surface Discipline"]);
     append(&path, &selector);

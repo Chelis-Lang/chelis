@@ -513,7 +513,7 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 
 | cut | carries | shell impact | notes |
 |---|---|---|---|
-| **v0.17.0 - loud checking + canonical eval rendering** (SHIPPED) | [#730] P1 + [#731] P1 + [#732] P1, and everything else merged since 0.16.1 | **source migration** (wave 1) | breaking deltas only: loud rejections (incl. the new loud compiled-lane `test_*` assert, [#796] - the old inert-`0` stub is gone, so anything leaning on it fails heavily in E2E), `with seed(n)` -> `42i64` ([#731] P1 - the Shoals / Whale / hello-chelis HEAD canaries fail on unsuffixed seeds), and dtype-faithful eval rendering. Seed form frozen ([#735] changes only meaning); eval payload render frozen (C matches it at 0.18) |
+| **v0.17.0 - loud checking + canonical eval rendering** (SHIPPED) | [#730] P1 + [#731] P1 + [#732] P1, and everything else merged since 0.16.1 | **source migration** (wave 1) | breaking deltas only: loud rejections (incl. the new loud compiled-lane `test_*` assert, [#796] - the old inert-`0` stub is gone, so anything leaning on it fails heavily in E2E), `with seed(n)` -> `42i64` ([#731] P1 - the Shoals / hello-chelis HEAD canaries fail on unsuffixed seeds), and dtype-faithful eval rendering. Seed form frozen ([#735] changes only meaning); eval payload render frozen (C matches it at 0.18) |
 | **v0.18.0 - checker totality, DeepTag, host-type/ABI boundary, compiled rendering** (SHIPPED) | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type/ABI state) + [#732] P2 (compiled render) | **mechanical** for shells | no wire break ([#730] P2 preserves the `CHELIS_*` ids); the added loudness lands on already-broken code, so no *expected* source migration. Completes byte-identical payload rendering. The release-hygiene requirement is that the tarball ships `chelis_runtime_dtype.h`, which public `chelis_runtime.h` includes |
 | **v0.18.1 - always-labelled root prefix** (SHIPPED) | [05-OBS-6]'s `name = value` prefix from #994, with the stale repo expectations synchronized in #1011 | **exact-output migration** | shipped the prefix once without changing payload digits or value shape; it did not prove manifest completeness, dotted expansion/order, unavailable-root diagnostics, or artifact routing |
 | **v0.18.3 - extent/cast migration + faithful-observation guards** (SHIPPED) | [05-DIM-1/2] extent migration + `round` parity + `cast_trunc` + [#732] P3 (PRs #1099/#1115/#1118) | **source + exact-output migration** for the extent/round/cast changes; [#732] P3 itself is behavior-preserving | Phase 3's tolerance table and shared comparator shipped here and must not be scheduled again in v0.20 |
@@ -643,7 +643,7 @@ Migration-note stubs (the breaking delta per cut):
   silently substituted (incl. compiled-lane `test_*` asserts, which no longer
   stub to an inert `0`); `with seed(n)` requires an `i64`-suffixed literal
   (`seed(42i64)`); eval output is dtype-faithful (integers print as integers).
-  Known HEAD-canary casualties: Shoals, Whale, hello-chelis (unsuffixed seeds),
+  Known HEAD-canary casualties: Shoals, hello-chelis (unsuffixed seeds),
   plus any E2E leaning on the old assert stub."
 - **0.18.0** (mechanical) - "pin bump only: more previously-silent errors are
   caught (bogus casts, non-record field access, malformed host types) but on
@@ -733,7 +733,7 @@ A source-migration cut separates two kinds of breakage, handled differently:
   loud compiled-lane `test_*` rejection ([#796]) are the repo's own tests and
   **must be green before tagging** - a cut is never tagged over a red repo E2E.
 - **Shell-owned** failures do not gate the tag; they are the *expected*
-  migration signal (the Shoals / Whale / hello-chelis HEAD canaries failing on
+  migration signal (the Shoals / hello-chelis HEAD canaries failing on
   unsuffixed seeds). Their `conform` bump fixes are **prepared before the tag**
   so shells migrate promptly once it lands.
 

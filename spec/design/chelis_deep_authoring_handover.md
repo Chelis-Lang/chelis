@@ -138,7 +138,7 @@ preserving the same per-edit oracle shape for Deep-authored properties.
 - Deep-path diagnostics are not populated for type/effect/linearity errors.
   Query/edit-owned failures can identify addressed functions; compiler pass
   diagnostics still carry `deep_path: None`.
-- No runtime sandbox, effects distribution, FlukeBall harness, Beacon proof
+- No runtime sandbox, effects distribution, downstream harness, Beacon proof
   path, or `.dp` prove completeness is claimed here.
 
 ## Handover Oracle

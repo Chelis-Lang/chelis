@@ -5,7 +5,7 @@
 //! never saw the manifest, so a green style gate was not evidence that the
 //! package loads — and a CI or agent loop that used it as a pre-build check
 //! got a false pass, then discovered the failure one stage later. That was
-//! reported by the QFBench/Voyage agent-authoring benchmark, where a
+//! reported by a downstream agent-authoring benchmark, where a
 //! regenerated source file passed the style gate and broke the build.
 //!
 //! What this suite pins is the invariant behind the report, not just the one

@@ -34,8 +34,8 @@ multiply before anything runs. The error from its JSON report:
   gives an agent check, eval, prove, and structural edits as MCP tools.
 - **Properties you can review.** `chelis prove` checks `@property` declarations with
   type checking, an SMT solver, or seeded sampling, and each result names the
-  method behind it. Hull, a second checker written in Chelis, cross-checks the
-  compiler, and a core calculus of Chelis is mechanized in Lean 4.
+  method behind it. A second checker written in Chelis cross-checks the compiler,
+  and a core calculus of Chelis is mechanized in Lean 4.
 - **General-purpose numerics.** Surf (`.ch`) is the readable syntax; Deep (`.dp`) is
   the canonical form the compiler and agents use. Programs build to C. Shells,
   installed with Reef, cover numerical methods (Nautilus), dataframes (Coral), and

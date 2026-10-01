@@ -46,8 +46,8 @@ pub(super) fn run_obligations(
         Ok(ObligationRunResult::Ran(o)) => o,
         // A module that does not type-check cannot have its obligations
         // meaningfully verified; surface the check diagnostics and Error,
-        // never silent success (RT3-F2). This also affects FlukeBall's
-        // strict prove-compat admission flow.
+        // never silent success (RT3-F2). This also affects strict downstream
+        // prove-compat admission flows.
         Ok(ObligationRunResult::CheckFailed(messages)) => {
             emit_check_failure(options, &messages, totals);
             return Status::Error;

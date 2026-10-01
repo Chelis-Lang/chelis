@@ -69,7 +69,7 @@ fn a_pruned_shared_skill_fails_the_audit() {
     let root = stamp(tmp.path(), "pruned");
     assert!(audit::audit(&root).ok(), "baseline green");
 
-    // The c-note shape: a reasoned exclusion, carried out by deleting the dir.
+    // A reasoned exclusion, carried out by deleting the dir.
     std::fs::remove_dir_all(root.join("agent-skills/cli-surface")).unwrap();
 
     let report = audit::audit(&root);

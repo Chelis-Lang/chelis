@@ -463,7 +463,7 @@ build" walkthrough:
    - `cargo build` / `chelis test` are green with everything at its pin, no
      lockfile churn.
 3. `chelis reef doctor --root ~` reports every shell green across all classes.
-4. octant's `consuming.md` workaround and C Note's verify-in-Dockerfile step
+4. octant's `consuming.md` workaround and downstream verify-in-Dockerfile steps
    retire (WS-A); shells drop their vendored `install_chelis_toolchain.py`
    (WS-B).
 
