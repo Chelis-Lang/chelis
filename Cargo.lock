@@ -477,6 +477,7 @@ dependencies = [
 name = "chelis-backend-c"
 version = "0.18.12"
 dependencies = [
+ "chelis-crmath",
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
@@ -486,7 +487,6 @@ dependencies = [
  "chelis-unord",
  "chelis-vocab",
  "half",
- "pkg-config",
  "serde_json",
  "sha2",
  "tempfile",

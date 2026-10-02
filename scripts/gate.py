@@ -312,7 +312,6 @@ CLIPPY_NO_DEFAULT_FEATURES: list[str] = [
 ]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
-    "chelis-backend-c/sleef,"
     "chelis-cli/ownership-ledger,"
     "chelis-compiler-api/compilation-trace,"
     "chelis-compiler-api/ownership-ledger,"

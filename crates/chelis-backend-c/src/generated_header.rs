@@ -1377,7 +1377,6 @@ impl<'a> ConditionalDepths<'a> {
 fn validate_generated_include_set(source: &str) -> Result<(), GeneratedHeaderError> {
     const ALLOWED_INCLUDES: &[&str] = &[
         "\"chelis_blas.h\"",
-        "\"chelis_math.h\"",
         "\"chelis_runtime.h\"",
         "<assert.h>",
         "<inttypes.h>",

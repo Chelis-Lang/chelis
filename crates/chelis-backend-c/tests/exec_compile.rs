@@ -6,7 +6,7 @@
 //! The kernel allocates output tensors internally via chelis_alloc.
 //! We link the carried runtime archive, staged into each probe directory.
 
-use chelis_backend_c::{CodegenOptions, MathLib};
+use chelis_backend_c::CodegenOptions;
 
 mod support;
 use chelis_ir::ConcreteHostType as HostType;
@@ -2433,10 +2433,10 @@ static chelis_tensor *make_view_1d(float* data, int64_t n) {
 }
 "#;
 
-// ---- Test 6 / Item 6: MathLib::None exp kernel ----
+// ---- Test 6 / Item 6: exp kernel through the carried correctly rounded kernel ----
 
 #[test]
-fn exec_math_none_exp_kernel_correct_output() {
+fn exec_exp_kernel_correct_output() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -2452,29 +2452,22 @@ fn exec_math_none_exp_kernel_correct_output() {
     let result = codegen_with_options(
         &dag,
         "test_exp_none",
-        CodegenOptions {
-            math_lib_override: Some(MathLib::None),
-            ..Default::default()
-        },
+        CodegenOptions::default(),
     )
     .unwrap();
     let src = &result.c_source;
 
     assert!(
-        !src.contains("CHELIS_HAS_SLEEF"),
-        "MathLib::None must not emit Sleef guard"
-    );
-    assert!(
         !src.contains("chelis_math.h"),
-        "MathLib::None must not include chelis_math.h"
+        "generated C must not include chelis_math.h"
     );
     assert!(
-        src.contains("expf("),
-        "MathLib::None must use scalar expf()"
+        src.contains("static float chelis_cr_expf(float x)") && src.contains("= chelis_cr_expf("),
+        "generated C must define and call the carried exp kernel"
     );
     assert!(
         src.contains("#pragma omp parallel for simd"),
-        "MathLib::None must use Level-1 omp simd"
+        "generated C must use the Level-1 omp simd loop"
     );
 
     let harness = format!(
@@ -2508,95 +2501,11 @@ int main() {{
     );
 
     let Some(output) = compile_and_run_kernel("none_exp", src, &harness) else {
-        panic!("MathLib::None exp kernel failed to compile/run");
+        panic!("exp kernel failed to compile/run");
     };
     assert!(
         output.contains("PASS"),
-        "MathLib::None exp kernel wrong output:\n{output}"
-    );
-}
-
-// ---- Test 4: Sleef kernel scalar fallback (without -DCHELIS_HAS_SLEEF) ----
-//
-// FINDING: A single Load->Exp DAG does NOT generate the Sleef path because
-// fuse() only fuses chains of length >= 2.  The Sleef path lives in
-// emit_fused_elem which is only called for FusedElem nodes.  A single Exp
-// goes through emit_unary_func which never emits Sleef.  This test uses a
-// 2-op chain (Exp -> Neg) so that fuse() produces a FusedElem node.
-#[test]
-fn exec_sleef_kernel_scalar_fallback_correct() {
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    let a = dag.add_node(
-        decl,
-        RiscOp::Load { name: "a".into() },
-        vec![],
-        vec_f32(9),
-        None,
-    );
-    let e = dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(9), None);
-    dag.add_node(decl, RiscOp::Neg, vec![e], vec_f32(9), None); // 2-op chain: fuses into FusedElem
-    let dag = fuse(&dag);
-
-    let result = codegen_with_options(
-        &dag,
-        "test_exp_sleef",
-        CodegenOptions {
-            math_lib_override: Some(MathLib::Sleef),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let src = &result.c_source;
-
-    assert!(
-        src.contains("#ifdef CHELIS_HAS_SLEEF"),
-        "Missing Sleef guard"
-    );
-    assert!(src.contains("CHELIS_EXPF8("), "Missing CHELIS_EXPF8");
-    assert!(src.contains("_mm256_loadu_ps("), "Missing AVX2 load");
-    assert!(src.contains("_mm256_storeu_ps("), "Missing AVX2 store");
-    assert!(src.contains("for (; __i < "), "Missing scalar tail");
-    assert!(src.contains("#else"), "Missing #else");
-
-    // Compile WITHOUT -DCHELIS_HAS_SLEEF: the scalar #else branch runs for all 9 elements.
-    let harness = format!(
-        r#"{HARNESS_HEADER}
-extern void test_exp_sleef(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
-
-int main() {{
-    float in_data[9] = {{0.0f, 1.0f, -1.0f, 0.5f, 2.0f, -2.0f, 0.1f, 3.0f, -0.5f}};
-    chelis_tensor *in_t = make_view_1d(in_data, 9);
-    chelis_tensor* in_ptr = in_t;
-    chelis_tensor* inputs[1] = {{in_ptr}};
-    chelis_tensor* out_slot = NULL;
-    chelis_tensor* outputs[1] = {{out_slot}};
-
-    test_exp_sleef(inputs, 1, outputs, 1);
-
-    int ok = 1;
-    for (int i = 0; i < 9; i++) {{
-        // The 2-op chain is exp->neg, so expected = -expf(x)
-        float expected = -expf(in_data[i]);
-        float got = ((float*)chelis_tensor_read_view(outputs[0]).data)[i];
-        float reldiff = fabsf(got - expected) / (fabsf(expected) + 1e-6f);
-        if (reldiff > 1e-4f) {{
-            printf("MISMATCH at %d: got %.6f expected %.6f\n", i, got, expected);
-            ok = 0;
-        }}
-    }}
-    printf("%s\n", ok ? "PASS" : "FAIL");
-    return ok ? 0 : 1;
-}}
-"#
-    );
-
-    let Some(output) = compile_and_run_kernel("sleef_exp_neg9", src, &harness) else {
-        panic!("Sleef exp->neg kernel scalar fallback failed to compile/run");
-    };
-    assert!(
-        output.contains("PASS"),
-        "Sleef exp->neg kernel scalar fallback wrong:\n{output}"
+        "exp kernel wrong output:\n{output}"
     );
 }
 
@@ -2697,7 +2606,6 @@ fn exec_count_multi_axis_matches_exact_int64_result() {
         &dag,
         "test_count_multi",
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -2774,7 +2682,6 @@ fn exec_count_selected_zero_extent_returns_zero() {
         &dag,
         "test_count_empty",
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -3093,7 +3000,6 @@ fn exec_div_ieee_corner_cases() {
         &dag,
         "test_div_ieee",
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -3153,7 +3059,6 @@ fn exec_recip_ieee_corner_cases() {
         &dag,
         "test_recip_ieee",
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -3251,7 +3156,6 @@ fn run_int_div_op_exec(
         &dag,
         fn_name,
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -3572,7 +3476,6 @@ fn exec_floor_div_int_zero_divisor_traps() {
         &dag,
         "test_floor_div_trap",
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -3741,10 +3644,7 @@ fn exec_zero_size_tensor_does_not_crash() {
     let result = codegen_with_options(
         &dag,
         "test_exp_zero",
-        CodegenOptions {
-            math_lib_override: Some(MathLib::Sleef),
-            ..Default::default()
-        },
+        CodegenOptions::default(),
     )
     .unwrap();
     let src = &result.c_source;
@@ -8540,7 +8440,6 @@ fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
         "runtime_branch_local_ascription",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -8673,7 +8572,6 @@ fn an_all_interface_class_traps_at_entry_when_its_witnesses_disagree() {
         "guard_entry",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -8736,7 +8634,6 @@ fn an_all_interface_class_runs_when_its_witnesses_agree() {
         "guard_entry_ok",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -8842,7 +8739,6 @@ fn a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c() {
         "bcast_entry",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -9207,7 +9103,6 @@ fn entry_guards_run_in_assigned_slot_order_not_claim_name_order() {
         "entry_order",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -9274,7 +9169,6 @@ fn a_literal_claim_over_a_runtime_read_traps_at_entry_on_c() {
         "lit_entry",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -9402,7 +9296,6 @@ fn a_local_class_guards_at_its_operation_and_renders_the_numeric_trap() {
         "local_guard",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -9586,7 +9479,6 @@ fn numeric_local_extent_claims_execute_exactly() {
                     "numeric_claim",
                     CodegenOptions {
                         use_blas: false,
-                        math_lib_override: Some(MathLib::None),
                         static_entry: false,
                     },
                 )
@@ -9778,7 +9670,6 @@ fn an_interface_member_of_a_mixed_class_is_still_checked() {
         "mixed_class",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -9905,7 +9796,6 @@ fn a_literal_claim_on_a_symbolic_input_in_a_local_class_traps() {
         "sym_mixed",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10034,7 +9924,6 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
         "iface_resolved",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10112,7 +10001,6 @@ fn local_reshape_guards_follow_declaration_order() {
         "order_probe",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10214,7 +10102,6 @@ fn checked_snapshot_shape_capture_survives_submission_repurpose() {
         "snapshot_shape",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10623,7 +10510,6 @@ fn issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares() {
         "three_scopes",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10738,7 +10624,6 @@ fn issue_1788_two_scopes_in_one_function_share_one_declaration() {
         "two_scopes",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10874,7 +10759,6 @@ fn assert_zero_geometry_both_lanes(
         "gradient_geometry",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )

@@ -82,7 +82,6 @@ enum CExpressionBuiltin {
     Ceil,
     Round,
     Recip,
-    Pow,
     Abs,
     Min,
     Max,
@@ -152,7 +151,6 @@ impl CExpressionBuiltin {
             "ceil" => Self::Ceil,
             "round" => Self::Round,
             "recip" => Self::Recip,
-            "pow" => Self::Pow,
             "abs" => Self::Abs,
             "min" => Self::Min,
             "max" => Self::Max,
@@ -245,12 +243,11 @@ pub(crate) fn emit_host_abi_program(
     let program = projected.program();
     let _site_identity_count = projected.sites().len();
     // Emit helpers and functions into a body buffer first so we can detect which
-    // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
-    // when a helper uses the vForce vvexpf/vvlogf path).  The preamble is then
-    // assembled with the right includes and prepended.  Without this, the
-    // include-stripping in `append_helper` silently drops the inner emitter's
-    // `#include "chelis_math.h"` and the resulting `main.c` calls vvexpf with
-    // no declaration in scope.
+    // runtime headers they transitively require (`chelis_blas.h` when a helper
+    // calls BLAS).  The preamble is then assembled with the right includes and
+    // prepended.  Without this, the include-stripping in `append_helper`
+    // silently drops the inner emitter's include and the resulting `main.c`
+    // calls a function with no declaration in scope.
     let mut body: Vec<String> = Vec::new();
     let mut helper_requirements = HelperRequirements::default();
     append_scalar_conversion_helpers(&mut body);
@@ -619,9 +616,6 @@ pub(crate) fn emit_host_abi_program(
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
         out.push(CEmitter::blas_integer_support());
-    }
-    if helper_requirements.needs_math_header {
-        out.push("#include \"chelis_math.h\"".to_string());
     }
     out.extend(crate::fp_env::helper_lines().map(str::to_string));
     out.push(String::new());
@@ -1134,21 +1128,25 @@ fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
 /// Instantiate the scalar host-expression path at each concrete float ABI.
 ///
 /// Tensor activations lower through `chelis_ir::tier2`; scalar calls in a
-/// Surf `def` reach this emitter after host-ABI projection instead. Reduced
+/// Surf `def` reach this emitter after host-ABI projection instead. Both
+/// lanes take one definition: each composite helper body is emitted from the
+/// very graph `tier2` builds for spec/05 §3.3, one finalized C statement per
+/// primitive, so the scalar and tensor results cannot drift apart. `tanh` is
+/// the [05-OP-46] primitive and `relu` is [05-OP-43]'s selection. Reduced
 /// floats need distinct per-node finalizers even though both compute as C
 /// `float`, so one generated specialization cannot serve every source dtype.
 fn append_activation_helpers(
     out: &mut Vec<String>,
+    prim: Prim,
     suffix: &str,
-    c_type: &str,
-    literal_suffix: &str,
-    exp: &str,
     finalizer: Option<&str>,
 ) {
-    let literal = |value: &str| match suffix {
-        "f16" => format!("chelis_f16_to_f32(chelis_host_f64_to_f16({value}))"),
-        "bf16" => format!("chelis_bf16_to_f32(chelis_host_f64_to_bf16({value}))"),
-        _ => format!("{value}{literal_suffix}"),
+    let c_type = if prim == Prim::F64 { "double" } else { "float" };
+    let zero = if prim == Prim::F64 { "0.0" } else { "0.0f" };
+    let tanh = if prim == Prim::F64 {
+        "chelis_cr_tanh"
+    } else {
+        "chelis_cr_tanhf"
     };
     let finalize = |expr: String| match finalizer {
         Some(function) => format!("{function}({expr})"),
@@ -1158,116 +1156,121 @@ fn append_activation_helpers(
     out.push(format!(
         "static inline {c_type} chelis_host_relu_{suffix}({c_type} x) {{"
     ));
-    out.push(format!(
-        "    return x < {} ? {} : x;",
-        literal("0.0"),
-        literal("0.0")
-    ));
-    out.push("}".to_string());
-
-    out.push(format!(
-        "static inline {c_type} chelis_host_sigmoid_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!("    {c_type} neg_x = {};", finalize("-x".into())));
-    out.push(format!(
-        "    {c_type} exp_neg_x = {};",
-        finalize(format!("{exp}(neg_x)"))
-    ));
-    out.push(format!("    {c_type} one = {};", finalize(literal("1.0"))));
-    out.push(format!(
-        "    {c_type} denominator = {};",
-        finalize("one + exp_neg_x".into())
-    ));
-    out.push(format!(
-        "    return {};",
-        finalize("one / denominator".into())
-    ));
+    out.push(format!("    return x < {zero} ? {zero} : x;"));
     out.push("}".to_string());
 
     out.push(format!(
         "static inline {c_type} chelis_host_tanh_{suffix}({c_type} x) {{"
     ));
-    out.push(format!("    {c_type} two = {};", finalize(literal("2.0"))));
-    out.push(format!(
-        "    {c_type} two_x = {};",
-        finalize("two * x".into())
-    ));
-    out.push(format!(
-        "    {c_type} sigmoid = chelis_host_sigmoid_{suffix}(two_x);"
-    ));
-    out.push(format!(
-        "    {c_type} two_again = {};",
-        finalize(literal("2.0"))
-    ));
-    out.push(format!(
-        "    {c_type} twice_sigmoid = {};",
-        finalize("two_again * sigmoid".into())
-    ));
-    out.push(format!(
-        "    {c_type} neg_one = {};",
-        finalize(literal("-1.0"))
-    ));
-    out.push(format!(
-        "    return {};",
-        finalize("twice_sigmoid + neg_one".into())
-    ));
+    out.push(format!("    return {};", finalize(format!("{tanh}(x)"))));
     out.push("}".to_string());
 
-    out.push(format!(
-        "static inline {c_type} chelis_host_silu_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!(
-        "    {c_type} sigmoid = chelis_host_sigmoid_{suffix}(x);"
-    ));
-    out.push(format!("    return {};", finalize("x * sigmoid".into())));
-    out.push("}".to_string());
+    let lowerings: [(&str, ActivationLowering); 3] = [
+        ("sigmoid", chelis_ir::tier2::lower_sigmoid),
+        ("silu", chelis_ir::tier2::lower_silu),
+        ("gelu", chelis_ir::tier2::lower_gelu),
+    ];
+    for (name, lower) in lowerings {
+        out.push(format!(
+            "static inline {c_type} chelis_host_{name}_{suffix}({c_type} x) {{"
+        ));
+        out.extend(activation_body(prim, lower, &finalize));
+        out.push("}".to_string());
+    }
+}
 
-    out.push(format!(
-        "static inline {c_type} chelis_host_gelu_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!(
-        "    {c_type} c = {};",
-        finalize(literal("0.7978845608028654"))
-    ));
-    out.push(format!(
-        "    {c_type} k = {};",
-        finalize(literal("0.044715"))
-    ));
-    out.push(format!(
-        "    {c_type} x_squared = {};",
-        finalize("x * x".into())
-    ));
-    out.push(format!(
-        "    {c_type} x_cubed = {};",
-        finalize("x_squared * x".into())
-    ));
-    out.push(format!(
-        "    {c_type} scaled_cube = {};",
-        finalize("k * x_cubed".into())
-    ));
-    out.push(format!(
-        "    {c_type} sum_inner = {};",
-        finalize("x + scaled_cube".into())
-    ));
-    out.push(format!(
-        "    {c_type} inner = {};",
-        finalize("c * sum_inner".into())
-    ));
-    out.push(format!(
-        "    {c_type} tanh_inner = chelis_host_tanh_{suffix}(inner);"
-    ));
-    out.push(format!("    {c_type} one = {};", finalize(literal("1.0"))));
-    out.push(format!(
-        "    {c_type} one_plus_tanh = {};",
-        finalize("one + tanh_inner".into())
-    ));
-    out.push(format!(
-        "    {c_type} x_mul = {};",
-        finalize("x * one_plus_tanh".into())
-    ));
-    out.push(format!("    {c_type} half = {};", finalize(literal("0.5"))));
-    out.push(format!("    return {};", finalize("half * x_mul".into())));
-    out.push("}".to_string());
+type ActivationLowering = fn(
+    chelis_ir::dag::Owner,
+    &mut chelis_ir::dag::Dag,
+    chelis_ir::dag::NodeId,
+    &TensorType,
+    Option<&str>,
+) -> chelis_ir::dag::NodeId;
+
+/// The C statements of one activation helper: the `tier2` lowering of a
+/// rank-0 `x` at `prim`, one finalized statement per primitive, in the
+/// graph's construction order (every operand precedes its user).
+fn activation_body(
+    prim: Prim,
+    lower: ActivationLowering,
+    finalize: &dyn Fn(String) -> String,
+) -> Vec<String> {
+    let ty = chelis_ir::tier2::scalar_type(prim);
+    let mut dag = chelis_ir::dag::Dag::new();
+    let owner = chelis_ir::dag::Owner::from(dag.declare("activation"));
+    let x = dag.add_node(
+        owner,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let root = lower(owner, &mut dag, x, &ty, None);
+    let c_type = if prim == Prim::F64 { "double" } else { "float" };
+    let kernel = |f32_name: &str, f64_name: &str| {
+        if prim == Prim::F64 {
+            f64_name.to_string()
+        } else {
+            f32_name.to_string()
+        }
+    };
+    let name = |id: chelis_ir::dag::NodeId| {
+        if id == x {
+            "x".to_string()
+        } else {
+            format!("v{}", id.0)
+        }
+    };
+    let mut lines = Vec::new();
+    for (index, node) in dag.nodes().iter().enumerate() {
+        let id = chelis_ir::dag::NodeId(index);
+        if id == x {
+            continue;
+        }
+        let input = |position: usize| name(node.inputs[position]);
+        let value = match &node.op {
+            RiscOp::Const { value } => {
+                // The constant is already finalized at `prim`; f16, bf16,
+                // and f32 values are exact as C `float`.
+                let wide = value.as_f64_lossy();
+                if prim == Prim::F64 {
+                    format!("chelis_f64_from_bits(UINT64_C(0x{:016x}))", wide.to_bits())
+                } else {
+                    format!(
+                        "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
+                        exact_f64_to_f32(wide).to_bits()
+                    )
+                }
+            }
+            RiscOp::Neg => finalize(format!("-{}", input(0))),
+            RiscOp::Exp => finalize(format!(
+                "{}({})",
+                kernel("chelis_cr_expf", "chelis_cr_exp"),
+                input(0)
+            )),
+            RiscOp::Add => finalize(format!("{} + {}", input(0), input(1))),
+            RiscOp::Mul => finalize(format!("{} * {}", input(0), input(1))),
+            RiscOp::Recip => {
+                let one = if prim == Prim::F64 { "1.0" } else { "1.0f" };
+                finalize(format!("{one} / {}", input(0)))
+            }
+            other => unreachable!(
+                "spec/05 §3.3 activation lowering produced `{other:?}`, which the \
+                 host helper emitter has no C spelling for"
+            ),
+        };
+        lines.push(format!("    {c_type} {} = {value};", name(id)));
+    }
+    lines.push(format!("    return {};", name(root)));
+    lines
+}
+
+/// A finalized f16, bf16, or f32 constant's f64 image narrowed to C `float`.
+/// The image is exactly representable, so the narrowing is exact.
+fn exact_f64_to_f32(wide: f64) -> f32 {
+    let narrow = wide as f32;
+    debug_assert!(f64::from(narrow).to_bits() == wide.to_bits() || wide.is_nan());
+    narrow
 }
 
 fn append_tensor_math_helpers(out: &mut Vec<String>) {
@@ -1277,24 +1280,10 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("static inline float chelis_host_finalize_bf16(float x) {".to_string());
     out.push("    return chelis_bf16_to_f32(chelis_f32_to_bf16(x));".to_string());
     out.push("}".to_string());
-    append_activation_helpers(
-        out,
-        "f16",
-        "float",
-        "f",
-        "expf",
-        Some("chelis_host_finalize_f16"),
-    );
-    append_activation_helpers(
-        out,
-        "bf16",
-        "float",
-        "f",
-        "expf",
-        Some("chelis_host_finalize_bf16"),
-    );
-    append_activation_helpers(out, "f32", "float", "f", "expf", None);
-    append_activation_helpers(out, "f64", "double", "", "exp", None);
+    append_activation_helpers(out, Prim::F16, "f16", Some("chelis_host_finalize_f16"));
+    append_activation_helpers(out, Prim::Bf16, "bf16", Some("chelis_host_finalize_bf16"));
+    append_activation_helpers(out, Prim::F32, "f32", None);
+    append_activation_helpers(out, Prim::F64, "f64", None);
 }
 
 /// Private scalar-cast helpers for the generated translation unit.
@@ -2024,13 +2013,11 @@ fn emit_host_declarations(
 #[derive(Debug, Clone, Copy, Default)]
 struct HelperRequirements {
     needs_blas_header: bool,
-    needs_math_header: bool,
 }
 
 impl HelperRequirements {
     fn merge(&mut self, other: Self) {
         self.needs_blas_header |= other.needs_blas_header;
-        self.needs_math_header |= other.needs_math_header;
     }
 }
 
@@ -2089,9 +2076,6 @@ fn append_helper(
         if line.starts_with("#include ") {
             if line.contains("\"chelis_blas.h\"") {
                 requirements.needs_blas_header = true;
-            }
-            if line.contains("\"chelis_math.h\"") {
-                requirements.needs_math_header = true;
             }
             continue;
         }
@@ -6762,15 +6746,27 @@ impl<'a> HostEmitter<'a> {
                     return Ok(());
                 }
                 "exp" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
-                    self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "expf");
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_cr_expf",
+                    );
                     return Ok(());
                 }
                 "log" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
-                    self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "logf");
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_cr_logf",
+                    );
                     return Ok(());
                 }
                 "sin" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
-                    self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "sinf");
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_cr_sinf",
+                    );
                     return Ok(());
                 }
                 "sqrt" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
@@ -7418,7 +7414,6 @@ impl<'a> HostEmitter<'a> {
             "ceil",
             "round",
             "recip",
-            "pow",
             "abs",
             "min",
             "max",
@@ -7960,37 +7955,37 @@ impl<'a> HostEmitter<'a> {
                     EmittedExpr::call("chelis_tensor_shape", [arg(0), arg(1)])
                 }
                 CExpressionBuiltin::Numel => EmittedExpr::call("chelis_tensor_numel", [arg(0)]),
-                // Scalar math — these run on host `double` values in lowered
-                // closures (e.g. the per-element GELU / RMSNorm map bodies).
-                // The RISC DAG variants of these ops are handled separately in
-                // `emit.rs`, but when a Surf `def` body is routed through the
-                // host interpreter, we need the libm names directly.
+                // Scalar math in a Surf `def` body routed through the host
+                // lane. The RISC DAG variants of these ops are handled in
+                // `emit.rs`; both name the correctly rounded `chelis_cr_*`
+                // kernels ([05-OP-46]) the unit carries, and `sqrt` is the
+                // correctly rounded IEEE square root.
                 CExpressionBuiltin::Sqrt => finalize_scalar_expr(
                     EmittedExpr::call(float_math_function(ty, "sqrt", "sqrtf"), [numeric_arg(0)]),
                     ty,
                 ),
                 CExpressionBuiltin::Exp => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "exp", "expf"), [numeric_arg(0)]),
+                    EmittedExpr::call(float_math_function(ty, "chelis_cr_exp", "chelis_cr_expf"), [numeric_arg(0)]),
                     ty,
                 ),
                 CExpressionBuiltin::Log => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "log", "logf"), [numeric_arg(0)]),
+                    EmittedExpr::call(float_math_function(ty, "chelis_cr_log", "chelis_cr_logf"), [numeric_arg(0)]),
                     ty,
                 ),
                 CExpressionBuiltin::Sin => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "sin", "sinf"), [numeric_arg(0)]),
+                    EmittedExpr::call(float_math_function(ty, "chelis_cr_sin", "chelis_cr_sinf"), [numeric_arg(0)]),
                     ty,
                 ),
                 CExpressionBuiltin::Cos => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "cos", "cosf"), [numeric_arg(0)]),
+                    EmittedExpr::call(float_math_function(ty, "chelis_cr_cos", "chelis_cr_cosf"), [numeric_arg(0)]),
                     ty,
                 ),
                 CExpressionBuiltin::Tan => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "tan", "tanf"), [numeric_arg(0)]),
+                    EmittedExpr::call(float_math_function(ty, "chelis_cr_tan", "chelis_cr_tanf"), [numeric_arg(0)]),
                     ty,
                 ),
                 CExpressionBuiltin::Atan => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "atan", "atanf"), [numeric_arg(0)]),
+                    EmittedExpr::call(float_math_function(ty, "chelis_cr_atan", "chelis_cr_atanf"), [numeric_arg(0)]),
                     ty,
                 ),
                 CExpressionBuiltin::Relu
@@ -8114,13 +8109,6 @@ impl<'a> HostEmitter<'a> {
                         BinaryOperator::Divide,
                         EmittedExpr::integer(1),
                         numeric_arg(0),
-                    ),
-                    ty,
-                ),
-                CExpressionBuiltin::Pow => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "pow", "powf"),
-                        [numeric_arg(0), numeric_arg(1)],
                     ),
                     ty,
                 ),
@@ -12494,6 +12482,77 @@ mod expression_dispatch_tests {
         }
         assert!(emitted.contains("chelis_host_finalize_f16"));
         assert!(emitted.contains("chelis_host_finalize_bf16"));
+    }
+
+    /// The host activation helpers compute with the carried kernels: `tanh`
+    /// is [05-OP-46]'s correctly rounded primitive at every float width, and
+    /// the composite helpers call `chelis_cr_*` kernels and no libm name.
+    /// Compiled and run against `chelis-crmath`'s bits (chelis#2957).
+    #[test]
+    fn activation_helpers_call_the_correctly_rounded_kernels() {
+        let mut helpers = Vec::new();
+        append_tensor_math_helpers(&mut helpers);
+        let emitted = helpers.join("\n");
+        for libm in ["expf(", "tanhf(", " exp(", " tanh("] {
+            assert!(!emitted.contains(libm), "helpers must not call `{libm}`:\n{emitted}");
+        }
+        let witnesses: [f32; 4] = [-0.055_804_74, 1e-3, 1e-5, -3.0];
+        let mut main = String::from(
+            "#include \"chelis_runtime.h\"\n#include <stdio.h>\n#include <string.h>\n",
+        );
+        main.push_str(&emitted);
+        main.push_str("\nint main(void) {\n");
+        for w in witnesses {
+            main.push_str(&format!(
+                "    {{ float y = chelis_host_tanh_f32(chelis_f32_from_bits(UINT32_C(0x{:08x}))); uint32_t b; memcpy(&b, &y, 4); printf(\"%08x\\n\", (unsigned)b); }}\n",
+                w.to_bits()
+            ));
+            main.push_str(&format!(
+                "    {{ double y = chelis_host_tanh_f64(chelis_f64_from_bits(UINT64_C(0x{:016x}))); uint64_t b; memcpy(&b, &y, 8); printf(\"%016llx\\n\", (unsigned long long)b); }}\n",
+                f64::from(w).to_bits()
+            ));
+        }
+        main.push_str("    return 0;\n}\n");
+        let main = crate::crmath_kernels::link_called_kernels(main);
+
+        let dir = tempfile::tempdir().unwrap();
+        let staged = chelis_runtime_bundle::stage(dir.path()).unwrap();
+        std::fs::write(dir.path().join("main.c"), &main).unwrap();
+        let toolchain = crate::toolchain::strict_reference_toolchain(
+            crate::toolchain::c_compiler(),
+            crate::toolchain::CodegenRequirements::default(),
+        );
+        let bin = dir.path().join("helpers");
+        let compiled = std::process::Command::new(&toolchain.compiler)
+            .args(&toolchain.compile_flags)
+            .arg("-std=c11")
+            .arg("-I")
+            .arg(dir.path())
+            .arg(dir.path().join("main.c"))
+            .arg(&staged.archive)
+            .args(&toolchain.link_flags)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let run = std::process::Command::new(&bin).output().unwrap();
+        assert!(run.status.success());
+        let stdout = String::from_utf8(run.stdout).unwrap();
+        let got: Vec<&str> = stdout.lines().collect();
+        let mut want = Vec::new();
+        for w in witnesses {
+            want.push(format!("{:08x}", chelis_crmath::tanh_f32(w).to_bits()));
+            want.push(format!(
+                "{:016x}",
+                chelis_crmath::tanh_f64(f64::from(w)).to_bits()
+            ));
+        }
+        assert_eq!(got, want, "tanh helpers must equal the correctly rounded kernel");
     }
 
     /// Extent decoding and checked allocation belong to the runtime owner.

@@ -641,7 +641,6 @@ mod tests {
         let function = function();
         let options = crate::CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(crate::MathLib::None),
             static_entry: false,
         };
         let dag = crate::testing::verified_dag(&function.tensor_helpers[0].dag, options).unwrap();

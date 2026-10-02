@@ -228,7 +228,7 @@ Test-authored C fixtures, the C a test writes and compiles with `cc`, are
 portability tests whether or not they were written as one (chelis#2496).
 Authors run them on macOS, where Apple clang accepts both defects that
 chelis#1864 merged: a `PRIu64` whose `<inttypes.h>` arrived only through the
-Accelerate framework that `chelis_math.h` includes on Apple, and an unbraced
+Accelerate framework that `chelis_math.h` then included on Apple, and an unbraced
 `if` followed by a second statement on its line, which GCC's `-Wall` warns about
 and `-Werror` makes an error. A local run, `gate.py --validation` included, is
 therefore no portability evidence on macOS. Before merge a fixture reaches Linux

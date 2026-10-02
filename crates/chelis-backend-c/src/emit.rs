@@ -54,8 +54,6 @@ pub struct CEmitter {
     /// entry always supplies an empty set and retains every check.
     host_entry_coverage: Vec<chelis_ir::axis_sources::EntryExtentGuard>,
     use_blas: bool,
-    /// Which vectorized math library to target for fused-elem SIMD emission (Level 3b).
-    math_lib: crate::MathLib,
     /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
     reduction_inlined: chelis_unord::UnordSet<usize>,
     /// Backing-slot plan for materialized C tensors.
@@ -350,9 +348,6 @@ impl CEmitter {
         Self::validate_pad_output_sizing(dag);
 
         let reduction_inlined = dag.reduction_inlined_fused_elems();
-        let math_lib = options
-            .math_lib_override
-            .unwrap_or_else(crate::MathLib::detect);
         let output_specs = Self::output_specs(dag);
         let output_ids = output_specs
             .iter()
@@ -466,7 +461,6 @@ impl CEmitter {
                 .nodes()
                 .iter()
                 .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. })),
-            math_lib,
             reduction_inlined: reduction_inlined
                 .to_sorted()
                 .into_iter()
@@ -523,9 +517,6 @@ impl CEmitter {
         if e.use_blas {
             e.line("#include \"chelis_blas.h\"");
             e.line(&Self::blas_integer_support());
-        }
-        if e.math_lib != crate::MathLib::None {
-            e.line("#include \"chelis_math.h\"");
         }
         // The C port of the random kernels' one boundary (chelis#2408):
         // `chelis_random_unit` is `[05-RNG-1]`'s unit value of the word under
@@ -1581,14 +1572,14 @@ impl CEmitter {
             }
             RiscOp::Neg => self.emit_unary(id, UnaryEmission::Neg, &node.inputs, &node.output_type),
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
-            RiscOp::Exp => self.emit_unary_func(id, "expf", &node.inputs, &node.output_type),
-            RiscOp::Log => self.emit_unary_func(id, "logf", &node.inputs, &node.output_type),
-            RiscOp::Sin => self.emit_unary_func(id, "sinf", &node.inputs, &node.output_type),
+            RiscOp::Exp => self.emit_unary_func(id, "chelis_cr_expf", &node.inputs, &node.output_type),
+            RiscOp::Log => self.emit_unary_func(id, "chelis_cr_logf", &node.inputs, &node.output_type),
+            RiscOp::Sin => self.emit_unary_func(id, "chelis_cr_sinf", &node.inputs, &node.output_type),
             RiscOp::Sqrt => self.emit_unary_func(id, "sqrtf", &node.inputs, &node.output_type),
-            RiscOp::Cos => self.emit_unary_func(id, "cosf", &node.inputs, &node.output_type),
-            RiscOp::Tan => self.emit_unary_func(id, "tanf", &node.inputs, &node.output_type),
-            RiscOp::Atan => self.emit_unary_func(id, "atanf", &node.inputs, &node.output_type),
-            RiscOp::Tanh => self.emit_unary_func(id, "tanhf", &node.inputs, &node.output_type),
+            RiscOp::Cos => self.emit_unary_func(id, "chelis_cr_cosf", &node.inputs, &node.output_type),
+            RiscOp::Tan => self.emit_unary_func(id, "chelis_cr_tanf", &node.inputs, &node.output_type),
+            RiscOp::Atan => self.emit_unary_func(id, "chelis_cr_atanf", &node.inputs, &node.output_type),
+            RiscOp::Tanh => self.emit_unary_func(id, "chelis_cr_tanhf", &node.inputs, &node.output_type),
             RiscOp::Abs if node.output_type.precision.is_integer() => {
                 self.emit_integer_abs(id, &node.inputs, &node.output_type)
             }
@@ -2837,25 +2828,28 @@ impl CEmitter {
     }
 
     /// Returns true when the tensor's element type is `double`, requiring
-    /// double-precision math helpers (`exp` vs `expf`) and `chelis_fill_f64`.
+    /// double-precision math helpers (`chelis_cr_exp` vs `chelis_cr_expf`) and
+    /// `chelis_fill_f64`.
     fn is_f64(ty: &TensorType) -> bool {
         matches!(ty.precision, Prim::F64)
     }
 
     /// Double-precision equivalent of a single-precision C math symbol used
-    /// by the emitter. Only the set we actually route through emit_unary_func
+    /// by the emitter. Transcendentals name the correctly rounded kernels the
+    /// generated unit carries ([05-OP-46]); `sqrt` and the rounding helpers
+    /// are exact C operations. Only the set we actually route through emit_unary_func
     /// and emit_binary_func is mapped here; unmapped symbols pass through
     /// unchanged so the emitter never silently renames an unexpected function.
     fn double_math_fn(scalar_f: &str) -> &str {
         match scalar_f {
-            "expf" => "exp",
-            "logf" => "log",
-            "sinf" => "sin",
+            "chelis_cr_expf" => "chelis_cr_exp",
+            "chelis_cr_logf" => "chelis_cr_log",
+            "chelis_cr_sinf" => "chelis_cr_sin",
             "sqrtf" => "sqrt",
-            "cosf" => "cos",
-            "tanf" => "tan",
-            "atanf" => "atan",
-            "tanhf" => "tanh",
+            "chelis_cr_cosf" => "chelis_cr_cos",
+            "chelis_cr_tanf" => "chelis_cr_tan",
+            "chelis_cr_atanf" => "chelis_cr_atan",
+            "chelis_cr_tanhf" => "chelis_cr_tanh",
             "fabsf" => "fabs",
             "floorf" => "floor",
             "ceilf" => "ceil",
@@ -4124,7 +4118,7 @@ impl CEmitter {
         self.line("}");
     }
 
-    // ---- Unary func (expf, logf, sinf, sqrtf) ----
+    // ---- Unary func (chelis_cr_expf, ..., sqrtf) ----
     fn emit_unary_func(&mut self, id: usize, func: &str, inputs: &[NodeId], ty: &TensorType) {
         if Self::is_reduced_float(ty) {
             self.emit_unary_func_reduced_f(id, func, inputs, ty);
@@ -4159,112 +4153,15 @@ impl CEmitter {
         self.line(&format!(
             "const {et}* restrict __in_a_{id} = (const {et}*)t{a}_data;"
         ));
-        // SIMD/batched math paths currently only support f32. For f64 tensors
-        // or when no SIMD library is selected, fall back to the scalar OMP SIMD
-        // loop with the appropriate (double- or single-precision) math function.
-        if !is_f64 && self.math_lib == crate::MathLib::VForce {
-            if let Some(vf_fn) = Self::vforce_func(func) {
-                // vForce whole-array batch API on macOS (Accelerate.framework).
-                //
-                // chelis#1112: vForce's count parameter is `const int *`, a
-                // foreign ABI this project does not get to widen, so the
-                // element count is the one place an extent must cross into
-                // 32 bits. The narrowing is GUARDED rather than cast: above
-                // INT_MAX the batch call is skipped for the scalar loop,
-                // which computes the same values at any size. A bare
-                // `(int)t->size` here would process a wrapped prefix of the
-                // buffer and leave the rest of the output uninitialized.
-                self.line(&format!("if (t{id}_size <= 2147483647LL) {{"));
-                self.indent += 1;
-                self.line(&format!("int __n_{id} = (int)t{id}_size;"));
-                self.line(&format!("{vf_fn}(__out_{id}, __in_a_{id}, &__n_{id});"));
-                self.indent -= 1;
-                self.line("} else {");
-                self.indent += 1;
-                self.line("#pragma omp parallel for simd");
-                self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
-                self.indent += 1;
-                self.line(&format!(
-                    "__out_{id}[i] = {};",
-                    elem_expr(format!("__in_a_{id}[i]"))
-                ));
-                self.indent -= 1;
-                self.line("}");
-                self.indent -= 1;
-                self.line("}");
-            } else {
-                self.line("#pragma omp parallel for simd");
-                self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
-                self.indent += 1;
-                self.line(&format!(
-                    "__out_{id}[i] = {};",
-                    elem_expr(format!("__in_a_{id}[i]"))
-                ));
-                self.indent -= 1;
-                self.line("}");
-            }
-        } else if !is_f64 && self.math_lib == crate::MathLib::Sleef {
-            if let Some(simd_macro) = Self::sleef_macro(func) {
-                self.line("#ifdef CHELIS_HAS_SLEEF");
-                self.line("{");
-                self.indent += 1;
-                self.line(&format!("int64_t __i_{id} = 0;"));
-                self.line(&format!(
-                    "for (; __i_{id} + 8 <= t{id}_size; __i_{id} += 8) {{"
-                ));
-                self.indent += 1;
-                self.line(&format!(
-                    "__m256 __v_{id} = _mm256_loadu_ps(__in_a_{id} + __i_{id});"
-                ));
-                self.line(&format!("__m256 __r_{id} = {simd_macro}(__v_{id});"));
-                self.line(&format!(
-                    "_mm256_storeu_ps(__out_{id} + __i_{id}, __r_{id});"
-                ));
-                self.indent -= 1;
-                self.line("}");
-                self.line(&format!("for (; __i_{id} < t{id}_size; __i_{id}++) {{"));
-                self.indent += 1;
-                self.line(&format!(
-                    "__out_{id}[__i_{id}] = {};",
-                    elem_expr(format!("__in_a_{id}[__i_{id}]"))
-                ));
-                self.indent -= 1;
-                self.line("}");
-                self.indent -= 1;
-                self.line("}");
-                self.line("#else");
-                self.line("#pragma omp parallel for simd");
-                self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
-                self.indent += 1;
-                self.line(&format!(
-                    "__out_{id}[i] = {};",
-                    elem_expr(format!("__in_a_{id}[i]"))
-                ));
-                self.indent -= 1;
-                self.line("}");
-                self.line("#endif");
-            } else {
-                self.line("#pragma omp parallel for simd");
-                self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
-                self.indent += 1;
-                self.line(&format!(
-                    "__out_{id}[i] = {};",
-                    elem_expr(format!("__in_a_{id}[i]"))
-                ));
-                self.indent -= 1;
-                self.line("}");
-            }
-        } else {
-            self.line("#pragma omp parallel for simd");
-            self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
-            self.indent += 1;
-            self.line(&format!(
-                "__out_{id}[i] = {};",
-                elem_expr(format!("__in_a_{id}[i]"))
-            ));
-            self.indent -= 1;
-            self.line("}");
-        }
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "__out_{id}[i] = {};",
+            elem_expr(format!("__in_a_{id}[i]"))
+        ));
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
@@ -4651,39 +4548,6 @@ impl CEmitter {
         self.line("}");
         self.indent -= 1;
         self.line("}");
-    }
-
-    /// Map a scalar C math function name to its vForce batch equivalent, or
-    /// `None` to keep the correctly-rounded scalar loop.
-    ///
-    /// `sqrtf` is deliberately absent (chelis#719). IEEE-754 sec 5.4.1 requires
-    /// `squareRoot` to be correctly rounded; Accelerate's `vvsqrtf` is not. It
-    /// returns 0x3F9CC470 for sqrt(1.5), one ulp below the correctly-rounded
-    /// 0x3F9CC471. Routing sqrt through vForce also made the result
-    /// layout-dependent, since the strided path already used scalar `sqrtf`. The
-    /// scalar loop is correctly rounded on every platform (arm64 `fsqrt`, x86
-    /// `sqrtss`, or libm) and the compiler auto-vectorizes it, so the contiguous
-    /// and strided paths now agree bit for bit. exp/log/sin carry no IEEE
-    /// correctness requirement and stay on vForce (their per-op tolerances live
-    /// in spec/05 sec 8, chelis#732).
-    fn vforce_func(scalar_func: &str) -> Option<&'static str> {
-        match scalar_func {
-            "expf" => Some("vvexpf"),
-            "logf" => Some("vvlogf"),
-            "sinf" => Some("vvsinf"),
-            _ => None,
-        }
-    }
-
-    /// Map a scalar C math function name to its Sleef AVX2 8-wide macro.
-    fn sleef_macro(scalar_func: &str) -> Option<&'static str> {
-        match scalar_func {
-            "expf" => Some("CHELIS_EXPF8"),
-            "logf" => Some("CHELIS_LOGF8"),
-            "sinf" => Some("CHELIS_SINF8"),
-            "sqrtf" => Some("CHELIS_SQRTF8"),
-            _ => None,
-        }
     }
 
     /// A rank-0 float input at its exact arithmetic reading: f16 and bf16
@@ -5567,34 +5431,14 @@ impl CEmitter {
 
     // ---- Fused elementwise helpers ----
 
-    /// Returns true if any step in a fused kernel performs a transcendental math op.
-    fn has_math_ops(ops: &[FusedStep]) -> bool {
-        ops.iter().any(|s| {
-            matches!(
-                s.op,
-                FusedStepOp::Exp
-                    | FusedStepOp::Log
-                    | FusedStepOp::Sin
-                    | FusedStepOp::Sqrt
-                    | FusedStepOp::Cos
-                    | FusedStepOp::Tan
-                    | FusedStepOp::Atan
-                    | FusedStepOp::Tanh
-                    | FusedStepOp::Abs
-                    | FusedStepOp::Floor
-                    | FusedStepOp::Ceil
-            )
-        })
-    }
-
     /// Emit one fused-step expression for the scalar fast/tail path.
     ///
     /// chelis#919: `is_f64` selects the double-precision math symbols
-    /// (`exp` rather than `expf`, `fmax` rather than `fmaxf`) and the
-    /// unsuffixed `1.0` / `0.0` literals. It must agree with the
-    /// element type the caller declared for the `v{s}` step variables:
-    /// emitting `expf` into a `double v0` silently narrows through the
-    /// single-precision libm entry point, which is exactly the F1
+    /// (`chelis_cr_exp` rather than `chelis_cr_expf`, `fmax` rather than
+    /// `fmaxf`) and the unsuffixed `1.0` / `0.0` literals. It must agree with
+    /// the element type the caller declared for the `v{s}` step variables:
+    /// emitting `chelis_cr_expf` into a `double v0` silently narrows through
+    /// the single-precision kernel, which is exactly the F1
     /// footgun. `emit_fused_elem` derives both from the same
     /// `Self::is_f64(ty)`.
     ///
@@ -5621,7 +5465,7 @@ impl CEmitter {
         inputs: &[FusedInput],
         is_f64: bool,
     ) -> String {
-        // Map a single-precision libm symbol to its double-precision
+        // Map a single-precision math symbol to its double-precision
         // counterpart when the chain computes in `double`. Same helper
         // `emit_unary_func` uses, so the fused and unfused lanes cannot
         // disagree about which entry point a given op resolves to.
@@ -5697,17 +5541,17 @@ impl CEmitter {
             }
             FusedStepOp::Exp => {
                 let a = resolve(&inputs[0]);
-                let f = mf("expf");
+                let f = mf("chelis_cr_expf");
                 format!("{f}({a})")
             }
             FusedStepOp::Log => {
                 let a = resolve(&inputs[0]);
-                let f = mf("logf");
+                let f = mf("chelis_cr_logf");
                 format!("{f}({a})")
             }
             FusedStepOp::Sin => {
                 let a = resolve(&inputs[0]);
-                let f = mf("sinf");
+                let f = mf("chelis_cr_sinf");
                 format!("{f}({a})")
             }
             FusedStepOp::Sqrt => {
@@ -5717,22 +5561,22 @@ impl CEmitter {
             }
             FusedStepOp::Cos => {
                 let a = resolve(&inputs[0]);
-                let f = mf("cosf");
+                let f = mf("chelis_cr_cosf");
                 format!("{f}({a})")
             }
             FusedStepOp::Tan => {
                 let a = resolve(&inputs[0]);
-                let f = mf("tanf");
+                let f = mf("chelis_cr_tanf");
                 format!("{f}({a})")
             }
             FusedStepOp::Atan => {
                 let a = resolve(&inputs[0]);
-                let f = mf("atanf");
+                let f = mf("chelis_cr_atanf");
                 format!("{f}({a})")
             }
             FusedStepOp::Tanh => {
                 let a = resolve(&inputs[0]);
-                let f = mf("tanhf");
+                let f = mf("chelis_cr_tanhf");
                 format!("{f}({a})")
             }
             FusedStepOp::Abs => {
@@ -5754,121 +5598,6 @@ impl CEmitter {
                 let a = resolve(&inputs[0]);
                 let f = mf("rintf");
                 format!("{f}({a})")
-            }
-        }
-    }
-
-    /// Emit one fused-step expression for the AVX2 + Sleef path.
-    fn simd_step_expr(
-        op: &FusedStepOp,
-        resolve: &dyn Fn(&FusedInput) -> String,
-        inputs: &[FusedInput],
-    ) -> String {
-        match op {
-            FusedStepOp::Add => {
-                let a = resolve(&inputs[0]);
-                let b = resolve(&inputs[1]);
-                format!("_mm256_add_ps({a}, {b})")
-            }
-            FusedStepOp::Sub => {
-                let a = resolve(&inputs[0]);
-                let b = resolve(&inputs[1]);
-                format!("_mm256_sub_ps({a}, {b})")
-            }
-            FusedStepOp::Mul => {
-                let a = resolve(&inputs[0]);
-                let b = resolve(&inputs[1]);
-                format!("_mm256_mul_ps({a}, {b})")
-            }
-            FusedStepOp::Div => {
-                let a = resolve(&inputs[0]);
-                let b = resolve(&inputs[1]);
-                format!("_mm256_div_ps({a}, {b})")
-            }
-            // chelis#178: the fused-elem path is f32-only, so only float
-            // `floor_div` reaches here — `floor(a / b)` via AVX2.
-            // `trunc_div` is integer-only and cannot fuse to f32.
-            FusedStepOp::FloorDiv => {
-                let a = resolve(&inputs[0]);
-                let b = resolve(&inputs[1]);
-                format!("_mm256_floor_ps(_mm256_div_ps({a}, {b}))")
-            }
-            FusedStepOp::TruncDiv => {
-                unreachable!(
-                    "trunc_div is integer-only (chelis#178); the fused-elem path is \
-                     f32-only and cannot carry an integer trunc_div step"
-                )
-            }
-            FusedStepOp::MaxElem => {
-                let a = resolve(&inputs[0]);
-                let b = resolve(&inputs[1]);
-                format!(
-                    "_mm256_blendv_ps({b}, {a}, _mm256_or_ps(_mm256_cmp_ps({a}, {a}, _CMP_UNORD_Q), _mm256_and_ps(_mm256_cmp_ps({b}, {b}, _CMP_ORD_Q), _mm256_cmp_ps({a}, {b}, _CMP_GE_OQ))))"
-                )
-            }
-            FusedStepOp::MinElem => {
-                let a = resolve(&inputs[0]);
-                let b = resolve(&inputs[1]);
-                format!(
-                    "_mm256_blendv_ps({b}, {a}, _mm256_or_ps(_mm256_cmp_ps({a}, {a}, _CMP_UNORD_Q), _mm256_and_ps(_mm256_cmp_ps({b}, {b}, _CMP_ORD_Q), _mm256_cmp_ps({a}, {b}, _CMP_LE_OQ))))"
-                )
-            }
-            FusedStepOp::Neg => {
-                let a = resolve(&inputs[0]);
-                format!("_mm256_sub_ps(_mm256_setzero_ps(), {a})")
-            }
-            FusedStepOp::Recip => {
-                let a = resolve(&inputs[0]);
-                format!("_mm256_div_ps(_mm256_set1_ps(1.0f), {a})")
-            }
-            FusedStepOp::Exp => {
-                let a = resolve(&inputs[0]);
-                format!("CHELIS_EXPF8({a})")
-            }
-            FusedStepOp::Log => {
-                let a = resolve(&inputs[0]);
-                format!("CHELIS_LOGF8({a})")
-            }
-            FusedStepOp::Sin => {
-                let a = resolve(&inputs[0]);
-                format!("CHELIS_SINF8({a})")
-            }
-            FusedStepOp::Sqrt => {
-                let a = resolve(&inputs[0]);
-                format!("CHELIS_SQRTF8({a})")
-            }
-            // New ops: no SIMD intrinsic yet, emit scalar broadcast via set1
-            FusedStepOp::Cos => {
-                let a = resolve(&inputs[0]);
-                format!("_mm256_set1_ps(cosf(_mm256_cvtss_f32({a})))")
-            }
-            FusedStepOp::Tan => {
-                let a = resolve(&inputs[0]);
-                format!("_mm256_set1_ps(tanf(_mm256_cvtss_f32({a})))")
-            }
-            FusedStepOp::Atan => {
-                let a = resolve(&inputs[0]);
-                format!("_mm256_set1_ps(atanf(_mm256_cvtss_f32({a})))")
-            }
-            FusedStepOp::Tanh => {
-                let a = resolve(&inputs[0]);
-                format!("_mm256_set1_ps(tanhf(_mm256_cvtss_f32({a})))")
-            }
-            FusedStepOp::Abs => {
-                let a = resolve(&inputs[0]);
-                format!("_mm256_set1_ps(fabsf(_mm256_cvtss_f32({a})))")
-            }
-            FusedStepOp::Floor => {
-                let a = resolve(&inputs[0]);
-                format!("_mm256_set1_ps(floorf(_mm256_cvtss_f32({a})))")
-            }
-            FusedStepOp::Ceil => {
-                let a = resolve(&inputs[0]);
-                format!("_mm256_set1_ps(ceilf(_mm256_cvtss_f32({a})))")
-            }
-            FusedStepOp::Round => {
-                let a = resolve(&inputs[0]);
-                format!("_mm256_set1_ps(rintf(_mm256_cvtss_f32({a})))")
             }
         }
     }
@@ -5947,7 +5676,7 @@ impl CEmitter {
             ));
         }
         // Element type and math-symbol precision come from the same
-        // `ty`, so a `double v0` can never be fed by an `expf`.
+        // `ty`, so a `double v0` can never be fed by a `chelis_cr_expf`.
         let et = Self::elem_type(ty);
         let is_f64 = Self::is_f64(ty);
         // The exact public carrier exposes an untyped `void *data` payload.
@@ -5996,14 +5725,6 @@ impl CEmitter {
             }
         }
 
-        // The Sleef path is 8-wide `__m256` single precision
-        // (`_mm256_loadu_ps`, `_mm256_storeu_ps`), so it is f32-only.
-        // f64 chains take the scalar OMP SIMD loop, mirroring how
-        // `emit_unary_func` skips its vForce/Sleef batch paths when
-        // `is_f64`.
-        let use_sleef =
-            !is_f64 && self.math_lib == crate::MathLib::Sleef && Self::has_math_ops(ops);
-
         // Closures for resolving fused inputs in scalar (fast-path) context.
         let resolve_fast = |fi: &FusedInput| -> String {
             match fi {
@@ -6012,101 +5733,23 @@ impl CEmitter {
             }
         };
 
-        // Closure for resolving fused inputs in AVX2 SIMD context.
-        let resolve_simd = |fi: &FusedInput| -> String {
-            match fi {
-                FusedInput::External(i) => format!("__v_ext{i}"),
-                FusedInput::PreviousStep(j) => format!("__v{j}"),
-            }
-        };
-
         let last = ops.len() - 1;
 
-        if use_sleef {
-            // --- Sleef AVX2 path ---
-            // The 8-wide body is guarded by #ifdef CHELIS_HAS_SLEEF so the
-            // generated C compiles without Sleef installed; the #else branch
-            // falls back to the Level-1 scalar loop.
-            self.line("#ifdef CHELIS_HAS_SLEEF");
-            self.line("{");
-            self.indent += 1;
-            self.line("int64_t __i = 0;");
-            // 8-wide main loop
-            self.line(&format!("for (; __i + 8 <= t{id}_size; __i += 8) {{"));
-            self.indent += 1;
-            // Load 8 floats from each external input.
-            for (ext_idx, _) in inputs.iter().enumerate() {
-                self.line(&format!(
-                    "__m256 __v_ext{ext_idx} = _mm256_loadu_ps(__ext{ext_idx}_{id} + __i);"
-                ));
-            }
-            // Emit each step with SIMD intrinsics.
-            for (s, step) in ops.iter().enumerate() {
-                let expr = Self::simd_step_expr(&step.op, &resolve_simd, &step.input_indices);
-                self.line(&format!("__m256 __v{s} = {expr};"));
-                // [04-NUM-2]: arithmetic lanes finalize NaN to the canonical
-                // quiet NaN; extrema select and keep their operand's bits.
-                if !matches!(step.op, FusedStepOp::MaxElem | FusedStepOp::MinElem) {
-                    self.line(&format!(
-                        "__v{s} = _mm256_blendv_ps(__v{s}, _mm256_set1_ps(chelis_f32_from_bits(UINT32_C(0x7fc00000))), _mm256_cmp_ps(__v{s}, __v{s}, _CMP_UNORD_Q));"
-                    ));
-                }
-            }
-            self.line(&format!("_mm256_storeu_ps(__out_{id} + __i, __v{last});"));
-            self.indent -= 1;
-            self.line("}");
-            // Scalar tail loop for remaining elements (n % 8).
-            self.line(&format!("for (; __i < t{id}_size; __i++) {{"));
-            self.indent += 1;
-            for (ext_idx, _) in inputs.iter().enumerate() {
-                self.line(&format!(
-                    "{et} __in_ext{ext_idx} = __ext{ext_idx}_{id}[__i];"
-                ));
-            }
-            for (s, step) in ops.iter().enumerate() {
-                let expr =
-                    Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices, is_f64);
-                self.line(&format!("{et} v{s} = {expr};"));
-            }
-            self.line(&format!("__out_{id}[__i] = v{last};"));
-            self.indent -= 1;
-            self.line("}");
-            self.indent -= 1;
-            self.line("}");
-            self.line("#else");
-            // Fallback: Level-1 scalar OMP SIMD loop.
-            self.line("#pragma omp parallel for simd");
-            self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
-            self.indent += 1;
-            for (ext_idx, _) in inputs.iter().enumerate() {
-                self.line(&format!("{et} __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"));
-            }
-            for (s, step) in ops.iter().enumerate() {
-                let expr =
-                    Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices, is_f64);
-                self.line(&format!("{et} v{s} = {expr};"));
-            }
-            self.line(&format!("__out_{id}[i] = v{last};"));
-            self.indent -= 1;
-            self.line("}");
-            self.line("#endif");
-        } else {
-            // --- Level-1 scalar OMP SIMD loop (default fast path) ---
-            self.line("#pragma omp parallel for simd");
-            self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
-            self.indent += 1;
-            for (ext_idx, _) in inputs.iter().enumerate() {
-                self.line(&format!("{et} __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"));
-            }
-            for (s, step) in ops.iter().enumerate() {
-                let expr =
-                    Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices, is_f64);
-                self.line(&format!("{et} v{s} = {expr};"));
-            }
-            self.line(&format!("__out_{id}[i] = v{last};"));
-            self.indent -= 1;
-            self.line("}");
+        // --- Level-1 scalar OMP SIMD loop (default fast path) ---
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        for (ext_idx, _) in inputs.iter().enumerate() {
+            self.line(&format!("{et} __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"));
         }
+        for (s, step) in ops.iter().enumerate() {
+            let expr =
+                Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices, is_f64);
+            self.line(&format!("{et} v{s} = {expr};"));
+        }
+        self.line(&format!("__out_{id}[i] = v{last};"));
+        self.indent -= 1;
+        self.line("}");
 
         self.indent -= 1;
         self.line("} else {");
@@ -7755,7 +7398,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             _ => panic!("expected FusedElem op"),
         };
         // WS-A1 guard: this codegen path is f32-hardcoded (chelis_fill_f32
-        // zero, `float acc = 0.0f` initializer, `expf`/`logf`/`sinf`
+        // zero, `float acc = 0.0f` initializer, `chelis_cr_expf`-family
         // single-precision math symbols, fmaxf reduction operator). A
         // non-f32 output dtype would silently truncate to f32 — exactly
         // the F1 footgun class. Reject until a follow-on widens the
@@ -7924,15 +7567,15 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 }
                 FusedStepOp::Exp => {
                     let a = resolve(&step.input_indices[0]);
-                    format!("expf({a})")
+                    format!("chelis_cr_expf({a})")
                 }
                 FusedStepOp::Log => {
                     let a = resolve(&step.input_indices[0]);
-                    format!("logf({a})")
+                    format!("chelis_cr_logf({a})")
                 }
                 FusedStepOp::Sin => {
                     let a = resolve(&step.input_indices[0]);
-                    format!("sinf({a})")
+                    format!("chelis_cr_sinf({a})")
                 }
                 FusedStepOp::Sqrt => {
                     let a = resolve(&step.input_indices[0]);
@@ -7940,19 +7583,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 }
                 FusedStepOp::Cos => {
                     let a = resolve(&step.input_indices[0]);
-                    format!("cosf({a})")
+                    format!("chelis_cr_cosf({a})")
                 }
                 FusedStepOp::Tan => {
                     let a = resolve(&step.input_indices[0]);
-                    format!("tanf({a})")
+                    format!("chelis_cr_tanf({a})")
                 }
                 FusedStepOp::Atan => {
                     let a = resolve(&step.input_indices[0]);
-                    format!("atanf({a})")
+                    format!("chelis_cr_atanf({a})")
                 }
                 FusedStepOp::Tanh => {
                     let a = resolve(&step.input_indices[0]);
-                    format!("tanhf({a})")
+                    format!("chelis_cr_tanhf({a})")
                 }
                 FusedStepOp::Abs => {
                     let a = resolve(&step.input_indices[0]);
@@ -9711,7 +9354,7 @@ mod tests {
         );
         dag.add_node(decl, RiscOp::Exp, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("expf("));
+        assert!(c.contains("chelis_cr_expf("));
     }
 
     #[test]
@@ -9727,7 +9370,7 @@ mod tests {
         );
         dag.add_node(decl, RiscOp::Log, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("logf("));
+        assert!(c.contains("chelis_cr_logf("));
     }
 
     #[test]
@@ -9743,7 +9386,7 @@ mod tests {
         );
         dag.add_node(decl, RiscOp::Sin, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("sinf("));
+        assert!(c.contains("chelis_cr_sinf("));
     }
 
     #[test]
@@ -10989,7 +10632,7 @@ mod tests {
     #[test]
     fn f64_tensor_exp_emits_exp_not_expf() {
         // exp(tensor[n, f64]) must route to the double-precision math symbol.
-        // Emitting expf() would silently truncate to float and lose precision.
+        // Emitting chelis_cr_expf() would silently truncate to float and lose precision.
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let ty = TensorType {
@@ -11006,22 +10649,16 @@ mod tests {
         dag.add_node(decl, RiscOp::Exp, vec![a], ty, None);
         let verified = crate::testing::verified_dag(&dag, crate::CodegenOptions::default())
             .expect("f64 exp test DAG must verify ownership");
-        let c = CEmitter::emit_dag_with_options(
-            verified,
-            "test_fn",
-            crate::CodegenOptions {
-                math_lib_override: Some(crate::MathLib::None),
-                ..crate::CodegenOptions::default()
-            },
-        )
-        .unwrap();
+        let c =
+            CEmitter::emit_dag_with_options(verified, "test_fn", crate::CodegenOptions::default())
+                .unwrap();
         assert!(
-            c.contains("exp("),
-            "f64 exp must emit exp(, not expf(:\n{c}"
+            c.contains("chelis_cr_exp("),
+            "f64 exp must emit chelis_cr_exp(, not chelis_cr_expf(:\n{c}"
         );
         assert!(
-            !c.contains("expf("),
-            "f64 exp must not emit the f32 expf( symbol:\n{c}"
+            !c.contains("chelis_cr_expf("),
+            "f64 exp must not emit the f32 chelis_cr_expf( kernel:\n{c}"
         );
     }
 
@@ -11879,7 +11516,7 @@ mod tests {
         );
         dag.add_node(decl, RiscOp::Cos, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("cosf("), "expected cosf( in:\n{c}");
+        assert!(c.contains("chelis_cr_cosf("), "expected chelis_cr_cosf( in:\n{c}");
     }
 
     #[test]
@@ -11895,7 +11532,7 @@ mod tests {
         );
         dag.add_node(decl, RiscOp::Tan, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("tanf("), "expected tanf( in:\n{c}");
+        assert!(c.contains("chelis_cr_tanf("), "expected chelis_cr_tanf( in:\n{c}");
     }
 
     #[test]
@@ -11911,7 +11548,7 @@ mod tests {
         );
         dag.add_node(decl, RiscOp::Atan, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("atanf("), "expected atanf( in:\n{c}");
+        assert!(c.contains("chelis_cr_atanf("), "expected chelis_cr_atanf( in:\n{c}");
     }
 
     #[test]

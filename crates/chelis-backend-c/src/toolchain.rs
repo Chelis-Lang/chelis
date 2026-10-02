@@ -54,6 +54,23 @@ pub fn strict_reference_toolchain(
     pinned_toolchain(compiler, requirements, false)
 }
 
+/// Link the target's BLAS provider when the generated unit calls BLAS
+/// (Accelerate on macOS, OpenBLAS elsewhere). Transcendentals need no
+/// library: generated units carry their correctly rounded kernels
+/// (spec/design/correctly_rounded_math.md section 4.2).
+fn blas_link_flags(requirements: CodegenRequirements, link_flags: &mut Vec<String>) -> BlasProvider {
+    if !requirements.needs_blas {
+        BlasProvider::None
+    } else if cfg!(target_os = "macos") {
+        link_flags.push("-framework".to_string());
+        link_flags.push("Accelerate".to_string());
+        BlasProvider::Accelerate
+    } else {
+        link_flags.push("-lopenblas".to_string());
+        BlasProvider::OpenBlas
+    }
+}
+
 pub fn test_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
     resolve_toolchain(requirements, &["CHELIS_TEST_CC", "CHELIS_CC"])
 }
@@ -62,11 +79,7 @@ fn resolve_toolchain(requirements: CodegenRequirements, override_vars: &[&str]) 
     let compiler = resolve_compiler(override_vars);
     // OpenMP is gated on `is_real_gcc(&compiler)`. On macOS, `resolve_compiler`
     // returns "clang" (Apple-clang), so this is always false there: Apple-clang
-    // does not bundle libomp and `-fopenmp` is unsupported. The Accelerate
-    // -framework link in `pinned_toolchain` is therefore decoupled from any
-    // OpenMP gating. If a future contributor enables OpenMP on Apple-clang via
-    // Homebrew libomp (`-Xpreprocessor -fopenmp -lomp`), revisit this branch
-    // but keep the Accelerate link unconditional.
+    // does not bundle libomp and `-fopenmp` is unsupported.
     let openmp_enabled = requirements.wants_openmp && is_real_gcc(&compiler);
     pinned_toolchain(compiler, requirements, openmp_enabled)
 }
@@ -98,27 +111,7 @@ fn pinned_toolchain(
         link_flags.push("-fopenmp".to_string());
     }
 
-    // On macOS, generated C always routes transcendental math (expf/logf/sinf/sqrtf)
-    // through Accelerate's vForce intrinsics (vvexpf/vvlogf/vvsinf/vvsqrtf) via
-    // `chelis_runtime/include/chelis_math.h`, regardless of whether BLAS is
-    // requested.  Linking against the Accelerate framework is therefore
-    // mandatory on macOS to resolve those symbols, mirroring what
-    // `.github/scripts/smoke_macos_accelerate.py` does for the on-disk
-    // compile path.
-    let blas_provider = if cfg!(target_os = "macos") {
-        link_flags.push("-framework".to_string());
-        link_flags.push("Accelerate".to_string());
-        if requirements.needs_blas {
-            BlasProvider::Accelerate
-        } else {
-            BlasProvider::None
-        }
-    } else if requirements.needs_blas {
-        link_flags.push("-lopenblas".to_string());
-        BlasProvider::OpenBlas
-    } else {
-        BlasProvider::None
-    };
+    let blas_provider = blas_link_flags(requirements, &mut link_flags);
 
     NativeToolchain {
         compiler,
@@ -379,14 +372,13 @@ mod tests {
             strict_reference_toolchain("pinned-cc".into(), CodegenRequirements::default());
         assert_eq!(no_blas.blas_provider, BlasProvider::None);
         assert!(!no_blas.link_flags.contains(&"-lopenblas".to_string()));
-        if cfg!(target_os = "macos") {
-            assert!(
-                no_blas
-                    .link_flags
-                    .windows(2)
-                    .any(|flags| flags[0] == "-framework" && flags[1] == "Accelerate")
-            );
-        }
+        assert!(
+            !no_blas
+                .link_flags
+                .windows(2)
+                .any(|flags| flags[0] == "-framework" && flags[1] == "Accelerate"),
+            "a unit without BLAS links no math or BLAS framework"
+        );
     }
 
     #[test]

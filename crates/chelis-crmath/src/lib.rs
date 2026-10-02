@@ -20,6 +20,8 @@
 
 use half::{bf16, f16};
 
+pub mod c_source;
+
 mod ffi {
     // The shims in `csrc/crmath_ffi.c`. They are pure functions of their operand:
     // no global or thread-local state, no pointer arguments.
