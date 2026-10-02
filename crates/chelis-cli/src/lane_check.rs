@@ -1313,17 +1313,22 @@ mod tests {
     #[test]
     fn descendant_holding_stdout_open_cannot_outlive_deadline() {
         let dir = tempfile::tempdir().unwrap();
-        let environment = BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]);
+        let environment = BTreeMap::from([(
+            "PATH".into(),
+            std::env::var("PATH").expect("PATH provides the timeout fixture's sleep executable"),
+        )]);
         let result = capture(
             "/bin/sh",
-            &["-c".into(), "/bin/sleep 3 &".into()],
+            &["-c".into(), "sleep 3 &".into()],
             dir.path(),
             &environment,
             Duration::from_secs(1),
         );
         assert!(
             result.timed_out,
-            "a reaped shell cannot leave the pipe indefinitely open"
+            "a reaped shell cannot leave the pipe indefinitely open; status={:?}, stderr={}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr)
         );
         assert_eq!(result.status, Some(0), "the parent exited before its child");
     }
