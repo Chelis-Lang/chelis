@@ -115,7 +115,8 @@ sources and print the command that fixes them.
   with a one-line notice when the pushed commit is not this worktree's
   `HEAD` or the leg's paths have uncommitted changes. It runs only checks
   that never write into the worktree, and no hook ever runs cargo: the
-  rejection registry and the chelis-std bundle are CI's to check.
+  rejection registry is CI's to check, and the chelis-std bundle is built
+  with the compiler and refused when committed.
 
 On a branch that predates `scripts/regen_hooks.py`, both hooks do nothing.
 Without a managed venv or `uv`, pre-commit fails, naming the fix, only when

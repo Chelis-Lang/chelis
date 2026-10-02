@@ -64,10 +64,8 @@ EXIT_ERROR = 2
 # property: conformance-assets and reviewed-unsupported-wording compare and
 # print; opaque-corpus regenerates into a temporary directory. No hook ever
 # invokes cargo, so the rejection registry, whose check builds the workspace,
-# is CI's alone. The chelis-std bundle check rewrites and restores its
-# outputs, and the bundle is becoming a build-time artifact (chelis#2930), so
-# it is excluded, as is every tier-1 and tier-2 leg. test_regen_hooks.py runs
-# these checks against a copy and requires the copy to stay byte-identical.
+# is CI's alone, as is every tier-1 leg. test_regen_hooks.py runs these
+# checks against a copy and requires the copy to stay byte-identical.
 READ_ONLY_CHECKS = frozenset(
     {"conformance-assets", "reviewed-unsupported-wording", "opaque-corpus"}
 )
