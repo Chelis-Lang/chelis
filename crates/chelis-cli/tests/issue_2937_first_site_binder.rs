@@ -546,3 +546,184 @@ fn a_parameter_carried_binder_is_claimed_at_a_local_site_in_a_runtime_arm() {
         &["extent `h`: claimed = 2, insert axis 1 = 3", INSERT_TRAP],
     );
 }
+
+/// A runtime `if` inside a `let` initializer, with a first site in its `then`
+/// arm. A tensor kernel would lower the `if` as a `where` that computes both
+/// arms, which cannot bind `h` on one path alone, so the body runs in host
+/// control flow on both lanes.
+fn let_arm_source(then_value: &str, else_value: &str, tail: &str, calls: &str) -> String {
+    format!(
+        "def f[c, h](v: &tensor[c, f32], k: i64, flag: bool) -> tensor[c, h, f32] = {{\n\
+         \x20 s = if flag then {{\n\
+         \x20   a: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+         \x20   {then_value}\n\
+         \x20 }} else {else_value}\n\
+         {tail}\
+         }}\n\
+         {calls}"
+    )
+}
+
+const SUMMED_ARM: &str = "sum(sum(a, 1i32), 0i32)";
+const SUMMED_ELSE: &str = "sum(v, 0i32)";
+const SCALAR_ARM: &str = "shape(a, 1i32)";
+const SCALAR_ELSE: &str = "0i64";
+/// The arm's value scales the result, so the result shows whether it ran.
+const SCALED_TAIL: &str = "\x20 step2 = insert(v, 1i32, add(k, 1i64))\n\
+     \x20 mul(step2, s |> insert(0i32, shape(v, 0i32)) |> insert(1i32, shape(step2, 1i32)))\n";
+const SCALED_LATER_SITE: &str = "\x20 step2: tensor[c, h, f32] = insert(v, 1i32, add(k, 1i64))\n\
+     \x20 mul(step2, s |> insert(0i32, shape(v, 0i32)) |> insert(1i32, shape(step2, 1i32)))\n";
+const DISCARDED_TAIL: &str = "\x20 _ = s\n\x20 insert(v, 1i32, add(k, 1i64))\n";
+const SCALAR_TAIL: &str = "\x20 insert(v, 1i32, add(add(k, 1i64), mul(s, 0i64)))\n";
+const MUL_TRAP: &[&str] = &[
+    "extent `h`: a axis 1 = 3, mul axis 1 = 4",
+    "numeric trap: domain in mul at i64",
+];
+const ARM_INSERT_TRAP: &[&str] = &["extent `h`: a axis 1 = 3, insert axis 1 = 4", INSERT_TRAP];
+const ONES_2X4: &str = "tensor(shape=[2, 4], data=[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])";
+const THREES_2X4: &str = "tensor(shape=[2, 4], data=[3.0, 3.0, 3.0, 3.0, 6.0, 6.0, 6.0, 6.0])";
+
+fn out_call(flag: &str) -> String {
+    format!("out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, {flag})\n")
+}
+
+/// A flag the compiler cannot fold: `3 > threshold`.
+fn runtime_flag(threshold: i64) -> String {
+    format!("gt({RUNTIME_THREE}, {threshold}i64)")
+}
+
+/// An untaken call, then the call whose arm runs.
+fn other_then_out() -> String {
+    format!(
+        "other = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, false)\n{}",
+        out_call("true")
+    )
+}
+
+/// The arm runs and binds `h` = 3; the arm's value scales the result, which
+/// produces 4 and so traps as a later site.
+#[test]
+fn a_first_site_in_a_runtime_arm_of_a_let_initializer_claims_the_result() {
+    assert_lanes_trap_identically(
+        "let_arm_used",
+        &let_arm_source(
+            SUMMED_ARM,
+            SUMMED_ELSE,
+            SCALED_TAIL,
+            &out_call(&runtime_flag(2)),
+        ),
+        MUL_TRAP,
+    );
+}
+
+/// The same with the arm's scalar value discarded.
+#[test]
+fn a_first_site_in_a_discarded_scalar_arm_claims_the_result() {
+    assert_lanes_trap_identically(
+        "let_arm_scalar_discarded",
+        &let_arm_source(SCALAR_ARM, SCALAR_ELSE, DISCARDED_TAIL, &out_call("true")),
+        ARM_INSERT_TRAP,
+    );
+}
+
+/// The same with a discarded tensor arm under a runtime flag.
+#[test]
+fn a_first_site_in_a_discarded_arm_claims_the_result_under_a_runtime_flag() {
+    assert_lanes_trap_identically(
+        "let_arm_discarded_runtime_flag",
+        &let_arm_source(
+            SUMMED_ARM,
+            SUMMED_ELSE,
+            DISCARDED_TAIL,
+            &out_call(&runtime_flag(2)),
+        ),
+        ARM_INSERT_TRAP,
+    );
+}
+
+/// The same with a later ascription, after an untaken call of the same def.
+#[test]
+fn a_first_site_in_a_discarded_arm_claims_a_later_ascription() {
+    assert_lanes_trap_identically(
+        "let_arm_discarded_later_site",
+        &let_arm_source(
+            SUMMED_ARM,
+            SUMMED_ELSE,
+            "\x20 _ = s\n\
+             \x20 step2: tensor[c, h, f32] = insert(v, 1i32, add(k, 1i64))\n\
+             \x20 step2\n",
+            &other_then_out(),
+        ),
+        ARM_INSERT_TRAP,
+    );
+}
+
+/// The same with the declared result, after an untaken call of the same def.
+#[test]
+fn a_first_site_in_a_discarded_arm_claims_the_result_after_an_untaken_call() {
+    assert_lanes_trap_identically(
+        "let_arm_discarded_result",
+        &let_arm_source(SUMMED_ARM, SUMMED_ELSE, DISCARDED_TAIL, &other_then_out()),
+        ARM_INSERT_TRAP,
+    );
+}
+
+/// The controls for the rows above: the arm does not run, so it binds
+/// nothing, and the declared result is the path's first site.
+#[test]
+fn an_untaken_scalar_arm_leaves_the_result_as_the_first_site() {
+    assert_lanes_agree(
+        "let_arm_untaken_result",
+        &let_arm_source(SCALAR_ARM, SCALAR_ELSE, SCALAR_TAIL, &out_call("false")),
+        &format!("out = {ONES_2X4}"),
+    );
+}
+
+/// An untaken arm leaves a later ascription as the path's first site.
+#[test]
+fn an_untaken_scalar_arm_leaves_a_later_ascription_as_the_first_site() {
+    assert_lanes_agree(
+        "let_arm_untaken_later_site",
+        &let_arm_source(
+            SCALAR_ARM,
+            SCALAR_ELSE,
+            "\x20 step2: tensor[c, h, f32] = insert(v, 1i32, add(add(k, 1i64), mul(s, 0i64)))\n\
+             \x20 step2\n",
+            &out_call(&runtime_flag(5)),
+        ),
+        &format!("out = {ONES_2X4}"),
+    );
+}
+
+/// The same when the untaken arm's value scales the result.
+#[test]
+fn an_untaken_tensor_arm_leaves_a_later_ascription_as_the_first_site() {
+    assert_lanes_agree(
+        "let_arm_untaken_used",
+        &let_arm_source(
+            SUMMED_ARM,
+            SUMMED_ELSE,
+            SCALED_LATER_SITE,
+            &out_call(&runtime_flag(5)),
+        ),
+        &format!("out = {THREES_2X4}"),
+    );
+}
+
+/// The same for two untaken calls of one def.
+#[test]
+fn each_untaken_call_leaves_a_later_ascription_as_the_first_site() {
+    assert_lanes_agree(
+        "let_arm_untaken_twice",
+        &let_arm_source(
+            SUMMED_ARM,
+            SUMMED_ELSE,
+            SCALED_LATER_SITE,
+            &format!(
+                "other = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, false)\n{}",
+                out_call("false")
+            ),
+        ),
+        &format!("other = {THREES_2X4}\nout = {THREES_2X4}"),
+    );
+}

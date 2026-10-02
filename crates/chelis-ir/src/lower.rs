@@ -81,6 +81,7 @@ pub struct LowerDiagnostic {
     pub span_id: Option<String>,
     pub fatal: bool,
     unsupported: Option<Box<Unsupported>>,
+    host_control: bool,
 }
 
 impl LowerDiagnostic {
@@ -91,6 +92,7 @@ impl LowerDiagnostic {
             span_id,
             fatal: false,
             unsupported: None,
+            host_control: false,
         }
     }
 
@@ -112,6 +114,7 @@ impl LowerDiagnostic {
             span_id,
             fatal: false,
             unsupported: Some(Box::new(unsupported)),
+            host_control: false,
         }
     }
 
@@ -128,6 +131,20 @@ impl LowerDiagnostic {
     pub fn fatal(mut self) -> Self {
         self.fatal = true;
         self
+    }
+
+    /// Mark a body a tensor kernel cannot carry but host control flow can:
+    /// the declaration's body belongs on the host lane of both evaluators,
+    /// so the shared kernel decision routes it there instead of failing.
+    fn host_control(mut self) -> Self {
+        self.host_control = true;
+        self
+    }
+
+    /// Whether this diagnostic routes its declaration to host control flow
+    /// rather than rejecting it.
+    pub fn requires_host_control(&self) -> bool {
+        self.host_control
     }
 }
 
@@ -444,7 +461,7 @@ fn raise_lowering_diagnostic(diagnostic: LowerDiagnostic) -> ! {
     // `host::try_lower_compiled_program` keys off this so the user
     // receives the AD rejection text instead of an undefined-symbol
     // host call. Issue #197.
-    if !diagnostic.fatal && unrepresentable_panic_suppressed() {
+    if !diagnostic.fatal && !diagnostic.host_control && unrepresentable_panic_suppressed() {
         std::panic::panic_any(UnrepresentableDag);
     }
     std::panic::panic_any(diagnostic);
@@ -7530,9 +7547,10 @@ struct LowerCtx<'program> {
     /// declared later, by the first site in evaluation order that produces
     /// its extent, and every later site naming it, the declared result
     /// included, is a claim against that witness. The list therefore belongs
-    /// to the activation, not to a block: a `let` does not restore it, and
-    /// only a runtime `if` arm, whose first sites bind on that arm's path
-    /// alone, truncates it.
+    /// to the activation, not to a block: a `let` does not restore it. A
+    /// first site inside a runtime `if` arm would bind on that arm's path
+    /// alone, which a `Where` cannot express, so lowering routes such a body
+    /// to host control flow (see [`Self::selected_arm_depth`]).
     signature_witnesses: Vec<(String, NodeId)>,
     /// Every parameter witness minted by the CURRENT activation's
     /// [`LowerCtx::prepare_parameter_witnesses`], in parameter order.
@@ -7609,6 +7627,11 @@ struct LowerCtx<'program> {
     /// directly is an INDIRECT trap (behind a helper call or a `let`); it
     /// has no [05-OP-68] guard and must not fall back to a placeholder.
     if_branch_depth: usize,
+    /// Depth of runtime `if` arms that lower into a `Where`, which computes
+    /// both arms on every path. A first site inside one would bind its
+    /// binder on a path that may not run (spec/04-type-system.md section
+    /// 4.4.1), so such a body runs in host control flow instead.
+    selected_arm_depth: usize,
     linearity: LinearityInfo,
     /// chelis#620 (Inlining-F1 successor): per-callee active-inline depth.
     /// Recursion lowers by unrolling, so a self- or mutually-recursive call
@@ -7787,6 +7810,7 @@ impl<'program> LowerCtx<'program> {
             program_signatures: program_signatures.into(),
             random_path_condition: None,
             if_branch_depth: 0,
+            selected_arm_depth: 0,
             linearity,
             inlining_depths: UnordMap::new(),
             inlining_active: 0,
@@ -10877,6 +10901,23 @@ impl<'program> LowerCtx<'program> {
                 .expect("a pending token names one of the ascription's claims");
             if self.local_claim_awaits_first_site(ascription, claim) {
                 let label = Self::local_ascription_claim_label(ascription, axis, claim);
+                if self.selected_arm_depth > 0 {
+                    raise_lowering_diagnostic(
+                        LowerDiagnostic::new(
+                            format!(
+                                "the output-inferred dimension `{}` is first produced under a \
+                                 runtime conditional; a tensor kernel computes both arms, so it \
+                                 cannot bind `{}` on the arm's path alone (spec/04-type-system.md \
+                                 section 4.4.1)",
+                                extent_binder_label(&label),
+                                extent_binder_label(&label),
+                            ),
+                            None,
+                            span.map(str::to_owned),
+                        )
+                        .host_control(),
+                    );
+                }
                 let witness = self.dag.add_node(
                     self.owner(),
                     RiscOp::ExtentWitness {
@@ -21545,13 +21586,11 @@ impl<'program> LowerCtx<'program> {
         // Each arm's activation, which a key-valued branch's join consumes
         // that arm's key under.
         let then_active = self.draw_activation();
-        // A binder first produced inside one arm is bound only on that arm's
-        // path, so its first-site witness does not outlive the arm.
-        let introduced_binders = self.signature_witnesses.len();
         self.if_branch_depth += 1;
+        self.selected_arm_depth += 1;
         let then_value = self.lower_expr(then_expr);
+        self.selected_arm_depth -= 1;
         self.if_branch_depth -= 1;
-        self.signature_witnesses.truncate(introduced_binders);
         let then_node = self.expect_runtime_if_branch(then_value, "then", span);
         if let Some(parent_path) = saved_random_path {
             let path_ty = TensorType {
@@ -21597,9 +21636,10 @@ impl<'program> LowerCtx<'program> {
         });
         let else_active = self.draw_activation();
         self.if_branch_depth += 1;
+        self.selected_arm_depth += 1;
         let else_value = self.lower_expr(else_expr);
+        self.selected_arm_depth -= 1;
         self.if_branch_depth -= 1;
-        self.signature_witnesses.truncate(introduced_binders);
         let else_node = self.expect_runtime_if_branch(else_value, "else", span);
         self.random_path_condition = saved_random_path;
         self.branch_path_condition = saved_branch_path;

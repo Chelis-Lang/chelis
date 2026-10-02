@@ -4339,14 +4339,22 @@ pub fn host_def_kernel(
         DefBodyDecision::Host => return Ok(None),
         DefBodyDecision::TensorVar(..) => return Ok(None),
     };
-    let dag = lower_kernel_dag(
+    let dag = match lower_kernel_dag(
         &signature.body_expr,
         program,
         &signature.scope,
         Some(&signature.params),
         &expected,
         transfer_literal_result_claims,
-    )?;
+    ) {
+        Ok(dag) => dag,
+        // A body only host control flow can carry, such as a first site
+        // under a runtime `if` (spec/04-type-system.md section 4.4.1), is a
+        // routing decision rather than a failed lowering. The C lane's
+        // `lower_def_body_kernel` reaches the host lane for it too.
+        Err(diagnostic) if diagnostic.requires_host_control() => return Ok(None),
+        Err(diagnostic) => return Err(diagnostic),
+    };
     if let Some(builtin) = kernel_dag_loads_builtin(&dag, &signature.scope) {
         return Err(crate::lower::LowerDiagnostic::new(
             format!(

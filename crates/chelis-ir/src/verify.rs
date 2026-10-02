@@ -3308,12 +3308,28 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                             crate::axis_sources::same_shape_result_agreement(dag, node.id),
                             Ok(Some(_))
                         )
-                        // A claim captured after its value was produced (an
-                        // output-inferred binder's first site lowers inside
-                        // the body) sits on a `Copy` carrier of that value;
-                        // the guard derivation observes it through the
-                        // carrier's input, as for a local ascription.
-                        || matches!(node.op, RiscOp::Copy))
+                        // A claim on an output-inferred binder whose first
+                        // site lowers inside the body is captured after the
+                        // value was produced, so it sits on a single-input
+                        // `Copy` carrier of that value; the guard derivation
+                        // observes it through the carrier's input, as for a
+                        // local ascription. Only that claim, whose declaring
+                        // witness is the first site's, may use the carrier.
+                        || matches!(node.op, RiscOp::Copy)
+                            && node.inputs.len() == 1
+                            && dag
+                                .get(*required)
+                                .and_then(|token| token.shape_deps.first())
+                                .and_then(|declared| dag.get(*declared))
+                                .is_some_and(|declared| {
+                                    matches!(
+                                        declared.op,
+                                        RiscOp::ExtentWitness {
+                                            site: crate::dag::ExtentWitnessSite::LocalExpand,
+                                            ..
+                                        }
+                                    )
+                                }))
             });
             if required.0 >= node.id.0 || !supported {
                 errors.push(format!("result claim at node {} requires an earlier witness and a supported producing axis", node.id.0));
@@ -5422,6 +5438,80 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("shape read") && error.contains("i64")),
             "i32 shape output must fail the exact runtime-extent invariant: {errors:?}"
+        );
+    }
+
+    /// A result claim on a `Copy` carrier is admitted only when the claim's
+    /// declaring witness is an output-inferred binder's first site; a `Copy`
+    /// carrying a claim declared by a parameter's witness is not a producer.
+    fn copy_carried_result_claim_errors(declaring_site: ExtentWitnessSite) -> Vec<String> {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let value = dag.add_node(
+            decl,
+            RiscOp::Load { name: "v".into() },
+            vec![],
+            tensor_ty(&[3], Prim::F32),
+            None,
+        );
+        let extent = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Int64,
+        };
+        let declared = dag.add_node(
+            decl,
+            RiscOp::ExtentWitness {
+                site: declaring_site,
+                parameter: "v".to_string(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![value],
+            extent.clone(),
+            None,
+        );
+        let token = dag.add_node(
+            decl,
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::ResultClaim {
+                    claim: "h".to_string(),
+                    axis: RtAxis::Lit(0),
+                },
+                parameter: "v".to_string(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![value],
+            extent,
+            None,
+        );
+        dag.add_shape_dep(token, declared);
+        let carrier = dag.add_node(
+            decl,
+            RiscOp::Copy,
+            vec![value],
+            tensor_ty(&[3], Prim::F32),
+            None,
+        );
+        dag.add_shape_dep(carrier, token);
+        dag.add_root(carrier);
+        verify(&dag)
+            .into_iter()
+            .filter(|error| error.contains(&format!("result claim at node {}", carrier.0)))
+            .collect()
+    }
+
+    #[test]
+    fn a_copy_carries_only_a_first_site_result_claim() {
+        assert!(
+            copy_carried_result_claim_errors(ExtentWitnessSite::LocalExpand).is_empty(),
+            "a first site's result claim may sit on a `Copy` carrier"
+        );
+        assert!(
+            !copy_carried_result_claim_errors(ExtentWitnessSite::Caller).is_empty(),
+            "a parameter witness's result claim on a `Copy` must be rejected"
         );
     }
 
