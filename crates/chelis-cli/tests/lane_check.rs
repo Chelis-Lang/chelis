@@ -119,7 +119,7 @@ fn unavailable_native_compiler_is_a_link_error_with_diagnostics() {
 fn timed_out_evaluation_reports_lane_and_deadline() {
     let dir = tempdir().unwrap();
     let program = dir.path().join("slow.ch");
-    fs::write(&program, "result = process_run(\"/bin/sleep\", [\"5\"])\n").unwrap();
+    fs::write(&program, "result = process_run(\"sleep\", [\"5\"])\n").unwrap();
     let output = Command::cargo_bin("chelis")
         .unwrap()
         .args([
@@ -135,6 +135,6 @@ fn timed_out_evaluation_reports_lane_and_deadline() {
     let record: Value =
         serde_json::from_slice(output.stdout.split(|byte| *byte == b'\n').next().unwrap()).unwrap();
     assert_eq!(record["stage"], "eval", "{record:?}");
-    assert_eq!(record["process"]["timed_out"], true);
-    assert_eq!(record["process"]["deadline_seconds"], 1);
+    assert_eq!(record["process"]["timed_out"], true, "{record:?}");
+    assert_eq!(record["process"]["deadline_seconds"], 1, "{record:?}");
 }
