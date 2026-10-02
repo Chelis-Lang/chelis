@@ -960,7 +960,7 @@ def build_canary_corpus() -> Corpus:
     against models of the class that perturb the reference as a module with the
     defect would compute:
 
-    - a coefficient or scale bound off by one
+    - the text parser's digit or scale limit off by one
     - an inner limb rendered without its leading zeros
     - a limb carry dropped in addition
     - a limb borrow dropped in subtraction

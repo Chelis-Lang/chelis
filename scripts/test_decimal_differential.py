@@ -651,7 +651,7 @@ def unpadded_text(x: ref.Decimal) -> str:
 
 # Each defect class the canary's docstring names, with its models by name.
 CANARY_DEFECTS: dict[str, dict[str, dict[str, object]]] = {
-    "a coefficient or scale bound off by one": {
+    "the text parser's digit or scale limit off by one": {
         "37 digits": {"MAX_DIGITS": 37, "MAX_COEFFICIENT": 10**37 - 1},
         "39 digits": {"MAX_DIGITS": 39, "MAX_COEFFICIENT": 10**39 - 1},
         "scale 37": {"MAX_SCALE": 37},
