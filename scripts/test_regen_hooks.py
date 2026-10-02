@@ -249,16 +249,10 @@ class RegenHookRepository(unittest.TestCase):
             GIT_COMMITTER_EMAIL="hook@example.invalid",
             GIT_CONFIG_NOSYSTEM="1",
             GIT_CONFIG_GLOBAL=os.devnull,
-            # `git commit` starts a detached `git maintenance run --auto`, which
-            # can still be writing under .git when the scratch tree is removed.
-            GIT_CONFIG_COUNT="2",
-            GIT_CONFIG_KEY_0="maintenance.auto",
-            GIT_CONFIG_VALUE_0="false",
-            GIT_CONFIG_KEY_1="gc.auto",
-            GIT_CONFIG_VALUE_1="0",
             TMPDIR=str(self.tmp),
         )
         self.git("init", "--quiet", "--template=", "--initial-branch=main", str(self.repo), cwd=self.directory)
+        self.quiesce_maintenance(self.repo)
         for relative in FIXTURE_PATHS:
             source = REPO_ROOT / relative
             target = self.repo / relative
@@ -278,6 +272,7 @@ class RegenHookRepository(unittest.TestCase):
         self.install_hooks()
         self.remote = self.directory / "remote.git"
         self.git("init", "--quiet", "--bare", "--template=", str(self.remote), cwd=self.directory)
+        self.quiesce_maintenance(self.remote)
         self.git("remote", "add", "origin", str(self.remote))
         self.first_push = self.run_git("push", "--quiet", "origin", "main")
         self.assertEqual(self.first_push.returncode, 0, self.first_push.stderr)
@@ -601,6 +596,14 @@ class RegenHookRepository(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn("pre-commit hook: no managed Python interpreter", result.stderr)
         self.assertIn("uv venv --python 3.11", result.stderr)
+
+    def quiesce_maintenance(self, repository: Path) -> None:
+        # Commit and receive-pack start a detached `git maintenance run --auto`
+        # that can still be writing under the repository when the scratch tree
+        # is removed. Repository config reaches receive-pack, which clears
+        # GIT_CONFIG_* from its environment.
+        for key, value in (("maintenance.auto", "false"), ("gc.auto", "0"), ("receive.autogc", "false")):
+            self.git("-C", str(repository), "config", key, value, cwd=self.directory)
 
     def test_concurrent_commits_in_two_worktrees_do_not_interfere(self) -> None:
         linked = self.directory / "linked worktree"
