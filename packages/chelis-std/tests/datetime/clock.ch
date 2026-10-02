@@ -1,7 +1,7 @@
 module Std.Tests.Datetime.Clock
-import Std.Datetime (Instant, Duration, instant_to_string, parse_instant, instant_add_duration, duration, duration_negate, duration_gte, duration_lte)
+import Std.Datetime (Instant, Duration, instant_to_string, parse_instant, duration, duration_negate, duration_gte, duration_lte)
 import Std.Datetime.Clock (MonotonicInstant, clock_now, monotonic_now, monotonic_until)
-import Std.Test (assert_true, assert_false)
+import Std.Test (assert_true)
 -- These read the real host clocks, so each asserts only what holds for every
 -- reading; exact readings from an injected clock are pinned in the
 -- evaluator's tests.
