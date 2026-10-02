@@ -9313,6 +9313,105 @@ mod tests {
         );
     }
 
+    /// `add(neg(x), filled)`, where `neg` restamps `x`'s `m` axis as `n` and
+    /// `filled` is a zero `expand`ed to a run-time count, the only site that
+    /// produces `n`. With `declaration_first`, `filled` precedes `neg`.
+    fn restamp_and_its_extent_site(declaration_first: bool) -> Dag {
+        let named = |name: &str| TensorType {
+            dims: vec![DimInfo::Named(name.to_string(), None)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            named("m"),
+            None,
+        );
+        let restamp = |dag: &mut Dag| dag.add_node(decl, RiscOp::Neg, vec![x], named("n"), None);
+        let filled = |dag: &mut Dag| {
+            let count = dag.add_node(
+                decl,
+                RiscOp::synth_const(Prim::Int64, 3.0),
+                vec![],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::Int64,
+                },
+                None,
+            );
+            let zero = dag.add_node(
+                decl,
+                RiscOp::synth_const(Prim::F32, 0.0),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            dag.add_node(
+                decl,
+                RiscOp::Expand {
+                    axis: 0,
+                    size: RtDim::Node(1),
+                },
+                vec![zero, count],
+                named("n"),
+                None,
+            )
+        };
+        let (negated, zeros) = if declaration_first {
+            let zeros = filled(&mut dag);
+            (restamp(&mut dag), zeros)
+        } else {
+            let negated = restamp(&mut dag);
+            (negated, filled(&mut dag))
+        };
+        let sum = dag.add_node(decl, RiscOp::Add, vec![negated, zeros], named("n"), None);
+        dag.set_roots(vec![sum]);
+        dag
+    }
+
+    // chelis#2883: no parsed program reaches the order refusal once a
+    // helper's binders take the caller's extent, so a constructed graph
+    // drives it. `neg`'s restamp guard compares against `n`, which only the
+    // `expand` declares; placed before that site the guard reads `n` first and
+    // the emitter refuses the function with the typed #1277 receipt rather
+    // than writing C that does not compile. The same graph with the `expand`
+    // first emits, declaring `n` before every read.
+    #[test]
+    fn an_extent_read_before_its_declaration_is_a_typed_refusal() {
+        let error = emit_test_dag(&restamp_and_its_extent_site(false), "f")
+            .expect_err("`neg` reads `n` before the `expand` declares it");
+        let identity = error.identity();
+        assert_eq!(
+            identity.what,
+            UnsupportedKind::Construct("extent `n` is rendered before it is declared".into()),
+            "{error}"
+        );
+        assert_eq!(identity.context, "emitted function `f`");
+        assert_eq!(identity.stage, Stage::Codegen("c"));
+        assert_eq!(
+            identity.disposition,
+            chelis_types::unsupported::RejectionAuthorityKind::Unimplemented
+        );
+        assert_eq!(
+            identity.tracking_issue.map(|issue| issue.number()),
+            Some(1277)
+        );
+
+        let c = emit_test_dag(&restamp_and_its_extent_site(true), "f")
+            .unwrap_or_else(|error| panic!("declaration first: {error}"));
+        let declaration = c
+            .find("int64_t n = ((int64_t*)t1_data)[0];")
+            .unwrap_or_else(|| panic!("`n` is declared from the count:\n{c}"));
+        let guard = c
+            .find("if ((chelis_tensor_shape(t0, 0)) != n)")
+            .unwrap_or_else(|| panic!("`neg`'s restamp guard reads `n`:\n{c}"));
+        assert!(declaration < guard, "{c}");
+        assert!(!c.contains(EXTENT_MARKS), "{c}");
+    }
+
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
     }
