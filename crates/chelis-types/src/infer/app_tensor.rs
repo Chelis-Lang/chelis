@@ -1127,7 +1127,7 @@ pub(super) fn check_expand_signature(
         .get(2)
         .and_then(|size| ambiguous_size_name_error(builtin, size, env, subst))
     {
-        return report(errors, error);
+        return report_at_check_site(errors, error, site);
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);

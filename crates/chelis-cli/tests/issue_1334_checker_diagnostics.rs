@@ -312,7 +312,7 @@ fn expand_axis_and_size_rejections_keep_the_call_and_direction() {
 }
 
 #[test]
-fn expand_rejects_a_list_and_an_unmaterializable_axis_or_extent_at_the_call() {
+fn expand_rejects_non_tensor_or_runtime_axis_but_admits_runtime_size() {
     for (source, expected, got, argument, kind) in [
         (
             "out = expand([1.0f32], 0i32, 3i64)\n",
@@ -328,13 +328,6 @@ fn expand_rejects_a_list_and_an_unmaterializable_axis_or_extent_at_the_call() {
             "argument 2",
             "DimensionMismatch",
         ),
-        (
-            "def f(n: i64) = expand(to_tensor([1.0f32]), 0i32, n)\n",
-            "static or shape-sourced size",
-            "the symbolic dimension `n`",
-            "argument 3",
-            "DimensionMismatch",
-        ),
     ] {
         let error = checked_error(source, kind, "expand(", expected, got);
         assert!(
@@ -342,6 +335,13 @@ fn expand_rejects_a_list_and_an_unmaterializable_axis_or_extent_at_the_call() {
             "{error}"
         );
     }
+    let (ok, stdout, stderr) = run(
+        "check",
+        "def f(n: i64) = expand(to_tensor([1.0f32]), 0i32, n)\n",
+    );
+    let report: Value = serde_json::from_str(&stdout).expect("runtime-size JSON");
+    assert!(ok, "{stderr}: {report}");
+    assert_eq!(report["errors"], serde_json::json!([]));
 }
 
 #[test]

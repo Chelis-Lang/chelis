@@ -310,6 +310,19 @@ fn a_size_name_that_is_both_a_value_and_a_dimension_is_a_type_error() {
                     && m.contains("ambiguous")),
                 "{op}: {label}: expected the ambiguous-name diagnostic, got {msgs:?}"
             );
+            let call = source
+                .find(&format!("{op}("))
+                .expect("ambiguous-size call in fixture");
+            assert!(
+                rep.errors.iter().any(|error| {
+                    error.kind.diagnostic_name() == "DimensionMismatch"
+                        && error.message.contains(&format!("{op} size names `n`"))
+                        && error.message.contains("argument 3")
+                        && error.span_offset == Some(call)
+                }),
+                "{op}: {label}: size rejection must identify argument 3 at its own call: {:?}",
+                rep.errors
+            );
         }
     }
 }

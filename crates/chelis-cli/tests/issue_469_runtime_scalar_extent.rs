@@ -435,22 +435,43 @@ fn two_different_runtime_extents_meeting_elementwise_trap_on_both_lanes() {
 fn a_size_name_that_is_both_a_value_and_a_dimension_is_rejected_on_every_command() {
     let dir = tempdir().expect("tempdir");
     let stem = "ambiguous";
-    let path = write_fixture(
-        &dir,
-        stem,
-        "def f[n](x: tensor[n, i64], m: i64) -> i64 = {\n  n = m\n  y = insert(x, 0, n)\n  shape(y, 0)\n}\n\
-         out = f(to_tensor([1i64, 2i64]), 3i64)\n",
+    let source = "def f[n](x: tensor[n, i64], m: i64) -> i64 = {\n  n = m\n  y = insert(x, 0, n)\n  shape(y, 0)\n}\n\
+         out = f(to_tensor([1i64, 2i64]), 3i64)\n";
+    let path = write_fixture(&dir, stem, source);
+    let checked = check(&path);
+    assert!(
+        !checked.status.success(),
+        "check must reject: {}",
+        combined(&checked)
     );
-    let needle = "insert size names `n`, which is both a value of type i64 and a dimension \
-                  binder of the enclosing definition, so the extent it denotes is ambiguous";
+    let report: serde_json::Value =
+        serde_json::from_slice(&checked.stdout).expect("check JSON report");
+    assert!(
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["span"]["offset"].as_u64()
+                        == source.find("insert(").map(|offset| offset as u64)
+                    && error["message"].as_str().is_some_and(|message| {
+                        message.contains("insert") && message.contains("argument 3")
+                    })
+            })),
+        "check must locate the ambiguous size at insert argument 3: {report}"
+    );
     for (command, output) in [
-        ("check", check(&path)),
         ("eval", eval(&path)),
         ("build", build_and_run(&dir, stem, &path)),
     ] {
         let text = combined(&output);
         assert!(!output.status.success(), "{command} must reject: {text}");
-        assert!(text.contains(needle), "{command}: {text}");
+        assert!(
+            text.contains("DimensionMismatch")
+                && text.contains("insert")
+                && text.contains("argument 3")
+                && text.contains("at byte"),
+            "{command} must render the located checker rejection: {text}"
+        );
         assert!(!text.contains("out = "), "{command}: {text}");
     }
 }
