@@ -13,7 +13,8 @@ use chelis_deep::parser::parse_str as parse_deep_lenient;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::errors::CheckErrorKind;
-use chelis_types::{BUILTIN_NAMES, check_ir_fitness};
+use chelis_types::types::Type;
+use chelis_types::{BUILTIN_NAMES, builtin_env, check_ir_fitness};
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
@@ -76,10 +77,19 @@ fn conv_arity_zero_through_six_is_total_and_exact() {
     }
 }
 
+// A builtin's malformed arities are too many arguments, always, and too few,
+// which a builtin whose exact signature takes no argument (the [05-OP-75]
+// clock reads) cannot have, so it gets one argument instead.
 #[test]
 fn every_builtin_rejects_zero_and_oversized_arity_without_panicking() {
+    let (env, _) = builtin_env();
     for name in BUILTIN_NAMES {
-        for arity in [0, 12] {
+        let nullary = matches!(
+            env.lookup(name).map(|scheme| &scheme.body),
+            Some(Type::Fn(params, _)) if params.is_empty()
+        );
+        let too_few = if nullary { 1 } else { 0 };
+        for arity in [too_few, 12] {
             let args = std::iter::repeat_n("(lit {type: (t-prim {} f32)} 1.0)", arity)
                 .collect::<Vec<_>>()
                 .join(" ");
