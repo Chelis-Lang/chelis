@@ -110,8 +110,11 @@ pub trait TensorElement: element::ElementStorage + Sized + Copy {
     /// `Self::DTYPE`.
     #[inline]
     unsafe fn data_ptr_unchecked(tensor: *mut chelis_tensor) -> *mut Self {
+        // The dtype is descriptor metadata. Storage validation belongs to the
+        // operation's entry, so this per-element check never rescans bool
+        // bytes, which made whole-tensor reads quadratic (chelis#2903).
         debug_assert_eq!(
-            unsafe { tensor_dtype(tensor, "unchecked typed tensor data access") },
+            unsafe { tensor_metadata_dtype(tensor, "unchecked typed tensor data access") },
             Self::DTYPE
         );
         unsafe { tensor_data(tensor) as *mut Self }
@@ -853,10 +856,19 @@ unsafe fn validate_tensor(tensor: *const chelis_tensor, context: &str) -> Runtim
     validate_tensor_contents(tensor, context)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Bool storage bytes `validate_tensor_contents` has checked on this
+    /// thread; tests read it to bound validation cost per operation.
+    static BOOL_BYTES_VALIDATED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 unsafe fn validate_tensor_contents(tensor: &chelis_tensor, context: &str) -> RuntimeDType {
     let dtype = validate_tensor_metadata(tensor, context);
     if dtype == RuntimeDType::Bool {
         let data = tensor_storage_data(tensor.storage);
+        #[cfg(test)]
+        BOOL_BYTES_VALIDATED.with(|checked| checked.set(checked.get() + tensor.count()));
         for index in 0..tensor.count() {
             let byte = *data.add(index);
             if Bool8::from_u8(byte).is_none() {
@@ -8319,6 +8331,105 @@ mod tests {
             assert_eq!(*(tensor_data(tensor) as *const i64), 7);
             assert_eq!(chelis_tensor_to_scalar(tensor), value);
             chelis_tensor_release(tensor);
+        }
+    }
+}
+
+/// chelis#2903: a whole-tensor read validates bool storage once at entry,
+/// never again per element, and still refuses a noncanonical byte.
+#[cfg(test)]
+mod bool_validation_cost_tests {
+    use super::*;
+    use std::process::Command;
+
+    const CHILD_CASE: &str = "CHELIS_BOOL_VALIDATION_COST_CHILD_CASE";
+
+    fn bytes_validated() -> usize {
+        BOOL_BYTES_VALIDATED.with(std::cell::Cell::get)
+    }
+
+    /// A bool tensor of `n` elements, true at odd indices.
+    unsafe fn alternating(n: usize) -> *mut chelis_tensor {
+        let tensor = chelis_alloc(1, [n as i64].as_ptr(), CHELIS_DTYPE_BOOL);
+        let guard = chelis_tensor_begin_write(tensor);
+        let data = chelis_tensor_write_view(guard).data.cast::<u8>();
+        for index in 0..n {
+            data.add(index).write((index % 2) as u8);
+        }
+        chelis_tensor_end_write(guard);
+        tensor
+    }
+
+    #[test]
+    fn whole_tensor_reads_validate_bool_storage_once() {
+        for n in [1_usize, 64, 2048] {
+            unsafe {
+                let tensor = alternating(n);
+                let before = bytes_validated();
+                let elements = chelis_tensor_elements(tensor);
+                assert_eq!(chelis_list_len(elements), n as i64);
+                assert_eq!(bytes_validated() - before, n, "to_list of {n} bools");
+                chelis_list_release(elements);
+
+                let before = bytes_validated();
+                let text = tensor_to_string(tensor);
+                assert!(text.starts_with("tensor(shape=["), "{text}");
+                assert_eq!(bytes_validated() - before, n, "formatting {n} bools");
+                chelis_tensor_release(tensor);
+            }
+        }
+    }
+
+    #[test]
+    fn noncanonical_bool_child() {
+        let Ok(case) = std::env::var(CHILD_CASE) else {
+            return;
+        };
+        unsafe {
+            let tensor = alternating(8);
+            // A foreign writer that bypasses the write guard.
+            chelis_tensor_read_view(tensor)
+                .data
+                .cast::<u8>()
+                .cast_mut()
+                .add(5)
+                .write(2);
+            match case.as_str() {
+                "elements" => {
+                    chelis_tensor_elements(tensor);
+                }
+                "formatting" => {
+                    tensor_to_string(tensor);
+                }
+                other => panic!("unknown child case `{other}`"),
+            }
+        }
+        panic!("case `{case}` accepted a noncanonical bool byte");
+    }
+
+    #[test]
+    fn whole_tensor_reads_still_refuse_a_noncanonical_bool_byte() {
+        for (case, context) in [
+            ("elements", "chelis_tensor_elements input"),
+            ("formatting", "tensor formatting"),
+        ] {
+            let output = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "bool_validation_cost_tests::noncanonical_bool_child",
+                    "--nocapture",
+                ])
+                .env(CHILD_CASE, case)
+                .output()
+                .expect("run the noncanonical bool child");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(1), "{case}: {stderr}");
+            assert!(
+                stderr.contains(&format!(
+                    "Domain: {context}: bool tensor contains noncanonical byte 2 at element 5"
+                )),
+                "{case}: {stderr}"
+            );
         }
     }
 }
