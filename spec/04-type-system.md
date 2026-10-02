@@ -1852,9 +1852,9 @@ The zero-cotangent and target-independent execution rules are [05-OP-7] and
 dimension may preserve its name; and every other expression produces a fresh
 runtime extent. A name occurring anywhere in `size` that denotes both a value
 binding (a parameter, a local or a top-level binding) and an in-scope
-dimension (a binder of the enclosing definition, or a dimension a tensor type
-in scope carries) is a type error, because the two readings can denote
-different extents. A static negative size is a type error. A runtime negative
+dimension (a dimension binder of the enclosing definition, or a dimension a
+tensor type in scope carries) is a type error, because the two readings can
+denote different extents. A static negative size is a type error. A runtime negative
 size traps `Domain` before allocation or access.
 
 Each operation has exactly one result shape. `expand` sets the extent at

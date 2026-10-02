@@ -171,10 +171,12 @@ pub(super) fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
     kids.first().and_then(symbol_name)
 }
 
-/// True when `name` is a dimension binder of the enclosing definition.
+/// True when `name` is a dimension binder of the enclosing definition. A
+/// listed name its signature uses only as a precision or rank binder is not
+/// one.
 fn definition_binds_dimension(env: &Env, name: &str) -> bool {
     env.type_resolution_binders()
-        .is_some_and(|binders| binders.dim_vars.contains_key(name))
+        .is_some_and(|binders| binders.binds_dimension(name))
 }
 
 /// True when `name` is a dimension of the definition being checked: a binder

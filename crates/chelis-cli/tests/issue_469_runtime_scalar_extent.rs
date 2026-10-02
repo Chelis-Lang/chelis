@@ -941,3 +941,16 @@ fn a_later_top_level_value_never_replaces_a_callee_dimension_on_both_lanes() {
         );
     }
 }
+
+/// A value that shares its name with a precision binder is not a dimension, so
+/// the size reads the value on both lanes (spec/04-type-system.md section
+/// 4.7.2). Check used to reject it as ambiguous.
+#[test]
+fn a_value_named_like_a_precision_binder_sizes_by_the_value_on_both_lanes() {
+    assert_lanes_agree(
+        "precision_binder_value",
+        "def g[p](z: tensor[2, p], y: tensor[2, i64], p: i64) -> i64 = shape(insert(y, 0, p), 0)\n\
+         out = g(to_tensor([1.0f32, 2.0f32]), to_tensor([1i64, 2i64]), 5i64)\n",
+        "out = 5",
+    );
+}

@@ -59,9 +59,20 @@ pub(crate) struct DeclarationBinderIdentities {
     pub(crate) type_vars: UnordMap<String, TypeVar>,
     pub(crate) dim_vars: UnordMap<String, DimVar>,
     pub(crate) rank_vars: UnordMap<String, RankVar>,
+    /// Listed names the signature uses only as a type or rank binder. Body
+    /// completion still gives each one a dimension identity, but the name is
+    /// not a dimension of the definition (spec/04-type-system.md section
+    /// 4.7.2 reads a size name as a dimension, never as a precision or rank).
+    pub(crate) non_dimension_binders: UnordSet<String>,
 }
 
 impl DeclarationBinderIdentities {
+    /// Whether `name` is a dimension binder of the declaration: a listed name
+    /// the signature uses as a dimension, or uses in no role at all.
+    pub(crate) fn binds_dimension(&self, name: &str) -> bool {
+        self.dim_vars.contains_key(name) && !self.non_dimension_binders.contains(name)
+    }
+
     pub(crate) fn contains_name(&self, name: &str) -> bool {
         self.type_vars.contains_key(name)
             || self.dim_vars.contains_key(name)
@@ -94,6 +105,11 @@ impl DeclarationBinderIdentities {
 
     fn complete(&mut self, binder_names: &UnordSet<String>, var_gen: &mut VarGen) {
         for name in binder_names.to_sorted() {
+            if !self.dim_vars.contains_key(name)
+                && (self.type_vars.contains_key(name) || self.rank_vars.contains_key(name))
+            {
+                self.non_dimension_binders.insert(name.clone());
+            }
             self.type_vars
                 .entry(name.clone())
                 .or_insert_with(|| var_gen.fresh_tvar());
@@ -2326,6 +2342,7 @@ mod tests {
                     ("m".to_string(), DimVar(4)),
                 ]),
                 rank_vars: UnordMap::new(),
+                non_dimension_binders: UnordSet::new(),
             },
         );
         let instantiation = InstantiatedScheme {

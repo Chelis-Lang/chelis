@@ -399,3 +399,33 @@ fn a_pattern_binder_never_inherits_an_outer_list_literal_length() {
         "a match pattern over a list literal",
     );
 }
+
+/// Section 4.7.2's ambiguity is between a value and a dimension. A value that
+/// shares its name with a precision binder is not ambiguous, and the size reads
+/// it. A value that shares its name with a rank binder is not ambiguous
+/// either; that program is still rejected, but only because a rank-polymorphic
+/// body may not call `shape` (section 4.2). Both used to be reported as "a
+/// dimension binder of the enclosing definition", because the unkinded binder
+/// list gives every listed name an identity in every role.
+#[test]
+fn a_precision_or_rank_binder_shares_its_name_with_a_value_unambiguously() {
+    assert_checks_clean(
+        "def g[p](z: tensor[2, p], y: tensor[2, i64], p: i64) -> i64 = shape(insert(y, 0, p), 0)\n",
+        "a precision binder",
+    );
+    let rep = check_ir_program(&surf_to_deep(
+        "def g[r](z: &tensor[..r, f32], y: tensor[2, i64], r: i64) -> i64 = shape(insert(y, 0, r), 0)\n",
+    ))
+    .err()
+    .unwrap_or_else(|| panic!("a rank-polymorphic body calling `shape` is rejected"));
+    let msgs = messages(&rep);
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("may not call shape-rewriting builtin `shape`")),
+        "a rank binder: expected the section 4.2 rejection, got {msgs:?}"
+    );
+    assert!(
+        !msgs.iter().any(|m| m.contains("ambiguous")),
+        "a rank binder is not a dimension, so the size is not ambiguous: {msgs:?}"
+    );
+}
