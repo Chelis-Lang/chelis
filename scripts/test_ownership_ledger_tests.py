@@ -6,6 +6,7 @@ import ast
 import contextlib
 import io
 from pathlib import Path
+import subprocess
 import tomllib
 import unittest
 from unittest import mock
@@ -161,6 +162,31 @@ class DerivationTests(unittest.TestCase):
                 else:
                     chdir.assert_called_once_with(ledger.REPO_ROOT)
                     execvp.assert_called_once_with("cargo", expected)
+
+    def test_main_exits_nonzero_without_running_anything_on_each_error(self) -> None:
+        # Exiting zero here would let the gate and the macOS job pass having
+        # run no ledger target at all.
+        unplaced = metadata(
+            *BASE, ("chelis-runtime", [test_target("runtime_ledger", LEDGER)])
+        )
+        failure = subprocess.CalledProcessError(101, ["cargo", "metadata"])
+        for label, behavior, message in (
+            ("bad target set", {"return_value": unplaced}, "no ledger command runs"),
+            ("cargo metadata failure", {"side_effect": failure}, "cargo"),
+        ):
+            with self.subTest(case=label):
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(ledger, "cargo_metadata", **behavior),
+                    mock.patch.object(ledger.os, "execvp") as execvp,
+                    contextlib.redirect_stdout(io.StringIO()) as stdout,
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    status = ledger.main(["chelis-compiler-api"])
+                self.assertNotEqual(status, 0)
+                execvp.assert_not_called()
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn(message, stderr.getvalue())
 
     def test_runs_on_the_system_python_a_runner_ships(self) -> None:
         # The macOS nightly job runs this script under the runner's python3.

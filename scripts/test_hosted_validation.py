@@ -3,10 +3,12 @@
 import copy
 from pathlib import Path
 import unittest
+from unittest import mock
 
 import yaml
 
 from scripts import gate
+from scripts import ownership_ledger_tests as ledger_targets
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,10 +74,21 @@ def assert_hosted_coverage(test, workflow, nightly):
         if step.get("run", "").startswith("cargo ")
         or "ownership_ledger_tests.py" in step.get("run", "")
     ]
+    # Every ledger package, in run order, on both sides: a package the gate
+    # runs and the workflow does not, or the reverse, fails here.
+    gate_commands = [
+        command
+        for command in gate.STAGES["integration"]
+        if command[1:2] == ["scripts/ownership_ledger_tests.py"]
+    ]
     test.assertEqual(
-        commands,
-        [ledger_run(gate.OWNERSHIP_LEDGER_API_TESTS), ledger_run(gate.OWNERSHIP_LEDGER_CLI_TESTS)],
+        gate_commands,
+        [
+            [gate.MANAGED_PYTHON, "scripts/ownership_ledger_tests.py", package]
+            for package in ledger_targets.LEDGER_PACKAGES
+        ],
     )
+    test.assertEqual(commands, [ledger_run(command) for command in gate_commands])
     for step in ledger["steps"]:
         test.assertNotIn("if", step)
         test.assertFalse(step.get("continue-on-error", False))
@@ -217,6 +230,19 @@ class HostedCoverageTests(unittest.TestCase):
         step["run"] = "cargo nextest run -p chelis-cli --features ownership-ledger --test issue_1314_json_bigint_ledger"
         with self.assertRaises(AssertionError):
             assert_hosted_coverage(self, self.workflow, workflow)
+
+    def test_a_ledger_package_missing_from_either_side_is_rejected(self):
+        packages = (*ledger_targets.LEDGER_PACKAGES, "chelis-runtime")
+        with mock.patch.object(ledger_targets, "LEDGER_PACKAGES", packages):
+            with self.assertRaises(AssertionError):
+                assert_hosted_coverage(self, self.workflow, self.nightly)
+            # The workflow alone gaining the package still disagrees with the gate.
+            workflow = copy.deepcopy(self.nightly)
+            workflow["jobs"]["macos-ownership-ledger"]["steps"].append(
+                {"name": "Ledger", "run": "python3 scripts/ownership_ledger_tests.py chelis-runtime"}
+            )
+            with self.assertRaises(AssertionError):
+                assert_hosted_coverage(self, self.workflow, workflow)
 
     def test_the_ledger_cli_command_runs_after_the_compiler_api_command(self):
         workflow = copy.deepcopy(self.nightly)
