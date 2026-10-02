@@ -16165,21 +16165,34 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     // a host-only descendant. Other builtins may carry static axis/list
     // arguments, so this two-tensor boundary is specific to matmul.
     let hoist_matmul_operands = kids.len() == 3 && direct_var_name(&kids[0]) == Some("matmul");
-    if !hoist_matmul_operands
-        && !kids
-            .iter()
-            .skip(1)
-            .any(should_keep_tensor_expr_in_host_lane)
-    {
+    let host_operand = |arg: &Expr| {
+        should_keep_tensor_expr_in_host_lane(arg) || operand_reads_host_record(arg, scope)
+    };
+    if !hoist_matmul_operands && !kids.iter().skip(1).any(host_operand) {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
+
+    // Hoisted operands run before the operation's helper, so an earlier
+    // operand left inside the helper would run after a later hoisted one.
+    // Every operand before the last hoisted one that does any work is
+    // therefore hoisted too, and the operands are evaluated once, in source
+    // order, by construction.
+    let last_hoisted = kids
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, arg)| hoist_matmul_operands || host_operand(arg))
+        .map(|(index, _)| index)
+        .next_back();
 
     let mut new_children = vec![kids[0].clone()];
     let mut scoped = scope.clone();
     let mut bindings = Vec::new();
 
     for (index, arg) in kids.iter().enumerate().skip(1) {
-        if hoist_matmul_operands || should_keep_tensor_expr_in_host_lane(arg) {
+        let precedes_a_hoisted_operand =
+            last_hoisted.is_some_and(|last| index < last) && operand_does_work(arg);
+        if hoist_matmul_operands || host_operand(arg) || precedes_a_hoisted_operand {
             let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))
@@ -16218,6 +16231,46 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     let rewritten = Expr::node(list.tag(), list.meta().clone(), new_children, *span);
     record_host_work(|profile| profile.app_clone_nodes += deep_expr_nodes(&rewritten));
     Ok((Cow::Owned(rewritten), Cow::Owned(scoped), bindings))
+}
+
+/// Whether evaluating an operand can trap or have an effect, so that its
+/// position in the evaluation order is observable. A name, a literal and a
+/// callable value do no work; a borrow does the work of what it borrows.
+fn operand_does_work(expr: &Expr) -> bool {
+    match expr.tag() {
+        None | Some(DeepTag::Var | DeepTag::Lit | DeepTag::Fn) => false,
+        Some(DeepTag::Borrow) => match expr {
+            Expr::Node(list, _) => list.children_slice().iter().any(operand_does_work),
+            _ => true,
+        },
+        Some(_) => true,
+    }
+}
+
+/// Whether an operand reads a record value the host lane holds
+/// (computed_tensor_host_admission.md): a projection of a record-typed
+/// name, or an application with such an argument, such as an accessor
+/// `col_days(a)` or a helper `filled(c.days, 0i64)`. The tensor execution
+/// lane has no record carrier, so a helper over the whole operation cannot
+/// read the field, and the operation would otherwise fall back to host
+/// emission, which has no tensor arm. The operand's typed producer fact is
+/// therefore Host: it is evaluated once, in source order, and enters the
+/// operation as a typed input, exactly as if bound to a name. Callable
+/// arguments are not entered, so no binder inside the operand can shadow
+/// the name the scope types.
+fn operand_reads_host_record(expr: &Expr, scope: &UnordMap<String, HostTypeTerm>) -> bool {
+    if let Some(path) = record_projection_path(expr) {
+        return path
+            .first()
+            .and_then(|base| scope.get(base))
+            .is_some_and(|ty| matches!(ty, HostTypeTerm::Adt(..)));
+    }
+    let Some((DeepTag::App, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    kids.iter()
+        .skip(1)
+        .any(|actual| operand_reads_host_record(actual, scope))
 }
 
 fn host_fn_signature(ty: &HostTypeTerm) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {

@@ -236,6 +236,19 @@ pub fn run_failure_stderr(source: &GeneratedProgram, driver: &str) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// The stdout and stderr of a program that must fail, for a test that also
+/// checks which effects ran before the failure.
+pub fn run_failure_output(source: &GeneratedProgram, driver: &str) -> (String, String) {
+    let (_dir, binary) = compile_program(source, &[], driver);
+    let output = Command::new(binary).output().expect("execute failing C");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        !output.status.success(),
+        "expected a failing program: stdout={stdout}"
+    );
+    (stdout, String::from_utf8_lossy(&output.stderr).into_owned())
+}
+
 fn execute_program(source: &GeneratedProgram, peers: &[String], driver: &str) -> (Value, String) {
     let (_dir, binary) = compile_program(source, peers, driver);
     let (summary, stdout, _) = execute_binary(&binary);
