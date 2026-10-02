@@ -7215,8 +7215,8 @@ struct LowerCtx<'program> {
     shape_bindings: UnordMap<String, Expr>,
     /// chelis#469/#528: `let`-bound names whose value const-folds to a
     /// compile-time integer (a literal, `cast(N, _)`, or integer arithmetic
-    /// over such values — the §4.7.2 `SizeClass::Static` provenance the
-    /// checker follows transitively through `let` bindings). Lets a later
+    /// over such values, the static values the checker also folds through
+    /// `let` bindings). Lets a later
     /// `expand(s, axis, cast(len, i32))` (or `len` used directly) recover
     /// the concrete extent instead of the pre-fix size-1 default — the exact
     /// eval-`[7]`-vs-C-`[1]` silent miscompile #469 exists to prevent when a
@@ -15454,7 +15454,8 @@ impl<'program> LowerCtx<'program> {
                 } else {
                     self.checked_unit_axis(x, axis, &args[0])
                 };
-                // Recover the broadcast extent. Three sources, in order:
+                // Recover the broadcast extent. The arms below are
+                // refinements tried in order, and the last one is total:
                 //
                 //   1. A statically-extractable size (a bare int, `(lit
                 //      ...)`, a `cast`-wrapped int, or a symbolic dim
@@ -15473,7 +15474,9 @@ impl<'program> LowerCtx<'program> {
                 //      `Lit(1)` that produced the `Lit(n) vs Lit(1)`
                 //      verification failure under `grad`.
                 //
-                //   3. Otherwise default to size 1.
+                //   3. Otherwise the size is ordinary integer dataflow: a
+                //      rank-0 `RtDim::Node` input (chelis#469). No size is
+                //      refused for its provenance and none defaults to 1.
                 //
                 // chelis#384/#397: when the extent comes from a
                 // `shape(src, axis)` argument, capture `src`'s lowered node so
@@ -15507,9 +15510,7 @@ impl<'program> LowerCtx<'program> {
                     //     through `cast` / `let` by `shape_app_operand_axis_
                     //     resolved`). Tried BEFORE the bare-symbol arm so the
                     //     `let`-bound form resolves to the tensor extent rather
-                    //     than a sourceless `Sym("len")` that the guard below
-                    //     rejects (the check-`accept` / build-`reject`
-                    //     asymmetry #469 tracks). The source node is recorded
+                    //     than a `Sym("len")`. The source node is recorded
                     //     as a `shape_dep` below so its `Load` survives DCE and
                     //     declares the extent symbol (chelis#384/#397).
                     else if let Some((src, source_axis, _)) =
@@ -15532,9 +15533,14 @@ impl<'program> LowerCtx<'program> {
                     }
                     // (3) A bare `var` naming a §4.7.2 Form-2 symbolic dim (an
                     //     in-scope tensor dimension, or a monomorphized dim
-                    //     substitution). The post-node sourceless guard below
-                    //     validates the symbol has a real tensor source and
-                    //     fails closed otherwise.
+                    //     substitution) keeps that identity. A name with
+                    //     neither, such as a scalar parameter, a local or
+                    //     top-level binding, or a `cast` over one, is a runtime
+                    //     value: it lowers through arm (4)'s dataflow, because
+                    //     section 4.7.2 forbids refusing an extent for its
+                    //     provenance (chelis#469). The identity recognized here
+                    //     is a refinement; missing it yields a fresh extent
+                    //     under the section 4.7 guards, never a rejection.
                     else if let Some(name) = bare_var_name(strip_cast_wrappers(size_arg)) {
                         if let Some(value) =
                             self.dim_substitutions.get(&name).and_then(|dim| match dim {
@@ -15565,13 +15571,7 @@ impl<'program> LowerCtx<'program> {
                                 )),
                             }
                         } else {
-                            raise_fatal_lowering_error(
-                                format!(
-                                    "`{callee}` size resolves to `{name}`, but no in-scope tensor axis supplies that extent. Use an i64 literal or a shape(tensor, i32-axis) read. Tracked by Chelis-Lang/chelis#469"
-                                ),
-                                Some(app_span),
-                                self.current_span_id.clone(),
-                            )
+                            self.lower_one_bound(size_arg, &mut inputs, "expand size")
                         }
                     }
                     // (4) chelis#1379: every other checked integer size is an
@@ -15593,9 +15593,7 @@ impl<'program> LowerCtx<'program> {
                     //     decides literal-versus-node for every runtime extent.
                     //     A literal or named claim over the axis is checked by
                     //     the section 4.7 runtime extent guards rather than by
-                    //     refusing the program; the silent `Concrete(1)`
-                    //     default that chelis#469 replaced is not reachable
-                    //     from here.
+                    //     refusing the program, and no size defaults to 1.
                     else {
                         self.lower_one_bound(size_arg, &mut inputs, "expand size")
                     }
@@ -24686,9 +24684,8 @@ mod tests {
     /// chelis#369 negative parity + chelis#469/#528 positive parity: the
     /// SHAPE-recovery path must follow ONLY a genuine `let len = shape(...)`
     /// binding — a `len` bound to a static `cast(7, i32)` must NOT
-    /// mis-recover `x`'s shape extent 3. It is not sourceless, though: a
-    /// `let`-bound static value folds to its own extent (`SizeClass::Static`
-    /// followed through the `let`), so the size resolves to `Concrete(7)`, not
+    /// mis-recover `x`'s shape extent 3. A `let`-bound static value folds to
+    /// its own extent through the `let`, so the size resolves to `Concrete(7)`, not
     /// the pre-#469 size-1 default (which silently miscompiled eval-`[7]` to
     /// C-`[1]`) and not `x`'s 3.
     #[test]
@@ -24722,7 +24719,7 @@ mod tests {
     /// to a static value must drop the stale shape entry, so a later expand
     /// size referencing the re-bound name does not recover the old shape
     /// extent 3 — it folds to the NEW static value (5) instead (chelis#469/
-    /// #528 `SizeClass::Static` shadowing symmetry). Guards the shadowing
+    /// #528 static-value shadowing symmetry). Guards the shadowing
     /// path in `lower_let` for both `shape_bindings` and `static_size_bindings`.
     #[test]
     fn issue_369_expand_shadowed_let_binding_does_not_leak_stale_shape() {
@@ -24755,6 +24752,67 @@ mod tests {
             "a re-bound (shadowed) `len` must fold to the NEW static 5, never \
              recover the stale shape extent 3; got {size:?}",
         );
+    }
+
+    /// chelis#469: a size naming a runtime scalar with no tensor source and no
+    /// static value lowers as ordinary integer dataflow, an `RtDim::Node` whose
+    /// input is the scalar itself. Section 4.7.2 forbids refusing an extent
+    /// for its provenance; this arm used to raise "no in-scope tensor axis
+    /// supplies that extent". Both the bare name and a `cast` over it, which
+    /// the arm strips, take the dataflow route.
+    #[test]
+    fn issue_469_a_runtime_scalar_size_lowers_as_a_node() {
+        for size in ["(var {} k)", "(cast {} (var {} k) (t-prim {} i64))"] {
+            let body = format!(
+                r#"
+                (app {{type: (t-tensor {{}} (d-name {{}} *) (t-prim {{}} f32))}}
+                     (var {{}} insert)
+                     (app {{type: (t-prim {{}} f32)}}
+                          (var {{}} scalar_to_tensor)
+                          (cast {{type: (t-prim {{}} f32)}} (lit {{}} 3.0) (t-prim {{}} f32)))
+                     (cast {{}} (lit {{}} 0) (t-prim {{}} i32))
+                     {size})
+            "#
+            );
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            )
+            .declared_for_test();
+            let k = ctx.dag.add_node(
+                ctx.owner(),
+                RiscOp::Load { name: "k".into() },
+                vec![],
+                TensorType {
+                    dims: vec![],
+                    precision: chelis_types::types::Prim::Int64,
+                },
+                None,
+            );
+            ctx.bindings.insert("k".into(), LoweredValue::Node(k));
+            let expr = chelis_deep::parser::parse_str(&body).expect("parse body");
+            let _ = ctx.lower_expr(&expr[0]);
+            let expand = ctx
+                .dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.op, RiscOp::Expand { .. }))
+                .expect("an Expand node must be present");
+            let RiscOp::Expand { size: rt, .. } = &expand.op else {
+                unreachable!("matched above")
+            };
+            let RtDim::Node(slot) = rt else {
+                panic!("{size}: a runtime scalar size is a node-valued extent; got {rt:?}")
+            };
+            let carried = expand.inputs[*slot];
+            let carried_op = &ctx.dag.get(carried).expect("size input node").op;
+            assert!(
+                carried == k || matches!(carried_op, RiscOp::Cast { .. }),
+                "{size}: the extent input is the scalar `k` (or its cast); got {carried_op:?}"
+            );
+        }
     }
 
     #[test]
