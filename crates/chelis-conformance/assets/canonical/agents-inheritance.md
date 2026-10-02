@@ -494,6 +494,9 @@ holds the measurements behind these rules.
   immediately with the exact missing items. Prefer a labelled partial report over
   silence or an overstated completion claim, and deduplicate repeated reports that
   race with a resume nudge.
+- Every message sent to a subagent or peer session ends by asking the recipient to
+  acknowledge it and confirm what it will do. No acknowledgement means the message was
+  not received: resend it, consolidated.
 - More than five subagents live at once under one orchestrator needs the user's
   explicit approval and a stated reason. Five is the widest fan-out measured working
   here, not a certified safe width, and it is a separate budget from the CPU one above.
