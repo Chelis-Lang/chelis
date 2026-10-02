@@ -303,12 +303,22 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
     (
         "parse_critical_duplicate_key",
         r#"parse_zoned_text("2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][u-ca=gregory]")"#,
-        r#"parse_zoned_text: domain: "2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][u-ca=gregory]" gives the critical key "u-ca" two values"#,
+        r#"parse_zoned_text: domain: "2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][u-ca=gregory]" gives the critical key "u-ca" more than one value"#,
     ),
     (
         "parse_critical_duplicate_key_second",
         r#"parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][!u-ca=gregory]")"#,
-        r#"parse_zoned_text: domain: "2022-07-08T00:14:07Z[UTC][u-ca=iso8601][!u-ca=gregory]" gives the critical key "u-ca" two values"#,
+        r#"parse_zoned_text: domain: "2022-07-08T00:14:07Z[UTC][u-ca=iso8601][!u-ca=gregory]" gives the critical key "u-ca" more than one value"#,
+    ),
+    (
+        "parse_critical_after_two_values",
+        r#"parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][u-ca=gregory][!u-ca=iso8601]")"#,
+        r#"parse_zoned_text: domain: "2022-07-08T00:14:07Z[UTC][u-ca=iso8601][u-ca=gregory][!u-ca=iso8601]" gives the critical key "u-ca" more than one value"#,
+    ),
+    (
+        "parse_critical_between_two_values",
+        r#"parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][!u-ca=iso8601][u-ca=gregory]")"#,
+        r#"parse_zoned_text: domain: "2022-07-08T00:14:07Z[UTC][u-ca=iso8601][!u-ca=iso8601][u-ca=gregory]" gives the critical key "u-ca" more than one value"#,
     ),
     (
         "parse_unclosed",
@@ -453,6 +463,14 @@ const EXACT_RESULTS: &[(&str, &str)] = &[
     (
         "elective_repeat_of_unknown_key",
         r#"assert_eq(parse_zoned_text("2026-01-01T00:00:00Z[UTC][foo=a][foo=a]").zone_name, "UTC", "an elective repeat is ignored")"#,
+    ),
+    (
+        "elective_after_two_values",
+        r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][u-ca=gregory][u-ca=iso8601]").zone_name, "UTC", "elective tags only")"#,
+    ),
+    (
+        "critical_between_one_value",
+        r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][!u-ca=iso8601][u-ca=iso8601]").zone_name, "UTC", "one value")"#,
     ),
     (
         "critical_duplicate_same_value",
@@ -623,8 +641,25 @@ fn suffix_tags_accepted(tags: &[Tag]) -> bool {
     }
 }
 
-/// Every single tag and every ordered pair of tags over an unrecognized key
-/// and `u-ca`, each value, and both flags, after a zone annotation.
+/// Suffix tag sequences checked per `chelis test` case. Each case checks a
+/// batch in one fold and reports the texts it judged wrongly.
+const SUFFIX_TAGS_PER_CASE: usize = 150;
+
+/// Every sequence of one to three suffix tags over an unrecognized key and
+/// `u-ca`, each value, and both flags, after a zone annotation, each against
+/// [`suffix_tags_accepted`].
+///
+/// Why these lengths suffice: RFC 9557 §3.3 judges each key by its tags as a
+/// group, through three facts: whether a critical tag names a key the module
+/// does not recognize, whether the key's tags give more than one value while
+/// one of them is critical, and the key's first value. A comparison that is
+/// not over the whole group (with the first tag only, or with the previous
+/// tag only) disagrees with the rule first at three tags of one key, as in
+/// `[u-ca=iso8601][u-ca=gregory][!u-ca=iso8601]`, and every combination of
+/// the three facts for one key, with the other key's tag before, between or
+/// after, occurs within three tags. A fourth tag adds no new combination, and
+/// four tags of `u-ca` alone (1 296 more texts) would more than double the
+/// suite's time.
 #[test]
 fn std_datetime_zone_suffix_tags_follow_rfc_9557() {
     let mut tags: Vec<Tag> = Vec::new();
@@ -636,45 +671,64 @@ fn std_datetime_zone_suffix_tags_follow_rfc_9557() {
             tags.push(("u-ca", value, critical));
         }
     }
-    let render = |sequence: &[Tag]| -> String {
-        sequence
+    let mut sequences: Vec<Vec<Tag>> = vec![Vec::new()];
+    let mut frontier: Vec<Vec<Tag>> = vec![Vec::new()];
+    for _ in 0..3 {
+        frontier = frontier
             .iter()
-            .map(|(key, value, critical)| {
-                format!("[{}{key}={value}]", if *critical { "!" } else { "" })
+            .flat_map(|prefix| {
+                tags.iter().map(move |tag| {
+                    let mut longer = prefix.clone();
+                    longer.push(*tag);
+                    longer
+                })
             })
-            .collect()
-    };
-    let mut sequences: Vec<Vec<Tag>> = tags.iter().map(|tag| vec![*tag]).collect();
-    for first in &tags {
-        for second in &tags {
-            sequences.push(vec![*first, *second]);
-        }
+            .collect();
+        sequences.extend(frontier.iter().cloned());
     }
-    let cases: Vec<(String, String, bool)> = sequences
+    sequences.remove(0);
+    assert_eq!(sequences.len(), 10 + 100 + 1000);
+    let cases: Vec<(String, bool)> = sequences
         .iter()
-        .enumerate()
-        .map(|(index, sequence)| {
-            let expected = suffix_tags_accepted(sequence);
+        .map(|sequence| {
+            let suffix: String = sequence
+                .iter()
+                .map(|(key, value, critical)| {
+                    format!("[{}{key}={value}]", if *critical { "!" } else { "" })
+                })
+                .collect();
             (
-                format!("tags_{index:03}"),
-                format!(
-                    "assert_eq(accepted(\"2022-07-08T00:14:07Z[Europe/London]{}\"), {expected}, \"accepted\")",
-                    render(sequence)
-                ),
-                expected,
+                format!("2022-07-08T00:14:07Z[UTC]{suffix}"),
+                suffix_tags_accepted(sequence),
             )
         })
         .collect();
-    assert!(cases.iter().any(|case| case.2) && cases.iter().any(|case| !case.2));
+    assert!(cases.iter().any(|case| case.1) && cases.iter().any(|case| !case.1));
     let expressions: Vec<(String, String)> = cases
-        .iter()
-        .map(|(name, expression, _)| (name.clone(), expression.clone()))
+        .chunks(SUFFIX_TAGS_PER_CASE)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let list: Vec<String> = chunk
+                .iter()
+                .map(|(text, expected)| format!("(\"{text}\", {expected})"))
+                .collect();
+            (
+                format!("tags_{index:03}"),
+                format!(
+                    "assert_eq(fold(fn (acc: string, case: (string, bool)) -> if eq(accepted(case.0), case.1) then acc else acc |> string_concat(\" \") |> string_concat(case.0), \"\", [{}]), \"\", \"texts judged against RFC 9557\")",
+                    list.join(", ")
+                ),
+            )
+        })
         .collect();
     let outcomes = run_expression_suite("datetime-zone-suffix-tags-2862", &expressions);
-    let wrong: Vec<String> = cases
+    let wrong: Vec<String> = expressions
         .iter()
-        .filter(|(name, _, _)| outcomes.get(name) != Some(&None))
-        .map(|(_, expression, expected)| format!("{expression} (RFC 9557 accepts: {expected})"))
+        .filter_map(|(name, _)| match outcomes.get(name) {
+            Some(None) => None,
+            Some(Some(message)) => Some(format!("{name}: {message}")),
+            None => Some(format!("{name}: no verdict")),
+        })
         .collect();
     assert!(
         wrong.is_empty(),

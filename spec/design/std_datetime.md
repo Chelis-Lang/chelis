@@ -877,7 +877,8 @@ compares `zoned_instant` and `time_zone_name`.
     A key that two tags give different values is rejected when either tag is critical
     (RFC 9557 §3.3), and every critical tag must be one the module recognizes, whatever
     its position. Otherwise the first tag with a key decides and later elective ones
-    are ignored.
+    are ignored. The parser collects every tag and then judges them together, grouped by
+    key, so no verdict depends on which tags it compares.
 
 **Decisions recorded by S4a.**
 - **Representation.** `TimeZone { name: string, initial_offset: i64, transitions:

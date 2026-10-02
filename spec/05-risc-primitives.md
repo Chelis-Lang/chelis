@@ -3352,11 +3352,11 @@ exact ADT identity by [05-OP-34].
 > zero: RFC 9557 §2 and §3.4 read these as a known UTC time whose local offset
 > is unknown, so the written date and time are then UTC. Every other offset,
 > `+00:00` included, is present. A key that two suffix tags give different
-> values fails `domain` when either tag is critical, as RFC 9557 §3.3
-> requires. Otherwise an elective tag whose key an earlier tag gives is
-> ignored, and a `u-ca` tag whose value is `iso8601` or `gregory` is accepted;
-> another `u-ca` value and any other critical tag fail `domain`, and any other
-> elective tag is ignored.
+> values fails `domain` when either tag is critical, whatever their positions,
+> as RFC 9557 §3.3 requires. Otherwise an elective tag whose key an earlier
+> tag gives is ignored, and a `u-ca` tag whose value is `iso8601` or `gregory`
+> is accepted; another `u-ca` value and any other critical tag fail `domain`,
+> and any other elective tag is ignored.
 > `zoned_from_text(zt,tz,policy)` resolves the record against `tz` whatever its
 > name. When the offset is absent, every policy gives the instant that the
 > written date and time denote at offset zero, failing `overflow` outside the

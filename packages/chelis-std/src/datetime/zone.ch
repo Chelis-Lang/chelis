@@ -674,20 +674,32 @@ def is_suffix_values(values: string) -> bool = {
 -- The problem with the annotations from `start` to the end: (problem, zone
 -- name, critical). The first annotation names the zone; each later one is a
 -- `key=value` tag.
--- Whether an earlier tag gives `key` another value while it or this tag is
--- critical, which RFC 9557 §3.3 makes erroneous. Every critical tag must name
--- the recognized key `u-ca`, whatever its position; past those checks, a
--- repeated key keeps its first tag's value and the later tag is ignored.
-def conflicting_tag(seen: List[(string, string, bool)], key: string, value: string, critical: bool) -> bool =
-  fold(fn (acc: bool, tag: (string, string, bool)) -> tag.0
-  |> eq(key)
-  |> and(neq(tag.1, value))
-  |> and(or(critical, tag.2))
-  |> or(acc), false, seen)
+-- RFC 9557 §3.3 over the whole sequence of suffix tags, each (key, value,
+-- critical), grouped by key: a critical tag must name the recognized key
+-- `u-ca`; a key whose tags give more than one value fails when any of them is
+-- critical; otherwise each key's first tag decides, so the first `u-ca` must
+-- name a supported calendar and every later tag is ignored. The result is
+-- the problem, or "" when the tags are accepted.
+def tags_problem(text: string, tags: List[(string, string, bool)]) -> string = {
+  unknown = filter(fn (tag: (string, string, bool)) -> and(tag.2, neq(tag.0, "u-ca")), tags)
+  conflicted = filter(fn (tag: (string, string, bool)) -> key_conflicts(tags, tag.0), tags)
+  calendars = filter(fn (tag: (string, string, bool)) -> eq(tag.0, "u-ca"), tags)
+  if gt(len(unknown), 0i64) then joined([quoted(text), " has the unknown critical annotation ", quoted(joined([index(unknown, 0i64).0, "=", index(unknown, 0i64).1]))]) else if gt(len(conflicted), 0i64) then joined([quoted(text), " gives the critical key ", quoted(index(conflicted, 0i64).0), " more than one value"]) else if eq(len(calendars), 0i64) then "" else if index(calendars, 0i64).1
+  |> eq("iso8601")
+  |> or(eq(index(calendars, 0i64).1, "gregory")) then "" else joined([quoted(text), " names the calendar ", quoted(index(calendars, 0i64).1), ", not iso8601 or gregory"])
+}
+-- Whether the tags with `key` give more than one value while one of them is
+-- critical.
+def key_conflicts(tags: List[(string, string, bool)], key: string) -> bool = {
+  same = filter(fn (tag: (string, string, bool)) -> eq(tag.0, key), tags)
+  values_differ = fold(fn (acc: bool, tag: (string, string, bool)) -> or(acc, neq(tag.1, index(same, 0i64).1)), false, same)
+  any_critical = fold(fn (acc: bool, tag: (string, string, bool)) -> or(acc, tag.2), false, same)
+  and(values_differ, any_critical)
+}
 def annotation_reading(text: string, start: i64) -> (string, string, bool) = {
   size = string_len(text)
-  -- (problem, next index, zone name, critical, annotations seen, tags seen
-  -- as (key, value, critical))
+  -- (problem, next index, zone name, critical, annotations seen, suffix tags
+  -- as (key, value, critical)), judged as a whole after the scan
   scanned = fold(fn (acc: (string, i64, string, bool, i64, List[(string, string, bool)]), step: i64) -> if neq(acc.0, "") then acc else if gte(acc.1, size) then acc else if text |> char_at(acc.1) |> neq("[") then (joined([quoted(text), " has text after its annotations"]), acc.1, acc.2, acc.3, acc.4, acc.5) else {
     close = find_from(text, "]", acc.1)
     if lt(close, 0i64) then (joined([quoted(text), " has an unclosed annotation"]), acc.1, acc.2, acc.3, acc.4, acc.5) else {
@@ -701,12 +713,15 @@ def annotation_reading(text: string, start: i64) -> (string, string, bool) = {
         if key
         |> is_key
         |> and(is_suffix_values(value))
-        |> not then (joined([quoted(text), " has an invalid annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4, acc.5) else if critical |> and(neq(key, "u-ca")) then (joined([quoted(text), " has the unknown critical annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4, acc.5) else if conflicting_tag(acc.5, key, value, critical) then (joined([quoted(text), " gives the critical key ", quoted(key), " two values"]), acc.1, acc.2, acc.3, acc.4, acc.5) else if fold(fn (found: bool, tag: (string, string, bool)) -> or(found, eq(tag.0, key)), false, acc.5) then ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), acc.5) else if eq(key, "u-ca") then if value |> eq("iso8601") |> or(eq(value, "gregory")) then ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), append(acc.5, (key, value, critical))) else (joined([quoted(text), " names the calendar ", quoted(value), ", not iso8601 or gregory"]), acc.1, acc.2, acc.3, acc.4, acc.5) else ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), append(acc.5, (key, value, critical)))
+        |> not then (joined([quoted(text), " has an invalid annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4, acc.5) else ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), append(acc.5, (key, value, critical)))
       }
     }
   }, ("", start, "", false, 0i64, []), range(0i64, size))
-  (problem, next, zone_name, critical, seen, _) = scanned
-  if neq(problem, "") then (problem, "", false) else if lt(next, size) then (joined([quoted(text), " has text after its annotations"]), "", false) else if eq(seen, 0i64) then (joined([quoted(text), " has no time zone annotation"]), "", false) else ("", zone_name, critical)
+  (problem, next, zone_name, critical, seen, tags) = scanned
+  if neq(problem, "") then (problem, "", false) else if lt(next, size) then (joined([quoted(text), " has text after its annotations"]), "", false) else if eq(seen, 0i64) then (joined([quoted(text), " has no time zone annotation"]), "", false) else {
+    judged = tags_problem(text, tags)
+    if eq(judged, "") then ("", zone_name, critical) else (judged, "", false)
+  }
 }
 -- A zone annotation is a time zone name or a numeric offset `±HH:MM[:SS]`.
 def zone_annotation_ok(body: string) -> bool =
