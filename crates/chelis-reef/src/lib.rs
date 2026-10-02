@@ -1,6 +1,6 @@
 use chelis_shell::{
     CollectionObligation, PackageId, SHELL_FORMAT_VERSION, ShellModule, ShellPackage, ShellSymbol,
-    SymbolKind, TypeVariableDomain, TypeVariableRestriction, read_shell, write_shell,
+    SymbolKind, TypeVariableDomain, TypeVariableRestriction, read_shell,
 };
 use chelis_surf::ast::{
     Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
@@ -3758,29 +3758,102 @@ pub fn build_package_with_options(
         write_lockfile_unlocked(&root.join("reef.lock"), &lock)?;
     }
 
-    let (root_pkg, linked_decls) = link_package_for_build(&graph)?;
-    let deep = expanded_desugared_program(&linked_decls)?;
-    let checked = checked_library_with_effects(&deep)?;
+    let packed = pack_graph(&root, &graph, canonical_archive_mtime()?)?;
 
     let dist_dir = root.join("dist");
     fs::create_dir_all(&dist_dir).map_err(|e| e.to_string())?;
-    let archive_path = dist_dir.join(format!(
-        "{}-{}.tar.zst",
-        root_pkg.id.name, root_pkg.id.version
-    ));
-    let shell_path = dist_dir.join(format!("{}-{}.chb", root_pkg.id.name, root_pkg.id.version));
-    build_archive(&root, &archive_path)?;
-    let archive_sha256 = sha256_file(&archive_path)?;
-    let shell = build_shell_package(root_pkg, &checked, &archive_sha256)?;
-    write_shell(&shell_path, &shell).map_err(|e| e.to_string())?;
-    let shell_sha256 = sha256_file(&shell_path)?;
+    let stem = format!("{}-{}", packed.package.name, packed.package.version);
+    let archive_path = dist_dir.join(format!("{stem}.tar.zst"));
+    let shell_path = dist_dir.join(format!("{stem}.chb"));
+    document_schema::atomic_replace(&archive_path, &packed.archive)?;
+    fs::write(&shell_path, &packed.shell).map_err(|e| e.to_string())?;
 
     Ok(PackageBuildArtifacts {
-        package: root_pkg.id.clone(),
+        shell_sha256: sha256_bytes(&packed.shell),
+        archive_sha256: sha256_bytes(&packed.archive),
+        package: packed.package,
         shell_path,
         archive_path,
-        shell_sha256,
-        archive_sha256,
+    })
+}
+
+/// A package's source archive and shell, the pair `chelis reef build` writes
+/// to `dist/<name>-<version>.{tar.zst,chb}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackedPackage {
+    pub package: PackageId,
+    /// The zstd-compressed tar archive of the package sources.
+    pub archive: Vec<u8>,
+    /// The canonical shell encoding, naming the archive's SHA-256.
+    pub shell: Vec<u8>,
+}
+
+/// Pack the chelis-std runtime whose source tree is at `root`, stamping every
+/// archive member with `archive_mtime`, and write nothing.
+///
+/// The runtime is its own dependency graph: it is the root, it declares no
+/// dependencies, and nothing in its graph comes from an embedded runtime, so
+/// it is packed before any runtime exists. The `chelis-std-bundle` build
+/// script produces the runtime each binary embeds this way. The packing step
+/// is the one `chelis reef build` runs, so building the same tree with that
+/// command and the same mtime yields the same bytes.
+pub fn pack_runtime_package(root: &Path, archive_mtime: u64) -> Result<PackedPackage, String> {
+    let root = canonical_root(root)?;
+    let manifest = read_manifest(&root.join("reef.toml"))?;
+    if manifest.typed.package.name.as_str() != CHELIS_STD_PACKAGE_NAME {
+        return Err(format!(
+            "{} names package `{}`; only `{CHELIS_STD_PACKAGE_NAME}` packs without an embedded runtime",
+            root.join("reef.toml").display(),
+            manifest.typed.package.name
+        ));
+    }
+    if !manifest.typed.dependencies.is_empty() {
+        return Err(format!(
+            "{} declares dependencies; the `{CHELIS_STD_PACKAGE_NAME}` runtime must have none",
+            root.join("reef.toml").display()
+        ));
+    }
+    let modules = load_package_modules(&root, &manifest)?;
+    let id = PackageId {
+        name: manifest.typed.package.name.to_string(),
+        version: manifest.typed.package.version.to_string(),
+    };
+    let graph = PackageGraph {
+        root_package: id.name.clone(),
+        packages: BTreeMap::from([(
+            id.name.clone(),
+            LoadedPackage {
+                id,
+                manifest: manifest.raw.clone(),
+                resolver: manifest.typed.resolver,
+                modules,
+                source: LoadedSourceKind::Root { root: root.clone() },
+                archive_sha256: None,
+                shell_sha256: None,
+                shell: None,
+                remote_origin: None,
+            },
+        )]),
+    };
+    pack_graph(&root, &graph, archive_mtime)
+}
+
+/// Check the root package of `graph` and pack its archive and shell.
+fn pack_graph(
+    root: &Path,
+    graph: &PackageGraph,
+    archive_mtime: u64,
+) -> Result<PackedPackage, String> {
+    let (root_pkg, linked_decls) = link_package_for_build(graph)?;
+    let deep = expanded_desugared_program(&linked_decls)?;
+    let checked = checked_library_with_effects(&deep)?;
+    let archive = pack_archive(root, archive_mtime, || {})?;
+    let shell = build_shell_package(root_pkg, &checked, &sha256_bytes(&archive))?;
+    let shell = chelis_shell::encode_shell(&shell).map_err(|e| e.to_string())?;
+    Ok(PackedPackage {
+        package: root_pkg.id.clone(),
+        archive,
+        shell,
     })
 }
 
@@ -9388,15 +9461,18 @@ enum ArchiveMember {
     Snapshot(Vec<u8>),
 }
 
+/// Write the source archive of the package at `root` to `out_path`, with the
+/// archive mtime `chelis reef build` uses.
+#[cfg(test)]
 fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
-    build_archive_with_snapshot_hook(root, out_path, || {})
+    let archive = pack_archive(root, canonical_archive_mtime()?, || {})?;
+    document_schema::atomic_replace(out_path, &archive)
 }
 
-fn build_archive_with_snapshot_hook<F>(
-    root: &Path,
-    out_path: &Path,
-    after_snapshots: F,
-) -> Result<(), String>
+/// The zstd-compressed tar archive of the package at `root`, every member
+/// stamped with `archive_mtime`. `after_snapshots` runs once every member's
+/// bytes are captured, before any is serialized.
+fn pack_archive<F>(root: &Path, archive_mtime: u64, after_snapshots: F) -> Result<Vec<u8>, String>
 where
     F: FnOnce(),
 {
@@ -9408,7 +9484,6 @@ where
     let manifest_text = std::str::from_utf8(&manifest_bytes)
         .map_err(|error| format!("{} is not UTF-8: {error}", manifest_path.display()))?;
     let manifest = parse_manifest_contents(&manifest_path, manifest_text)?;
-    let archive_mtime = canonical_archive_mtime()?;
     let mut members = BTreeMap::<String, ArchiveMember>::new();
     members.insert(
         "reef.toml".to_string(),
@@ -9504,9 +9579,7 @@ where
         }
         builder.finish().map_err(|e| e.to_string())?;
     }
-    let compressed =
-        zstd::stream::encode_all(Cursor::new(tar_bytes), 19).map_err(|e| e.to_string())?;
-    document_schema::atomic_replace(out_path, &compressed)
+    zstd::stream::encode_all(Cursor::new(tar_bytes), 19).map_err(|e| e.to_string())
 }
 
 const DEFAULT_ARCHIVE_MTIME: u64 = 0;
@@ -11938,16 +12011,14 @@ mod tests {
         .unwrap();
         fs::write(root.join("src/main.ch"), b"module Snapshot.Main\n").unwrap();
         fs::write(root.join("src/NOTICE.md"), b"captured bytes").unwrap();
-        let archive_path = root.join("snapshot.tar.zst");
         let manifest_before = fs::read(root.join("reef.toml")).unwrap();
 
-        build_archive_with_snapshot_hook(root, &archive_path, || {
+        let compressed = pack_archive(root, DEFAULT_ARCHIVE_MTIME, || {
             fs::write(root.join("src/NOTICE.md"), b"replacement bytes").unwrap();
             fs::write(root.join("reef.toml"), b"attacker manifest bytes").unwrap();
         })
         .unwrap();
 
-        let compressed = fs::read(archive_path).unwrap();
         let decoded = zstd::stream::decode_all(Cursor::new(compressed)).unwrap();
         let mut members = BTreeMap::new();
         for entry in tar::Archive::new(Cursor::new(decoded)).entries().unwrap() {
