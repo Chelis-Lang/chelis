@@ -4403,6 +4403,16 @@ impl<'a> EvalContext<'a> {
                 tensor_scatter_value(&base, &indices, &updates, axis, &mode)
                     .map(RuntimeValue::Tensor)
             }
+            // [05-OP-52]: `scatter_replace` is the replace-mode instance of
+            // `scatter`.
+            "scatter_replace" => {
+                let base = expect_tensor_arg(args, 0)?;
+                let indices = expect_tensor_arg(args, 1)?;
+                let updates = expect_tensor_arg(args, 2)?;
+                let axis = expect_int_arg(args, 3)?;
+                tensor_scatter_value(&base, &indices, &updates, axis, "replace")
+                    .map(RuntimeValue::Tensor)
+            }
             "scatter_elements" => {
                 let data = expect_tensor_arg(args, 0)?;
                 let indices = expect_tensor_arg(args, 1)?;

@@ -2360,8 +2360,13 @@ pub(super) fn tensor_scatter_value(
     if !indices.precision.is_integer() {
         return Err("scatter expects integer tensor indices".to_string());
     }
-    let expected = tensor_gather_value(base, indices, axis as i64)?;
-    if expected.value.shape != updates.value.shape || expected.precision != updates.precision {
+    // The updates take the gathered shape (section 3.5.1); computing it from
+    // the shapes alone keeps an out-of-range index reported by scatter's own
+    // bounds check below, as the C runtime reports it.
+    let mut expected_shape = base.value.shape[..axis].to_vec();
+    expected_shape.extend_from_slice(&indices.value.shape);
+    expected_shape.extend_from_slice(&base.value.shape[axis + 1..]);
+    if expected_shape != updates.value.shape || base.precision != updates.precision {
         return Err("scatter updates must match gathered tensor shape and precision".to_string());
     }
     let index_values = indices
