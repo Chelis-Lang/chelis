@@ -4008,7 +4008,10 @@ fn cmd_build(
     let (entry_seeds, entry_defs) = match &entry_decls {
         Some(entry) => {
             let entry_exprs = expanded_desugared_program(entry).map_err(boxed_string_error)?;
-            (entry_seed_names(&entry_exprs), entry_def_names(&entry_exprs))
+            (
+                entry_seed_names(&entry_exprs),
+                entry_def_names(&entry_exprs),
+            )
         }
         None => (
             entry_seed_names(&full_deep_exprs),

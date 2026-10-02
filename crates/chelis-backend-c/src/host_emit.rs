@@ -211,7 +211,9 @@ fn runtime_string_literal(value: &str) -> String {
 /// its type's qualification keeps the name it has.
 fn stored_constructor_name(ty: &HostType, ctor: &str) -> String {
     let source = match ty {
-        HostType::Adt(type_name, _) => chelis_types::linked_constructor_source_name(type_name, ctor),
+        HostType::Adt(type_name, _) => {
+            chelis_types::linked_constructor_source_name(type_name, ctor)
+        }
         _ => None,
     };
     source.unwrap_or(ctor).to_string()

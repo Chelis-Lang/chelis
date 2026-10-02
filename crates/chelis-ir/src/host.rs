@@ -2493,9 +2493,7 @@ pub fn captured_global_names<T>(program: &HostProgram<T>) -> Vec<String> {
         .flat_map(|binding| {
             [
                 binding.name.clone(),
-                LoadStoreName::top_level(&binding.name)
-                    .as_str()
-                    .to_string(),
+                LoadStoreName::top_level(&binding.name).as_str().to_string(),
             ]
             .into_iter()
             .filter(|name| referenced.contains(name))

@@ -98,7 +98,10 @@ fn write_file(path: &Path, contents: &str) {
 /// `app` (entry `App.Main`, sibling `App.Helpers`) with a path dependency on
 /// `drawlib`; chelis-std resolves from the toolchain.
 fn package() -> (TempDir, PathBuf) {
-    package_with(DRAWLIB, &[("src/helpers.ch", HELPERS), ("src/main.ch", ENTRY)])
+    package_with(
+        DRAWLIB,
+        &[("src/helpers.ch", HELPERS), ("src/main.ch", ENTRY)],
+    )
 }
 
 /// `app`, holding `app_files`, with a path dependency on `drawlib`, whose
