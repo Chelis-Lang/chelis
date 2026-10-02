@@ -14,7 +14,7 @@ that both runs a default build and compiles C itself:
 
 - A function runs a default build when a `"build"` string literal opens an
   argument list in it (`["build", ...]`, `.arg("build")`, or the first
-  argument of a call to a same-file function that does not name
+  argument of a call to a same-file function or method that does not name
   `"--emit-c"`) and the function itself does not name `"--emit-c"`.
 - A function compiles C when it calls `link_generated`, or a `Type::new`
   whose argument names a C compiler: a literal such as `"cc"`, or a name such
@@ -22,13 +22,15 @@ that both runs a default build and compiles C itself:
   a static library other than the runtime archive links a driver against a
   published library and does not count.
 
-A function inherits both facts from the same-file functions it calls, except
-that a function naming `"--emit-c"` inherits no default build, so a helper
-that builds and a helper that links are reported where they meet. The guard
-follows no values: a command name held in a variable, a build or compile
-helper defined in another file (other than `link_generated`), a compiler
-reached under another name, and a function that mixes a source-only build
-with a default one are not seen.
+A function inherits both facts from the same-file functions and methods it
+calls, as `f(...)` or `x.f(...)`, except that a function naming `"--emit-c"`
+inherits no default build, so a helper that builds and a helper that links
+are reported where they meet. Calls resolve by name alone: a method of any
+type resolves to every same-file function of that name. The guard follows no
+values: a command name held in a variable or placed after the first element
+of a list, a build or compile helper defined in another file (other than
+`link_generated`), a compiler reached under another name, and a function that
+mixes a source-only build with a default one are not seen.
 """
 from __future__ import annotations
 
@@ -248,9 +250,10 @@ def analyze(source: str) -> list[Function]:
             tokens[index].kind == "str" and tokens[index].text == EMIT_C
             for index in function.own
         )
-    calls: dict[int, set[str]] = {}
+    # Callees in first-call order, so the cited lines do not depend on hashing.
+    calls: dict[int, dict[str, None]] = {}
     for function in found:
-        callees = calls.setdefault(id(function), set())
+        callees = calls.setdefault(id(function), {})
         for index in function.own:
             token = tokens[index]
             previous = tokens[index - 1]
@@ -260,9 +263,9 @@ def analyze(source: str) -> list[Function]:
                 and token.text in by_name
                 and following is not None
                 and following.text == "("
-                and previous.text not in {"fn", "."}
+                and previous.text != "fn"
             ):
-                callees.add(token.text)
+                callees.setdefault(token.text)
             if (
                 token.kind == "ident"
                 and function.compile_line is None
@@ -280,7 +283,7 @@ def analyze(source: str) -> list[Function]:
                 function.build_line = token.line
             elif previous.text == "(" and tokens[index - 2].kind == "ident":
                 opener = tokens[index - 2].text
-                helpers = by_name.get(opener, []) if tokens[index - 3].text not in {"fn", "."} else []
+                helpers = by_name.get(opener, []) if tokens[index - 3].text != "fn" else []
                 if opener == "arg" or (helpers and not any(h.has_emit_c for h in helpers)):
                     function.build_line = token.line
     # Inherit both facts from same-file callees until nothing changes; a

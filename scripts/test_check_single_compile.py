@@ -1,7 +1,10 @@
 """Tests for the single-compile guard (chelis#2928)."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -97,6 +100,45 @@ DOUBLE = {
         '    Command::new("cc").args(["main.c", "libchelis_runtime.a", "-o", "main"]).status().unwrap();\n'
         "}\n"
     ),
+    "a compiler held in a bare identifier": (
+        "fn lane() {\n"
+        '    run(&["build", "main.ch"]);\n'
+        '    let cc = locate("clang-17");\n'
+        '    StdCommand::new(&cc).arg("main.c").status().unwrap();\n'
+        "}\n"
+    ),
+    "a method that links the default build": (
+        "struct CBuild {\n"
+        "    out: PathBuf,\n"
+        "}\n"
+        "impl CBuild {\n"
+        "    fn link_and_run(&self) -> Output {\n"
+        '        assert!(link_generated(&self.out, "prog.c", "prog").success());\n'
+        '        Command::new(self.out.join("prog")).output().unwrap()\n'
+        "    }\n"
+        "}\n"
+        "fn build_c(file: &Path) -> CBuild {\n"
+        '    Command::new(chelis_bin()).args(["build", "--target", "c"]).arg(file).output().unwrap();\n'
+        "    CBuild { out: PathBuf::new() }\n"
+        "}\n"
+        "#[test]\n"
+        "fn lane() {\n"
+        "    build_c(&file).link_and_run();\n"
+        "}\n"
+    ),
+    "a method that takes the command": (
+        "struct Harness;\n"
+        "impl Harness {\n"
+        "    fn cli(&self, command: &str, path: &Path) -> Output {\n"
+        '        Command::cargo_bin("chelis").unwrap().arg(command).arg(path).output().unwrap()\n'
+        "    }\n"
+        "}\n"
+        "#[test]\n"
+        "fn lane() {\n"
+        '    harness.cli("build", &path);\n'
+        '    assert!(link_generated(&out, "main.c", "main").success());\n'
+        "}\n"
+    ),
     "a compile inside a closure": (
         "fn lane() {\n"
         '    run(&["build", "main.ch"]);\n'
@@ -176,6 +218,25 @@ SINGLE = {
         "    json!({})\n"
         "}\n"
     ),
+    "a method that links a source-only build": (
+        "struct CBuild {\n"
+        "    out: PathBuf,\n"
+        "}\n"
+        "impl CBuild {\n"
+        "    fn link_and_run(&self) -> Output {\n"
+        '        assert!(link_generated(&self.out, "prog.c", "prog").success());\n'
+        '        Command::new(self.out.join("prog")).output().unwrap()\n'
+        "    }\n"
+        "}\n"
+        "fn build_c(file: &Path) -> CBuild {\n"
+        '    Command::new(chelis_bin()).args(["build", "--emit-c", "--target", "c"]).arg(file).output().unwrap();\n'
+        "    CBuild { out: PathBuf::new() }\n"
+        "}\n"
+        "#[test]\n"
+        "fn lane() {\n"
+        "    build_c(&file).link_and_run();\n"
+        "}\n"
+    ),
     "build and compile in unrelated functions": (
         "fn published() {\n"
         '    run(&["build", "main.ch"]);\n'
@@ -200,6 +261,31 @@ SINGLE = {
         "}\n"
     ),
 }
+
+
+# A test that calls two build helpers and two link helpers, the later-defined
+# of each first.
+TWO_OF_EACH = (
+    "fn build_a() {\n"
+    '    run(&["build", "a.ch"]);\n'
+    "}\n"
+    "fn build_b() {\n"
+    '    run(&["build", "b.ch"]);\n'
+    "}\n"
+    "fn link_a(out: &Path) {\n"
+    '    assert!(link_generated(out, "a.c", "a").success());\n'
+    "}\n"
+    "fn link_b(out: &Path) {\n"
+    '    assert!(link_generated(out, "b.c", "b").success());\n'
+    "}\n"
+    "#[test]\n"
+    "fn lanes() {\n"
+    "    build_b();\n"
+    "    build_a();\n"
+    "    link_b(&out);\n"
+    "    link_a(&out);\n"
+    "}\n"
+)
 
 
 class PlantedTree:
@@ -256,6 +342,30 @@ class DoubleCompileTests(unittest.TestCase):
         self.assertEqual(flagged(failures), {"both_lanes"}, failures)
         self.assertIn("(line 2)", failures[0])
         self.assertIn("(line 5)", failures[0])
+
+    def test_the_cited_lines_do_not_depend_on_string_hashing(self) -> None:
+        tree = PlantedTree(self, {"crates/planted/tests/case.rs": TWO_OF_EACH})
+        script = (
+            "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+            "import check_single_compile as guard; "
+            "print(guard.check(Path(sys.argv[2]), ['crates/planted/tests/case.rs']))"
+        )
+        outputs = {
+            subprocess.run(
+                [sys.executable, "-B", "-c", script, str(Path(guard.__file__).parent), str(tree.root)],
+                env={**os.environ, "PYTHONHASHSEED": str(seed)},
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            for seed in range(8)
+        }
+        self.assertEqual(len(outputs), 1, outputs)
+        # The first build and link helpers `lanes` calls supply the cited lines.
+        (output,) = outputs
+        self.assertIn("fn lanes", output)
+        self.assertIn("(line 5)", output)
+        self.assertIn("(line 11)", output)
 
     def test_every_single_compile_passes(self) -> None:
         for label, text in SINGLE.items():
