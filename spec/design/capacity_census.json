@@ -1461,6 +1461,13 @@
     },
     {
       "kind": "std-adt-numeric",
+      "id": "datetime/columns::Durations: (n) (variant {} Durations (field {} seconds (t-tensor {} (d-var {} n) (t-prim {} i64))) (field {} nanoseconds (t-tensor {} (d-var {} n) (t-prim {} i64))))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
       "id": "datetime/zone::TimeZone: () (variant {} TimeZone (field {} name (t-prim {} string)) (field {} initial_offset (t-prim {} i64)) (field {} transitions (t-adt {} List (t-tuple {} (t-prim {} i64) (t-prim {} i64)))) (field {} footer (t-adt {} Option (t-tuple {} (t-prim {} i64) (t-adt {} Option (t-tuple {} (t-prim {} i64) (t-tuple {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64)) (t-tuple {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64))))))))",
       "flags": [
         "numeric-op"
@@ -1724,6 +1731,195 @@
     {
       "kind": "std-def-numeric",
       "id": "datetime/clock::monotonic_until: (t-fn {} (t-adt {} MonotonicInstant) (t-adt {} MonotonicInstant) (t-adt {} Duration))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_add_days: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} Dates (t-var {} n)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_add_months: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} DayOverflow) (t-adt {} Dates (t-var {} n)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_day: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_day_of_year: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_days_until: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_from_ymd: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} Dates (t-var {} n)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_gt: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_gte: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_lt: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_lte: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_month: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_to_strings: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-adt {} List (t-prim {} string)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_weekday_iso_number: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::dates_year: (t-fn {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::durations: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} Durations (t-var {} n)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::durations_nanoseconds: (t-fn {} (t-adt {} Durations (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::durations_seconds: (t-fn {} (t-adt {} Durations (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_add_duration: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Durations (t-var {} n)) (t-adt {} Instants (t-var {} n)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_from_unix_count: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} TimeUnit) (t-adt {} Instants (t-var {} n)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_gt: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_gte: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_lt: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_lte: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instants (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_round_to: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Duration) (t-adt {} Rounding) (t-adt {} Instants (t-var {} n)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_seconds_since_f64: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instant) (t-tensor {} (d-var {} n) (t-prim {} f64)))",
+      "flags": [
+        "float-carrier"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_to_dates_at: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Offset) (t-adt {} Dates (t-var {} n)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_to_unix_count: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} TimeUnit) (t-adt {} Rounding) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::instants_until: (t-fn {} (t-adt {} Instants (t-var {} n)) (t-adt {} Instants (t-var {} n)) (t-adt {} Durations (t-var {} n)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::try_dates_from_ymd: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-tuple {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool))))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::try_durations: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-tuple {} (t-adt {} Durations (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool))))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/columns::try_parse_dates: (t-fn {} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool))))",
       "flags": []
     },
     {
