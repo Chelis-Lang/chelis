@@ -541,3 +541,88 @@ fn a_size_name_that_is_neither_a_value_nor_a_dimension_is_a_lowering_error_on_bo
         assert!(text.contains(needle), "{lane}: {text}");
     }
 }
+
+/// A size name inside an inlined callee reads the callee's own scope. The
+/// callee's value parameter `k` used to lose to the caller's binder `k`, which
+/// stays visible while the callee is inlined: eval printed the parameter's
+/// extent and C the caller's 2. The checker cannot see this, because inside
+/// `g` the name `k` has one meaning.
+#[test]
+fn a_callee_value_spelled_like_a_caller_binder_sizes_by_the_value_on_both_lanes() {
+    for (stem, source, expected) in [
+        (
+            "leak_runtime_four",
+            format!(
+                "def g(t: tensor[2, i64], k: i64) = insert(t, 0, k)\n\
+                 def f[k](x: tensor[k, i64]) = g(to_tensor([1i64, 2i64]), {RUNTIME_FOUR})\n\
+                 out = f(to_tensor([1i64, 2i64]))\n"
+            ),
+            "tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])",
+        ),
+        (
+            "leak_shape_arith",
+            "def g(t: tensor[2, i64], k: i64) = insert(t, 0, k)\n\
+             def f[k](x: tensor[k, i64]) = g(to_tensor([1i64, 2i64]), add(shape(x, 0), 1i64))\n\
+             out = f(to_tensor([1i64, 2i64]))\n"
+                .to_string(),
+            THREE_BY_TWO,
+        ),
+        (
+            "leak_expand",
+            "def g(t: tensor[1, i64], k: i64) = expand(t, 0, k)\n\
+             def f[k](x: tensor[k, i64]) = g(to_tensor([7i64]), add(shape(x, 0), 1i64))\n\
+             out = f(to_tensor([1i64, 2i64]))\n"
+                .to_string(),
+            "tensor(shape=[3], data=[7, 7, 7])",
+        ),
+    ] {
+        assert_lanes_agree(stem, &source, expected);
+    }
+}
+
+/// Controls for the row above, and the adversarial direction: a callee's own
+/// dimension binder `n` keeps reading its dimension when the caller has a value
+/// `n`, and a caller's value still flows into a callee's dimension through the
+/// argument's shape.
+#[test]
+fn callee_dimensions_and_renamed_values_keep_their_meaning_on_both_lanes() {
+    for (stem, source, expected) in [
+        (
+            "renamed_callee_value",
+            "def g(t: tensor[2, i64], q: i64) = insert(t, 0, q)\n\
+             def f[k](x: tensor[k, i64]) = g(to_tensor([1i64, 2i64]), add(shape(x, 0), 1i64))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            THREE_BY_TWO,
+        ),
+        (
+            "caller_value_into_callee_dimension",
+            "def g[n](x: tensor[n, i64]) -> i64 = shape(insert(x, 0, n), 0)\n\
+             def f(n: i64) -> i64 = g(expand(to_tensor([1i64]), 0, n))\n\
+             out = f(3i64)\n",
+            "out = 3",
+        ),
+        (
+            "callee_value_from_caller_value",
+            "def g(t: tensor[2, i64], k: i64) -> i64 = tensor_to_scalar(sum(sum(insert(t, 0, k), 0), 0))\n\
+             def f[k](x: tensor[k, i64], j: i64) -> i64 = g(to_tensor([1i64, 2i64]), j)\n\
+             out = f(to_tensor([1i64, 2i64]), 5i64)\n",
+            "out = 15",
+        ),
+        (
+            "callee_value_beside_caller_binder",
+            "def g(t: tensor[2, i64], k: i64) = insert(t, 0, k)\n\
+             def f[k](x: tensor[k, i64], j: i64) = g(to_tensor([1i64, 2i64]), j)\n\
+             out = f(to_tensor([1i64, 2i64, 3i64, 4i64]), 3i64)\n",
+            THREE_BY_TWO,
+        ),
+        (
+            "callee_dimension_beside_caller_value",
+            "def g[n](x: tensor[n, i64]) -> i64 = shape(insert(x, 0, n), 0)\n\
+             def f(n: i64, y: tensor[2, i64]) -> i64 = g(y)\n\
+             out = f(5i64, to_tensor([1i64, 2i64]))\n",
+            "out = 2",
+        ),
+    ] {
+        assert_lanes_agree(stem, source, expected);
+    }
+}

@@ -15543,8 +15543,23 @@ impl<'program> LowerCtx<'program> {
                     //     under the section 4.7 guards, never a rejection. A
                     //     name that is neither a dimension nor a value has no
                     //     extent to read at all, and stays a fatal error.
+                    //
+                    //     A value this activation can see is read first.
+                    //     Section 4.7.2 makes "a name occurring anywhere in
+                    //     `size` that denotes both a value binding [...] and an
+                    //     in-scope dimension" a type error, so within one
+                    //     definition a name the activation's own scope binds
+                    //     as a value is never also a dimension. The dimension
+                    //     tables below are not scoped to the activation: a
+                    //     caller's binder stays visible in them while a callee
+                    //     is inlined. A dimension reading of such a name can
+                    //     only be a caller's binder leaking in, and reading it
+                    //     would size the callee's axis by the caller's extent
+                    //     (chelis#469).
                     else if let Some(name) = bare_var_name(strip_cast_wrappers(size_arg)) {
-                        if let Some(value) =
+                        if self.activation_binds_value(&name) {
+                            self.lower_one_bound(size_arg, &mut inputs, "expand size")
+                        } else if let Some(value) =
                             self.dim_substitutions.get(&name).and_then(|dim| match dim {
                                 DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
                                     Some(*value)
@@ -18236,15 +18251,21 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
-    /// True when `name` reads a value here: a local or parameter binding, a
-    /// graph input, a folded static size, or a top-level declaration. An
-    /// `expand`/`insert` size naming such a value lowers as dataflow; a name
-    /// that is none of these, and no dimension either, has nothing to read
-    /// (chelis#469).
+    /// True when the current activation's own scope binds `name` as a value:
+    /// one of its parameters or locals, a value its function literal captured
+    /// where it was written, or a top-level value declared so far. These are
+    /// the tables chelis#2588 swaps per activation, so a caller activation's
+    /// values are never consulted.
+    fn activation_binds_value(&self, name: &str) -> bool {
+        self.bindings.contains_key(name) || self.static_size_bindings.contains_key(name)
+    }
+
+    /// True when `name` reads a value here: [`Self::activation_binds_value`],
+    /// or a top-level declaration the program names. An `expand`/`insert`
+    /// size naming such a value lowers as dataflow; a name that is none of
+    /// these, and no dimension either, has nothing to read (chelis#469).
     fn names_a_value(&self, name: &str) -> bool {
-        self.bindings.contains_key(name)
-            || self.interface_loads.contains(name)
-            || self.static_size_bindings.contains_key(name)
+        self.activation_binds_value(name)
             || self.program_defs.contains_key(name)
             || self.program_types.contains_key(name)
             || self.program_signatures.contains_key(name)
