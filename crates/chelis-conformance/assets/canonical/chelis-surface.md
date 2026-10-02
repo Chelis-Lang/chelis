@@ -715,6 +715,7 @@ losses, optimizers, and training loops live in a shell, not in `chelis-std`
 | `Std.Io.Parquet`, `Std.Io.Safetensors` | `read_parquet`/`write_parquet`; `save_tensors`/`load_tensors`. Check concrete dtype, shape, and target support for a selected call. |
 | `Std.Scalar`, `Std.Text`, `Std.Test` | Scalar `max`/`min`/`abs`; `join`; assertions, shape checks, and failure helpers. |
 | `Std.Datetime`, `Std.Datetime.Business`, `Std.Datetime.Clock`, `Std.Rounding`, `Std.Decimal`, `Std.Process`, `Std.Contracts` | Validated dates, times, instants, offsets, durations, periods, and date/instant columns; business-day calendars over a declared horizon; the host wall and monotonic clocks, which carry `IO`; the shared rounding modes; exact 38-digit decimal arithmetic; `run`/`run_chelis`; named contract predicates. |
+| `Std.Datetime.Zone` | `TimeZone` values read from TZif bytes the program supplies (`time_zone_from_tzif`) or fixed (`time_zone_fixed`, `time_zone_utc`); `Zoned` values with local-reading resolution under a required `Disambiguation`, and RFC 9557 text resolved under a required `OffsetConflict`. |
 
 Compiled-host support for a source-defined module depends on its
 selected dependencies and execution path.
