@@ -288,6 +288,94 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
+      - name: Diagnose restored compiler fixture artifacts (base control only)
+        if: ${{ github.ref == 'refs/heads/agent/2940-ci-failure-triage' }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import subprocess
+          import time
+
+          root = Path.cwd()
+          output = root / "target/ci-fixture-cache-control"
+          output.mkdir(parents=True, exist_ok=True)
+          targets = [
+              root / "target/graph-fixture-target",
+              root / "target/agents/wire-codec-rustdoc",
+              root / "target/agents/native-bindings-driver",
+          ]
+          def snapshot(directory):
+              rows = []
+              for pattern in ("**/libproc_macro2*.rmeta", "**/libserde_core*.rmeta"):
+                  for path in sorted(directory.glob(pattern)):
+                      info = path.lstat()
+                      rows.append({
+                          "path": str(path.relative_to(root)),
+                          "mode": stat.filemode(info.st_mode),
+                          "permissions": oct(stat.S_IMODE(info.st_mode)),
+                          "uid": info.st_uid,
+                          "gid": info.st_gid,
+                          "links": info.st_nlink,
+                          "symlink": os.readlink(path) if path.is_symlink() else None,
+                          "writable": os.access(path, os.W_OK),
+                      })
+              return rows
+          report = {
+              "head": os.environ["GITHUB_SHA"],
+              "rustc": subprocess.check_output(
+                  ["rustc", "--version", "--verbose"], text=True
+              ),
+              "wrapper": os.environ.get("RUSTC_WRAPPER"),
+              "before": {str(path.relative_to(root)): snapshot(path) for path in targets},
+              "controls": {},
+          }
+          (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+          command = [
+              "cargo", "rustdoc", "--manifest-path",
+              str(root / "scripts/fixtures/capacity_graph/serde/Cargo.toml"),
+              "--locked", "--lib", "--output-format", "json",
+              "-Z", "unstable-options", "--", "--document-private-items",
+          ]
+          for name, target in [
+              ("restored", targets[0]),
+              ("fresh", output / "fresh-target"),
+          ]:
+              environment = {
+                  **os.environ,
+                  "RUSTC_BOOTSTRAP": "1",
+                  "CARGO_BUILD_JOBS": "1",
+                  "CARGO_HUSKY_DONT_INSTALL_HOOKS": "1",
+                  "CARGO_TARGET_DIR": str(target),
+              }
+              started = time.monotonic()
+              result = subprocess.run(
+                  command, env=environment, capture_output=True, text=True, timeout=300
+              )
+              report["controls"][name] = {
+                  "command": command,
+                  "target": str(target.relative_to(root)),
+                  "status": result.returncode,
+                  "seconds": time.monotonic() - started,
+                  "stdout": result.stdout,
+                  "stderr": result.stderr,
+                  "after": snapshot(target),
+              }
+              (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report, indent=2))
+          PY
+
+      - name: Upload compiler fixture diagnostic observations
+        if: ${{ always() && github.ref == 'refs/heads/agent/2940-ci-failure-triage' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: compiler-fixture-cache-control
+          path: target/ci-fixture-cache-control/report.json
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Dtype Phase 0-3 oracle
         env:
           GH_TOKEN: ${{ github.token }}
