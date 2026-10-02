@@ -1089,8 +1089,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     ///
     /// One owner class is knowingly outside it: `materialize_function_ref`
     /// mints from a `Value::FunctionRef` that outlives the expression scope
-    /// that produced it, so such an owner takes the enclosing region (for
-    /// example the whole tuple in `(identity, 1i64)`). Narrowing it would mean
+    /// that produced it, so such an owner takes the region active where the
+    /// value is consumed (for example the whole `Some(identity)`). A record,
+    /// list or tuple literal consumes each item inside the item's own span, so
+    /// there the owner takes the item's region. Narrowing the rest would mean
     /// carrying a span on the `Value`, tracked as chelis#2319.
     fn with_expr_span<T>(
         &mut self,
@@ -1443,10 +1445,22 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.classify_or_reject(ty, Placement::Value, None)?;
         let mut operands = Vec::with_capacity(items.len());
         for item in items {
-            let value = self.with_site(HostSiteKind::Argument, |lowerer| {
-                lowerer.lower_expr(item, None)
-            })?;
-            operands.push(self.consume(value, None)?);
+            // Consume the operand at the item's own expression site. The C
+            // projection renders a site's actions where it emits that
+            // expression, so the copy of a shared value consumed at the
+            // enclosing site ran only after the whole literal: a later item's
+            // call had by then released the value the earlier item stored
+            // (chelis#2891). `lower_direct_call_argument` nests an argument's
+            // sites the same way, but `lower_call` still consumes the
+            // arguments at the call's own site.
+            operands.push(self.with_site(HostSiteKind::Argument, |lowerer| {
+                lowerer.with_expr_span(item, |lowerer| {
+                    lowerer.with_site(HostSiteKind::Expression, |lowerer| {
+                        let value = lowerer.lower_expr_at_site(item, None)?;
+                        lowerer.consume(value, None)
+                    })
+                })
+            })?);
         }
         self.apply(
             ty,
