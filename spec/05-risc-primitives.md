@@ -3346,18 +3346,28 @@ exact ADT identity by [05-OP-34].
 > an `instant` text followed by one zone annotation, which is `[`, an optional
 > critical flag `!`, an RFC 9557 `time-zone-name` or an `offset` other than `Z`
 > or `z`, and `]`, and then by zero or more RFC 9557 suffix tags. It returns the
-> `ZonedText` record of the local reading, the written offset, the annotation's
-> name as written, and whether the annotation is critical. A `u-ca` tag whose
-> value is `iso8601` or `gregory` is accepted; another `u-ca` value and any
-> other critical tag fail `domain`, and any other elective tag is ignored.
+> `ZonedText` record of the date and time as written, the written offset, the
+> annotation's name as written, and whether the annotation is critical. The
+> offset is absent when it is written `Z`, `z`, or with a `-` sign and value
+> zero: RFC 9557 §2 and §3.4 read these as a known UTC time whose local offset
+> is unknown, so the written date and time are then UTC. Every other offset,
+> `+00:00` included, is present. A `u-ca` tag whose value is `iso8601` or
+> `gregory` is accepted; another `u-ca` value and any other critical tag fail
+> `domain`, and any other elective tag is ignored. A key that two tags give
+> different values fails `domain` when either tag is critical; otherwise a tag
+> whose key an earlier tag gives is ignored, as RFC 9557 §3.3 requires.
 > `zoned_from_text(zt,tz,policy)` resolves the record against `tz` whatever its
-> name. `UseWrittenOffset` gives the instant `local - offset`, failing
-> `overflow` outside the instant range and `domain` when the annotation is
-> critical and `time_zone_offset_at` there is not the written offset.
-> `UseZoneRules` resolves the local reading as `zoned_from_local` does with
-> `RejectNonUniqueLocal`. `RejectOffsetMismatch` fails as `zoned_from_local`
-> with `EarlierInstant` fails for the local reading and `overflow` when
-> `local - offset` is outside the instant range, gives `local - offset` when it is one of
+> name. When the offset is absent, every policy gives the instant that the
+> written date and time denote at offset zero, failing `overflow` outside the
+> instant range and `domain` where `tz` does not cover that instant; no policy
+> compares an offset. Otherwise, with `written` the written date and time,
+> `UseWrittenOffset` gives the instant `written - offset`, failing `overflow`
+> outside the instant range and `domain` when the annotation is critical and
+> `time_zone_offset_at` there is not the written offset. `UseZoneRules`
+> resolves `written` as `zoned_from_local` does with `RejectNonUniqueLocal`.
+> `RejectOffsetMismatch` fails as `zoned_from_local` with `EarlierInstant`
+> fails for `written` and `overflow` when `written - offset` is outside the
+> instant range, gives `written - offset` when it is one of
 > `zoned_from_local`'s candidates, and fails `domain` otherwise. Resolving
 > `parse_zoned_text(zoned_to_string(z))` against `z`'s zone with
 > `UseWrittenOffset` returns `z`.

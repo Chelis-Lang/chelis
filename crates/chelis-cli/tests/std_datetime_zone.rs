@@ -24,7 +24,7 @@ use common::{make_app, write_file};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const IMPORTS: &str = "import Std.Datetime (DateTime, ClampToMonthEnd, RejectInvalidDay, date, time, datetime, instant_from_unix, offset_from_seconds, period, duration)\nimport Std.Datetime.Zone (TimeZone, Zoned, ZonedText, EarlierInstant, LaterInstant, CompatibleInstant, RejectNonUniqueLocal, UseWrittenOffset, UseZoneRules, RejectOffsetMismatch, time_zone_from_tzif, try_time_zone_from_tzif, time_zone_fixed, time_zone_utc, time_zone_offset_at, try_time_zone_offset_at, zoned, try_zoned, zoned_from_local, try_zoned_from_local, zoned_add_duration, zoned_add_period, parse_zoned_text, try_parse_zoned_text, zoned_from_text, try_zoned_from_text)";
+const IMPORTS: &str = "import Std.Datetime (DateTime, ClampToMonthEnd, RejectInvalidDay, date, time, datetime, instant_from_unix, offset_from_seconds, period, duration)\nimport Std.Datetime.Zone (TimeZone, Zoned, ZonedText, EarlierInstant, LaterInstant, CompatibleInstant, RejectNonUniqueLocal, UseWrittenOffset, UseZoneRules, RejectOffsetMismatch, time_zone_from_tzif, try_time_zone_from_tzif, time_zone_fixed, time_zone_utc, time_zone_offset_at, try_time_zone_offset_at, zoned, try_zoned, zoned_from_local, try_zoned_from_local, zoned_add_duration, zoned_add_period, zoned_to_string, parse_zoned_text, try_parse_zoned_text, zoned_from_text, try_zoned_from_text)\nimport Std.Test (assert_eq)";
 
 /// Helpers for the generated fixtures: zones read from the checked-in TZif
 /// files (`@TZIF@` is the fixture directory), a TZif writer for files no
@@ -34,6 +34,7 @@ def zone_file(path: string) -> List[i64] ! { IO } = read_bytes(string_concat("@T
 def new_york() -> TimeZone ! { IO } = time_zone_from_tzif("America/New_York", zone_file("zones/America/New_York.tzif"))
 def kiritimati() -> TimeZone ! { IO } = time_zone_from_tzif("Pacific/Kiritimati", zone_file("zones/Pacific/Kiritimati.tzif"))
 def short_lived() -> TimeZone ! { IO } = time_zone_from_tzif("Etc/Short_Lived", zone_file("synthetic/empty_footer.tzif"))
+def london() -> TimeZone ! { IO } = time_zone_from_tzif("Europe/London", zone_file("zones/Europe/London.tzif"))
 def byte_of(value: i64, shift: i64) -> i64 = {
   r = mod(floor_div(value, fold(fn (acc: i64, k: i64) -> mul(acc, 256i64), 1i64, range(0i64, shift))), 256i64)
   if lt(r, 0i64) then add(r, 256i64) else r
@@ -197,7 +198,12 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
     (
         "from_local_uncovered",
         "zoned_from_local(local(2001i64, 9i64, 8i64, 12i64, 0i64, 0i64), short_lived(), EarlierInstant)",
-        r#"zoned_from_local: domain: 2001-09-08T12:00:00 is within one day of unix second 1000000000, the last transition of "Etc/Short_Lived", whose footer is empty"#,
+        r#"zoned_from_local: domain: 2001-09-08T12:00:00 needs offsets at or after unix second 1000000000, the last transition of "Etc/Short_Lived", whose footer is empty"#,
+    ),
+    (
+        "from_local_uncovered_far",
+        "zoned_from_local(local(2030i64, 1i64, 1i64, 0i64, 0i64, 0i64), short_lived(), EarlierInstant)",
+        r#"zoned_from_local: domain: 2030-01-01T00:00:00 needs offsets at or after unix second 1000000000, the last transition of "Etc/Short_Lived", whose footer is empty"#,
     ),
     (
         "from_local_two_gaps",
@@ -285,6 +291,16 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
         r#"parse_zoned_text: domain: "2026-11-01T01:30:00-04:00[America/New_York]x" has text after its annotations"#,
     ),
     (
+        "parse_critical_duplicate_key",
+        r#"parse_zoned_text("2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][u-ca=gregory]")"#,
+        r#"parse_zoned_text: domain: "2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][u-ca=gregory]" gives the critical key "u-ca" two values"#,
+    ),
+    (
+        "parse_critical_duplicate_key_second",
+        r#"parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][!u-ca=gregory]")"#,
+        r#"parse_zoned_text: domain: "2022-07-08T00:14:07Z[UTC][u-ca=iso8601][!u-ca=gregory]" gives the critical key "u-ca" two values"#,
+    ),
+    (
         "parse_unclosed",
         r#"parse_zoned_text("2026-11-01T01:30:00-04:00[America/New_York")"#,
         r#"parse_zoned_text: domain: "2026-11-01T01:30:00-04:00[America/New_York" has an unclosed annotation"#,
@@ -305,6 +321,26 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
         r#"zoned_from_text: domain: 2026-07-01T12:00:00-05:00 has a critical zone annotation, but "America/New_York" has offset -04:00 there"#,
     ),
     (
+        "from_text_plus_zero_critical",
+        r#"zoned_from_text(parse_zoned_text("2022-07-08T00:14:07+00:00[!Europe/London]"), london(), UseWrittenOffset)"#,
+        r#"zoned_from_text: domain: 2022-07-08T00:14:07+00:00 has a critical zone annotation, but "Europe/London" has offset +01:00 there"#,
+    ),
+    (
+        "from_text_unknown_offset_end",
+        r#"zoned_from_text(parse_zoned_text("9999-12-31T23:59:59Z[UTC]"), time_zone_utc(), UseZoneRules)"#,
+        "zoned_from_text: overflow: 9999-12-31T23:59:59Z is outside the supported instant range",
+    ),
+    (
+        "try_from_text_unknown_offset_end",
+        r#"try_zoned_from_text(parse_zoned_text("9999-12-31T23:59:59-00:00[UTC]"), time_zone_utc(), RejectOffsetMismatch)"#,
+        "try_zoned_from_text: overflow: 9999-12-31T23:59:59Z is outside the supported instant range",
+    ),
+    (
+        "from_text_unknown_offset_uncovered",
+        r#"zoned_from_text(parse_zoned_text("2030-01-01T00:00:00z[!Etc/Short_Lived]"), short_lived(), RejectOffsetMismatch)"#,
+        r#"zoned_from_text: domain: 2030-01-01T00:00:00Z is at or after unix second 1000000000, the last transition of "Etc/Short_Lived", whose footer is empty"#,
+    ),
+    (
         "from_text_zone_rules_fold",
         r#"zoned_from_text(parse_zoned_text("2026-11-01T01:30:00-05:00[America/New_York]"), new_york(), UseZoneRules)"#,
         r#"zoned_from_text: domain: 2026-11-01T01:30:00 occurs 2 times in "America/New_York", at offsets -04:00, -05:00"#,
@@ -318,6 +354,95 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
         "from_text_uncovered",
         r#"zoned_from_text(parse_zoned_text("2030-01-01T00:00:00+01:00[Etc/Short_Lived]"), short_lived(), UseWrittenOffset)"#,
         r#"zoned_from_text: domain: 2029-12-31T23:00:00Z is at or after unix second 1000000000, the last transition of "Etc/Short_Lived", whose footer is empty"#,
+    ),
+];
+
+/// (test name, `assert_eq` call that must pass). RFC 9557 Figure 2 writes
+/// `Z`, a UTC time with an unknown local offset, so every policy gives its
+/// UTC instant, 00:14:07Z, whose London reading is 01:14:07+01:00. Figure 1
+/// writes `+00:00`, a known offset that London does not use there; it differs
+/// from Figure 2 under `UseZoneRules` and fails under a critical annotation
+/// (`from_text_plus_zero_critical` above).
+const EXACT_RESULTS: &[(&str, &str)] = &[
+    (
+        "figure_2_elective_written",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07Z[Europe/London]"), london(), UseWrittenOffset)), "2022-07-08T01:14:07+01:00[Europe/London]", "figure 2")"#,
+    ),
+    (
+        "figure_2_elective_zone_rules",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07Z[Europe/London]"), london(), UseZoneRules)), "2022-07-08T01:14:07+01:00[Europe/London]", "figure 2")"#,
+    ),
+    (
+        "figure_2_elective_reject_mismatch",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07Z[Europe/London]"), london(), RejectOffsetMismatch)), "2022-07-08T01:14:07+01:00[Europe/London]", "figure 2")"#,
+    ),
+    (
+        "figure_2_critical_written",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07Z[!Europe/London]"), london(), UseWrittenOffset)), "2022-07-08T01:14:07+01:00[Europe/London]", "figure 2")"#,
+    ),
+    (
+        "figure_2_critical_zone_rules",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07Z[!Europe/London]"), london(), UseZoneRules)), "2022-07-08T01:14:07+01:00[Europe/London]", "figure 2")"#,
+    ),
+    (
+        "figure_2_critical_reject_mismatch",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07Z[!Europe/London]"), london(), RejectOffsetMismatch)), "2022-07-08T01:14:07+01:00[Europe/London]", "figure 2")"#,
+    ),
+    (
+        "lower_z_written",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07z[!Europe/London]"), london(), UseWrittenOffset)), "2022-07-08T01:14:07+01:00[Europe/London]", "z")"#,
+    ),
+    (
+        "lower_z_zone_rules",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07z[Europe/London]"), london(), UseZoneRules)), "2022-07-08T01:14:07+01:00[Europe/London]", "z")"#,
+    ),
+    (
+        "lower_z_reject_mismatch",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07z[Europe/London]"), london(), RejectOffsetMismatch)), "2022-07-08T01:14:07+01:00[Europe/London]", "z")"#,
+    ),
+    (
+        "minus_zero_written",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07-00:00[!Europe/London]"), london(), UseWrittenOffset)), "2022-07-08T01:14:07+01:00[Europe/London]", "-00:00")"#,
+    ),
+    (
+        "minus_zero_zone_rules",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07-00:00[Europe/London]"), london(), UseZoneRules)), "2022-07-08T01:14:07+01:00[Europe/London]", "-00:00")"#,
+    ),
+    (
+        "minus_zero_reject_mismatch",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07-00:00[Europe/London]"), london(), RejectOffsetMismatch)), "2022-07-08T01:14:07+01:00[Europe/London]", "-00:00")"#,
+    ),
+    (
+        "unknown_offset_is_absent",
+        r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[Europe/London]").offset, None, "Z")"#,
+    ),
+    (
+        "minus_zero_is_absent",
+        r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07-00:00[Europe/London]").offset, None, "-00:00")"#,
+    ),
+    (
+        "plus_zero_is_present",
+        r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07+00:00[Europe/London]").offset, Some(offset_from_seconds(0i64)), "+00:00")"#,
+    ),
+    (
+        "figure_1_elective_written",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07+00:00[Europe/London]"), london(), UseWrittenOffset)), "2022-07-08T01:14:07+01:00[Europe/London]", "figure 1 keeps the written instant")"#,
+    ),
+    (
+        "figure_1_elective_zone_rules",
+        r#"assert_eq(zoned_to_string(zoned_from_text(parse_zoned_text("2022-07-08T00:14:07+00:00[Europe/London]"), london(), UseZoneRules)), "2022-07-08T00:14:07+01:00[Europe/London]", "figure 1 reads 00:14:07 on London's clock")"#,
+    ),
+    (
+        "elective_duplicate_keys",
+        r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][u-ca=gregory]").zone_name, "UTC", "elective duplicates")"#,
+    ),
+    (
+        "elective_duplicate_first_decides",
+        r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][u-ca=hebrew]").zone_name, "UTC", "the first tag decides")"#,
+    ),
+    (
+        "critical_duplicate_same_value",
+        r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][!u-ca=iso8601]").zone_name, "UTC", "one value")"#,
     ),
 ];
 
@@ -440,6 +565,22 @@ fn std_datetime_zone_failures_report_their_exact_message() {
     }
 }
 
+#[test]
+fn std_datetime_zone_text_results_are_exact() {
+    let expressions: Vec<(String, String)> = EXACT_RESULTS
+        .iter()
+        .map(|(name, expression)| (name.to_string(), expression.to_string()))
+        .collect();
+    let outcomes = run_expression_suite("datetime-zone-results-2862", &expressions);
+    for (name, expression) in EXACT_RESULTS {
+        assert_eq!(
+            outcomes.get(*name),
+            Some(&None),
+            "{name}: `{expression}` must pass"
+        );
+    }
+}
+
 /// Every call below passes, or fails `domain` or `overflow` under its own
 /// callable's name; a primitive trap would surface under another message.
 fn extreme_cases() -> Vec<(&'static str, String)> {
@@ -494,11 +635,15 @@ fn extreme_cases() -> Vec<(&'static str, String)> {
                     format!("zoned_from_local({local}, {zone}, {policy})"),
                 ));
             }
-            for offset in ["86399i64", "-86399i64"] {
+            for offset in [
+                "Some(offset_from_seconds(86399i64))",
+                "Some(offset_from_seconds(-86399i64))",
+                "None",
+            ] {
                 for conflict in conflicts {
                     cases.push((
                         "zoned_from_text",
-                        format!("zoned_from_text(ZonedText {{ local: {local}, offset: offset_from_seconds({offset}), zone_name: \"X\", critical: true }}, {zone}, {conflict})"),
+                        format!("zoned_from_text(ZonedText {{ written: {local}, offset: {offset}, zone_name: \"X\", critical: true }}, {zone}, {conflict})"),
                     ));
                 }
             }
@@ -591,7 +736,7 @@ fn std_datetime_zone_opaque_types_reject_outside_construction() {
     write_file(
         &path,
         &format!(
-            "{header}plain = ZonedText {{ local: datetime(date(2026i64, 1i64, 1i64), time(0i64, 0i64, 0i64, 0i64)), offset: offset_from_seconds(0i64), zone_name: \"UTC\", critical: false }}\nname = parse_zoned_text(\"2026-01-01T00:00:00Z[UTC]\").zone_name\n"
+            "{header}plain = ZonedText {{ written: datetime(date(2026i64, 1i64, 1i64), time(0i64, 0i64, 0i64, 0i64)), offset: Some(offset_from_seconds(0i64)), zone_name: \"UTC\", critical: false }}\nname = parse_zoned_text(\"2026-01-01T00:00:00Z[UTC]\").zone_name\n"
         ),
     );
     let (success, rendered) = run_chelis(&app_pkg, &reef_home, &["check", path.to_str().unwrap()]);

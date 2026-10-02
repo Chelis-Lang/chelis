@@ -838,29 +838,45 @@ compares `zoned_instant` and `time_zone_name`.
 - `zoned_add_period(z, p, overflow: DayOverflow, disambiguation) -> Zoned` adds `p` to the
   local date and keeps the local time, then re-resolves with `disambiguation`. Date units
   move on the wall clock and time units on the instant line (prior art §6).
-- **Text.** `zoned_to_string` emits RFC 9557: `2026-10-01T09:30:00-04:00[America/New_York]`.
-  Offset zero is written `+00:00`, not `Z`: RFC 9557 §2 gives `Z` the meaning "local
-  offset unknown", which a resolved `Zoned` is not (Temporal and jiff write `+00:00`).
-  `parse_zoned_text` still reads `Z` as offset zero, as §8.8 does.
+- **Text.** `zoned_to_string` emits RFC 9557 text,
+  `2026-10-01T09:30:00-04:00[America/New_York]`, extended as §8.8 extends RFC 3339: an
+  offset whose seconds are nonzero, such as a local mean time offset, is written
+  `±HH:MM:SS`, which RFC 3339's `time-numoffset` lacks. Offset zero is written `+00:00`,
+  not `Z`: RFC 9557 §2 gives `Z` the meaning "local offset unknown", which a resolved
+  `Zoned` is not (Temporal and jiff write `+00:00`).
+  - Parsing keeps that meaning. A written `Z`, `z` or negative zero offset (`-00:00`,
+    RFC 9557 §3.4) leaves the record's offset absent, and its date and time are then
+    UTC. `+00:00` is a known offset of zero.
   - Parsing is split so it needs no lookup function and no effect.
     `parse_zoned_text` / `try_parse_zoned_text` return a plain `ZonedText` record:
-    `{ local: DateTime, offset: Offset, zone_name: string, critical: bool }`.
+    `{ written: DateTime, offset: Option[Offset], zone_name: string, critical: bool }`.
+    The date and time field is `written`, not `local`, because under an absent offset
+    it is a UTC reading, not a local one.
   - `zoned_from_text(zt, tz, conflict: OffsetConflict) -> Zoned` and its `try_` form
     resolve it against a `TimeZone` the caller obtained. They do not compare
     `zone_name` with `time_zone_name(tz)`: a link name such as `America/Buenos_Aires`
     resolves to a zone that carries its target's name (§13).
+    - With the offset absent, every policy gives the instant the written UTC date and
+      time name. No critical-annotation check or mismatch test applies, since the text
+      asserts no local offset: RFC 9557's Figure 2,
+      `2022-07-08T00:14:07Z[!Europe/London]`, is consistent and resolves to 00:14:07Z,
+      written `2022-07-08T01:14:07+01:00[Europe/London]`.
     - `UseWrittenOffset` keeps the instant the text names.
     - `UseZoneRules` re-reads the local time in the zone. Its gap/fold cases fail
       `domain`; a caller wanting a policy goes through `zoned_from_local`.
-    - `RejectOffsetMismatch` accepts the written offset when `local − offset` is one of
+    - `RejectOffsetMismatch` accepts the written offset when `written − offset` is one of
       `zoned_from_local`'s candidates for that local time, and fails `domain` otherwise.
       So in a fold, a written offset that is one of the two valid offsets selects that
       occurrence, as Temporal's `'reject'` does.
   - A critical (`!`) zone annotation fails `domain` under `UseWrittenOffset` when the
     written offset fails `RejectOffsetMismatch`'s test (`time_zone_offset_at(tz,
-    local − offset) ≠ offset`), as RFC 9557 requires.
+    written − offset) ≠ offset`), as RFC 9557 requires. Its Figure 1,
+    `2022-07-08T00:14:07+00:00[!Europe/London]`, fails so.
   - The suffix tags `u-ca=iso8601` and `u-ca=gregory` are accepted. Other calendars are
     rejected, unknown elective tags are ignored, and unknown critical tags are rejected.
+    A key that two tags give different values is rejected when either tag is critical
+    (RFC 9557 §3.3); otherwise the first tag with a key decides and later ones are
+    ignored.
 
 **Decisions recorded by S4a.**
 - **Representation.** `TimeZone { name: string, initial_offset: i64, transitions:
@@ -893,12 +909,20 @@ compares `zoned_instant` and `time_zone_name`.
   `:SS` only when nonzero and `+00:00` for zero; `parse_zoned_text` reads such a numeric
   annotation, `:SS` included, as the zone name.
 - **`RejectOffsetMismatch`** checks, in order: the `overflow` of `zoned_from_local`'s
-  computation of the candidates, then whether `local − offset` is inside the instant range
-  (`overflow`), then that computation's `domain` failures, then whether `local − offset`
-  is a candidate (`domain`). Every `overflow` comes before any `domain`, as §5 requires. So a written zone text
+  computation of the candidates, then whether `written − offset` is inside the instant
+  range (`overflow`), then that computation's `domain` failures, then whether
+  `written − offset` is a candidate (`domain`). Every `overflow` comes before any `domain`, as §5 requires. So a written zone text
   round-trips under `UseWrittenOffset`, but not always under `RejectOffsetMismatch`: near
   the end of a zone with an empty footer, or near the range edge, computing the candidates
   fails.
+- **Unknown local offset.** `ZonedText`'s offset is an `Option[Offset]`, absent for `Z`,
+  `z` and a negative zero offset, and an absent offset resolves to its UTC instant under
+  every policy. Reading `Z` as offset zero would make `UseZoneRules` read a UTC time as
+  London's local time, an hour away in summer, and would fail RFC 9557's consistent
+  Figure 2 under a critical annotation. Rejecting `Z` would refuse common producers'
+  output, such as `…Z[UTC]`. §8.8's `parse_offset_datetime` still reads `Z` as offset
+  zero, since an `OffsetDateTime` names its instant exactly either way. Under §8.8's
+  seconds extension `-00:00:00` is a negative zero offset too, so it is also unknown.
 - **No `try_` forms** for `zoned_add_duration` and `zoned_add_period`; this section lists
   none.
 - **Fixtures.** The tests read TZif files generated from the Python `tzdata` package

@@ -2978,7 +2978,8 @@ class ContractValidationTests(unittest.TestCase):
         for clause in (
             "`time_zone_offset_at(tz,i)` is the offset in force at `i`",
             "`RejectNonUniqueLocal` fails `domain` in a fold and in a gap",
-            "`UseWrittenOffset` gives the instant `local - offset`",
+            "`UseWrittenOffset` gives the instant `written - offset`",
+            "`+00:00` included, is present",
             "`u-ca` tag whose value is `iso8601` or `gregory` is accepted",
         ):
             with self.subTest(clause=clause):
@@ -3140,6 +3141,14 @@ class ContractValidationTests(unittest.TestCase):
             "`EarlierInstant` gives `dt - o_b`",
         )
         self.assert_contract_fails("OP-73.*EarlierInstant")
+
+    def test_zone_unknown_offset_resolves_under_every_policy(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "When the offset is absent, every policy gives",
+            "When the offset is absent, `UseWrittenOffset` gives",
+        )
+        self.assert_contract_fails("OP-73.*When the offset is absent")
 
     def test_zone_daylight_start_prevails_at_a_tie(self) -> None:
         self.replace(

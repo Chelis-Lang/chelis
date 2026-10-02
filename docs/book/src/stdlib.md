@@ -254,11 +254,14 @@ policy)` resolves a local reading, where the `Disambiguation` (`EarlierInstant`,
 `LaterInstant`, `CompatibleInstant`, or `RejectNonUniqueLocal`) decides a reading
 that a daylight saving change skips or repeats. `zoned_add_duration` moves along
 the instant line and `zoned_add_period` moves the wall clock. `zoned_to_string`
-writes RFC 9557 text such as `2026-10-01T09:30:00-04:00[America/New_York]`;
+writes RFC 9557 text such as `2026-10-01T09:30:00-04:00[America/New_York]`, with an
+offset whose seconds are nonzero written `±HH:MM:SS` as the text profile allows;
 `parse_zoned_text` reads it into a plain `ZonedText` record, and
 `zoned_from_text(zt, tz, policy)` resolves that against a zone the caller
 obtained, with an `OffsetConflict` policy for a written offset the zone does not
-use there. A zone whose TZif footer is empty has no offsets from its last
+use there. A written `Z`, `z` or `-00:00` means a UTC time whose local offset is
+unknown (RFC 9557): its record has no offset, and every policy resolves it to that
+UTC instant. A zone whose TZif footer is empty has no offsets from its last
 transition on, and a call that needs one there fails `domain`.
 
 ### Exported but unavailable

@@ -3,7 +3,7 @@ export (Disambiguation, EarlierInstant, LaterInstant, CompatibleInstant, RejectN
 import Std.Datetime (DayOverflow, DateTime, Instant, Offset, Duration, Period, date, date_epoch_day, date_from_epoch_day, date_year, date_month, date_day, date_weekday, weekday_iso_number, is_leap_year, days_in_month, date_add_days, try_date_add_months, date_to_string, datetime, datetime_date, datetime_time, time_nanosecond_of_day, time_from_nanosecond_of_day, datetime_to_string, try_parse_datetime, offset_from_seconds, offset_seconds, offset_to_string, try_parse_offset, instant_from_unix, instant_unix_second, instant_nanosecond, instant_to_datetime_at, instant_to_string, duration_second, duration_nanosecond, duration_to_string, period_months, period_days, period_to_string)
 -- Std.Datetime.Zone: time zone rules as values and zone-aware conversion,
 -- governed by [05-OP-73]. A `TimeZone` is built from TZif bytes (RFC 9636,
--- version 2 or later) or from a fixed offset; nothing reads the host's time
+-- versions 2 to 4) or from a fixed offset; nothing reads the host's time
 -- zone database. `TimeZone` and `Zoned` are opaque, so the validating
 -- producers below are their only construction path. Failures use `fail` with
 -- the message grammar `<function>: <kind>: <detail>`, and every range check
@@ -31,8 +31,12 @@ type TimeZone =
 @opaque
 type Zoned =
   | Zoned { instant: Instant, zone: TimeZone }
+-- Zoned text as written: its date and time, its offset, absent for `Z`, `z`
+-- and a negative zero offset, which RFC 9557 reads as a UTC time with an
+-- unknown local offset (the date and time are then UTC), the annotation's
+-- zone name, and whether the annotation is critical.
 type ZonedText =
-  | ZonedText { local: DateTime, offset: Offset, zone_name: string, critical: bool }
+  | ZonedText { written: DateTime, offset: Option[Offset], zone_name: string, critical: bool }
 -- Range constants are written inline, because a compiled program prints every
 -- reachable nullary definition of an imported module as a root (#2624):
 -- - unix seconds -377705030401..253402214400 (the instant range);
@@ -536,7 +540,7 @@ def local_resolution(tz: TimeZone, civil: i64, nanosecond: i64, disambiguation: 
   }, None, trials)
   match outside with {
     | Some(o) => ("overflow", joined([local, " at offset ", zoned_offset_text(o), " is outside the supported instant range"]), 0i64)
-    | None => if lt(covered_high, high) then ("domain", joined([local, " is within one day of unix second ", to_string(index(tz.transitions, sub(len(tz.transitions), 1i64)).0), ", the last transition of ", quoted(tz.name), ", whose footer is empty"]), 0i64) else {
+    | None => if lt(covered_high, high) then ("domain", joined([local, " needs offsets at or after unix second ", to_string(index(tz.transitions, sub(len(tz.transitions), 1i64)).0), ", the last transition of ", quoted(tz.name), ", whose footer is empty"]), 0i64) else {
     candidates = filter(fn (o: i64) -> eq(offset_in_force(tz, sub(civil, o)).1, o), trials)
     if gt(len(candidates), 0i64) then {
       earliest = fold(fn (acc: i64, o: i64) -> smaller(acc, sub(civil, o)), 9223372036854775807i64, candidates)
@@ -670,27 +674,37 @@ def is_suffix_values(values: string) -> bool = {
 -- The problem with the annotations from `start` to the end: (problem, zone
 -- name, critical). The first annotation names the zone; each later one is a
 -- `key=value` tag.
+-- Whether an earlier tag gives `key` another value while it or this tag is
+-- critical, which RFC 9557 §3.3 makes erroneous. Otherwise a repeated key
+-- keeps its first tag's value and the later tag is ignored.
+def conflicting_tag(seen: List[(string, string, bool)], key: string, value: string, critical: bool) -> bool =
+  fold(fn (acc: bool, tag: (string, string, bool)) -> tag.0
+  |> eq(key)
+  |> and(neq(tag.1, value))
+  |> and(or(critical, tag.2))
+  |> or(acc), false, seen)
 def annotation_reading(text: string, start: i64) -> (string, string, bool) = {
   size = string_len(text)
-  -- (problem, next index, zone name, critical, annotations seen)
-  scanned = fold(fn (acc: (string, i64, string, bool, i64), step: i64) -> if neq(acc.0, "") then acc else if gte(acc.1, size) then acc else if text |> char_at(acc.1) |> neq("[") then (joined([quoted(text), " has text after its annotations"]), acc.1, acc.2, acc.3, acc.4) else {
+  -- (problem, next index, zone name, critical, annotations seen, tags seen
+  -- as (key, value, critical))
+  scanned = fold(fn (acc: (string, i64, string, bool, i64, List[(string, string, bool)]), step: i64) -> if neq(acc.0, "") then acc else if gte(acc.1, size) then acc else if text |> char_at(acc.1) |> neq("[") then (joined([quoted(text), " has text after its annotations"]), acc.1, acc.2, acc.3, acc.4, acc.5) else {
     close = find_from(text, "]", acc.1)
-    if lt(close, 0i64) then (joined([quoted(text), " has an unclosed annotation"]), acc.1, acc.2, acc.3, acc.4) else {
+    if lt(close, 0i64) then (joined([quoted(text), " has an unclosed annotation"]), acc.1, acc.2, acc.3, acc.4, acc.5) else {
       critical = text |> char_at(add(acc.1, 1i64)) |> eq("!")
       body_start = if critical then add(acc.1, 2i64) else add(acc.1, 1i64)
       body = string_slice(text, body_start, sub(close, body_start))
       equals = find_from(body, "=", 0i64)
-      if eq(acc.4, 0i64) then if gte(equals, 0i64) then (joined([quoted(text), " has no time zone annotation"]), acc.1, acc.2, acc.3, acc.4) else if zone_annotation_ok(body) then ("", add(close, 1i64), body, critical, 1i64) else (joined([quoted(text), " has an invalid time zone annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4) else if lt(equals, 0i64) then (joined([quoted(text), " has a second time zone annotation"]), acc.1, acc.2, acc.3, acc.4) else {
+      if eq(acc.4, 0i64) then if gte(equals, 0i64) then (joined([quoted(text), " has no time zone annotation"]), acc.1, acc.2, acc.3, acc.4, acc.5) else if zone_annotation_ok(body) then ("", add(close, 1i64), body, critical, 1i64, acc.5) else (joined([quoted(text), " has an invalid time zone annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4, acc.5) else if lt(equals, 0i64) then (joined([quoted(text), " has a second time zone annotation"]), acc.1, acc.2, acc.3, acc.4, acc.5) else {
         key = string_slice(body, 0i64, equals)
         value = string_slice(body, add(equals, 1i64), sub(sub(string_len(body), equals), 1i64))
         if key
         |> is_key
         |> and(is_suffix_values(value))
-        |> not then (joined([quoted(text), " has an invalid annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4) else if eq(key, "u-ca") then if value |> eq("iso8601") |> or(eq(value, "gregory")) then ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64)) else (joined([quoted(text), " names the calendar ", quoted(value), ", not iso8601 or gregory"]), acc.1, acc.2, acc.3, acc.4) else if critical then (joined([quoted(text), " has the unknown critical annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4) else ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64))
+        |> not then (joined([quoted(text), " has an invalid annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4, acc.5) else if conflicting_tag(acc.5, key, value, critical) then (joined([quoted(text), " gives the critical key ", quoted(key), " two values"]), acc.1, acc.2, acc.3, acc.4, acc.5) else if fold(fn (found: bool, tag: (string, string, bool)) -> or(found, eq(tag.0, key)), false, acc.5) then ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), acc.5) else if eq(key, "u-ca") then if value |> eq("iso8601") |> or(eq(value, "gregory")) then ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), append(acc.5, (key, value, critical))) else (joined([quoted(text), " names the calendar ", quoted(value), ", not iso8601 or gregory"]), acc.1, acc.2, acc.3, acc.4, acc.5) else if critical then (joined([quoted(text), " has the unknown critical annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4, acc.5) else ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), append(acc.5, (key, value, critical)))
       }
     }
-  }, ("", start, "", false, 0i64), range(0i64, size))
-  (problem, next, zone_name, critical, seen) = scanned
+  }, ("", start, "", false, 0i64, []), range(0i64, size))
+  (problem, next, zone_name, critical, seen, _) = scanned
   if neq(problem, "") then (problem, "", false) else if lt(next, size) then (joined([quoted(text), " has text after its annotations"]), "", false) else if eq(seen, 0i64) then (joined([quoted(text), " has no time zone annotation"]), "", false) else ("", zone_name, critical)
 }
 -- A zone annotation is a time zone name or a numeric offset `±HH:MM[:SS]`.
@@ -703,7 +717,7 @@ def zone_annotation_ok(body: string) -> bool =
     | None => false
   } else is_zone_name(body)
 def zoned_text_reading(text: string) -> (string, ZonedText) = {
-  placeholder = ZonedText { local: datetime(date(1970i64, 1i64, 1i64), time_from_nanosecond_of_day(0i64)), offset: offset_from_seconds(0i64), zone_name: "UTC", critical: false }
+  placeholder = ZonedText { written: datetime(date(1970i64, 1i64, 1i64), time_from_nanosecond_of_day(0i64)), offset: None, zone_name: "UTC", critical: false }
   bracket = find_from(text, "[", 0i64)
   separator = separator_index(text)
   if lt(bracket, 0i64) then (joined([quoted(text), " has no time zone annotation"]), placeholder) else {
@@ -716,7 +730,15 @@ def zoned_text_reading(text: string) -> (string, ZonedText) = {
         | Some(local) => match try_parse_offset(offset_text) with {
         | Some(offset) => {
         (problem, zone_name, critical) = annotation_reading(text, bracket)
-        if eq(problem, "") then ("", ZonedText { local, offset, zone_name, critical }) else (problem, placeholder)
+        unknown =
+          offset_text
+          |> eq("Z")
+          |> or(eq(offset_text, "z"))
+          |> or(offset
+        |> offset_seconds
+        |> eq(0i64)
+        |> and(eq(string_slice(offset_text, 0i64, 1i64), "-")))
+        if eq(problem, "") then ("", ZonedText { written: local, offset: if unknown then None else Some(offset), zone_name, critical }) else (problem, placeholder)
       }
         | None => (joined([quoted(offset_text), " in ", quoted(text), " is not an offset in the text profile"]), placeholder)
       }
@@ -733,35 +755,44 @@ def try_parse_zoned_text(text: string) -> Option[ZonedText] = {
   (problem, zt) = zoned_text_reading(text)
   if eq(problem, "") then Some(zt) else None
 }
--- (kind, detail, unix second) for a zoned text resolved against `tz`.
+-- (kind, detail, unix second) for a zoned text resolved against `tz`. An
+-- absent offset names the UTC instant of the written date and time under
+-- every policy.
 def text_resolution(zt: ZonedText, tz: TimeZone, conflict: OffsetConflict) -> (string, string, i64) = {
-  (civil, nanosecond) = local_civil(zt.local)
-  written = offset_seconds(zt.offset)
+  (civil, nanosecond) = local_civil(zt.written)
+  match zt.offset with {
+    | None => if civil |> in_span(-377705030401i64, 253402214400i64) |> not then ("overflow", joined([datetime_to_string(zt.written), "Z is outside the supported instant range"]), 0i64) else if offset_in_force(tz, civil).0 then ("", "", civil) else ("domain", uncovered_text(tz, civil, nanosecond), 0i64)
+    | Some(o) => written_offset_resolution(zt, tz, conflict, civil, nanosecond, offset_seconds(o))
+  }
+}
+-- (kind, detail, unix second) for a zoned text whose offset `written` is
+-- known, resolved under `conflict`.
+def written_offset_resolution(zt: ZonedText, tz: TimeZone, conflict: OffsetConflict, civil: i64, nanosecond: i64, written: i64) -> (string, string, i64) = {
   trial = sub(civil, written)
-  local = joined([datetime_to_string(zt.local), zoned_offset_text(written)])
+  shown = joined([datetime_to_string(zt.written), zoned_offset_text(written)])
   match conflict with {
     | UseZoneRules => {
     (kind, detail, second) = local_resolution(tz, civil, nanosecond, RejectNonUniqueLocal)
     (kind, detail, second)
   }
-    | UseWrittenOffset => if trial |> in_span(-377705030401i64, 253402214400i64) |> not then ("overflow", joined([local, " is outside the supported instant range"]), 0i64) else {
+    | UseWrittenOffset => if trial |> in_span(-377705030401i64, 253402214400i64) |> not then ("overflow", joined([shown, " is outside the supported instant range"]), 0i64) else {
     (covered, actual) = offset_in_force(tz, trial)
-    if not(covered) then ("domain", uncovered_text(tz, trial, nanosecond), 0i64) else if zt.critical |> and(neq(actual, written)) then ("domain", joined([local, " has a critical zone annotation, but ", quoted(tz.name), " has offset ", zoned_offset_text(actual), " there"]), 0i64) else ("", "", trial)
+    if not(covered) then ("domain", uncovered_text(tz, trial, nanosecond), 0i64) else if zt.critical |> and(neq(actual, written)) then ("domain", joined([shown, " has a critical zone annotation, but ", quoted(tz.name), " has offset ", zoned_offset_text(actual), " there"]), 0i64) else ("", "", trial)
   }
     | RejectOffsetMismatch => {
     (kind, detail, _) = local_resolution(tz, civil, nanosecond, EarlierInstant)
-    if eq(kind, "overflow") then (kind, detail, 0i64) else if trial |> in_span(-377705030401i64, 253402214400i64) |> not then ("overflow", joined([local, " is outside the supported instant range"]), 0i64) else {
+    if eq(kind, "overflow") then (kind, detail, 0i64) else if trial |> in_span(-377705030401i64, 253402214400i64) |> not then ("overflow", joined([shown, " is outside the supported instant range"]), 0i64) else {
       (covered, actual) = offset_in_force(tz, trial)
-      if eq(kind, "domain") |> or(not(covered)) then ("domain", if eq(kind, "domain") then detail else uncovered_text(tz, trial, nanosecond), 0i64) else if neq(actual, written) then ("domain", joined([local, " does not match ", quoted(tz.name), ", which has offset ", zoned_offset_text(actual), " there"]), 0i64) else ("", "", trial)
+      if eq(kind, "domain") |> or(not(covered)) then ("domain", if eq(kind, "domain") then detail else uncovered_text(tz, trial, nanosecond), 0i64) else if neq(actual, written) then ("domain", joined([shown, " does not match ", quoted(tz.name), ", which has offset ", zoned_offset_text(actual), " there"]), 0i64) else ("", "", trial)
     }
   }
   }
 }
 def zoned_from_text(zt: ZonedText, tz: TimeZone, conflict: OffsetConflict) -> Zoned = {
   (kind, detail, second) = text_resolution(zt, tz, conflict)
-  if eq(kind, "") then Zoned { instant: instant_from_unix(second, local_civil(zt.local).1), zone: tz } else if eq(kind, "domain") then "zoned_from_text" |> domain_failure(detail) |> fail else "zoned_from_text" |> overflow_failure(detail) |> fail
+  if eq(kind, "") then Zoned { instant: instant_from_unix(second, local_civil(zt.written).1), zone: tz } else if eq(kind, "domain") then "zoned_from_text" |> domain_failure(detail) |> fail else "zoned_from_text" |> overflow_failure(detail) |> fail
 }
 def try_zoned_from_text(zt: ZonedText, tz: TimeZone, conflict: OffsetConflict) -> Option[Zoned] = {
   (kind, detail, second) = text_resolution(zt, tz, conflict)
-  if eq(kind, "") then Some(Zoned { instant: instant_from_unix(second, local_civil(zt.local).1), zone: tz }) else if eq(kind, "domain") then None else "try_zoned_from_text" |> overflow_failure(detail) |> fail
+  if eq(kind, "") then Some(Zoned { instant: instant_from_unix(second, local_civil(zt.written).1), zone: tz }) else if eq(kind, "domain") then None else "try_zoned_from_text" |> overflow_failure(detail) |> fail
 }

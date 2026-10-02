@@ -1183,7 +1183,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "datetime/zone::ZonedText: () (variant {} ZonedText (field {} local (t-adt {} DateTime)) (field {} offset (t-adt {} Offset)) (field {} zone_name (t-prim {} string)) (field {} critical (t-prim {} bool)))",
+        "datetime/zone::ZonedText: () (variant {} ZonedText (field {} written (t-adt {} DateTime)) (field {} offset (t-adt {} Option (t-adt {} Offset))) (field {} zone_name (t-prim {} string)) (field {} critical (t-prim {} bool)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"

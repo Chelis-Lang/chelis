@@ -19,6 +19,7 @@ def tzif_file(version: i64, times: List[i64], indices: List[i64], offsets: List[
 def new_york() -> TimeZone = time_zone_from_tzif("America/New_York", tzif_file(50i64, [1173596400i64], [1i64], [-18000i64, -14400i64], "EST5EDT,M3.2.0,M11.1.0"))
 def lord_howe() -> TimeZone = time_zone_from_tzif("Australia/Lord_Howe", tzif_file(50i64, [], [], [37800i64], "<+1030>-10:30<+11>-11,M10.1.0,M4.1.0"))
 def short_lived() -> TimeZone = time_zone_from_tzif("Etc/Short_Lived", tzif_file(50i64, [1000000000i64], [1i64], [0i64, 3600i64], ""))
+def london() -> TimeZone = time_zone_from_tzif("Europe/London", tzif_file(50i64, [], [], [0i64], "GMT0BST,M3.5.0/1,M10.5.0"))
 def offset_seconds_at(tz: TimeZone, second: i64) -> i64 = offset_seconds(time_zone_offset_at(tz, instant_from_unix(second, 0i64)))
 def local_reading(year: i64, month: i64, day: i64, hour: i64, minute: i64) -> DateTime = datetime(date(year, month, day), time(hour, minute, 0i64, 0i64))
 def resolved_second(dt: DateTime, tz: TimeZone, policy: Disambiguation) -> Option[i64] =
@@ -194,8 +195,8 @@ def test_text_round_trips() -> unit ! { Test } = {
 }
 def test_parse_zoned_text_fields() -> unit ! { Test } = {
   zt = parse_zoned_text("2026-11-01T01:30:00.5-04:00[!America/New_York][u-ca=iso8601][_x=elective]")
-  _ = assert_eq(datetime_to_string(zt.local), "2026-11-01T01:30:00.5", "the local reading")
-  _ = assert_eq(offset_seconds(zt.offset), -14400i64, "the offset")
+  _ = assert_eq(datetime_to_string(zt.written), "2026-11-01T01:30:00.5", "the written reading")
+  _ = assert_eq(zt.offset, Some(offset_from_seconds(-14400i64)), "the offset")
   _ = assert_eq(zt.zone_name, "America/New_York", "the zone name")
   _ = assert_true(zt.critical, "critical")
   _ = assert_false(parse_zoned_text("2026-11-01T01:30:00Z[UTC][u-ca=gregory]").critical, "elective")
@@ -208,6 +209,27 @@ def test_parse_zoned_text_rejects() -> unit ! { Test } = {
   _ = assert_eq(try_parse_zoned_text("2026-11-01T01:30:00-04:00[America/../York]"), None, "a dot-dot part")
   _ = assert_eq(try_parse_zoned_text("2026-11-01T01:30:00-04:00[Z]x"), None, "text after the annotations")
   assert_eq(try_parse_zoned_text("2026-02-30T01:30:00-04:00[America/New_York]"), None, "an invalid date")
+}
+def test_an_unknown_local_offset_names_a_utc_instant() -> unit ! { Test } = {
+  _ = assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[!Europe/London]").offset, None, "Z leaves the offset unknown")
+  _ = assert_eq(second_from_text("2022-07-08T00:14:07Z[!Europe/London]", london(), UseWrittenOffset), Some(1657239247i64), "RFC 9557 Figure 2, critical")
+  _ = assert_eq(second_from_text("2022-07-08T00:14:07Z[Europe/London]", london(), UseZoneRules), Some(1657239247i64), "Figure 2 under the zone's rules")
+  _ = assert_eq(second_from_text("2022-07-08T00:14:07z[Europe/London]", london(), RejectOffsetMismatch), Some(1657239247i64), "z is no mismatch")
+  assert_eq(second_from_text("2022-07-08T00:14:07-00:00[!Europe/London]", london(), UseZoneRules), Some(1657239247i64), "-00:00 is Z")
+}
+def test_a_known_zero_offset_is_not_an_unknown_one() -> unit ! { Test } = {
+  _ = assert_eq(parse_zoned_text("2022-07-08T00:14:07+00:00[Europe/London]").offset, Some(offset_from_seconds(0i64)), "+00:00 is a known offset")
+  _ = assert_eq(second_from_text("2022-07-08T00:14:07+00:00[!Europe/London]", london(), UseWrittenOffset), None, "RFC 9557 Figure 1 is inconsistent")
+  _ = assert_eq(second_from_text("2022-07-08T00:14:07+00:00[Europe/London]", london(), UseZoneRules), Some(1657235647i64), "00:14:07 on London's clock")
+  assert_eq(second_from_text("2022-07-08T00:14:07+00:00[Europe/London]", london(), RejectOffsetMismatch), None, "a mismatch with British Summer Time")
+}
+def test_a_critical_key_takes_one_value() -> unit ! { Test } = {
+  _ = assert_eq(try_parse_zoned_text("2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][u-ca=gregory]"), None, "a critical key with two values")
+  _ = assert_eq(try_parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][!u-ca=gregory]"), None, "the critical tag second")
+  _ = assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][u-ca=gregory]").zone_name, "UTC", "elective duplicates")
+  _ = assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][!u-ca=iso8601]").zone_name, "UTC", "a repeated critical key with one value")
+  _ = assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][u-ca=hebrew]").zone_name, "UTC", "the first elective tag decides")
+  assert_eq(try_parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=hebrew][u-ca=iso8601]"), None, "a first tag naming another calendar")
 }
 def test_written_offsets_select_a_fold_occurrence() -> unit ! { Test } = {
   _ = assert_eq(second_from_text("2026-11-01T01:30:00-04:00[America/New_York]", new_york(), RejectOffsetMismatch), Some(1793511000i64), "-04:00 is the first 01:30")

@@ -17,6 +17,10 @@ with `time_zone_from_tzif`, and prints four bindings:
   tz, policy)` returns `z` under both `UseWrittenOffset` and
   `RejectOffsetMismatch` (the first holds for every `z` by [05-OP-73]; the
   second need not, and is compared at these sampled instants only);
+- `utc_texts`: at the same instants, each written as its UTC date and time
+  with `Z`, `z` or `-00:00` (RFC 9557's unknown local offset) and an
+  elective or critical annotation, `zoned_from_text` under every
+  `OffsetConflict` policy, compared with `zoneinfo`'s reading of that instant;
 - for `UTC` only, a separate eval-only program checks that the file's zone
   equals `time_zone_utc()`. Compiled C prints a reachable nullary definition as
   extra roots (chelis#2624) and then aborts on the footer's `None` component
@@ -81,12 +85,19 @@ def resolution_row(tz: TimeZone, civil: i64, policy: Disambiguation) -> List[i64
 }
 def resolution_rows(tz: TimeZone, civils: List[i64]) -> List[i64] = fold(fn (acc: List[i64], civil: i64) -> acc |> concat(resolution_row(tz, civil, EarlierInstant)) |> concat(resolution_row(tz, civil, LaterInstant)) |> concat(resolution_row(tz, civil, CompatibleInstant)) |> concat(resolution_row(tz, civil, RejectNonUniqueLocal)), [], civils)
 def text_rows(tz: TimeZone, seconds: List[i64]) -> string = fold(fn (acc: string, s: i64) -> if eq(acc, "") then zoned_to_string(zoned(instant_from_unix(s, 0i64), tz)) else acc |> string_concat("|") |> string_concat(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz))), "", seconds)
+def utc_text_row(tz: TimeZone, text: string) -> string =
+  zoned_to_string(zoned_from_text(parse_zoned_text(text), tz, UseWrittenOffset))
+  |> string_concat("|")
+  |> string_concat(zoned_to_string(zoned_from_text(parse_zoned_text(text), tz, UseZoneRules)))
+  |> string_concat("|")
+  |> string_concat(zoned_to_string(zoned_from_text(parse_zoned_text(text), tz, RejectOffsetMismatch)))
+def utc_text_rows(tz: TimeZone, texts: List[string]) -> string = fold(fn (acc: string, text: string) -> if eq(acc, "") then utc_text_row(tz, text) else acc |> string_concat("|") |> string_concat(utc_text_row(tz, text)), "", texts)
 def round_trip_rows(tz: TimeZone, seconds: List[i64]) -> List[i64] = map(fn (s: i64) -> if and(eq(zoned_from_text(parse_zoned_text(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz))), tz, UseWrittenOffset), zoned(instant_from_unix(s, 0i64), tz)), eq(zoned_from_text(parse_zoned_text(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz))), tz, RejectOffsetMismatch), zoned(instant_from_unix(s, 0i64), tz))) then 1i64 else 0i64, seconds)
 """
 
 IMPORTS = """\
 import Std.Datetime (datetime, date_from_epoch_day, time_from_nanosecond_of_day, instant_from_unix, instant_unix_second, offset_seconds)
-import Std.Datetime.Zone (TimeZone, Disambiguation, EarlierInstant, LaterInstant, CompatibleInstant, RejectNonUniqueLocal, UseWrittenOffset, RejectOffsetMismatch, time_zone_from_tzif, time_zone_utc, time_zone_offset_at, try_zoned_from_local, zoned, zoned_instant, zoned_to_string, parse_zoned_text, zoned_from_text)
+import Std.Datetime.Zone (TimeZone, Disambiguation, EarlierInstant, LaterInstant, CompatibleInstant, RejectNonUniqueLocal, UseWrittenOffset, UseZoneRules, RejectOffsetMismatch, time_zone_from_tzif, time_zone_utc, time_zone_offset_at, try_zoned_from_local, zoned, zoned_instant, zoned_to_string, parse_zoned_text, zoned_from_text)
 """
 
 
@@ -171,6 +182,20 @@ def expected_text(zone: zoneinfo.ZoneInfo, name: str, second: int) -> str:
     return datetime.datetime.fromtimestamp(second, UTC).astimezone(zone).isoformat() + f"[{name}]"
 
 
+def utc_text(name: str, second: int, index: int) -> str:
+    """The instant's UTC date and time with an unknown-offset spelling and an
+    annotation, varied by `index` over `Z`, `z` and `-00:00` and over
+    elective and critical."""
+    written = datetime.datetime.fromtimestamp(second, UTC).replace(tzinfo=None).isoformat()
+    spelling = ("Z", "z", "-00:00")[index % 3]
+    flag = "!" if (index // 3) % 2 else ""
+    return f"{written}{spelling}[{flag}{name}]"
+
+
+def strings_literal(values: list[str]) -> str:
+    return "[" + ", ".join(json.dumps(value) for value in values) + "]"
+
+
 def ints_literal(values: list[int]) -> str:
     return '"' + ",".join(str(value) for value in values) + '"'
 
@@ -198,12 +223,14 @@ def zone_program(name: str) -> Program:
         f"resolutions = resolution_rows({construct}, parse_ints({ints_literal(civils)}))",
         f"texts = text_rows({construct}, parse_ints({ints_literal(samples)}))",
         f"round_trips = round_trip_rows({construct}, parse_ints({ints_literal(samples)}))",
+        f"utc_texts = utc_text_rows({construct}, {strings_literal([utc_text(name, s, k) for k, s in enumerate(samples)])})",
     ]
     expected = {
         "offsets": render([utc_offset(zone, s) for s in instants]),
         "resolutions": render([value for civil in civils for value in expected_resolution(zone, civil)]),
         "texts": "|".join(expected_text(zone, name, s) for s in samples),
         "round_trips": render([1 for _ in samples]),
+        "utc_texts": "|".join(expected_text(zone, name, s) for s in samples for _ in range(3)),
     }
     source = "module Demo.Main\n" + IMPORTS + PRELUDE + "\n".join(body) + "\n"
     return Program(name.replace("/", "_"), source, expected)

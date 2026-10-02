@@ -358,7 +358,7 @@ EXPECTED_OP_MANIFESTS = {
 | `datetime/clock::MonotonicInstant` | `MonotonicInstant { second: i64, nanosecond: i64 }` |
 | `datetime/zone::TimeZone` | `TimeZone { name: string, initial_offset: i64, transitions: List[(i64,i64)], footer: Option[(i64,Option[(i64,(i64,i64,i64,i64,i64),(i64,i64,i64,i64,i64))])] }` |
 | `datetime/zone::Zoned` | `Zoned { instant: Instant, zone: TimeZone }` |
-| `datetime/zone::ZonedText` | `ZonedText { local: DateTime, offset: Offset, zone_name: string, critical: bool }` |""".splitlines()
+| `datetime/zone::ZonedText` | `ZonedText { written: DateTime, offset: Option[Offset], zone_name: string, critical: bool }` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
@@ -2777,6 +2777,11 @@ def validate_normative_contract(
             "with offset zero written `+00:00`",
             "any other critical tag fail `domain`, and any other elective tag is ignored",
             "resolves the record against `tz` whatever its name",
+            "The offset is absent when it is written `Z`, `z`, or with a `-` sign and value zero",
+            "When the offset is absent, every policy gives the instant that the written "
+            "date and time denote at offset zero",
+            "A key that two tags give different values fails `domain` when either tag is "
+            "critical",
         ),
         "05-OP-74": (
             "governs exactly the seven constructors of the standard-library plain enum "
