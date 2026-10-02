@@ -374,11 +374,14 @@ The C backend is the numeric oracle for every GPU backend (§2). The Metal
 numeric-agreement contract is [05-OBS-3]'s: for each kernel under test, every
 Metal result has the same bits as the `chelis-ir` evaluator (which the C backend
 is verified against). There is no Metal-specific absolute or relative tolerance.
-Metal kernels compile without fast math and without contraction, preserve
-subnormals, and compute every transcendental with a Chelis-owned correctly
-rounded kernel; an MSL built-in, `precise::` included, is not one, because MSL
-bounds its error rather than rounding correctly. An operation the Metal backend
-cannot compute to these bits is rejected under [05-UNS-1], never approximated.
+A Metal kernel admits an operation only where it can produce those bits:
+without fast math or contraction, with round-to-nearest-even and preserved
+subnormals, and with every transcendental computed by a Chelis-owned correctly
+rounded kernel. An MSL built-in, `precise::` included, is not one, because MSL
+bounds its error rather than rounding correctly. MSL also permits a device to
+flush f32 subnormals or round f32 arithmetic toward zero, and has no f64, so an
+operation or dtype whose bits the device cannot guarantee is rejected under
+[05-UNS-1], never approximated.
 (The Metal and HIP lanes do not yet meet this contract; see
 [chelis#2968](https://github.com/Chelis-Lang/chelis/issues/2968) and
 [chelis#2969](https://github.com/Chelis-Lang/chelis/issues/2969).)

@@ -98,6 +98,10 @@ Read from the upstream sources:
   needed.
 - **Evaluation method.** The code assumes `FLT_EVAL_METHOD == 0` (no x87 extended
   precision). The vendored wrapper rejects any other value with `#error`.
+- **Internal precision.** Most binary32 kernels evaluate in binary64 internally and
+  round once. [04-NUM-8] defines a correctly rounded primitive by its result value,
+  so that internal precision is not an operation width; the prohibition on computing
+  at f64 and narrowing still applies to every operation of a graph.
 - **State.** No thread-local or global mutable state; tables are `static const`.
   `errno` and inexact-flag support are off by default and stay off.
 - **NaN results.** Kernels return `x + x` or similar for a NaN operand, which propagates
@@ -196,7 +200,15 @@ Emission changes:
   `MathLib::detect`, and `CodegenOptions::math_lib_override` are deleted, along with
   the tests that pinned the Sleef and vForce paths.
 - `tier2.rs`: `tanh` stops lowering to `2*sigmoid(2x)-1`; the IR gains a `Tanh` unary
-  primitive with the [05-OP-46] adjoint `g*(1-y*y)`, and `gelu` lowers over it.
+  primitive with the [05-OP-46] adjoint `g*(1-y*y)`. `gelu` lowers to `x*sigmoid(2u)`
+  with spec/05 §3.3's exact spelling of `u`, not to `0.5*x*(1+tanh(u))`. The two are
+  equal over the reals, but the tanh spelling cancels for negative `x`: with a
+  correctly rounded f32 `tanh` it measured 176 ULP at `x=-3`, 4,354 ULP at `x=-4`, and
+  `0` instead of `-8.4e-11` at `x=-6`. The sigmoid spelling has no cancellation; its
+  remaining error (measured up to 148 ULP at `x=-9.336` and 37 ULP at `x=-5.476` on a
+  dense f32 sweep) comes from the rounding of `u` amplified by `exp(2u)`. Because the
+  graph is pinned, that error is the same in every lane. `sigmoid` and `silu` keep
+  their graphs (measured at most 2.3 ULP with exact leaves).
 
 Vectorized kernels are admissible later only as vectorized forms of these kernels that
 pass the exhaustive binary32 oracle; vendor vector libraries are not correctly rounded
@@ -204,13 +216,19 @@ and are excluded.
 
 ### 4.3 GPU lanes
 
-HIP and Metal are `scope:experimental`. Until each has Chelis-owned device kernels that
-pass the same oracle, a transcendental in device code is rejected under [05-UNS-1] with
-a typed diagnostic, never computed with `ocml`, MSL built-ins, or `precise::` forms, and
-the rejection is listed on the known-issues page (#1170). Metal compiles with fast math
-disabled and HIP's runtime compilation passes the contraction-off and denormal flags,
-since those are cheap and govern the arithmetic the fence still admits. The remaining
-GPU items in #2968 and #2969 (NaN-dropping reductions, the f16 max/min identity,
+HIP and Metal are `scope:experimental`, and their implementation is deferred until
+after the CPU lanes. Until a device lane has Chelis-owned kernels that pass the same
+oracle, a transcendental in device code is rejected under [05-UNS-1] with a typed
+diagnostic, never computed with `ocml`, MSL built-ins, or `precise::` forms, and the
+rejection is listed on the known-issues page (#1170).
+
+Metal is harder than a missing kernel. MSL permits a device to flush f32 subnormals
+and to round f32 arithmetic toward zero independently of the fast-math setting, and
+it has no f64. Turning fast math off therefore does not make Metal reach CPU bits, and
+this design makes no such claim: an f64 operation, and any f32 operation whose bits
+the device cannot guarantee, stays rejected on Metal. Whether a device-kernel route
+exists for f32 on Metal is an open question for the deferred GPU work. The other GPU
+items in #2968 and #2969 (NaN-dropping reductions, the f16 max/min identity,
 `atomicAdd` scatter order) are outside this design and stay open.
 
 ## 5. Build profile and environment (#2962)
@@ -306,7 +324,9 @@ has a negative partner.
    (contiguous, permuted, rank-0), and a fused-kernel element gives identical bits in
    eval and in a built executable, for each function and each float dtype. Partner: the
    test fails if the C fold or the IR fold is redirected to `std`.
-7. Eval and C are bit-equal on `sigmoid`, `silu`, `gelu`, `softmax`, and `normal_cdf`
+7. `gelu` at `x = -3, -4, -5, -6, -9.336` matches the MPFR-evaluated value of the pinned
+   `x*sigmoid(2u)` graph bit for bit in both lanes; partner: the `0.5*x*(1+tanh(u))`
+   spelling fails it. Eval and C are bit-equal on `sigmoid`, `silu`, `gelu`, `softmax`, and `normal_cdf`
    over the #2952, #2959, and #2971 probe sets, and on `tanh` near zero (`1e-3`, `1e-5`),
    where the old lowering was 620 and 14,932 ULP off.
 8. Emitted-C scan: generated C for a corpus that uses every transcendental contains no
@@ -344,22 +364,32 @@ has a negative partner.
 
 ## 9. Implementation slices
 
-One pull request; each slice is a commit, in this order.
+One pull request; each slice is a commit. The CPU lanes (eval and C) come first; GPU
+implementation is deferred and only fenced.
+
+Three slices are implemented on parallel branches and combined into the pull request.
+They do not depend on the kernels:
+
+| slice | content | sub-issues it closes (oracle) |
+|---|---|---|
+| impl-profile | Strict product profile, environment allowlist, canary TU (§5). | #2962 (test 9) |
+| impl-evalwidth | Eval f64 funnels at declared width (softmax, cumsum, clamp, scatter-add) and clamp trap parity. | #2971, #2972, #2973 (their own oracles) |
+| impl-fpenv | Entry-point environment save/set/restore and canonical NaN in every float arm (§6). | #2964 (test 10 and the NaN unit test) |
+
+The kernel slices follow, in order:
 
 | # | slice | sub-issues it closes (oracle) |
 |---|---|---|
 | S0 | Spec amendments and this document. | none alone; supplies #2967's text items 1, 2, and 4 and the manifest alignment of item 3 |
-| S1 | `chelis-crmath`: vendored CORE-MATH, the amalgamation script and its `--check`, the Rust API, NaN canonicalization, guards; tests 1-5; the `disallowed-methods` lint. | none alone |
-| S2 | Evaluator: `dtype_semantics.rs`, IR constant folding, host ops through `chelis-crmath`; `Tanh` IR primitive and adjoint; softmax and the other f64 funnels at declared width; NaN canonicalization in every float arm; per-thread environment. | #2971 (test 7, softmax rows); #2972 (its own oracle on cumsum, clamp, and scatter-add at i64 above 2^53 and f32 at 2^24); #2973 only if its trap oracle passes after the clamp rewrite |
-| S3 | C backend: static kernel emission, libm names replaced, host activations from one definition, vForce, Sleef, `MathLib`, and the `sleef` feature removed; `chelis_math.h` rewritten and census rerun. | #2952, #2958, #2959, #2961, #2963 (tests 6-8, 11); #2966's Sleef items only, so #2966 stays open |
-| S4 | Strict product profile, environment allowlist, canary TU. | #2962 (test 9) |
-| S5 | Entry-point environment save/set/restore in runtime, emitted entries, and bindings. | #2964 with S2's NaN part (test 10 and the NaN unit test) |
-| S6 | Prove: fuzz evaluator and contracts at declared width; restated exp contract. | #2965 (test 12) |
-| S7 | GPU fence: device transcendentals rejected under [05-UNS-1]; Metal fast math off; HIP contraction and denormal flags; known-issues rows. | none closed; Part of #2968 and #2969 |
+| K1 | `chelis-crmath`: vendored CORE-MATH, the amalgamation script and its `--check`, the Rust API, NaN canonicalization, guards; tests 1-5 (with test 3 a manual gate); the `disallowed-methods` lint. | none alone |
+| K2 | Eval wiring: `dtype_semantics.rs`, IR constant folding, host ops through `chelis-crmath`; `Tanh` IR primitive and adjoint; `gelu` respelled; host activations derived from the §3.3 lowering. | none alone |
+| K3 | C wiring: static kernel emission, libm names replaced, host activations from one definition; vForce, Sleef, `MathLib`, and the `sleef` feature removed; `chelis_math.h` rewritten and census rerun. | #2952, #2958, #2959, #2961, #2963 (tests 6-8, 11); #2966's Sleef items only, so #2966 stays open |
+| K4 | Prove: fuzz evaluator and contracts at declared width; restated exp contract. | #2965 (test 12) |
 | S8 | `OP_TOLERANCES` emptied, `AgreementOp` reduced, [05-OBS-3] block regenerated; the tolerance-statement check. | #2967 (tests 13-14) |
-| S9 | `docs/book` backends page, `docs/manual_gates.md` rows, `changelog.d` fragment (`changed.breaking`: transcendental and compound results change bits wherever the old lanes were not correctly rounded). | none |
+| G1 | GPU fence: device transcendentals and Metal f64 rejected under [05-UNS-1]; known-issues rows. Device kernels deferred. | none closed; Part of #2968 and #2969 |
+| S9 | `docs/book` backends page, `docs/manual_gates.md` rows, `changelog.d` fragment (`changed.breaking`: transcendental and compound results change bits wherever the old lanes were not correctly rounded, and `gelu` changes spelling). | none |
 
-After S3, #1311's question (pin a reference graph for embedded transcendentals) is
+After K3, #1311's question (pin a reference graph for embedded transcendentals) is
 answered by correct rounding instead; whether to close it as superseded is a tracker
 decision.
 
@@ -380,7 +410,7 @@ decision.
 ## 11. Open questions
 
 1. Whether `chelis_math.h` survives in reduced form or leaves the published header
-   roots entirely (S3 decides from what it still has to declare; the census rerun is
+   roots entirely (K3 decides from what it still has to declare; the census rerun is
    the check either way).
 2. Whether the x86-64 target's declared CPU baseline should include hardware FMA
    (x86-64-v3), which would remove the software `fma` call from binary64 kernels at the

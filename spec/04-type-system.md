@@ -3494,6 +3494,16 @@ Scope:
 > where the bits could differ - those compute at f32 per the table. No
 > lane SHALL compute at any width wider than the one declared above.
 >
+> A correctly rounded primitive ([05-OP-46]) is defined by its result: the
+> exact real value of its function rounded once to the arithmetic width.
+> The precision a kernel uses internally to obtain that result, such as an
+> f32 kernel that evaluates in f64 or in multi-word arithmetic and rounds
+> once, is not an operation width and is not governed by this atom. Every
+> operation of a graph, including each primitive inside a composition, still
+> computes and finalizes at the declared width: evaluating a composition, or
+> a transcendental that is not correctly rounded, at f64 and narrowing the
+> result is non-conforming.
+>
 > REDUCED-precision computation - performing an op at an arithmetic width
 > narrower than the one declared above SUCH THAT THE RESULT BITS CAN
 > DIFFER, such as a 19-bit tensor-core mode for f32 matmul (the

@@ -1260,16 +1260,21 @@ three atoms above and never admits `bool` to a numeric capability or kernel.
 | `sigmoid(x)` | `recip(add(const(1.0), exp(neg(x))))` |
 | `tanh(x)` | The Tier 1 primitive `tanh` of §2.2 and [05-OP-46]; it has no lowering |
 | `silu(x)` | `mul(x, sigmoid(x))` |
-| `gelu(x)` | The tanh approximation `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))` |
+| `gelu(x)` | `mul(x, sigmoid(mul(const(2.0), u)))` with `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and `c` the constant sqrt(2/pi) |
 
 All five activation functions admit float tensors and float scalars at f16,
 bf16, f32, and f64. The scalar form returns the same scalar dtype and is the
 rank-zero instance of the tensor operation; non-float operands are type
 errors. Each RISC primitive in the lowering computes at [04-NUM-8]'s declared
 arithmetic width and finalizes to the operand's storage width before the next
-primitive observes it, as required by [04-NUM-1]. The `exp` and `tanh` leaves
-are [05-OP-46]'s correctly rounded primitives, so each lowering denotes one
-result bit pattern for each input. `tanh` is a primitive rather than a
+primitive observes it, as required by [04-NUM-1]. Each constant is the real
+value rounded once to the operand dtype. The `exp` leaf is [05-OP-46]'s
+correctly rounded primitive, so each lowering denotes one result bit pattern
+for each input. `gelu` is the tanh approximation of the Gaussian error linear
+unit, `0.5*x*(1+tanh(u))`, spelled through the identity
+`0.5*(1+tanh(u)) = sigmoid(2u)`: the tanh spelling cancels catastrophically
+for negative `x`, where `tanh(u)` approaches `-1`, and the sigmoid spelling
+does not. `tanh` is a primitive rather than a
 composition: no graph over the other primitives reproduces the correctly
 rounded hyperbolic tangent near zero, where `2*sigmoid(2x)-1` cancels. The
 adjoint is the derivative of the lowering above for `sigmoid`, `silu`, and
@@ -3753,11 +3758,10 @@ path even though bare `round` under `grad` remains a structural
 > [05-DIM-3], including negative-axis normalization and runtime validation.
 >
 > Result: The pointwise lowerings are the formulas in section 3.3: sigmoid
-> is 1/(1+exp(-x)), silu is x*sigmoid(x), and gelu is the stated
-> approximation over [05-OP-46]'s hyperbolic tangent primitive. Softmax uses
-> section 4.2's max-shifted exponentials divided by their axis sum. Every
-> exponential and hyperbolic tangent in these graphs is [05-OP-46]'s
-> correctly rounded primitive, and every other step is a finalized IEEE
+> is 1/(1+exp(-x)), silu is x*sigmoid(x), and gelu is x*sigmoid(2u) with
+> section 3.3's exact spelling of u. Softmax uses section 4.2's max-shifted
+> exponentials divided by their axis sum. Every exponential in these graphs
+> is [05-OP-46]'s correctly rounded primitive, and every other step is a finalized IEEE
 > operation without contraction, so each composition denotes exactly one
 > result bit pattern per input. Constants, each primitive intermediate, and
 > results retain the operand dtype; the formulas do not license an f64
