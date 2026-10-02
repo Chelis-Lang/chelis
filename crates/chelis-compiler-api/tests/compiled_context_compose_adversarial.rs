@@ -1447,10 +1447,22 @@ fn gextra_library_keyed_draw_from_new_code_agrees_across_context_and_monolith() 
              snippet={snippet}, errors={errors:?}"
         );
         if rejects {
-            assert!(
-                errors.0.contains("arity") && errors.1.contains("arity"),
-                "a keyless call is an arity error on both paths: {errors:?}"
-            );
+            for (lane, error) in [
+                ("monolithic", mono.err().expect("keyless call rejects")),
+                ("context", inctx.err().expect("keyless call rejects")),
+            ] {
+                assert_eq!(error.stage, "check", "{lane}: {error:?}");
+                assert!(
+                    error.errors.iter().any(|diagnostic| {
+                        diagnostic.kind() == chelis_vocab::DiagnosticKind::ArityMismatch
+                            && diagnostic.expected.as_deref() == Some("2 arguments")
+                            && diagnostic.got.as_deref() == Some("1 argument")
+                            && diagnostic.message.contains("lib_drop")
+                            && diagnostic.span.is_some()
+                    }),
+                    "{lane}: keyless library call must reject with its authored arity and call site: {error:?}"
+                );
+            }
         }
     }
 }

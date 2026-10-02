@@ -67,6 +67,49 @@ fn declared_result_literal(
     literal_at(&resolved.ok()?)
 }
 
+/// Name the selected axis or offending tensor operand while the diagonal
+/// application still holds its authored call site for the reporting boundary.
+pub(super) fn diagonal_result_error(
+    node: &DeepNode,
+    operand: &Type,
+    axis1: usize,
+    axis2: usize,
+    message: String,
+) -> CheckError {
+    if axis1 == axis2 && matches!(operand, Type::Tensor(..)) {
+        let expected = format!("axis distinct from {axis1}");
+        let got = format!("axis {axis2}");
+        CheckError::with_types(
+            CheckErrorKind::TypeMismatch,
+            with_node_provenance(
+                node,
+                format!("diagonal argument 3 (axis): expected {expected}, got {got}; {message}"),
+            ),
+            expected,
+            got,
+            vec![],
+        )
+    } else if !matches!(operand, Type::Tensor(..)) {
+        let got = operand.to_string();
+        CheckError::with_types(
+            CheckErrorKind::TypeMismatch,
+            with_node_provenance(
+                node,
+                format!("diagonal argument 1: expected tensor, got {got}"),
+            ),
+            "tensor".to_string(),
+            got,
+            vec![],
+        )
+    } else {
+        CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_node_provenance(node, message),
+            vec![],
+        )
+    }
+}
+
 /// chelis#1739. `[05-OP-33]` replaces the retained axis extent with the smaller
 /// selected extent, so a literal selected axis bounds the result from above for
 /// every runtime value of the other axis. A declared extent strictly greater
