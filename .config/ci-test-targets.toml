@@ -2692,7 +2692,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit executes the shared pre-commit hook's regenerate-and-stage, refusal, no-op, escape, worktree, and truncation controls"
+reason = "script-unit executes the shared pre-commit hook's check-only staged-content, sequencer, no-op, interpreter, worktree, cleanup, and truncation controls"
 tracking_issue = "chelis#1868"
 
 [[path_rule]]
@@ -2701,7 +2701,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit executes the shared pre-push hook's stale, fresh, escape, worktree, and truncation controls"
+reason = "script-unit executes the shared pre-push hook's stale, fresh, skip-notice, no-cargo, worktree, and truncation controls"
 tracking_issue = "chelis#1868"
 
 [[path_rule]]
@@ -2728,7 +2728,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit executes the regeneration hooks' leg selection, staging, refusal, and push-range checks in temporary clones"
+reason = "script-unit executes the regeneration hooks' leg selection, staged-content checks, and push-range checks in temporary clones"
 tracking_issue = "chelis#1868"
 
 [[path_rule]]

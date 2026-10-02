@@ -119,9 +119,7 @@ class LegInputDeclarations(unittest.TestCase):
 
     def test_every_hook_leg_declares_existing_inputs(self) -> None:
         """A misspelled input would make a hook skip its leg without a word."""
-        for leg in regen_all.regen_legs("python"):
-            if leg.tier != 0:
-                continue
+        for leg in regen_hooks.pre_push_legs("python"):
             with self.subTest(leg=leg.name):
                 self.assertTrue(leg.inputs, "a leg the hooks run must declare inputs")
                 for spec in leg.inputs:
@@ -139,10 +137,9 @@ class PrePushReadOnly(unittest.TestCase):
         legs = regen_hooks.pre_push_legs("PY")
         self.assertEqual(
             [leg.name for leg in legs],
-            ["rejection-registry", "conformance-assets",
-             "reviewed-unsupported-wording", "opaque-corpus"],
+            ["conformance-assets", "reviewed-unsupported-wording", "opaque-corpus"],
         )
-        self.assertTrue(all(leg.tier == 0 for leg in legs))
+        self.assertTrue(all(leg.tier == 0 and leg.needs == "python" for leg in legs))
 
     def test_python_pre_push_checks_leave_the_tree_byte_identical(self) -> None:
         for leg in regen_hooks.pre_push_legs(sys.executable):
@@ -407,14 +404,33 @@ class RegenHookRepository(unittest.TestCase):
         self.assertEqual(fresh.returncode, 0, fresh.stderr)
         self.assertEqual(self.committed(ASSET), self.committed("AGENTS.md"))
 
-    def test_pre_commit_does_nothing_when_no_input_is_staged(self) -> None:
-        # A hand-edited derived file alone is the pre-push hook's to catch.
-        (self.repo / ASSET).write_text("hand edit\n", encoding="utf-8")
+    def test_pre_commit_does_nothing_when_no_leg_path_is_staged(self) -> None:
+        (self.repo / ASSET).write_text("unstaged hand edit\n", encoding="utf-8")
         (self.repo / "README.md").write_text("unrelated\n", encoding="utf-8")
-        self.git("add", ASSET, "README.md")
+        self.git("add", "README.md")
         result = self.run_git("commit", "-m", "docs: readme")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
+
+    def test_pre_commit_checks_a_staged_derived_file_on_its_own(self) -> None:
+        """An edited, renamed or deleted output selects its leg as well."""
+        moved = ASSET.replace("agents-inheritance.md", "renamed.md")
+        cases = (
+            ("edit", lambda: (self.repo / ASSET).write_text("hand edit\n", encoding="utf-8"),
+             ("commit", "-am", "chore: edit asset")),
+            ("rename", lambda: self.git("mv", ASSET, moved),
+             ("commit", "-m", "chore: move asset")),
+            ("delete", lambda: self.git("rm", "--quiet", ASSET),
+             ("commit", "-m", "chore: drop asset")),
+        )
+        for name, change, command in cases:
+            with self.subTest(change=name):
+                change()
+                result = self.run_git(*command)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("are inconsistent", result.stderr)
+                self.assertIn(ASSET, result.stderr)
+                self.git("reset", "--quiet", "--hard")
 
     def test_amend_is_checked(self) -> None:
         self.edit_agents()
@@ -696,49 +712,59 @@ class RegenHookRepository(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("not checking conformance-assets: its paths have uncommitted", result.stderr)
 
-    def test_pre_push_skips_cargo_legs_on_a_cold_target(self) -> None:
-        # The first push has no remote-tracking base, so every path counts,
-        # crates/ included; this clone has no target.
-        self.assertIn(
-            "pre-push: skipping rejection-registry: the cargo target is cold",
-            self.first_push.stderr,
-        )
-        # The chelis-std bundle is never a hook leg (chelis#2930).
-        self.assertNotIn("std-bundle", self.first_push.stderr)
-        self.assertFalse(self.cargo_log.exists(), "a cold skip must start no cargo")
-
-    def test_pre_push_runs_no_cargo_leg_on_a_stale_lock(self) -> None:
-        """Cargo would rewrite an inconsistent Cargo.lock; probe it first."""
-        warm = self.repo / "target/debug/rejection_source_inventory"
-        warm.parent.mkdir(parents=True)
-        warm.write_text("", encoding="utf-8")
+    def test_pre_push_never_invokes_cargo_even_when_every_leg_is_selected(self) -> None:
+        """A URL remote has no tracking refs, so every path counts."""
         source = self.repo / "crates/demo/src/lib.rs"
         source.parent.mkdir(parents=True)
         source.write_text('fn f() { unimplemented_rejection!("x", 1); }\n', encoding="utf-8")
-        self.git("add", str(source))
+        (self.repo / "spec").mkdir()
+        (self.repo / "spec/05-risc-primitives.md").write_text("# spec\n", encoding="utf-8")
+        self.git("add", str(source), "spec")
         self.git("commit", "--quiet", "-m", "feat: cite")
+        result = self.run_git("push", self.remote.as_uri(), "main:refs/heads/url-push")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("conformance-assets", result.stderr)
+        self.assertNotIn("rejection-registry", result.stderr)
+        self.assertFalse(self.cargo_log.exists(), "a hook invoked cargo")
+        self.assertNotIn("rejection-registry", self.first_push.stderr)
+
+    def test_pre_push_checks_a_pushed_annotated_tag(self) -> None:
+        self.edit_agents()
+        self.git("add", "AGENTS.md")
+        self.git("commit", "--quiet", "--no-verify", "-m", "docs: edit")
+        self.git("tag", "-a", "-m", "release", "v-stale")
+        result = self.run_git("push", "origin", "v-stale")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("stale derived artifacts (conformance-assets)", result.stderr)
+
+    def test_pre_push_leaves_the_index_file_alone(self) -> None:
+        self.edit_agents()
+        self.regenerate()
+        self.git("add", "AGENTS.md", ASSET)
+        self.git("commit", "--quiet", "-m", "docs: edit")
+        # A newer mtime with the same bytes makes a status refresh rewrite
+        # the index unless optional locks are off.
+        stamp = time.time() + 5
+        os.utime(self.repo / ASSET, (stamp, stamp))
+        index = self.git_dir() / "index"
+        before = (index.read_bytes(), index.stat().st_mtime_ns)
         result = self.push()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("cannot confirm Cargo.lock is current", result.stderr)
-        self.assertEqual(
-            self.cargo_log.read_text(encoding="utf-8").splitlines(),
-            [" ".join(regen_hooks.CARGO_LOCK_GUARD[1:])],
-        )
+        self.assertIn("conformance-assets", result.stderr)
+        self.assertEqual((index.read_bytes(), index.stat().st_mtime_ns), before)
 
-    def test_pre_push_selects_the_registry_only_for_citation_edits(self) -> None:
-        source = self.repo / "crates/demo/src/lib.rs"
-        source.parent.mkdir(parents=True)
-        for text, expected in (
-            ("pub fn plain() {}\n", False),
-            ("pub fn cited() { unimplemented_rejection!(\"x\", 1); }\n", True),
-        ):
-            with self.subTest(expected=expected):
-                source.write_text(text, encoding="utf-8")
-                self.git("add", str(source))
-                self.git("commit", "--quiet", "-m", "feat: demo")
-                result = self.push()
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual("rejection-registry" in result.stderr, expected, result.stderr)
+    def test_pre_commit_reads_skip_worktree_paths_in_a_sparse_checkout(self) -> None:
+        sparse = self.directory / "sparse worktree"
+        self.git("worktree", "add", "--quiet", "--no-checkout", "-b", "sparse", str(sparse))
+        self.git("sparse-checkout", "set", "--cone", "scripts", "agent-skills", cwd=sparse)
+        self.git("checkout", "--quiet", "sparse", cwd=sparse)
+        self.assertFalse((sparse / ASSET).exists(), "the asset must be outside the cone")
+        self.interpreter(sparse / ".venv/bin/python")
+        self.edit_agents(sparse)
+        self.git("add", "AGENTS.md", cwd=sparse)
+        result = self.run_git("commit", "-m", "docs: edit", cwd=sparse)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"AGENTS.md and {ASSET} are inconsistent", result.stderr)
 
     # --- worktree safety -------------------------------------------------
 

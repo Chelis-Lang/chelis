@@ -97,9 +97,10 @@ stages anything; they report derived artifacts that disagree with their
 sources and print the command that fixes them.
 
 - **pre-commit** runs the legs in the table at the top of the hook when a
-  staged path is one of their inputs, such as `AGENTS.md`,
-  `docs/CHELIS_SURFACE.md`, `packages/chelis-std/SKILL.md`, or
-  `agent-skills/` for the embedded conformance assets. It runs the generator
+  staged path, renamed or deleted ones included, is one of their inputs or
+  outputs, such as `AGENTS.md`, `docs/CHELIS_SURFACE.md`,
+  `packages/chelis-std/SKILL.md`, `agent-skills/`, or the embedded
+  conformance assets themselves. It runs the generator
   on a private, always-removed copy of the staged files, so partial staging,
   `git commit <paths>`, and `git commit -a` are judged by what they commit.
   On disagreement it names both files, prints the write command, and asks
@@ -108,19 +109,17 @@ sources and print the command that fixes them.
   concludes a conflicted merge, and a refused commit leaves the operation
   resumable; `rebase --continue` and conflict-free merges, cherry-picks, and
   rebases do not run it.
-- **pre-push** runs the `--check` form of each tier-0 leg of
-  `scripts/regen_all.py` whose inputs or outputs the push changes, the
-  rejection registry only for spec edits or Rust edits that add or remove an
-  `unimplemented_rejection!` line. On staleness it fails the push and prints
-  the write command. It skips a leg with a one-line notice when the pushed
-  commit is not this worktree's `HEAD`, when the leg's paths have
-  uncommitted changes, or when the registry's helper is not yet built in the
-  cargo target or `Cargo.lock` is not current. It runs only checks that
-  never write into the worktree. CI stays the authority.
+- **pre-push** runs the `--check` form of each pure-Python tier-0 leg of
+  `scripts/regen_all.py` whose inputs or outputs the push changes. On
+  staleness it fails the push and prints the write command. It skips a leg
+  with a one-line notice when the pushed commit is not this worktree's
+  `HEAD` or the leg's paths have uncommitted changes. It runs only checks
+  that never write into the worktree, and no hook ever runs cargo: the
+  rejection registry and the chelis-std bundle are CI's to check.
 
 On a branch that predates `scripts/regen_hooks.py`, both hooks do nothing.
 Without a managed venv or `uv`, pre-commit fails, naming the fix, only when
-a commit stages a leg input, and pre-push prints a notice and lets the push
+a commit stages a leg's input or output, and pre-push prints a notice and lets the push
 through. `git commit --no-verify` and `git push --no-verify` are the only
 bypass.
 

@@ -194,16 +194,6 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
                 "crates/chelis-types/src/rejection_registry_generated.rs",
             ),
             needs="cargo + python",
-            # The numbered chapters supply the atoms; the production module
-            # graph under crates/ supplies the issue citations.
-            inputs=(
-                "scripts/generate_rejection_registries.py",
-                "scripts/check_configuration_closure.py",
-                "spec/",
-                "crates/",
-                "Cargo.toml",
-                "Cargo.lock",
-            ),
         ),
         RegenLeg(
             name="conformance-assets",

@@ -14,7 +14,8 @@
 #
 # The legs, one row each: name|inputs|outputs|check|fix. Inputs and outputs
 # are space-separated repository paths, a trailing `/` naming a directory.
-# A leg runs when a staged path falls under its inputs. scripts/regen_hooks.py
+# A leg runs when a staged path, either side of a rename or a deletion
+# included, falls under its inputs or outputs. scripts/regen_hooks.py
 # then copies the staged version of its inputs and outputs into a private
 # temporary directory and runs `check` there with the managed Python; a check
 # of `-` runs `fix` there instead and reports every output it changes. `fix`
@@ -47,7 +48,7 @@ newline='
 '
 relevant=
 while IFS='|' read -r name inputs outputs check fix; do
-    staged=$(git --literal-pathspecs diff --cached --name-only --no-renames -- $inputs) || exit 2
+    staged=$(git --literal-pathspecs diff --cached --name-only --no-renames -- $inputs $outputs) || exit 2
     if [ -n "$staged" ]; then
         relevant="$relevant$name|$inputs|$outputs|$check|$fix$newline"
     fi

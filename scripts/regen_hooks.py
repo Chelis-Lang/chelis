@@ -11,7 +11,7 @@ worktree's managed Python:
 pre-commit
     Check only; it writes nothing in the worktree or the index. Its legs are
     the `name|inputs|outputs|check|fix` table in `.githooks/pre-commit`; the
-    template picks the rows whose inputs are staged, using git alone, and
+    template picks the rows with a staged input or output, using git alone, and
     passes them here. For each, this copies the staged version of only that
     leg's inputs and outputs into a private temporary directory, which is
     removed on every exit path (SIGINT, SIGTERM and SIGHUP included), and runs
@@ -23,18 +23,18 @@ pre-commit
     what they commit. It never runs cargo.
 
 pre-push
-    Check only; it writes nothing that survives it. It selects tier-0 legs of
-    the `scripts/regen_all.py` manifest by their declared `inputs` and
-    `writes`. For each pushed ref it collects the paths the push changes
-    (against the remote's old value when this clone has it, otherwise against
-    the merge base with the remote's default branch, otherwise every path)
-    and runs the `--check` form of every leg those paths touch. The checks
-    read the working tree, so a leg is checked only when the pushed commit is
-    this worktree's HEAD and the leg's paths are clean; otherwise the hook
-    prints one line saying the check was skipped and why. A leg that needs
-    cargo is skipped the same way when the cargo target is cold, which is
-    when the binary that leg builds is absent. A stale leg fails the push and
-    the hook prints the exact write command. CI stays the authority.
+    Check only; it writes nothing, and no git call it makes takes the index
+    lock. It selects the pure-Python tier-0 legs of the `scripts/regen_all.py`
+    manifest by their declared `inputs` and `writes`; no hook ever runs cargo,
+    so the rejection registry is checked by CI alone. For each pushed ref,
+    peeled to its commit, it collects the paths the push changes (against the
+    remote's old value when this clone has it, otherwise against the merge
+    base with the remote's default branch, otherwise every path) and runs the
+    `--check` form of every leg those paths touch. The checks read the working
+    tree, so a leg is checked only when the pushed commit is this worktree's
+    HEAD and the leg's paths are clean; otherwise the hook prints one line
+    saying the check was skipped and why. A stale leg fails the push and the
+    hook prints the exact write command. CI stays the authority.
 
 The only bypass is git's own `--no-verify`. Exit codes: 0 pass or nothing to
 do, 1 inconsistent or stale, 2 a git or generator command could not run.
@@ -59,45 +59,18 @@ EXIT_PASS = 0
 EXIT_REFUSED = 1
 EXIT_ERROR = 2
 
-# A cargo leg is warm when the binary it builds already exists under the
-# cargo target directory; otherwise its first check is a full build.
-# The legs pre-push may run: those whose --check never writes a file in the
-# worktree, not even transiently. Each was read for that property:
-#   conformance-assets, reviewed-unsupported-wording: compare and print only;
-#   opaque-corpus: regen_all regenerates into a temporary directory;
-#   rejection-registry: compares and prints; its cargo metadata, check and
-#     run calls write only the cargo target directory, which is ignored
-#     build output, and CARGO_LOCK_GUARD below keeps cargo from rewriting
-#     Cargo.lock.
-# The chelis-std bundle check rewrites and restores its outputs, and the
-# bundle is becoming a build-time artifact (chelis#2930), so it is excluded,
-# as is every tier-1 and tier-2 leg. test_regen_hooks.py executes the Python
-# checks against a copy and requires the copy to stay byte-identical.
+# The legs pre-push may run: pure-Python tier-0 legs whose --check never
+# writes a file in the worktree, not even transiently. Each was read for that
+# property: conformance-assets and reviewed-unsupported-wording compare and
+# print; opaque-corpus regenerates into a temporary directory. No hook ever
+# invokes cargo, so the rejection registry, whose check builds the workspace,
+# is CI's alone. The chelis-std bundle check rewrites and restores its
+# outputs, and the bundle is becoming a build-time artifact (chelis#2930), so
+# it is excluded, as is every tier-1 and tier-2 leg. test_regen_hooks.py runs
+# these checks against a copy and requires the copy to stay byte-identical.
 READ_ONLY_CHECKS = frozenset(
-    {"rejection-registry", "conformance-assets", "reviewed-unsupported-wording",
-     "opaque-corpus"}
+    {"conformance-assets", "reviewed-unsupported-wording", "opaque-corpus"}
 )
-
-# cargo rewrites an inconsistent Cargo.lock on any resolving command. Before
-# a cargo leg runs, this asks cargo, offline and without writing, whether the
-# committed lock is current; when it is not, the leg is skipped with a notice.
-CARGO_LOCK_GUARD = ("cargo", "tree", "--locked", "--offline", "--workspace",
-                    "--depth", "0", "--quiet")
-
-WARM_BINARIES: dict[str, str] = {
-    "rejection-registry": "debug/rejection_source_inventory",
-}
-
-
-# The rejection registry's check costs about 27 s even on a warm target, and
-# its `crates/` input covers nearly every push. Only a Rust diff line naming
-# the citation macro can change the issue manifest, so under `crates/` a path
-# selects that leg only when its pushed diff adds or removes such a line. A
-# module-graph edit that drops a citing file without touching it is left to
-# CI. The atom half of the registry (`spec/`) is not narrowed.
-CONTENT_FILTERS: dict[str, tuple[str, str]] = {
-    "rejection-registry": ("crates/", "unimplemented_rejection!"),
-}
 
 
 UV_FALLBACK = "uv run --managed-python --python 3.11 --no-project --isolated python"
@@ -219,7 +192,8 @@ def snapshot_index(
     if not paths:
         return
     completed = subprocess.run(
-        ["git", "checkout-index", "-z", "--stdin", f"--prefix={destination}/"],
+        ["git", "checkout-index", "-z", "--stdin", "--ignore-skip-worktree-bits",
+         f"--prefix={destination}/"],
         cwd=repo,
         env=environ,
         input="\0".join(paths) + "\0",
@@ -262,9 +236,11 @@ def pre_commit(
     inconsistent = []
     with tempfile.TemporaryDirectory(prefix="chelis-pre-commit-") as scratch:
         for leg in parse_commit_legs(table):
-            sources = [path for path in staged if matches(path, leg.inputs)]
-            if not sources:
+            if not any(matches(path, leg.inputs + leg.outputs) for path in staged):
                 continue
+            sources = [path for path in staged if matches(path, leg.inputs)] or [
+                f"the sources ({' '.join(leg.inputs)})"
+            ]
             snapshot = Path(scratch) / leg.name
             snapshot.mkdir()
             snapshot_index(repo, [*leg.inputs, *leg.outputs], snapshot, environ)
@@ -367,30 +343,10 @@ def pushed_legs(
     if base is None:
         paths = git_paths(repo, "ls-tree", "-r", "--name-only", update.local_sha,
                           environ=environ)
-        return touched(legs, paths, outputs=True)
-    paths = git_paths(repo, "diff", "--name-only", "--no-renames", base,
-                      update.local_sha, environ=environ)
-    selected = []
-    for leg in legs:
-        candidates = paths
-        if leg.name in CONTENT_FILTERS:
-            prefix, pattern = CONTENT_FILTERS[leg.name]
-            citing = set(git_paths(
-                repo, "diff", "--name-only", "--no-renames", "-G", pattern, base,
-                update.local_sha, "--", prefix, environ=environ,
-            ))
-            candidates = [
-                path for path in paths
-                if not path.startswith(prefix) or path in citing
-                or matches(path, leg.writes)
-            ]
-        selected.extend(touched([leg], candidates, outputs=True))
-    return selected
-
-
-def cargo_target(repo: Path, environ: dict[str, str]) -> Path:
-    target = Path(environ.get("CARGO_TARGET_DIR", repo / "target"))
-    return target if target.is_absolute() else repo / target
+    else:
+        paths = git_paths(repo, "diff", "--name-only", "--no-renames", base,
+                          update.local_sha, environ=environ)
+    return touched(legs, paths, outputs=True)
 
 
 def check_command(repo: Path, leg: regen_all.RegenLeg, python: str) -> str:
@@ -404,7 +360,7 @@ def pre_push_legs(python: str) -> list[regen_all.RegenLeg]:
     """The manifest legs pre-push may check, in manifest order."""
     return [
         leg for leg in regen_all.regen_legs(python)
-        if leg.tier == 0 and leg.name in READ_ONLY_CHECKS
+        if leg.tier == 0 and leg.needs == "python" and leg.name in READ_ONLY_CHECKS
     ]
 
 
@@ -422,6 +378,14 @@ def pre_push(
     for update in parse_ref_updates(ref_text):
         if is_null(update.local_sha):
             continue
+        # A pushed annotated tag names a tag object; compare its commit.
+        peeled = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{update.local_sha}^{{commit}}"],
+            cwd=repo, env=environ, capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        if not peeled:
+            continue
+        update = RefUpdate(update.local_ref, peeled, update.remote_ref, update.remote_sha)
         selected = pushed_legs(repo, remote, update, legs, environ)
         if not selected:
             continue
@@ -449,27 +413,6 @@ def pre_push(
                     file=out,
                 )
                 continue
-            warm = WARM_BINARIES.get(leg.name)
-            if warm is not None and not (cargo_target(repo, environ) / warm).is_file():
-                print(
-                    f"pre-push: skipping {leg.name}: the cargo target is cold "
-                    f"({cargo_target(repo, environ) / warm} is absent); check it with "
-                    f"{check_command(repo, leg, python)}",
-                    file=out,
-                )
-                continue
-            if warm is not None:
-                guard = regen_all.launch(
-                    quiet_runner, list(CARGO_LOCK_GUARD), cwd=repo, env=environ
-                )
-                if guard.returncode != 0:
-                    print(
-                        f"pre-push: skipping {leg.name}: cargo cannot confirm "
-                        "Cargo.lock is current without rewriting it; run "
-                        f"{check_command(repo, leg, python)}",
-                        file=out,
-                    )
-                    continue
             to_check.append(leg)
 
     if not to_check:
@@ -522,7 +465,9 @@ def main(argv: list[str]) -> int:
     # process before the temporary copy is removed.
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGHUP, terminate)
-    environ = dict(os.environ)
+    # No git call here may take the index lock or refresh the index; a
+    # status refresh would otherwise rewrite .git/index during a push.
+    environ = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
     try:
         if argv[0] == "pre-commit":
             table = argv[1] if len(argv) > 1 else ""
