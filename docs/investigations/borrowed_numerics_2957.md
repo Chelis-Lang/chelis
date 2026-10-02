@@ -250,8 +250,8 @@ Future-proof: the rule is decided fully now even if binary64 lands after binary3
   of -8.4e-11 at -6 (measured by the round-1 review). The lanes still agree, because
   `gelu` is defined as its graph. The algebraically equal graph `x*sigmoid(2u)`, using
   `0.5*(1+tanh(u)) = sigmoid(2u)`, has no `1 + tanh` subtraction. Measured at f32 with exact leaves it stays within 7 ULP
-  on [-6, 10]; the worst case on [-10, -2] is 148 ULP at -9.336, which comes from the
-  rounding of `u` amplified by `exp(2u)`, not from cancellation. The spec amendment
+  on [-2, 10]; it reaches 37 ULP at -5.476 and 148 ULP at -9.336, both from the rounding
+  of `u` amplified by `exp(2u)`, not from cancellation. The spec amendment
   should adopt it.
 - The approximate tier is the planned GPU route, not part of the first spec amendment.
   Adding a new, separately named op later breaks no existing program, and no released
