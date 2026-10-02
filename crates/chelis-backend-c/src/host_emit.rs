@@ -7097,6 +7097,11 @@ impl<'a> HostEmitter<'a> {
             "max",
             "min_elem",
             "max_elem",
+            // C's `&&`, `||` and `!` combine scalars; over `chelis_tensor *`
+            // they combine the pointers. `not` has a tensor arm above.
+            "and",
+            "or",
+            "not",
         ];
         // A TENSOR operand reaching these scalar operator arms normally means
         // the op has no tensor emission arm (the tensor block above returned

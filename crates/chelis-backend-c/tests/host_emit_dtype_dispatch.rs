@@ -805,3 +805,36 @@ fn scalar_to_tensor_coercion_int64_preserves_tag_and_integer_bits() {
         "i64 helper input must not round-trip through f64:\n{src}"
     );
 }
+
+// ---- logical operators over tensor operands ----------------------------
+
+// A checked logical operation over tensors routes through the typed DAG lane
+// ([04-TOT-2]). The host lane's `and` and `or` arms are C's scalar `&&` and
+// `||`; over two `chelis_tensor *` operands they would combine the pointers,
+// so emission refuses with a typed unsupported rather than writing that C.
+#[test]
+fn logical_binary_over_tensor_operands_is_refused_in_host_emission() {
+    for op in ["and", "or"] {
+        let program = make_binary_program(op, Prim::Bool);
+        let error = emit_host_program(&program, "logical_tensor")
+            .expect_err("a tensor `and`/`or` must not reach scalar host emission");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains(&format!("builtin `{op}`"))
+                && rendered.contains("tensor operands in `chelis build` host emission"),
+            "{op}: {rendered}"
+        );
+    }
+}
+
+// The positive twin: `not` keeps its elementwise tensor arm, which reads and
+// writes the bool storage through typed pointers.
+#[test]
+fn logical_not_over_a_tensor_operand_keeps_its_elementwise_arm() {
+    let program = make_unary_program("not", Prim::Bool);
+    let src = emit_host_program(&program, "not_tensor").unwrap();
+    assert!(
+        src.contains("(uint8_t*)") && src.contains("= !__"),
+        "tensor `not` must negate each element through typed bool storage; got:\n{src}"
+    );
+}
