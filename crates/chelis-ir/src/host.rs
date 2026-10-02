@@ -10937,98 +10937,18 @@ fn lower_tuple_get_host_expr(
 }
 
 // ---------------------------------------------------------------------------
-// Host-lane scalar forward-mode AD (chelis#405).
+// Host-lane scalar gradients (chelis#405, chelis#3017).
 //
-// Per `spec/design/archive/phase5_host_scalar_ad.md`, the locked design is
-// forward-mode dual numbers. A scalar function `f: f32 -> f32` (or
-// multi-scalar-param) that lands in the host lane has no reverse-mode
-// transform, so `grad(f, wrt=p)(args)` previously rejected with the
-// unresolved-callable marker. This pass implements the dual transform
-// entirely at compile time: it walks `f`'s pure-scalar body and produces
-// two parallel HostExpr trees — a value tree and a derivative tree — using
-// only the existing host scalar builtins (`add`/`mul`/`sub`/`div`/`neg`/
-// `exp`/`log`/`sin`/`cos`/`tanh`/`sqrt`/`pow`/`abs`/`cast`). No new runtime
-// struct and no new C builtin are required: the dual "struct" is split into
-// two expression trees at lowering time, which is the forward-mode
-// dual-number scheme the spec prescribes (one directional derivative per
-// pass). Both trees carry the operand dtype: every constant, intermediate
-// and result is at the dtype of the values it combines ([04-NUM-8],
-// [05-OP-64]), and a node whose dtype is not determined fails closed.
-//
-// Multi-parameter `wrt=(p1, p2, ...)` emits one derivative tree per
-// parameter (each with that parameter's seed = 1.0 and the rest = 0.0) and
-// combines them into a host tuple — the gradient tuple.
-//
-// `wrt` over a host container (list/dict/ADT/tuple) is rejected: this pass
-// returns `None`, the caller falls through to the unresolved-callable
-// marker, and the existing `cmd_build` guard surfaces the clean diagnostic.
-// Tensor-lane reverse-mode AD is untouched: a grad whose differentiated fn
-// is tensor-typed is handled by `lower_grad_callable_app` on the DAG path
-// and never reaches this host-lane pass.
+// A `grad` over a scalar top-level def lowers through the same reverse-mode
+// DAG that `chelis eval` evaluates (spec/06 section 2.3): one adjoint graph,
+// one traversal and accumulation order, so every lane rounds the same
+// operations. `try_lower_general_list_grad_app` owns that lowering; the
+// helpers below classify scalar defs for it.
 
-/// A dual value: the primal value expression and its derivative expression,
-/// both scalar host expressions of the dual's dtype `ty`.
-#[derive(Clone)]
-struct Dual {
-    value: HostExpr,
-    deriv: HostExpr,
-    ty: HostTypeTerm,
-}
-
-fn scalar_builtin(name: &str, args: Vec<HostExpr>, ty: &HostTypeTerm) -> HostExpr {
-    HostExpr::new(HostExprKind::Builtin {
-        name: name.to_string(),
-        args,
-        ty: ty.clone(),
-    })
-}
-
-/// A float constant at the float dtype `ty`. The lexical carrier is `f64`,
-/// so a constant of any other width is finalized by `cast`, exactly as a
-/// checked `lit` is ([04-LIT-1]). `None` for a non-float or unresolved `ty`.
-fn typed_float_const(value: f64, ty: &HostTypeTerm) -> Option<HostExpr> {
-    let HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim)) = ty else {
-        return None;
-    };
-    if !prim.is_float() {
-        return None;
-    }
-    let literal = HostExpr::new(HostExprKind::Float(value));
-    Some(if *prim == Prim::F64 {
-        literal
-    } else {
-        HostExpr::new(HostExprKind::Builtin {
-            name: "cast".to_string(),
-            args: vec![literal],
-            ty: ty.clone(),
-        })
-    })
-}
-
-/// A seed or constant-derivative value (`0` or `1`) at the scalar dtype `ty`.
-fn typed_seed(seed: i64, ty: &HostTypeTerm) -> Option<HostExpr> {
-    if *ty == HostTypeTerm::Int64 {
-        return Some(HostExpr::new(HostExprKind::Int(seed)));
-    }
-    typed_float_const(seed as f64, ty)
-}
-
-/// The common dtype of the duals an op combines. Operands of one op share a
-/// dtype in checked code (no implicit promotion); a disagreement fails closed
-/// rather than picking a width.
-fn common_dual_type(args: &[Dual]) -> Option<HostTypeTerm> {
-    let (first, rest) = args.split_first()?;
-    rest.iter()
-        .all(|arg| arg.ty == first.ty)
-        .then(|| first.ty.clone())
-}
-
-/// `true` if a host type is a scalar this pass can differentiate. Integer
-/// inputs are accepted (their derivative seed is 0 unless they are the
-/// active `wrt`, but `wrt` over an integer is still a directional
-/// derivative). Everything else — list/dict/ADT/tuple/tensor/option — is a
-/// container and is rejected.
-fn is_dual_scalar_type(ty: &HostTypeTerm) -> bool {
+/// `true` if a host type is a scalar parameter or result the scalar-gradient
+/// classification admits. Everything else (list/dict/ADT/tuple/tensor/option)
+/// is a container with its own reconstruction plan.
+fn is_host_scalar_grad_type(ty: &HostTypeTerm) -> bool {
     matches!(
         ty,
         &HostTypeTerm::Float64 | &HostTypeTerm::Float32 | &HostTypeTerm::Int64
@@ -11072,8 +10992,8 @@ fn resolve_scalar_def<'a>(
     let mut param_tys = Vec::new();
     for (index, param) in params_list.children_slice().iter().enumerate() {
         let pname = param_name(param)?;
-        // An undetermined parameter dtype fails closed: the dual trees are
-        // built at the parameter's dtype, never at an assumed width.
+        // An undetermined parameter dtype fails closed rather than assuming
+        // a width.
         let pty = param_host_type(param).or_else(|| {
             lookup_declared_fn_type(program, name).and_then(|(tys, _)| tys.get(index).cloned())
         })?;
@@ -11082,133 +11002,6 @@ fn resolve_scalar_def<'a>(
     }
     let body = fn_kids.get(1)?;
     Some((param_names, param_tys, body))
-}
-
-/// Try to lower `app(grad(f, wrt=...), arg0, ...)` as a host-lane scalar
-/// forward-mode derivative. Returns `Some(host_expr)` on success, `None`
-/// when this is not a scalar-grad app this pass handles (tensor lane,
-/// structured `wrt`, unsupported op, unresolvable callee — all fall through
-/// to the existing unresolved-callable-marker rejection path).
-fn try_lower_scalar_grad_app(
-    list: &Node,
-    program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
-    tensor_helpers: &mut TensorHelperSink,
-) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
-    let kids = list.children_slice();
-    let Some(callee) = kids.first().and_then(as_node) else {
-        return Ok(None);
-    };
-    if callee.tag() != DeepTag::Grad {
-        return Ok(None);
-    }
-    // The function being differentiated: `(grad {wrt:...} (var f) (lit 0))`.
-    let grad_kids = callee.children_slice();
-    let Some(fn_var) = grad_kids.first().and_then(as_node) else {
-        return Ok(None);
-    };
-    if fn_var.tag() != DeepTag::Var {
-        return Ok(None);
-    }
-    let Some(fn_name) = fn_var.children_slice().first().and_then(symbol_name) else {
-        return Ok(None);
-    };
-    let fn_name = fn_name.to_string();
-
-    let Some((param_names, param_tys, body)) = resolve_scalar_def(program, &fn_name) else {
-        return Ok(None);
-    };
-
-    // Return type must be scalar; reject (fall through) otherwise. We infer
-    // it from the def's declared signature when available.
-    if let Some((_, ret_ty)) = lookup_declared_fn_type(program, &fn_name)
-        && !is_dual_scalar_type(&ret_ty)
-    {
-        return Ok(None);
-    }
-    // Every parameter must be a scalar. A structured parameter that is not the
-    // `wrt` target is still fine to treat as a constant, but the call args
-    // would be containers we cannot evaluate in the dual tree, so reject the
-    // whole app (the recursive structured-AD lane below owns those calls).
-    if param_tys.iter().any(|ty| !is_dual_scalar_type(ty)) {
-        return Ok(None);
-    }
-
-    // Resolve the `wrt` parameter names from the grad meta. Absent `wrt`
-    // means "all parameters" (single-param defs commonly omit it).
-    let Some(wrt_names) = grad_wrt_param_names(callee, &param_names) else {
-        return Ok(None);
-    };
-    if wrt_names.is_empty() {
-        return Ok(None);
-    }
-
-    // Lower each call argument once into a value HostExpr. Their derivative
-    // seed is determined per `wrt` pass below.
-    let call_args = &kids[1..];
-    if call_args.len() != param_names.len() {
-        return Ok(None);
-    }
-    let arg_values: Vec<HostExpr> = call_args
-        .iter()
-        .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
-        .collect::<Result<Vec<_>, _>>()?;
-    // Each argument enters its parameter's dual at that parameter's dtype.
-    if arg_values
-        .iter()
-        .zip(&param_tys)
-        .any(|(value, ty)| host_expr_type(value) != *ty)
-    {
-        return Ok(None);
-    }
-
-    // One forward pass per `wrt` parameter.
-    let mut derivs = Vec::new();
-    let mut deriv_tys = Vec::new();
-    for wrt_name in &wrt_names {
-        let mut env: UnordMap<String, Dual> = UnordMap::new();
-        for (idx, pname) in param_names.iter().enumerate() {
-            let seed = i64::from(pname == wrt_name);
-            let Some(deriv) = typed_seed(seed, &param_tys[idx]) else {
-                return Ok(None);
-            };
-            env.insert(
-                pname.clone(),
-                Dual {
-                    value: arg_values[idx].clone(),
-                    deriv,
-                    ty: param_tys[idx].clone(),
-                },
-            );
-        }
-        let Some(dual) = dual_eval(body, &env, program, 0) else {
-            return Ok(None);
-        };
-        // The gradient with respect to a parameter has that parameter's
-        // dtype. A body that casts to another width carries its tangent at
-        // that width; the result is converted back once, as the adjoint of
-        // that cast would be.
-        let Some(wrt_idx) = param_names.iter().position(|name| name == wrt_name) else {
-            return Ok(None);
-        };
-        let wrt_ty = &param_tys[wrt_idx];
-        let deriv = if dual.ty == *wrt_ty {
-            dual.deriv
-        } else {
-            scalar_builtin("cast", vec![dual.deriv], wrt_ty)
-        };
-        derivs.push(deriv);
-        deriv_tys.push(wrt_ty.clone());
-    }
-
-    if derivs.len() == 1 {
-        Ok(derivs.pop())
-    } else {
-        Ok(Some(HostExpr::new(HostExprKind::Tuple(
-            derivs,
-            HostTypeTerm::Tuple(deriv_tys),
-        ))))
-    }
 }
 
 #[derive(Clone)]
@@ -11304,7 +11097,7 @@ fn resolve_list_grad_shape_expr(
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> Result<Expr, crate::lower::LowerDiagnostic> {
     let mut resolved = actual.clone();
-    for _ in 0..=MAX_DUAL_INLINE_DEPTH {
+    for _ in 0..=MAX_LIST_SHAPE_RESOLUTION_DEPTH {
         if static_list_spine_items(&resolved).is_some() {
             break;
         }
@@ -11553,92 +11346,61 @@ fn pack_grad_roots(plan: &GradPackPlan, roots: &mut impl Iterator<Item = HostExp
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct ScalarGradBodyRequirements {
-    has_tensor_value: bool,
-    reaches_host_collection_transform: bool,
-}
-
-impl ScalarGradBodyRequirements {
-    fn merge(&mut self, other: Self) {
-        self.has_tensor_value |= other.has_tensor_value;
-        self.reaches_host_collection_transform |= other.reaches_host_collection_transform;
-    }
-}
-
-/// Classify the body rather than its public signature when choosing between
-/// scalar-host AD and reverse-DAG AD. A scalar-returning function can still
-/// contain rank-zero tensor values through [05-OP-50], including in a called
-/// scalar helper. Conversely, host collection transforms carry callbacks and
-/// must keep the deliberate scalar-host rejection even when their callbacks
-/// contain tensor intermediates.
-fn scalar_grad_body_requirements(
+/// `true` if a scalar body, or a scalar def it calls, reaches a host
+/// collection transform. Those transforms carry callbacks and keep the
+/// deliberate scalar-host rejection even when their callbacks contain tensor
+/// intermediates.
+fn scalar_grad_body_reaches_host_collection_transform(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
     visiting: &mut UnordSet<String>,
-) -> ScalarGradBodyRequirements {
-    let mut requirements = ScalarGradBodyRequirements {
-        has_tensor_value: matches!(
-            expr_host_type(expr, program, scope),
-            HostTypeTerm::Tensor(_)
-        ),
-        reaches_host_collection_transform: false,
-    };
-
+) -> bool {
     if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
         && let Some(name) = kids.first().and_then(direct_var_name)
     {
-        let scalar_def = resolve_scalar_def(program, name);
-        if scalar_def.is_none() {
-            requirements.reaches_host_collection_transform |= matches!(
+        match resolve_scalar_def(program, name) {
+            None if matches!(
                 terminal_name(name),
                 "map" | "filter" | "fold" | "scan" | "partition" | "flat_map"
-            );
-        }
-        if !requirements.reaches_host_collection_transform
-            && let Some((param_names, param_tys, body)) = scalar_def
-            && visiting.insert(name.to_string())
-        {
-            let callee_scope = param_names
-                .iter()
-                .cloned()
-                .zip(param_tys.iter().cloned())
-                .collect();
-            requirements.merge(scalar_grad_body_requirements(
-                body,
-                program,
-                &callee_scope,
-                visiting,
-            ));
-            visiting.remove(name);
+            ) =>
+            {
+                return true;
+            }
+            Some((_, _, body)) if visiting.insert(name.to_string()) => {
+                let reaches =
+                    scalar_grad_body_reaches_host_collection_transform(body, program, visiting);
+                visiting.remove(name);
+                if reaches {
+                    return true;
+                }
+            }
+            _ => {}
         }
     }
 
+    let mut reaches = false;
     visit_semantic_expr_children(expr, |child| {
-        requirements.merge(scalar_grad_body_requirements(
-            child, program, scope, visiting,
-        ));
+        reaches |= scalar_grad_body_reaches_host_collection_transform(child, program, visiting);
     });
-    requirements
+    reaches
 }
 
-fn pure_scalar_callable_needs_reverse_dag(program: &HostLoweringSession<'_>, name: &str) -> bool {
+/// A pure-scalar callable's gradient lowers through the reverse DAG unless
+/// its body reaches a host collection transform or a recursive top-level
+/// def, both of which decline to the unresolved-transform marker.
+fn pure_scalar_callable_lowers_through_reverse_dag(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+) -> bool {
     if top_level_fn_needs_host_lane_tensor_lowering(program, name) {
         return false;
     }
-    let Some((param_names, param_tys, body)) = resolve_scalar_def(program, name) else {
+    let Some((_, _, body)) = resolve_scalar_def(program, name) else {
         return false;
     };
-    let scope = param_names
-        .iter()
-        .cloned()
-        .zip(param_tys.iter().cloned())
-        .collect();
     let mut visiting = UnordSet::new();
     visiting.insert(name.to_string());
-    let requirements = scalar_grad_body_requirements(body, program, &scope, &mut visiting);
-    requirements.has_tensor_value && !requirements.reaches_host_collection_transform
+    !scalar_grad_body_reaches_host_collection_transform(body, program, &mut visiting)
 }
 
 /// Reconstruct primitive and finite recursive cotangents from one reverse DAG.
@@ -11666,21 +11428,20 @@ fn try_lower_general_list_grad_app(
     let Some(fn_name) = grad_kids.first().and_then(direct_var_name) else {
         return Ok(None);
     };
-    // A scalar signature does not determine the lowering route. Pure scalar
-    // arithmetic stays at the scalar-host AD boundary, and an unsupported
-    // host collection transform deliberately declines there to the
-    // unresolved-transform marker. A body with [05-OP-50] tensor values needs
-    // the reverse DAG even when its parameters and result are all scalar.
+    // Every gradient, pure-scalar ones included, lowers through the reverse
+    // DAG `chelis eval` evaluates (spec/06 section 2.3), so each lane rounds
+    // the same adjoint operations in the same accumulation order
+    // (chelis#3017). A pure-scalar body that reaches a host collection
+    // transform deliberately declines to the unresolved-transform marker.
     //
     // This body-sensitive decision precedes lowering: mixed/tensor callables
-    // and DAG-backed scalar bodies still enter the #2078 path, so their
-    // forward extent failures and deliberate DAG diagnostics propagate
-    // without fallback.
+    // and scalar bodies enter the #2078 path, so their forward extent
+    // failures and deliberate DAG diagnostics propagate without fallback.
     let pure_scalar_callable =
         lookup_declared_fn_type(program, fn_name).is_some_and(|(parameters, result)| {
-            parameters.iter().all(is_dual_scalar_type) && is_dual_scalar_type(&result)
+            parameters.iter().all(is_host_scalar_grad_type) && is_host_scalar_grad_type(&result)
         });
-    if pure_scalar_callable && !pure_scalar_callable_needs_reverse_dag(program, fn_name) {
+    if pure_scalar_callable && !pure_scalar_callable_lowers_through_reverse_dag(program, fn_name) {
         return Ok(None);
     }
     let Some((DeepTag::Fn, _, fn_kids)) =
@@ -11975,372 +11736,10 @@ fn grad_wrt_param_names(grad_list: &Node, param_names: &[String]) -> Option<Vec<
     }
 }
 
-/// Maximum nesting of inlined user-defined scalar calls and `let` blocks the
-/// dual transform will follow. A non-recursive scalar def nests shallowly;
-/// the cap exists so a (mutually) recursive scalar callee fails closed —
-/// falling through to the unresolved-callable-marker rejection, not looping
-/// forever or producing an unbounded dual tree.
-const MAX_DUAL_INLINE_DEPTH: usize = 64;
-
-/// Forward-mode dual evaluation of a pure-scalar Deep body. Returns `None`
-/// for any construct this pass does not support (non-scalar op, unresolved
-/// var, control flow) so the caller falls through to the rejection path.
-/// `depth` tracks inlined-call / `let` nesting against `MAX_DUAL_INLINE_DEPTH`.
-fn dual_eval(
-    expr: &Expr,
-    env: &UnordMap<String, Dual>,
-    program: &HostLoweringSession<'_>,
-    depth: usize,
-) -> Option<Dual> {
-    if depth > MAX_DUAL_INLINE_DEPTH {
-        return None;
-    }
-    match expr {
-        Expr::Node(list, _) => match list.tag() {
-            // A literal is a constant at its checked dtype ([04-LIT-1]); a
-            // literal without one has no width this pass may assume.
-            DeepTag::Lit => {
-                let prim = expr_scalar_primitive(expr)?;
-                let ty = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim));
-                let value = match list.children_slice().first()? {
-                    Expr::Atom(Atom::Float(v), _) => typed_float_const(*v, &ty)?,
-                    Expr::Atom(Atom::Int(v), _) if ty == HostTypeTerm::Int64 => {
-                        HostExpr::new(HostExprKind::Int(*v))
-                    }
-                    // An integer-source float literal casts from the exact
-                    // integer, never through `f64`.
-                    Expr::Atom(Atom::Int(v), _) if prim.is_float() => {
-                        HostExpr::new(HostExprKind::Builtin {
-                            name: "cast".to_string(),
-                            args: vec![HostExpr::new(HostExprKind::Int(*v))],
-                            ty: ty.clone(),
-                        })
-                    }
-                    _ => return None,
-                };
-                Some(Dual {
-                    value,
-                    deriv: typed_seed(0, &ty)?,
-                    ty,
-                })
-            }
-            DeepTag::Var => {
-                let name = list.children_slice().first().and_then(symbol_name)?;
-                env.get(name).cloned()
-            }
-            DeepTag::App => {
-                let dual = dual_eval_app(expr, list, env, program, depth)?;
-                // The application's checked dtype, when stamped, must be the
-                // dtype the dual trees were built at.
-                match expr_scalar_primitive(expr) {
-                    Some(prim)
-                        if dual.ty != HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim)) =>
-                    {
-                        None
-                    }
-                    _ => Some(dual),
-                }
-            }
-            // `(let (bind n0 v0 n1 v1 ...) body)`: forward-mode through a
-            // block body. Each binding's value is dual-evaluated in the
-            // environment built so far (sequential scoping — a later binding
-            // may reference an earlier one), then added to a cloned
-            // environment under which the body is evaluated. The value and
-            // derivative trees are substituted at each use site rather than
-            // bound to host-let variables; this is correct because the dual
-            // trees are pure scalar arithmetic with no side effects. The
-            // canonical scalar-AD shapes (single-variable derivatives,
-            // Black-Scholes Greeks) reuse each intermediate a small number of
-            // times, so the substituted trees stay small.
-            DeepTag::Let => dual_eval_let(list, env, program, depth),
-            DeepTag::Block => {
-                // chelis#859: dual-eval every child in order; the value is
-                // the last child's. Host scalar bodies are pure, so the
-                // non-last children contribute nothing to the duals.
-                let kids = list.children_slice();
-                let (last, init) = kids.split_last()?;
-                for child in init {
-                    let _ = dual_eval(child, env, program, depth)?;
-                }
-                dual_eval(last, env, program, depth)
-            }
-            _ => None,
-        },
-        Expr::MetaExpr(meta, _) => dual_eval(&meta.expr, env, program, depth),
-        _ => None,
-    }
-}
-
-/// Forward-mode dual evaluation of a `(let (bind ...) body)` block. Returns
-/// `None` if the binding structure is unexpected or any bound value / the
-/// body contains a construct `dual_eval` does not support.
-fn dual_eval_let(
-    list: &Node,
-    env: &UnordMap<String, Dual>,
-    program: &HostLoweringSession<'_>,
-    depth: usize,
-) -> Option<Dual> {
-    let kids = list.children_slice();
-    let bind_list = kids.first().and_then(as_node)?;
-    if bind_list.tag() != DeepTag::Bind {
-        return None;
-    }
-    let body = kids.get(1)?;
-    let bind_kids = bind_list.children_slice();
-    // Bindings are alternating `name value` pairs; an odd count is malformed.
-    if !bind_kids.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut local_env = env.clone();
-    for pair in bind_kids.as_chunks::<2>().0 {
-        let name = symbol_name(&pair[0])?;
-        let dual = dual_eval(&pair[1], &local_env, program, depth + 1)?;
-        local_env.insert(name.to_string(), dual);
-    }
-    dual_eval(body, &local_env, program, depth + 1)
-}
-
-fn dual_eval_app(
-    app_expr: &Expr,
-    list: &Node,
-    env: &UnordMap<String, Dual>,
-    program: &HostLoweringSession<'_>,
-    depth: usize,
-) -> Option<Dual> {
-    let kids = list.children_slice();
-    let callee = kids.first().and_then(as_node)?;
-    if callee.tag() != DeepTag::Var {
-        return None;
-    }
-    let op = callee.children_slice().first().and_then(symbol_name)?;
-    let arg_exprs = &kids[1..];
-    let mut args: Vec<Dual> = Vec::new();
-    for a in arg_exprs {
-        args.push(dual_eval(a, env, program, depth)?);
-    }
-
-    // Helper closures over scalar builtins.
-    let v = |d: &Dual| d.value.clone();
-    let dv = |d: &Dual| d.deriv.clone();
-    // Every builtin arm computes, and builds its constants, at its operands'
-    // common dtype; a user-defined callee binds its own parameter dtypes.
-    let ty = || common_dual_type(&args);
-    let dual = |value: HostExpr, deriv: HostExpr, ty: HostTypeTerm| Dual { value, deriv, ty };
-
-    match (op, args.len()) {
-        ("add", 2) => {
-            let ty = ty()?;
-            Some(dual(
-                scalar_builtin("add", vec![v(&args[0]), v(&args[1])], &ty),
-                scalar_builtin("add", vec![dv(&args[0]), dv(&args[1])], &ty),
-                ty,
-            ))
-        }
-        ("sub", 2) => {
-            let ty = ty()?;
-            Some(dual(
-                scalar_builtin("sub", vec![v(&args[0]), v(&args[1])], &ty),
-                scalar_builtin("sub", vec![dv(&args[0]), dv(&args[1])], &ty),
-                ty,
-            ))
-        }
-        ("mul", 2) => {
-            // (uv)' = u'v + uv'
-            let ty = ty()?;
-            let lhs = scalar_builtin("mul", vec![dv(&args[0]), v(&args[1])], &ty);
-            let rhs = scalar_builtin("mul", vec![v(&args[0]), dv(&args[1])], &ty);
-            Some(dual(
-                scalar_builtin("mul", vec![v(&args[0]), v(&args[1])], &ty),
-                scalar_builtin("add", vec![lhs, rhs], &ty),
-                ty,
-            ))
-        }
-        ("div", 2) => {
-            // (u/v)' = u'/v - (q v')/v with q = u/v: the same rounded
-            // operations as the reverse-mode adjoint (`grad.rs`, `Div`:
-            // g/b and g y / b), so a lane taking either mode agrees.
-            let ty = ty()?;
-            let quotient = scalar_builtin("div", vec![v(&args[0]), v(&args[1])], &ty);
-            let through_u = scalar_builtin("div", vec![dv(&args[0]), v(&args[1])], &ty);
-            let q_dv = scalar_builtin("mul", vec![quotient.clone(), dv(&args[1])], &ty);
-            let through_v = scalar_builtin("div", vec![q_dv, v(&args[1])], &ty);
-            let deriv = scalar_builtin("sub", vec![through_u, through_v], &ty);
-            Some(dual(quotient, deriv, ty))
-        }
-        ("neg", 1) => {
-            let ty = ty()?;
-            Some(dual(
-                scalar_builtin("neg", vec![v(&args[0])], &ty),
-                scalar_builtin("neg", vec![dv(&args[0])], &ty),
-                ty,
-            ))
-        }
-        ("exp", 1) => {
-            // (e^u)' = e^u * u'
-            let ty = ty()?;
-            let value = scalar_builtin("exp", vec![v(&args[0])], &ty);
-            let deriv = scalar_builtin("mul", vec![value.clone(), dv(&args[0])], &ty);
-            Some(dual(value, deriv, ty))
-        }
-        ("log", 1) => {
-            // (ln u)' = u' / u
-            let ty = ty()?;
-            Some(dual(
-                scalar_builtin("log", vec![v(&args[0])], &ty),
-                scalar_builtin("div", vec![dv(&args[0]), v(&args[0])], &ty),
-                ty,
-            ))
-        }
-        ("sin", 1) => {
-            // (sin u)' = cos(u) * u'
-            let ty = ty()?;
-            let cos = scalar_builtin("cos", vec![v(&args[0])], &ty);
-            Some(dual(
-                scalar_builtin("sin", vec![v(&args[0])], &ty),
-                scalar_builtin("mul", vec![cos, dv(&args[0])], &ty),
-                ty,
-            ))
-        }
-        ("cos", 1) => {
-            // (cos u)' = -sin(u) * u'
-            let ty = ty()?;
-            let sin = scalar_builtin("sin", vec![v(&args[0])], &ty);
-            let neg_sin = scalar_builtin("neg", vec![sin], &ty);
-            Some(dual(
-                scalar_builtin("cos", vec![v(&args[0])], &ty),
-                scalar_builtin("mul", vec![neg_sin, dv(&args[0])], &ty),
-                ty,
-            ))
-        }
-        ("tanh", 1) => {
-            // (tanh u)' = (1 - tanh(u)^2) * u'
-            let ty = ty()?;
-            let t = scalar_builtin("tanh", vec![v(&args[0])], &ty);
-            let t2 = scalar_builtin("mul", vec![t.clone(), t.clone()], &ty);
-            let one_minus = scalar_builtin("sub", vec![typed_float_const(1.0, &ty)?, t2], &ty);
-            let deriv = scalar_builtin("mul", vec![one_minus, dv(&args[0])], &ty);
-            Some(dual(t, deriv, ty))
-        }
-        ("sqrt", 1) => {
-            // (sqrt u)' = u' / (2 sqrt(u))
-            let ty = ty()?;
-            let s = scalar_builtin("sqrt", vec![v(&args[0])], &ty);
-            let den = scalar_builtin("mul", vec![typed_float_const(2.0, &ty)?, s.clone()], &ty);
-            let deriv = scalar_builtin("div", vec![dv(&args[0]), den], &ty);
-            Some(dual(s, deriv, ty))
-        }
-        ("pow", 2) => {
-            // Only constant exponents are supported in forward mode here:
-            // (u^c)' = c * u^(c-1) * u'. A non-constant exponent (`deriv`
-            // not identically zero) needs the general
-            // u^v * (v' ln u + v u'/u) form; reject to stay correct. `c - 1`
-            // is computed at the operand dtype, not folded at `f64`.
-            let ty = ty()?;
-            float_const(&args[1].value)?;
-            if !is_zero_float(&args[1].deriv) {
-                return None;
-            }
-            let exponent = v(&args[1]);
-            let exponent_less_one = scalar_builtin(
-                "sub",
-                vec![exponent.clone(), typed_float_const(1.0, &ty)?],
-                &ty,
-            );
-            let pow_inner = scalar_builtin("pow", vec![v(&args[0]), exponent_less_one], &ty);
-            let coeff = scalar_builtin("mul", vec![exponent, pow_inner], &ty);
-            Some(dual(
-                scalar_builtin("pow", vec![v(&args[0]), v(&args[1])], &ty),
-                scalar_builtin("mul", vec![coeff, dv(&args[0])], &ty),
-                ty,
-            ))
-        }
-        // `cast` between scalar precisions is linear: the value and the
-        // derivative are both converted to the checked target dtype, which
-        // the application carries. A cast without a stamped target has no
-        // width this pass may assume.
-        // `cast_trunc` deliberately has NO arm here: falling through to
-        // the user-call path yields `None`, which is the [05-OP-6]
-        // `no_grad` rejection. A passthrough dual would be the silent
-        // zero-derivative the atom forbids.
-        ("cast", 1) => {
-            let target = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(expr_scalar_primitive(
-                app_expr,
-            )?));
-            if !is_dual_scalar_type(&target) {
-                return None;
-            }
-            if target == args[0].ty {
-                return Some(args[0].clone());
-            }
-            Some(dual(
-                scalar_builtin("cast", vec![v(&args[0])], &target),
-                scalar_builtin("cast", vec![dv(&args[0])], &target),
-                target,
-            ))
-        }
-        // A call to a user-defined scalar def (`d1(...)`, `normal_cdf(...)`):
-        // inline the callee's body into the dual tree. The callee must be a
-        // top-level scalar def with scalar parameters; its body is
-        // dual-evaluated in a fresh environment binding each parameter to the
-        // corresponding already-computed dual argument (the chain rule is
-        // carried by the argument derivatives). `resolve_scalar_def` rejects
-        // non-scalar parameters, and `dual_eval` rejects any body construct
-        // this pass does not support, so an unsupported callee falls through
-        // to `None` (the unresolved-callable-marker rejection path).
-        _ => dual_eval_user_call(op, &args, program, depth),
-    }
-}
-
-/// Inline a call to a user-defined scalar def into the dual tree. Returns
-/// `None` when the callee is not a resolvable scalar def, its arity does not
-/// match, an argument's dtype is not its parameter's, or its body uses an
-/// unsupported construct.
-fn dual_eval_user_call(
-    op: &str,
-    args: &[Dual],
-    program: &HostLoweringSession<'_>,
-    depth: usize,
-) -> Option<Dual> {
-    let (param_names, param_tys, body) = resolve_scalar_def(program, op)?;
-    if param_names.len() != args.len() {
-        return None;
-    }
-    if param_tys.iter().any(|ty| !is_dual_scalar_type(ty)) {
-        return None;
-    }
-    if args.iter().zip(&param_tys).any(|(arg, ty)| arg.ty != *ty) {
-        return None;
-    }
-    let mut call_env: UnordMap<String, Dual> = UnordMap::new();
-    for (name, arg) in param_names.iter().zip(args.iter()) {
-        call_env.insert(name.clone(), arg.clone());
-    }
-    dual_eval(body, &call_env, program, depth + 1)
-}
-
-/// A scalar literal under its dtype finalization: `Float`/`Int`, or a `cast`
-/// of one (a non-`f64` float constant, see `typed_float_const`).
-fn scalar_literal(expr: &HostExpr) -> &HostExpr {
-    match &expr.kind {
-        HostExprKind::Builtin { name, args, .. } if name == "cast" && args.len() == 1 => &args[0],
-        _ => expr,
-    }
-}
-
-/// Extract a compile-time float constant from a HostExpr if it is a literal.
-fn float_const(expr: &HostExpr) -> Option<f64> {
-    match &scalar_literal(expr).kind {
-        HostExprKind::Float(v) => Some(*v),
-        HostExprKind::Int(v) => Some(*v as f64),
-        _ => None,
-    }
-}
-
-fn is_zero_float(expr: &HostExpr) -> bool {
-    let expr = scalar_literal(expr);
-    matches!(&expr.kind, HostExprKind::Float(v) if *v == 0.0)
-        || matches!(&expr.kind, HostExprKind::Int(0))
-}
+/// Maximum number of top-level value indirections followed while resolving a
+/// gradient target's static list spine. A cycle fails closed rather than
+/// looping.
+const MAX_LIST_SHAPE_RESOLUTION_DEPTH: usize = 64;
 
 fn lower_app_host_expr(
     app_expr: &Expr,
@@ -12358,17 +11757,6 @@ fn lower_app_host_expr(
         tensor_helpers,
         expected_ty,
     )? {
-        return Ok(grad_lowered);
-    }
-    // chelis#405: host-lane scalar forward-mode AD. When the callee is a
-    // `grad(...)` form differentiating a scalar `f32 -> f32` (or
-    // multi-scalar-param) top-level def, emit the dual-propagated derivative
-    // directly. A `None` return falls through to the generic path, which
-    // produces the unresolved-callable marker; grad/vmap-applying
-    // programs get the `cmd_build` workaround text and everything else
-    // is rejected at ABI projection (container `wrt`, tensor-lane grad,
-    // unsupported op).
-    if let Some(grad_lowered) = try_lower_scalar_grad_app(list, program, scope, tensor_helpers)? {
         return Ok(grad_lowered);
     }
     let kids = list.children_slice();

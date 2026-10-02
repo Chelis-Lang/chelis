@@ -1,13 +1,20 @@
-//! chelis#2993: the host-lane forward-mode scalar AD pass builds its dual
-//! trees at the operand dtype ([04-NUM-8], [05-OP-64]). A top-level f32
-//! `grad` application lowers to an f32 result whose every intermediate is
-//! f32 and whose every constant is finalized to f32; nothing defaults to
-//! double.
+//! chelis#2993 and chelis#3017: a host-lane `grad` over a scalar def lowers
+//! through the reverse-mode DAG that `chelis eval` evaluates (spec/06 section
+//! 2.3), at the operand dtype ([04-NUM-8]). The lowered value is one rank-zero
+//! tensor helper projected to a scalar; every helper node is at the operand
+//! dtype; and the helper computes the same bits as the eval lane's DAG for the
+//! same application.
+use chelis_deep::ExprCarrier;
+use chelis_deep::ast::{Atom, Expr};
 use chelis_ir::ConcreteHostType as HostType;
+use chelis_ir::eval::eval_tensor_roots_with_strict;
 use chelis_ir::host::{
-    ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind, try_lower_compiled_program,
+    ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind, HostTensorHelper,
+    try_lower_compiled_program,
 };
+use chelis_ir::lower::lower_subexpr_program;
 use chelis_types::types::Prim;
+use chelis_unord::UnordMap;
 
 fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
@@ -31,8 +38,9 @@ fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
     chelis_types::check_linearity(&checked).expect("linearity")
 }
 
-/// The lowered `out` global: its declared host type and value.
-fn lowered_out(src: &str) -> (HostType, HostExpr) {
+/// The lowered `out` global: its declared host type and value, and the
+/// program's global tensor helpers.
+fn lowered_out(src: &str) -> (HostType, HostExpr, Vec<HostTensorHelper>) {
     let compiled = try_lower_compiled_program(&checked_surf(src)).expect("host lowering");
     let host = compiled
         .host
@@ -42,147 +50,171 @@ fn lowered_out(src: &str) -> (HostType, HostExpr) {
         .into_iter()
         .find(|binding| binding.name.rsplit('.').next() == Some("out"))
         .expect("an `out` global");
-    (out.ty, out.value)
+    (out.ty, out.value, host.global_tensor_helpers)
 }
 
-/// Every scalar dtype the tree computes at, and every float literal that is
-/// not finalized by a `cast` (an untyped `f64` constant).
-#[derive(Default)]
-struct Widths {
-    computed: Vec<(String, HostType)>,
-    bare_float_literals: Vec<f64>,
+/// The helper a scalar gradient lowers to: `let g = <helper>() in
+/// tensor_to_scalar(g)`, with the helper's rank-zero result and the
+/// projection both at `prim`.
+fn gradient_helper<'a>(
+    src: &str,
+    value: &HostExpr,
+    helpers: &'a [HostTensorHelper],
+    prim: Prim,
+) -> &'a HostTensorHelper {
+    let HostExprKind::Let { bindings, body, ty } = &value.kind else {
+        panic!("{src}: a scalar gradient is a bound reverse-DAG result: {value:?}");
+    };
+    assert_eq!(*ty, HostType::Scalar(prim), "{src}");
+    let [binding] = bindings.as_slice() else {
+        panic!("{src}: one gradient binding: {value:?}");
+    };
+    let HostExprKind::TensorCall { helper, args, .. } = &binding.value.kind else {
+        panic!("{src}: the gradient is a tensor helper call: {value:?}");
+    };
+    assert!(args.is_empty(), "{src}: a top-level gradient takes no inputs");
+    let HostExprKind::Builtin { name, ty, .. } = &body.kind else {
+        panic!("{src}: the gradient is projected to a scalar: {value:?}");
+    };
+    assert_eq!(
+        (name.as_str(), ty),
+        ("tensor_to_scalar", &HostType::Scalar(prim)),
+        "{src}"
+    );
+    let helper = &helpers[*helper];
+    assert!(helper.output.dims.is_empty(), "{src}: a rank-zero gradient");
+    assert_eq!(helper.output.precision, prim, "{src}");
+    helper
 }
 
-fn collect(expr: &HostExpr, under_cast: bool, out: &mut Widths) {
-    match &expr.kind {
-        HostExprKind::Float(value) => {
-            if !under_cast {
-                out.bare_float_literals.push(*value);
+fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
+    let ExprCarrier::DecodedNode(chelis_deep::DeepTag::Def, _, kids) = expr.carrier() else {
+        return None;
+    };
+    let name = match kids.first()? {
+        Expr::Atom(Atom::Name(name), _) => name.clone(),
+        _ => return None,
+    };
+    Some((name, kids.get(1)?.clone()))
+}
+
+/// The eval lane's value for `out`: the subexpression lowered to a DAG and
+/// evaluated, as `chelis eval` does for a gradient application.
+fn eval_lane_out(src: &str) -> String {
+    let checked = checked_surf(src);
+    let mut defs = UnordMap::new();
+    let mut out_expr = None;
+    for expr in checked.exprs() {
+        if let Some((name, body)) = def_name_and_body(expr) {
+            if name == "out" {
+                out_expr = Some(body.clone());
             }
+            defs.insert(name, body);
         }
-        HostExprKind::Int(_) | HostExprKind::Var(..) => {}
-        HostExprKind::Builtin { name, args, ty } => {
-            out.computed.push((name.clone(), ty.clone()));
-            for arg in args {
-                collect(arg, name == "cast", out);
-            }
-        }
-        HostExprKind::Tuple(items, _) => {
-            for item in items {
-                collect(item, false, out);
-            }
-        }
-        HostExprKind::FormalIngress { value, .. } => collect(value, under_cast, out),
-        HostExprKind::ResultClaimScope { body, .. } => collect(body, under_cast, out),
-        other => panic!("unexpected node in a scalar dual tree: {other:?}"),
     }
+    let type_env = checked
+        .type_env()
+        .iter()
+        .map(|(name, ty)| (name.clone(), ty.clone()))
+        .collect();
+    let dag = lower_subexpr_program(
+        &out_expr.expect("source must define out"),
+        UnordMap::new(),
+        type_env,
+        defs,
+    );
+    let roots = dag.roots().to_vec();
+    let values = eval_tensor_roots_with_strict(&dag, &roots, |_| None).expect("eval lane");
+    format!("{:?}", values[&roots[0]].storage())
 }
 
-fn widths(expr: &HostExpr) -> Widths {
-    let mut out = Widths::default();
-    collect(expr, false, &mut out);
-    out
+fn helper_value(helper: &HostTensorHelper) -> String {
+    let roots = helper.dag.roots().to_vec();
+    assert_eq!(roots.len(), 1, "one gradient root");
+    let values = eval_tensor_roots_with_strict(&helper.dag, &roots, |_| None).expect("helper");
+    format!("{:?}", values[&roots[0]].storage())
 }
 
-/// The issue's oracle bodies, each `f: T -> T`. `{t}` is the dtype.
-const BODIES: [&str; 4] = ["mul(exp(x), x)", "div(1.0{t}, x)", "log(x)", "sqrt(x)"];
+/// chelis#3017's witness bodies, built only from correctly rounded
+/// arithmetic, then the #2993 oracle bodies. `{t}` is the dtype.
+const BODIES: [&str; 10] = [
+    "mul(x, x)",
+    "add(mul(x, x), x)",
+    "div(x, add(x, 1.0{t}))",
+    "mul(x, sqrt(x))",
+    "div(sqrt(x), add(x, 1.0{t}))",
+    "sqrt(sqrt(x))",
+    "sqrt(sqrt(sqrt(x)))",
+    "mul(exp(x), x)",
+    "div(1.0{t}, x)",
+    "log(x)",
+];
 
-fn program(dtype: &str, body: &str) -> String {
+fn program(dtype: &str, body: &str, input: &str) -> String {
     let body = body.replace("{t}", dtype);
-    format!("def f(x: {dtype}) -> {dtype} = {body}\nout = grad(f)(0.7{dtype})\n")
+    format!("def f(x: {dtype}) -> {dtype} = {body}\nout = grad(f)({input}{dtype})\n")
 }
 
-fn assert_at_width(dtype: &str, prim: Prim) {
+fn assert_reverse_dag_at(dtype: &str, prim: Prim) {
     for body in BODIES {
-        let src = program(dtype, body);
-        let (ty, value) = lowered_out(&src);
-        assert_eq!(ty, HostType::Scalar(prim), "{src}: result dtype");
-        let widths = widths(&value);
-        assert!(
-            !widths.computed.is_empty(),
-            "{src}: the derivative is computed, not a folded constant"
-        );
-        for (name, ty) in &widths.computed {
+        for input in ["0.374", "0.648", "0.1"] {
+            let src = program(dtype, body, input);
+            let (ty, value, helpers) = lowered_out(&src);
+            assert_eq!(ty, HostType::Scalar(prim), "{src}: result dtype");
+            let helper = gradient_helper(&src, &value, &helpers, prim);
+            for node in helper.dag.nodes() {
+                if node.output_type.precision.is_float() {
+                    assert_eq!(
+                        node.output_type.precision, prim,
+                        "{src}: {:?} computes at another width",
+                        node.op
+                    );
+                }
+            }
             assert_eq!(
-                *ty,
-                HostType::Scalar(prim),
-                "{src}: `{name}` computes at {ty:?}"
-            );
-        }
-        if prim != Prim::F64 {
-            assert!(
-                widths.bare_float_literals.is_empty(),
-                "{src}: constants {:?} stay at f64",
-                widths.bare_float_literals
+                helper_value(helper),
+                eval_lane_out(&src),
+                "{src}: the host helper and the eval lane differ"
             );
         }
     }
 }
 
 #[test]
-fn f32_scalar_grad_computes_every_op_and_constant_at_f32() {
-    assert_at_width("f32", Prim::F32);
+fn f32_scalar_grad_is_the_eval_lanes_reverse_dag_at_f32() {
+    assert_reverse_dag_at("f32", Prim::F32);
 }
 
 #[test]
-fn f64_scalar_grad_control_stays_at_f64() {
-    assert_at_width("f64", Prim::F64);
-}
-
-#[test]
-fn f32_constants_inside_the_derivative_rule_are_f32() {
-    // `tanh` and `sqrt` introduce rule constants (1 and 2).
-    for body in ["tanh(x)", "sqrt(x)"] {
-        let src = program("f32", body);
-        let (ty, value) = lowered_out(&src);
-        assert_eq!(ty, HostType::Float32, "{src}");
-        let widths = widths(&value);
-        assert!(widths.bare_float_literals.is_empty(), "{src}");
-        assert!(
-            widths
-                .computed
-                .iter()
-                .all(|(_, ty)| *ty == HostType::Float32),
-            "{src}: {:?}",
-            widths.computed
-        );
-    }
+fn f64_scalar_grad_is_the_eval_lanes_reverse_dag_at_f64() {
+    assert_reverse_dag_at("f64", Prim::F64);
 }
 
 #[test]
 fn f32_multi_parameter_gradient_tuple_is_f32() {
-    let src =
-        "def f(x: f32, y: f32) -> f32 = mul(x, y)\nout = grad(f, wrt=(x, y))(0.5f32, 2.0f32)\n";
-    let (ty, value) = lowered_out(src);
+    let src = "def f(x: f32, y: f32) -> f32 = mul(x, y)\nout = grad(f, wrt=(x, y))(0.5f32, 2.0f32)\n";
+    let (ty, _, helpers) = lowered_out(src);
     assert_eq!(
         ty,
         HostType::Tuple(vec![HostType::Float32, HostType::Float32])
     );
-    let HostExprKind::Tuple(_, tuple_ty) = &value.kind else {
-        panic!("a two-parameter gradient is a tuple: {value:?}");
-    };
-    assert_eq!(*tuple_ty, ty);
-    let widths = widths(&value);
-    assert!(
-        widths
-            .computed
-            .iter()
-            .all(|(_, ty)| *ty == HostType::Float32)
-    );
-    assert!(
-        widths.bare_float_literals.is_empty(),
-        "seeds stay at f64: {:?}",
-        widths.bare_float_literals
-    );
+    assert!(!helpers.is_empty(), "{src}: the gradient is a reverse DAG");
+    for helper in &helpers {
+        assert!(
+            helper.dag.nodes().iter().all(|node| {
+                !node.output_type.precision.is_float() || node.output_type.precision == Prim::F32
+            }),
+            "{src}: every helper node is f32"
+        );
+    }
 }
 
 #[test]
-fn mixed_width_body_is_not_lowered_at_an_assumed_width() {
-    // A body that changes width through a checked `cast` node is outside
-    // this pass: it falls through to the unresolved-transform marker (the
-    // existing rejection path) instead of being computed at one width.
-    let src = "def f(x: f32) -> f64 = mul(cast(mul(x, x), f64), 2.0f64)\nout = grad(f)(0.5f32)\n";
-    let (_, value) = lowered_out(src);
+fn host_collection_transform_body_keeps_its_rejection() {
+    // A pure-scalar body that reaches a host collection transform still
+    // declines to the unresolved-transform marker rather than a DAG.
+    let src = "def f(x: f32) -> f32 = fold(fn (acc: f32, y: f32) -> add(acc, mul(y, x)), 0.0f32, [1.0f32, 2.0f32])\nout = grad(f)(0.5f32)\n";
+    let (_, value, _) = lowered_out(src);
     let HostExprKind::Call { function, .. } = &value.kind else {
         panic!("{src}: expected the unresolved-transform marker, got {value:?}");
     };

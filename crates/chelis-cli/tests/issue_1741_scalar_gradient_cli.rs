@@ -72,20 +72,46 @@ fn check_and_eval_agree_for_scalar_gradients_and_reject_real_mixed_surfaces() {
     }
 }
 
-// chelis#2993: `chelis build` computes a top-level scalar `grad` at the
-// operand dtype ([04-NUM-8]; [05-OP-46] and [05-OP-64]: constants and
-// intermediates stay at the operand dtype). The executable prints what
-// `chelis eval` prints, `eval --json` reports the operand dtype, and the
-// emitted host code for an f32 program holds no `double` intermediate and no
-// f64 dtype tag.
+// chelis#2993 and chelis#3017: `chelis build` computes a top-level scalar
+// `grad` at the operand dtype ([04-NUM-8]) through the same reverse-mode DAG
+// `chelis eval` evaluates (spec/06 section 2.3), so the executable prints
+// what eval prints. `eval --json` reports the operand dtype, and the emitted
+// gradient code for an f32 program holds no `double` intermediate and no f64
+// dtype tag.
 
-/// The issue's oracle bodies, each `f: T -> T`; `{t}` is the dtype.
+/// The #2993 oracle bodies, each `f: T -> T`; `{t}` is the dtype.
 const BODIES: [&str; 4] = ["mul(exp(x), x)", "div(1.0{t}, x)", "log(x)", "sqrt(x)"];
+
+/// Bodies built only from correctly rounded arithmetic, so a lane mismatch
+/// can only come from the differentiation order (#3017's witnesses first).
+/// Bodies with `exp`/`log`/`sin`/`cos`/`tanh` are left to confirm after the
+/// correctly rounded math kernels land in both lanes (chelis#2957).
+const EXACT_BODIES: [&str; 8] = [
+    "add(mul(x, x), x)",
+    "mul(x, sqrt(x))",
+    "sqrt(sqrt(x))",
+    "mul(x, x)",
+    "div(x, add(x, 1.0{t}))",
+    "div(sqrt(x), add(x, 1.0{t}))",
+    "sqrt(sqrt(sqrt(x)))",
+    "div(1.0{t}, x)",
+];
 
 fn width_program(dtype: &str, body: &str, root: &str) -> String {
     let body = body.replace("{t}", dtype);
     let root = root.replace("{t}", dtype);
     format!("module Probe.Case\ndef f(x: {dtype}) -> {dtype} = {body}\nout = {root}\n")
+}
+
+/// One program printing `grad(f)` at the 24 inputs 0.1, 0.237, ..., 3.251.
+fn sweep_program(dtype: &str, body: &str) -> String {
+    let body = body.replace("{t}", dtype);
+    let mut source = format!("module Probe.Case\ndef f(x: {dtype}) -> {dtype} = {body}\n");
+    for index in 0..24 {
+        let input = 0.1 + 0.137 * f64::from(index);
+        source.push_str(&format!("r{index} = print(grad(f)({input:.3}{dtype}))\n"));
+    }
+    source
 }
 
 fn chelis(args: &[&str]) -> std::process::Output {
@@ -144,17 +170,43 @@ fn emitted_c(source: &str) -> String {
     std::fs::read_to_string(out.join("p.c")).expect("emitted p.c")
 }
 
-/// The statements that compute and print `out`: the emitted `main` body.
-fn main_body(emitted: &str) -> &str {
-    let body = common::host_body_definition(emitted, "main");
+/// One emitted C definition, from its signature to its closing brace.
+fn definition<'a>(emitted: &'a str, name: &str) -> &'a str {
+    let body = common::host_body_definition(emitted, name);
     let end = body.find("\n}\n").map_or(body.len(), |end| end + 2);
     &body[..end]
 }
 
+/// The code that computes and prints `out`: the emitted `main` and every
+/// top-level tensor helper kernel (the reverse-DAG gradient).
+fn gradient_code(emitted: &str) -> Vec<&str> {
+    let mut code = vec![definition(emitted, "main")];
+    let mut index = 0;
+    while emitted.contains(&format!("p__global__tensor_{index}__private(")) {
+        code.push(definition(emitted, &format!("p__global__tensor_{index}__private")));
+        index += 1;
+    }
+    assert!(code.len() > 1, "a scalar gradient lowers to a tensor helper:\n{emitted}");
+    code
+}
+
 #[test]
-fn executable_prints_what_eval_prints_at_every_float_width() {
-    for dtype in ["f32", "f64", "f16", "bf16"] {
-        for body in BODIES {
+fn executable_prints_what_eval_prints_over_the_exact_sweep() {
+    for dtype in ["f32", "f64"] {
+        for body in EXACT_BODIES {
+            let source = sweep_program(dtype, body);
+            let eval = eval_stdout(&source);
+            assert_eq!(eval.lines().count(), 48, "{source}: 24 prints and roots");
+            let built = common::build_and_run(&source, "p");
+            assert_eq!(built, eval, "{source}");
+        }
+    }
+}
+
+#[test]
+fn executable_prints_what_eval_prints_at_the_narrow_widths() {
+    for dtype in ["f16", "bf16"] {
+        for body in EXACT_BODIES {
             let source = width_program(dtype, body, "print(grad(f)(0.7{t}))");
             let eval = eval_stdout(&source);
             let built = common::build_and_run(&source, "p");
@@ -178,17 +230,28 @@ fn emitted_f32_gradient_has_no_double_intermediate_or_f64_tag() {
     for body in BODIES {
         let source = width_program("f32", body, "print(grad(f)(0.7{t}))");
         let emitted = emitted_c(&source);
-        let main = main_body(&emitted);
-        for forbidden in ["double", "CHELIS_DTYPE_F64", "chelis_f64_from_bits"] {
-            assert!(
-                !main.contains(forbidden),
-                "{source}: `{forbidden}` in the emitted host code:\n{main}"
-            );
+        for code in gradient_code(&emitted) {
+            for forbidden in ["double", "CHELIS_DTYPE_F64", "chelis_f64_from_bits"] {
+                assert!(
+                    !code.contains(forbidden),
+                    "{source}: `{forbidden}` in the emitted gradient code:\n{code}"
+                );
+            }
         }
-        assert!(main.contains("CHELIS_DTYPE_F32"), "{source}:\n{main}");
+        assert!(
+            gradient_code(&emitted)
+                .iter()
+                .all(|code| code.contains("CHELIS_DTYPE_F32")),
+            "{source}"
+        );
     }
     // Control: the f64 program does compute in double.
     let source = width_program("f64", BODIES[0], "print(grad(f)(0.7{t}))");
     let emitted = emitted_c(&source);
-    assert!(main_body(&emitted).contains("CHELIS_DTYPE_F64"), "{source}");
+    assert!(
+        gradient_code(&emitted)
+            .iter()
+            .all(|code| code.contains("CHELIS_DTYPE_F64")),
+        "{source}"
+    );
 }
