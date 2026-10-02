@@ -1,0 +1,90 @@
+#!/bin/sh
+{
+# The whole file is one brace group opened on line 2, so any truncated copy
+# is an unterminated compound command that sh rejects loudly rather than a
+# valid program that does nothing (see .githooks/commit-msg).
+#
+# Tracked template for the pre-commit hook, installed by copy into the COMMON
+# git hooks directory exactly as commit-msg is, and for the same reasons: it
+# names no worktree, resolves its repository at run time, and uses only the
+# committing worktree's uv-managed Python, with the commit-msg precedence
+# (chelis#1409). It writes nothing: it fails the commit when a staged source
+# and its staged derived output disagree, and git's --no-verify is the only
+# bypass. .cargo-husky/hooks/pre-commit is a byte-identical copy.
+#
+# The legs, one row each: name|inputs|outputs|check|fix. Inputs and outputs
+# are space-separated repository paths, a trailing `/` naming a directory.
+# A leg runs when a staged path, either side of a rename or a deletion
+# included, falls under its inputs or outputs. scripts/regen_hooks.py
+# then copies the staged version of its inputs and outputs into a private
+# temporary directory and runs `check` there with the managed Python; a check
+# of `-` runs `fix` there instead and reports every output it changes. `fix`
+# is what the message tells the author to run. Adding a leg is one row here,
+# the same row in the cargo-husky copy, and a test in
+# scripts/test_regen_hooks.py, which also ties each row to scripts/regen_all.py.
+legs='conformance-assets|scripts/regenerate_conformance_assets.py AGENTS.md docs/CHELIS_SURFACE.md packages/chelis-std/SKILL.md agent-skills/ .claude/skills .codex/skills|crates/chelis-conformance/assets/skills/ crates/chelis-conformance/assets/canonical/|-|scripts/regenerate_conformance_assets.py
+reviewed-unsupported-wording|scripts/generate_reviewed_unsupported_wording_snapshot.py|crates/chelis-cli/tests/snapshots/issue_1870__reviewed__unsupported_wording.snap|-|scripts/generate_reviewed_unsupported_wording_snapshot.py
+opaque-corpus|tests/corpus/opaque_invariants/generate_corpus.py|tests/corpus/opaque_invariants/manifest.json tests/corpus/opaque_invariants/programs/|-|tests/corpus/opaque_invariants/generate_corpus.py'
+
+set -eu
+# The path lists are split on spaces and must never be globbed.
+set -f
+
+hook=pre-commit
+repo_root=$(git rev-parse --show-toplevel)
+repo_root=$(CDPATH='' cd "$repo_root" && pwd -P)
+script="$repo_root/scripts/regen_hooks.py"
+
+# The hooks directory is shared by every worktree, so this also runs on
+# branches that predate the script. They have nothing to check: exit quietly,
+# unlike commit-msg, whose checker every live branch carries.
+if [ ! -f "$script" ]; then
+    exit 0
+fi
+
+# Decide relevance with git alone, so a commit that stages no leg input
+# passes even where no managed Python exists.
+newline='
+'
+relevant=
+while IFS='|' read -r name inputs outputs check fix; do
+    staged=$(git --literal-pathspecs diff --cached --name-only --no-renames -- $inputs $outputs) || exit 2
+    if [ -n "$staged" ]; then
+        relevant="$relevant$name|$inputs|$outputs|$check|$fix$newline"
+    fi
+done <<LEGS
+$legs
+LEGS
+if [ -z "$relevant" ]; then
+    exit 0
+fi
+set -- "$relevant"
+
+# An activated profile must belong to the committing worktree, not its caller.
+if [ -n "${DEVENV_STATE:-}" ]; then
+    state=$(CDPATH='' cd "$DEVENV_STATE" 2>/dev/null && pwd -P) || state=
+    case "$state" in
+        "$repo_root/.devenv/"*)
+            if [ -x "$state/venv/bin/python" ]; then
+                exec "$state/venv/bin/python" "$script" "$hook" "$@"
+            fi
+            ;;
+    esac
+fi
+
+if [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
+    exec "$repo_root/.devenv/state/venv/bin/python" "$script" "$hook" "$@"
+elif [ -x "$repo_root/.venv/bin/python" ]; then
+    exec "$repo_root/.venv/bin/python" "$script" "$hook" "$@"
+elif command -v uv >/dev/null 2>&1; then
+    # --isolated: without it uv prefers an activated VIRTUAL_ENV or a .venv
+    # in any parent directory, such as the primary checkout's when this
+    # worktree is nested inside it, over the managed interpreter.
+    unset UV_PYTHON_PREFERENCE
+    exec uv run --managed-python --python 3.11 --no-project --isolated python "$script" "$hook" "$@"
+fi
+
+printf '%s\n' "$hook hook: no managed Python interpreter is available to check the staged derived artifacts." >&2
+printf '%s\n' 'Enter Devenv, run: uv venv --python 3.11, or install uv.' >&2
+exit 2
+}

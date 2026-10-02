@@ -188,10 +188,11 @@ class CommitHookInterpreterTests(unittest.TestCase):
             "fi\n"
             'if [ "$1" != run ] || [ "$2" != --managed-python ] ||\n'
             '   [ "$3" != --python ] || [ "$4" != 3.11 ] ||\n'
-            '   [ "$5" != --no-project ] || [ "$6" != python ]; then\n'
+            '   [ "$5" != --no-project ] || [ "$6" != --isolated ] ||\n'
+            '   [ "$7" != python ]; then\n'
             "    exit 2\n"
             "fi\n"
-            "shift 6\n"
+            "shift 7\n"
             f'exec {shlex.quote(sys.executable)} "$@"\n',
             encoding="utf-8",
         )
@@ -202,6 +203,47 @@ class CommitHookInterpreterTests(unittest.TestCase):
         self.interpreter(state / "venv/bin/python", selected=False)
         self.env["DEVENV_STATE"] = str(state)
         self.assert_policy()
+
+    def test_uv_fallback_never_adopts_an_active_or_parent_venv(self) -> None:
+        """Without --isolated, uv runs VIRTUAL_ENV's or a parent .venv's
+        interpreter in place of the managed one; this uv models that."""
+        ran = self.directory / "foreign-venv-ran"
+        for venv in (self.directory / "active-venv", self.directory / ".venv"):
+            python = venv / "bin/python"
+            python.parent.mkdir(parents=True)
+            python.write_text(
+                f"#!/bin/sh\necho {shlex.quote(str(venv))} >> {shlex.quote(str(ran))}\n"
+                "exit 97\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+        uv = self.bin / "uv"
+        uv.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" != run ] || [ "$2" != --managed-python ] ||\n'
+            '   [ "$3" != --python ] || [ "$4" != 3.11 ] ||\n'
+            '   [ "$5" != --no-project ]; then\n'
+            "    exit 2\n"
+            "fi\n"
+            'if [ "$6" = --isolated ] && [ "$7" = python ]; then\n'
+            "    shift 7\n"
+            f'    exec {shlex.quote(sys.executable)} "$@"\n'
+            "fi\n"
+            'shift 6\n'
+            '[ "$1" = python ] && shift\n'
+            'if [ -n "${VIRTUAL_ENV:-}" ]; then exec "$VIRTUAL_ENV/bin/python" "$@"; fi\n'
+            f'exec {shlex.quote(str(self.directory / ".venv/bin/python"))} "$@"\n',
+            encoding="utf-8",
+        )
+        uv.chmod(0o755)
+        for active in (str(self.directory / "active-venv"), None):
+            with self.subTest(virtual_env=active):
+                if active is None:
+                    self.env.pop("VIRTUAL_ENV", None)
+                else:
+                    self.env["VIRTUAL_ENV"] = active
+                self.assert_policy()
+                self.assertFalse(ran.exists(), "a foreign venv's interpreter ran")
 
 
 if __name__ == "__main__":

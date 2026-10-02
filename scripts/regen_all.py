@@ -151,6 +151,12 @@ class RegenLeg:
     `custom_check`, or when the leg is only a printed `note`. `env` is applied
     to the write command only; `--check` never sets it. `after_write` names a
     hook run after a successful write that may demand a manual action.
+
+    `inputs` are the tracked paths whose change can make `writes` stale:
+    an entry ending in `/` names a directory, any other entry one exact path.
+    `scripts/regen_hooks.py` selects the legs a commit or push touched by
+    them, so they cover what the leg's generator reads, its own script
+    included. Legs no hook runs leave them empty.
     """
 
     name: str
@@ -159,6 +165,7 @@ class RegenLeg:
     check_argv: tuple[str, ...] | None
     writes: tuple[str, ...]
     needs: str
+    inputs: tuple[str, ...] = ()
     env: tuple[tuple[str, str], ...] = ()
     manual_after: str | None = None
     after_write: str | None = None
@@ -198,6 +205,15 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
                 "crates/chelis-conformance/assets/canonical/",
             ),
             needs="python",
+            inputs=(
+                "scripts/regenerate_conformance_assets.py",
+                "AGENTS.md",
+                "docs/CHELIS_SURFACE.md",
+                "packages/chelis-std/SKILL.md",
+                "agent-skills/",
+                ".claude/skills",
+                ".codex/skills",
+            ),
         ),
         RegenLeg(
             name="reviewed-unsupported-wording",
@@ -216,6 +232,7 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
                 "issue_1870__reviewed__unsupported_wording.snap",
             ),
             needs="python",
+            inputs=("scripts/generate_reviewed_unsupported_wording_snapshot.py",),
         ),
         RegenLeg(
             name="opaque-corpus",
@@ -227,6 +244,7 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
                 f"{OPAQUE_CORPUS_DIR}/programs/",
             ),
             needs="python",
+            inputs=(OPAQUE_CORPUS_GENERATOR,),
             custom_check="opaque-corpus",
         ),
         RegenLeg(

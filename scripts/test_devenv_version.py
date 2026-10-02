@@ -240,22 +240,23 @@ def parse_git_hook_catalog(text: str) -> GitHookCatalog:
             "absolute --config path into the shared .git/hooks (chelis#1409)"
         )
     install = re.search(
-        r'(?ms)^  tasks\."chelis:install-commit-hook" = \{\n.*?^  \};$',
+        r'(?ms)^  tasks\."chelis:install-git-hooks" = \{\n.*?^  \};$',
         text,
     )
     if install is None:
         raise ValueError(
-            "the Git hook module must define the chelis:install-commit-hook task"
+            "the Git hook module must define the chelis:install-git-hooks task"
         )
     task = install.group(0)
     for fragment, why in (
         ('after = [ "devenv:enterShell" ];', "run on shell entry"),
         ("--path-format=absolute --git-common-dir", "resolve the shared hooks directory absolutely"),
-        (".githooks/commit-msg", "install from the tracked template"),
+        ('/.githooks"', "install from the tracked templates"),
+        ("for hook in commit-msg pre-commit pre-push; do", "install every tracked hook"),
         ('cp "$template"', "copy the template rather than reference it"),
-        ('mktemp "$hooks_dir/commit-msg.XXXXXX"', "stage under a unique name"),
+        ('mktemp "$hooks_dir/$hook.XXXXXX"', "stage under a unique name"),
         ('mv "$staged"', "install by atomic rename"),
-        ("fi\n      # Unconditionally", "chmod outside the copy branch"),
+        ("fi\n        # Unconditionally", "chmod outside the copy branch"),
         ("core.hooksPath", "warn when core.hooksPath would override the install"),
     ):
         if fragment not in task:
@@ -572,9 +573,10 @@ class DevenvVersionTests(unittest.TestCase):
         for fragment in (
             'after = [ "devenv:enterShell" ];',
             "--path-format=absolute --git-common-dir",
-            ".githooks/commit-msg",
+            '/.githooks"',
+            "for hook in commit-msg pre-commit pre-push; do",
             'cp "$template"',
-            'mktemp "$hooks_dir/commit-msg.XXXXXX"',
+            'mktemp "$hooks_dir/$hook.XXXXXX"',
             'mv "$staged"',
         ):
             with self.subTest(fragment=fragment):
@@ -585,9 +587,9 @@ class DevenvVersionTests(unittest.TestCase):
     def test_removing_the_install_task_fails_at_the_parse_boundary(self) -> None:
         config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
         mutated = config.replace(
-            'tasks."chelis:install-commit-hook"', 'tasks."chelis:something-else"'
+            'tasks."chelis:install-git-hooks"', 'tasks."chelis:something-else"'
         )
-        with self.assertRaisesRegex(ValueError, "install-commit-hook"):
+        with self.assertRaisesRegex(ValueError, "install-git-hooks"):
             parse_git_hook_catalog(mutated)
 
     def test_git_hooks_input_without_nixpkgs_follow_fails_at_parse_boundary(

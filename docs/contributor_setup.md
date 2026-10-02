@@ -90,6 +90,39 @@ installs it on shell entry. Do not set `core.hooksPath`: that setting is
 shared across worktrees while the tracked hook belongs to a branch. The
 hook finds this checkout's managed Python or uses uv.
 
+Two more tracked hooks, `.githooks/pre-commit` and `.githooks/pre-push`, are
+installed the same two ways and run `scripts/regen_hooks.py` with the same
+uv-managed interpreter, never a `python3` from `PATH`. Neither writes or
+stages anything; they report derived artifacts that disagree with their
+sources and print the command that fixes them.
+
+- **pre-commit** runs the legs in the table at the top of the hook when a
+  staged path, renamed or deleted ones included, is one of their inputs or
+  outputs, such as `AGENTS.md`, `docs/CHELIS_SURFACE.md`,
+  `packages/chelis-std/SKILL.md`, `agent-skills/`, or the embedded
+  conformance assets themselves. It runs the generator
+  on a private, always-removed copy of the staged files, so partial staging,
+  `git commit <paths>`, and `git commit -a` are judged by what they commit.
+  On disagreement it names both files, prints the write command, and asks
+  you to `git add` the result. It never runs cargo. git runs it for
+  `commit`, `commit --amend`, `cherry-pick --continue`, and the commit that
+  concludes a conflicted merge, and a refused commit leaves the operation
+  resumable; `rebase --continue` and conflict-free merges, cherry-picks, and
+  rebases do not run it.
+- **pre-push** runs the `--check` form of each pure-Python tier-0 leg of
+  `scripts/regen_all.py` whose inputs or outputs the push changes. On
+  staleness it fails the push and prints the write command. It skips a leg
+  with a one-line notice when the pushed commit is not this worktree's
+  `HEAD` or the leg's paths have uncommitted changes. It runs only checks
+  that never write into the worktree, and no hook ever runs cargo: the
+  rejection registry and the chelis-std bundle are CI's to check.
+
+On a branch that predates `scripts/regen_hooks.py`, both hooks do nothing.
+Without a managed venv or `uv`, pre-commit fails, naming the fix, only when
+a commit stages a leg's input or output, and pre-push prints a notice and lets the push
+through. `git commit --no-verify` and `git push --no-verify` are the only
+bypass.
+
 ## Optional Devenv shell
 
 The native path above works without Devenv. The optional shell supplies

@@ -2473,6 +2473,15 @@ reason = "script-unit runs through the managed project command launcher and exer
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "devenv/git-hooks.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit parses the hook catalog and the install task for every tracked hook through the Devenv version contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
 prefix = "devenv/toolchains.nix"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2696,6 +2705,60 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "the discovered PR script suite executes both hooks' owned-profile, foreign-profile, uv fallback, and truncation regressions"
 tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = ".githooks/pre-commit"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the shared pre-commit hook's check-only staged-content, sequencer, no-op, interpreter, worktree, cleanup, and truncation controls"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = ".githooks/pre-push"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the shared pre-push hook's stale, fresh, skip-notice, no-cargo, worktree, and truncation controls"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = ".cargo-husky/hooks/pre-commit"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit requires the cargo-husky pre-commit hook to be byte-identical to the tested shared template"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = ".cargo-husky/hooks/pre-push"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit requires the cargo-husky pre-push hook to be byte-identical to the tested shared template"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/regen_hooks.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the regeneration hooks' leg selection, staged-content checks, and push-range checks in temporary clones"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/test_regen_hooks.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the regeneration hook regressions"
+tracking_issue = "chelis#1868"
 
 [[path_rule]]
 prefix = "scripts/test_bootstrapless_scripts.py"
