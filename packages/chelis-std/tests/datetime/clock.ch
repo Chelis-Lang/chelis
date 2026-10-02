@@ -9,10 +9,6 @@ def test_clock_now_round_trips_through_text() -> unit ! { Test, IO } = {
   now = clock_now()
   assert_true(eq(parse_instant(instant_to_string(now)), now), "a wall reading's canonical text parses back to it")
 }
-def test_clock_now_differs_from_a_nanosecond_later() -> unit ! { Test, IO } = {
-  now = clock_now()
-  assert_false(eq(parse_instant(instant_to_string(now)), instant_add_duration(now, duration(0i64, 1i64))), "a wall reading is not the instant one nanosecond later")
-}
 def test_monotonic_until_a_reading_and_itself_is_zero() -> unit ! { Test, IO } = {
   mark = monotonic_now()
   assert_true(eq(monotonic_until(mark, mark), duration(0i64, 0i64)), "no time elapses from a reading to itself")

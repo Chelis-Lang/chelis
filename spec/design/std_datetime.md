@@ -805,8 +805,10 @@ failure.
 stays under 2^40 seconds, and `duration` normalizes it without failing. The module uses
 `Std.Datetime` only through its exported producers.
 
-**Why a separate module.** The clock lives in its own module so that a program, or a
-shell's policy, can import all of pure `Std.Datetime` and provably never read the clock.
+**Why a separate module.** The clock lives in its own module so that nothing in pure
+`Std.Datetime` reads the clock. What keeps a program from reading it is the `IO` effect,
+not the import: the clock builtins are callable from any program, as `process_run` is,
+and every caller carries `IO`.
 
 ## 13. The `bed` repository: external data (stages S4b and S7)
 

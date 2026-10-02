@@ -2,8 +2,8 @@ module Std.Datetime.Clock
 export (MonotonicInstant, clock_now, monotonic_now, monotonic_until)
 import Std.Datetime (Instant, Duration, instant_from_unix, duration)
 -- Std.Datetime.Clock: the host clocks, governed by [05-OP-73]. It is the only
--- module of the Std.Datetime family that reads the host, so a program that
--- does not import it never reads a clock. Each read is one [05-OP-75]
+-- module of the Std.Datetime family that reads the host. Any code that reads a
+-- clock, here or through the builtins directly, carries `IO`. Each read is one [05-OP-75]
 -- builtin and carries `IO`. A failed read fails under the builtin's name,
 -- `clock_wall_read: io: <detail>` or `clock_monotonic_read: io: <detail>`,
 -- because a library definition cannot relabel a builtin's failure.
