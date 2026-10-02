@@ -2,13 +2,16 @@
 //! before it declares it.
 //!
 //! The C emitter declares an extent name at the site its extent origin
-//! resolves to. In the issue's program the name of `masked`'s `n` resolves to
+//! resolves to. In the issue's program the name of `masked`'s `n` resolved to
 //! the `insert` inside the later `filled(t, 0i64)`, while the `and` that
-//! builds the mask reads the name in its guard first, so `chelis build`
-//! succeeded and wrote C that does not compile. The emitter now refuses a
-//! name the finished function reads before its declaration with the same
-//! typed rejection it gives a name it never declares. Building the program
-//! is the remaining work of chelis#2883.
+//! builds the mask read the name in its guard first, so `chelis build`
+//! succeeded and wrote C that does not compile. The emitter refuses a name
+//! the finished function reads before its declaration with the same typed
+//! rejection it gives a name it never declares; the order detection has unit
+//! tests beside the emitter. With each helper's dimension binders
+//! instantiated per activation (chelis#2917), the helpers' results carry
+//! `masked`'s own `n`, which its parameter declares first, so the issue's
+//! programs now build and run.
 //!
 //! The order comes from marks the emitter puts on a name where it renders
 //! or declares it, not from identifier spellings in the C text, so a
@@ -18,10 +21,9 @@
 //! span ID the C carries in a comment, whatever it spells, and a span ID
 //! carrying one of the mark characters is refused where Deep is parsed.
 //!
-//! The rejected programs must fail at code generation with that rejection.
-//! The neighbouring programs that already compiled must still compile, run
-//! with every ledger allocation finalized, and print what `chelis eval`
-//! prints.
+//! The issue's programs and the neighbouring programs that already compiled
+//! must compile, run with every ledger allocation finalized, and print what
+//! `chelis eval` prints.
 
 mod ownership_support;
 
@@ -51,29 +53,23 @@ fn source(case: &Case) -> String {
     format!("{PRELUDE}{}", case.body)
 }
 
-/// Each refused program with the half of the declaration invariant it
-/// breaks.
-fn refused() -> Vec<(Case, &'static str)> {
+/// The issue's programs, which the emitter refused before each helper's
+/// binders were instantiated per activation.
+fn issue_programs() -> Vec<Case> {
     vec![
-        // The issue's program: the only site producing the extent comes
-        // after the guard that reads it.
-        (
-            Case {
-                name: "projection_of_where_built_record".into(),
-                body: format!("{MASKED}r_a = col_xs(masked({VALUES}).0)\n"),
-            },
-            "is rendered before it is declared",
-        ),
-        // Without the third `filled` no site produces the extent at all.
-        (
-            Case {
-                name: "projection_without_a_producing_site".into(),
-                body: format!(
-                    "def masked[n](t: tensor[n, i64]) -> (Col[n], tensor[n, bool]) = {{\n  mask = in_range(t)\n  (Col {{ xs: where(mask, t, t) }}, mask)\n}}\nr_a = col_xs(masked({VALUES}).0)\n"
-                ),
-            },
-            "is rendered but never declared",
-        ),
+        // The issue's program: the only site producing the helper's extent
+        // came after the guard that read it.
+        Case {
+            name: "projection_of_where_built_record".into(),
+            body: format!("{MASKED}r_a = col_xs(masked({VALUES}).0)\n"),
+        },
+        // Without the third `filled` no site produced that extent at all.
+        Case {
+            name: "projection_without_a_producing_site".into(),
+            body: format!(
+                "def masked[n](t: tensor[n, i64]) -> (Col[n], tensor[n, bool]) = {{\n  mask = in_range(t)\n  (Col {{ xs: where(mask, t, t) }}, mask)\n}}\nr_a = col_xs(masked({VALUES}).0)\n"
+            ),
+        },
     ]
 }
 
@@ -150,48 +146,6 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_default()
 }
 
-fn declaration_rejection(error: &CompilerError, how: &str) -> Result<(), String> {
-    let messages: Vec<&str> = error
-        .errors
-        .iter()
-        .map(|diagnostic| diagnostic.message.as_str())
-        .collect();
-    let refused = messages.iter().any(|message| {
-        message.contains("unsupported: extent `")
-            && message.contains(how)
-            && message.contains("(codegen:c)")
-            && message.contains("unimplemented chelis#1277:")
-    });
-    if refused {
-        Ok(())
-    } else {
-        Err(format!("not the extent declaration rejection: {error:?}"))
-    }
-}
-
-fn check_refused(case: &Case, how: &str) -> Result<(), String> {
-    let source = source(case);
-    catch_unwind(AssertUnwindSafe(|| {
-        // The evaluator runs the program, so the refusal is the C lane's.
-        evaluated(&source);
-        match compile(CompileRequest {
-            source_kind: SourceKind::Surf,
-            source: source.clone(),
-            target: CompileTarget::C,
-            entry_name: None,
-        }) {
-            Ok(_) => Err("compiled C that reads an extent before declaring it".to_string()),
-            Err(error) => declaration_rejection(&error, how),
-        }
-    }))
-    .map_err(panic_message)
-    .and_then(|outcome| outcome)
-    .map_err(|message| {
-        let head: String = message.chars().take(600).collect();
-        format!("{}:\n{source}\n  -> {head}", case.name)
-    })
-}
-
 fn check_compiled(case: &Case) -> Result<(), String> {
     let source = source(case);
     catch_unwind(AssertUnwindSafe(|| {
@@ -208,12 +162,13 @@ fn check_compiled(case: &Case) -> Result<(), String> {
 }
 
 // REGRESSION TEST. On `1a772bea6` the issue's program built and its C failed
-// to compile with an undeclared identifier.
+// to compile with an undeclared identifier; on `18a143bb5` the emitter
+// refused both programs.
 #[test]
-fn an_extent_read_before_its_declaration_is_refused() {
-    let failures: Vec<String> = refused()
+fn the_issue_programs_compile_as_eval_runs_them() {
+    let failures: Vec<String> = issue_programs()
         .iter()
-        .filter_map(|(case, how)| check_refused(case, how).err())
+        .filter_map(|case| check_compiled(case).err())
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
@@ -303,33 +258,33 @@ fn a_span_id_never_reads_or_declares_an_extent() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// The issue's program is still refused when every span ID spells the
-/// early-read extent's name: bare, as a C declaration of it, or marked as a
+/// The issue's program builds and runs unchanged when every span ID spells
+/// its extent's name: bare, as a C declaration of it, or marked as a
 /// declaration in the earlier private-use alphabet. A span ID cannot carry
 /// the C0 marks themselves (the negative twin below).
 #[test]
-fn a_span_id_does_not_hide_a_read_before_its_declaration() {
+fn a_span_id_spelling_an_extent_declares_and_reads_nothing() {
     let issue = format!("{PRELUDE}{MASKED}r_a = col_xs(masked({VALUES}).0)\n");
-    let refused = compile_c(SourceKind::Deep, &deep_with_spans(&issue, "s"))
-        .expect_err("the issue's program");
-    let message = messages(&refused);
-    let name = message
-        .split("extent `")
-        .nth(1)
-        .and_then(|rest| rest.split('`').next())
-        .unwrap_or_else(|| panic!("no extent named in {message}"));
-    for span in [
-        name.to_string(),
-        format!("int64_t {name} = 3;"),
-        format!("\u{E001}{name}\u{E002}"),
-    ] {
-        let deep = deep_with_spans(&issue, &span);
-        let Err(error) = compile_c(SourceKind::Deep, &deep) else {
-            panic!("{span:?}: a span ID declares nothing");
-        };
-        declaration_rejection(&error, "is rendered before it is declared")
-            .unwrap_or_else(|failure| panic!("{span:?}: {failure}"));
-    }
+    let expected = evaluated(&issue);
+    let failures: Vec<String> = ["n", "int64_t n = 3;", "\u{E001}n\u{E002}"]
+        .iter()
+        .filter_map(|span| {
+            catch_unwind(AssertUnwindSafe(|| {
+                let generated =
+                    ownership_support::emit_deep(&deep_with_spans(&issue, span), "issue_span");
+                assert!(
+                    generated.contains(&format!("// span: {span}\n")),
+                    "{generated}"
+                );
+                let (summary, stdout) = ownership_support::run_program(&generated);
+                ownership_support::balanced(&summary);
+                assert_eq!(stdout, expected, "compiled output differs from eval");
+            }))
+            .err()
+            .map(|payload| format!("{span:?}: {}", panic_message(payload)))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
 // The negative twin: the emitter marks extents with C0 control characters,

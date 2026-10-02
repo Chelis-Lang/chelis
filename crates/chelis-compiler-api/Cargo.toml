@@ -160,6 +160,11 @@ path = "tests/issue_2891_aggregate_shared_operand.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_2917_activation_dimensions"
+path = "tests/issue_2917_activation_dimensions.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "key_admission_lanes"
 path = "tests/key_admission_lanes.rs"
 required-features = ["ownership-ledger"]

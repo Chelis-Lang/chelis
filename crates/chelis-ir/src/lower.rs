@@ -1512,6 +1512,9 @@ pub(crate) struct TensorCallsiteSpecialization {
     precision_substitutions: UnordMap<String, Prim>,
     rank_substitutions: UnordMap<String, Vec<DimInfo>>,
     dim_axis_positions: UnordMap<String, (usize, DimInfo)>,
+    /// Checked dimension binders of the activations in force (see
+    /// `LowerCtx::checked_dim_substitutions`).
+    checked_dim_substitutions: UnordMap<String, DimInfo>,
     /// Checked plus authored aliases used only to rebuild the current
     /// declaration's parameter/result contracts.
     claim_precision_substitutions: UnordMap<String, Prim>,
@@ -1542,10 +1545,25 @@ impl SubexprLoweringContext {
         tensor_specialization
             .dim_axis_positions
             .merge(specialization.dim_axis_positions);
+        for (name, dim) in specialization.checked_dim_substitutions.into_sorted() {
+            tensor_specialization
+                .checked_dim_substitutions
+                .entry(name)
+                .or_insert(dim);
+        }
         Self {
             tensor_specialization,
             ..self.clone()
         }
+    }
+
+    /// This context with the activation's checked dimension binders
+    /// instantiated. Bindings already in force keep their value.
+    pub(crate) fn with_checked_dimensions(&self, dimensions: UnordMap<String, DimInfo>) -> Self {
+        self.with_tensor_callsite_specialization(TensorCallsiteSpecialization {
+            checked_dim_substitutions: dimensions,
+            ..TensorCallsiteSpecialization::default()
+        })
     }
 
     pub fn new(
@@ -2095,6 +2113,10 @@ pub(crate) fn try_lower_staged_host_region(
             .clone();
         ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
         ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
+        ctx.checked_dim_substitutions = context
+            .tensor_specialization
+            .checked_dim_substitutions
+            .clone();
         ctx.host_program = Some(program);
         ctx.host_stage_status = status.clone();
         ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
@@ -2224,6 +2246,10 @@ fn lower_subexpr_program_inner_impl(
         .clone();
     ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
     ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
+    ctx.checked_dim_substitutions = context
+        .tensor_specialization
+        .checked_dim_substitutions
+        .clone();
     #[cfg(feature = "lowering-trace")]
     {
         ctx.trace = trace.clone();
@@ -3032,6 +3058,34 @@ fn formal_param_type_var_name(expr: &Expr) -> Option<String> {
 /// argument type exprs in declared order (the trailing return type is
 /// dropped), so the caller can recover each parameter's renamed precision
 /// variable. Returns `None` when the node has no `t-fn` type metadata.
+/// The checker-recorded type of a `fn` node, whose `d-var` identities are
+/// that definition's own generalized dimension binders.
+fn checked_fn_type_expr(fn_expr: &Expr) -> Option<&Expr> {
+    match fn_expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) => {
+            metadata.ty().map(|ty| ty.expression())
+        }
+        _ => None,
+    }
+}
+
+fn collect_dimension_binders(expr: &Expr, binders: &mut UnordSet<String>) {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::DVar, _, children) => {
+            if let Some(Expr::Atom(Atom::Name(name), _)) = children.first() {
+                binders.insert(name.clone());
+            }
+        }
+        ExprCarrier::DecodedNode(_, _, children) => {
+            for child in children {
+                collect_dimension_binders(child, binders);
+            }
+        }
+        ExprCarrier::MetadataExpression(meta) => collect_dimension_binders(&meta.expr, binders),
+        _ => {}
+    }
+}
+
 fn fn_type_arg_exprs(fn_expr: &Expr) -> Option<Vec<&Expr>> {
     let meta = match fn_expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) => metadata,
@@ -3568,6 +3622,7 @@ pub(crate) fn tensor_callsite_specialization(
         precision_substitutions,
         rank_substitutions,
         dim_axis_positions,
+        checked_dim_substitutions: UnordMap::new(),
         claim_precision_substitutions,
         claim_rank_substitutions,
     })
@@ -7618,6 +7673,14 @@ struct LowerCtx<'program> {
     /// adding a node is a lowering defect.
     decl: Option<DeclId>,
     dim_substitutions: UnordMap<String, DimInfo>,
+    /// The checked dimension binders of the activations being inlined,
+    /// mapped to this call's actual axes (runtime_extents.md C2.2). The
+    /// checker generalizes each definition over its own `d-var`
+    /// identities and records them on every body node, so a body node's
+    /// type names the callee's binder until this map instantiates it.
+    /// Scoped like `dim_substitutions`: one activation's bindings never
+    /// reach a sibling call.
+    checked_dim_substitutions: UnordMap<String, DimInfo>,
     /// WS-A8: precision-tvar substitutions, keyed by the precision-var
     /// name (e.g. `p`) as it appears in `(t-var {} p)` precision slots
     /// of the polymorphic def's signature. Populated at call sites of
@@ -7738,6 +7801,7 @@ impl<'program> LowerCtx<'program> {
             inlined_values: UnordMap::new(),
             decl: None,
             dim_substitutions: UnordMap::new(),
+            checked_dim_substitutions: UnordMap::new(),
             prec_substitutions: UnordMap::new(),
             rank_substitutions: UnordMap::new(),
             dim_axis_positions: UnordMap::new(),
@@ -8221,11 +8285,19 @@ impl<'program> LowerCtx<'program> {
     fn type_from_meta(&self, meta: &Metadata) -> TensorType {
         meta.ty()
             .map(|ty| {
-                Self::type_from_type_expr_with_subst(
+                let mut tensor = Self::type_from_type_expr_with_subst(
                     ty.expression(),
                     &self.prec_substitutions,
                     &self.rank_substitutions,
-                )
+                );
+                for dim in &mut tensor.dims {
+                    if let DimInfo::Named(name, None) = dim
+                        && let Some(actual) = self.checked_dim_substitutions.get(name)
+                    {
+                        *dim = actual.clone();
+                    }
+                }
+                tensor
             })
             .unwrap_or_else(Self::default_type)
     }
@@ -12564,6 +12636,7 @@ impl<'program> LowerCtx<'program> {
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         let saved_dim_substitutions = self.dim_substitutions.clone();
+        let saved_checked_dim_substitutions = self.checked_dim_substitutions.clone();
         let saved_prec_substitutions = self.prec_substitutions.clone();
         let saved_rank_substitutions = self.rank_substitutions.clone();
         let saved_dim_axis_positions = self.dim_axis_positions.clone();
@@ -12606,6 +12679,7 @@ impl<'program> LowerCtx<'program> {
         let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut authored_formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
+        let mut actual_positions = Vec::new();
         // Prepare every actual in caller scope, in written order. Installing
         // a formal early can change the value or static fact of a later actual.
         let actuals = args
@@ -12622,14 +12696,18 @@ impl<'program> LowerCtx<'program> {
         let declaring_scope = self.declaring_scope(fn_expr);
         self.replace_scope(declaring_scope);
         for (
-            (((name, (static_size, callable, value)), param_ty), formal_expr),
-            authored_formal_expr,
+            position,
+            (
+                (((name, (static_size, callable, value)), param_ty), formal_expr),
+                authored_formal_expr,
+            ),
         ) in param_names
             .iter()
             .zip(actuals)
             .zip(param_types)
             .zip(param_type_exprs.iter())
             .zip(authored_param_type_exprs.iter())
+            .enumerate()
         {
             // Preserve a caller-known integer through the inlined parameter
             // name. This is required by the [05-OP-35] wrappers: their public
@@ -12683,12 +12761,19 @@ impl<'program> LowerCtx<'program> {
                     formal_type_exprs.push(formal_expr.clone());
                     authored_formal_type_exprs.push(authored_formal_expr.clone());
                     actual_types.push(actual_ty);
+                    actual_positions.push(position);
                 }
                 self.bindings.insert_with_facts(name.clone(), arg_id, facts);
             }
         }
         self.dim_substitutions
             .merge(tensor_dim_substitutions(&formal_types, &actual_types));
+        self.instantiate_checked_dimensions(
+            fn_expr,
+            &actual_positions,
+            &actual_types,
+            expected_return_ty,
+        );
         // Issue #388: record the positional index of each named axis in the
         // formal parameter shapes so a named reduction/expand-anchor lookup
         // can recover the axis even after monomorphization erases the named
@@ -12886,8 +12971,8 @@ impl<'program> LowerCtx<'program> {
                 == self.dag.get(*id).expect("result").output_type.dims.len()
         {
             for (axis, checked_dim) in expected_return_ty.dims.iter().enumerate() {
-                if Self::is_distinct_checked_named_result_axis(&declared_result, axis, checked_dim)
-                {
+                let produced = &self.dag.get(*id).expect("result").output_type;
+                if Self::is_distinct_checked_named_result_axis(produced, axis, checked_dim) {
                     *id = self.refine_checked_result_axis_name(*id, axis, checked_dim);
                 }
             }
@@ -12913,10 +12998,81 @@ impl<'program> LowerCtx<'program> {
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         self.dim_substitutions = saved_dim_substitutions;
+        self.checked_dim_substitutions = saved_checked_dim_substitutions;
         self.prec_substitutions = saved_prec_substitutions;
         self.rank_substitutions = saved_rank_substitutions;
         self.dim_axis_positions = saved_dim_axis_positions;
         result
+    }
+
+    /// Instantiate the callee's checked dimension binders for this
+    /// activation (runtime_extents.md C2.2). The evidence is each tensor
+    /// actual at its checked formal's axis, then this call's checked result
+    /// for a binder no tensor actual supplies, such as one that occurs only
+    /// inside a record formal. A binder keeps its first binding, equal sizes
+    /// never merge two binders, and an unknown axis is no evidence. The
+    /// enclosing activation's bindings stay in force for the caller
+    /// expressions and callables substituted into this body.
+    fn instantiate_checked_dimensions(
+        &mut self,
+        fn_expr: &Expr,
+        actual_positions: &[usize],
+        actual_types: &[TensorType],
+        expected_return_ty: &TensorType,
+    ) {
+        let Some(checked_type) = checked_fn_type_expr(fn_expr) else {
+            return;
+        };
+        let mut binders = UnordSet::new();
+        collect_dimension_binders(checked_type, &mut binders);
+        if binders.is_empty() {
+            return;
+        }
+        let Some(checked_formals) = fn_type_arg_exprs(fn_expr) else {
+            return;
+        };
+        let mut evidence = Vec::new();
+        for (position, actual) in actual_positions.iter().zip(actual_types) {
+            if let Some(formal) = checked_formals.get(*position) {
+                evidence.push((
+                    Self::formal_param_type_for_call(
+                        formal,
+                        &self.prec_substitutions,
+                        &self.rank_substitutions,
+                    ),
+                    actual.clone(),
+                ));
+            }
+        }
+        if let Some(result) = extract_fn_return_type(fn_expr)
+            && expected_return_ty != &Self::default_type()
+        {
+            evidence.push((
+                Self::formal_param_type_for_call(
+                    result,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                ),
+                expected_return_ty.clone(),
+            ));
+        }
+        for (checked, actual) in evidence {
+            if checked.dims.len() != actual.dims.len() {
+                continue;
+            }
+            for (checked, actual) in checked.dims.iter().zip(&actual.dims) {
+                let DimInfo::Named(name, None) = checked else {
+                    continue;
+                };
+                let unknown =
+                    matches!(actual, DimInfo::Named(axis, None) if axis.is_empty() || axis == "*");
+                if binders.contains(name) && !unknown && actual != checked {
+                    self.checked_dim_substitutions
+                        .entry(name.clone())
+                        .or_insert_with(|| actual.clone());
+                }
+            }
+        }
     }
 
     /// Execute a resolved signature activation over bindings already placed
@@ -19217,12 +19373,17 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// A checked call type refines an authored result only when this exact
+    /// A checked call type refines a produced result only when this exact
     /// axis gained a concrete, non-wildcard name. A known extent attached to
     /// the same name is not a new name. Literals stay solely in the authored
     /// result path, where their runtime obligations originate.
+    ///
+    /// The comparison is with the label the produced axis carries, never with
+    /// the callee's authored result: the checked name belongs to the caller's
+    /// activation and the authored one to the callee's, so equal spellings
+    /// (both `n`) name different binders (runtime_extents.md C2.2).
     fn is_distinct_checked_named_result_axis(
-        declared: &TensorType,
+        produced: &TensorType,
         axis: usize,
         checked: &DimInfo,
     ) -> bool {
@@ -19232,8 +19393,8 @@ impl<'program> LowerCtx<'program> {
         !checked_binder.is_empty()
             && checked_binder != "*"
             && !matches!(
-                declared.dims.get(axis),
-                Some(DimInfo::Named(authored_binder, _)) if authored_binder == checked_binder
+                produced.dims.get(axis),
+                Some(DimInfo::Named(produced_label, _)) if produced_label == checked_binder
             )
     }
 
@@ -27018,8 +27179,8 @@ mod tests {
             &checked.dims[1]
         ));
 
-        // An already-authored name and wildcard/empty names never become a
-        // checked-result refinement.
+        // A name the produced axis already carries and wildcard/empty names
+        // never become a checked-result refinement.
         assert!(!LowerCtx::is_distinct_checked_named_result_axis(
             &authored,
             0,
