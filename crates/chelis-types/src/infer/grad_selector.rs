@@ -510,7 +510,7 @@ fn walk_grad_selector_identity(
     if tag == DeepTag::Grad
         && let Some(wrt) = metadata.wrt()
     {
-        validate_one_grad_selector(children, wrt, callables, locals, identities, errors);
+        validate_one_grad_selector(expr, children, wrt, callables, locals, identities, errors);
     }
 
     for child in children {
@@ -519,6 +519,7 @@ fn walk_grad_selector_identity(
 }
 
 fn validate_one_grad_selector(
+    expr: &deep::Expr,
     children: &[deep::Expr],
     wrt: &chelis_deep::annotations::WrtTargets,
     callables: &BTreeMap<String, SelectorCallableOrigin>,
@@ -531,43 +532,59 @@ fn validate_one_grad_selector(
         .map(|variable| variable.name().value().clone())
         .collect::<Vec<_>>();
     let Some([target, selector]) = <&[deep::Expr; 2]>::try_from(children).ok() else {
-        errors.push(CheckError::new(
-            CheckErrorKind::MalformedForm,
-            "Deep `grad` carrying `wrt` metadata requires exactly one callable target and one operative integer selector child (spec/03 [03-META-2])".to_string(),
-            vec![],
-        ));
+        report_at_check_site(
+            errors,
+            CheckError::new(
+                CheckErrorKind::MalformedForm,
+                "Deep `grad` carrying `wrt` metadata requires exactly one callable target and one operative integer selector child (spec/03 [03-META-2])".to_string(),
+                vec![],
+            ),
+            CheckSite::Expr(expr),
+        );
         return;
     };
     let Some(indices) = selector_indices(selector) else {
-        errors.push(CheckError::new(
-            CheckErrorKind::MalformedForm,
-            "Deep `grad` carrying `wrt` metadata requires an operative integer literal or nonempty tuple of integer literals (spec/03 [03-META-2])".to_string(),
-            vec![],
-        ));
+        report_at_check_site(
+            errors,
+            CheckError::new(
+                CheckErrorKind::MalformedForm,
+                "Deep `grad` carrying `wrt` metadata requires an operative integer literal or nonempty tuple of integer literals (spec/03 [03-META-2])".to_string(),
+                vec![],
+            ),
+            CheckSite::Expr(expr),
+        );
         return;
     };
     let origin = selector_callable_origin(target, callables, locals, identities);
     let SelectorCallableOrigin::Known { params, .. } = origin else {
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!(
-                "Deep `grad` selector target `{}` has no statically resolvable callable origin (spec/03 [03-META-2])",
-                selector_variable_name(target).unwrap_or("<dynamic expression>")
+        report_at_check_site(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!(
+                    "Deep `grad` selector target `{}` has no statically resolvable callable origin (spec/03 [03-META-2])",
+                    selector_variable_name(target).unwrap_or("<dynamic expression>")
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+            CheckSite::Expr(expr),
+        );
         return;
     };
     if names.len() != indices.len() {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            format!(
-                "Deep `grad` selector metadata names {} parameter(s), but its index child selects {} (spec/03 [03-META-2])",
-                names.len(),
-                indices.len()
+        report_at_check_site(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "Deep `grad` selector metadata names {} parameters but its operative child selects {} indices (spec/03 [03-META-2])",
+                    names.len(),
+                    indices.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+            CheckSite::Expr(expr),
+        );
         return;
     }
     for (name, index) in names.into_iter().zip(indices) {
@@ -576,24 +593,40 @@ fn validate_one_grad_selector(
             .and_then(|index| params.get(index));
         match indexed {
             Some(indexed_parameter) if indexed_parameter != &name => {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!(
-                        "Deep `grad` selector metadata names parameter `{name}`, but index {index} selects parameter `{indexed_parameter}` (spec/03 [03-META-2])"
+                let expected = format!("parameter `{name}`");
+                let got = format!("parameter `{indexed_parameter}`");
+                report_at_check_site(
+                    errors,
+                    CheckError::with_types(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "Deep `grad` selector index {index}: expected metadata-named {expected}, got {got} (spec/03 [03-META-2])"
+                        ),
+                        expected,
+                        got,
+                        vec![],
                     ),
-                    vec![],
-                ));
+                    CheckSite::Expr(expr),
+                );
                 return;
             }
             None => {
-                errors.push(CheckError::new(
-                    CheckErrorKind::ArityMismatch,
-                    format!(
-                        "Deep `grad` selector metadata names parameter `{name}`, but index {index} is outside the callable's {} parameter(s) (spec/03 [03-META-2])",
-                        params.len()
+                let expected = format!("index in 0..{}", params.len());
+                let got = format!("index {index}");
+                report_at_check_site(
+                    errors,
+                    CheckError::with_types(
+                        CheckErrorKind::ArityMismatch,
+                        format!(
+                            "Deep `grad` selector for parameter `{name}`: expected {expected} for the callable's {} parameters, got {got} (spec/03 [03-META-2])",
+                            params.len()
+                        ),
+                        expected,
+                        got,
+                        vec![],
                     ),
-                    vec![],
-                ));
+                    CheckSite::Expr(expr),
+                );
                 return;
             }
             Some(_) => {}

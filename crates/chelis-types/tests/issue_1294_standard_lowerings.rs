@@ -98,10 +98,12 @@ fn expand_rejects_nonunit_axis_recipe() {
     let error = check(nonunit).expect_err("expand must not replace a non-unit axis");
     assert!(
         error.errors.iter().any(|diagnostic| {
-            diagnostic.message.contains("expand")
+            diagnostic.kind.diagnostic_name() == "DimensionMismatch"
+                && diagnostic.message.contains("expand")
                 && diagnostic.message.contains("axis 1")
-                && diagnostic.message.contains("1")
-                && diagnostic.message.contains("3")
+                && diagnostic.expected.as_deref() == Some("1")
+                && diagnostic.got.as_deref() == Some("3")
+                && diagnostic.span_offset == nonunit.find("expand(")
         }),
         "non-unit expand should fail at its owning checker guard, got {error:?}"
     );

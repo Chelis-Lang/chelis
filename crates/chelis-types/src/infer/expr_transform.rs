@@ -7,6 +7,7 @@ use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_grad(
+    expr: &deep::Expr,
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
@@ -48,7 +49,9 @@ pub(super) fn infer_grad(
                 subst,
             ) {
                 GradDecision::Decided(Ok(grad_ty)) => grad_ty,
-                GradDecision::Decided(Err(error)) => report(errors, *error),
+                GradDecision::Decided(Err(error)) => {
+                    report_at_check_site(errors, *error, CheckSite::Expr(expr))
+                }
                 // Publish the same parameters with a fresh gradient result,
                 // so application can bind the types before cotangent selection.
                 // This also covers recursive-group inference (chelis#2626).
@@ -250,13 +253,16 @@ fn grad_result_type(
         let mut selected = Vec::with_capacity(indices.len());
         for &index in indices {
             let Some(arg) = args.get(index) else {
-                return Err(Box::new(CheckError::new(
+                let expected = format!("index in 0..{}", args.len());
+                let got = format!("index {index}");
+                return Err(Box::new(CheckError::with_types(
                     CheckErrorKind::ArityMismatch,
                     format!(
-                        "grad `wrt` index {} is out of bounds for function with {} parameters",
-                        index,
+                        "grad `wrt`: expected {expected} for a function with {} parameters, got {got}",
                         args.len()
                     ),
+                    expected,
+                    got,
                     vec![],
                 )));
             };

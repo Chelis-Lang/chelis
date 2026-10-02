@@ -296,7 +296,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                     infer_record_update(node, env, vg, subst, adt_reg, errors, product)
                 }
                 DeepTag::Cast => infer_cast(expr, node, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Grad => infer_grad(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Grad => infer_grad(expr, node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Vmap => infer_vmap(node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Def => infer_def(node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Defsig => {

@@ -358,12 +358,20 @@ def f(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2i64, 
 "#,
         "reduce_window_max with i64 window/strides",
     );
-    assert_rejected_with(
-        r#"
+    let source = r#"
 def g(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2, 2], [2, 2])
-"#,
-        "List[i64]",
-        "reduce_window_max with i32 window",
+"#;
+    let errors = typecheck_surf(source);
+    assert!(
+        errors.iter().any(|error| {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("List i64")
+                && error.got.as_deref() == Some("List i32")
+                && error.span_offset == source.find("reduce_window_max(")
+                && error.message.contains("argument 2")
+        }),
+        "reduce_window_max must reject the i32 window list in argument 2: {}",
+        errors_summary(&errors)
     );
 }
 

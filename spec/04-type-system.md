@@ -2669,12 +2669,12 @@ Each element of `errors` carries:
 > **[04-FIT-27]** For a checker rejection of `to_list`,
 > `tensor_to_scalar`, `copy`, `cast`, `expand` (axis or size), `shrink`
 > (arity, tensor, or bounds), `reshape` (shape type, tensor input, or
-> element count), or a function application's argument count or
-> tensor-dimension match, the diagnostic SHALL retain the available
-> location of the rejecting call or offending operand, not substitute a
-> containing declaration or unrelated argument. Its message SHALL name
-> the callee and rejected argument position; a per-axis mismatch SHALL
-> name the axis as well.
+> element count), a reduction's tensor input or selected axis, or a function
+> application's argument count or tensor-dimension match, the diagnostic SHALL
+> retain the available location of the rejecting call or offending operand,
+> not substitute a containing declaration or unrelated argument. Its message
+> SHALL name the callee and rejected argument position; a per-axis mismatch
+> SHALL name the axis as well.
 > When that check knows a directional requirement and the value that failed
 > it, the diagnostic SHALL carry both in `expected` and `got`, and the human
 > message SHALL use those same values. The requirement is the operation's

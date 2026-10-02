@@ -179,11 +179,11 @@ fn infer_app_inner(
     }
 
     if matches!(func_name.as_deref(), Some("pad")) {
-        return infer_pad_app(node, env, vg, subst, adt_reg, errors, product);
+        return infer_pad_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("stride")) {
-        return infer_stride_app(node, env, vg, subst, adt_reg, errors, product);
+        return infer_stride_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339: the four-argument anchored form belongs to `insert`, but
@@ -434,23 +434,34 @@ fn infer_app_inner(
         _ => None,
     };
     if let Some((retired, keyed)) = retired_draw {
-        return_with_collection_cleanup!(report(
+        let builtin = if func_name.as_deref() == Some("dropout") {
+            "dropout"
+        } else {
+            "uniform_like"
+        };
+        let expected = format!("{} arguments", arg_tys.len() + 1);
+        let got = format!("{} arguments", arg_tys.len());
+        return_with_collection_cleanup!(report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "`{retired}` is the retired counter-stream spelling: a random draw \
+                        "call `{builtin}`: expected {expected}, got {got}; \
+                         `{retired}` is the retired counter-stream spelling: a random draw \
                          takes an explicit key first, `{keyed}` (spec/05-risc-primitives.md \
                          section 2.7)"
                     ),
                 ),
+                expected,
+                got,
                 vec![format!(
                     "Pass a key first: make one with `key_from_seed(seed)` and derive more \
                      with `split_key`, `split_keys` or `fold_in`, as in `{keyed}`"
                 )],
             ),
+            CheckSite::Expr(expr),
         ));
     }
 
@@ -712,25 +723,26 @@ fn infer_app_inner(
                 // a rank-mixed literal. The dim slot `k` is a
                 // dimension variable, not a shape-vector variable;
                 // see spec/04-type-system.md §4.5.1.
-                return_with_collection_cleanup!(report(
+                return_with_collection_cleanup!(report_at_check_site(
                     errors,
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         with_node_provenance(
                             node,
                             format!(
-                                "list element rank mismatch: {} dims vs {} dims; \
-                             List[tensor[...]] requires rank-uniform elements \
-                             (the dim slot is a dimension variable, not a \
-                             shape-vector variable). Reshape or flatten \
-                             elements to a common rank before listing \
-                             (spec/04-type-system.md §4.5.1).",
+                                "call `Cons` arguments 1 and 2: list element rank mismatch: {} dims vs {} dims; \
+                                 List[tensor[...]] requires rank-uniform elements \
+                                 (the dim slot is a dimension variable, not a \
+                                 shape-vector variable). Reshape or flatten \
+                                 elements to a common rank before listing \
+                                 (spec/04-type-system.md §4.5.1).",
                                 head_dims.len(),
                                 tail_dims.len(),
                             ),
                         ),
                         vec![],
                     ),
+                    CheckSite::Expr(expr),
                 ));
             }
             if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {

@@ -18,6 +18,7 @@ use chelis_deep::Expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_ir_program;
+use chelis_types::errors::CheckErrorKind;
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
@@ -258,15 +259,14 @@ def p(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = pad(&x)
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on bare pad(&x)");
     assert!(
+        rep.errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::ArityMismatch)
+                && error.expected.as_deref() == Some("3 argument(s)")
+                && error.got.as_deref() == Some("1 argument(s)")
+                && error.span_offset == src.find("pad(")
+        }),
+        "expected a pad arity error at the call, got {:?}",
         rep.errors
-            .iter()
-            .any(|e| e.message.to_lowercase().contains("pad")
-                && (e.message.contains("padding") || e.message.contains("arity"))),
-        "expected a pad/arity error, got {:?}",
-        rep.errors
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
     );
 }
 

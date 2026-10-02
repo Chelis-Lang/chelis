@@ -95,6 +95,17 @@ fn matches_route_rejection(
                 && error.message.contains("broadcasts an existing axis")
                 && error.span_offset == source.find("expand(")
         }
+        "stride" | "pad" => {
+            let (expected, got) = if route == "stride" {
+                ("2 strides", "1 strides")
+            } else {
+                ("2 padding pairs", "1 padding pairs")
+            };
+            error.kind.diagnostic_name() == "ArityMismatch"
+                && error.expected.as_deref() == Some(expected)
+                && error.got.as_deref() == Some(got)
+                && error.span_offset == source.find(&format!("{route}("))
+        }
         "tensor_to_scalar" => {
             error.kind.diagnostic_name() == "TypeMismatch"
                 && error.message.contains(route)
@@ -199,7 +210,7 @@ fn app_shape_window_family_validates_a_late_bound_operand() {
             valid_result: "tensor[2, 2, f32]",
             invalid_call: "stride($, 1i64)",
             invalid_result: "tensor[2, 4, f32]",
-            diagnostic: "stride expects 2 strides for rank 2 tensor, got 1",
+            diagnostic: "stride",
         },
         Row {
             route: "pad",
@@ -208,7 +219,7 @@ fn app_shape_window_family_validates_a_late_bound_operand() {
             valid_result: "tensor[3, 5, f32]",
             invalid_call: "pad($, [[0i64, 1i64]], 0.0f32)",
             invalid_result: "tensor[3, 4, f32]",
-            diagnostic: "pad expects 2 padding pairs for rank 2 tensor, got 1",
+            diagnostic: "pad",
         },
     ] {
         run(&row);
@@ -660,7 +671,7 @@ fn assert_family_error(errors: &[CheckError], family: &str, dtype: &str) {
     );
 }
 
-fn matches_collection_rejection(error: &CheckError, route: &str, diagnostic: &str) -> bool {
+fn matches_collection_rejection(error: &CheckError, route: &str, diagnostic: &str, source: &str) -> bool {
     match route {
         "concat" => {
             error.kind.diagnostic_name() == "TypeMismatch"
@@ -681,6 +692,12 @@ fn matches_collection_rejection(error: &CheckError, route: &str, diagnostic: &st
                 && error.expected.as_deref() == Some("i32")
                 && error.got.as_deref() == Some("i64")
         }
+        "stride step" => {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("i64")
+                && error.got.as_deref() == Some("i32")
+                && error.span_offset == source.find("stride(")
+        }
         _ => error.message.contains(diagnostic),
     }
 }
@@ -694,15 +711,15 @@ fn run_cell(cell: &Cell) {
         diagnostic,
     } = cell;
 
-    // DISPOSITION LOCK. The resolved rejection pins the wording the late-bound
-    // one has to equal.
+    // The resolved and late-bound calls must report the same owning rule and
+    // preserve any source-aware structured operands.
     let eager = check(resolved_invalid).expect_err(&format!(
         "{route}: an invalid resolved call must be rejected"
     ));
     assert!(
         eager
             .iter()
-            .any(|error| { matches_collection_rejection(error, route, diagnostic) }),
+            .any(|error| { matches_collection_rejection(error, route, diagnostic, resolved_invalid) }),
         "{route}: the resolved rejection must name its own rule, got:\n{}",
         summary(&eager)
     );
@@ -729,7 +746,7 @@ fn run_cell(cell: &Cell) {
     } else {
         assert!(
             late.iter()
-                .any(|error| { matches_collection_rejection(error, route, diagnostic) }),
+                .any(|error| { matches_collection_rejection(error, route, diagnostic, late_invalid) }),
             "{route}: the late-bound rejection must match the resolved rule, got:\n{}",
             summary(&late)
         );
@@ -853,7 +870,7 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             resolved_invalid: "def f(x: tensor[2, 4, f32], a: i32) -> tensor[2, 2, f32] = stride(x, a, 2i64)\n",
             late_invalid: "def f(x: tensor[2, 4, f32], a: i32) -> tensor[2, 2, f32] = {\n  g = fn (v) -> stride(x, v, 2i64)\n  g(a)\n}\n",
             late_valid: "def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = {\n  g = fn (t) -> stride(t, 1i64, 2i64)\n  g(x)\n}\n",
-            diagnostic: "stride expects i64 strides (write 2i64), got i32",
+            diagnostic: "stride",
         },
     ] {
         run_cell(&cell);

@@ -110,9 +110,6 @@ fn describe_failed_call_operand(
     subst: &Subst,
     kind: &CheckErrorKind,
 ) -> Option<(String, Option<String>, Option<String>)> {
-    let Type::Fn(explicit_params, _) = func_ty else {
-        return None;
-    };
     let Type::Fn(params, _) = subst.apply(func_ty) else {
         return None;
     };
@@ -126,6 +123,26 @@ fn describe_failed_call_operand(
             Some(got),
         ));
     }
+    if matches!(kind, CheckErrorKind::ArityMismatch) {
+        for (index, (parameter, argument)) in params.iter().zip(arguments).enumerate() {
+            if let (Type::Fn(expected_args, _), Type::Fn(actual_args, _)) =
+                (parameter, subst.apply(argument))
+                && expected_args.len() != actual_args.len()
+            {
+                let count = |n: usize| format!("{n} parameter{}", if n == 1 { "" } else { "s" });
+                let expected = count(expected_args.len());
+                let got = count(actual_args.len());
+                return Some((
+                    format!("`{callee}` argument {} (callback): expected {expected}, got {got}", index + 1),
+                    Some(expected),
+                    Some(got),
+                ));
+            }
+        }
+    }
+    let Type::Fn(explicit_params, _) = func_ty else {
+        return None;
+    };
     for (index, (param, argument)) in params.iter().zip(arguments).enumerate() {
         let actual = subst.apply(argument);
         if matches!(kind, CheckErrorKind::DimensionMismatch) {

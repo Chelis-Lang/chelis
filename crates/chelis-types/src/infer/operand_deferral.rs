@@ -299,10 +299,10 @@ pub(super) fn check_shape_route_signature(
             check_permute_signature(site, node, kids, arg_tys, subst, errors)
         }
         ShapeRouteKind::Shrink => check_shrink_signature(site, node, kids, arg_tys, subst, errors),
-        ShapeRouteKind::Stride => check_stride_signature(node, kids, arg_tys, subst, errors),
-        ShapeRouteKind::Pad => check_pad_signature(node, kids, arg_tys, vg, subst, errors),
+        ShapeRouteKind::Stride => check_stride_signature(node, site, kids, arg_tys, subst, errors),
+        ShapeRouteKind::Pad => check_pad_signature(node, site, kids, arg_tys, vg, subst, errors),
         ShapeRouteKind::ReduceWindow { name } => {
-            check_reduce_window_signature(node, kids, name, arg_tys, subst, errors)
+            check_reduce_window_signature(node, site, kids, name, arg_tys, subst, errors)
         }
         ShapeRouteKind::Reshape { input_var_name } => check_reshape_signature(
             site,

@@ -69,6 +69,94 @@ fn checked_error(source: &str, kind: &str, call: &str, expected: &str, got: &str
 }
 
 #[test]
+fn specialized_application_arity_rejections_retain_source_and_actual_count() {
+    for (source, callee, expected) in [
+        (
+            "out = pad(to_tensor([1.0f32]))\n",
+            "pad(",
+            "3 argument(s)",
+        ),
+        (
+            "out = stride(to_tensor([1.0f32]))\n",
+            "stride(",
+            "at least 2 arguments",
+        ),
+        (
+            "out = reduce_window_sum(to_tensor([1.0f32]))\n",
+            "reduce_window_sum(",
+            "3 argument(s)",
+        ),
+    ] {
+        let error = checked_error(source, "ArityMismatch", callee, expected, "1 argument(s)");
+        assert!(error["message"].as_str().unwrap().contains(callee.trim_end_matches('(')));
+    }
+
+    for source in [
+        "out = pad(to_tensor([1.0f32]), [[0i64, 0i64]], 0.0f32)\n",
+        "out = stride(to_tensor([1.0f32]), 1i64)\n",
+        "out = reduce_window_sum(to_tensor([1.0f32]), [1i64], [1i64])\n",
+    ] {
+        let (ok, stdout, stderr) = run("check", source);
+        let report: Value = serde_json::from_str(&stdout).expect("valid arity JSON");
+        assert!(ok, "{source:?}: {stderr}: {report}");
+        assert_eq!(report["errors"], serde_json::json!([]));
+    }
+}
+
+#[test]
+fn nested_callback_arity_names_the_first_argument_and_direction() {
+    let bad = "out = fold(fn (acc: i64) -> acc, 0i64, [1i64])\n";
+    let error = checked_error(bad, "ArityMismatch", "fold(", "2 parameters", "1 parameter");
+    assert!(error["message"].as_str().unwrap().contains("argument 1"), "{error}");
+
+    let good = "out = fold(fn (acc: i64, item: i64) -> add(acc, item), 0i64, [1i64])\n";
+    let (ok, stdout, stderr) = run("check", good);
+    let report: Value = serde_json::from_str(&stdout).expect("valid callback JSON");
+    assert!(ok, "{stderr}: {report}");
+    assert_eq!(report["errors"], serde_json::json!([]));
+}
+
+#[test]
+fn reduction_rejections_name_the_axis_or_bool_tensor_requirement() {
+    let source = "out = sum(to_tensor([1.0f32]), 2i32)\n";
+    let error = checked_error(source, "DimensionMismatch", "sum(", "axis in -1..1", "2");
+    assert!(
+        error["message"].as_str().unwrap().contains("argument 2")
+            && error["message"].as_str().unwrap().contains("axis 2"),
+        "the rejected axis must be attributable: {error}"
+    );
+    let source = "out = count(to_tensor([1.0f32]), 0i32)\n";
+    let error = checked_error(source, "PrecisionMismatch", "count(", "bool tensor", "f32");
+    assert!(
+        error["message"].as_str().unwrap().contains("argument 1"),
+        "the rejected tensor must be attributable: {error}"
+    );
+
+    for source in [
+        "out = sum(to_tensor([1.0f32]), 0i32)\n",
+        "out = count(to_tensor([true, false]), 0i32)\n",
+    ] {
+        let (ok, stdout, stderr) = run("check", source);
+        let report: Value = serde_json::from_str(&stdout).expect("valid reduction JSON");
+        assert!(ok, "{source:?}: {stderr}: {report}");
+        assert_eq!(report["errors"], serde_json::json!([]));
+    }
+}
+
+#[test]
+fn diagonal_rejects_a_repeated_axis_at_the_call_and_keeps_the_allowed_axis() {
+    let bad = "out = diagonal(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), 0i32, 0i32)\n";
+    let error = checked_error(bad, "TypeMismatch", "diagonal(", "axis distinct from 0", "axis 0");
+    assert!(error["message"].as_str().unwrap().contains("argument 3"), "{error}");
+
+    let good = "out = diagonal(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), 0i32, 1i32)\n";
+    let (ok, stdout, stderr) = run("check", good);
+    let report: Value = serde_json::from_str(&stdout).expect("valid diagonal JSON");
+    assert!(ok, "{stderr}: {report}");
+    assert_eq!(report["errors"], serde_json::json!([]));
+}
+
+#[test]
 fn rejected_tensor_conversion_and_copy_calls_locate_the_genuine_operand() {
     for (source, kind, call, expected, got) in [
         (

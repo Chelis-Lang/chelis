@@ -1077,6 +1077,7 @@ pub(super) fn finish_unified_app(
                             axis1,
                             axis2,
                             node,
+                            source_site,
                             env,
                             vg,
                             adt_reg,
@@ -1089,14 +1090,33 @@ pub(super) fn finish_unified_app(
                         return ty;
                     }
                     Err(message) => {
-                        return report(
-                            errors,
+                        let error = if axis1 == axis2 && matches!(diagonal_operand, Type::Tensor(..)) {
+                            let expected = format!("axis distinct from {axis1}");
+                            let got = format!("axis {axis2}");
+                            CheckError::with_types(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(node, format!("diagonal argument 3 (axis): expected {expected}, got {got}; {message}")),
+                                expected,
+                                got,
+                                vec![],
+                            )
+                        } else if !matches!(diagonal_operand, Type::Tensor(..)) {
+                            let got = diagonal_operand.to_string();
+                            CheckError::with_types(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(node, format!("diagonal argument 1: expected tensor, got {got}")),
+                                "tensor".to_string(),
+                                got,
+                                vec![],
+                            )
+                        } else {
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_node_provenance(node, message),
                                 vec![],
-                            ),
-                        );
+                            )
+                        };
+                        return report_at_check_site(errors, error, source_site);
                     }
                 }
             }

@@ -171,7 +171,8 @@ fn symbolic_program(declared: &str, operand: &str) -> String {
 /// exactly one `DimensionMismatch` naming the bound and the declared extent.
 #[test]
 fn a_symbolic_pair_declared_wider_than_its_literal_axis_does_not_score_one() {
-    let (_dir, path) = write_program(&symbolic_program("9", THREE_BY_FOUR));
+    let source = symbolic_program("9", THREE_BY_FOUR);
+    let (_dir, path) = write_program(&source);
     let json = check_json(&path);
 
     let score = json["score"].as_f64().expect("numeric score");
@@ -186,14 +187,14 @@ fn a_symbolic_pair_declared_wider_than_its_literal_axis_does_not_score_one() {
         panic!("expected exactly one error, got {errors:?}");
     };
     assert_eq!(error["kind"].as_str(), Some("DimensionMismatch"));
-    let message = error["message"].as_str().expect("message string");
+    assert_eq!(error["expected"], "extent at most 4");
+    assert_eq!(error["got"], "declared extent 9");
     assert_eq!(
-        message,
-        "diagonal declares the smaller selected extent ([05-OP-33]): axis 1 is \
-         literal 4, so the result extent is at most 4, but the declared result \
-         extent is 9",
-        "the CLI must carry the same exact diagnostic the checker suite pins"
+        error["span"]["offset"].as_u64(),
+        source.find("diagonal(").map(|offset| offset as u64),
+        "{error:?}"
     );
+    assert!(error["message"].as_str().unwrap().contains("axis 1"), "{error:?}");
 }
 
 /// REGRESSION TEST. `chelis eval --file` refuses the same program before

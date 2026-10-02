@@ -662,28 +662,32 @@ pub(super) fn check_reduction_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    format!("{name} expects tensor input, got {other}"),
+                    format!("{name} argument 1: expected tensor input, got {other}"),
+                    "tensor".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
 
     if name == "count" && !matches!(prec, TensorPrec::Concrete(Prim::Bool)) {
-        return report(
+        let got = prec.render();
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "count expects exactly a bool tensor, got tensor precision {}",
-                    prec.render()
-                ),
+                format!("count argument 1: expected exactly a bool tensor, got tensor precision {got}"),
+                "bool tensor".to_string(),
+                got,
                 vec!["Use count for bool tensors; numeric reductions use sum/prod_reduce.".into()],
             ),
+            site,
         );
     }
 
@@ -716,31 +720,38 @@ pub(super) fn check_reduction_signature(
             .iter()
             .all(|axis| extract_int_for_dim(axis).is_some())
     {
-        for axis_expr in axis_exprs {
+        for (position, axis_expr) in axis_exprs.iter().enumerate() {
             let raw = extract_int_for_dim(axis_expr).expect("guarded static axis");
             let Some(axis) = normalize_static_axis(dims.len(), raw) else {
-                return report(
+                let expected = format!("axis in -{}..{}", dims.len(), dims.len());
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{name} axis {raw} is out of bounds for rank {} tensor",
+                            "{name} argument {}, axis {raw}: expected {expected} for rank {} tensor, got {raw}",
+                            position + 2,
                             dims.len()
                         ),
+                        expected,
+                        raw.to_string(),
                         vec![],
                     ),
+                    site,
                 );
             };
             if remove.contains(&axis) {
-                return report(
+                let got = format!("duplicate axis {raw}");
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "{name}: duplicate reduction axis {raw}; each normalized axis may appear at most once"
-                        ),
+                        format!("{name} argument {}, axis {raw}: expected unique normalized axis, got {got}", position + 2),
+                        "unique normalized axis".to_string(),
+                        got,
                         vec![],
                     ),
+                    site,
                 );
             }
             remove.push(axis);
@@ -755,32 +766,54 @@ pub(super) fn check_reduction_signature(
                 })
             });
         if selects_concrete_named_axis {
-            return report(
+            let (position, selected) = axis_exprs
+                .iter()
+                .enumerate()
+                .find_map(|(position, axis)| {
+                    let axis_name = symbolic_dim_ref_name(axis)?;
+                    dims.iter()
+                        .any(|dim| matches!(subst.semantic_dim(dim), Dim::Name(name) if name == axis_name))
+                        .then_some((position + 2, axis_name))
+                })
+                .expect("guarded matching named axis");
+            let got = format!("named axis `{selected}`");
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    "count on a concrete-rank operand requires one or more positional i32 axes; named axes are reserved for rank-polymorphic operands".to_string(),
+                    format!(
+                        "count argument {position}, axis `{selected}`: expected positional i32 axis on a concrete-rank operand, got {got}; named axes are reserved for rank-polymorphic operands"
+                    ),
+                    "positional i32 axis".to_string(),
+                    got,
                     vec!["Use the selected dimensions' positional indices, or make the operand rank-polymorphic and name every selected axis.".to_string()],
                 ),
+                site,
             );
         }
-        for ax in axis_exprs {
+        for (position, ax) in axis_exprs.iter().enumerate() {
             // A positional integer that reaches the named path: either the
             // operand is rank-spread (index meaningless at symbolic rank) or it
             // is mixed with other axes. Direct the user to name each axis.
             if extract_int_for_dim(ax).is_some() {
-                return report(
+                let got = describe_axis_arg(Some(ax));
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{name}: positional and named axes cannot be mixed, and positional axes \
-                         require a concrete-rank operand; name every selected axis on a \
-                         rank-spread operand (e.g. `{name}(x, seq, head)`) \
-                         (spec/04-type-system.md \u{00a7}4.5.3)"
+                            "{name} argument {}, axis {got}: expected named axis of the operand, got {got}; \
+                             positional and named axes cannot be mixed, and positional axes \
+                             require a concrete-rank operand; name every selected axis on a \
+                             rank-spread operand (e.g. `{name}(x, seq, head)`) \
+                             (spec/04-type-system.md \u{00a7}4.5.3)",
+                            position + 2
                         ),
+                        "named axis of the operand".to_string(),
+                        got,
                         vec![],
                     ),
+                    site,
                 );
             }
             // Issue #259: a non-literal, non-name axis (a runtime `i32`
@@ -788,20 +821,23 @@ pub(super) fn check_reduction_signature(
             // targeted compile-time-constant diagnostic rather than leaking an
             // unresolved output type downstream.
             let Some(axis_name) = symbolic_dim_ref_name(ax) else {
-                return report(
+                let got = describe_axis_arg(Some(ax));
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{name} axis must be a compile-time constant or a named axis of the \
-                         operand, got {}",
-                            describe_axis_arg(Some(ax)),
+                            "{name} argument {} (axis): expected compile-time constant or named axis of the operand, got {got}",
+                            position + 2
                         ),
+                        "compile-time constant or named axis of the operand".to_string(),
+                        got,
                         vec![format!(
                             "Pass a literal axis (e.g. `{name}(x, 0)`) on a concrete-rank operand, or \
-                         name the axis (e.g. `{name}(x, seq)`) to reduce by name."
+                             name the axis (e.g. `{name}(x, seq)`) to reduce by name."
                         )],
                     ),
+                    site,
                 );
             };
             let hits: Vec<usize> = dims
@@ -815,32 +851,43 @@ pub(super) fn check_reduction_signature(
                     // chelis#339: a duplicate axis name in the variadic list
                     // is a hard error, never a silent deduplication.
                     if remove.contains(i) {
-                        return report(
+                        let got = format!("duplicate `{axis_name}`");
+                        return report_at_check_site(
                             errors,
-                            CheckError::new(
+                            CheckError::with_types(
                                 CheckErrorKind::DimensionMismatch,
                                 format!(
-                                    "{name}: duplicate reduction axis `{axis_name}`; each named \
-                                 axis may appear at most once in a variadic reduction \
-                                 (spec/04-type-system.md \u{00a7}4.5.3)"
+                                    "{name} argument {}, axis `{axis_name}`: expected unique reduction axis, got {got}; \
+                                     each named axis may appear at most once in a variadic reduction \
+                                     (spec/04-type-system.md \u{00a7}4.5.3)",
+                                    position + 2
                                 ),
+                                "unique reduction axis".to_string(),
+                                got,
                                 vec![],
                             ),
+                            site,
                         );
                     }
                     remove.push(*i);
                 }
                 [] if has_spread => {
-                    return report(
+                    let got = format!("`{axis_name}`");
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "{name}: rank-spread operand has no named `{axis_name}` axis to \
-                             reduce (spec/04-type-system.md \u{00a7}4.5.3)"
+                                "{name} argument {}, axis `{axis_name}`: expected named axis of operand, got {got}; \
+                                 rank-spread operand has no named `{axis_name}` axis to reduce \
+                                 (spec/04-type-system.md \u{00a7}4.5.3)",
+                                position + 2
                             ),
+                            "named axis of operand".to_string(),
+                            got,
                             vec![],
                         ),
+                        site,
                     );
                 }
                 [] => {
@@ -849,33 +896,44 @@ pub(super) fn check_reduction_signature(
                     // runtime `i32` binding (issue #259) and a mistyped/absent
                     // axis name — so the message stays neutral between them
                     // rather than asserting "runtime value".
-                    return report(
+                    let got = format!("`{axis_name}`");
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "{name} axis `{axis_name}` is neither a compile-time constant nor a \
-                             named axis of the operand: a reduction axis must be a literal or \
-                             `cast(N, i32)` constant, or the name of an existing axis"
+                                "{name} argument {}, axis `{axis_name}`: expected literal or named axis of the operand, got {got}; \
+                                 axis `{axis_name}` is neither a compile-time constant nor a \
+                                 named axis of the operand: a reduction axis must be a literal or \
+                                 `cast(N, i32)` constant, or the name of an existing axis",
+                                position + 2
                             ),
+                            "literal or named axis of the operand".to_string(),
+                            got,
                             vec![format!(
                                 "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, i32)`, or \
-                             name an existing axis of the operand (e.g. `{name}(x, seq)`)."
+                                 name an existing axis of the operand (e.g. `{name}(x, seq)`)."
                             )],
                         ),
+                        site,
                     );
                 }
                 _ => {
-                    return report(
+                    let got = format!("ambiguous `{axis_name}`");
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "{name}: named axis `{axis_name}` is ambiguous; it appears more than \
-                             once in the operand shape"
+                                "{name} argument {}, axis `{axis_name}`: expected unique named axis, got {got}; \
+                                 it appears more than once in the operand shape",
+                                position + 2
                             ),
+                            "unique named axis".to_string(),
+                            got,
                             vec![],
                         ),
+                        site,
                     );
                 }
             }
@@ -923,13 +981,17 @@ pub(super) fn check_reduction_signature(
             TensorPrec::Concrete(p) => match p.default_reduce_sum_result_precision() {
                 Ok(rp) => TensorPrec::Concrete(rp),
                 Err(msg) => {
-                    return report(
+                    let got = prec.render();
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::TypeMismatch,
-                            format!("sum: {msg}"),
+                            format!("sum argument 1: expected reducible tensor precision, got {got}; {msg}"),
+                            "reducible tensor precision".to_string(),
+                            got,
                             vec![],
                         ),
+                        site,
                     );
                 }
             },
@@ -949,34 +1011,39 @@ pub(super) fn check_reduction_signature(
         if let Type::Tensor(_, declared_prec) = resolved_result
             && declared_prec != result_prec
         {
-            return report(
+            let expected = declared_prec.render();
+            let got = result_prec.render();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::PrecisionMismatch,
                     format!(
                         "sum on operand precision `{}` produces result precision `{}` per \
-                     spec/04-type-system.md §5.7.1 (the §5.7.1 result-precision table \
-                     widens narrow integer operands to i32 to prevent silent overflow); \
-                     declared result precision `{}` is incompatible. Use `tensor[{}]` or \
-                     omit the result type to accept the spec default.",
+                         spec/04-type-system.md §5.7.1 (the §5.7.1 result-precision table \
+                         widens narrow integer operands to i32 to prevent silent overflow); \
+                         declared result: expected {expected}, got {got}. Use `tensor[{got}]` or \
+                         omit the result type to accept the spec default.",
                         prec.render(),
                         result_prec.render(),
-                        declared_prec.render(),
-                        result_prec.render(),
                     ),
+                    expected,
+                    got,
                     vec![format!(
                         "spec/04-type-system.md §5.7.1: `reduce_sum` on `{}` operands \
-                     produces a `{}` result by default to prevent silent overflow",
+                         produces a `{}` result by default to prevent silent overflow",
                         prec.render(),
                         result_prec.render(),
                     )],
                 ),
+                site,
             );
         }
     }
     let canonical = Type::Tensor(out_dims, result_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        return report(errors, te.into());
+        let mut error: CheckError = te.into();
+        error.message = format!("{name} result (from argument 1): {}", error.message);
+        return report_at_check_site(errors, error, site);
     }
     subst.apply(&canonical)
 }

@@ -83,6 +83,7 @@ pub(super) fn reject_unreachable_diagonal_extent(
     axis1: usize,
     axis2: usize,
     node: &DeepNode,
+    site: CheckSite<'_>,
     env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
@@ -108,22 +109,26 @@ pub(super) fn reject_unreachable_diagonal_extent(
     if declared <= bound {
         return None;
     }
-    Some(report(
+    let expected = format!("extent at most {bound}");
+    let got = format!("declared extent {declared}");
+    Some(report_at_check_site(
         errors,
-        CheckError::new(
+        CheckError::with_types(
             CheckErrorKind::DimensionMismatch,
             with_node_provenance(
                 node,
                 format!(
-                    "diagonal declares the smaller selected extent ([05-OP-33]): \
-                     axis {source_axis} is literal {bound}, so the result extent is \
-                     at most {bound}, but the declared result extent is {declared}"
+                    "diagonal argument 1, axis {source_axis}: expected {expected}, got {got}; \
+                     the result declares the smaller selected extent ([05-OP-33])"
                 ),
             ),
+            expected,
+            got,
             vec![format!(
                 "Declare an extent at or below {bound}, or select an axis pair \
                  whose literal extent is at least {declared}"
             )],
         ),
+        site,
     ))
 }

@@ -36,7 +36,7 @@ fn rendered(errors: &[CheckError]) -> Vec<String> {
     messages
 }
 
-fn both_ingress_diagnostics(source: &str) -> Vec<String> {
+fn both_ingress_diagnostics(source: &str) -> Vec<CheckError> {
     let parsed = parse_str(source).expect("valid source");
     let desugared = desugar_program(&parsed).expect("Surf fixture must desugar");
     let expanded: Vec<Expr> = expand_program(&desugared, &ExpansionOptions::default())
@@ -44,12 +44,12 @@ fn both_ingress_diagnostics(source: &str) -> Vec<String> {
         .into_exprs();
     let typed = check_typed_program(&desugared)
         .err()
-        .map_or_else(Vec::new, |report| rendered(&report.errors));
+        .map_or_else(Vec::new, |report| report.errors);
     let ir = check_ir_program(&expanded)
         .err()
-        .map_or_else(Vec::new, |report| rendered(&report.errors));
+        .map_or_else(Vec::new, |report| report.errors);
     assert_eq!(
-        typed, ir,
+        rendered(&typed), rendered(&ir),
         "the stamped and normalized checker ingresses disagree:\n{source}\n\
          typed={typed:?}\nir={ir:?}"
     );
@@ -67,7 +67,7 @@ fn check_both_ingresses(source: &str, accepted: bool) {
         assert!(
             diagnostics
                 .iter()
-                .any(|message| message.starts_with("[PrecisionMismatch] ")),
+                .any(|error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)),
             "both ingresses must reject with PrecisionMismatch:\n{source}\n{diagnostics:?}"
         );
     }
@@ -336,33 +336,41 @@ fn window_reduction_contracts_cover_each_spec_family_on_both_ingresses() {
 
 #[test]
 fn window_shape_diagnostics_precede_family_admission_on_both_ingresses() {
-    for (source, needle) in [
+    for (source, expected, got) in [
         (
             "def g(x: tensor[3, bool]) -> tensor[2, bool] = \
              reduce_window_sum(x, [0i64], [1i64])\n",
-            "window_shape[0] = 0 must be >= 1",
+            "window extent >= 1",
+            "0",
         ),
         (
             "def g(x: tensor[3, bool]) -> tensor[2, bool] = \
              reduce_window_sum(x, [2i64], [0i64])\n",
-            "strides[0] = 0 must be >= 1",
+            "stride >= 1",
+            "0",
         ),
         (
             "def g(x: tensor[3, bool]) -> tensor[2, bool] = \
              reduce_window_sum(x, [1i64, 1i64], [1i64, 1i64])\n",
-            "window arity 2 exceeds tensor rank 1",
+            "window arity at most 1",
+            "window arity 2",
         ),
     ] {
         let diagnostics = both_ingress_diagnostics(source);
         assert!(
-            diagnostics.iter().any(|message| message.contains(needle)),
+            diagnostics.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                    && error.expected.as_deref() == Some(expected)
+                    && error.got.as_deref() == Some(got)
+                    && error.span_offset == source.find("reduce_window_sum(")
+            }),
             "the specialized window diagnostic must remain authoritative:\n\
              {source}\n{diagnostics:?}"
         );
         assert!(
             diagnostics
                 .iter()
-                .all(|message| !message.starts_with("[PrecisionMismatch] ")),
+                .all(|error| !matches!(error.kind, CheckErrorKind::PrecisionMismatch)),
             "family admission must not hide a prior window error:\n{source}\n{diagnostics:?}"
         );
     }
@@ -384,16 +392,19 @@ fn deferred_window_shape_diagnostics_precede_late_family_rejection_on_both_ingre
         let invalid_rank = source(dtype, "[1i64, 1i64]");
         let diagnostics = both_ingress_diagnostics(&invalid_rank);
         assert!(
-            diagnostics
-                .iter()
-                .any(|message| message.contains("window arity 2 exceeds tensor rank 1")),
+            diagnostics.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                    && error.expected.as_deref() == Some("window arity at most 1")
+                    && error.got.as_deref() == Some("window arity 2")
+                    && error.span_offset == invalid_rank.find("reduce_window_sum(")
+            }),
             "the deferred window diagnostic must remain authoritative:\n\
              {invalid_rank}\n{diagnostics:?}"
         );
         assert!(
             diagnostics
                 .iter()
-                .all(|message| !message.starts_with("[PrecisionMismatch] ")),
+                .all(|error| !matches!(error.kind, CheckErrorKind::PrecisionMismatch)),
             "late family admission must not hide a deferred window error:\n\
              {invalid_rank}\n{diagnostics:?}"
         );
@@ -404,7 +415,7 @@ fn deferred_window_shape_diagnostics_precede_late_family_rejection_on_both_ingre
     assert!(
         diagnostics
             .iter()
-            .any(|message| message.starts_with("[PrecisionMismatch] ")),
+            .any(|error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)),
         "a shape-valid bool operand must still fail Numeric admission:\n\
          {valid_rank}\n{diagnostics:?}"
     );

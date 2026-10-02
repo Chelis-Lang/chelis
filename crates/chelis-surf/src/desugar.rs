@@ -2091,21 +2091,20 @@ impl DesugarCtx {
                 vec![node(DeepTag::Export, children)]
             }
         };
-        if let Some(entry) = span_entry(decl.span()) {
-            for expr in &mut lowered {
-                if let deep::Expr::Node(node, _) = expr
-                    && matches!(
-                        node.tag(),
-                        DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias
-                    )
-                    && node.meta().span_id().is_none()
-                {
-                    let mut meta = node.meta().clone();
-                    meta.insert(entry.clone())
-                        .expect("declaration has no existing span ID");
-                    node.try_replace_meta(meta)
-                        .expect("Surf declaration span is valid metadata");
-                }
+        for expr in &mut lowered {
+            if let deep::Expr::Node(node, _) = expr
+                && matches!(
+                    node.tag(),
+                    DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias
+                )
+                && node.meta().span_id().is_none()
+                && let Some(entry) = span_entry(decl.span())
+            {
+                let mut meta = node.meta().clone();
+                meta.insert(entry)
+                    .expect("declaration has no existing span ID");
+                node.try_replace_meta(meta)
+                    .expect("Surf declaration span is valid metadata");
             }
         }
         lowered

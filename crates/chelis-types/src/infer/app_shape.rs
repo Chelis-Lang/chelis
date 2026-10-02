@@ -27,18 +27,22 @@ pub(super) fn infer_reduction_app(
     product: &mut InferenceProduct,
 ) -> Type {
     if fname == "argmax_reduce" || fname == "argmin_reduce" {
-        return report(
+        let expected = "2 arguments";
+        let got = format!("{} arguments", node.child_count().saturating_sub(1));
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
                 format!(
-                    "{fname} is an index-returning reduction and has no variadic \
-                 named-axis form: an index along one axis is not composable with a \
-                 second reduction (spec/04-type-system.md \u{00a7}4.5.3). Reduce one \
-                 axis at a time."
+                    "{fname} argument 3 (second axis): expected {expected}, got {got}; \
+                     index-returning reductions have no variadic named-axis form \
+                     (spec/04-type-system.md \u{00a7}4.5.3). Reduce one axis at a time."
                 ),
+                expected.to_string(),
+                got,
                 vec![],
             ),
+            CheckSite::Expr(expr),
         );
     }
 
@@ -876,6 +880,7 @@ pub(super) fn check_shrink_signature(
 /// expected 1 args`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_stride_app(
+    expr: &deep::Expr,
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
@@ -886,13 +891,12 @@ pub(super) fn infer_stride_app(
 ) -> Type {
     let kids = node.children_slice();
     if kids.len() < 3 {
-        return report(
+        return report_builtin_arity_range(
             errors,
-            CheckError::new(
-                CheckErrorKind::ArityMismatch,
-                "stride expects a tensor followed by one positive i32 stride per axis".to_string(),
-                vec![],
-            ),
+            CheckSite::Expr(expr),
+            "stride",
+            "at least 2 arguments",
+            kids.len().saturating_sub(1),
         );
     }
 
@@ -911,7 +915,7 @@ pub(super) fn infer_stride_app(
     route_arg_tys.extend(stride_tys);
     defer_or_check_shape_route(
         ShapeRouteKind::Stride,
-        CheckSite::Node(node),
+        CheckSite::Expr(expr),
         node,
         kids,
         route_arg_tys,
@@ -929,30 +933,34 @@ pub(super) fn infer_stride_app(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_stride_signature(
     node: &DeepNode,
+    site: CheckSite<'_>,
     kids: &[deep::Expr],
     arg_tys: &[Type],
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     let input_ty = arg_tys[0].clone();
-    let stride_tys: Vec<Type> = arg_tys[1..].to_vec();
 
-    for stride_ty in &stride_tys {
+    for (position, stride_ty) in arg_tys[1..].iter().enumerate() {
         let resolved = subst.apply(stride_ty);
         match resolved {
             // Stride steps are extent-domain ([05-DIM-1]): i64.
             Type::Prim(Prim::Int64) | Type::Var(_) | Type::Error(_) => {}
             other => {
-                return report(
+                let got = other.to_string();
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::TypeMismatch,
                         with_node_provenance(
                             node,
-                            format!("stride expects i64 strides (write 2i64), got {other}"),
+                            format!("stride argument {} (step): expected i64, got {got} (write 2i64)", position + 2),
                         ),
+                        "i64".to_string(),
+                        got,
                         vec![],
                     ),
+                    site,
                 );
             }
         }
@@ -963,13 +971,17 @@ pub(super) fn check_stride_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            return report(
+            let got = other.to_string();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    with_node_provenance(node, format!("stride expects tensor input, got {other}")),
+                    with_node_provenance(node, format!("stride argument 1: expected tensor, got {got}")),
+                    "tensor".to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
     };
@@ -985,21 +997,24 @@ pub(super) fn check_stride_signature(
     let strides: Vec<Option<i64>> = kids[2..].iter().map(extract_int_for_dim).collect();
 
     if strides.len() != dims.len() {
-        return report(
+        let expected = format!("{} strides", dims.len());
+        let got = format!("{} strides", strides.len());
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "stride expects {} strides for rank {} tensor, got {}",
-                        dims.len(),
-                        dims.len(),
-                        strides.len()
+                        "stride arguments 2.. (steps): expected {expected} for rank {} tensor, got {got}",
+                        dims.len()
                     ),
                 ),
+                expected,
+                got,
                 vec![],
             ),
+            site,
         );
     }
 
@@ -1011,18 +1026,23 @@ pub(super) fn check_stride_signature(
             continue;
         };
         if *step <= 0 {
-            return report(
+            let got = step.to_string();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
                     with_node_provenance(
                         node,
                         format!(
-                            "stride axis {axis} step {step} must be positive (zero or negative strides are not allowed)"
+                            "stride argument {}, axis {axis}: expected positive step, got {got} (zero or negative strides are not allowed)",
+                            axis + 2
                         ),
                     ),
+                    "positive step".to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
         let step_us = *step as usize;
@@ -1059,6 +1079,7 @@ pub(super) fn check_stride_signature(
 /// finding for issue Chelis-Lang/chelis#187.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_pad_app(
+    expr: &deep::Expr,
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
@@ -1069,11 +1090,14 @@ pub(super) fn infer_pad_app(
 ) -> Type {
     let kids = node.children_slice();
     if kids.len() != 4 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            "pad expects a tensor, a list of [lo, hi] padding pairs (one per axis), and a fill scalar".to_string(),
-            vec![],
-        ));
+        return report_builtin_arity(
+            errors,
+            node,
+            CheckSite::Expr(expr),
+            "pad",
+            3,
+            kids.len().saturating_sub(1),
+        );
     }
 
     let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
@@ -1088,7 +1112,7 @@ pub(super) fn infer_pad_app(
     let route_arg_tys = vec![input_ty, padding_ty, fill_ty];
     defer_or_check_shape_route(
         ShapeRouteKind::Pad,
-        CheckSite::Node(node),
+        CheckSite::Expr(expr),
         node,
         kids,
         route_arg_tys,
@@ -1106,6 +1130,7 @@ pub(super) fn infer_pad_app(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_pad_signature(
     node: &DeepNode,
+    site: CheckSite<'_>,
     kids: &[deep::Expr],
     arg_tys: &[Type],
     vg: &mut VarGen,
@@ -1120,20 +1145,24 @@ pub(super) fn check_pad_signature(
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
     let expected_padding_ty = Type::Adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&padding_ty, &expected_padding_ty, subst) {
-        return report(
+        let expected = expected_padding_ty.to_string();
+        let got = subst.apply(&padding_ty).to_string();
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "pad expects a list of [lo, hi] i64 padding pairs \
-                         (write 1i64 or cast(..., i64) on each amount), got {}",
-                        subst.apply(&padding_ty)
+                        "pad argument 2 (padding): expected {expected} of [lo, hi] i64 pairs, got {got} \
+                         (write 1i64 or cast(..., i64) on each amount)"
                     ),
                 ),
+                expected,
+                got,
                 vec![],
             ),
+            site,
         );
     }
 
@@ -1142,13 +1171,17 @@ pub(super) fn check_pad_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            return report(
+            let got = other.to_string();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    with_node_provenance(node, format!("pad expects tensor input, got {other}")),
+                    with_node_provenance(node, format!("pad argument 1: expected tensor, got {got}")),
+                    "tensor".to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
     };
@@ -1173,19 +1206,21 @@ pub(super) fn check_pad_signature(
         }
     };
     if let Err(_te) = unify(&fill_ty, &expected_fill_ty, subst) {
-        return report(
+        let expected = expected_fill_ty.to_string();
+        let got = subst.apply(&fill_ty).to_string();
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
                 with_node_provenance(
                     node,
-                    format!(
-                        "pad fill must be a scalar of the input tensor precision ({expected_fill_ty}), got {}",
-                        subst.apply(&fill_ty)
-                    ),
+                    format!("pad argument 3 (fill): expected scalar of input tensor precision {expected}, got {got}"),
                 ),
+                expected,
+                got,
                 vec![],
             ),
+            site,
         );
     }
 
@@ -1198,33 +1233,43 @@ pub(super) fn check_pad_signature(
             return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
         }
         PairListShape::Malformed { axis, reason } => {
-            return report(
+            let got = reason.to_string();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    with_node_provenance(node, format!("pad axis {axis} pair {reason}")),
+                    with_node_provenance(
+                        node,
+                        format!("pad argument 2, axis {axis}: expected [lo, hi] pair, got {got}"),
+                    ),
+                    "[lo, hi] pair".to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
     };
 
     if padding.len() != dims.len() {
-        return report(
+        let expected = format!("{} padding pairs", dims.len());
+        let got = format!("{} padding pairs", padding.len());
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "pad expects {} padding pairs for rank {} tensor, got {}",
-                        dims.len(),
-                        dims.len(),
-                        padding.len()
+                        "pad argument 2 (padding): expected {expected} for rank {} tensor, got {got}",
+                        dims.len()
                     ),
                 ),
+                expected,
+                got,
                 vec![],
             ),
+            site,
         );
     }
 
@@ -1236,16 +1281,20 @@ pub(super) fn check_pad_signature(
             continue;
         };
         if *lo < 0 || *hi < 0 {
-            return report(
+            let got = format!("[{lo}, {hi}]");
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
                     with_node_provenance(
                         node,
-                        format!("pad axis {axis} padding [{lo}, {hi}] has negative entry"),
+                        format!("pad argument 2, axis {axis}: expected non-negative padding pair, got {got}"),
                     ),
+                    "non-negative padding pair".to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
         match (*lo == 0 && *hi == 0, subst.observe_dim(dim).known_extent()) {
@@ -1267,11 +1316,11 @@ pub(super) fn check_pad_signature(
 /// `reduce_window_*(&x, window_shape, strides)` infer.
 ///
 /// Per `spec/05-risc-primitives.md` §2.3.1:
-/// - `window_shape` and `strides` are `List[i32]` of equal length
+/// - `window_shape` and `strides` are `List[i64]` of equal length
 ///   `n >= 1`.
 /// - The trailing `n` axes of the input are the windowed axes; leading
 ///   `rank - n` axes pass through.
-/// - Each window/stride entry must be a positive i32 literal at
+/// - Each window/stride entry must be a positive i64 literal at
 ///   check time (non-literal arguments fall back to a wildcard output
 ///   shape so runtime checks can still apply).
 /// - Output rank equals input rank. Trailing dim i is
@@ -1292,16 +1341,13 @@ pub(super) fn infer_reduce_window_app(
 ) -> Type {
     let kids = node.children_slice();
     if kids.len() != 4 {
-        return report(
+        return report_builtin_arity(
             errors,
-            CheckError::new(
-                CheckErrorKind::ArityMismatch,
-                format!(
-                    "{name} expects 3 arguments (tensor, window_shape, strides), got {}",
-                    kids.len().saturating_sub(1)
-                ),
-                vec![],
-            ),
+            node,
+            CheckSite::Expr(expr),
+            name,
+            3,
+            kids.len().saturating_sub(1),
         );
     }
     let func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
@@ -1318,7 +1364,7 @@ pub(super) fn infer_reduce_window_app(
         ShapeRouteKind::ReduceWindow {
             name: name.to_string(),
         },
-        CheckSite::Node(node),
+        CheckSite::Expr(expr),
         node,
         kids,
         route_arg_tys.clone(),
@@ -1359,6 +1405,7 @@ pub(super) fn infer_reduce_window_app(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_reduce_window_signature(
     node: &DeepNode,
+    site: CheckSite<'_>,
     kids: &[deep::Expr],
     name: &str,
     arg_tys: &[Type],
@@ -1371,35 +1418,33 @@ pub(super) fn check_reduce_window_signature(
 
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
     if let Err(_te) = unify(&window_ty, &int_list, subst) {
-        return report(
+        let expected = int_list.to_string();
+        let got = subst.apply(&window_ty).to_string();
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
-                with_node_provenance(
-                    node,
-                    format!(
-                        "{name} expects window_shape to be List[i64], got {}",
-                        subst.apply(&window_ty)
-                    ),
-                ),
+                with_node_provenance(node, format!("{name} argument 2 (window_shape): expected {expected}, got {got}")),
+                expected,
+                got,
                 vec![],
             ),
+            site,
         );
     }
     if let Err(_te) = unify(&stride_ty, &int_list, subst) {
-        return report(
+        let expected = int_list.to_string();
+        let got = subst.apply(&stride_ty).to_string();
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
-                with_node_provenance(
-                    node,
-                    format!(
-                        "{name} expects strides to be List[i64], got {}",
-                        subst.apply(&stride_ty)
-                    ),
-                ),
+                with_node_provenance(node, format!("{name} argument 3 (strides): expected {expected}, got {got}")),
+                expected,
+                got,
                 vec![],
             ),
+            site,
         );
     }
 
@@ -1408,13 +1453,17 @@ pub(super) fn check_reduce_window_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            return report(
+            let got = other.to_string();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    with_node_provenance(node, format!("{name} expects tensor input, got {other}")),
+                    with_node_provenance(node, format!("{name} argument 1: expected tensor, got {got}")),
+                    "tensor".to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
     };
@@ -1430,73 +1479,89 @@ pub(super) fn check_reduce_window_signature(
     };
 
     if window_shape.is_empty() || strides.is_empty() {
-        return report(
+        let expected = "non-empty window_shape and strides";
+        let got = format!("window_shape len {}, strides len {}", window_shape.len(), strides.len());
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
                 with_node_provenance(
                     node,
-                    format!("{name} requires a non-empty window_shape and strides"),
+                    format!("{name} arguments 2 and 3: expected {expected}, got {got}"),
                 ),
+                expected.to_string(),
+                got,
                 vec![],
             ),
+            site,
         );
     }
     if window_shape.len() != strides.len() {
-        return report(
+        // The two authored lists are peers. Their lengths must agree, but
+        // neither side is the declared authority for the other.
+        return report_at_check_site(
             errors,
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "{name} window_shape (len {}) and strides (len {}) must agree",
+                        "{name} arguments 2 (window_shape) and 3 (strides): \
+                         lengths disagree ({} and {}, respectively)",
                         window_shape.len(),
                         strides.len()
                     ),
                 ),
                 vec![],
             ),
+            site,
         );
     }
     let n = window_shape.len();
     if dims.len() < n {
-        return report(
+        let expected = format!("window arity at most {}", dims.len());
+        let got = format!("window arity {n}");
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                with_node_provenance(
-                    node,
-                    format!("{name} window arity {n} exceeds tensor rank {}", dims.len()),
-                ),
+                with_node_provenance(node, format!("{name} argument 2 (window_shape): expected {expected} for operand rank {}, got {got}", dims.len())),
+                expected,
+                got,
                 vec![],
             ),
+            site,
         );
     }
     for (i, &w) in window_shape.iter().enumerate() {
         if w <= 0 {
-            return report(
+            let got = w.to_string();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    with_node_provenance(
-                        node,
-                        format!("{name} window_shape[{i}] = {w} must be >= 1"),
-                    ),
+                    with_node_provenance(node, format!("{name} argument 2, axis {i}: expected window extent >= 1, got {got}")),
+                    "window extent >= 1".to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
     }
     for (i, &s) in strides.iter().enumerate() {
         if s <= 0 {
-            return report(
+            let got = s.to_string();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    with_node_provenance(node, format!("{name} strides[{i}] = {s} must be >= 1")),
+                    with_node_provenance(node, format!("{name} argument 3, axis {i}: expected stride >= 1, got {got}")),
+                    "stride >= 1".to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
     }
@@ -1509,19 +1574,21 @@ pub(super) fn check_reduce_window_signature(
                 let w = window_shape[i];
                 let s = strides[i];
                 if in_dim < w {
-                    return report(
+                    let expected = format!("window extent <= {in_dim}");
+                    let got = w.to_string();
+                    return report_at_check_site(
                         errors,
-                        CheckError::new(
+                        CheckError::with_types(
                             CheckErrorKind::DimensionMismatch,
                             with_node_provenance(
                                 node,
-                                format!(
-                                    "{name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
-                                    leading + i
-                                ),
+                                format!("{name} argument 2, axis {}: expected {expected}, got {got}", leading + i),
                             ),
+                            expected,
+                            got,
                             vec![],
                         ),
+                        site,
                     );
                 }
                 // `in_dim >= w` (checked above) and `s >= 1` guarantee
