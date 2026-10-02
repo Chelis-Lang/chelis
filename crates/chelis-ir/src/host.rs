@@ -1863,6 +1863,16 @@ pub enum HostExprKind<T = HostTypeTerm> {
         value: Box<HostExpr<T>>,
         ty: T,
     },
+    /// A checked local tensor ascription's value, whose named axes are sites
+    /// of the enclosing activation's dimension binders (spec/04-type-system.md
+    /// section 4.4.1). The value is unchanged. After it is produced, each
+    /// site binds an output-inferred binder the activation has not bound yet
+    /// and is a section 4.7 claim against the binder's first site otherwise.
+    ExtentSites {
+        value: Box<HostExpr<T>>,
+        sites: Vec<crate::lower::LocalAscriptionNamedSite>,
+        ty: T,
+    },
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -2131,6 +2141,11 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
         }
         HostExprKind::FormalIngress { value, ty } => ConcreteHostExprKind::FormalIngress {
             value: Box::new(resolve_host_expr(*value)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::ExtentSites { value, sites, ty } => ConcreteHostExprKind::ExtentSites {
+            value: Box::new(resolve_host_expr(*value)?),
+            sites,
             ty: ty.into_concrete()?,
         },
         HostExprKind::Int(value) => ConcreteHostExprKind::Int(value),
@@ -2530,7 +2545,9 @@ pub fn captured_global_names<T>(program: &HostProgram<T>) -> Vec<String> {
 pub fn collect_host_var_names<T>(expr: &HostExpr<T>, out: &mut UnordSet<String>) {
     match &expr.kind {
         HostExprKind::ResultClaimScope { body, .. } => collect_host_var_names(body, out),
-        HostExprKind::FormalIngress { value, .. } => collect_host_var_names(value, out),
+        HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
+            collect_host_var_names(value, out)
+        }
         HostExprKind::Int(_)
         | HostExprKind::Float(_)
         | HostExprKind::Bool(_)
@@ -3597,7 +3614,9 @@ fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> b
 fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
     match &expr.kind {
         HostExprKind::ResultClaimScope { body, .. } => host_body_uses_builtin(body, builtin),
-        HostExprKind::FormalIngress { value, .. } => host_body_uses_builtin(value, builtin),
+        HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
+            host_body_uses_builtin(value, builtin)
+        }
         HostExprKind::Builtin { name, args, .. } => {
             name == builtin || args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
         }
@@ -3866,7 +3885,9 @@ fn body_callsite_span_per_helper(expr: &HostExpr) -> UnordMap<usize, Option<Stri
                 walk(list, out);
             }
             HostExprKind::ResultClaimScope { body, .. } => walk(body, out),
-            HostExprKind::FormalIngress { value, .. } => walk(value, out),
+            HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
+                walk(value, out)
+            }
             _ => {}
         }
     }
@@ -3942,7 +3963,7 @@ fn detect_multiple_return_paths_rejection(function: &HostFunction) -> Option<Sum
             HostExprKind::ResultClaimScope { body, .. } => {
                 arm_references_sparse_helper(body, function)
             }
-            HostExprKind::FormalIngress { value, .. } => {
+            HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
                 arm_references_sparse_helper(value, function)
             }
             _ => false,
@@ -4175,7 +4196,9 @@ fn host_body_has_call_matching<T>(
         }
         HostExprKind::AdtConstruct { fields, .. } => fields.iter().any(recurse),
         HostExprKind::ResultClaimScope { body, .. } => recurse(body),
-        HostExprKind::FormalIngress { value, .. } => recurse(value),
+        HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
+            recurse(value)
+        }
         _ => false,
     }
 }
@@ -7839,7 +7862,7 @@ fn lower_checked_local_ascription_region(
             )
         })?;
 
-    try_lower_tensor_helper_call_with_context(
+    let value = try_lower_tensor_helper_call_with_context(
         local_region.expression(),
         program,
         scope,
@@ -7855,7 +7878,20 @@ fn lower_checked_local_ascription_region(
                  by the tensor execution lane"
             ),
         )
-    })
+    })?;
+    // The region runs on its own, so its named axes are related to the
+    // activation's other sites of the same binders where the host program
+    // executes it (spec/04-type-system.md section 4.4.1).
+    let sites = checked_lowering.local_ascription_named_sites(local_region);
+    if sites.is_empty() {
+        return Ok(value);
+    }
+    let ty = host_expr_type(&value);
+    Ok(HostExpr::new(HostExprKind::ExtentSites {
+        value: Box::new(value),
+        sites,
+        ty,
+    }))
 }
 
 fn host_expr_lowering_error(
@@ -8764,7 +8800,7 @@ fn collect_named_callback_signatures(
         HostExprKind::ResultClaimScope { body, .. } => {
             collect_named_callback_signatures(body, out);
         }
-        HostExprKind::FormalIngress { value, .. } => {
+        HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
             collect_named_callback_signatures(value, out);
         }
         HostExprKind::Call { args, .. } | HostExprKind::Builtin { args, .. } => {
@@ -8932,7 +8968,7 @@ fn infer_callable_param_types_in_expr(
         HostExprKind::ResultClaimScope { body, .. } => {
             infer_callable_param_types_in_expr(body, unknown, out);
         }
-        HostExprKind::FormalIngress { value, .. } => {
+        HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
             infer_callable_param_types_in_expr(value, unknown, out);
         }
         HostExprKind::Call {
@@ -9076,7 +9112,7 @@ fn refine_host_expr_types(
                 changed = true;
             }
         }
-        HostExprKind::FormalIngress { value, ty } => {
+        HostExprKind::FormalIngress { value, ty } | HostExprKind::ExtentSites { value, ty, .. } => {
             changed |= refine_host_expr_types(value, scope, signatures);
             let value_ty = host_expr_type(value);
             if ty.is_unresolved() && !value_ty.is_unresolved() {
@@ -10081,7 +10117,9 @@ fn collect_lowered_host_names(expr: &HostExpr, out: &mut UnordSet<String>) {
         | HostExprKind::String(_)
         | HostExprKind::Unit => {}
         HostExprKind::ResultClaimScope { body, .. } => collect_lowered_host_names(body, out),
-        HostExprKind::FormalIngress { value, .. } => collect_lowered_host_names(value, out),
+        HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
+            collect_lowered_host_names(value, out)
+        }
         HostExprKind::AdtFieldAccess { base, .. } => collect_lowered_host_names(base, out),
         HostExprKind::List(args, _)
         | HostExprKind::Tuple(args, _)
@@ -19275,7 +19313,8 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
         | HostExprKind::FlatMap { ty, .. }
         | HostExprKind::TensorCall { ty, .. }
         | HostExprKind::ResultClaimScope { ty, .. }
-        | HostExprKind::FormalIngress { ty, .. } => ty.clone(),
+        | HostExprKind::FormalIngress { ty, .. }
+        | HostExprKind::ExtentSites { ty, .. } => ty.clone(),
         HostExprKind::Unit | HostExprKind::SignatureEntry { .. } => HostTypeTerm::Unit,
     }
 }
@@ -19516,6 +19555,11 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
         },
         HostExprKind::FormalIngress { value, .. } => HostExprKind::FormalIngress {
             value: Box::new(force_host_expr_type(*value, ty.clone())),
+            ty,
+        },
+        HostExprKind::ExtentSites { value, sites, .. } => HostExprKind::ExtentSites {
+            value: Box::new(force_host_expr_type(*value, ty.clone())),
+            sites,
             ty,
         },
         HostExprKind::SignatureEntry {

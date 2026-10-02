@@ -189,6 +189,64 @@ struct DeclaredResultClaim {
     /// Every declared dimension this invocation can resolve: a literal, or
     /// a binder a tensor parameter witnesses.
     axes: Vec<ResultAxisClaim>,
+    /// Declared dimensions whose binder no parameter declares, so only the
+    /// body can bind it (spec/04-type-system.md section 4.4.1). Each is
+    /// resolved where the claim is checked, against the first site of its
+    /// activation that produced the binder's extent; one the path has not
+    /// bound claims nothing, because the result is then its first site.
+    /// Grouped by binder in declared order, as the C lane's frames are.
+    first_sites: Vec<FirstSiteAxis>,
+}
+
+/// One declared result axis named by an output-inferred binder of
+/// `activation`.
+#[derive(Clone)]
+struct FirstSiteAxis {
+    axis: usize,
+    binder: String,
+    activation: u64,
+}
+
+/// The dimension-binder extents each executing activation has bound
+/// (spec/04-type-system.md section 4.4.1).
+///
+/// A parameter axis binds its binder when the activation starts. An
+/// output-inferred binder is bound by the first site, in evaluation order,
+/// that produces its extent, and every later site that names it is a claim
+/// against that site. The records are keyed by activation rather than kept
+/// in a lexical frame: a binder first bound inside a block stays bound after
+/// the block, and a callee's records never mix with its caller's.
+#[derive(Default)]
+pub(super) struct ActivationExtents {
+    current: u64,
+    next: u64,
+    bound: BTreeMap<(u64, String), (NamedResultSource, i64)>,
+}
+
+impl ActivationExtents {
+    /// Start a fresh activation; the returned key restores its caller.
+    fn enter(&mut self) -> u64 {
+        self.next += 1;
+        std::mem::replace(&mut self.current, self.next)
+    }
+
+    fn exit(&mut self, caller: u64) {
+        let ended = self.current;
+        self.bound.retain(|(activation, _), _| *activation != ended);
+        self.current = caller;
+    }
+
+    fn get(&self, activation: u64, binder: &str) -> Option<&(NamedResultSource, i64)> {
+        self.bound.get(&(activation, binder.to_string()))
+    }
+
+    fn current(&self, binder: &str) -> Option<&(NamedResultSource, i64)> {
+        self.get(self.current, binder)
+    }
+
+    fn bind(&mut self, binder: String, source: NamedResultSource, extent: i64) {
+        self.bound.insert((self.current, binder), (source, extent));
+    }
 }
 
 /// One declared result axis and the value it requires.
@@ -220,6 +278,11 @@ impl ResultAxisClaim {
 }
 
 impl DeclaredResultClaim {
+    /// No axis this claim checks, now or once its first sites resolve.
+    fn is_vacuous(&self) -> bool {
+        self.axes.is_empty() && self.first_sites.is_empty()
+    }
+
     fn verdict(&self, produced: &RuntimeValue, op: &str) -> Result<(), String> {
         let RuntimeValue::Tensor(tensor) = produced else {
             return Ok(());
@@ -1518,6 +1581,12 @@ impl<'a> EvalContext<'a> {
             self.result_producer = self.bindings.result_producer(name).cloned();
             return Ok(value);
         }
+        // A dimension binder a site of this activation bound, which outlives
+        // the block the site sits in (spec/04-type-system.md section 4.4.1).
+        if let Some((_, extent)) = self.activation_extents.current(name) {
+            self.result_producer = None;
+            return Ok(RuntimeValue::int64(*extent));
+        }
         if let Some(value) = self.tensor_bindings.get(name) {
             // External tensor bindings enter the host evaluator through the
             // same semantic ingress as a DAG Load.
@@ -1917,7 +1986,7 @@ impl<'a> EvalContext<'a> {
                 }
                 _ => matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name)),
             };
-            let producer = if name == "index" && claims.iter().any(|claim| !claim.axes.is_empty()) {
+            let producer = if name == "index" && !claims.iter().all(DeclaredResultClaim::is_vacuous) {
                 self.result_producer
                     .as_ref()
                     .and_then(ResultProducer::operation)
@@ -2030,6 +2099,7 @@ impl<'a> EvalContext<'a> {
                 .into_iter()
                 .map(|(axis, required)| ResultAxisClaim::literal(axis, required))
                 .collect(),
+            first_sites: Vec::new(),
         })
     }
 
@@ -2038,12 +2108,16 @@ impl<'a> EvalContext<'a> {
     /// A binder is resolved from its first witness among the tensor
     /// parameters, in signature order, which is the canonical side the entry
     /// plan compares every later witness against. A binder no tensor
-    /// parameter declares has no witness here and adds nothing. Axes stay in
-    /// declared order, which the C lane's claim frame also follows.
+    /// parameter declares is output-inferred: with `activation`, the body
+    /// executing in that activation binds it, and the claim keeps the axis
+    /// for [`EvalContext::resolve_first_sites`]; without one it adds
+    /// nothing. Axes stay in declared order, which the C lane's claim frame
+    /// also follows.
     fn with_named_result_axes(
         claim: Option<DeclaredResultClaim>,
         declared: Option<&Expr>,
         witnesses: &[(String, NamedResultSource, usize)],
+        activation: Option<u64>,
     ) -> Result<Option<DeclaredResultClaim>, String> {
         let Some((_, dim_exprs)) = declared.and_then(tensor_type_dim_exprs) else {
             return Ok(claim);
@@ -2055,6 +2129,7 @@ impl<'a> EvalContext<'a> {
             return Ok(claim);
         }
         let mut named = Vec::new();
+        let mut first_sites = Vec::<FirstSiteAxis>::new();
         for (axis, dim_expr) in dim_exprs.iter().enumerate() {
             let Some((DeepTag::DName | DeepTag::DVar, kids)) = tagged_expr_children(dim_expr)
             else {
@@ -2065,6 +2140,21 @@ impl<'a> EvalContext<'a> {
             };
             let Some((_, source, size)) = witnesses.iter().find(|(name, _, _)| name == binder)
             else {
+                if let Some(activation) = activation {
+                    let binder = chelis_ir::lower::extent_binder_label(binder);
+                    let at = first_sites
+                        .iter()
+                        .rposition(|site| site.binder == binder)
+                        .map_or(first_sites.len(), |last| last + 1);
+                    first_sites.insert(
+                        at,
+                        FirstSiteAxis {
+                            axis,
+                            binder,
+                            activation,
+                        },
+                    );
+                }
                 continue;
             };
             let required = i64::try_from(*size)
@@ -2075,15 +2165,17 @@ impl<'a> EvalContext<'a> {
                 source: Some(source.clone()),
             });
         }
-        if named.is_empty() {
+        if named.is_empty() && first_sites.is_empty() {
             return Ok(claim);
         }
         let mut claim = claim.unwrap_or(DeclaredResultClaim {
             rank: dim_exprs.len(),
             axes: Vec::new(),
+            first_sites: Vec::new(),
         });
         claim.axes.extend(named);
         claim.axes.sort_by_key(|axis| axis.axis);
+        claim.first_sites = first_sites;
         Ok(Some(claim))
     }
 
@@ -2174,6 +2266,7 @@ impl<'a> EvalContext<'a> {
         Ok((!axes.is_empty()).then_some(DeclaredResultClaim {
             rank: actualized.dims.len(),
             axes,
+            first_sites: Vec::new(),
         }))
     }
 
@@ -2225,7 +2318,7 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::MetadataExpression(_) => {}
         }
         let value = self.eval_expr(expr)?;
-        if claims.iter().all(|claim| claim.axes.is_empty()) {
+        if claims.iter().all(DeclaredResultClaim::is_vacuous) {
             return Ok(value);
         }
         let producer = self
@@ -2437,6 +2530,7 @@ impl<'a> EvalContext<'a> {
                 claims.push(DeclaredResultClaim {
                     rank: claim.dims.len(),
                     axes,
+                    first_sites: Vec::new(),
                 });
             }
             return self.eval_under_result_claim(region.initializer(), &claims);
@@ -2533,6 +2627,7 @@ impl<'a> EvalContext<'a> {
         for claim in inherited_result_claims {
             self.check_declared_result_claim(claim, &value, producer_operation)?;
         }
+        self.observe_local_named_sites(&lowering, region, &value, producer_operation)?;
         self.result_producer = Some(ResultProducer::tensor(producer_operation));
         Ok(value)
     }
@@ -2765,7 +2860,7 @@ impl<'a> EvalContext<'a> {
                     &authored,
                     &args,
                 )?;
-                let claim = Self::with_named_result_axes(claim, Some(result), &witnesses)?;
+                let claim = Self::with_named_result_axes(claim, Some(result), &witnesses, None)?;
                 formal_claims.extend(claim);
             }
         }
@@ -2789,6 +2884,13 @@ impl<'a> EvalContext<'a> {
         inherited_claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
     ) -> Result<RuntimeValue, String> {
+        // A caller's first-site axes resolve in the caller's activation,
+        // whose sites have all run by the time its callee produces the
+        // result: the callee only ever sees concrete axes.
+        let inherited_claims = &inherited_claims
+            .iter()
+            .map(|claim| self.resolve_first_sites(claim))
+            .collect::<Vec<_>>();
         match callable {
             RuntimeValue::Closure {
                 checked_function: _,
@@ -2839,6 +2941,7 @@ impl<'a> EvalContext<'a> {
                 if let Some(name) = active_declaration.as_ref() {
                     self.active_declaration_names.push(name.clone());
                 }
+                let caller_activation = self.activation_extents.enter();
                 let value = (|| {
                     // A dimension variable declared by a tensor parameter is
                     // also an exact runtime i64 value in the callee frame.
@@ -2972,10 +3075,23 @@ impl<'a> EvalContext<'a> {
                         &param_types,
                         &args,
                     )?;
+                    // The parameters bind their binders before the body runs;
+                    // the body's sites bind the rest.
+                    for (name, source, size) in &named_result_witnesses {
+                        let size = i64::try_from(*size).map_err(|_| {
+                            format!("dimension binder `{name}` exceeds the exact i64 range")
+                        })?;
+                        self.activation_extents.bind(
+                            chelis_ir::lower::extent_binder_label(name),
+                            source.clone(),
+                            size,
+                        );
+                    }
                     let declaration_claim = Self::with_named_result_axes(
                         declaration_claim,
                         declared_result,
                         &named_result_witnesses,
+                        Some(self.activation_extents.current),
                     )?;
                     // Dimension-name order is canonical for extending the callee frame.
                     for (name, size) in dimension_bindings.into_sorted() {
@@ -3038,10 +3154,33 @@ impl<'a> EvalContext<'a> {
                     //
                     // Frames retain distinct declarations even when the literal
                     // values agree. Forwarding a frame does not append it again.
+                    let late_first_sites = declaration_claim
+                        .as_ref()
+                        .filter(|claim| !claim.first_sites.is_empty())
+                        .map(|claim| DeclaredResultClaim {
+                            rank: claim.rank,
+                            axes: Vec::new(),
+                            first_sites: claim.first_sites.clone(),
+                        });
                     let mut claims = declaration_claim.into_iter().collect::<Vec<_>>();
                     claims.extend_from_slice(inherited_claims);
-                    self.eval_under_result_claim(&body, &claims)
+                    let value = self.eval_under_result_claim(&body, &claims)?;
+                    // The declared result is a later site of every binder
+                    // the body bound, including one whose first site ran
+                    // after the returned value's producer, where the claim
+                    // above found it unbound.
+                    if let Some(claim) = late_first_sites {
+                        let producer = self
+                            .result_producer
+                            .as_ref()
+                            .and_then(ResultProducer::operation)
+                            .unwrap_or("return")
+                            .to_owned();
+                        self.check_declared_result_claim(&claim, &value, &producer)?;
+                    }
+                    Ok(value)
                 })();
+                self.activation_extents.exit(caller_activation);
                 if active_declaration.is_some() {
                     let popped = self.active_declaration_names.pop();
                     debug_assert_eq!(popped.as_ref(), active_declaration.as_ref());
@@ -3170,7 +3309,8 @@ impl<'a> EvalContext<'a> {
         value: &RuntimeValue,
         producer: &str,
     ) -> Result<(), String> {
-        self.mark_numeric_trap_from_trusted_result(claim.verdict(value, producer))
+        let verdict = self.resolve_first_sites(claim).verdict(value, producer);
+        self.mark_numeric_trap_from_trusted_result(verdict)
     }
 
     fn check_declared_shape_claim(
@@ -3179,7 +3319,79 @@ impl<'a> EvalContext<'a> {
         shape: &[usize],
         producer: &str,
     ) -> Result<(), String> {
-        self.mark_numeric_trap_from_trusted_result(claim.shape_verdict(shape, producer))
+        let verdict = self
+            .resolve_first_sites(claim)
+            .shape_verdict(shape, producer);
+        self.mark_numeric_trap_from_trusted_result(verdict)
+    }
+
+    /// `claim` with each first-site axis resolved against the site that
+    /// bound its binder in the claim's activation, after the declared axes,
+    /// as the C lane checks its first-site frames after the declared frame.
+    /// An axis whose binder that activation has not bound is dropped.
+    fn resolve_first_sites(&self, claim: &DeclaredResultClaim) -> DeclaredResultClaim {
+        let mut resolved = DeclaredResultClaim {
+            rank: claim.rank,
+            axes: claim.axes.clone(),
+            first_sites: Vec::new(),
+        };
+        for site in &claim.first_sites {
+            if let Some((source, required)) =
+                self.activation_extents.get(site.activation, &site.binder)
+            {
+                resolved.axes.push(ResultAxisClaim {
+                    axis: site.axis,
+                    required: *required,
+                    source: Some(source.clone()),
+                });
+            }
+        }
+        resolved
+    }
+
+    /// Relate the named sites of a local tensor ascription region to the
+    /// other sites of the executing activation (spec/04-type-system.md
+    /// section 4.4.1): a binder the activation has not bound is bound here,
+    /// and one it has bound is a section 4.7 claim this site's extent must
+    /// meet, trapping `Domain` at `producer` otherwise.
+    fn observe_local_named_sites(
+        &mut self,
+        lowering: &chelis_ir::lower::SubexprLoweringContext,
+        region: &chelis_ir::lower::LocalAscriptionBindingRegion,
+        value: &RuntimeValue,
+        producer: &str,
+    ) -> Result<(), String> {
+        let RuntimeValue::Tensor(tensor) = value else {
+            return Ok(());
+        };
+        for site in lowering.local_ascription_named_sites(region) {
+            let Some(&observed) = tensor.value.shape.get(site.axis) else {
+                continue;
+            };
+            let observed = i64::try_from(observed)
+                .map_err(|_| format!("extent `{}` exceeds the exact i64 range", site.binder))?;
+            match self.activation_extents.current(&site.binder) {
+                Some((_, required)) if *required != observed => {
+                    let required = *required;
+                    return self.mark_numeric_trap_from_trusted_result(Err(format!(
+                        "extent `{}`: claimed = {required}, {producer} axis {} = {observed}\n\
+                         numeric trap: domain in {producer} at i64",
+                        site.binder, site.axis
+                    )));
+                }
+                Some(_) => {}
+                None => self.activation_extents.bind(
+                    site.binder.clone(),
+                    NamedResultSource {
+                        claim: site.binder,
+                        parameter: site.binding,
+                        axis: site.axis,
+                    },
+                    observed,
+                ),
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn mark_numeric_trap_from_trusted_result<T>(
@@ -5649,6 +5861,7 @@ mod legacy_capture_order_tests {
             cancel: None,
             system: system::EvalSystemBoundary::permissive(),
             failure_kind: RuntimeFailureKind::Ordinary,
+            activation_extents: Default::default(),
         }
     }
 

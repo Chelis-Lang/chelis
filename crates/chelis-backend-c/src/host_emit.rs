@@ -3272,16 +3272,33 @@ fn emit_function(
     // The expression spine forwards the frame; branch arms share its immutable
     // contents and arguments/sibling bindings never inherit it. A named axis
     // reads its witnessing parameter here, before entry drops can release it.
+    // The declared frame is checked first, then each output-inferred
+    // binder's frame, then the caller's.
+    let first_site_frames = FirstSiteFrame::of(function);
+    let (first_site_lines, claims_parent) = match &function.ret_ty {
+        HostAbiType::Tensor(ty) => FirstSiteFrame::declare(
+            &first_site_frames,
+            ty.dims.len(),
+            &emitter.indent,
+            "__chelis_caller_result_claims",
+        ),
+        _ => (Vec::new(), "__chelis_caller_result_claims".to_string()),
+    };
+    emitter.lines.extend(first_site_lines);
+    emitter.first_site_frames = first_site_frames;
     match HostResultClaim::of(function) {
         Some(claim) => emitter.lines.extend(claim.frame_lines(
             &emitter.indent,
             "__chelis_result_axes",
             "__chelis_declared_result",
-            "__chelis_caller_result_claims",
+            &claims_parent,
             Some("__chelis_result_claims"),
             false,
         )),
-        None => emitter.lines.push(format!("{}const __chelis_host_result_claim *__chelis_result_claims = __chelis_caller_result_claims;", emitter.indent)),
+        None => emitter.lines.push(format!(
+            "{}const __chelis_host_result_claim *__chelis_result_claims = {claims_parent};",
+            emitter.indent
+        )),
     }
     // Entry guards and the frame still read parameters the body does not
     // use. Their verified entry drops run only after those reads finish.
@@ -3289,6 +3306,10 @@ fn emit_function(
     emitter.result_claims = Some("__chelis_result_claims".to_string());
     emitter.claim_on_spine = true;
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
+    // The declared result is a later site of every binder the body bound,
+    // including one whose first site ran after the returned value's producer,
+    // where that producer's check found the frame empty.
+    emitter.emit_late_first_site_checks("__result");
     let terminal = ownership_sites
         .iter()
         .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionReturn)
@@ -3687,7 +3708,9 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     fn walk(expr: &HostExpr, out: &mut UnordSet<String>) {
         match &expr.kind {
             HostExprKind::ResultClaimScope { body, .. } => walk(body, out),
-            HostExprKind::FormalIngress { value, .. } => walk(value, out),
+            HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
+                walk(value, out)
+            }
             HostExprKind::Call { function, args, .. } => {
                 out.insert(function.clone());
                 for arg in args {
@@ -3888,6 +3911,97 @@ struct HostEmitter<'a> {
     result_claims: Option<String>,
     /// Taken at each expression entry and forwarded to its returned-value child.
     claim_on_spine: bool,
+    /// The function's output-inferred binders and their mutable claim frames
+    /// ([`FirstSiteFrame`]); empty outside a function body.
+    first_site_frames: Vec<FirstSiteFrame>,
+}
+
+/// The claim frame of one output-inferred binder of the function being
+/// emitted (spec/04-type-system.md section 4.4.1): no parameter declares
+/// the binder, so the frame starts empty and the first site the body executes
+/// fills it ([`HostExprKind::ExtentSites`]). The declared result and every
+/// later site are then claims against that site. The frame lives for the
+/// whole invocation, so a site inside a block binds the binder after the
+/// block, and a site inside an `if` arm binds it on that arm's path only.
+struct FirstSiteFrame {
+    binder: String,
+    axes_name: String,
+    frame_name: String,
+    /// The declared result axes the binder names.
+    result_axes: Vec<usize>,
+}
+
+impl FirstSiteFrame {
+    /// The output-inferred binders `function`'s declared result names, in
+    /// declared order: a named axis that neither a tensor parameter, a List
+    /// entry, nor a tensor helper's own claim resolves.
+    fn of(function: &HostFunction) -> Vec<Self> {
+        let HostAbiType::Tensor(ty) = &function.ret_ty else {
+            return Vec::new();
+        };
+        let named_lists = function.entry_contract.named_list_binders();
+        let mut frames: Vec<Self> = Vec::new();
+        for (axis, dim) in ty.dims.iter().enumerate() {
+            let DimInfo::Named(binder, _) = dim else {
+                continue;
+            };
+            let declared = binder == "*"
+                || named_lists.iter().any(|name| name == binder)
+                || function.params.iter().any(|param| {
+                    matches!(&param.ty, HostAbiType::Tensor(param_ty)
+                    if param_ty.dims.iter().any(
+                        |dim| matches!(dim, DimInfo::Named(name, _) if name == binder),
+                    ))
+                })
+                || function
+                    .helper_result_claim_axes
+                    .contains(&chelis_ir::dag::RtAxis::Lit(
+                        i32::try_from(axis).expect("rank fits i32"),
+                    ));
+            if declared {
+                continue;
+            }
+            let label = chelis_ir::lower::extent_binder_label(binder);
+            if let Some(frame) = frames.iter_mut().find(|frame| frame.binder == label) {
+                frame.result_axes.push(axis);
+                continue;
+            }
+            let index = frames.len();
+            frames.push(Self {
+                binder: label,
+                axes_name: format!("__chelis_first_site_axes_{index}"),
+                frame_name: format!("__chelis_first_site_frame_{index}"),
+                result_axes: vec![axis],
+            });
+        }
+        frames
+    }
+
+    /// Declare every frame, chained in declared order in front of `parent`,
+    /// and return the chain's head.
+    fn declare(frames: &[Self], rank: usize, indent: &str, parent: &str) -> (Vec<String>, String) {
+        let mut lines = Vec::new();
+        let mut next = parent.to_string();
+        for frame in frames.iter().rev() {
+            lines.push(format!(
+                "{indent}__chelis_host_result_axis {}[] = {{",
+                frame.axes_name
+            ));
+            for axis in &frame.result_axes {
+                lines.push(format!(
+                    "{indent}    {{ {axis}, 0, {}, NULL, 0 }},",
+                    c_string_literal(&frame.binder)
+                ));
+            }
+            lines.push(format!("{indent}}};"));
+            lines.push(format!(
+                "{indent}__chelis_host_result_claim {} = {{ {next}, {rank}, 0, {}, 0 }};",
+                frame.frame_name, frame.axes_name
+            ));
+            next = format!("&{}", frame.frame_name);
+        }
+        (lines, next)
+    }
 }
 
 struct HostTensorHelpers<'a> {
@@ -4102,6 +4216,7 @@ impl<'a> HostEmitter<'a> {
             temp_counter: 0,
             result_claims: None,
             claim_on_spine: false,
+            first_site_frames: Vec::new(),
         }
     }
 
@@ -4482,7 +4597,7 @@ impl<'a> HostEmitter<'a> {
                 VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
                 VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
                     dest: None,
-                    label: "builtin:copy" | "builtin:debug",
+                    label: "builtin:copy" | "builtin:debug" | "extent_sites",
                     ..
                 }) => {}
                 VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
@@ -5390,6 +5505,20 @@ impl<'a> HostEmitter<'a> {
                 self.emit_expression_site(site, target)?;
                 return Ok(());
             }
+            HostExprKind::ExtentSites {
+                value,
+                sites,
+                ty: sites_ty,
+            } => {
+                require_same_abi_type(ty, sites_ty, "local ascription extent sites")?;
+                self.claim_on_spine = on_result_spine;
+                self.assign_expr(target, value, ty)?;
+                if matches!(ty, HostType::Tensor(_)) {
+                    self.emit_extent_sites(target, sites);
+                }
+                self.emit_expression_site(site, target)?;
+                return Ok(());
+            }
             HostExprKind::FormalIngress {
                 value,
                 ty: ingress_ty,
@@ -6028,6 +6157,89 @@ impl<'a> HostEmitter<'a> {
             "{}{origin} = __chelis_host_result_origin_leaf(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\");",
             self.indent
         ));
+    }
+
+    /// Relate the named sites of the local tensor ascription whose value is
+    /// `target` to the invocation's other sites of the same output-inferred
+    /// binder: an empty frame takes this site's extent, and a filled one is a
+    /// section 4.7 claim that traps `Domain` at the value's producer. A
+    /// binder a parameter declares has no frame here; the ascription's region
+    /// claims it against that parameter.
+    fn emit_extent_sites(
+        &mut self,
+        target: &str,
+        sites: &[chelis_ir::lower::LocalAscriptionNamedSite],
+    ) {
+        let origin = result_origin_name(target);
+        for site in sites {
+            let Some(frame) = self
+                .first_site_frames
+                .iter()
+                .find(|frame| frame.binder == site.binder)
+            else {
+                continue;
+            };
+            let (axes, frame_name) = (frame.axes_name.clone(), frame.frame_name.clone());
+            let count = frame.result_axes.len();
+            let indent = self.indent.clone();
+            let axis = site.axis;
+            self.lines.push(format!("{indent}{{"));
+            self.lines.push(format!(
+                "{indent}    const int64_t __chelis_site_extent = chelis_tensor_shape({target}, {axis});"
+            ));
+            self.lines
+                .push(format!("{indent}    if ({frame_name}.count == 0) {{"));
+            for index in 0..count {
+                self.lines.push(format!(
+                    "{indent}        {axes}[{index}].required = __chelis_site_extent; {axes}[{index}].source = {}; {axes}[{index}].source_axis = {axis};",
+                    c_string_literal(&site.binding)
+                ));
+            }
+            self.lines
+                .push(format!("{indent}        {frame_name}.count = {count};"));
+            self.lines.push(format!(
+                "{indent}    }} else if ({axes}[0].required != __chelis_site_extent) {{"
+            ));
+            self.lines.push(format!(
+                "{indent}        if ({origin} == NULL || {origin}->child_count != -1 || {origin}->op == NULL || {origin}->trap == NULL) {{ fprintf(stderr, \"host runtime: an extent claim reached a tensor without producer provenance\\n\"); abort(); }}"
+            ));
+            self.lines.push(format!(
+                "{indent}        fprintf(stderr, \"extent `%s`: claimed = %lld, %s axis %lld = %lld\\n\", {}, (long long){axes}[0].required, {origin}->op, (long long){axis}, (long long)__chelis_site_extent);",
+                c_string_literal(&site.binder)
+            ));
+            self.lines.push(format!(
+                "{indent}        chelis_numeric_trap({origin}->trap);"
+            ));
+            self.lines.push(format!("{indent}    }}"));
+            self.lines.push(format!("{indent}}}"));
+        }
+    }
+
+    /// Check each output-inferred binder's frame alone against the returned
+    /// `target`, at the return.
+    fn emit_late_first_site_checks(&mut self, target: &str) {
+        if self.first_site_frames.is_empty() {
+            return;
+        }
+        let origin = result_origin_name(target);
+        let indent = self.indent.clone();
+        self.lines.push(format!("{indent}{{"));
+        self.lines.push(format!(
+            "{indent}    const int __chelis_late_known = {origin} != NULL && {origin}->child_count == -1 && {origin}->op != NULL && {origin}->trap != NULL;"
+        ));
+        self.lines.push(format!(
+            "{indent}    const char *__chelis_late_op = __chelis_late_known ? {origin}->op : \"return\";"
+        ));
+        self.lines.push(format!(
+            "{indent}    const char *__chelis_late_trap = __chelis_late_known ? {origin}->trap : \"numeric trap: domain in return at i64\";"
+        ));
+        for frame in &self.first_site_frames {
+            self.lines.push(format!(
+                "{indent}    {{ __chelis_host_result_claim __chelis_late = {}; __chelis_late.next = NULL; __chelis_check_host_result_claims(&__chelis_late, {target}, __chelis_late_op, __chelis_late_trap); }}",
+                frame.frame_name
+            ));
+        }
+        self.lines.push(format!("{indent}}}"));
     }
 
     fn emit_result_claim_guard(&mut self, target: &str, ty: &HostType, claims: Option<&str>) {
@@ -10996,7 +11208,8 @@ fn host_type(expr: &HostExpr) -> HostType {
         | HostExprKind::FlatMap { ty, .. }
         | HostExprKind::TensorCall { ty, .. }
         | HostExprKind::ResultClaimScope { ty, .. }
-        | HostExprKind::FormalIngress { ty, .. } => ty.clone(),
+        | HostExprKind::FormalIngress { ty, .. }
+        | HostExprKind::ExtentSites { ty, .. } => ty.clone(),
         HostExprKind::Unit | HostExprKind::SignatureEntry { .. } => HostType::Unit,
     }
 }

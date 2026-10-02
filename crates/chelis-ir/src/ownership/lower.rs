@@ -1116,6 +1116,21 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         match &expr.kind {
             ConcreteHostExprKind::ResultClaimScope { body, .. } => self.lower_expr(body, tail),
             ConcreteHostExprKind::FormalIngress { value, .. } => self.lower_expr(value, tail),
+            ConcreteHostExprKind::ExtentSites { value, .. } => {
+                // The sites read the value's extents after it is produced, so
+                // the value stays live through this expression; it is
+                // returned unchanged, as `debug` returns its argument.
+                let value = self.lower_expr(value, None)?;
+                let operand = self.borrow(value)?;
+                self.emit(Op::Apply {
+                    dest: None,
+                    label: "extent_sites".to_string(),
+                    kind: ApplyKind::Intrinsic,
+                    schema: OperationSchema::new(vec![super::ir::OwnershipUse::Borrow], None),
+                    args: vec![operand],
+                });
+                Ok(Value::Named(operand.owner))
+            }
             ConcreteHostExprKind::Int(value) => {
                 self.define(&ConcreteHostType::Int64, format!("literal {value}"))
             }
@@ -2721,7 +2736,8 @@ fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
         | ConcreteHostExprKind::FlatMap { ty, .. }
         | ConcreteHostExprKind::TensorCall { ty, .. }
         | ConcreteHostExprKind::ResultClaimScope { ty, .. }
-        | ConcreteHostExprKind::FormalIngress { ty, .. } => ty.clone(),
+        | ConcreteHostExprKind::FormalIngress { ty, .. }
+        | ConcreteHostExprKind::ExtentSites { ty, .. } => ty.clone(),
     }
 }
 

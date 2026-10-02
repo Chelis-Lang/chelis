@@ -661,6 +661,11 @@ fn project_expr(
             value: Box::new(project_expr(*value, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
+        ConcreteHostExprKind::ExtentSites { value, sites, ty } => HostAbiExprKind::ExtentSites {
+            value: Box::new(project_expr(*value, allowed_callbacks)?),
+            sites,
+            ty: HostAbiType::try_from_concrete(&ty)?,
+        },
         ConcreteHostExprKind::Int(value) => HostAbiExprKind::Int(value),
         ConcreteHostExprKind::Float(value) => HostAbiExprKind::Float(value),
         ConcreteHostExprKind::Bool(value) => HostAbiExprKind::Bool(value),

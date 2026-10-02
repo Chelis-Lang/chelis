@@ -171,6 +171,7 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         cancel: None,
         system: system::EvalSystemBoundary::permissive(),
         failure_kind: RuntimeFailureKind::Ordinary,
+        activation_extents: Default::default(),
     };
     ctx.eval_expr(expr)
 }
@@ -222,6 +223,7 @@ fn issue_1125_eval_checked_root(
         cancel: None,
         system: system::EvalSystemBoundary::permissive(),
         failure_kind: RuntimeFailureKind::Ordinary,
+        activation_extents: Default::default(),
     };
     ctx.resolve_top_level(root)
 }
@@ -1854,6 +1856,7 @@ fn eval_deep_with_bindings(
         cancel: None,
         system: system::EvalSystemBoundary::permissive(),
         failure_kind: RuntimeFailureKind::Ordinary,
+        activation_extents: Default::default(),
     };
     for (name, value) in args {
         ctx.bindings.insert((*name).to_string(), value.clone());

@@ -282,3 +282,267 @@ fn a_first_site_inside_a_runtime_arm_binds_only_that_path() {
          other = tensor(shape=[2, 4], data=[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])",
     );
 }
+
+/// A runtime `if` keeps its body in host control flow on both lanes, so these
+/// rows exercise the host lanes' own record of each binder's first site.
+fn arm_source(then_body: &str, else_body: &str, calls: &str) -> String {
+    format!(
+        "def f[c, h](v: &tensor[c, f32], k: i64, flag: bool) -> tensor[c, h, f32] = if flag then {{\n\
+         {then_body}\
+         }} else {else_body}\n\
+         {calls}"
+    )
+}
+
+/// The first site sits inside the taken arm and the arm's value disagrees
+/// with it: the declared result is a later site on that path and traps.
+#[test]
+fn a_declared_result_that_disagrees_with_a_first_site_in_a_runtime_arm_traps_domain() {
+    assert_lanes_trap_identically(
+        "arm_result_site",
+        &arm_source(
+            "\x20 step1: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+             \x20 _ = step1\n\
+             \x20 insert(v, 1i32, add(k, 1i64))\n",
+            "insert(v, 1i32, k)",
+            &format!("out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, true)\n"),
+        ),
+        &[
+            "extent `h`: step1 axis 1 = 3, insert axis 1 = 4",
+            INSERT_TRAP,
+        ],
+    );
+    // The arms agree with each other, so only the first site can refute the
+    // returned extent.
+    assert_lanes_trap_identically(
+        "arm_result_site_equal_arms",
+        &arm_source(
+            "\x20 step1: tensor[c, h, f32] = insert(v, 1i32, add(k, 1i64))\n\
+             \x20 _ = step1\n\
+             \x20 insert(v, 1i32, k)\n",
+            "insert(v, 1i32, k)",
+            &format!("out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, true)\n"),
+        ),
+        &[
+            "extent `h`: step1 axis 1 = 4, insert axis 1 = 3",
+            INSERT_TRAP,
+        ],
+    );
+}
+
+/// The controls for the row above: an agreeing taken arm, and the other arm,
+/// whose path has no earlier site, so its value is the first site.
+#[test]
+fn a_first_site_in_a_runtime_arm_binds_only_the_path_that_runs_it() {
+    let source = format!(
+        "def f[c, h](v: &tensor[c, f32], k: i64, j: i64, flag: bool) -> tensor[c, h, f32] = if flag then {{\n\
+         \x20 step1: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+         \x20 _ = step1\n\
+         \x20 insert(v, 1i32, j)\n\
+         }} else insert(v, 1i32, add(j, 1i64))\n\
+         a = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, {RUNTIME_THREE}, true)\n\
+         b = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, {RUNTIME_THREE}, false)\n\
+         c = f(to_tensor([1.0f32, 2.0f32]), 2i64, 2i64, true)\n"
+    );
+    assert_lanes_agree(
+        "arm_paths",
+        &source,
+        "a = tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0])\n\
+         b = tensor(shape=[2, 4], data=[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])\n\
+         c = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+    );
+}
+
+/// A later local ascription in a runtime arm is a claim against the first
+/// site, reported at the later site's producer on both lanes.
+#[test]
+fn a_later_local_ascription_in_a_runtime_arm_that_disagrees_traps_domain() {
+    assert_lanes_trap_identically(
+        "arm_later_site",
+        &arm_source(
+            "\x20 step1: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+             \x20 step2: tensor[c, h, f32] = insert(v, 1i32, add(k, 1i64))\n\
+             \x20 add(step1, step2)\n",
+            "insert(v, 1i32, k)",
+            &format!("out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, true)\n"),
+        ),
+        &["extent `h`: claimed = 3, insert axis 1 = 4", INSERT_TRAP],
+    );
+}
+
+/// In a runtime arm, the bound binder sizes a later `insert` by name. A size
+/// reads the binder's value, so it cannot disagree with the first site; the
+/// row pins that the host lanes read the first site's extent for it.
+#[test]
+fn a_bound_binder_sizes_a_later_insert_in_a_runtime_arm() {
+    assert_lanes_agree(
+        "arm_later_size",
+        &arm_source(
+            "\x20 step1: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+             \x20 twos = 2.0f32 |> scalar_to_tensor |> insert(0i32, shape(v, 0i32)) |> insert(1i32, h)\n\
+             \x20 mul(step1, twos)\n",
+            "insert(v, 1i32, k)",
+            &format!("out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, true)\n"),
+        ),
+        "out = tensor(shape=[2, 3], data=[2.0, 2.0, 2.0, 4.0, 4.0, 4.0])",
+    );
+}
+
+/// A first site inside a block binds the binder for the rest of the
+/// activation: the block's end does not unbind it, for a later ascription or
+/// for the declared result.
+#[test]
+fn a_first_site_inside_a_block_stays_bound_after_the_block() {
+    let block = "\x20 s = {\n\
+                 \x20   step1: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+                 \x20   sum(sum(step1, 1i32), 0i32)\n\
+                 \x20 }\n\
+                 \x20 _ = s\n";
+    let call = format!("out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, true)\n");
+    assert_lanes_trap_identically(
+        "block_result_site",
+        &arm_source(
+            &format!("{block}\x20 insert(v, 1i32, add(k, 1i64))\n"),
+            "insert(v, 1i32, k)",
+            &call,
+        ),
+        &[
+            "extent `h`: step1 axis 1 = 3, insert axis 1 = 4",
+            INSERT_TRAP,
+        ],
+    );
+    assert_lanes_trap_identically(
+        "block_later_site",
+        &arm_source(
+            &format!(
+                "{block}\x20 step2: tensor[c, h, f32] = insert(v, 1i32, add(k, 1i64))\n\
+                 \x20 _ = step2\n\
+                 \x20 insert(v, 1i32, k)\n"
+            ),
+            "insert(v, 1i32, k)",
+            &call,
+        ),
+        &["extent `h`: claimed = 3, insert axis 1 = 4", INSERT_TRAP],
+    );
+}
+
+/// The declared result is checked against a first site that runs after the
+/// returned value's producer, on the host lanes and in a straight-line body.
+#[test]
+fn a_first_site_after_the_returned_producer_still_binds_the_result() {
+    let body = "\x20 r = insert(v, 1i32, add(k, 1i64))\n\
+                \x20 step1: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+                \x20 _ = step1\n\
+                \x20 r\n";
+    assert_lanes_trap_identically(
+        "late_site_arm",
+        &arm_source(
+            body,
+            "insert(v, 1i32, k)",
+            &format!("out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, true)\n"),
+        ),
+        &[
+            "extent `h`: step1 axis 1 = 3, insert axis 1 = 4",
+            INSERT_TRAP,
+        ],
+    );
+    assert_lanes_trap_identically(
+        "late_site_block",
+        &format!(
+            "def f[c, h](v: &tensor[c, f32], k: i64) -> tensor[c, h, f32] = {{\n\
+             {body}\
+             }}\n\
+             out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE})\n"
+        ),
+        &[INSERT_TRAP],
+    );
+}
+
+/// A `match` arm binds like an `if` arm, and a returned callee's value is
+/// claimed against the caller's first site.
+#[test]
+fn a_first_site_in_a_match_arm_or_before_a_tail_call_is_claimed() {
+    let matched = |some: &str| {
+        format!(
+            "def f[c, h](v: &tensor[c, f32], k: i64, o: Option[i64]) -> tensor[c, h, f32] = match o with {{\n\
+             \x20 | Some(j) => {{\n\
+             \x20   step1: tensor[c, h, f32] = insert(v, 1i32, j)\n\
+             \x20   _ = step1\n\
+             \x20   insert(v, 1i32, k)\n\
+             \x20 }}\n\
+             \x20 | None => insert(v, 1i32, add(k, 1i64))\n\
+             }}\n\
+             a = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, None)\n\
+             b = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, Some({some}))\n"
+        )
+    };
+    assert_lanes_agree(
+        "match_agrees",
+        &matched(RUNTIME_THREE),
+        "a = tensor(shape=[2, 4], data=[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])\n\
+         b = tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0])",
+    );
+    assert_lanes_trap_identically(
+        "match_disagrees",
+        &matched("2i64"),
+        &[
+            "extent `h`: step1 axis 1 = 2, insert axis 1 = 3",
+            INSERT_TRAP,
+        ],
+    );
+    assert_lanes_trap_identically(
+        "tail_call",
+        &format!(
+            "def g[c, n](v: &tensor[c, f32], k: i64) -> tensor[c, n, f32] = insert(v, 1i32, k)\n\
+             {}",
+            arm_source(
+                "\x20 step1: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+                 \x20 _ = step1\n\
+                 \x20 g(v, add(k, 1i64))\n",
+                "g(v, k)",
+                &format!("out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, true)\n"),
+            )
+        ),
+        &[
+            "extent `h`: step1 axis 1 = 3, insert axis 1 = 4",
+            INSERT_TRAP,
+        ],
+    );
+}
+
+/// Each invocation binds its own first sites.
+#[test]
+fn each_invocation_binds_its_own_first_site() {
+    assert_lanes_agree(
+        "per_invocation",
+        &arm_source(
+            "\x20 step1: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+             \x20 step1\n",
+            "insert(v, 1i32, k)",
+            &format!(
+                "a = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE}, true)\n\
+                 b = f(to_tensor([1.0f32, 2.0f32]), 2i64, true)\n"
+            ),
+        ),
+        "a = tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0])\n\
+         b = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+    );
+}
+
+/// In host control flow, a local ascription naming a parameter-carried binder
+/// is claimed at its own producer on both lanes (chelis#2374's named
+/// residual for host regions).
+#[test]
+fn a_parameter_carried_binder_is_claimed_at_a_local_site_in_a_runtime_arm() {
+    assert_lanes_trap_identically(
+        "arm_param_site",
+        &format!(
+            "def f[c, h](v: &tensor[c, f32], m: &tensor[h, f32], k: i64, flag: bool) -> tensor[c, h, f32] = if flag then {{\n\
+             \x20 step1: tensor[c, h, f32] = insert(v, 1i32, k)\n\
+             \x20 add(step1, step1)\n\
+             }} else insert(v, 1i32, k)\n\
+             out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([0.0f32, 0.0f32]), {RUNTIME_THREE}, true)\n"
+        ),
+        &["extent `h`: claimed = 2, insert axis 1 = 3", INSERT_TRAP],
+    );
+}

@@ -836,6 +836,7 @@ pub(crate) fn revalidate_adt_value(
         cancel: chelis_types::current_cancel_token(),
         system: super::system::EvalSystemBoundary::deny_all(),
         failure_kind: RuntimeFailureKind::Ordinary,
+        activation_extents: Default::default(),
     };
     ctx.bindings.insert(pred.binder.clone(), value.clone());
 
