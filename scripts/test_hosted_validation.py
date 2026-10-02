@@ -16,6 +16,13 @@ SKILL_COMMANDS = (
     f"{PYTHON} -m unittest scripts.test_check_agent_skills scripts.test_hosted_validation",
     "cargo test -p chelis-conformance --test asset_drift_tripwire --test skill_set_uniformity",
 )
+
+
+def ledger_run(command):
+    """The macOS spelling of a gate ledger command: its script under `python3`."""
+    assert command[0] == gate.MANAGED_PYTHON, command
+    return " ".join(["python3", *command[1:]])
+
 def assert_hosted_coverage(test, workflow, nightly):
     jobs = workflow["jobs"]
     docs = jobs["docs"]
@@ -52,15 +59,22 @@ def assert_hosted_coverage(test, workflow, nightly):
         test.assertFalse(steps[0].get("continue-on-error", False))
     # The featureless workspace shards skip the ownership-ledger targets, so
     # their own job runs the gate's commands verbatim, the CLI command last
-    # because it rebuilds ./target/debug/chelis.
+    # because it rebuilds ./target/debug/chelis. Each command derives its
+    # targets from Cargo metadata; a hand-written cargo command would repeat
+    # the list, so none may appear beside them.
     ledger = jobs["macos-ownership-ledger"]
     test.assertEqual(ledger["runs-on"], "macos-latest")
     test.assertNotIn("if", ledger)
     test.assertFalse(ledger.get("continue-on-error", False))
-    commands = [step.get("run") for step in ledger["steps"] if step.get("run", "").startswith("cargo ")]
+    commands = [
+        step.get("run")
+        for step in ledger["steps"]
+        if step.get("run", "").startswith("cargo ")
+        or "ownership_ledger_tests.py" in step.get("run", "")
+    ]
     test.assertEqual(
         commands,
-        [" ".join(gate.OWNERSHIP_LEDGER_API_TESTS), " ".join(gate.OWNERSHIP_LEDGER_CLI_TESTS)],
+        [ledger_run(gate.OWNERSHIP_LEDGER_API_TESTS), ledger_run(gate.OWNERSHIP_LEDGER_CLI_TESTS)],
     )
     for step in ledger["steps"]:
         test.assertNotIn("if", step)
@@ -180,10 +194,10 @@ class HostedCoverageTests(unittest.TestCase):
     def test_ownership_ledger_must_run_on_macos_as_the_gate_spells_it(self):
         for command in (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS):
             for change in ("missing", "skipped", "ignore-failure", "profile"):
-                with self.subTest(command=command[4], change=change):
+                with self.subTest(command=command[-1], change=change):
                     workflow = copy.deepcopy(self.nightly)
                     steps = workflow["jobs"]["macos-ownership-ledger"]["steps"]
-                    step = next(step for step in steps if step.get("run") == " ".join(command))
+                    step = next(step for step in steps if step.get("run") == ledger_run(command))
                     if change == "missing":
                         steps.remove(step)
                     elif change == "skipped":
@@ -195,11 +209,20 @@ class HostedCoverageTests(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         assert_hosted_coverage(self, self.workflow, workflow)
 
+    def test_a_hand_written_ledger_list_is_rejected(self):
+        # The pre-derivation spelling repeated every target in the workflow.
+        workflow = copy.deepcopy(self.nightly)
+        steps = workflow["jobs"]["macos-ownership-ledger"]["steps"]
+        step = next(step for step in steps if step.get("run") == ledger_run(gate.OWNERSHIP_LEDGER_CLI_TESTS))
+        step["run"] = "cargo nextest run -p chelis-cli --features ownership-ledger --test issue_1314_json_bigint_ledger"
+        with self.assertRaises(AssertionError):
+            assert_hosted_coverage(self, self.workflow, workflow)
+
     def test_the_ledger_cli_command_runs_after_the_compiler_api_command(self):
         workflow = copy.deepcopy(self.nightly)
         steps = workflow["jobs"]["macos-ownership-ledger"]["steps"]
         api, cli = (
-            next(index for index, step in enumerate(steps) if step.get("run") == " ".join(command))
+            next(index for index, step in enumerate(steps) if step.get("run") == ledger_run(command))
             for command in (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS)
         )
         steps[api], steps[cli] = steps[cli], steps[api]

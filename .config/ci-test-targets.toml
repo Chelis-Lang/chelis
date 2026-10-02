@@ -3138,6 +3138,24 @@ reason = "gate stage definitions and command construction are exercised by the g
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ownership_ledger_tests.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit derives the ownership-ledger commands from Cargo metadata and reconciles them against every member manifest"
+tracking_issue = "chelis#2931"
+
+[[path_rule]]
+prefix = "scripts/test_ownership_ledger_tests.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit discovers and runs this suite"
+tracking_issue = "chelis#2931"
+
+[[path_rule]]
 prefix = "scripts/test_gate.py"
 disposition = "owner"
 workflow = "ci.yml"
