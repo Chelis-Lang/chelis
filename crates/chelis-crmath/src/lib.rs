@@ -6,7 +6,10 @@
 //! NaN. This crate is the only place a Rust lane may compute them. The kernels are
 //! CORE-MATH's (vendored unmodified under `vendor/core-math`, MIT licence), compiled
 //! from the generated `csrc/crmath_amalgamation.c` that the C backend also emits, so
-//! the evaluator and built programs run the same kernel text.
+//! the evaluator and built programs run the same kernel text. The amalgamation is the
+//! upstream text reduced to the generated-C contract (portable arms only, no
+//! floating-point environment access); `scripts/vendor_core_math.py` documents the
+//! reduction.
 //! `spec/design/correctly_rounded_math.md` owns the design.
 //!
 //! The API is closed and per dtype. The f16 and bf16 forms widen the operand exactly to
