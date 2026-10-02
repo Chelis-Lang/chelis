@@ -1085,6 +1085,13 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-adt-numeric",
+        "datetime/business::BusinessCalendar: () (variant {} BusinessCalendar (field {} weekmask (t-adt {} Weekmask)) (field {} holidays (t-adt {} List (t-prim {} i64))) (field {} valid_from (t-prim {} i64)) (field {} valid_until (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
         "datetime::Date: () (variant {} Date (field {} epoch_day (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
@@ -1548,6 +1555,160 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "std-def-numeric",
         "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} i64)) (t-prim {} string) (t-unit {}))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_calendar: (t-fn {} (t-adt {} Weekmask) (t-adt {} List (t-adt {} Date)) (t-adt {} Date) (t-adt {} Date) (t-adt {} BusinessCalendar))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_calendar_holidays: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} List (t-adt {} Date)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_calendar_valid_from: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_calendar_valid_until: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_calendar_weekmask: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Weekmask))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_day_count: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} Date) (t-prim {} i64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_day_offset: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-prim {} i64) (t-adt {} NonBusinessStart) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_day_roll: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} BusinessDayRoll) (t-adt {} Date))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_in_all: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::business_in_any: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::dates_business_day_count: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Dates (t-var {} n)) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::dates_business_day_offset: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Dates (t-var {} n)) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} i64))) (t-adt {} NonBusinessStart) (t-adt {} Dates (t-var {} n)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::dates_business_day_roll: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Dates (t-var {} n)) (t-adt {} BusinessDayRoll) (t-adt {} Dates (t-var {} n)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::dates_is_business_day: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Dates (t-var {} n)) (t-tensor {} (d-var {} n) (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::is_business_day: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_calendar: (t-fn {} (t-adt {} Weekmask) (t-adt {} List (t-adt {} Date)) (t-adt {} Date) (t-adt {} Date) (t-adt {} Option (t-adt {} BusinessCalendar)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_day_count: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} Date) (t-adt {} Option (t-prim {} i64)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_day_offset: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-prim {} i64) (t-adt {} NonBusinessStart) (t-adt {} Option (t-adt {} Date)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_day_roll: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} BusinessDayRoll) (t-adt {} Option (t-adt {} Date)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_in_all: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar) (t-adt {} Option (t-adt {} BusinessCalendar)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_business_in_any: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} BusinessCalendar) (t-adt {} Option (t-adt {} BusinessCalendar)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/business::try_is_business_day: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} Option (t-prim {} bool)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
