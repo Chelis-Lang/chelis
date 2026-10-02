@@ -12,29 +12,29 @@
 //! handles a whole batch, and each (dtype, input bits) pair is memoized per
 //! process, so repeated predicates do not recompile the program.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
 
 use chelis_compiler_api::compiler;
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_types::{ScalarValue, tensor_from_scalars, types::Prim};
 
-type Memo = Mutex<HashMap<(Prim, u64), ScalarValue>>;
+type Memo = Mutex<BTreeMap<(&'static str, u64), ScalarValue>>;
 
 fn memo() -> &'static Memo {
     static MEMO: OnceLock<Memo> = OnceLock::new();
-    MEMO.get_or_init(|| Mutex::new(HashMap::new()))
+    MEMO.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 /// The bit pattern that identifies a float scalar inside its dtype.
-fn float_key(value: ScalarValue) -> Option<(Prim, u64)> {
+fn float_key(value: ScalarValue) -> Option<(&'static str, u64)> {
     let prim = value.prim();
     if !prim.is_float() {
         return None;
     }
     // Every float dtype embeds exactly in f64, so the f64 bits identify the
-    // value within its dtype (signed zero and NaN payload included).
-    Some((prim, value.as_f64_lossy().to_bits()))
+    // value within its dtype, signed zero included.
+    Some((prim.name(), value.as_f64_lossy().to_bits()))
 }
 
 /// `Std.Contracts.normal_cdf` at each input's own dtype. Every input must
@@ -63,7 +63,7 @@ pub fn normal_cdf_batch(inputs: &[ScalarValue]) -> Result<Vec<ScalarValue>, Stri
     let mut missing = Vec::new();
     {
         let memo = memo().lock().map_err(|_| "normal_cdf memo poisoned")?;
-        let mut queued = HashSet::new();
+        let mut queued = BTreeSet::new();
         for value in inputs {
             let key = float_key(*value).expect("dtype checked above");
             if !memo.contains_key(&key) && queued.insert(key) {
