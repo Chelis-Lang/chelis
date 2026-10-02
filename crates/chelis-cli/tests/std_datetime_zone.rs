@@ -517,12 +517,40 @@ fn run_chelis(app_pkg: &Path, reef_home: &Path, args: &[&str]) -> (bool, String)
 /// sweep can outgrow that timeout on a slow runner.
 const CASES_PER_SUITE: usize = 40;
 
+/// Seconds a quiet machine takes, with the debug build, to compile one
+/// generated suite file before its first test runs: the prelude, the imports
+/// and the bundled std. A one-case run under a fresh reef home measures 8 s
+/// (3 s once the reef cache is warm).
+const LOCAL_COMPILE_SECS: f64 = 8.0;
+
+/// Every `chelis test` limit below is this many times the run's local
+/// quiet-machine time. CI has run these suites up to 5.7 times slower than
+/// a quiet local machine (the extreme sweep: 791 s there, 139 s here), so 10
+/// keeps the limits clear of CI with room to spare.
+const LIMIT_MARGIN: f64 = 10.0;
+
+/// The `chelis test` limits for one run of `cases` cases that each take
+/// `case_secs` locally: `(--timeout, --suite-timeout)`, in seconds.
+///
+/// The run takes `LOCAL_COMPILE_SECS + cases × case_secs` locally, and the
+/// suite timeout is `LIMIT_MARGIN` times that. Each test may use the whole
+/// suite budget, which is at least `LIMIT_MARGIN` times any one case's local
+/// time. `chelis test` kills a file worker after `timeout × (cases + 1) + 10`
+/// seconds, which therefore exceeds the suite timeout as well.
+fn run_limits(cases: usize, case_secs: f64) -> (u64, u64) {
+    let local = LOCAL_COMPILE_SECS + case_secs * cases as f64;
+    let suite = (LIMIT_MARGIN * local).ceil() as u64;
+    (suite, suite)
+}
+
 /// Runs `chelis test` over fixtures with one test per expression, at most
-/// [`CASES_PER_SUITE`] to a run, and returns each test's outcome: `None` for
-/// PASS, `Some(message)` for FAIL.
+/// [`CASES_PER_SUITE`] to a run, under [`run_limits`] for cases that take
+/// `case_secs` each locally, and returns each test's outcome: `None` for PASS,
+/// `Some(message)` for FAIL.
 fn run_expression_suite(
     dir_name: &str,
     expressions: &[(String, String)],
+    case_secs: f64,
 ) -> BTreeMap<String, Option<String>> {
     let (_dir, reef_home, app_pkg) = make_app(dir_name);
     let prelude = PRELUDE.replace("@TZIF@", &fixture_dir().to_string_lossy());
@@ -541,10 +569,26 @@ fn run_expression_suite(
         // One fixture file at a time, so no run sees another's module.
         let path = app_pkg.join(format!("tests/zone_cases_{index:03}.ch"));
         write_file(&path, &source);
+        let (timeout, suite_timeout) = run_limits(chunk.len(), case_secs);
+        let started = std::time::Instant::now();
         let (_, rendered) = run_chelis(
             &app_pkg,
             &reef_home,
-            &["test", "--batch-mode", "file", path.to_str().unwrap()],
+            &[
+                "test",
+                "--batch-mode",
+                "file",
+                "--timeout",
+                &timeout.to_string(),
+                "--suite-timeout",
+                &suite_timeout.to_string(),
+                path.to_str().unwrap(),
+            ],
+        );
+        eprintln!(
+            "{dir_name} run {index}: {} cases in {:.1} s (limits: {timeout} s per test, {suite_timeout} s per suite)",
+            chunk.len(),
+            started.elapsed().as_secs_f64()
         );
         std::fs::remove_file(&path).expect("remove the finished fixture");
         let mut reported = 0usize;
@@ -587,7 +631,10 @@ fn std_datetime_zone_failures_report_their_exact_message() {
         .iter()
         .map(|(name, expression, _)| (name.to_string(), expression.to_string()))
         .collect();
-    let outcomes = run_expression_suite("datetime-zone-failures-2862", &expressions);
+    // Locally the slowest run, 40 cases under a fresh reef home, takes 17.2 s:
+    // (17.2 - 8) / 40 = 0.23 s a case. The limit for 40 cases is
+    // 10 × (8 + 40 × 0.3) = 200 s.
+    let outcomes = run_expression_suite("datetime-zone-failures-2862", &expressions, 0.3);
     for (name, expression, expected) in EXACT_FAILURES {
         assert_eq!(
             outcomes.get(*name),
@@ -603,7 +650,9 @@ fn std_datetime_zone_text_results_are_exact() {
         .iter()
         .map(|(name, expression)| (name.to_string(), expression.to_string()))
         .collect();
-    let outcomes = run_expression_suite("datetime-zone-results-2862", &expressions);
+    // Locally the one run, 23 cases, takes 24.9 s: (24.9 - 8) / 23 = 0.73 s a
+    // case. The limit is 10 × (8 + 23 × 0.8) = 264 s.
+    let outcomes = run_expression_suite("datetime-zone-results-2862", &expressions, 0.8);
     for (name, expression) in EXACT_RESULTS {
         assert_eq!(
             outcomes.get(*name),
@@ -643,34 +692,34 @@ fn suffix_tags_accepted(tags: &[Tag]) -> bool {
 
 /// Suffix tag sequences checked per `chelis test` case. Each case checks a
 /// batch in one fold and reports the texts it judged wrongly.
-const SUFFIX_TAGS_PER_CASE: usize = 150;
+const SUFFIX_TAGS_PER_CASE: usize = 30;
 
-/// Every sequence of one to three suffix tags over an unrecognized key and
-/// `u-ca`, each value, and both flags, after a zone annotation, each against
-/// [`suffix_tags_accepted`].
+/// Every sequence of one to three suffix tags drawn from `foo=a`,
+/// `u-ca=iso8601` and `u-ca=hebrew`, each elective or critical, after a zone
+/// annotation, against [`suffix_tags_accepted`]: 6 + 36 + 216 = 258 texts.
 ///
-/// Why these lengths suffice: RFC 9557 §3.3 judges each key by its tags as a
-/// group, through three facts: whether a critical tag names a key the module
-/// does not recognize, whether the key's tags give more than one value while
-/// one of them is critical, and the key's first value. A comparison that is
-/// not over the whole group (with the first tag only, or with the previous
-/// tag only) disagrees with the rule first at three tags of one key, as in
-/// `[u-ca=iso8601][u-ca=gregory][!u-ca=iso8601]`, and every combination of
-/// the three facts for one key, with the other key's tag before, between or
-/// after, occurs within three tags. A fourth tag adds no new combination, and
-/// four tags of `u-ca` alone (1 296 more texts) would more than double the
-/// suite's time.
+/// Why this set and these lengths suffice: RFC 9557 §3.3 judges each key by
+/// its tags as a group, through three facts: whether a critical tag names a
+/// key the module does not recognize, whether the key's tags give more than
+/// one value while one of them is critical, and the key's first value. `foo`
+/// is the unrecognized key, and one value of it is enough, because any
+/// critical `foo` tag already fails. `u-ca` with a supported and an
+/// unsupported calendar gives it two values and both first-value outcomes.
+/// A comparison that is not over the whole group (with the first tag only,
+/// or with the previous tag only) disagrees with the rule first at three tags
+/// of one key, as in `[u-ca=iso8601][u-ca=hebrew][!u-ca=iso8601]`, and every
+/// combination of the three facts, with the other key's tag before, between
+/// or after, occurs within three tags.
 #[test]
 fn std_datetime_zone_suffix_tags_follow_rfc_9557() {
-    let mut tags: Vec<Tag> = Vec::new();
-    for critical in [false, true] {
-        for value in ["a", "b"] {
-            tags.push(("foo", value, critical));
-        }
-        for value in ["iso8601", "gregory", "hebrew"] {
-            tags.push(("u-ca", value, critical));
-        }
-    }
+    let tags: Vec<Tag> = vec![
+        ("foo", "a", false),
+        ("foo", "a", true),
+        ("u-ca", "iso8601", false),
+        ("u-ca", "iso8601", true),
+        ("u-ca", "hebrew", false),
+        ("u-ca", "hebrew", true),
+    ];
     let mut sequences: Vec<Vec<Tag>> = vec![Vec::new()];
     let mut frontier: Vec<Vec<Tag>> = vec![Vec::new()];
     for _ in 0..3 {
@@ -687,7 +736,7 @@ fn std_datetime_zone_suffix_tags_follow_rfc_9557() {
         sequences.extend(frontier.iter().cloned());
     }
     sequences.remove(0);
-    assert_eq!(sequences.len(), 10 + 100 + 1000);
+    assert_eq!(sequences.len(), 6 + 36 + 216);
     let cases: Vec<(String, bool)> = sequences
         .iter()
         .map(|sequence| {
@@ -721,7 +770,9 @@ fn std_datetime_zone_suffix_tags_follow_rfc_9557() {
             )
         })
         .collect();
-    let outcomes = run_expression_suite("datetime-zone-suffix-tags-2862", &expressions);
+    // Locally the one run, 9 cases of up to 30 texts, takes 24.2 s:
+    // (24.2 - 8) / 9 = 1.8 s a case. The limit is 10 × (8 + 9 × 1.9) = 251 s.
+    let outcomes = run_expression_suite("datetime-zone-suffix-tags-2862", &expressions, 1.9);
     let wrong: Vec<String> = expressions
         .iter()
         .filter_map(|(name, _)| match outcomes.get(name) {
@@ -861,7 +912,10 @@ fn std_datetime_zone_extreme_arguments_raise_no_primitive_trap() {
         .enumerate()
         .map(|(index, (_, expression))| (format!("case_{index:04}"), expression.clone()))
         .collect();
-    let outcomes = run_expression_suite("datetime-zone-extremes-2862", &expressions);
+    // Locally the slowest run, the first 40 cases (New York and Kiritimati,
+    // under a fresh reef home), takes 65.1 s: (65.1 - 8) / 40 = 1.43 s a case.
+    // The limit for 40 cases is 10 × (8 + 40 × 1.5) = 680 s.
+    let outcomes = run_expression_suite("datetime-zone-extremes-2862", &expressions, 1.5);
     let mut failures = 0usize;
     for (index, (function, expression)) in cases.iter().enumerate() {
         let outcome = &outcomes[&format!("case_{index:04}")];
@@ -937,25 +991,39 @@ fn toolchain_json() -> String {
     .to_string()
 }
 
-/// The differential: every fixture zone's offsets, every gap and fold under
-/// each `Disambiguation`, and the RFC 9557 text, on `chelis eval` and on
-/// compiled C, each against Python's `zoneinfo` reading the same file.
-#[test]
-fn std_datetime_zone_agrees_with_zoneinfo_on_eval_and_c() {
+/// Runs the differential on `lanes` (`eval` or `c`): every fixture zone's
+/// offsets, every gap and fold under each `Disambiguation`, and the RFC 9557
+/// text, against Python's `zoneinfo` reading the same file. Each lane is its
+/// own test so that neither comes near nextest's per-test kill on CI
+/// (`ci-full`: 3 000 s). Together they took 1 948 s there before the
+/// `utc_texts` row, which made them about half as slow again. On a quiet
+/// local machine the eval lane takes 263 s and the C lane 189 s; at CI's
+/// observed 5.7 times that is about 1 500 s and 1 080 s.
+fn run_zone_differential(lanes: &str) {
     let python =
         managed_python::managed_python(&repo_root()).unwrap_or_else(|error| panic!("{error}"));
     let chelis = assert_cmd::cargo_bin!("chelis").to_path_buf();
-    let output = std::process::Command::new(python)
+    let mut command = std::process::Command::new(python);
+    command
         .arg(repo_root().join("scripts/datetime_zone_differential.py"))
         .arg("--chelis")
         .arg(&chelis)
         .arg("--reef-home")
         .arg(&common::SHARED_REEF.reef_home)
-        .args(["--toolchain-json", &toolchain_json(), "--lanes", "eval,c"])
+        .args(["--lanes", lanes]);
+    if lanes == "c" {
+        command.args(["--toolchain-json", &toolchain_json()]);
+    }
+    let started = std::time::Instant::now();
+    let output = command
         .output()
         .expect("spawn the zone differential harness");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!(
+        "zone differential on {lanes}: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
     assert!(
         output.status.success()
             && stdout
@@ -965,7 +1033,17 @@ fn std_datetime_zone_agrees_with_zoneinfo_on_eval_and_c() {
         output.status
     );
     assert!(
-        stdout.contains("7 zones") && stdout.contains("lanes eval+c"),
+        stdout.contains("7 zones") && stdout.contains(&format!("lanes {lanes})")),
         "{stdout}"
     );
+}
+
+#[test]
+fn std_datetime_zone_agrees_with_zoneinfo_on_eval() {
+    run_zone_differential("eval");
+}
+
+#[test]
+fn std_datetime_zone_agrees_with_zoneinfo_on_c() {
+    run_zone_differential("c");
 }
