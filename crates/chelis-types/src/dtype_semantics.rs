@@ -657,10 +657,7 @@ impl FloatUnOp {
     }
 
     const fn is_activation(self) -> bool {
-        matches!(
-            self,
-            Self::Relu | Self::Sigmoid | Self::Silu | Self::Gelu
-        )
+        matches!(self, Self::Relu | Self::Sigmoid | Self::Silu | Self::Gelu)
     }
 }
 
@@ -1147,10 +1144,7 @@ fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
         FloatUnOp::Floor => value.floor(),
         FloatUnOp::Ceil => value.ceil(),
         FloatUnOp::Round => value.round_ties_even(),
-        FloatUnOp::Relu
-        | FloatUnOp::Sigmoid
-        | FloatUnOp::Silu
-        | FloatUnOp::Gelu => {
+        FloatUnOp::Relu | FloatUnOp::Sigmoid | FloatUnOp::Silu | FloatUnOp::Gelu => {
             unreachable!("derived activations decompose before the unary primitive kernel")
         }
     })
@@ -1174,10 +1168,7 @@ fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
         FloatUnOp::Floor => value.floor(),
         FloatUnOp::Ceil => value.ceil(),
         FloatUnOp::Round => value.round_ties_even(),
-        FloatUnOp::Relu
-        | FloatUnOp::Sigmoid
-        | FloatUnOp::Silu
-        | FloatUnOp::Gelu => {
+        FloatUnOp::Relu | FloatUnOp::Sigmoid | FloatUnOp::Silu | FloatUnOp::Gelu => {
             unreachable!("derived activations decompose before the unary primitive kernel")
         }
     })
@@ -2168,10 +2159,7 @@ fn float_vec_unop_f32<T: Copy>(
         FloatUnOp::Floor => map!(f32::floor),
         FloatUnOp::Ceil => map!(f32::ceil),
         FloatUnOp::Round => map!(f32::round_ties_even),
-        FloatUnOp::Relu
-        | FloatUnOp::Sigmoid
-        | FloatUnOp::Silu
-        | FloatUnOp::Gelu => {
+        FloatUnOp::Relu | FloatUnOp::Sigmoid | FloatUnOp::Silu | FloatUnOp::Gelu => {
             unreachable!("derived activations decompose before the unary tensor kernel")
         }
     }
@@ -2202,10 +2190,7 @@ fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
         FloatUnOp::Floor => map!(f64::floor),
         FloatUnOp::Ceil => map!(f64::ceil),
         FloatUnOp::Round => map!(f64::round_ties_even),
-        FloatUnOp::Relu
-        | FloatUnOp::Sigmoid
-        | FloatUnOp::Silu
-        | FloatUnOp::Gelu => {
+        FloatUnOp::Relu | FloatUnOp::Sigmoid | FloatUnOp::Silu | FloatUnOp::Gelu => {
             unreachable!("derived activations decompose before the unary tensor kernel")
         }
     }
@@ -2288,10 +2273,12 @@ fn float_vec_activation<T: ActivationElement>(op: FloatUnOp, values: &[T]) -> Ve
     let mut graph = ElementActivationGraph(std::marker::PhantomData);
     values
         .iter()
-        .map(|&value| match lower_activation(&mut graph, activation, value) {
-            Ok(result) => result,
-            Err(never) => match never {},
-        })
+        .map(
+            |&value| match lower_activation(&mut graph, activation, value) {
+                Ok(result) => result,
+                Err(never) => match never {},
+            },
+        )
         .collect()
 }
 

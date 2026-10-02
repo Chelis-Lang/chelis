@@ -61,7 +61,12 @@ fn eval_main_in_package(library: &str, client: &str, dtype: &str, input: &[u64])
         .unwrap()
 }
 
-fn eval_package_on_this_thread(library: &str, client: &str, dtype: &str, input: &[u64]) -> Vec<u64> {
+fn eval_package_on_this_thread(
+    library: &str,
+    client: &str,
+    dtype: &str,
+    input: &[u64],
+) -> Vec<u64> {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("src")).unwrap();
     std::fs::write(
@@ -195,7 +200,13 @@ macro_rules! reference_graphs {
                 while level.len() > 1 {
                     level = level
                         .chunks(2)
-                        .map(|pair| if pair.len() == 2 { pair[0] + pair[1] } else { pair[0] })
+                        .map(|pair| {
+                            if pair.len() == 2 {
+                                pair[0] + pair[1]
+                            } else {
+                                pair[0]
+                            }
+                        })
                         .collect();
                 }
                 let sum = level[0];
@@ -225,18 +236,8 @@ macro_rules! reference_graphs {
     };
 }
 
-reference_graphs!(
-    ref32,
-    f32,
-    chelis_crmath::exp_f32,
-    chelis_crmath::tanh_f32
-);
-reference_graphs!(
-    ref64,
-    f64,
-    chelis_crmath::exp_f64,
-    chelis_crmath::tanh_f64
-);
+reference_graphs!(ref32, f32, chelis_crmath::exp_f32, chelis_crmath::tanh_f32);
+reference_graphs!(ref64, f64, chelis_crmath::exp_f64, chelis_crmath::tanh_f64);
 
 fn assert_bits(op: &str, dtype: &str, inputs: &[u64], got: &[u64], want: &[u64]) {
     assert_eq!(got.len(), want.len());
@@ -295,10 +296,18 @@ fn f64_activations_match_the_correctly_rounded_reference_bit_for_bit() {
 #[test]
 fn tanh_near_zero_is_the_hyperbolic_tangent_not_a_cancelled_sigmoid() {
     for x in [1e-8_f32, -1e-8, 1e-5, 1e-3] {
-        let got = eval_main(&unary_source("f32", 1, "tanh(x)"), "f32", &[u64::from(x.to_bits())]);
+        let got = eval_main(
+            &unary_source("f32", 1, "tanh(x)"),
+            "f32",
+            &[u64::from(x.to_bits())],
+        );
         let got = f32::from_bits(got[0] as u32);
         assert_ne!(got, 0.0, "tanh({x:e}) cancelled to zero");
-        assert_eq!(got.to_bits(), chelis_crmath::tanh_f32(x).to_bits(), "tanh({x:e})");
+        assert_eq!(
+            got.to_bits(),
+            chelis_crmath::tanh_f32(x).to_bits(),
+            "tanh({x:e})"
+        );
     }
 }
 
@@ -306,11 +315,32 @@ fn tanh_near_zero_is_the_hyperbolic_tangent_not_a_cancelled_sigmoid() {
 fn softmax_matches_the_correctly_rounded_reference_bit_for_bit() {
     // The #2971 probe vector, then the #2952 witnesses.
     let probe: Vec<f32> = vec![
-        0.1, 1.7, -2.3, 0.33, 3.9, -0.77, 2.2, 1.05, -5.5, 0.6, 4.1, -1.9, 2.75, 0.01, -0.4, 1.3,
-        -1.335_994_5, -0.461_234_3, -1.728_890_8,
+        0.1,
+        1.7,
+        -2.3,
+        0.33,
+        3.9,
+        -0.77,
+        2.2,
+        1.05,
+        -5.5,
+        0.6,
+        4.1,
+        -1.9,
+        2.75,
+        0.01,
+        -0.4,
+        1.3,
+        -1.335_994_5,
+        -0.461_234_3,
+        -1.728_890_8,
     ];
     let bits: Vec<u64> = probe.iter().map(|x| u64::from(x.to_bits())).collect();
-    let got = eval_main(&unary_source("f32", probe.len(), "softmax(x, 0)"), "f32", &bits);
+    let got = eval_main(
+        &unary_source("f32", probe.len(), "softmax(x, 0)"),
+        "f32",
+        &bits,
+    );
     let want: Vec<u64> = ref32::softmax(&probe)
         .iter()
         .map(|x| u64::from(x.to_bits()))
@@ -319,7 +349,11 @@ fn softmax_matches_the_correctly_rounded_reference_bit_for_bit() {
 
     let wide: Vec<f64> = probe.iter().map(|x| f64::from(*x)).collect();
     let bits: Vec<u64> = wide.iter().map(|x| x.to_bits()).collect();
-    let got = eval_main(&unary_source("f64", wide.len(), "softmax(x, 0)"), "f64", &bits);
+    let got = eval_main(
+        &unary_source("f64", wide.len(), "softmax(x, 0)"),
+        "f64",
+        &bits,
+    );
     let want: Vec<u64> = ref64::softmax(&wide).iter().map(|x| x.to_bits()).collect();
     assert_bits("softmax", "f64", &bits, &got, &want);
 }
@@ -327,7 +361,13 @@ fn softmax_matches_the_correctly_rounded_reference_bit_for_bit() {
 #[test]
 fn normal_cdf_matches_the_correctly_rounded_reference_bit_for_bit() {
     for (dtype, inputs) in [
-        ("f32", inputs_f32().iter().map(|x| f64::from(*x)).collect::<Vec<_>>()),
+        (
+            "f32",
+            inputs_f32()
+                .iter()
+                .map(|x| f64::from(*x))
+                .collect::<Vec<_>>(),
+        ),
         ("f64", inputs_f64(f64::MAX)),
     ] {
         let finite: Vec<f64> = inputs
@@ -365,7 +405,10 @@ fn normal_cdf_matches_the_correctly_rounded_reference_bit_for_bit() {
                 .iter()
                 .map(|x| {
                     let x = *x as f32;
-                    (u64::from(x.to_bits()), u64::from(ref32::normal_cdf(x).to_bits()))
+                    (
+                        u64::from(x.to_bits()),
+                        u64::from(ref32::normal_cdf(x).to_bits()),
+                    )
                 })
                 .unzip()
         } else {
@@ -394,7 +437,11 @@ fn gelu_is_the_pinned_graph_on_every_finite_f16_input() {
         .filter(|bits| f16::from_bits(*bits).is_finite())
         .map(u64::from)
         .collect();
-    let got = eval_main(&unary_source("f16", inputs.len(), "gelu(x)"), "f16", &inputs);
+    let got = eval_main(
+        &unary_source("f16", inputs.len(), "gelu(x)"),
+        "f16",
+        &inputs,
+    );
     let want: Vec<u64> = inputs
         .iter()
         .map(|bits| u64::from(f16::from_f32(gelu(f16::from_bits(*bits as u16).to_f32())).to_bits()))
@@ -535,15 +582,26 @@ fn eval_pins_the_ieee_default_and_restores_the_host_environment() {
         .iter()
         .map(|x| u64::from(x.to_bits()))
         .collect();
-    let source = unary_source("f32", 3, "add(mul(x, to_tensor([0.01f32, 0.33f32, 1.0f32])), tanh(x))");
+    let source = unary_source(
+        "f32",
+        3,
+        "add(mul(x, to_tensor([0.01f32, 0.33f32, 1.0f32])), tanh(x))",
+    );
     let default = eval_main(&source, "f32", &inputs);
     let saved = control::read();
     control::write(control::HOSTILE);
     let hostile = eval_main(&source, "f32", &inputs);
     let after = control::read();
     control::write(saved);
-    assert_eq!(after, control::HOSTILE, "eval must restore the host's control state");
-    assert_eq!(hostile, default, "the host's FP environment changed eval's results");
+    assert_eq!(
+        after,
+        control::HOSTILE,
+        "eval must restore the host's control state"
+    );
+    assert_eq!(
+        hostile, default,
+        "the host's FP environment changed eval's results"
+    );
 }
 
 /// Sanity for the reference itself: the sample covers inputs where each graph
@@ -551,6 +609,14 @@ fn eval_pins_the_ieee_default_and_restores_the_host_environment() {
 #[test]
 fn reference_inputs_cover_both_saturated_and_unsaturated_regions() {
     let inputs = inputs_f32();
-    assert!(inputs.iter().any(|x| ref32::sigmoid(*x) > 0.1 && ref32::sigmoid(*x) < 0.9));
-    assert!(inputs.iter().any(|x| ref32::gelu(*x) == *x && x.is_finite() && *x > 1e30));
+    assert!(
+        inputs
+            .iter()
+            .any(|x| ref32::sigmoid(*x) > 0.1 && ref32::sigmoid(*x) < 0.9)
+    );
+    assert!(
+        inputs
+            .iter()
+            .any(|x| ref32::gelu(*x) == *x && x.is_finite() && *x > 1e30)
+    );
 }

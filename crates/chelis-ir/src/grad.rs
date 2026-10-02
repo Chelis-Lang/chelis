@@ -1786,7 +1786,8 @@ fn compute_adjoints(
                 ty.clone(),
                 None,
             );
-            let one_minus = dag.add_node(node.owner, RiscOp::Sub, vec![one, y_sq], ty.clone(), None);
+            let one_minus =
+                dag.add_node(node.owner, RiscOp::Sub, vec![one, y_sq], ty.clone(), None);
             let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, one_minus], ty, None);
             Some(vec![(x, dx)])
         }
