@@ -2853,8 +2853,24 @@ impl CEmitter {
     fn is_host_math_transcendental(func: &str) -> bool {
         matches!(
             func,
-            "exp" | "expf" | "log" | "logf" | "sin" | "sinf" | "cos" | "cosf" | "tan" | "tanf"
-                | "atan" | "atanf" | "tanh" | "tanhf" | "pow" | "powf" | "erf" | "erff"
+            "exp"
+                | "expf"
+                | "log"
+                | "logf"
+                | "sin"
+                | "sinf"
+                | "cos"
+                | "cosf"
+                | "tan"
+                | "tanf"
+                | "atan"
+                | "atanf"
+                | "tanh"
+                | "tanhf"
+                | "pow"
+                | "powf"
+                | "erf"
+                | "erff"
         )
     }
 

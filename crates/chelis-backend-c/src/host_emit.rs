@@ -1207,9 +1207,19 @@ fn lower_gelu_through_sigmoid(
     parent_span: Option<&str>,
 ) -> chelis_ir::dag::NodeId {
     let node = |dag: &mut chelis_ir::dag::Dag, op: RiscOp, inputs: Vec<chelis_ir::dag::NodeId>| {
-        dag.add_node(owner, op, inputs, ty.clone(), parent_span.map(str::to_owned))
+        dag.add_node(
+            owner,
+            op,
+            inputs,
+            ty.clone(),
+            parent_span.map(str::to_owned),
+        )
     };
-    let c = node(dag, RiscOp::synth_const(ty.precision, 0.7978845608028654), vec![]);
+    let c = node(
+        dag,
+        RiscOp::synth_const(ty.precision, 0.7978845608028654),
+        vec![],
+    );
     let k = node(dag, RiscOp::synth_const(ty.precision, 0.044715), vec![]);
     let x_squared = node(dag, RiscOp::Mul, vec![x, x]);
     let x_cubed = node(dag, RiscOp::Mul, vec![x_squared, x]);
@@ -12759,8 +12769,7 @@ mod expression_dispatch_tests {
             let input = u16::from_str_radix(fields.next().unwrap(), 16).unwrap();
             let got = u16::from_str_radix(fields.next().unwrap(), 16).unwrap();
             let x = f16::from_bits(input).to_f32();
-            let want =
-                f16::from_f32(gelu_reference_f32(x, &f16_finalize, &f16_constant)).to_bits();
+            let want = f16::from_f32(gelu_reference_f32(x, &f16_finalize, &f16_constant)).to_bits();
             f16_rows += 1;
             if got != want {
                 mismatches.push(format!(
@@ -12774,7 +12783,10 @@ mod expression_dispatch_tests {
             "gelu(65504) must be 65504 (chelis#2997)"
         );
 
-        let bf16_line = stdout.lines().find(|line| line.starts_with("bf16 ")).unwrap();
+        let bf16_line = stdout
+            .lines()
+            .find(|line| line.starts_with("bf16 "))
+            .unwrap();
         let got = u32::from_str_radix(&bf16_line[5..], 16).unwrap();
         assert_eq!(
             got,
@@ -12790,7 +12802,9 @@ mod expression_dispatch_tests {
         for (x, got) in f32_inputs.iter().zip(&f32_rows) {
             let want = gelu_reference_f32(*x, &|v| v, &|v| v as f32).to_bits();
             if *got != want {
-                mismatches.push(format!("f32 gelu({x}): got {got:#010x}, graph {want:#010x}"));
+                mismatches.push(format!(
+                    "f32 gelu({x}): got {got:#010x}, graph {want:#010x}"
+                ));
             }
         }
         assert_eq!(
@@ -12806,7 +12820,9 @@ mod expression_dispatch_tests {
         for (x, got) in f64_inputs.iter().zip(&f64_rows) {
             let want = gelu_reference_f64(*x).to_bits();
             if *got != want {
-                mismatches.push(format!("f64 gelu({x}): got {got:#018x}, graph {want:#018x}"));
+                mismatches.push(format!(
+                    "f64 gelu({x}): got {got:#018x}, graph {want:#018x}"
+                ));
             }
         }
         assert_eq!(
