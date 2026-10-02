@@ -1,3 +1,5 @@
+// chelis#2957 S3: Rust std transcendental until S3 moves this to chelis-crmath.
+#![allow(clippy::disallowed_methods)]
 // Executable specification test suite for the Chelis language.
 //
 // Tests organized by language behavior, not by crate. Each test exercises the

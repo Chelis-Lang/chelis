@@ -459,6 +459,8 @@ impl SpecialFnRegistry {
 }
 
 #[cfg(test)]
+// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

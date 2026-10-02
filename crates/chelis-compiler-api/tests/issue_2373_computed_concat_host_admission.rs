@@ -1,4 +1,6 @@
 //! #2373: a computed tensor retains its checked concat geometry at admission.
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#![allow(clippy::disallowed_methods)]
 
 use chelis_compiler_api::compiler::{check, eval};
 use chelis_compiler_api::schema::{CheckRequest, EvalRequest, ExecutionValue, SourceKind};

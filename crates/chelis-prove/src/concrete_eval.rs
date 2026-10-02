@@ -348,6 +348,8 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
     }
 }
 
+// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 /// Apply a whitelisted unary/binary intrinsic to its already-evaluated
 /// arguments. Out-of-grammar names and wrong arity yield `NaN` (the
 /// candidate is then rejected / the predicate is unsatisfied) rather than
@@ -377,6 +379,8 @@ fn apply_intrinsic(name: &str, a: &[f64]) -> f64 {
     }
 }
 
+// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 /// Fast `erf` approximation using Abramowitz & Stegun 7.1.26 (maximum
 /// error < 1.5e-7 over the reals). This is the standard rational
 /// approximation for concrete f64 evaluation in the fuzz tier — it does

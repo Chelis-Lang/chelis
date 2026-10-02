@@ -15,6 +15,8 @@
 //! variants. We use a Metal-specific tolerance that's wider than HIP's
 //! for transcendental-heavy kernels — see ABS_TOL/REL_TOL constants and
 //! the per-test relaxations.
+// chelis#2957 S7: Rust std transcendental until S7 moves this to chelis-crmath.
+#![allow(clippy::disallowed_methods)]
 
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};

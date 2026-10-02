@@ -7,6 +7,8 @@
 //! against the IR evaluator's reference math.
 //!
 //! Spec source of truth: `spec/05-risc-primitives.md` §2.2.
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#![allow(clippy::disallowed_methods)]
 
 use std::collections::BTreeMap;
 

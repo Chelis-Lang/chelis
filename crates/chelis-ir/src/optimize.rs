@@ -6,6 +6,8 @@ use crate::dag::{ComparisonKind, Dag, LogicalKind, NodeId, Owner, RiscOp};
 
 type CseKey = (Owner, String, Vec<NodeId>, Vec<NodeId>, Vec<NodeId>);
 
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 /// Constant folding: if a binary op has two Const inputs, evaluate it.
 ///
 /// Span propagation per spec/design/chelis_span_survival.md §2.3

@@ -430,6 +430,8 @@ pub(crate) mod testing {
 }
 
 #[cfg(test)]
+// chelis#2957 S3: Rust std transcendental until S3 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};

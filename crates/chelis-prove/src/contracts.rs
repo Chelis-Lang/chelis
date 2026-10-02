@@ -337,6 +337,8 @@ struct FuzzOutcome {
     domain: &'static str,
 }
 
+// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 fn run_fuzz_discharge(id: &str, samples: usize, seed: u64) -> FuzzOutcome {
     match id {
         NORMAL_CDF_RANGE => fuzz_unary(
@@ -615,6 +617,8 @@ fn sample_signed_domain(index: usize, samples: usize, rng: &mut Lcg, radius: f64
     }
 }
 
+// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 fn sample_positive_domain(index: usize, samples: usize, rng: &mut Lcg) -> f64 {
     match index {
         0 => 1.0,
@@ -657,6 +661,8 @@ fn erfc_approx(x: f64) -> f64 {
     1.0 - erf_approx(x)
 }
 
+// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 fn erf_approx(x: f64) -> f64 {
     if x == 0.0 {
         return 0.0;

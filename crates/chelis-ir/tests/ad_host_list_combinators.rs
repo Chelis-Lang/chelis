@@ -1,3 +1,5 @@
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#![allow(clippy::disallowed_methods)]
 use chelis_deep::ExprCarrier;
 use chelis_deep::ast::{Atom, Expr};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};

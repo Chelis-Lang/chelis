@@ -3387,6 +3387,8 @@ fn restore_target(
 }
 
 #[cfg(test)]
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::eval::{TensorValue, eval_scalar};

@@ -1825,6 +1825,8 @@ pub(super) fn extract_bounds_pair_list(
         .collect()
 }
 
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 /// Numerically stable softmax along a single axis:
 /// `softmax(x, axis)[i] = exp(x[i] - max(x, axis)) / sum_j exp(x[j] - max(x, axis))`.
 /// Matches the spec §4.2 lowering used by `tier2::lower_softmax`.

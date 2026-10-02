@@ -1,4 +1,6 @@
 //! #2373: linked C and Eval execute the same checked computed concat.
+// chelis#2957 S3: Rust std transcendental until S3 moves this to chelis-crmath.
+#![allow(clippy::disallowed_methods)]
 
 mod common;
 

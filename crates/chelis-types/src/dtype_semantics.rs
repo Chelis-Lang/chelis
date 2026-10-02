@@ -1121,6 +1121,8 @@ pub fn float_binop(
     Ok(ScalarValue { bits })
 }
 
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
     match op {
         FloatUnOp::Neg => -value,
@@ -1146,6 +1148,8 @@ fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
     }
 }
 
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
     match op {
         FloatUnOp::Neg => -value,
@@ -2236,6 +2240,8 @@ macro_rules! impl_native_activation_element {
                 -self
             }
 
+            // chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+            #[allow(clippy::disallowed_methods)]
             fn exp(self) -> Self {
                 self.exp()
             }
@@ -2269,6 +2275,8 @@ macro_rules! impl_reduced_activation_element {
                 Self::from_f32(-self.to_f32())
             }
 
+            // chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+            #[allow(clippy::disallowed_methods)]
             fn exp(self) -> Self {
                 Self::from_f32(self.to_f32().exp())
             }
@@ -4327,6 +4335,8 @@ pub fn tensor_from_scalars(prim: Prim, values: &[ScalarValue]) -> TensorStorage 
 }
 
 #[cfg(test)]
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;

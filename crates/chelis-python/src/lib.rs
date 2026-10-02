@@ -2031,6 +2031,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod native_dlpack_owner_tests;
 
 #[cfg(test)]
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use pyo3::types::{IntoPyDict, PyModule};

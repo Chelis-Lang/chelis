@@ -1,3 +1,5 @@
+// chelis#2957 S3: Rust std transcendental until S3 moves this to chelis-crmath.
+#![allow(clippy::disallowed_methods)]
 mod common;
 
 use assert_cmd::Command;
