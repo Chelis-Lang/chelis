@@ -243,6 +243,58 @@ class PythonAbiVersionTest(unittest.TestCase):
                 ci_setup_uv_python.python_abi_version(fake_python)
 
 
+class EnvironmentSignatureTest(unittest.TestCase):
+    def signature(self, version: str, libdir: str) -> str:
+        fake_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=f"CPython-{version}\n", stderr=""
+        )
+        with mock.patch("subprocess.run", return_value=fake_result):
+            return ci_setup_uv_python.environment_signature(
+                Path("/fake/.venv/bin/python"), libdir
+            )
+
+    def test_a_patch_release_changes_the_signature(self) -> None:
+        # A restored Rust cache must rebuild pyo3 when uv installs a new
+        # patch release under a new lib dir.
+        old = self.signature("3.11.16", "/uv/cpython-3.11.16-linux-x86_64-gnu/lib")
+        new = self.signature("3.11.17", "/uv/cpython-3.11.17-linux-x86_64-gnu/lib")
+        self.assertEqual(old, "CPython-3.11.16:/uv/cpython-3.11.16-linux-x86_64-gnu/lib")
+        self.assertNotEqual(old, new)
+
+    def test_empty_version_raises(self) -> None:
+        fake_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="   \n", stderr=""
+        )
+        with mock.patch("subprocess.run", return_value=fake_result):
+            with self.assertRaisesRegex(RuntimeError, "empty Python version"):
+                ci_setup_uv_python.environment_signature(
+                    Path("/fake/.venv/bin/python"), "/uv/lib"
+                )
+
+
+class SetGithubEnvTest(unittest.TestCase):
+    def test_replaces_rather_than_appends(self) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".env") as fh:
+            github_env_path = fh.name
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {"GITHUB_ENV": github_env_path, "SIG_VAR": "CPython-3.11.16:/old"},
+                clear=False,
+            ):
+                ci_setup_uv_python.set_github_env("SIG_VAR", "CPython-3.11.17:/new")
+            self.assertEqual(
+                Path(github_env_path).read_text(encoding="utf-8"),
+                "SIG_VAR=CPython-3.11.17:/new\n",
+            )
+        finally:
+            os.unlink(github_env_path)
+
+    def test_no_github_env_is_noop(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            ci_setup_uv_python.set_github_env("SIG_VAR", "value")  # no raise
+
+
 class EnsureLinkSymlinkTest(unittest.TestCase):
     """The Linux symlink path is the one that mattered for PR #184 CI;
     macOS is no-op and tested for symmetry. Use real temp dirs so the

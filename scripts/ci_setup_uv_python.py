@@ -168,6 +168,28 @@ def python_abi_version(venv_python: Path) -> str:
     return abi
 
 
+def environment_signature(venv_python: Path, libdir: str) -> str:
+    """Identify the interpreter build that pyo3 links against.
+
+    The full version distinguishes patch releases, which uv installs under
+    a different directory, and LIBDIR is the path pyo3 passes to the linker.
+    """
+    result = subprocess.run(
+        [
+            str(venv_python),
+            "-c",
+            "import platform; print(platform.python_implementation() + '-' + platform.python_version())",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    version = result.stdout.strip()
+    if not version:
+        raise RuntimeError(f"`{venv_python}` returned an empty Python version")
+    return f"{version}:{libdir}"
+
+
 def _list_libdir(libdir: Path) -> str:
     """Render a one-line snapshot of `libdir` for error diagnostics."""
     try:
@@ -361,6 +383,20 @@ def append_to_github_env(var: str, value: str) -> None:
     print(f"{var}={deduped}")
 
 
+def set_github_env(var: str, value: str) -> None:
+    """Write `var=<value>` to `$GITHUB_ENV`, replacing any earlier value."""
+    github_env_path = os.environ.get("GITHUB_ENV")
+    if not github_env_path:
+        print(
+            "GITHUB_ENV not set; skipping env export (assuming local dry-run).",
+            file=sys.stderr,
+        )
+        return
+    with open(github_env_path, "a", encoding="utf-8") as fh:
+        fh.write(f"{var}={value}\n")
+    print(f"{var}={value}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -408,6 +444,15 @@ def main() -> int:
             "checked: " + ", ".join(str(p) for p in install_libdirs)
         )
     append_to_github_env(var, libdir)
+    # pyo3-build-config reruns only when an environment variable it tracks
+    # changes, and `PYO3_PYTHON` stays `.venv/bin/python` across Python patch
+    # releases. A restored Rust cache built against another patch would keep
+    # linking against that release's lib dir, which no longer exists, so
+    # name the interpreter build in the variable pyo3 tracks for this
+    # (PyO3/pyo3#2724).
+    set_github_env(
+        "PYO3_ENVIRONMENT_SIGNATURE", environment_signature(venv_python, libdir)
+    )
     return 0
 
 

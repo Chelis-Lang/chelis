@@ -2429,6 +2429,24 @@ reason = "the discovered script suite runs the hosted command shim regression ca
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "scripts/ci_setup_uv_python.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "every hosted job provisions its uv-managed Python and pyo3 link environment through this helper; the script suite proves its exports"
+tracking_issue = "chelis#2904"
+
+[[path_rule]]
+prefix = "scripts/test_ci_setup_uv_python.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered script suite runs the hosted Python setup regression cases"
+tracking_issue = "chelis#2904"
+
+[[path_rule]]
 prefix = ".github/actions/setup-project-ci/"
 disposition = "owner"
 workflow = "ci.yml"
