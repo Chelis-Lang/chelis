@@ -10,6 +10,12 @@
 //! typed rejection it gives a name it never declares. Building the program
 //! is the remaining work of chelis#2883.
 //!
+//! The order comes from marks the emitter puts on a name where it renders
+//! or declares it, not from identifier spellings in the C text, so a
+//! dimension spelled like a helper's parameter (`index`, `value`, `low`), a
+//! local (`word`, `element`), a member (`dtype`) or a checked-cast helper's
+//! variable (`sign`, `shift`) is never taken for an early read.
+//!
 //! The rejected programs must fail at code generation with that rejection.
 //! The neighbouring programs that already compiled must still compile, run
 //! with every ledger allocation finalized, and print what `chelis eval`
@@ -33,7 +39,7 @@ const MASKED: &str = "def masked[n](t: tensor[n, i64]) -> (Col[n], tensor[n, boo
 const VALUES: &str = "to_tensor([5i64, 2932897i64, -9223372036854775807i64])";
 
 struct Case {
-    name: &'static str,
+    name: String,
     body: String,
 }
 
@@ -49,7 +55,7 @@ fn refused() -> Vec<(Case, &'static str)> {
         // after the guard that reads it.
         (
             Case {
-                name: "projection_of_where_built_record",
+                name: "projection_of_where_built_record".into(),
                 body: format!("{MASKED}r_a = col_xs(masked({VALUES}).0)\n"),
             },
             "is rendered before it is declared",
@@ -57,7 +63,7 @@ fn refused() -> Vec<(Case, &'static str)> {
         // Without the third `filled` no site produces the extent at all.
         (
             Case {
-                name: "projection_without_a_producing_site",
+                name: "projection_without_a_producing_site".into(),
                 body: format!(
                     "def masked[n](t: tensor[n, i64]) -> (Col[n], tensor[n, bool]) = {{\n  mask = in_range(t)\n  (Col {{ xs: where(mask, t, t) }}, mask)\n}}\nr_a = col_xs(masked({VALUES}).0)\n"
                 ),
@@ -67,23 +73,48 @@ fn refused() -> Vec<(Case, &'static str)> {
     ]
 }
 
+/// Dimension names spelled like identifiers the emitter writes before or
+/// around the function's own declarations: the uniform-draw helpers'
+/// parameters and locals, the tensor views' members, the entry loop's
+/// variables, and a common binder.
+const DIMENSION_NAMES: &[&str] = &[
+    "index", "value", "low", "high", "word", "element", "dtype", "data", "row", "i", "n",
+];
+
+/// Dimension names spelled like the f16 and bf16 checked-cast helpers'
+/// variables, which the emitter writes only when a program casts to them.
+const CAST_DIMENSION_NAMES: &[&str] = &["sign", "shift"];
+
 fn compiled() -> Vec<Case> {
-    vec![
+    let mut cases = vec![
         Case {
-            name: "mask_projection",
+            name: "mask_projection".into(),
             body: format!("{MASKED}r_a = masked({VALUES}).1\n"),
         },
         Case {
-            name: "destructured_record",
+            name: "destructured_record".into(),
             body: format!("{MASKED}r_a = {{\n  (c, m) = masked({VALUES})\n  col_xs(c)\n}}\n"),
         },
         Case {
-            name: "unwrapped_where",
+            name: "unwrapped_where".into(),
             body: format!(
                 "r_a = {{\n  t = {VALUES}\n  mask = in_range(t)\n  where(mask, t, filled(t, 0i64))\n}}\n"
             ),
         },
-    ]
+    ];
+    cases.extend(DIMENSION_NAMES.iter().map(|name| Case {
+        name: format!("dimension_named_{name}"),
+        body: format!(
+            "def double_it[{name}](t: tensor[{name}, f32]) -> tensor[{name}, f32] = add(t, t)\nr_a = double_it(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+        ),
+    }));
+    cases.extend(CAST_DIMENSION_NAMES.iter().map(|name| Case {
+        name: format!("f16_cast_dimension_named_{name}"),
+        body: format!(
+            "def halve[{name}](t: tensor[{name}, f32]) -> tensor[{name}, f16] = cast(t, f16)\nr_a = halve(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+        ),
+    }));
+    cases
 }
 
 /// The evaluator's rendering of every root, in the compiled driver's format.
@@ -161,7 +192,7 @@ fn check_compiled(case: &Case) -> Result<(), String> {
     let source = source(case);
     catch_unwind(AssertUnwindSafe(|| {
         let expected = evaluated(&source);
-        let generated = ownership_support::emit(&source, case.name);
+        let generated = ownership_support::emit(&source, &case.name);
         let (summary, stdout) = ownership_support::run_program(&generated);
         ownership_support::balanced(&summary);
         assert_eq!(stdout, expected, "compiled output differs from eval");

@@ -813,16 +813,17 @@ impl CEmitter {
         // places after a reference is the same C that does not compile
         // (chelis#2883, where the only site that produces the extent runs
         // after an earlier operation's guard reads it). So the receipt also
-        // covers a name the finished function reads before declaring.
-        let rendered = dag.rendered_dim_names();
-        let violation = rendered
-            .iter()
-            .find(|name| !e.declared_dim_names.contains(*name))
-            .map(|name| (name.clone(), "is rendered but never declared"))
-            .or_else(|| {
-                extent_read_before_declaration(&e.lines, &rendered)
-                    .map(|name| (name, "is rendered before it is declared"))
-            });
+        // covers a name the finished function reads before declaring. The
+        // order comes from the marks the emitter put on each name where it
+        // rendered or declared it, read in the finished function's order;
+        // a spelling the emitter did not mark is never an extent read.
+        let read_first = settle_extent_marks(&mut e.lines);
+        let violation = dag
+            .rendered_dim_names()
+            .into_iter()
+            .find(|name| !e.declared_dim_names.contains(name))
+            .map(|name| (name, "is rendered but never declared"))
+            .or_else(|| read_first.map(|name| (name, "is rendered before it is declared")));
         if let Some((missing, how)) = violation {
             return Err(chelis_types::unsupported::Unsupported::new(
                 chelis_types::unsupported::UnsupportedKind::Construct(format!(
@@ -2553,7 +2554,7 @@ impl CEmitter {
         for ((canonical_slot, canonical_axis), name) in entry_dim_declarations {
             self.line(&format!(
                 "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
-                name
+                extent_declaration(&name)
             ));
             self.declared_dim_names.insert(name);
         }
@@ -2632,7 +2633,7 @@ impl CEmitter {
     fn emit_dim_info(dim: &DimInfo) -> String {
         match dim {
             DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => n.to_string(),
-            DimInfo::Named(name, None) => name.clone(),
+            DimInfo::Named(name, None) => extent_read(name),
         }
     }
 
@@ -8092,7 +8093,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             // A symbolic dim (reshape targets only; verify rejects it in
             // movement bounds) is a declared C variable, exactly as
             // `emit_dim_info` renders a runtime-bound named dimension.
-            RtDim::Sym(name) => name.clone(),
+            RtDim::Sym(name) => extent_read(name),
         }
     }
 
@@ -8119,8 +8120,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 continue;
             }
             self.declared_dim_names.insert(name.clone());
-            self.line(&format!("int64_t {name} = {extent_expr};"));
-            extent_expr = name;
+            self.line(&format!(
+                "int64_t {} = {extent_expr};",
+                extent_declaration(&name)
+            ));
+            extent_expr = extent_read(&name);
         }
     }
 
@@ -8244,6 +8248,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => {
                     Self::bound_c_expr(&RtDim::Node(0), &[*witness], witness.0, axis)
                 }
+                chelis_ir::axis_sources::CanonicalExtent::Binder(name) => extent_read(name),
                 other => other.to_string(),
             };
             let mismatch = format!("({extent_expr}) != {operand}");
@@ -8525,9 +8530,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => Some(
                         Self::bound_c_expr(&RtDim::Node(0), &[*witness], witness.0, axis),
                     ),
-                    chelis_ir::axis_sources::CanonicalExtent::Binder(name) => {
-                        self.declared_dim_names.contains(name).then(|| name.clone())
-                    }
+                    chelis_ir::axis_sources::CanonicalExtent::Binder(name) => self
+                        .declared_dim_names
+                        .contains(name)
+                        .then(|| extent_read(name)),
                 })
         });
         claimed.unwrap_or_else(|| carried.to_string())
@@ -8942,132 +8948,137 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     }
 }
 
-/// The first of `names` that a line of `lines` reads as a C identifier
-/// before the line declaring it, `int64_t <name> = <extent>;`, in function
-/// order (chelis#2883). Both declaration loops emit exactly that spelling,
-/// and a declaration's own right-hand side is a read. String and character
-/// literals, comments and preprocessor lines are not code, so a guard
-/// message that quotes a name is not a read of it.
-fn extent_read_before_declaration(lines: &[String], names: &[String]) -> Option<String> {
-    let names: BTreeSet<&str> = names.iter().map(String::as_str).collect();
-    let mut declared: BTreeSet<&str> = BTreeSet::new();
-    for line in lines {
-        let code = line.trim_start();
-        if code.starts_with('#') {
-            continue;
-        }
-        let declaration = code
-            .strip_prefix("int64_t ")
-            .and_then(|rest| rest.split_once(" = "))
-            .filter(|(name, _)| names.contains(name));
-        let read = declaration.map_or(code, |(_, extent)| extent);
-        if let Some(name) =
-            c_identifiers(read).find(|token| names.contains(token) && !declared.contains(token))
-        {
-            return Some(name.to_string());
-        }
-        if let Some((name, _)) = declaration {
-            declared.insert(name);
-        }
-    }
-    None
+// Marks the emitter puts around an extent name it renders as a C
+// identifier (`EXTENT_READ`) and around the name a declaration introduces
+// (`EXTENT_DECLARATION`), each closed by `EXTENT_END`. They are private-use
+// characters no generated C contains, and `settle_extent_marks` removes them
+// before the function is returned.
+const EXTENT_READ: char = '\u{E000}';
+const EXTENT_DECLARATION: char = '\u{E001}';
+const EXTENT_END: char = '\u{E002}';
+
+/// `name` as the emitter renders it where C reads the extent.
+fn extent_read(name: &str) -> String {
+    format!("{EXTENT_READ}{name}{EXTENT_END}")
 }
 
-/// The identifiers of one line of C, outside string and character
-/// literals and comments. A token that starts with a digit is a number and
-/// is skipped whole, so `1LL` yields no identifier.
-fn c_identifiers(code: &str) -> impl Iterator<Item = &str> {
-    let bytes = code.as_bytes();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let byte = bytes[i];
-        if byte == b'"' || byte == b'\'' {
-            i += 1;
-            while i < bytes.len() && bytes[i] != byte {
-                i += if bytes[i] == b'\\' { 2 } else { 1 };
-            }
-            i += 1;
-        } else if code[i..].starts_with("//") {
-            break;
-        } else if code[i..].starts_with("/*") {
-            i = code[i + 2..]
-                .find("*/")
-                .map_or(bytes.len(), |end| i + 2 + end + 2);
-        } else if byte.is_ascii_alphanumeric() || byte == b'_' {
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-            }
-            if !byte.is_ascii_digit() {
-                tokens.push(&code[start..i]);
-            }
-        } else {
-            i += 1;
+/// `name` as the emitter writes it in its `int64_t <name> = ...;`
+/// declaration.
+fn extent_declaration(name: &str) -> String {
+    format!("{EXTENT_DECLARATION}{name}{EXTENT_END}")
+}
+
+/// Remove the extent marks from `lines` and return the first name read, in
+/// line order, before its declaration (chelis#2883). Within a line a
+/// declaration's right-hand side is a read and comes first, as C evaluates
+/// it. Only the emitter writes the marks, so an identifier that merely has
+/// a name's spelling, such as a helper's parameter or a member access, is
+/// never taken for a read.
+fn settle_extent_marks(lines: &mut [String]) -> Option<String> {
+    let mut declared = BTreeSet::new();
+    let mut read_first = None;
+    for line in lines.iter_mut() {
+        if !line.contains([EXTENT_READ, EXTENT_DECLARATION]) {
+            continue;
         }
+        let mut plain = String::with_capacity(line.len());
+        let mut declaring = Vec::new();
+        let mut rest = line.as_str();
+        while let Some(start) = rest.find([EXTENT_READ, EXTENT_DECLARATION]) {
+            plain.push_str(&rest[..start]);
+            let mark = rest[start..].chars().next().expect("found a mark");
+            let after = &rest[start + mark.len_utf8()..];
+            let end = after
+                .find(EXTENT_END)
+                .expect("every extent mark is closed where it is written");
+            let name = &after[..end];
+            plain.push_str(name);
+            if mark == EXTENT_DECLARATION {
+                declaring.push(name.to_string());
+            } else if !declared.contains(name) && read_first.is_none() {
+                read_first = Some(name.to_string());
+            }
+            rest = &after[end + EXTENT_END.len_utf8()..];
+        }
+        plain.push_str(rest);
+        declared.extend(declaring);
+        *line = plain;
     }
-    tokens.into_iter()
+    read_first
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn an_extent_read_before_its_declaration_is_found() {
-        let lines = |text: &[&str]| text.iter().map(|line| line.to_string()).collect::<Vec<_>>();
-        let names = vec!["d5".to_string(), "n".to_string()];
-        // chelis#2883's shape: a guard reads `d5`, its declaration follows.
-        assert_eq!(
-            extent_read_before_declaration(
-                &lines(&[
-                    "    if ((chelis_tensor_shape(t5, 0)) != d5) {",
-                    "    int64_t d5 = ((int64_t*)t12_data)[0];",
-                ]),
-                &names,
-            ),
-            Some("d5".to_string())
-        );
-        // Declared first, then read, including by a later declaration's
-        // right-hand side: nothing is reported.
-        assert_eq!(
-            extent_read_before_declaration(
-                &lines(&[
-                    "    int64_t d5 = chelis_tensor_shape(inputs[0], 0);",
-                    "    int64_t n = d5;",
-                    "    chelis_tensor *t1 = chelis_alloc(1, (int64_t[]){ n }, CHELIS_DTYPE_I64);",
-                ]),
-                &names,
-            ),
-            None
-        );
-        // A declaration reading a name declared only after it is a read.
-        assert_eq!(
-            extent_read_before_declaration(
-                &lines(&["    int64_t n = d5;", "    int64_t d5 = 3;"]),
-                &names,
-            ),
-            Some("d5".to_string())
-        );
-        // Quoted names, comments, pragmas and other identifiers that merely
-        // contain a name are not reads.
-        assert_eq!(
-            extent_read_before_declaration(
-                &lines(&[
-                    "    fprintf(stderr, \"extent `d5`: claimed = %lld\\n\", (long long)(t5_size));",
-                    "    // span: d5 n",
-                    "    /* d5 */ int64_t n_d5 = 'n';",
-                    "    #pragma omp parallel for simd n",
-                    "    int64_t d51 = 1LL;",
-                    "    int64_t d5 = n_d5;",
-                ]),
-                &names,
-            ),
-            None
-        );
-    }
     use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
     use chelis_types::types::Prim;
+
+    // chelis#2883: the order check reads the emitter's own marks, so a read
+    // before the declaration is found and the marks are removed, while an
+    // unmarked identifier with a name's spelling is never a read.
+    #[test]
+    fn extent_marks_order_reads_after_declarations_and_leave_plain_c() {
+        let mut lines = vec![
+            format!(
+                "    if ((chelis_tensor_shape(t5, 0)) != {}) {{",
+                extent_read("d5")
+            ),
+            format!(
+                "    int64_t {} = ((int64_t*)t12_data)[0];",
+                extent_declaration("d5")
+            ),
+        ];
+        assert_eq!(settle_extent_marks(&mut lines), Some("d5".to_string()));
+        assert_eq!(
+            lines,
+            [
+                "    if ((chelis_tensor_shape(t5, 0)) != d5) {",
+                "    int64_t d5 = ((int64_t*)t12_data)[0];",
+            ]
+        );
+
+        // Declared, then read, including by a later declaration's right-hand
+        // side. The unmarked `index`, `value` and `.dtype` are a helper's
+        // parameters and a member access that share the names' spellings.
+        let mut lines = vec![
+            "static uint64_t mix(uint64_t value, int64_t index) { return value + index; }"
+                .to_string(),
+            "    chelis_dtype dtype = chelis_tensor_read_view(inputs[0]).dtype;".to_string(),
+            format!(
+                "    int64_t {} = chelis_tensor_shape(inputs[0], 0);",
+                extent_declaration("index")
+            ),
+            format!(
+                "    int64_t {} = {};",
+                extent_declaration("value"),
+                extent_read("index")
+            ),
+            format!(
+                "    chelis_tensor *t1 = chelis_alloc(1, (int64_t[]){{ {} }}, CHELIS_DTYPE_I64);",
+                extent_read("value")
+            ),
+        ];
+        assert_eq!(settle_extent_marks(&mut lines), None);
+        assert!(lines.iter().all(|line| !line.contains([
+            EXTENT_READ,
+            EXTENT_DECLARATION,
+            EXTENT_END
+        ])));
+        assert_eq!(lines[3], "    int64_t value = index;");
+
+        // A declaration whose right-hand side reads a name declared only on
+        // a later line reads it first.
+        let mut lines = vec![
+            format!(
+                "    int64_t {} = {};",
+                extent_declaration("n"),
+                extent_read("d5")
+            ),
+            format!("    int64_t {} = 3;", extent_declaration("d5")),
+        ];
+        assert_eq!(settle_extent_marks(&mut lines), Some("d5".to_string()));
+    }
 
     fn emit_test_dag(dag: &Dag, name: &str) -> Result<String, Unsupported> {
         let verified = crate::testing::verified_dag(dag, crate::CodegenOptions::default())
