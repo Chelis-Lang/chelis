@@ -688,8 +688,8 @@ gather planned above was built and measured, and four problems ruled it out:
 - A tensor cannot be sized from a scalar (#469). Every call would therefore build a
   horizon-length `List` first, 7 304 485 elements for a full-range calendar.
 - `chelis eval` rejects `scatter_replace` (#2892).
-- Compiled C rejected the table program at an internal shape invariant (#2893).
-- Compiled C panicked on one variant of it.
+- Compiled C rejected the table program at internal shape invariants (#2893, #2907).
+- Compiled C panicked on one variant of it (#2906).
 
 A tensor kernel can replace the per-element loop, without changing the contract, once both
 lanes lower such programs.

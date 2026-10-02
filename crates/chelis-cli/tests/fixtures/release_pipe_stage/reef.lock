@@ -8,8 +8,8 @@ version = "0.1.0"
 name = "chelis-std"
 version = "0.4.0"
 compiler = "=0.18.12"
-archive_sha256 = "8c984dd5f81ca80d743d1948b3f2a8334ac138634d7fb07aa301d10ed969e237"
-shell_sha256 = "b5cff944f92a34d4c6568a94de5ce0c17e6fc80f03ce36402f095b5a33d833c9"
+archive_sha256 = "c36f47cb25f58785073e5d8f6a52f2e94e3a29afe7000019ebe4ed4916809e48"
+shell_sha256 = "444de1f05c0e2dbbee29644e1f3c10edd09c094647234caa327445beba8ed1c0"
 
 [dependencies.source]
 kind = "bundled"

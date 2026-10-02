@@ -203,6 +203,8 @@ def calendar_problem(weekmask: Weekmask, days: List[i64], valid_from: i64, valid
     bad = first_outside(days, valid_from, valid_until)
     if gte(bad, 0i64) then joined(["holiday ", day_text(index(days, bad)), " is outside the horizon ", day_text(valid_from), "..", day_text(valid_until)]) else ""
   }
+-- `holidays` is bound before the literal that also stores `weekmask`: compiled C
+-- releases an ADT that one field stores while another reads it (#2891).
 def normalized_calendar(weekmask: Weekmask, days: List[i64], valid_from: i64, valid_until: i64) -> BusinessCalendar = {
   holidays = normalized_holidays(weekmask, days, valid_from, valid_until)
   BusinessCalendar { weekmask, holidays, valid_from, valid_until }
