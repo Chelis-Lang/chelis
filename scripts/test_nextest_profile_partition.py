@@ -514,7 +514,7 @@ class ProfilePartitionTests(unittest.TestCase):
         }
 
     def test_fast_selection_is_a_subset_of_unfiltered_nightly(self):
-        from scripts import ci_test_targets, gate
+        from scripts import ci_test_targets, gate, ownership_ledger_tests
         metadata = json.loads(subprocess.run(
             ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
             cwd=REPO_ROOT, check=True, capture_output=True, text=True,
@@ -550,7 +550,13 @@ class ProfilePartitionTests(unittest.TestCase):
                             for suite in full["rust-suites"].values()
                             for info in suite["testcases"].values() if not info["ignored"]))
         # Each gated standing target also runs in the gate's integration
-        # stage with exactly its features.
+        # stage with exactly its features. The gate runs the ownership-ledger
+        # targets through `ownership_ledger_tests.py`, which derives its
+        # cargo command from Cargo metadata, so compare that derived command.
+        def resolved(command):
+            if command[1:2] == ["scripts/ownership_ledger_tests.py"]:
+                return ownership_ledger_tests.ledger_command(command[2], metadata)
+            return command
         def gated(commands):
             return {
                 (command[command.index("-p") + 1],
@@ -559,7 +565,8 @@ class ProfilePartitionTests(unittest.TestCase):
                 if "-p" in command and "--features" in command
                 for index, value in enumerate(command) if value == "--test"
             }
-        self.assertLessEqual(gated(selections), gated(gate.STAGES["integration"]))
+        integration = [resolved(command) for command in gate.STAGES["integration"]]
+        self.assertLessEqual(gated(selections), gated(integration))
 
     def _sets(self):
         ci_matches = {k for k, (s, _) in self.ci.items() if s == "matches"}
