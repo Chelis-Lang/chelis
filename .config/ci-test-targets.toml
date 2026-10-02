@@ -1542,6 +1542,11 @@ disposition = "packages"
 packages = ["chelis-cli"]
 
 [[path_rule]]
+prefix = "examples/runtime_scalar_extents.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
 prefix = "examples/dropout_staged_claim.ch"
 disposition = "packages"
 packages = ["chelis-cli"]

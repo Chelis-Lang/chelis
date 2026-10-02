@@ -5525,13 +5525,13 @@ const DIRECT_SHAPE_READ_FOR_LINT_FIX: &str = "sig broadcast_rows[a]: tensor[a, f
      bias = to_tensor([0.25f32])\n\
      out = broadcast_rows(xs, bias)\n";
 
-/// A piped read of a value that is not a tensor. The stage parameter carries
-/// the upstream value's class, so a runtime scalar stays sourceless through
-/// however many stages.
-const PIPED_SOURCELESS_SCALAR: &str = "module Repro.PipedSourceless\n\
+/// A piped cast of a runtime scalar parameter used as the size, with a call
+/// whose scalar agrees with the declared extent `a` of `x`.
+const PIPED_RUNTIME_SCALAR: &str = "module Repro.PipedRuntimeScalar\n\
      sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
      def f(x: tensor[a, f32], k: i32) = { a_dim = k |> cast(i64)\n\
-     expand(to_tensor([0.25f32]), 0i32, a_dim) }\n";
+     expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
+     out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 3i32)\n";
 
 /// The projection with an axis the field does not have.
 const RECORD_PROJECTION_BAD_AXIS: &str = "module Repro.RecordBadAxis\n\
@@ -5859,27 +5859,18 @@ fn a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds() {
     );
 }
 
-/// Negative parity for the pipe arm: a piped read of a non-tensor stays
-/// sourceless, with the section 4.7.2 diagnostic unchanged.
+/// The pipe arm with a runtime scalar in place of a shape read: the piped
+/// cast of an `i32` parameter is an admissible size (chelis#469) and both
+/// lanes print the same `[3]` tensor.
 ///
-/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `33cc78e84` and it
-/// must stay green: admitting a pipe stage must not admit the bare runtime
-/// scalar the pipe carries.
+/// EVIDENTIARY STATUS: regression test. Before chelis#469 `chelis check`
+/// rejected it with the section 4.7.2 provenance diagnostic.
 #[test]
-fn a_piped_shape_read_of_a_non_tensor_is_still_sourceless() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let checked = check(&fixture(
-        &dir,
-        "piped_sourceless.ch",
-        PIPED_SOURCELESS_SCALAR,
-    ));
-    let report = String::from_utf8_lossy(&checked.stdout).to_string();
-    assert!(
-        report.contains(
-            "`expand` size resolves to the symbolic dimension `a_dim`, but no tensor in \
-             scope carries it"
-        ),
-        "the piped runtime scalar keeps the section 4.7.2 rejection: {report}"
+fn a_piped_runtime_scalar_size_executes_on_both_lanes() {
+    assert_both_lanes_render(
+        "piped_runtime_scalar",
+        PIPED_RUNTIME_SCALAR,
+        "out = tensor(shape=[3], data=[0.25, 0.25, 0.25])",
     );
 }
 
@@ -6297,10 +6288,9 @@ fn arithmetic_over_two_tensors_is_guarded_against_the_value_it_computes_on_eval(
 }
 
 /// A shape read mixed with a runtime scalar PARAMETER is admissible, and the
-/// scalar's value reaches the guard. This is the row the checker change exists
-/// for: `add(shape(x, 0), k)` has one operand with a real shape source and one
-/// with none, and the arithmetic walk used to let the sourceless operand poison
-/// the whole expression.
+/// scalar's value reaches the guard: `add(shape(x, 0), k)` has one operand
+/// with a shape source and one without, and chelis#1379's arithmetic walk used
+/// to let the operand without one poison the whole expression.
 ///
 /// EVIDENTIARY STATUS: regression test. On `fc5b6aa99` both spellings were
 /// refused at CHECK with "`insert` size resolves to a runtime scalar", so
@@ -6334,9 +6324,9 @@ fn a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval
 }
 
 /// A def-returned scalar mixed with a shape read is admissible for the same
-/// reason. A user `def` is opaque to the checker's walk, so it classifies as
-/// sourceless; the shape read beside it is what makes the expression
-/// admissible.
+/// reason. (When this row was written a user `def` classified as sourceless
+/// and the shape read beside it was what made the expression admissible;
+/// since chelis#469 every operand is admissible on its own.)
 ///
 /// EVIDENTIARY STATUS: regression test. Refused at CHECK on `fc5b6aa99`.
 #[test]
@@ -6356,20 +6346,19 @@ fn a_def_returned_scalar_mixed_with_a_shape_read_is_an_admissible_expand_size_on
     );
 }
 
-/// The negative that bounds the checker change: arithmetic with NO admissible
-/// operand stays sourceless, with its diagnostic unchanged. Without this row a
-/// rule that simply stopped rejecting arithmetic would pass every positive
-/// above while admitting a size no lane can source.
+/// Arithmetic with NO shape-read operand is admissible too (chelis#469):
+/// section 4.7.2 lists checked integer arithmetic over a parameter among the
+/// admissible extents, so each size below evaluates to its value.
 ///
-/// EVIDENTIARY STATUS: disposition lock. Measured identical on `fc5b6aa99` and
-/// on this head; the behaviour is deliberately unchanged.
+/// EVIDENTIARY STATUS: regression test. Before chelis#469 each spelling was
+/// refused at check with "`insert` size resolves to a runtime scalar".
 #[test]
-fn arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless() {
+fn arithmetic_over_a_scalar_with_no_tensor_source_is_an_admissible_size_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    for (name, size) in [
-        ("bare_scalar_arith", "add(k, 1i64)"),
-        ("bare_scalar_mul", "mul(k, 2i64)"),
-        ("bare_scalar_nested", "add(mul(k, 2i64), 1i64)"),
+    for (name, size, extent) in [
+        ("bare_scalar_arith", "add(k, 1i64)", 4),
+        ("bare_scalar_mul", "mul(k, 2i64)", 6),
+        ("bare_scalar_nested", "add(mul(k, 2i64), 1i64)", 7),
     ] {
         let source = format!(
             "def f[m](b: tensor[f32], k: i64) -> tensor[m, f32] = insert(b, 0, {size})\n\
@@ -6377,35 +6366,31 @@ fn arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless() {
              out = f(seed, 3i64)\n"
         );
         let (ok, out) = eval_result(&dir, &format!("{name}.ch"), &source);
+        assert!(ok, "`{size}` is an admissible size: {out}");
         assert!(
-            !ok,
-            "`{size}` has no shape source and must be rejected: {out}"
-        );
-        assert!(
-            out.contains("`insert` size resolves to a runtime scalar, but no tensor in scope")
-                && out.contains("chelis#469"),
-            "`{size}` keeps the section 4.7.2 sourceless diagnostic verbatim: {out}"
+            out.contains(&format!("shape=[{extent}]")),
+            "`{size}` evaluates to extent {extent}: {out}"
         );
     }
 }
 
-/// A bare runtime scalar is still rejected too. `add(k, 1i64)` above and a bare
-/// `k` are the same class, and a change that admitted arithmetic by weakening
-/// the leaf rule rather than the combination rule would separate them.
+/// A bare runtime scalar is admissible as well. `add(k, 1i64)` above and a
+/// bare `k` take one route through the lowering, and a change that admitted
+/// arithmetic while refusing the bare name would separate them.
 ///
-/// EVIDENTIARY STATUS: disposition lock. Unchanged from `fc5b6aa99`.
+/// EVIDENTIARY STATUS: regression test. Before chelis#469 the bare `k` was
+/// refused at check with "`insert` size resolves to the symbolic dimension".
 #[test]
-fn a_bare_runtime_scalar_expand_size_is_still_sourceless() {
+fn a_bare_runtime_scalar_is_an_admissible_expand_size_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = "def f[m](b: tensor[f32], k: i64) -> tensor[m, f32] = insert(b, 0, k)\n\
                   seed = sum(to_tensor([1.0f32]), 0)\n\
                   out = f(seed, 3i64)\n";
     let (ok, out) = eval_result(&dir, "bare_scalar.ch", source);
-    assert!(!ok, "a bare runtime scalar size must be rejected: {out}");
+    assert!(ok, "a bare runtime scalar size evaluates: {out}");
     assert!(
-        out.contains("`insert` size resolves to the symbolic dimension `k`")
-            && out.contains("chelis#469"),
-        "with the bare-symbol wording of the same diagnostic: {out}"
+        out.contains("shape=[3]") && out.contains("data=[1.0, 1.0, 1.0]"),
+        "and sizes the axis by k = 3: {out}"
     );
 }
 
@@ -8527,60 +8512,50 @@ fn a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds() {
 }
 
 // ---------------------------------------------------------------------------
-// chelis#1791 half B, through the CLI: `chelis check` must reject a sourceless
-// `expand` size written as a pipe stage exactly as it rejects the direct
-// spelling.
+// chelis#1791 half B, through the CLI: an `expand` size written as a pipe
+// stage gets the verdict the direct spelling gets. When this section was
+// written that verdict was the provenance rejection; chelis#469 removed it
+// (spec/04-type-system.md section 4.7.2), so both spellings now execute and
+// both lanes print the same tensor.
 //
 // `crates/chelis-types/tests/issue_530_expand_inline_size_gate.rs` holds the
-// checker-level rows and the byte comparison. This row exists because the
-// verdict a user sees is `chelis check`'s.
+// checker-level rows. This row exists because the verdict a user sees is the
+// CLI's.
 // ---------------------------------------------------------------------------
 
 /// The issue's reproducer B, whose size is a cast over a bare `i32`
-/// parameter and so has no tensor shape source.
-const SOURCELESS_PIPE_STAGE: &str = "module Repro.BPipe\n\
+/// parameter, with a call so both lanes execute it.
+const RUNTIME_SIZE_PIPE_STAGE: &str = "module Repro.BPipe\n\
 sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
 def f(x: tensor[a, f32], k: i32) = {\n  \
 a_dim = k |> cast(i64)\n  \
 [0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
-}\n";
+}\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 3i32)\n";
 
 /// The same program with the `expand` written directly.
-const SOURCELESS_DIRECT: &str = "module Repro.BDirect\n\
+const RUNTIME_SIZE_DIRECT: &str = "module Repro.BDirect\n\
 sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
 def f(x: tensor[a, f32], k: i32) = {\n  \
 a_dim = k |> cast(i64)\n  \
 expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
-}\n";
+}\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 3i32)\n";
 
-/// expand.sourceless_size.pipe_position: the user-visible verdict.
+/// Oracle rows `expand.runtime_size.pipe_position.eval` and `.c`: the size
+/// written as a pipe stage and written directly execute identically, and both
+/// lanes print the same tensor for each.
 ///
-/// EVIDENTIARY STATUS: regression test on the pipe spelling, disposition lock
-/// on the direct one. On `08e46ebe6` the pipe spelling was rejected, but with
-/// chelis#1909's declaration-boundary obligation message rather than section
-/// 4.7.2's, so the substring assertion below failed. Before chelis#1909, on
-/// `6abca2406`, it scored a clean 1.0 with an empty error list and the
-/// sourceless size reached the lowerer instead.
+/// EVIDENTIARY STATUS: regression test. Before chelis#469 both spellings were
+/// rejected at check with the section 4.7.2 provenance diagnostic; on
+/// `08e46ebe6` the pipe spelling was rejected with chelis#1909's
+/// declaration-boundary obligation message instead, and on `6abca2406` it
+/// checked clean while the direct spelling was rejected.
 #[test]
-fn a_sourceless_expand_size_is_rejected_in_pipe_position_by_the_cli() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let needle = "but no tensor in scope carries it";
-    let piped = check(&fixture(&dir, "sourceless_pipe.ch", SOURCELESS_PIPE_STAGE));
-    let piped_out = String::from_utf8_lossy(&piped.stdout).to_string();
-    assert!(
-        piped_out.contains(needle) && piped_out.contains("chelis#469"),
-        "the pipe stage must carry the section 4.7.2 sourceless-size diagnostic: {piped_out}"
-    );
-    assert!(
-        !piped_out.contains("\"score\": 1,"),
-        "and must not score a clean 1.0: {piped_out}"
-    );
-    let direct = check(&fixture(&dir, "sourceless_direct.ch", SOURCELESS_DIRECT));
-    let direct_out = String::from_utf8_lossy(&direct.stdout).to_string();
-    assert!(
-        direct_out.contains(needle) && direct_out.contains("chelis#469"),
-        "the direct spelling keeps its diagnostic: {direct_out}"
-    );
+fn a_runtime_expand_size_in_pipe_position_executes_on_both_lanes() {
+    let expected = "out = tensor(shape=[3], data=[0.25, 0.25, 0.25])";
+    assert_both_lanes_render("runtime_size_pipe", RUNTIME_SIZE_PIPE_STAGE, expected);
+    assert_both_lanes_render("runtime_size_direct", RUNTIME_SIZE_DIRECT, expected);
 }
 
 // ---------------------------------------------------------------------------

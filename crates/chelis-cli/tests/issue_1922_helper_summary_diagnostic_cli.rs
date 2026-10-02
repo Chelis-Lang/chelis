@@ -1,5 +1,11 @@
 //! The source-reachable fatal summary diagnostic must be an ordinary CLI
 //! failure, with its original location, rather than silent process exit 101.
+//!
+//! The fixture's fatal was its `insert` sized by `seq` until chelis#469 made
+//! that an ordinary runtime extent. The fatal public eval now reaches is the
+//! static-DAG `concat` rejection in `join_columns`; which fatal it is does not
+//! matter to this lock, only that it reaches the user through the diagnostic
+//! channel with its source span.
 
 use assert_cmd::Command;
 use std::fs;
@@ -12,9 +18,11 @@ fn fatal_summary_diagnostic_is_visible_in_text_and_json_eval() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("sink.ch");
     let formatted = chelis_surf::format::format_source(SOURCE).expect("format fixture");
-    let insert = "insert(sink_scalar, cast(0, i32), seq)";
-    let start = formatted.find(insert).expect("original insert remains");
-    let source_id = format!("surf:{start}..{}", start + insert.len());
+    let operand = "[x, y]";
+    let start = formatted
+        .find(operand)
+        .expect("join_columns' concat operand remains");
+    let source_id = format!("surf:{start}..{}", start + operand.len());
     fs::write(&path, formatted).expect("fixture");
     let checked = Command::cargo_bin("chelis")
         .expect("binary")
@@ -42,7 +50,8 @@ fn fatal_summary_diagnostic_is_visible_in_text_and_json_eval() {
         assert!(stderr.starts_with("error:"), "{stderr}");
         assert!(
             stderr.contains(
-                "`insert` size resolves to `seq`, but no in-scope tensor axis supplies that extent"
+                "tensor concat cannot be represented by the static tensor DAG; use its host \
+                 execution path (chelis#1906)"
             ),
             "{stderr}"
         );

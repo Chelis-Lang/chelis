@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "2c367c07d68dfcd37dca3fcc5790b6d355c77265d6ef82b4e1778135a8d11747",
+  "corpus_sha256": "e8d4c44598086e83631ecce9a4708e9683e13b7fd584a6d5fdc407007094e6a3",
   "rows": [
     {
       "id": "claim.combinator_result.c",
@@ -1413,6 +1413,18 @@
       "receipt": "cli_slice_b.a_record_projection_is_an_admissible_expand_size"
     },
     {
+      "id": "expand.runtime_size.pipe_position.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_expand_size_in_pipe_position_executes_on_both_lanes"
+    },
+    {
+      "id": "expand.runtime_size.pipe_position.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_expand_size_in_pipe_position_executes_on_both_lanes"
+    },
+    {
       "id": "expand.shape_derived.declared_result_survives.c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
@@ -1423,12 +1435,6 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval"
-    },
-    {
-      "id": "expand.sourceless_size.pipe_position",
-      "baseline": "nonconforming_rejection",
-      "phase_b": "rejects_exactly",
-      "receipt": "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too"
     },
     {
       "id": "grad.independent_calls.agree.c",

@@ -429,20 +429,28 @@ fn reshape_with_host_lane_list_spelling_is_rejected_on_both_ingresses() {
 // because the enumeration pattern was too narrow. All three are pre-existing.
 
 #[test]
-fn expand_with_sourceless_runtime_size_is_rejected_on_both_ingresses() {
+fn expand_with_a_runtime_scalar_size_gets_one_verdict_on_both_ingresses() {
     // `classify_expand_size` had an `Expr::List`-only match with a
-    // `_ => SizeClass::Unknown` default, and `Unknown` is the ACCEPTING class
-    // in `check_expand_signature` while `Sourceless` is the rejecting one. So a
-    // stamped size argument fell to the fail-OPEN default and the typed ingress
-    // accepted a §4.7.2 sourceless size that the IR ingress rejected -- the
-    // silent-miscompile class chelis#469 exists to prevent.
-    assert_agree_and_reject(
-        "(defsig {} f (t-fn {} (t-tensor {} (d-name {} seq) (t-prim {} f32)) (t-prim {} i32) \
-           (t-tensor {} (d-name {} seq) (t-prim {} f32))))\n\
+    // `_ => SizeClass::Unknown` default, so a stamped size argument fell to a
+    // different verdict than the same size on the IR ingress. chelis#469
+    // removed the provenance classification (spec/04-type-system.md section
+    // 4.7.2 admits any `i64` size), so the verdict the ingresses must agree on
+    // is now: an `i64` scalar parameter is admitted, and an `i32` one is
+    // refused by the size-dtype rule.
+    assert_agree_and_accept(
+        "(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} f32)) (t-prim {} i64) \
+           (t-tensor {} (d-name {} *) (t-prim {} f32))))\n\
          (def {} f (fn {} (params {} x k) \
            (app {} (var {} expand) (var {} x) (lit {type: (t-prim {} i32)} 0) (var {} k))))",
-        "no tensor in scope carries it",
-        "expand sized by a runtime scalar with no tensor source",
+        "expand sized by an i64 runtime scalar with no tensor source",
+    );
+    assert_agree_and_reject(
+        "(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} f32)) (t-prim {} i32) \
+           (t-tensor {} (d-name {} *) (t-prim {} f32))))\n\
+         (def {} f (fn {} (params {} x k) \
+           (app {} (var {} expand) (var {} x) (lit {type: (t-prim {} i32)} 0) (var {} k))))",
+        "expects an i64 size",
+        "expand sized by an i32 runtime scalar",
     );
 }
 

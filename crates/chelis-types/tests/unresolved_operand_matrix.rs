@@ -498,7 +498,7 @@ fn a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule() {
         (
             "expand",
             "def f(x: tensor[1, f32], a: i32) -> tensor[4, f32] = {\n  g = fn (v) -> expand(x, 0i32, v)\n  g(a)\n}\n",
-            "but no tensor in scope carries it",
+            "precision mismatch: expected i64, got i32",
         ),
         (
             "cast",

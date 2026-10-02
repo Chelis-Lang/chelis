@@ -1,0 +1,6 @@
+def horizon_table(horizon: i64) = cumsum(expand(to_tensor([1i64]), 0i32, horizon), 0i32)
+def horizon_days(horizon: i64) -> i64 = tensor_to_scalar(sum(expand(to_tensor([1i64]), 0i32, horizon), 0i32))
+def padded_rows(rows: tensor[2, f32], extra: i64) = insert(rows, 0i32, add(extra, 1i64))
+table = horizon_table(5i64)
+days = horizon_days(5i64)
+grid = [0.5f32, 1.5f32] |> to_tensor |> padded_rows(2i64)

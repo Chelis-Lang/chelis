@@ -608,6 +608,13 @@ fn parity_checked_runtime_extents() {
     drive_parity(&examples_root().join("checked_runtime_extents.ch"), true);
 }
 
+/// chelis#469: `expand`/`insert` sizes taken from scalar parameters and
+/// arithmetic over them, with no tensor carrying the extent.
+#[test]
+fn parity_runtime_scalar_extents() {
+    drive_parity(&examples_root().join("runtime_scalar_extents.ch"), true);
+}
+
 #[test]
 fn parity_mixed_signature_extents() {
     drive_parity(&examples_root().join("mixed_signature_extents.ch"), true);

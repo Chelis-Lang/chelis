@@ -125,19 +125,13 @@ def loss_cross(x: tensor[5, f32]) -> f32 = {\n\
 def df(x: tensor[5, f32]) -> tensor[5, f32] = grad(loss_cross)(x)\n\
 out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)]))\n";
 
-/// NEGATIVE PARITY: a `tensor[k]` output whose `expand` size is a bare
-/// `i32` SCALAR PARAMETER (no `shape(...)` read, no in-scope tensor dim)
-/// must STILL be rejected loudly — the fix recovers extents only from
-/// genuine `shape(...)` reads (direct or `let`-bound), never from an
-/// arbitrary runtime scalar. Guards that the size-1-default removal did
-/// not weaken the §4.7.2 Form-3 sourceless-size rejection (chelis#469).
-///
-/// SCOPE: this verifies the rejection only for the BARE `expand(s, 0, k)`
-/// spelling (the size slot is the scalar parameter directly). The
-/// cast-wrapped form `expand(s, 0, cast(k, i64))` is a SEPARATE,
-/// pre-existing gap that this fixture does NOT cover; it is tracked as
-/// chelis#521. Do not read this test as a broad §4.7.2 sourceless-size
-/// guarantee.
+/// NEGATIVE PARITY: a `tensor[k]` output whose `insert` size is a bare
+/// `i32` SCALAR PARAMETER must STILL be rejected loudly, never silently
+/// defaulted to extent 1. When this fixture was written the rejection was the
+/// §4.7.2 provenance rule; chelis#469 removed that rule (an `i64` scalar
+/// parameter is an admissible size), and the parameter here is `i32`, so the
+/// rejection is now the size-dtype rule: section 4.7.2 accepts only an `i64`
+/// size and no implicit promotion applies.
 const REPRO_BARE_SCALAR_REJECTS: &str = "module Repro.BareScalarRejects\n\
 def bad[k](x: tensor[3, f32], k: i32) -> tensor[k, f32] = {\n\
   scalar_t = scalar_to_tensor(cast(2.0, f32))\n\
@@ -276,16 +270,9 @@ fn issue_369_eval_cross_def_callee_shadow_inner_len_wins() {
     );
 }
 
-/// NEGATIVE PARITY: a genuinely sourceless `expand` size (a bare `i32`
-/// scalar parameter) must STILL be rejected loudly. The fix must not have
-/// turned the size-1 default into a silent extent guess for arbitrary
-/// runtime scalars — only `shape(...)` reads (direct or `let`-bound)
-/// recover an extent.
-///
-/// SCOPE: verified ONLY for the bare `expand(s, 0, k)` spelling. The
-/// cast-wrapped form `expand(s, 0, cast(k, i64))` is a separate
-/// pre-existing gap tracked as chelis#521 and is NOT asserted here; this
-/// is not a broad §4.7.2 sourceless-size guarantee.
+/// NEGATIVE PARITY: an `i32` scalar parameter as the `insert` size is still
+/// rejected loudly, now by the size-dtype rule (chelis#469; see the fixture's
+/// comment), and never defaulted to extent 1.
 #[test]
 fn issue_369_bare_scalar_expand_size_still_rejects() {
     let output = run_eval(REPRO_BARE_SCALAR_REJECTS, "bare_scalar");
@@ -298,9 +285,8 @@ fn issue_369_bare_scalar_expand_size_still_rejects() {
     );
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("insert") && combined.contains("symbolic dimension"),
-        "rejection must name the sourceless symbolic `insert` size \
-         (§4.7.2 / chelis#469), not some unrelated failure; got \
-         stdout={stdout} stderr={stderr}",
+        combined.contains("insert expects an i64 size"),
+        "rejection must name the `insert` size dtype (§4.7.2), not some \
+         unrelated failure; got stdout={stdout} stderr={stderr}",
     );
 }
