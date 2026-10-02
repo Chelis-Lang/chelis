@@ -4,8 +4,7 @@
 Each test builds a scratch git repository. Clean trees, ignored build
 outputs, and locks without a bundled chelis-std pass. A tracked file under
 either generated directory, a tracked lock with a bundled chelis-std entry,
-and an unreadable tracked lock fail; the staged warning mode reports the same
-findings and exits 0.
+and an unreadable tracked lock fail.
 """
 
 from __future__ import annotations
@@ -165,23 +164,6 @@ class StdBundleTrackingTests(unittest.TestCase):
         err = self.assert_refused(repo, "packages/chelis-std/dist/a.chb")
         self.assertIn("crates/chelis-std-bundle/dist/b.tar.zst", err)
         self.assertIn("examples/probe/reef.lock", err)
-
-    def test_staged_warning_reports_and_exits_zero(self):
-        repo = self.repository()
-        repo.track("packages/chelis-std/dist/a.chb", "shell")
-        code, out, err = repo.run("--staged", "--warn")
-        self.assertEqual(code, 0)
-        self.assertNotIn("FAIL", out)
-        self.assertIn("std bundle tracking: warning", err)
-        self.assertIn("packages/chelis-std/dist/a.chb", err)
-
-    def test_staged_mode_ignores_committed_files(self):
-        repo = self.repository()
-        repo.track("packages/chelis-std/dist/a.chb", "shell")
-        repo.git("commit", "-q", "-m", "commit the generated file")
-        code, out, err = repo.run("--staged", "--warn")
-        self.assertEqual((code, err), (0, ""))
-        self.assertEqual(repo.run()[0], 1)
 
 
 if __name__ == "__main__":

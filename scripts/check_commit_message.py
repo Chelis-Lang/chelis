@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""Reject commit messages that contain AI tool authorship markers.
-
-It also warns, without refusing the commit, when the commit stages a generated
-chelis-std file (`check_std_bundle_untracked.py`); CI refuses those.
-"""
+"""Reject commit messages that contain AI tool authorship markers."""
 
 from __future__ import annotations
 
-import io
 import re
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,38 +56,12 @@ def find_prohibited_marker(message: str) -> str | None:
     return None
 
 
-def warn_on_staged_generated_std_files(stderr: TextIO) -> None:
-    """Report staged generated chelis-std files on `stderr`.
-
-    Advisory only: a missing guard, or a git failure, skips the warning rather
-    than blocking the commit, because CI is the refusal.
-    """
-    try:
-        import check_std_bundle_untracked as guard
-    except ImportError:
-        return
-    try:
-        toplevel = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        guard.main(
-            ["--staged", "--warn", "--repo", toplevel], out=io.StringIO(), err=stderr
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return
-
-
 def main(argv: Sequence[str], *, stderr: TextIO = sys.stderr) -> int:
     try:
         message = CommitMessage.parse(argv)
     except ValueError as error:
         print(f"ERROR: {error}", file=stderr)
         return 2
-
-    warn_on_staged_generated_std_files(stderr)
 
     matched_pattern = find_prohibited_marker(message.text)
     if matched_pattern is None:

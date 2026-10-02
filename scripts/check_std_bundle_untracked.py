@@ -14,15 +14,12 @@ refuses three kinds of tracked file:
   `bundled`. Every lock reef writes records the runtime by the hashes of the
   binary that wrote it, so such a lock goes stale with any std edit.
 
-The default mode reads every tracked path and its staged bytes from the index
-and exits 1 when it finds one. `--staged --warn` checks only the paths staged
-for the next commit and always exits 0; the commit-msg hook runs it that way,
-and CI is the refusal.
+It reads every tracked path and its bytes from the index and exits 1 when it
+finds one. `gate.py --fast` and CI's lint-and-unit stage run it.
 
 Usage:
 
     <managed-python> scripts/check_std_bundle_untracked.py
-    <managed-python> scripts/check_std_bundle_untracked.py --staged --warn
 
 Acceptance is exit 0 with the final line ``std bundle tracking: PASS``.
 """
@@ -69,14 +66,6 @@ def _git(repo: Path, *args: str) -> bytes:
 def tracked_paths(repo: Path) -> list[str]:
     """Every path in the index."""
     output = _git(repo, "ls-files", "-z")
-    return [path for path in output.decode("utf-8").split("\0") if path]
-
-
-def staged_paths(repo: Path) -> list[str]:
-    """Paths the next commit adds, copies, modifies, or renames to."""
-    output = _git(
-        repo, "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"
-    )
     return [path for path in output.decode("utf-8").split("\0") if path]
 
 
@@ -140,27 +129,15 @@ def violations(repo: Path, paths: Sequence[str]) -> list[Violation]:
 
 def main(argv: Sequence[str], *, out: TextIO = sys.stdout, err: TextIO = sys.stderr) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--staged",
-        action="store_true",
-        help="check only the paths staged for the next commit",
-    )
-    parser.add_argument(
-        "--warn",
-        action="store_true",
-        help="report findings on stderr and exit 0",
-    )
     parser.add_argument("--repo", type=Path, default=REPO_ROOT, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    paths = staged_paths(args.repo) if args.staged else tracked_paths(args.repo)
-    found = violations(args.repo, paths)
+    found = violations(args.repo, tracked_paths(args.repo))
     if not found:
         print("std bundle tracking: PASS", file=out)
         return 0
-    label = "warning" if args.warn else "error"
     print(
-        f"std bundle tracking: {label}: generated chelis-std files are tracked.",
+        "std bundle tracking: error: generated chelis-std files are tracked.",
         file=err,
     )
     for violation in found:
@@ -171,8 +148,6 @@ def main(argv: Sequence[str], *, out: TextIO = sys.stdout, err: TextIO = sys.std
         "`git rm --cached <path>` (the ignore rules keep it out afterwards).",
         file=err,
     )
-    if args.warn:
-        return 0
     print("std bundle tracking: FAIL", file=out)
     return 1
 

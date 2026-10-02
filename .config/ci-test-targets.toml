@@ -2801,15 +2801,6 @@ reason = "script-unit executes the shared hook's acceptance, rejection, owned-pr
 tracking_issue = "chelis#2287"
 
 [[path_rule]]
-prefix = "scripts/check_commit_message.py"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "the discovered PR script suite executes the commit-message policy and the staged generated-std warning through both hooks"
-tracking_issue = "chelis#2287"
-
-[[path_rule]]
 prefix = "scripts/test_check_commit_message.py"
 disposition = "owner"
 workflow = "ci.yml"
