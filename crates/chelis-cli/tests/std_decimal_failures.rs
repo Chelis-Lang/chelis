@@ -13,9 +13,8 @@
 //! module, the removed names, and `grad` through `decimal_from_f64` are
 //! checked through `chelis check`, `chelis eval`, and `chelis build`.
 //!
-//! Pull-request CI runs the eval message test in full and a canary of the
-//! compiled message test and of the extreme sweep; the complete compiled
-//! message test and the complete sweep run in the nightly workflow
+//! Pull-request CI runs both message tests in full and a canary of the extreme
+//! sweep; the complete sweep runs in the nightly workflow
 //! (`.config/ci-test-targets.toml`).
 
 #[path = "common/mod.rs"]
@@ -351,63 +350,14 @@ fn run_expression_suite(
     outcomes
 }
 
-/// One case of `EXACT_FAILURES` per callable and failure kind, and the four
-/// cases where an earlier check must win over a later one.
-const FAILURE_KIND_CANARY: &[&str] = &[
-    "parse_plus_sign",
-    "fixed_string_digits",
-    "to_i64_above",
-    "to_i64_inexact",
-    "from_f64_nan",
-    "add_above_range",
-    "sub_below_range",
-    "mul_above_range",
-    "round_scale",
-    "div_zero",
-    "div_above_range",
-    "try_div_overflow",
-    "to_i64_inexact_before_range",
-    "from_f64_finiteness_before_scale",
-    "div_zero_before_scale",
-    "div_inexact_before_range",
-];
-
-fn failure_kind_canary() -> Vec<(&'static str, &'static str, &'static str)> {
-    let canary: Vec<_> = EXACT_FAILURES
-        .iter()
-        .copied()
-        .filter(|(name, _, _)| FAILURE_KIND_CANARY.contains(name))
-        .collect();
-    assert_eq!(
-        canary.len(),
-        FAILURE_KIND_CANARY.len(),
-        "every canary name is a case of EXACT_FAILURES"
-    );
-    let kinds: std::collections::BTreeSet<(&str, &str)> = EXACT_FAILURES
-        .iter()
-        .map(|(_, _, message)| {
-            let mut parts = message.splitn(3, ": ");
-            (parts.next().unwrap(), parts.next().unwrap())
-        })
-        .collect();
-    let covered: std::collections::BTreeSet<(&str, &str)> = canary
-        .iter()
-        .map(|(_, _, message)| {
-            let mut parts = message.splitn(3, ": ");
-            (parts.next().unwrap(), parts.next().unwrap())
-        })
-        .collect();
-    assert_eq!(covered, kinds, "the canary covers every callable and kind");
-    canary
-}
-
-fn assert_eval_failures(dir_name: &str, cases: &[(&str, &str, &str)]) {
-    let expressions: Vec<(String, String)> = cases
+#[test]
+fn std_decimal_failures_report_their_exact_message() {
+    let expressions: Vec<(String, String)> = EXACT_FAILURES
         .iter()
         .map(|(name, expression, _)| (name.to_string(), expression.to_string()))
         .collect();
-    let outcomes = run_expression_suite(dir_name, &expressions);
-    for (name, expression, expected) in cases {
+    let outcomes = run_expression_suite("decimal-failures-2778", &expressions);
+    for (name, expression, expected) in EXACT_FAILURES {
         assert_eq!(
             outcomes.get(*name),
             Some(&Some(expected.to_string())),
@@ -416,36 +366,17 @@ fn assert_eval_failures(dir_name: &str, cases: &[(&str, &str, &str)]) {
     }
 }
 
-#[test]
-fn std_decimal_failures_report_their_exact_message() {
-    assert_eval_failures("decimal-failures-2778", EXACT_FAILURES);
-}
-
-/// The compiled C lane on `FAILURE_KIND_CANARY` only.
-#[test]
-fn std_decimal_compiled_failure_kind_canary_reports_its_exact_message() {
-    assert_compiled_failures(
-        "decimal-compiled-failure-canary-2778",
-        &failure_kind_canary(),
-    );
-}
-
 /// The compiled C lane reports the same messages: one program selects an
 /// expression by the contents of `case.txt`, and each run must fail with that
-/// case's exact message. Runs in the nightly workflow, not in pull-request CI
-/// (`.config/ci-test-targets.toml`).
+/// case's exact message.
 #[test]
 fn std_decimal_compiled_failures_report_their_exact_message() {
-    assert_compiled_failures("decimal-compiled-failures-2778", EXACT_FAILURES);
-}
-
-fn assert_compiled_failures(dir_name: &str, cases: &[(&str, &str, &str)]) {
     if !gcc_available() {
         return;
     }
-    let (_dir, reef_home, app_pkg) = make_app(dir_name);
+    let (_dir, reef_home, app_pkg) = make_app("decimal-compiled-failures-2778");
     let mut chain = String::from("\"unselected\"");
-    for (index, (_, expression, _)) in cases.iter().enumerate().rev() {
+    for (index, (_, expression, _)) in EXACT_FAILURES.iter().enumerate().rev() {
         chain = format!("if eq(selector, \"{index}\") then reached({expression}) else {chain}");
     }
     let source = format!(
@@ -469,7 +400,7 @@ fn assert_compiled_failures(dir_name: &str, cases: &[(&str, &str, &str)]) {
         built,
         "the failure-selection program must build:\n{rendered}"
     );
-    for (index, (name, expression, expected)) in cases.iter().enumerate() {
+    for (index, (name, expression, expected)) in EXACT_FAILURES.iter().enumerate() {
         write_file(&app_pkg.join("case.txt"), &format!("{index}\n"));
         let run = StdCommand::new(out_dir.join("main"))
             .current_dir(&app_pkg)

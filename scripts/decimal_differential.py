@@ -954,8 +954,11 @@ def build_canary_corpus() -> Corpus:
     It calls every callable on the envelope's ends and on inputs whose
     arithmetic carries from one limb into the next, rounds a tie of each sign in
     every mode through every callable that takes a mode (except `decimal_round`
-    under `RejectInexact`, a failure, which the canary does not run), converts
-    an f64 and an f32 halfway case of each sign, divides on one witness of each
+    under `RejectInexact`, a failure, which the canary does not run), rounds a
+    tie whose floor is odd under `RoundTiesToEven` through `decimal_to_i64`,
+    `decimal_from_f64` and `decimal_div`, converts an f64 and an f32 halfway
+    case of each sign and an f32 midpoint witness pair that a conversion through
+    f64 rounds wrongly on one side, divides on one witness of each
     long-division correction, and observes every twin. It has no seeded random inputs, so it
     detects a defect only on the inputs it names; the default corpus is the
     complete check.
@@ -965,7 +968,7 @@ def build_canary_corpus() -> Corpus:
     for category, texts in (("envelope", [MAX_TEXT, "-" + MAX_TEXT, TINY_TEXT, "-" + TINY_TEXT, "0." + NINES]),
                             ("limbs", limbs), ("removable_zeros", ["-0.000e-5"]),
                             ("float_edges", ["9007199254740993", "-9007199254740993", "16777217", "-16777217",
-                                             f32_midpoint_witnesses(1)[0]])):
+                                             *f32_midpoint_witnesses(1)[:2]])):
         for text in texts:
             corpus.value(category, text)
     for category, texts in (("parse_accepted", ["1e-0005"]), ("parse_malformed", ["+1", "1e"]),
@@ -982,6 +985,9 @@ def build_canary_corpus() -> Corpus:
             corpus.from_f64("from_f64", sign * 2.5, 0, mode)
             corpus.round("round", ("-" if sign < 0 else "") + "4999999999999999999999999999999999999.5", 0, mode)
             corpus.div("div", str(5 * sign), "2", 0, mode)
+        corpus.to_i64("to_i64", ("-" if sign < 0 else "") + "1.5", "RoundTiesToEven")
+        corpus.from_f64("from_f64", sign * 1.5, 0, "RoundTiesToEven")
+        corpus.div("div", str(3 * sign), "2", 0, "RoundTiesToEven")
     for text, mode in (("9223372036854775807.5", "RoundTowardZero"), ("-9223372036854775808.5", "RoundTiesToEven"),
                        (TINY_TEXT, "RoundAwayFromZero")):
         corpus.to_i64("to_i64", text, mode)

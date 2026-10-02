@@ -367,8 +367,7 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
   the compiled C lane and compares them exactly. Nightly CI runs the edge corpus,
   pull-request CI runs a few hand-picked edge inputs on both lanes, and a large random run
   is a manual gate.
-- **Failure corpus.** Every `domain` and `overflow` path with its exact message (in compiled
-  C, pull-request CI checks one path per callable and kind; nightly CI checks all), extreme
+- **Failure corpus.** Every `domain` and `overflow` path with its exact message, extreme
   arguments with no primitive trap escaping (pull-request CI samples one argument per
   callable and extreme class), construction and inspection of `Decimal` outside the module
   rejected, removed names unexported, `grad` through `decimal_from_f64` rejected.

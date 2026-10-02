@@ -152,8 +152,9 @@ tracking_issue = "chelis#2860"
 
 # chelis#2778: the Std.Decimal reference and differential harness.
 # script-unit runs the reference's tests and the harness's generator and
-# comparator tests on every pull request; the chelis-cli `std_decimal_oracle`
-# differential itself runs nightly (see its test exclusion below).
+# comparator tests on every pull request. The chelis-cli `std_decimal_oracle`
+# target runs the differential's canary on every pull request and the complete
+# differential nightly (see its test exclusion below).
 [[path_rule]]
 prefix = "scripts/decimal_reference.py"
 disposition = "packages"
@@ -1320,11 +1321,11 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "recursive composite cotangent parity compiles and executes generated C"
 tracking_issue = "chelis#1293"
 
-# The complete Std.Decimal differential corpus, extreme-argument sweep and
-# compiled message test take minutes on a loaded package-expansion shard, and
-# the sweep can reach the 600-second `chelis test` suite timeout there.
-# Pull-request CI runs a canary of each instead, in the same targets;
-# docs/manual_gates.md has the command that runs the complete tests on demand.
+# The complete Std.Decimal differential corpus and extreme-argument sweep take
+# minutes each on a loaded package-expansion shard, and the sweep can reach the
+# 600-second `chelis test` suite timeout there. Pull-request CI runs a canary of
+# each instead, in the same targets, and the targets' other tests in full;
+# docs/manual_gates.md has the command that runs both complete tests on demand.
 [[test_exclusion]]
 package = "chelis-cli"
 target = "std_decimal_oracle"
@@ -1343,16 +1344,6 @@ workflow = "heavy-e2e.yml"
 job = "full-workspace"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "the Std.Decimal extreme-argument sweep evaluates 308 calls in one chelis test suite"
-tracking_issue = "chelis#2794"
-
-[[test_exclusion]]
-package = "chelis-cli"
-target = "std_decimal_failures"
-name = "std_decimal_compiled_failures_report_their_exact_message"
-workflow = "heavy-e2e.yml"
-job = "full-workspace"
-cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "the Std.Decimal compiled message test builds one program over every pinned failure message"
 tracking_issue = "chelis#2794"
 
 # Cargo metadata classifies paths under workspace package roots directly.

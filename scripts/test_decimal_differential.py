@@ -434,12 +434,26 @@ class Canary(unittest.TestCase):
                 else:
                     self.assertIn(rounded, args("row_round"))
 
+    def test_a_tie_with_an_odd_floor_meets_ties_to_even(self) -> None:
+        def args(row: str) -> set[tuple]:
+            return {c.args for c in CANARY.cases if c.row == row}
+        for sign in ("", "-"):
+            self.assertIn((sign + "1.5", "RoundTiesToEven"), args("row_try_to_i64"))
+            self.assertIn((float(sign + "1.5"), 0, "RoundTiesToEven"), args("row_try_from_f64"))
+            self.assertIn((sign + "3", "2", 0, "RoundTiesToEven"), args("row_try_div"))
+
     def test_both_float_roundings_meet_a_halfway_case_of_each_sign(self) -> None:
         floats = {c.args[0] for c in CANARY.cases if c.row == "row_floats"}
         self.assertTrue({"9007199254740993", "-9007199254740993", "16777217", "-16777217"} <= floats)
         for text, fmt in (("9007199254740993", ref.F64), ("16777217", ref.F32)):
             below, above = int(text) - 1, int(text) + 1
             self.assertEqual(ref.text_bits(str(below), fmt) + 1, ref.text_bits(str(above), fmt), text)
+
+    def test_an_f32_conversion_through_f64_fails_a_value(self) -> None:
+        def through_f64(x: ref.Decimal) -> int:
+            return struct.unpack("<I", struct.pack("<f", ref.decimal_to_f64(x)))[0]
+        values = [ref.decimal(c.args[0]) for c in CANARY.cases if c.row == "row_floats"]
+        self.assertTrue(any(ref.decimal_to_f32_bits(x) != through_f64(x) for x in values))
 
     def test_the_canary_is_one_program_with_no_failure_program(self) -> None:
         selected = canary_programs()
