@@ -1126,19 +1126,17 @@ pub fn float_binop(
     Ok(ScalarValue { bits })
 }
 
-// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
 fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
     canonical_nan_f32(match op {
         FloatUnOp::Neg => -value,
         FloatUnOp::Recip => value.recip(),
-        FloatUnOp::Exp => value.exp(),
-        FloatUnOp::Log => value.ln(),
-        FloatUnOp::Sin => value.sin(),
+        FloatUnOp::Exp => chelis_crmath::exp_f32(value),
+        FloatUnOp::Log => chelis_crmath::log_f32(value),
+        FloatUnOp::Sin => chelis_crmath::sin_f32(value),
         FloatUnOp::Sqrt => value.sqrt(),
-        FloatUnOp::Cos => value.cos(),
-        FloatUnOp::Tan => value.tan(),
-        FloatUnOp::Atan => value.atan(),
+        FloatUnOp::Cos => chelis_crmath::cos_f32(value),
+        FloatUnOp::Tan => chelis_crmath::tan_f32(value),
+        FloatUnOp::Atan => chelis_crmath::atan_f32(value),
         FloatUnOp::Tanh => chelis_crmath::tanh_f32(value),
         FloatUnOp::Abs => value.abs(),
         FloatUnOp::Floor => value.floor(),
@@ -1150,19 +1148,17 @@ fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
     })
 }
 
-// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
 fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
     canonical_nan_f64(match op {
         FloatUnOp::Neg => -value,
         FloatUnOp::Recip => value.recip(),
-        FloatUnOp::Exp => value.exp(),
-        FloatUnOp::Log => value.ln(),
-        FloatUnOp::Sin => value.sin(),
+        FloatUnOp::Exp => chelis_crmath::exp_f64(value),
+        FloatUnOp::Log => chelis_crmath::log_f64(value),
+        FloatUnOp::Sin => chelis_crmath::sin_f64(value),
         FloatUnOp::Sqrt => value.sqrt(),
-        FloatUnOp::Cos => value.cos(),
-        FloatUnOp::Tan => value.tan(),
-        FloatUnOp::Atan => value.atan(),
+        FloatUnOp::Cos => chelis_crmath::cos_f64(value),
+        FloatUnOp::Tan => chelis_crmath::tan_f64(value),
+        FloatUnOp::Atan => chelis_crmath::atan_f64(value),
         FloatUnOp::Tanh => chelis_crmath::tanh_f64(value),
         FloatUnOp::Abs => value.abs(),
         FloatUnOp::Floor => value.floor(),
@@ -2129,8 +2125,6 @@ pub fn float_relu_adjoint(
     }
 }
 
-// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
 fn float_vec_unop_f32<T: Copy>(
     op: FloatUnOp,
     values: &[T],
@@ -2149,13 +2143,13 @@ fn float_vec_unop_f32<T: Copy>(
     match op {
         FloatUnOp::Neg => map!(|x: f32| -x),
         FloatUnOp::Recip => map!(f32::recip),
-        FloatUnOp::Exp => map!(f32::exp),
-        FloatUnOp::Log => map!(f32::ln),
-        FloatUnOp::Sin => map!(f32::sin),
+        FloatUnOp::Exp => map!(chelis_crmath::exp_f32),
+        FloatUnOp::Log => map!(chelis_crmath::log_f32),
+        FloatUnOp::Sin => map!(chelis_crmath::sin_f32),
         FloatUnOp::Sqrt => map!(f32::sqrt),
-        FloatUnOp::Cos => map!(f32::cos),
-        FloatUnOp::Tan => map!(f32::tan),
-        FloatUnOp::Atan => map!(f32::atan),
+        FloatUnOp::Cos => map!(chelis_crmath::cos_f32),
+        FloatUnOp::Tan => map!(chelis_crmath::tan_f32),
+        FloatUnOp::Atan => map!(chelis_crmath::atan_f32),
         FloatUnOp::Tanh => map!(chelis_crmath::tanh_f32),
         FloatUnOp::Abs => map!(f32::abs),
         FloatUnOp::Floor => map!(f32::floor),
@@ -2167,8 +2161,6 @@ fn float_vec_unop_f32<T: Copy>(
     }
 }
 
-// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
 fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
     macro_rules! map {
         ($body:expr) => {
@@ -2182,13 +2174,13 @@ fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
     match op {
         FloatUnOp::Neg => map!(|x: f64| -x),
         FloatUnOp::Recip => map!(f64::recip),
-        FloatUnOp::Exp => map!(f64::exp),
-        FloatUnOp::Log => map!(f64::ln),
-        FloatUnOp::Sin => map!(f64::sin),
+        FloatUnOp::Exp => map!(chelis_crmath::exp_f64),
+        FloatUnOp::Log => map!(chelis_crmath::log_f64),
+        FloatUnOp::Sin => map!(chelis_crmath::sin_f64),
         FloatUnOp::Sqrt => map!(f64::sqrt),
-        FloatUnOp::Cos => map!(f64::cos),
-        FloatUnOp::Tan => map!(f64::tan),
-        FloatUnOp::Atan => map!(f64::atan),
+        FloatUnOp::Cos => map!(chelis_crmath::cos_f64),
+        FloatUnOp::Tan => map!(chelis_crmath::tan_f64),
+        FloatUnOp::Atan => map!(chelis_crmath::atan_f64),
         FloatUnOp::Tanh => map!(chelis_crmath::tanh_f64),
         FloatUnOp::Abs => map!(f64::abs),
         FloatUnOp::Floor => map!(f64::floor),
