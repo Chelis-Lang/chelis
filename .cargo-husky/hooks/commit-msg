@@ -23,8 +23,9 @@ if [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
 elif [ -x "$repo_root/.venv/bin/python" ]; then
     python_path="$repo_root/.venv/bin/python"
 elif command -v uv >/dev/null 2>&1; then
+    # --isolated: never adopt an activated or parent-directory venv.
     unset UV_PYTHON_PREFERENCE
-    exec uv run --managed-python --python 3.11 --no-project python \
+    exec uv run --managed-python --python 3.11 --no-project --isolated python \
         "$repo_root/scripts/check_commit_message.py" "$@"
 else
     printf '%s\n' 'ERROR: no managed Python interpreter exists for the commit hook.' >&2

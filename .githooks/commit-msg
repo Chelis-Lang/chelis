@@ -53,8 +53,10 @@ if [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
 elif [ -x "$repo_root/.venv/bin/python" ]; then
     exec "$repo_root/.venv/bin/python" "$checker" "$@"
 elif command -v uv >/dev/null 2>&1; then
+    # --isolated: without it uv prefers an activated VIRTUAL_ENV or a .venv
+    # in any parent directory over the managed interpreter.
     unset UV_PYTHON_PREFERENCE
-    exec uv run --managed-python --python 3.11 --no-project python "$checker" "$@"
+    exec uv run --managed-python --python 3.11 --no-project --isolated python "$checker" "$@"
 fi
 
 printf '%s\n' 'commit-msg hook: no managed Python interpreter is available.' >&2
