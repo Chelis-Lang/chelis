@@ -236,6 +236,19 @@ fn i32_cumsum_is_exact_in_both_lanes() {
     assert_lanes(&source, "cumsum-i32", "out", Prim::Int32, &expected);
 }
 
+/// Section 5.7.1: an i8 or i16 operand accumulates and is stored at the i32
+/// default accumulator, `sum_result(i8, i32) = i32`. Evidentiary status:
+/// REGRESSION TEST; at 08939bc0e eval narrows each prefix to i8 and traps
+/// overflow at 128.
+#[test]
+fn narrow_integer_cumsum_is_stored_at_the_i32_accumulator_in_both_lanes() {
+    for suffix in ["i8", "i16"] {
+        let source = format!("out = cumsum({}, 0)\n", int_tensor(suffix, &[127, 1, 1]));
+        let expected = ints(&[127, 128, 129]);
+        assert_lanes(&source, suffix, "out", Prim::Int32, &expected);
+    }
+}
+
 /// [04-NUM-3]: integer overflow is checked at each addition.
 #[test]
 fn i32_cumsum_overflow_traps_in_both_lanes() {
