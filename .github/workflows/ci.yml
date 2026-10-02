@@ -42,6 +42,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}-implementation
   cancel-in-progress: true
 
+# Candidate code also runs on workflow_dispatch in the base branch context.
+# Limit the cache capability independently of GITHUB_TOKEN permissions.
+cache-mode: read
+
 permissions:
   contents: read
 
@@ -580,6 +584,8 @@ jobs:
         continue-on-error: true
         if: ${{ github.event_name == 'pull_request' && steps.preflight-gate.outputs.gate == 'success' }}
         working-directory: candidate
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: >-
           python3 scripts/ci_candidate_identity.py
           --repository "${{ github.repository }}"
@@ -588,7 +594,7 @@ jobs:
           --run-attempt "${{ github.run_attempt }}"
           --pr-number "${{ github.event.pull_request.number }}"
           --head-sha "${{ github.event.pull_request.head.sha }}"
-          --base-ref "${{ github.event.pull_request.base.ref }}"
+          --base-ref "$BASE_REF"
           --candidate-sha "${{ steps.candidate.outputs.candidate_sha }}"
           --output "$RUNNER_TEMP/candidate-identity/candidate-identity.json"
 
