@@ -150,6 +150,11 @@ path = "tests/issue_2781_loop_result_captured_by_a_loop.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_2891_aggregate_shared_operand"
+path = "tests/issue_2891_aggregate_shared_operand.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "key_admission_lanes"
 path = "tests/key_admission_lanes.rs"
 required-features = ["ownership-ledger"]

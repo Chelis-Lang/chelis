@@ -1443,10 +1443,20 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.classify_or_reject(ty, Placement::Value, None)?;
         let mut operands = Vec::with_capacity(items.len());
         for item in items {
-            let value = self.with_site(HostSiteKind::Argument, |lowerer| {
-                lowerer.lower_expr(item, None)
-            })?;
-            operands.push(self.consume(value, None)?);
+            // Consume the operand at the item's own expression site. The C
+            // projection renders a site's actions where it emits that
+            // expression, so the copy of a shared value consumed at the
+            // enclosing site ran only after the whole literal: a later item's
+            // call had by then released the value the earlier item stored
+            // (chelis#2891). Direct call arguments nest the same way.
+            operands.push(self.with_site(HostSiteKind::Argument, |lowerer| {
+                lowerer.with_expr_span(item, |lowerer| {
+                    lowerer.with_site(HostSiteKind::Expression, |lowerer| {
+                        let value = lowerer.lower_expr_at_site(item, None)?;
+                        lowerer.consume(value, None)
+                    })
+                })
+            })?);
         }
         self.apply(
             ty,
