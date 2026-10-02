@@ -119,3 +119,19 @@ fn static_condition_fold_keeps_values_sealed() {
         "chelis#729 section C5 forbids a lossy f64 memo in the static condition fold"
     );
 }
+
+/// chelis#2972: scatter-add plans each destination's ordered leaves and
+/// combines them in the closed typed kernel at the operand width, so no
+/// binary64 funnel is reachable from it ([05-OP-33]).
+#[test]
+fn ir_scatter_add_can_only_plan_leaves_and_call_the_typed_kernel() {
+    let source = include_str!("../src/eval.rs");
+    let body = source_slice(source, "fn scatter_add(", "fn scatter_replace(");
+    assert!(body.contains("scatter_add_tensor_groups"));
+    for forbidden in [".to_f64_lossy_vec()", "finalize_wide", "as_f64_lossy", "+="] {
+        assert!(
+            !body.contains(forbidden),
+            "scatter_add must not use `{forbidden}`: it combines at the operand width"
+        );
+    }
+}

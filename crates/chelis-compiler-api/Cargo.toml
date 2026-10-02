@@ -92,6 +92,11 @@ path = "tests/fixed_control_host_c.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_2957_eval_declared_width"
+path = "tests/issue_2957_eval_declared_width.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "generated_header_native_probe"
 path = "tests/generated_header_native_probe.rs"
 required-features = ["ownership-ledger"]

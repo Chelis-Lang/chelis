@@ -2878,6 +2878,147 @@ pub fn reduce_tensor_groups(
     finalize_tensor(op.name(), result, raw).map_err(Into::into)
 }
 
+/// One [05-OP-33] addition at the operands' arithmetic width: integers
+/// exactly, trapping on overflow under `op`'s name; f32 and f64 natively; f16
+/// and bf16 through f32, rounded once into storage.
+fn width_add(
+    op: &'static str,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+) -> Result<ScalarValue, NumericKernelError> {
+    let sum = if lhs.prim().is_integer() {
+        int_binop(IntBinOp::Add, lhs, rhs)
+    } else {
+        float_binop(FloatBinOp::Add, lhs, rhs)
+    };
+    sum.map_err(|err| match err {
+        NumericKernelError::Trap(NumericTrap::Overflow { prim, .. }) => {
+            NumericTrap::Overflow { op, prim }.into()
+        }
+        other => other,
+    })
+}
+
+/// Convert within one numeric family where the value set of `value` is a
+/// subset of `prim`'s (an accumulator widening), or round a float once into
+/// a narrower storage dtype.
+fn within_family(
+    op: &'static str,
+    value: ScalarValue,
+    prim: Prim,
+) -> Result<ScalarValue, NumericKernelError> {
+    if value.prim() == prim {
+        Ok(value)
+    } else if value.prim().is_integer() && prim.is_integer() {
+        let exact = value.as_i64_exact().expect("integer elements read exactly");
+        scalar_from_i64(op, prim, exact).map_err(Into::into)
+    } else if value.prim().is_float() && prim.is_float() {
+        scalar_from_f64(op, prim, value.as_f64_lossy()).map_err(Into::into)
+    } else {
+        Err(NumericKernelError::WrongFamily {
+            op,
+            expected: if prim.is_integer() {
+                NumericFamily::Int
+            } else {
+                NumericFamily::Float
+            },
+            actual: value.prim(),
+        })
+    }
+}
+
+/// [05-OP-33] `cumsum` over explicitly ordered lanes. In lane order an
+/// exact-zero accumulator at §5.7.1's default sum-accumulator dtype adds each
+/// input, and each prefix is stored at `sum_result(p, default(p))`. Every
+/// input index belongs to exactly one lane; callers own the axis planning.
+pub fn cumsum_tensor_lanes(
+    input: &TensorStorage,
+    lanes: &[Vec<usize>],
+) -> Result<TensorStorage, NumericKernelError> {
+    const OP: &str = "cumsum";
+    let prim = input.prim();
+    let signature = prim
+        .default_reduce_sum_accumulator()
+        .and_then(|accumulator| {
+            prim.default_reduce_sum_result_precision()
+                .map(|result| (accumulator, result))
+        });
+    let (accumulator, result) = match (prim.is_integer() || prim.is_float(), signature) {
+        (true, Ok(signature)) => signature,
+        _ => {
+            return Err(NumericKernelError::InvalidReductionSignature {
+                op: OP,
+                input: prim,
+                accumulator: prim,
+                result: prim,
+            });
+        }
+    };
+    let zero = if accumulator.is_integer() {
+        scalar_from_i64(OP, accumulator, 0)?
+    } else {
+        scalar_from_f64(OP, accumulator, 0.0)?
+    };
+    let mut values = vec![within_family(OP, zero, result)?; input.len()];
+    for lane in lanes {
+        let mut running = zero;
+        for &index in lane {
+            let leaf = within_family(OP, input.scalar_at(index), accumulator)?;
+            running = width_add(OP, running, leaf)?;
+            values[index] = within_family(OP, running, result)?;
+        }
+    }
+    Ok(tensor_from_scalars(result, &values))
+}
+
+/// [05-OP-33] add-mode `scatter`. `leaves[d]` lists, in row-major update
+/// order, the update indices that target destination `d`. A targeted
+/// destination's leaf sequence is its base value followed by those updates,
+/// combined by the canonical adjacent-pair balanced tree at the operand
+/// arithmetic width; an untargeted destination keeps its base value.
+pub fn scatter_add_tensor_groups(
+    base: &TensorStorage,
+    updates: &TensorStorage,
+    leaves: &[Vec<usize>],
+) -> Result<TensorStorage, NumericKernelError> {
+    const OP: &str = "scatter";
+    let prim = base.prim();
+    if !(prim.is_integer() || prim.is_float()) {
+        return Err(NumericKernelError::InvalidReductionSignature {
+            op: OP,
+            input: prim,
+            accumulator: prim,
+            result: prim,
+        });
+    }
+    if updates.prim() != prim {
+        return Err(NumericKernelError::DtypeMismatch {
+            op: OP,
+            lhs: prim,
+            rhs: updates.prim(),
+        });
+    }
+    if leaves.len() != base.len() {
+        return Err(NumericKernelError::LengthMismatch {
+            op: OP,
+            lhs: base.len(),
+            rhs: leaves.len(),
+        });
+    }
+    let values = leaves
+        .iter()
+        .enumerate()
+        .map(|(destination, targeting)| {
+            let level = std::iter::once(base.scalar_at(destination))
+                .chain(targeting.iter().map(|&index| updates.scalar_at(index)))
+                .collect();
+            checked_adjacent_pair_fold(level, |left, right| width_add(OP, left, right))
+                .map(|value| value.expect("every leaf sequence starts with its base value"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(tensor_from_scalars(prim, &values))
+}
+
 /// Reduce explicitly ordered groups to exact i64 winner indices. Values
 /// are compared at their stored dtype and never cross binary64 for integer
 /// inputs; first-seen wins ties.

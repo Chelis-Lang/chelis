@@ -32,7 +32,7 @@ use chelis_types::dtype_semantics::{
     count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_relu, float_relu_adjoint,
     float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
     integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
-    tensor_from_scalars,
+    scatter_add_tensor_groups, tensor_from_scalars,
 };
 use chelis_types::dtype_semantics::{
     PreparedDropout, fold_in_storage, key_from_seed_storage, split_key_storage, split_keys_storage,
@@ -1602,9 +1602,10 @@ fn scatter_add(
     let expected_updates = sparse_domain_shape(&target.shape, &indices.shape, axis, batch_rank);
     assert_eq!(updates.shape, expected_updates);
 
-    let mut out = target.to_f64_lossy_vec();
-    let upd = updates.to_f64_lossy_vec();
-    for (update_linear, update) in upd.iter().enumerate() {
+    // [05-OP-33]: each destination's leaves are its target value, then the
+    // targeting updates in row-major update order.
+    let mut leaves = vec![Vec::new(); target.len()];
+    for update_linear in 0..updates.len() {
         let update_index = linear_to_index(update_linear, &updates.shape);
         let idx_index = sparse_index_coordinate(&update_index, axis, batch_rank, index_rank);
         let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
@@ -1617,9 +1618,12 @@ fn scatter_add(
         target_index.push(gathered as usize);
         target_index.extend_from_slice(&update_index[axis + index_suffix_rank..]);
         let target_linear = index_to_linear(&target_index, &target.shape);
-        out[target_linear] += update;
+        leaves[target_linear].push(update_linear);
     }
-    finalize_wide("scatter_add", prim, target.shape.clone(), out)
+    debug_assert_eq!(target.prim(), prim);
+    let storage = scatter_add_tensor_groups(target.storage(), updates.storage(), &leaves)
+        .map_err(|err| err.to_string())?;
+    Ok(TensorValue::from_storage(target.shape.clone(), storage))
 }
 
 /// Replace-scatter (last-write-wins) over duplicate target indices.
@@ -5703,6 +5707,41 @@ mod tests {
     use crate::lower::{LoweredLibrary, lower_program_to_library};
     use chelis_deep::parser::parse_str;
     use chelis_types::types::Prim;
+
+    /// [05-OP-33] (chelis#2972): add-mode scatter combines each destination's
+    /// base value and targeting updates by the canonical balanced tree at
+    /// the operand width. i64 stays exact above 2^53; at f32
+    /// `(2^24 + 1) + 1` rounds back to 2^24 at each node; i32 overflow traps
+    /// under the operation's name, as compiled C does.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At 08939bc0e the i64 row returns
+    /// 2^53, the f32 row 2^24 + 2, and the i32 row names `scatter_add`.
+    #[test]
+    fn scatter_add_combines_at_the_operand_width() {
+        let index = finalize_wide_int("test", Prim::Int64, vec![2], vec![0, 0]).unwrap();
+        let above = (1_i64 << 53) + 1;
+        let target = finalize_wide_int("test", Prim::Int64, vec![3], vec![above, 0, 0]).unwrap();
+        let updates = finalize_wide_int("test", Prim::Int64, vec![2], vec![1, 1]).unwrap();
+        let out = scatter_add(&target, &index, &updates, 0, 0, Prim::Int64).unwrap();
+        assert_eq!(
+            out.storage().to_i64_exact_vec(),
+            Some(vec![above + 2, 0, 0])
+        );
+
+        let target = finalize_wide("test", Prim::F32, vec![2], vec![16_777_216.0, 0.0]).unwrap();
+        let updates = finalize_wide("test", Prim::F32, vec![2], vec![1.0, 1.0]).unwrap();
+        let out = scatter_add(&target, &index, &updates, 0, 0, Prim::F32).unwrap();
+        assert_eq!(out.to_f64_lossy_vec(), vec![16_777_216.0, 0.0]);
+
+        let index = finalize_wide_int("test", Prim::Int64, vec![1], vec![0]).unwrap();
+        let target =
+            finalize_wide_int("test", Prim::Int32, vec![1], vec![i64::from(i32::MAX)]).unwrap();
+        let updates = finalize_wide_int("test", Prim::Int32, vec![1], vec![1]).unwrap();
+        assert_eq!(
+            scatter_add(&target, &index, &updates, 0, 0, Prim::Int32).unwrap_err(),
+            "numeric trap: overflow in scatter at i32"
+        );
+    }
 
     /// [05-OP-53]: the condition's shape equals the shape of every branch it
     /// selects, and a branch it selects nowhere is neither read nor
