@@ -3272,44 +3272,48 @@ fn emit_function(
     // The expression spine forwards the frame; branch arms share its immutable
     // contents and arguments/sibling bindings never inherit it. A named axis
     // reads its witnessing parameter here, before entry drops can release it.
-    // The declared frame is checked first, then each output-inferred
-    // binder's frame, then the caller's.
-    let first_site_frames = FirstSiteFrame::of(function);
-    let (first_site_lines, claims_parent) = match &function.ret_ty {
-        HostAbiType::Tensor(ty) => FirstSiteFrame::declare(
-            &first_site_frames,
-            ty.dims.len(),
-            &emitter.indent,
-            "__chelis_caller_result_claims",
-        ),
-        _ => (Vec::new(), "__chelis_caller_result_claims".to_string()),
-    };
-    emitter.lines.extend(first_site_lines);
-    emitter.first_site_frames = first_site_frames;
-    match HostResultClaim::of(function) {
-        Some(claim) => emitter.lines.extend(claim.frame_lines(
-            &emitter.indent,
-            "__chelis_result_axes",
-            "__chelis_declared_result",
-            &claims_parent,
-            Some("__chelis_result_claims"),
-            false,
-        )),
-        None => emitter.lines.push(format!(
-            "{}const __chelis_host_result_claim *__chelis_result_claims = {claims_parent};",
-            emitter.indent
-        )),
-    }
+    //
+    // The declared frame is checked first, then the frame of each
+    // output-inferred binder a body site names, then the caller's. Which
+    // binders a site names is known once the body is emitted, so the frames
+    // are placed here afterwards.
+    let claims_at = emitter.lines.len();
+    emitter.first_site_frames = FirstSiteFrame::of(function);
     // Entry guards and the frame still read parameters the body does not
     // use. Their verified entry drops run only after those reads finish.
     emitter.emit_entry_terminals(entry, authored)?;
     emitter.result_claims = Some("__chelis_result_claims".to_string());
     emitter.claim_on_spine = true;
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
+    emitter.first_site_frames.retain(|frame| frame.named);
     // The declared result is a later site of every binder the body bound,
     // including one whose first site ran after the returned value's producer,
     // where that producer's check found the frame empty.
     emitter.emit_late_first_site_checks("__result");
+    let indent = emitter.indent.clone();
+    let (mut claim_lines, claims_parent) = match &function.ret_ty {
+        HostAbiType::Tensor(ty) => FirstSiteFrame::declare(
+            &emitter.first_site_frames,
+            ty.dims.len(),
+            &indent,
+            "__chelis_caller_result_claims",
+        ),
+        _ => (Vec::new(), "__chelis_caller_result_claims".to_string()),
+    };
+    match HostResultClaim::of(function) {
+        Some(claim) => claim_lines.extend(claim.frame_lines(
+            &indent,
+            "__chelis_result_axes",
+            "__chelis_declared_result",
+            &claims_parent,
+            Some("__chelis_result_claims"),
+            false,
+        )),
+        None => claim_lines.push(format!(
+            "{indent}const __chelis_host_result_claim *__chelis_result_claims = {claims_parent};"
+        )),
+    }
+    emitter.lines.splice(claims_at..claims_at, claim_lines);
     let terminal = ownership_sites
         .iter()
         .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionReturn)
@@ -3929,6 +3933,9 @@ struct FirstSiteFrame {
     frame_name: String,
     /// The declared result axes the binder names.
     result_axes: Vec<usize>,
+    /// Whether a site in the body names the binder. A frame no site can
+    /// fill is not declared.
+    named: bool,
 }
 
 impl FirstSiteFrame {
@@ -3972,6 +3979,7 @@ impl FirstSiteFrame {
                 axes_name: format!("__chelis_first_site_axes_{index}"),
                 frame_name: format!("__chelis_first_site_frame_{index}"),
                 result_axes: vec![axis],
+                named: false,
             });
         }
         frames
@@ -6174,11 +6182,12 @@ impl<'a> HostEmitter<'a> {
         for site in sites {
             let Some(frame) = self
                 .first_site_frames
-                .iter()
+                .iter_mut()
                 .find(|frame| frame.binder == site.binder)
             else {
                 continue;
             };
+            frame.named = true;
             let (axes, frame_name) = (frame.axes_name.clone(), frame.frame_name.clone());
             let count = frame.result_axes.len();
             let indent = self.indent.clone();

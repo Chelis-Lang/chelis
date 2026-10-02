@@ -278,11 +278,6 @@ impl ResultAxisClaim {
 }
 
 impl DeclaredResultClaim {
-    /// No axis this claim checks, now or once its first sites resolve.
-    fn is_vacuous(&self) -> bool {
-        self.axes.is_empty() && self.first_sites.is_empty()
-    }
-
     fn verdict(&self, produced: &RuntimeValue, op: &str) -> Result<(), String> {
         let RuntimeValue::Tensor(tensor) = produced else {
             return Ok(());
@@ -1986,7 +1981,7 @@ impl<'a> EvalContext<'a> {
                 }
                 _ => matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name)),
             };
-            let producer = if name == "index" && !claims.iter().all(DeclaredResultClaim::is_vacuous) {
+            let producer = if name == "index" && !self.claims_are_vacuous(claims) {
                 self.result_producer
                     .as_ref()
                     .and_then(ResultProducer::operation)
@@ -2318,7 +2313,7 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::MetadataExpression(_) => {}
         }
         let value = self.eval_expr(expr)?;
-        if claims.iter().all(DeclaredResultClaim::is_vacuous) {
+        if self.claims_are_vacuous(claims) {
             return Ok(value);
         }
         let producer = self
@@ -3323,6 +3318,14 @@ impl<'a> EvalContext<'a> {
             .resolve_first_sites(claim)
             .shape_verdict(shape, producer);
         self.mark_numeric_trap_from_trusted_result(verdict)
+    }
+
+    /// Whether no claim checks an axis here: none is declared, and no first
+    /// site has bound a binder one names.
+    fn claims_are_vacuous(&self, claims: &[DeclaredResultClaim]) -> bool {
+        claims
+            .iter()
+            .all(|claim| self.resolve_first_sites(claim).axes.is_empty())
     }
 
     /// `claim` with each first-site axis resolved against the site that
