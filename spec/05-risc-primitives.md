@@ -3043,8 +3043,11 @@ exact ADT identity by [05-OP-34].
 > plain enums are `Weekday` (`Monday` through
 > `Sunday`), `DayOverflow` (`ClampToMonthEnd`, `RejectInvalidDay`), and
 > `TimeUnit` (`Hours`, `Minutes`, `Seconds`, `Milliseconds`, `Microseconds`,
-> `Nanoseconds`); every enum constructor is a valid value. A callable that drops
-> precision takes a [05-OP-74] `Rounding`.
+> `Nanoseconds`); every enum constructor is a valid value. `instant_to_unix_count`,
+> `duration_to_count`, and `instant_round_to`, with the `try_` forms of the
+> first two, take a [05-OP-74] `Rounding`. `duration_to_seconds_f64` is the one
+> other callable that drops precision; it is a named lossy boundary with fixed
+> nearest-even rounding.
 >
 > The calendar is proleptic Gregorian with astronomical year numbering, so
 > year 0 exists. The timescale is POSIX: every day has exactly 86 400 seconds
@@ -3073,28 +3076,32 @@ exact ADT identity by [05-OP-34].
 > Every callable is pure and total on its stated domain. A failing call
 > reports through [05-OP-60]'s failure channel with the message
 > `<function>: <kind>: <detail>`, where `<function>` is the exported callable's
-> name and `<detail>` names the offending value. `<kind>` is `domain` for an argument, count, or text that
-> denotes no value of its type (an invalid field; a year, epoch day, offset,
-> instant, duration, or period outside its range; text outside the profile
-> below) and for a `Reject` policy that fires. It is `overflow` only when a
-> result computed by adding, subtracting, negating, or multiplying these
-> values, including reading a civil value at an offset, leaves its type, and
-> when a count conversion's integer leaves i64. Checks run in the order the
-> defining computation produces the quantity each one checks, so a call that
-> could fail both ways reports the earlier check: `date_add_months` checks the
-> target year-month's range and then the day under its policy;
+> name and `<detail>` names the offending value. `<kind>` is `overflow` exactly
+> when a result computed from these values leaves its type: adding,
+> subtracting, negating, or multiplying dates, datetimes, instants, durations,
+> or periods, including `datetime_to_instant_at`'s reading of a civil value at
+> an offset; rounding an instant in `instant_round_to`; and a count leaving
+> i64 in `instant_to_unix_count` or `duration_to_count`. Every other failure is
+> `domain`: an argument, count, or text that denotes no value of its type (an
+> invalid field; a year, epoch day, offset, instant, duration, or period
+> outside its range; text outside the profile below), an argument outside the
+> operation's admitted values (an occurrence below 1 in
+> `nth_weekday_in_month`; an increment of `instant_round_to` that is not
+> positive or does not divide one day), and a `Reject` policy that fires. For
+> a call that could fail both ways, checks run in the order the defining
+> computation produces the quantity each one checks: `date_add_months` checks
+> the target year-month's range and then the day under its policy;
 > `date_add_period` and `datetime_add_period` do so for the month step and then
 > check the day step's range; `duration_to_count` applies its rounding policy
-> and then checks representability; `instant_round_to` checks the increment,
-> then its rounding policy, then the result's range; and the Easter computuses
-> check the year before the result's range. Every range and validity check
-> precedes the
-> arithmetic it protects, so no [04-NUM-9] trap of a primitive escapes a call
-> for any i64 arguments. A `try_` callable takes its twin's arguments, returns
-> `Some` of the twin's result, returns `None` exactly where the twin fails
-> `domain`, and fails exactly where the twin fails `overflow`;
-> `try_instant_to_unix_count` and `try_duration_to_count` also return `None`
-> where the integer leaves i64. The masked column forms below never fail.
+> and then checks representability; and `instant_round_to` checks the
+> increment, then its rounding policy, then the result's range. Every range and
+> validity check precedes the arithmetic it protects, so no [04-NUM-9] trap of
+> a primitive escapes a call for any arguments. Except for the masked column
+> forms below, a `try_` callable takes its twin's arguments, returns `Some` of
+> the twin's result, returns `None` exactly where the twin fails `domain`, and
+> fails exactly where the twin fails `overflow`; `try_instant_to_unix_count`
+> and `try_duration_to_count` also return `None` where the count leaves i64.
+> The masked column forms never fail.
 >
 > `is_leap_year`, `days_in_year`, and `days_in_month` are total over every i64
 > year; `days_in_month` fails `domain` unless the month is 1..12.
@@ -3231,9 +3238,10 @@ exact ADT identity by [05-OP-34].
 > the seven constructors of the standard-library plain enum `Rounding`:
 > `RoundTowardNegative`, `RoundTowardPositive`, `RoundTowardZero`,
 > `RoundAwayFromZero`, `RoundTiesToEven`, `RoundTiesToAway`, and
-> `RejectInexact`. A callable that takes a `Rounding` applies it once to an
-> exact value `v` and a positive quantum `q` that the callable names, with no
-> intermediate rounding, and selects an integer multiple `k·q`:
+> `RejectInexact`. A callable that its governing atom lists as taking a
+> `Rounding` applies it once to an exact value `v` and a positive quantum `q`
+> that the atom names, with no intermediate rounding, and selects an integer
+> multiple `k·q`:
 > `RoundTowardNegative` the largest `k·q <= v`; `RoundTowardPositive` the
 > smallest `k·q >= v`; `RoundTowardZero` whichever of those two is nearer
 > zero; `RoundAwayFromZero` whichever is farther from zero, which is `v` itself

@@ -595,10 +595,10 @@ integration tier, not the workspace loop.
 **Current enforcement status.** The primary census enforces canonical C
 identities, complete published-header attribution, conservative arithmetic
 classification, configuration-invariant declarations, and exact semantic
-registrations for numeric callables and stdlib constructors. Its 438 rows have
-final authority; none uses an exception disposition. The stdlib closure resolves
+registrations for numeric callables and stdlib constructors. Every one of its rows
+has final authority; none uses an exception disposition. The stdlib closure resolves
 imported and generic nominal types to a finite fixed point and rejects unresolved
-names. Its execution controls preserve the 195 exact [05-OP-35] identities.
+names. Its execution controls preserve every exact [05-OP-35] registry identity.
 
 The wire census verifies the compiler/Python publication graph, exact carrier
 shapes, codec and admission execution, and the default compiler-api library's
@@ -954,9 +954,9 @@ Deliverables, with phase homes:
    [05-OP-2]/[05-OP-34], not because any descriptor predates the ratchet.
    Typed wire and PyO3 rows follow the same structural/registration rule.
 
-   The primary baseline has completed that landing rule: its 313 discovered
-   rows have final authority as 74 exact nonnumeric rows, 16 exact tagged
-   carriers/transports, and 223 exact numeric-operation registrations. It has
+   The primary baseline has completed that landing rule: every discovered row
+   has final authority as an exact nonnumeric row, an exact tagged carrier or
+   transport, or an exact numeric-operation registration. It has
    zero grandfather, permanent-disposition, successor-override,
    integer-plumbing, or other transition rows. The wire baseline likewise has
    100 final rows (82 verified transports and 18 numeric operations), with no
@@ -1164,7 +1164,7 @@ Deliverables, with phase homes:
      dtype bounds and the existing precision-name backstop remain capacity;
      an ordinary unbounded `p -> p` stays nonnumeric. The stdlib closure cases
      in `capacity_census_tripwire` exercise these boundaries and preserve the
-     existing 195 definitions and twelve ADT identities. This is declared-surface
+     registered definitions and ADT identities. This is declared-surface
      evidence, not body inference, backend acceptance or completion of [#1288].
    - **Matched rows freeze enforcement metadata.** Equality is not
      merely `(kind, id)`: the tripwire compares the complete

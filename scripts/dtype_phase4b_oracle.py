@@ -2679,7 +2679,7 @@ def validate_normative_contract(
             "`f64(w) + f64(f) / 1e9`",
             "judged as a whole value rather than component by component",
             "the week-year lies in -9999..9999",
-            "takes a [05-OP-74] `Rounding`",
+            "take a [05-OP-74] `Rounding`",
             "negative years as `-` and six digits",
             "`-000000` is not a year",
             "Parsing a value's canonical text returns that value",

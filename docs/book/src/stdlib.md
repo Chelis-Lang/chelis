@@ -158,20 +158,23 @@ testing. The language specifies compiled host process execution too, but
 datetimes (`DateTime`), instants on the POSIX timescale (`Instant`), fixed
 offsets (`Offset`), instants with their written offset (`OffsetDateTime`),
 exact durations (`Duration`), calendar periods (`Period`), and the column types
-`Dates[n]` and `Instants[n]`. Years run from -9999 through 9999. Every type is
-opaque: obtain a value from a validating producer such as `date(y, m, d)`,
+`Dates[n]` and `Instants[n]`. Years run from -9999 through 9999. Each of these
+types is opaque: obtain a value from a validating producer such as `date(y, m, d)`,
 `parse_date(text)`, `instant_from_unix(s, ns)`, `duration(s, ns)`, or
 `period(months, days)`, never from a record literal.
 
 Where a library would choose silently, the caller states the policy:
 `date_add_months(d, n, ClampToMonthEnd)` or `RejectInvalidDay` for 31 January
-plus one month, and a `Rounding` from `Std.Rounding` for every conversion that
-drops precision, such as `instant_to_unix_count(i, Milliseconds,
-RoundTowardNegative)`; `RejectInexact` fails instead of rounding. Text forms
-follow one RFC 3339-based profile (`2026-10-01T09:30:00-04:00`, `PT3661S`,
-`P14M3D`). A failure reports `<function>: domain: <detail>` for an invalid
-input or `<function>: overflow: <detail>` for a result outside its type's
-range; each `try_` form returns `None` where its twin fails `domain`. `eq` and
+plus one month, and a `Rounding` from `Std.Rounding` for `instant_to_unix_count`,
+`duration_to_count`, and `instant_round_to`, such as
+`instant_to_unix_count(i, Milliseconds, RoundTowardNegative)`; `RejectInexact`
+fails instead of rounding. `duration_to_seconds_f64` is the one other conversion
+that drops precision, rounding to nearest. Text forms follow one RFC 3339-based
+profile (`2026-10-01T09:30:00-04:00`, `PT3661S`, `P14M3D`). A failure reports
+`<function>: domain: <detail>` for an input that denotes no value, or
+`<function>: overflow: <detail>` when arithmetic or a count conversion leaves
+its type's range. Each `try_` form other than the masked column forms returns
+`None` where its twin fails `domain`. `eq` and
 `neq` compare values, and the `*_lt`, `*_lte`, `*_gt`, and `*_gte` functions
 order them. The module is pure and runs under `chelis eval`, `chelis test`, and
 generated C.

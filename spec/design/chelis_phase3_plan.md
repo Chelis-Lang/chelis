@@ -769,10 +769,10 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 
 `cargo test -p chelis-cli --test std_package_acceptance -- --ignored --nocapture`
 
-This is the owning executable oracle for the `Std.Decimal` and `Std.Datetime`
-package surfaces (the ML
+This is the owning executable oracle for the `Std.Decimal` package surface (the ML
 modules — `Schedule`, `Optim`, `Nn.Generate` — since moved to `School.*` in chelis-std
-0.4.0). A later
+0.4.0). The `Std.Datetime` surface's owning oracle is `std_datetime_oracle`, with its
+manual gate `std_datetime_every_day_of_the_range_in_compiled_c`. A later
 phase-completion claim still requires a fresh-context red team and any documented manual
 gates.
 

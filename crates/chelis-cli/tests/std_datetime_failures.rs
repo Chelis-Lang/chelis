@@ -493,16 +493,6 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
         "instant_round_to(instant_from_unix(253402214400i64, 1i64), duration(7i64, 0i64), RoundTowardPositive)",
         "instant_round_to: domain: increment PT7S does not divide one day",
     ),
-    (
-        "order_easter_gregorian_year_before_range",
-        "easter_sunday_gregorian(10000i64)",
-        "easter_sunday_gregorian: domain: year 10000 is outside -9999..9999",
-    ),
-    (
-        "order_easter_orthodox_year_before_range",
-        "easter_sunday_orthodox(10000i64)",
-        "easter_sunday_orthodox: domain: year 10000 is outside -9999..9999",
-    ),
 ];
 
 const MAX: &str = "9223372036854775807i64";

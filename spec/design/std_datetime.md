@@ -166,8 +166,9 @@ message grammar so that every failure is deterministic and machine-readable:
 | `overflow` | An arithmetic result leaves the type's range. | still fails |
 | `io` | The host could not supply a clock reading (`Std.Datetime.Clock` only, §12). | no `try_` form |
 
-The one exception is `try_instant_to_unix_count` and `try_duration_to_count`. Their only
-failure is that the result does not fit in i64, and they return `None` for it (§8.5,
+Two `try_` forms have a second `None` case: `try_instant_to_unix_count` and
+`try_duration_to_count` return `None` where their twin fails `overflow` because the count
+does not fit in i64, as well as where it fails `domain` under `RejectInexact` (§8.5,
 §8.6).
 
 **Coverage rule.** One rule decides every edge case, and per-function text states only
@@ -178,9 +179,11 @@ exceptions to it:
 - Consulting data outside its coverage fails `domain`. Coverage means a calendar's
   horizon, or a zone's transitions past the last one when its footer is empty.
 - A result computed by arithmetic on values of these types that leaves its type fails
-  `overflow`, and nothing else does. That arithmetic is adding, subtracting, negating or
-  multiplying dates, times, instants, durations and periods, including reading a civil
-  value at an offset (`dt − o`). `period_mul` and `duration_mul` are such arithmetic.
+  `overflow`. That arithmetic is adding, subtracting, negating or multiplying dates,
+  times, instants, durations and periods, including reading a civil value at an offset
+  (`dt − o`) and rounding an instant to a multiple (`instant_round_to`). `period_mul` and
+  `duration_mul` are such arithmetic. A count conversion (`instant_to_unix_count`,
+  `duration_to_count`) whose count leaves i64 also fails `overflow`. Nothing else does.
 - Between a range failure and a coverage failure, the range check runs first, so
   `overflow` wins over a coverage `domain`.
 - Within one call, checks run in the order the defining computation produces the
@@ -191,9 +194,7 @@ exceptions to it:
     step's range, so `try_date_add_period(date(2024, 1, 31), period(1, 4000000),
     RejectInvalidDay)` returns `None` before the day step could overflow;
   - `duration_to_count`: the rounding policy, then representability in i64;
-  - `instant_round_to`: the increment, then the rounding policy, then the result's range;
-  - `easter_sunday_gregorian` and `easter_sunday_orthodox`: the year, then the result's
-    range.
+  - `instant_round_to`: the increment, then the rounding policy, then the result's range.
   No other S1 callable can fail both ways for one input; `instant_to_unix_count` follows
   the same order as `duration_to_count`, but only its nanosecond counts can leave i64,
   and those are always exact.
@@ -280,9 +281,13 @@ the table is reserved from S1 on.
 There is no roll-over option for month arithmetic. 31 January + 1 month rolling over to
 2 or 3 March is `date_add_days` applied to a clamped result, so it composes.
 
-**Rounding is shared, not time-specific.** Every conversion that drops precision takes a
-`Rounding` from `Std.Rounding`, a small module that S1 introduces and that `Std.Decimal`
-adopts when it is redesigned, so the standard library has one rounding vocabulary. Its
+**Rounding is shared, not time-specific.** The conversions that round to a quantum take a
+`Rounding` from `Std.Rounding`: in S1, `instant_to_unix_count`, `duration_to_count` and
+`instant_round_to`, with the `try_` forms of the first two, and in S3 the column forms
+of §10. `duration_to_seconds_f64` is the one other conversion that drops precision; it is
+a named lossy boundary with fixed nearest-even rounding (§8.6). `Std.Rounding` is a
+small module that S1 introduces and that `Std.Decimal` adopts when it is redesigned, so
+the standard library has one rounding vocabulary. Its
 variants use IEEE 754's attribute names, which spec/05 already uses for `round`, wherever
 IEEE 754 has one; `RoundAwayFromZero` and `RejectInexact` have no IEEE 754 counterpart.
 For an exact value `v` and a positive quantum `q`, each returns a multiple `k·q`:
@@ -386,8 +391,10 @@ data.
   proleptic Gregorian date.
 
 Both Easter functions use floor division and Euclidean remainders, so negative years are
-correct. Both fail `domain` for a year outside the range and `overflow` if the result
-leaves it. Observance rules such as "moved to Monday when it falls on a Sunday" are
+correct. Both fail `domain` for a year outside the range. For every year inside it the
+result lies inside the range: Gregorian Easter falls between 22 March and 25 April of its
+year, and Orthodox Easter between −9999-01-21 and 9999-06-27. So neither fails
+`overflow`. Observance rules such as "moved to Monday when it falls on a Sunday" are
 jurisdiction rules, so they belong to the data packages, not here.
 
 ### 8.4 Time and DateTime
@@ -434,7 +441,8 @@ never as a single nanosecond count.
   - Seconds, milliseconds and microseconds always fit in i64 over the range.
   - Nanoseconds fit only within about ±292 years of 1970; outside that this fails
     `overflow`.
-  - `try_instant_to_unix_count` returns `None` in exactly that case (§5).
+  - Under `RejectInexact`, a count that is not whole fails `domain`.
+  - `try_instant_to_unix_count` returns `None` in exactly those two cases (§5).
 - `instant_add_duration(i, d) -> Instant` fails `overflow`.
 - `instant_until(a, b) -> Duration` is exact and never fails.
 - `instant_round_to(i, increment: Duration, rounding) -> Instant` rounds to a multiple of
@@ -464,7 +472,8 @@ after an instant" has no meaning without a zone (§11).
 - `duration_from_count(count, unit: TimeUnit) -> Duration`, plus accessors
   `duration_second` and `duration_nanosecond`.
 - `duration_to_count(d, unit, rounding) -> i64` fails `overflow` when the result does not
-  fit; its `try_` form returns `None` in that case.
+  fit and, under `RejectInexact`, `domain` when the count is not whole; its `try_` form
+  returns `None` in both cases.
 - `duration_to_seconds_f64(d) -> f64` is the named lossy boundary for putting time on a
   numerical axis. It is a fixed composition, each step rounded to nearest-even, so every
   lane returns the same bits:
@@ -970,8 +979,9 @@ S6, Shoals keeps its own date layer.
 - **Removal.** Importing `Std.Time` fails as an unresolved import, as the existing
   removed-module test does for `Std.Init` and `Std.Tokenizer`. The changelog fragment
   and docs name the replacement.
-- **Downstream.** Shoals, hello-chelis, coral and nautilus pass `chelis check` against
-  each new standard-library bundle.
+- **Downstream.** Coral and nautilus pass `chelis check` against each new
+  standard-library bundle. Shoals and hello-chelis import `Std.Time`, so they fail
+  `chelis check` against bundles without it until their cut-overs (S6, S8, §15).
 
   The first opaque type in the standard library can turn an unannotated accessor lambda
   into an `OpaqueTypeViolation` in any program that reaches the module (spec/04 §2.5), so
