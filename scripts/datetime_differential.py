@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential oracle for `Std.Datetime` S1 (chelis#2859): eval and C against the reference.
+"""Differential oracle for `Std.Datetime` (chelis#2859, chelis#2861): eval and C against the reference.
 
 The harness generates Chelis programs that call `Std.Datetime`, runs each one
 through `chelis eval` and through `chelis build --target c` plus the native
@@ -36,6 +36,10 @@ Profiles:
   branch and the text corpus on both lanes, plus every day from 1900-01-01
   through 2100-12-31 in compiled C. (`chelis eval` takes about 14 ms per day
   row, so the full 1900-2100 sweep on eval belongs to the manual profile.)
+  Its column corpus calls every `Std.Datetime.Columns` callable on both lanes
+  over seeded columns that include the range edges, under every `TimeUnit`,
+  `Rounding` mode and `DayOverflow` policy; column bindings run in programs of
+  their own, and each column failure is a named program of its own.
 - `exhaustive`: the manual gate of `docs/manual_gates.md`. Every one of the
   7 304 484 days in compiled C (field round trip, weekday, day of year, ISO
   week and its inverse, text round trip), `date_period_until`'s defining
@@ -55,6 +59,7 @@ from dataclasses import dataclass, field
 import itertools
 import json
 import os
+import random
 from pathlib import Path
 import re
 import shutil
@@ -73,6 +78,7 @@ FIRST_1900 = ref.days_from_civil(1900, 1, 1)
 LAST_2100 = ref.days_from_civil(2100, 12, 31)
 PASS_MARKER = "STD DATETIME ORACLE: PASS"
 FAILURES_PER_PATH = 2
+COLUMN_CHUNK = 25
 BOTH = ("eval", "c")
 C_ONLY = ("c",)
 EVAL_ONLY = ("eval",)
@@ -84,6 +90,16 @@ TYPES = (
     "Weekday", "DayOverflow", "TimeUnit", "Dates", "Instants",
 )
 CONSTRUCTORS = ref.WEEKDAYS + ref.DAY_OVERFLOW + tuple(ref.TIME_UNIT_NANOS)
+COLUMN_TYPES = ("Durations",)
+COLUMN_FUNCTIONS = (
+    "durations", "try_durations", "durations_seconds", "durations_nanoseconds",
+    "dates_year", "dates_month", "dates_day", "dates_weekday_iso_number", "dates_day_of_year",
+    "dates_from_ymd", "try_dates_from_ymd", "dates_add_days", "dates_add_months", "dates_days_until",
+    "dates_lt", "dates_lte", "dates_gt", "dates_gte", "try_parse_dates", "dates_to_strings",
+    "instants_from_unix_count", "instants_to_unix_count", "instants_add_duration", "instants_until",
+    "instants_round_to", "instants_to_dates_at", "instants_seconds_since_f64",
+    "instants_lt", "instants_lte", "instants_gt", "instants_gte",
+)
 FUNCTIONS = (
     "is_leap_year", "days_in_year", "days_in_month", "weekday_iso_number",
     "weekday_from_iso_number", "try_weekday_from_iso_number", "weekday_name",
@@ -281,6 +297,23 @@ def try_column_nanos[n](x: (Instants[n], tensor[n, bool])) -> List[i64] = {
   (xs, mask) = x
   to_list(instants_nanoseconds(xs))
 }
+
+def instants_row[n](xs: Instants[n]) -> (List[i64], List[i64]) = {
+  seconds = instants_unix_seconds(xs)
+  (to_list(seconds), to_list(instants_nanoseconds(xs)))
+}
+
+def durations_row[n](ds: Durations[n]) -> (List[i64], List[i64]) = {
+  seconds = durations_seconds(ds)
+  (to_list(seconds), to_list(durations_nanoseconds(ds)))
+}
+
+def try_column_durations[n](x: (Durations[n], tensor[n, bool])) -> ((List[i64], List[i64]), List[bool]) = {
+  (ds, mask) = x
+  (durations_row(ds), to_list(mask))
+}
+
+def span[k](count: i64) -> tensor[k, i64] = to_tensor(range(0i64, count))
 
 def year_row(y: i64) -> List[i64] = [days_in_year(y), b2i(is_leap_year(y)), date_epoch_day(easter_sunday_gregorian(y)), date_epoch_day(easter_sunday_orthodox(y))]
 
@@ -558,6 +591,7 @@ class Corpus:
     failures: list[Failure] = field(default_factory=list)
     bulk: list[Value] = field(default_factory=list)
     days: DayCoverage = field(default_factory=DayCoverage)
+    columns: list[Value] = field(default_factory=list)
 
     def value(self, label: str, expr: str, expected: object, float_bits: bool = False) -> None:
         self.values.append(Value(f"v{len(self.values):05d}_{label}", expr, expected, float_bits))
@@ -1228,6 +1262,249 @@ def columns(corpus: Corpus) -> None:
                  expect_error(lambda: [ref.instant_from_unix(s, n, "instants_from_unix") for s, n in zip(bad_seconds, bad_nanos)]))
 
 
+# ---------------------------------------------------------------------------
+# Corpus: `Std.Datetime.Columns` (§10, stage S3). Columns are short literal
+# lists: random elements across the whole range, the range edges, ties for
+# every rounding mode, and month ends for both DayOverflow policies. Every
+# failure names its own column callable, and a column with two failing
+# elements must report the lower one; the reference names the element.
+
+COLUMN_SEED = SEED + 2
+INCREMENTS = ((0, 1), (0, 1_000), (1, 0), (900, 0), (28_800, 0), (86_400, 0))
+
+
+def tensor_lit(values: Sequence[int]) -> str:
+    return f"to_tensor({list_lit(values)})"
+
+
+def dates_col(days: Sequence[int]) -> str:
+    return f"dates_from_epoch_days({tensor_lit(days)})"
+
+
+def instants_col(instants: Sequence[tuple[int, int]]) -> str:
+    return f"instants_from_unix({tensor_lit([i[0] for i in instants])}, {tensor_lit([i[1] for i in instants])})"
+
+
+def durations_col(ds: Sequence[tuple[int, int]]) -> str:
+    return f"durations({tensor_lit([d[0] for d in ds])}, {tensor_lit([d[1] for d in ds])})"
+
+
+def instants_rows(instants: Sequence[tuple[int, int]]) -> tuple[list[int], list[int]]:
+    return [i[0] for i in instants], [i[1] for i in instants]
+
+
+def column_inputs(rng: random.Random) -> dict[str, list]:
+    days = [ref.MIN_EPOCH_DAY, ref.MIN_EPOCH_DAY + 1, -1, 0, 1, ref.MAX_EPOCH_DAY - 1, ref.MAX_EPOCH_DAY]
+    days += [rng.randint(ref.MIN_EPOCH_DAY, ref.MAX_EPOCH_DAY) for _ in range(13)]
+    month_ends = []
+    for _ in range(12):
+        year, month = rng.randint(ref.MIN_YEAR, ref.MAX_YEAR), rng.randint(1, 12)
+        month_ends.append(ref.date(year, month, ref.days_in_month(year, month)))
+    month_ends += [ref.date(2024, 1, 31), ref.date(2023, 1, 29), ref.date(2024, 3, 30)]
+    edge_instants = [(ref.INSTANT_MIN_SECOND, 0), (ref.INSTANT_MIN_SECOND + 1, 999_999_999), (-1, 999_999_999), (0, 0),
+                     (0, 1), (ref.INSTANT_MAX_SECOND - 1, 0), (ref.INSTANT_MAX_SECOND, 999_999_999)]
+    instants = edge_instants + [(rng.randint(ref.INSTANT_MIN_SECOND, ref.INSTANT_MAX_SECOND), rng.randrange(NANO))
+                                for _ in range(10)]
+    # Exact ties between two multiples of each unit and increment, on both sides of the epoch.
+    ties = [(-2, 500_000_000), (2, 500_000_000), (-5_400, 0), (5_400, 0), (-90, 0), (30, 0), (0, 500), (-1, 999_999_500),
+            (0, 500_000), (-1, 999_500_000), (450, 0), (-450, 0), (14_400, 0), (-14_400, 0), (43_200, 0)]
+    near_epoch = [(rng.randint(-9_000_000_000, 9_000_000_000), rng.randrange(NANO)) for _ in range(10)]
+    return {"days": days, "month_ends": month_ends, "instants": instants, "ties": ties, "near_epoch": near_epoch}
+
+
+def column_fields(corpus: Corpus, inputs: dict[str, list]) -> None:
+    days = inputs["days"]
+    column = dates_col(days)
+    for name in ("dates_year", "dates_month", "dates_day", "dates_weekday_iso_number", "dates_day_of_year"):
+        corpus.value(f"col_{name}", f"to_list({name}({column}))", getattr(ref, name)(days))
+    corpus.value("col_dates_to_strings", f"dates_to_strings({column})", ref.dates_to_strings(days))
+    fields = [ref.civil_from_days(day) for day in days]
+    years, months, mdays = ([f[k] for f in fields] for k in range(3))
+    corpus.value("col_dates_from_ymd", f"to_list(dates_epoch_days(dates_from_ymd({tensor_lit(years)}, {tensor_lit(months)}, {tensor_lit(mdays)})))",
+                 ref.dates_from_ymd(years, months, mdays))
+    bad = [(2024, 2, 29), (2023, 2, 29), (10_000, 1, 1), (-10_000, 12, 31), (2024, 0, 1), (2024, 13, 1), (2024, 4, 31),
+           (2024, 1, 0), (I64_MAX, I64_MIN, I64_MAX), (-9999, 1, 1), (9999, 12, 31), (-44, 2, 29), (-100, 2, 29)]
+    ys, ms, ds = ([b[k] for b in bad] for k in range(3))
+    corpus.value("col_try_dates_from_ymd", f"try_column_days(try_dates_from_ymd({tensor_lit(ys)}, {tensor_lit(ms)}, {tensor_lit(ds)}))",
+                 ref.try_dates_from_ymd(ys, ms, ds))
+    two_bad = ys[:2] + [2024, 2024, 2023], ms[:2] + [1, 13, 2], ds[:2] + [1, 1, 29]
+    corpus.fails("named_col_dates_from_ymd", f"to_list(dates_epoch_days(dates_from_ymd({', '.join(tensor_lit(v) for v in two_bad)})))",
+                 expect_error(lambda: ref.dates_from_ymd(*two_bad)))
+    texts = [ref.date_to_string(day) for day in days] + list(VALID_TEXT["date"]) + list(INVALID_TEXT["date"])
+    corpus.value("col_try_parse_dates", f"try_column_days(try_parse_dates([{', '.join(text_lit(t) for t in texts)}]))",
+                 ref.try_parse_dates(texts))
+
+
+def column_date_arithmetic(corpus: Corpus, inputs: dict[str, list], rng: random.Random) -> None:
+    days = inputs["days"]
+    counts = [rng.randint(ref.MIN_EPOCH_DAY - day, ref.MAX_EPOCH_DAY - day) for day in days]
+    counts[0], counts[-1] = ref.MAX_EPOCH_DAY - days[0], 0
+    corpus.value("col_dates_add_days", f"to_list(dates_epoch_days(dates_add_days({dates_col(days)}, {tensor_lit(counts)})))",
+                 ref.dates_add_days(days, counts))
+    for label, shift in (("end", [0, 1, 0, 1]), ("start", [0, -1, 0, -1]), ("max", [0, I64_MAX, 0, 0]), ("min", [0, 0, I64_MIN, 0])):
+        edge = [0, ref.MAX_EPOCH_DAY if label == "end" else ref.MIN_EPOCH_DAY, 5, ref.MAX_EPOCH_DAY if label == "end" else ref.MIN_EPOCH_DAY]
+        corpus.fails(f"named_col_add_days_{label}", f"to_list(dates_epoch_days(dates_add_days({dates_col(edge)}, {tensor_lit(shift)})))",
+                     expect_error(lambda edge=edge, shift=shift: ref.dates_add_days(edge, shift)))
+    ends = inputs["month_ends"] + days
+    months = []
+    for day in ends:
+        total = 12 * ref.civil_from_days(day)[0] + ref.civil_from_days(day)[1] - 1
+        months.append(rng.randint(max(-119_988 - total, -30_000), min(119_999 - total, 30_000)))
+    corpus.value("col_add_months_clamp", f"to_list(dates_epoch_days(dates_add_months({dates_col(ends)}, {tensor_lit(months)}, ClampToMonthEnd)))",
+                 ref.dates_add_months(ends, months, "ClampToMonthEnd"))
+    kept = [day for day in days if ref.civil_from_days(day)[2] <= 28]
+    kept_months = [rng.randint(-12, 12) if ref.MIN_EPOCH_DAY + 400 < day < ref.MAX_EPOCH_DAY - 400 else 0 for day in kept]
+    corpus.value("col_add_months_reject", f"to_list(dates_epoch_days(dates_add_months({dates_col(kept)}, {tensor_lit(kept_months)}, RejectInvalidDay)))",
+                 ref.dates_add_months(kept, kept_months, "RejectInvalidDay"))
+    january_31 = ref.date(2024, 1, 31)
+    december_1 = ref.date(9999, 12, 1)
+    for label, edge, shift, policy in (
+        ("reject", [0, january_31, january_31], [1, 1, 2], "RejectInvalidDay"),
+        ("domain_first", [0, january_31, december_1], [0, 1, 1], "RejectInvalidDay"),
+        ("overflow_first", [december_1, january_31], [1, 1], "RejectInvalidDay"),
+        ("range_before_day", [january_31], [I64_MAX], "RejectInvalidDay"),
+        ("clamp_min", [0, 0], [0, I64_MIN], "ClampToMonthEnd"),
+    ):
+        corpus.fails(f"named_col_add_months_{label}",
+                     f"to_list(dates_epoch_days(dates_add_months({dates_col(edge)}, {tensor_lit(shift)}, {policy})))",
+                     expect_error(lambda edge=edge, shift=shift, policy=policy: ref.dates_add_months(edge, shift, policy)))
+    other = [day if k % 3 == 0 else rng.randint(ref.MIN_EPOCH_DAY, ref.MAX_EPOCH_DAY) for k, day in enumerate(days)]
+    corpus.value("col_dates_days_until", f"to_list(dates_days_until({dates_col(days)}, {dates_col(other)}))", ref.dates_days_until(days, other))
+    for name in ref.DATE_ORDER:
+        corpus.value(f"col_{name}", f"to_list({name}({dates_col(days)}, {dates_col(other)}))", ref.dates_order(name, days, other))
+
+
+def column_durations(corpus: Corpus, rng: random.Random) -> None:
+    pairs = [(rng.randint(-10**15, 10**15), rng.randint(-3 * NANO, 3 * NANO)) for _ in range(10)]
+    pairs += [(I64_MAX, NANO - 1), (I64_MIN, 0), (I64_MIN + 1, -NANO), (-1, 999_999_999), (0, -1)]
+    seconds, nanos = [p[0] for p in pairs], [p[1] for p in pairs]
+    corpus.value("col_durations", f"durations_row(durations({tensor_lit(seconds)}, {tensor_lit(nanos)}))",
+                 tuple(list(x) for x in zip(*ref.durations(seconds, nanos))))
+    mixed = pairs[:3] + [(I64_MAX, NANO), (I64_MIN, -1), (I64_MAX, I64_MAX), (I64_MIN, I64_MIN)] + pairs[3:5]
+    ms, mn = [p[0] for p in mixed], [p[1] for p in mixed]
+    values, valid = ref.try_durations(ms, mn)
+    corpus.value("col_try_durations", f"try_column_durations(try_durations({tensor_lit(ms)}, {tensor_lit(mn)}))",
+                 (([v[0] for v in values], [v[1] for v in values]), valid))
+    corpus.fails("named_col_durations", f"durations_row(durations({tensor_lit(ms)}, {tensor_lit(mn)}))",
+                 expect_error(lambda: ref.durations(ms, mn)))
+
+
+def column_instants(corpus: Corpus, inputs: dict[str, list], rng: random.Random) -> None:
+    instants = inputs["instants"]
+    for unit, per in ref.TIME_UNIT_NANOS.items():
+        low = -((-ref.INSTANT_MIN_SECOND * NANO) // per)
+        high = (ref.INSTANT_MAX_SECOND * NANO + NANO - 1) // per
+        counts = [max(low, I64_MIN), min(high, I64_MAX), 0, -1, 1]
+        counts += [rng.randint(max(low, I64_MIN), min(high, I64_MAX)) for _ in range(6)]
+        corpus.value(f"col_from_count_{unit}", f"instants_row(instants_from_unix_count({tensor_lit(counts)}, {unit}))",
+                     instants_rows(ref.instants_from_unix_count(counts, unit)))
+        if high < I64_MAX:  # every i64 count of nanoseconds lies inside the instant range
+            past = [0, high + 1, low - 1, I64_MAX]
+            corpus.fails(f"named_col_from_count_{unit}", f"instants_row(instants_from_unix_count({tensor_lit(past)}, {unit}))",
+                         expect_error(lambda past=past, unit=unit: ref.instants_from_unix_count(past, unit)))
+    near = inputs["ties"] + inputs["near_epoch"]
+    for unit in ref.TIME_UNIT_NANOS:
+        column = near if unit == "Nanoseconds" else near + instants
+        for rounding in ref.ROUNDING_TOTAL:
+            corpus.value(f"col_to_count_{unit}_{rounding}", f"to_list(instants_to_unix_count({instants_col(column)}, {unit}, {rounding}))",
+                         ref.instants_to_unix_count(column, unit, rounding))
+        exact = [(s - s % (ref.TIME_UNIT_NANOS[unit] // NANO), 0) if ref.TIME_UNIT_NANOS[unit] >= NANO
+                 else (s, ns - ns % ref.TIME_UNIT_NANOS[unit]) for s, ns in (near if unit == "Nanoseconds" else near + instants[2:5])]
+        corpus.value(f"col_to_count_{unit}_exact", f"to_list(instants_to_unix_count({instants_col(exact)}, {unit}, RejectInexact))",
+                     ref.instants_to_unix_count(exact, unit, "RejectInexact"))
+        if unit != "Nanoseconds":
+            inexact = exact[:2] + [(1, 1), (3, 7)]
+            corpus.fails(f"named_col_to_count_inexact_{unit}", f"to_list(instants_to_unix_count({instants_col(inexact)}, {unit}, RejectInexact))",
+                         expect_error(lambda inexact=inexact, unit=unit: ref.instants_to_unix_count(inexact, unit, "RejectInexact")))
+    for label, column in (("max", [(0, 0), (ref.INSTANT_MAX_SECOND, 0)]), ("min", [(0, 0), (ref.INSTANT_MIN_SECOND, 0), (1, 1)])):
+        corpus.fails(f"named_col_to_count_range_{label}", f"to_list(instants_to_unix_count({instants_col(column)}, Nanoseconds, RoundTiesToEven))",
+                     expect_error(lambda column=column: ref.instants_to_unix_count(column, "Nanoseconds", "RoundTiesToEven")))
+    shifts = []
+    for second, nano in instants:
+        total = rng.randint(ref.INSTANT_MIN_SECOND * NANO - second * NANO - nano, (ref.INSTANT_MAX_SECOND + 1) * NANO - 1 - second * NANO - nano)
+        shifts.append(divmod(total, NANO))
+    corpus.value("col_add_duration", f"instants_row(instants_add_duration({instants_col(instants)}, {durations_col(shifts)}))",
+                 instants_rows(ref.instants_add_duration(instants, shifts)))
+    for label, column, shift in (("end", [(0, 0), (ref.INSTANT_MAX_SECOND, 999_999_999)], [(1, 0), (0, 1)]),
+                                 ("start", [(5, 0), (ref.INSTANT_MIN_SECOND, 0), (ref.INSTANT_MIN_SECOND, 0)], [(0, 0), (-1, 999_999_999), (I64_MIN, 0)]),
+                                 ("far", [(0, 0)], [(I64_MAX, 999_999_999)])):
+        corpus.fails(f"named_col_add_duration_{label}", f"instants_row(instants_add_duration({instants_col(column)}, {durations_col(shift)}))",
+                     expect_error(lambda column=column, shift=shift: ref.instants_add_duration(column, shift)))
+    reversed_instants = list(reversed(instants))
+    corpus.value("col_until", f"durations_row(instants_until({instants_col(instants)}, {instants_col(reversed_instants)}))",
+                 tuple(list(x) for x in zip(*ref.instants_until(instants, reversed_instants))))
+    for name in ref.INSTANT_ORDER:
+        twin = [(s, ns) if k % 2 else (s, min(ns + 1, NANO - 1)) for k, (s, ns) in enumerate(reversed_instants)]
+        column = instants[:3] + twin[3:]
+        corpus.value(f"col_{name}", f"to_list({name}({instants_col(instants)}, {instants_col(column)}))", ref.instants_order(name, instants, column))
+    for offset in (-86_399, -3_600, 0, 19_800, 86_399):
+        corpus.value(f"col_dates_at_{'west' if offset < 0 else 'east'}_{abs(offset)}", f"to_list(dates_epoch_days(instants_to_dates_at({instants_col(instants)}, {offset_src(offset)})))",
+                     ref.instants_to_dates_at(instants, offset))
+    for origin in ((0, 0), (ref.INSTANT_MIN_SECOND, 0), (ref.INSTANT_MAX_SECOND, 999_999_999), (-1, 999_999_999), instants[9]):
+        corpus.values.append(Value(f"v{len(corpus.values):05d}_col_seconds_since",
+                                   f"to_list(instants_seconds_since_f64({instants_col(instants + inputs['ties'])}, {instant_src(origin)}))",
+                                   ref.instants_seconds_since_f64(instants + inputs["ties"], origin), float_bits=True))
+
+
+def column_rounding(corpus: Corpus, inputs: dict[str, list]) -> None:
+    column = inputs["ties"] + inputs["near_epoch"] + inputs["instants"][2:5]
+    for increment in INCREMENTS:
+        for rounding in ref.ROUNDING_TOTAL:
+            corpus.value(f"col_round_{increment[0]}_{increment[1]}_{rounding}",
+                         f"instants_row(instants_round_to({instants_col(column)}, {duration_src(increment)}, {rounding}))",
+                         instants_rows(ref.instants_round_to(column, increment, rounding)))
+        step = ref.nanos_of(increment)
+        multiples = [ref.split_nanos(ref.nanos_of(i) - ref.nanos_of(i) % step) for i in column]
+        corpus.value(f"col_round_{increment[0]}_{increment[1]}_exact",
+                     f"instants_row(instants_round_to({instants_col(multiples)}, {duration_src(increment)}, RejectInexact))",
+                     instants_rows(ref.instants_round_to(multiples, increment, "RejectInexact")))
+        if step > 1:
+            inexact = multiples[:3] + [(0, 1), (5, 3)]
+            corpus.fails(f"named_col_round_inexact_{increment[0]}_{increment[1]}",
+                         f"instants_row(instants_round_to({instants_col(inexact)}, {duration_src(increment)}, RejectInexact))",
+                         expect_error(lambda inexact=inexact, increment=increment: ref.instants_round_to(inexact, increment, "RejectInexact")))
+    for label, increment in (("zero", (0, 0)), ("negative", (-1, 0)), ("seven", (7, 0)), ("two_days", (172_800, 0))):
+        corpus.fails(f"named_col_round_increment_{label}", f"instants_row(instants_round_to(instants_from_unix(span(0i64), span(0i64)), {duration_src(increment)}, RoundTiesToEven))",
+                     expect_error(lambda increment=increment: ref.instants_round_to([], increment, "RoundTiesToEven")))
+    for label, edge, increment, rounding in (("up", [(0, 0), (ref.INSTANT_MAX_SECOND, 999_999_999)], (1, 0), "RoundTowardPositive"),
+                                             ("down", [(ref.INSTANT_MIN_SECOND, 0)], (2, 0), "RoundTowardNegative"),
+                                             ("day", [(ref.INSTANT_MAX_SECOND, 1)], (86_400, 0), "RoundAwayFromZero")):
+        corpus.fails(f"named_col_round_range_{label}", f"instants_row(instants_round_to({instants_col(edge)}, {duration_src(increment)}, {rounding}))",
+                     expect_error(lambda edge=edge, increment=increment, rounding=rounding: ref.instants_round_to(edge, increment, rounding)))
+
+
+def column_lengths(corpus: Corpus) -> None:
+    """Columns whose lengths only the running program knows: the call rejects the pair."""
+    two, three = "dates_from_epoch_days(span(2i64))", "dates_from_epoch_days(span(3i64))"
+    stamps_two, stamps_three = "instants_from_unix(span(2i64), span(2i64))", "instants_from_unix(span(3i64), span(3i64))"
+    cases = (
+        ("dates_add_days", f"to_list(dates_epoch_days(dates_add_days({two}, span(3i64))))"),
+        ("dates_add_months", f"to_list(dates_epoch_days(dates_add_months({three}, span(2i64), ClampToMonthEnd)))"),
+        ("dates_days_until", f"to_list(dates_days_until({two}, {three}))"),
+        ("dates_lte", f"to_list(dates_lte({three}, {two}))"),
+        ("instants_add_duration", f"instants_row(instants_add_duration({stamps_two}, durations(span(3i64), span(3i64))))"),
+        ("instants_until", f"durations_row(instants_until({stamps_three}, {stamps_two}))"),
+        ("instants_gt", f"to_list(instants_gt({stamps_two}, {stamps_three}))"),
+    )
+    for function, expr in cases:
+        corpus.fails(f"named_col_lengths_{function}", expr, ref.domain(function, "arguments have different lengths"))
+
+
+def column_corpus(corpus: Corpus) -> None:
+    """§10: every column callable against its scalar twin, element by element."""
+    rng = random.Random(COLUMN_SEED)
+    inputs = column_inputs(rng)
+    columns = Corpus()
+    column_fields(columns, inputs)
+    column_date_arithmetic(columns, inputs, rng)
+    column_durations(columns, rng)
+    column_instants(columns, inputs, rng)
+    column_rounding(columns, inputs)
+    column_lengths(columns)
+    corpus.columns += [Value("c" + value.name, value.expr, value.expected, value.float_bits) for value in columns.values]
+    corpus.failures += [Failure("c" + failure.name, failure.expr, failure.function, failure.kind) for failure in columns.failures]
+
+
 def build_ci_corpus() -> Corpus:
     corpus = Corpus()
     day_samples(corpus)
@@ -1242,6 +1519,7 @@ def build_ci_corpus() -> Corpus:
     text_corpus(corpus)
     formatting(corpus)
     columns(corpus)
+    column_corpus(corpus)
     return corpus
 
 
@@ -1295,10 +1573,11 @@ class LaneResult:
 
 def program_source(body: list[str]) -> str:
     imports = ", ".join(TYPES + CONSTRUCTORS + FUNCTIONS)
+    columns = ", ".join(COLUMN_TYPES + COLUMN_FUNCTIONS)
     rounding = ", ".join(("Rounding",) + ref.ROUNDING)
     text = "\n".join(body)
-    return ("module Demo.Main\n\n" + f"import Std.Datetime ({imports})\n" + f"import Std.Rounding ({rounding})\n\n"
-            + prelude_for(text) + "\n" + text + "\n")
+    return ("module Demo.Main\n\n" + f"import Std.Datetime ({imports})\n" + f"import Std.Datetime.Columns ({columns})\n"
+            + f"import Std.Rounding ({rounding})\n\n" + prelude_for(text) + "\n" + text + "\n")
 
 
 def representative_failures(failures: list[Failure], per_path: int) -> list[Failure]:
@@ -1329,6 +1608,10 @@ def make_programs(corpus: Corpus, chunk: int) -> list[Program]:
         group = tuple(corpus.values[start:start + chunk])
         body = [f"{v.name} = [{v.expr}]" for v in group]
         programs.append(Program(f"values_{start:05d}", program_source(body), group))
+    # Column literals are long, so their bindings get smaller programs.
+    for start in range(0, len(corpus.columns), COLUMN_CHUNK):
+        group = tuple(corpus.columns[start:start + COLUMN_CHUNK])
+        programs.append(Program(f"columns_{start:05d}", program_source([f"{v.name} = [{v.expr}]" for v in group]), group))
     for failure in representative_failures(corpus.failures, FAILURES_PER_PATH):
         programs.append(Program(failure.name, program_source([f"{failure.name} = [{failure.expr}]"]), failure=failure))
     return programs
@@ -1403,6 +1686,13 @@ def compare_value(binding: Value, printed: str | None) -> str | None:
     if printed is None:
         return "no output line"
     expected = binding.resolve()
+    if binding.float_bits and isinstance(expected, list):
+        inner = printed[2:-2] if printed.startswith("[[") and printed.endswith("]]") else None
+        got = [float_bits(x.strip()) for x in inner.split(",")] if inner else []
+        want = [struct.unpack("<Q", struct.pack("<d", x))[0] for x in expected]
+        if got != want:
+            return f"expected {render([expected])} (bits {[hex(b) for b in want]}), printed {printed}"
+        return None
     if binding.float_bits:
         assert isinstance(expected, float)
         inner = printed[1:-1] if printed.startswith("[") and printed.endswith("]") else None
@@ -1564,6 +1854,7 @@ def main(argv: list[str] | None = None) -> int:
         programs = [program for program in programs if re.search(args.only, program.name)]
     programs = [program for program in programs if set(program.lanes) & set(lanes)]
     summary = (f"{len(corpus.days)} days in day rows, {len(corpus.bulk)} grids, {len(corpus.values)} values, "
+               f"{len(corpus.columns)} column values, "
                f"{len(corpus.failures)} failure cases, {len(programs)} programs")
     print(f"corpus: {summary}", flush=True)
     if args.list:

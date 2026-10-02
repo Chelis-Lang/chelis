@@ -1,5 +1,5 @@
-//! chelis#2859 (Std.Datetime S1): `chelis eval` and compiled C against an
-//! independent reference.
+//! chelis#2859 (Std.Datetime S1) and chelis#2861 (Std.Datetime.Columns):
+//! `chelis eval` and compiled C against an independent reference.
 //!
 //! The corpus and its oracle are Python, invoked here and not reimplemented in
 //! Rust: `scripts/datetime_reference.py` computes every expected value from
@@ -13,7 +13,10 @@
 //! The default test is the CI profile: the range edges, seeded samples across
 //! the whole range, every policy branch, every year's Easter, and the valid and
 //! invalid text corpus on both lanes, plus every day from 1900-01-01 through
-//! 2100-12-31 in compiled C. The ignored test is the manual gate in
+//! 2100-12-31 in compiled C. Its column corpus puts every `Std.Datetime.Columns`
+//! callable on both lanes over seeded columns with the range edges, under every
+//! `TimeUnit`, `Rounding` mode and `DayOverflow` policy, with the failures that
+//! must name their lowest failing element. The ignored test is the manual gate in
 //! `docs/manual_gates.md`: every day of the range in compiled C, and every day
 //! from 1900 through 2100 on `chelis eval`.
 

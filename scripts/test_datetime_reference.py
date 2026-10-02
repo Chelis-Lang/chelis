@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the Std.Datetime S1 reference and differential harness (chelis#2859).
+"""Unit tests for the Std.Datetime reference and differential harness (chelis#2859, chelis#2861).
 
 The reference is the oracle the compiler is held to, so these tests hold the
 reference to independent evidence: Python's `datetime`, a second derivation of
@@ -25,6 +25,7 @@ import datetime_differential as harness  # noqa: E402
 import datetime_reference as ref  # noqa: E402
 from datetime_reference import DatetimeError, I64_MAX, I64_MIN  # noqa: E402
 
+NANO = ref.NANOS_PER_SECOND
 MESSAGE = re.compile(r"^[a-z0-9_]+: (domain|overflow): \S.*$")
 
 # Western and Orthodox Easter Sundays (Gregorian dates), 2000 to 2030, as
@@ -452,13 +453,77 @@ class TextProfile(unittest.TestCase):
         self.assertEqual(ref.canonical("time", "12:00:00.500"), "12:00:00.5")
 
 
+class Columns(unittest.TestCase):
+    """§10: a column callable is its scalar twin at every index."""
+
+    def test_fields_and_construction_follow_the_scalar_twins(self) -> None:
+        days = [ref.MIN_EPOCH_DAY, -1, 19_782, ref.MAX_EPOCH_DAY]
+        self.assertEqual(ref.dates_year(days), [-9999, 1969, 2024, 9999])
+        self.assertEqual(ref.dates_weekday_iso_number(days), [1, 3, 4, 5])
+        self.assertEqual(ref.dates_day_of_year(days), [1, 365, 60, 365])
+        self.assertEqual(ref.dates_from_ymd([2024, 1969], [2, 12], [29, 31]), [19_782, -1])
+        self.assertEqual(ref.dates_to_strings([-735_525]), ["-000044-03-15"])
+
+    def test_the_lowest_failing_index_names_the_failure(self) -> None:
+        error = failure(lambda: ref.dates_from_ymd([2024, 2023, 2024], [1, 2, 13], [1, 29, 1]))
+        self.assertEqual((error.function, error.kind), ("dates_from_ymd", "domain"))
+        self.assertTrue(error.detail.startswith("element 1: "), error.detail)
+        error = failure(lambda: ref.dates_add_months([ref.date(9999, 12, 1), ref.date(2024, 1, 31)], [1, 1], "RejectInvalidDay"))
+        self.assertEqual((error.kind, error.detail[:11]), ("overflow", "element 0: "))
+        error = failure(lambda: ref.dates_add_months([ref.date(2024, 1, 31), ref.date(9999, 12, 1)], [1, 1], "RejectInvalidDay"))
+        self.assertEqual((error.kind, error.detail[:11]), ("domain", "element 0: "))
+        self.assertRegex(error.message, MESSAGE)
+
+    def test_masked_forms_never_fail_on_elements(self) -> None:
+        self.assertEqual(ref.try_dates_from_ymd([2024, 2023], [2, 2], [29, 29]), ([19_782, 0], [True, False]))
+        self.assertEqual(ref.try_parse_dates(["2024-02-29", "2024-02-30"]), ([19_782, 0], [True, False]))
+        self.assertEqual(ref.try_durations([I64_MAX, -1], [NANO, -500_000_000]), ([(0, 0), (-2, 500_000_000)], [False, True]))
+        with self.assertRaises(DatetimeError):
+            ref.durations([I64_MAX], [NANO])
+
+    def test_columns_of_different_lengths_fail_domain_first(self) -> None:
+        error = failure(lambda: ref.dates_add_days([0, 0], [1, 2, I64_MAX]))
+        self.assertEqual((error.function, error.kind, error.detail), ("dates_add_days", "domain", "arguments have 2 and 3 elements"))
+        self.assertEqual(ref.dates_add_days([0, 0], [1, 2]), [1, 2])
+
+    def test_rounding_checks_the_increment_before_any_element(self) -> None:
+        error = failure(lambda: ref.instants_round_to([], (7, 0), "RoundTiesToEven"))
+        self.assertEqual((error.function, error.kind), ("instants_round_to", "domain"))
+        self.assertEqual(ref.instants_round_to([], (900, 0), "RejectInexact"), [])
+        error = failure(lambda: ref.instants_round_to([(0, 0), (1, 0)], (2, 0), "RejectInexact"))
+        self.assertTrue(error.detail.startswith("element 1: "), error.detail)
+
+    def test_counts_round_or_reject_per_element(self) -> None:
+        column = [(-2, 500_000_000), (2, 500_000_000)]
+        self.assertEqual(ref.instants_to_unix_count(column, "Seconds", "RoundTiesToEven"), [-2, 2])
+        self.assertEqual(ref.instants_to_unix_count(column, "Seconds", "RoundTiesToAway"), [-2, 3])
+        error = failure(lambda: ref.instants_to_unix_count([(0, 0), (ref.INSTANT_MAX_SECOND, 0)], "Nanoseconds", "RejectInexact"))
+        self.assertEqual((error.kind, error.detail[:11]), ("overflow", "element 1: "))
+        self.assertEqual(ref.instants_from_unix_count([-1_500], "Milliseconds"), [(-2, 500_000_000)])
+        self.assertRaises(DatetimeError, ref.instants_from_unix_count, [I64_MAX], "Hours")
+
+    def test_the_time_axis_is_the_scalar_composition(self) -> None:
+        origin = (0, 1)
+        axis = ref.instants_seconds_since_f64([(0, 0), (1_700_000_000, 500_000_000)], origin)
+        self.assertEqual(axis, [-1e-9, 1_700_000_000.5])
+        self.assertEqual(axis[0], ref.duration_to_seconds_f64(ref.instant_until(origin, (0, 0))))
+        self.assertNotEqual(axis[0], 0.0)
+
+    def test_order_and_local_dates(self) -> None:
+        a, b = [(7, 1), (7, 0)], [(7, 0), (7, 0)]
+        self.assertEqual(ref.instants_order("instants_lt", a, b), [False, False])
+        self.assertEqual(ref.instants_order("instants_lte", a, b), [False, True])
+        self.assertEqual(ref.instants_to_dates_at([(-1, 0)], 0), [-1])
+        self.assertEqual(ref.instants_to_dates_at([(-1, 0)], 1), [0])
+
+
 class FailureGrammar(unittest.TestCase):
     def test_every_reference_failure_in_the_corpus_follows_section_5(self) -> None:
         corpus = harness.build_ci_corpus()
         self.assertGreater(len(corpus.failures), 100)
         for failure_case in corpus.failures:
             self.assertRegex(f"{failure_case.function}: {failure_case.kind}: x", MESSAGE)
-            self.assertIn(failure_case.function, harness.FUNCTIONS, failure_case)
+            self.assertIn(failure_case.function, harness.FUNCTIONS + harness.COLUMN_FUNCTIONS, failure_case)
 
     def test_kinds_are_closed(self) -> None:
         with self.assertRaises(ValueError):
@@ -601,6 +666,14 @@ class HarnessLogic(unittest.TestCase):
             self.assertIn(constructor, exprs)
         missing = [function for function in harness.FUNCTIONS if not re.search(rf"\b{function}\(", exprs)]
         self.assertEqual(missing, [])
+        column_exprs = harness.prelude() + " ".join(v.expr for v in corpus.columns) + " ".join(f.expr for f in corpus.failures)
+        missing = [function for function in harness.COLUMN_FUNCTIONS if not re.search(rf"\b{function}\(", column_exprs)]
+        self.assertEqual(missing, [])
+        column_kinds = {(f.function, f.kind) for f in corpus.failures if f.name.startswith("cf")}
+        for kind in (("dates_add_months", "domain"), ("dates_add_months", "overflow"), ("instants_to_unix_count", "domain"),
+                     ("instants_to_unix_count", "overflow"), ("instants_round_to", "domain"), ("instants_round_to", "overflow"),
+                     ("dates_days_until", "domain"), ("instants_until", "domain")):
+            self.assertIn(kind, column_kinds)
         kinds = {(f.function, f.kind) for f in corpus.failures}
         self.assertIn(("try_date_add_months", "overflow"), kinds)
         self.assertIn(("date_add_months", "domain"), kinds)
