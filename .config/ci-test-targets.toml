@@ -2092,8 +2092,8 @@ cadence = "pull_request and push"
 reason = "the runtime-archive lookup guard's repository scan and planted-lookup controls execute in script-unit"
 tracking_issue = "chelis#1354"
 
-# The single-compile guard scans every Rust file under crates/ from its
-# script-unit test.
+# The single-compile guard scans every Rust file under crates/ and every
+# Python file under scripts/ and .github/scripts/ from its script-unit test.
 [[path_rule]]
 prefix = "scripts/check_single_compile.py"
 disposition = "owner"
