@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -288,6 +289,107 @@ TWO_OF_EACH = (
 )
 
 
+# The business-day oracle's C lane before chelis#2928 gave it `--emit-c`
+# (scripts/datetime_business_differential.py), reduced to its build and link.
+PY_SHIPPED = f"""class Runner:
+    def c_lane(self, program):
+        app = self.app(program, "c")
+        build = self.run([str(self.chelis), "build", "src/main.ch", "--target", "c", "--output", "out"], app)
+        if build.returncode != 0:
+            return LaneResult("c", build.returncode, build.stdout, build.stderr, "build")
+        link = self.run([self.toolchain.compiler, *self.toolchain.compile_flags, "-Iout", "out/main.c",
+                         "out/{guard.RUNTIME_ARCHIVE}", *self.toolchain.link_flags, "-o", "out/case"], app)
+        return link
+"""
+
+# Each must fail: a default build and a compile meet in one Python function.
+PY_DOUBLE = {
+    "helpers split across methods": (
+        "class Runner:\n"
+        "    def build(self, app):\n"
+        '        return self.run([self.chelis, "build", "src/main.ch", "-o", "out"], app)\n'
+        "    def link(self, app):\n"
+        '        return self.run([self.toolchain.compiler, "out/main.c", "-o", "out/case"], app)\n'
+        "    def c_lane(self, app):\n"
+        "        self.build(app)\n"
+        "        self.link(app)\n"
+    ),
+    "helpers split across functions": (
+        "def build(chelis, app):\n"
+        '    subprocess.run([chelis, "build", "main.ch"], cwd=app, check=True)\n'
+        "def link(app):\n"
+        '    subprocess.run(["cc", "main.c", "-o", "main"], cwd=app, check=True)\n'
+        "def c_lane(chelis, app):\n"
+        "    build(chelis, app)\n"
+        "    link(app)\n"
+    ),
+    "a compiler held in a bare name": (
+        "def c_lane(chelis):\n"
+        '    subprocess.run((chelis, "build", "main.ch"), check=True)\n'
+        '    cc = shutil.which("clang-17")\n'
+        '    subprocess.run([cc, "main.c", "-o", "main"], check=True)\n'
+    ),
+    "a compiler inside str() and the command first": (
+        "def c_lane(compiler):\n"
+        '    run_chelis(["build", "main.ch"])\n'
+        '    subprocess.run([str(compiler), "main.c", "-o", "main"], check=True)\n'
+    ),
+    "module-level statements": (
+        'subprocess.run([CHELIS, "build", "main.ch"], check=True)\n'
+        'subprocess.run(["gcc", "main.c", "-o", "main"], check=True)\n'
+    ),
+}
+
+# Each must pass.
+PY_SINGLE = {
+    "source-only build compiled by the harness": (
+        "class Runner:\n"
+        "    def c_lane(self, main, app):\n"
+        '        build = self.run([str(self.chelis), "build", main, "--target", "c", "--emit-c", "--output", "out"], app)\n'
+        '        return self.run([self.toolchain.compiler, "out/main.c", "-o", "out/case"], app)\n'
+    ),
+    "default build run as published": (
+        "def c_lane(chelis, app):\n"
+        '    subprocess.run([chelis, "build", "src/main.ch", "--output", "out"], cwd=app, check=True)\n'
+        '    return subprocess.run([str(app / "out" / "main")], capture_output=True)\n'
+    ),
+    "another tool's build subcommand": (
+        "def prepare(compiler):\n"
+        '    subprocess.run(["cargo", "build", "-p", "chelis-cli"], check=True)\n'
+        '    subprocess.run([compiler, "probe.c", "-o", "probe"], check=True)\n'
+    ),
+    "published library linked into a driver": (
+        "def library(chelis, compiler, out):\n"
+        '    subprocess.run([chelis, "build", "lib.ch", "--output", str(out)], check=True)\n'
+        '    subprocess.run([compiler, "driver.c", str(out / "liblib.a"), "-o", "driver"], check=True)\n'
+    ),
+    "build and compile inside literals and comments": (
+        "# subprocess.run([chelis, \"build\", \"main.ch\"])\n"
+        "def c_lane(compiler):\n"
+        "    note = '[chelis, \"build\", \"main.ch\"]'\n"
+        '    subprocess.run([compiler, "main.c", "-o", "main"], check=True)\n'
+    ),
+}
+
+# A Python harness that calls two build helpers and two link helpers, the
+# later-defined of each first.
+PY_TWO_OF_EACH = (
+    "def build_a(chelis):\n"
+    '    subprocess.run([chelis, "build", "a.ch"])\n'
+    "def build_b(chelis):\n"
+    '    subprocess.run([chelis, "build", "b.ch"])\n'
+    "def link_a(compiler):\n"
+    '    subprocess.run([compiler, "a.c"])\n'
+    "def link_b(compiler):\n"
+    '    subprocess.run([compiler, "b.c"])\n'
+    "def lanes(chelis, compiler):\n"
+    "    build_b(chelis)\n"
+    "    build_a(chelis)\n"
+    "    link_b(compiler)\n"
+    "    link_a(compiler)\n"
+)
+
+
 class PlantedTree:
     """A temporary tree scanned with an explicit file list."""
 
@@ -306,7 +408,11 @@ class PlantedTree:
 
 
 def flagged(failures: list[str]) -> set[str]:
-    return {failure.split(": fn ", 1)[1].split(" ", 1)[0] for failure in failures if ": fn " in failure}
+    return {
+        match.group(1)
+        for failure in failures
+        if (match := re.search(r": (?:fn|def) (\S+) runs", failure))
+    }
 
 
 class RepositoryTests(unittest.TestCase):
@@ -344,11 +450,14 @@ class DoubleCompileTests(unittest.TestCase):
         self.assertIn("(line 5)", failures[0])
 
     def test_the_cited_lines_do_not_depend_on_string_hashing(self) -> None:
-        tree = PlantedTree(self, {"crates/planted/tests/case.rs": TWO_OF_EACH})
+        tree = PlantedTree(
+            self,
+            {"crates/planted/tests/case.rs": TWO_OF_EACH, "scripts/planted_lanes.py": PY_TWO_OF_EACH},
+        )
         script = (
             "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
             "import check_single_compile as guard; "
-            "print(guard.check(Path(sys.argv[2]), ['crates/planted/tests/case.rs']))"
+            "print(guard.check(Path(sys.argv[2]), ['crates/planted/tests/case.rs', 'scripts/planted_lanes.py']))"
         )
         outputs = {
             subprocess.run(
@@ -363,9 +472,35 @@ class DoubleCompileTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1, outputs)
         # The first build and link helpers `lanes` calls supply the cited lines.
         (output,) = outputs
-        self.assertIn("fn lanes", output)
-        self.assertIn("(line 5)", output)
-        self.assertIn("(line 11)", output)
+        self.assertIn("case.rs:14: fn lanes runs a default `chelis build` (line 5) and compiles C itself (line 11)", output)
+        self.assertIn("planted_lanes.py:9: def lanes runs a default `chelis build` (line 4) and compiles C itself (line 8)", output)
+
+    def test_the_shipped_python_double_compile_fails(self) -> None:
+        failures = PlantedTree(self, {"scripts/planted_differential.py": PY_SHIPPED}).check()
+        self.assertEqual(flagged(failures), {"c_lane"}, failures)
+        self.assertIn("(line 4) and compiles C itself (line 7)", failures[0])
+
+    def test_every_python_double_compile_fails(self) -> None:
+        for label, text in PY_DOUBLE.items():
+            with self.subTest(label):
+                self.assertTrue(
+                    flagged(PlantedTree(self, {"scripts/planted.py": text}).check()), text
+                )
+
+    def test_python_helpers_are_reported_where_they_meet(self) -> None:
+        for label, name in (
+            ("helpers split across methods", "c_lane"),
+            ("helpers split across functions", "c_lane"),
+            ("module-level statements", "<module>"),
+        ):
+            with self.subTest(label):
+                failures = PlantedTree(self, {"scripts/planted.py": PY_DOUBLE[label]}).check()
+                self.assertEqual(flagged(failures), {name}, failures)
+
+    def test_every_python_single_compile_passes(self) -> None:
+        for label, text in PY_SINGLE.items():
+            with self.subTest(label):
+                self.assertEqual(PlantedTree(self, {"scripts/planted.py": text}).check(), [])
 
     def test_every_single_compile_passes(self) -> None:
         for label, text in SINGLE.items():
@@ -412,15 +547,28 @@ class ScanTests(unittest.TestCase):
                 failures = PlantedTree(self, {"crates/planted/tests/case.rs": text}).check()
                 self.assertEqual(len(failures), 1, failures)
                 self.assertIn("cannot scan", failures[0])
+        failures = PlantedTree(
+            self, {"scripts/planted.py": 'def c_lane(:\n    run([chelis, "build"])\n'}
+        ).check()
+        self.assertEqual(len(failures), 1, failures)
+        self.assertIn("scripts/planted.py: cannot scan: not parseable Python", failures[0])
 
     def test_files_without_a_build_literal_are_skipped(self) -> None:
         text = DOUBLE["builder chain"].replace('"build"', '"check"')
         self.assertEqual(PlantedTree(self, {"crates/planted/tests/case.rs": text}).check(), [])
 
-    def test_the_repository_scan_reads_rust_files_under_crates(self) -> None:
-        files = guard.rust_files(guard.ROOT)
+    def test_the_repository_scan_reads_rust_crates_and_python_scripts(self) -> None:
+        files = guard.source_files(guard.ROOT)
         self.assertIn("crates/chelis-cli/tests/common/mod.rs", files)
-        self.assertTrue(all(path.startswith("crates/") and path.endswith(".rs") for path in files))
+        self.assertIn("scripts/datetime_business_differential.py", files)
+        self.assertIn(".github/scripts/smoke_macos_metal.py", files)
+        self.assertTrue(
+            all(
+                (path.startswith("crates/") and path.endswith(".rs"))
+                or (path.startswith(("scripts/", ".github/scripts/")) and path.endswith(".py"))
+                for path in files
+            )
+        )
 
 
 if __name__ == "__main__":
