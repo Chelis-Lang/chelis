@@ -2067,8 +2067,8 @@ class ContractValidationTests(unittest.TestCase):
             REPO_ROOT / "spec/registry/stdlib_numeric_manifest.md"
         ).read_text(encoding="utf-8")
         rows = re.findall(r"^\| `([^`]+)` \|", registry, re.MULTILINE)
-        self.assertEqual(len(rows), 198)
-        self.assertEqual(len(set(rows)), 198)
+        self.assertEqual(len(rows), 206)
+        self.assertEqual(len(set(rows)), 206)
         identities = set(rows)
         for identity in (
             "decimal::decimal_add",
@@ -2887,27 +2887,28 @@ class ContractValidationTests(unittest.TestCase):
         self.assert_contract_fails("OP-35.*never converts")
 
     def test_stdlib_decimal_contract_is_total(self) -> None:
-        block = self.repository_atom("05-OP-35")
+        block = self.repository_atom("05-OP-76")
         for clause in (
-            "The accepted decimal grammar is",
-            "canonical zero is `Decimal { coefficient: 0i64, scale: 0i64 }`",
-            "Addition, subtraction, multiplication, equality, and ordering use exact mathematical rationals",
-            "`decimal_to_string` emits the unique canonical non-exponent form",
+            "`|c| <= 10^38 - 1` and an integer scale `s` with `0 <= s <= 38`",
+            "each rational in the value set has exactly one representation",
+            "[05-OP-36] structural equality of two decimals is equality of the rationals they denote",
+            "so `decimal(decimal_to_string(x))` is `x`",
         ):
             with self.subTest(clause=clause):
                 self.assertIn(clause, block)
 
-    def test_decimal_parse_normalizes_before_representation_checks(self) -> None:
+    def test_decimal_failure_order_and_float_rounding_are_frozen(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "interpreted in exact arithmetic and normalized before either "
-                "representation\n> check",
-                "checked for i64 representation before normalization",
+                "each argument's own\n> validity from left to right, then `RejectInexact`, "
+                "then the result's range",
+                "the result's range, then `RejectInexact`, then each argument's own "
+                "validity",
             ),
             (
-                "removable trailing zeros do not cause `Overflow`",
-                "removable trailing zeros may cause `Overflow`",
+                "correctly rounded once to the target\n> format with ties to even",
+                "rounded to the target format by the host",
             ),
         )
         for old, new in mutations:
@@ -2916,7 +2917,7 @@ class ContractValidationTests(unittest.TestCase):
                 self.assertIn(old, original)
                 path.write_text(original.replace(old, new, 1), encoding="utf-8")
                 try:
-                    self.assert_contract_fails("OP-35")
+                    self.assert_contract_fails("OP-76")
                 finally:
                     path.write_text(original, encoding="utf-8")
 
@@ -3103,7 +3104,7 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
-    def test_stdlib_exact_domain_blanket_cannot_capture_decimal(self) -> None:
+    def test_stdlib_primitive_width_rule_cannot_become_a_blanket(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "Every primitive-width intermediate in a graph whose contract names a dtype",

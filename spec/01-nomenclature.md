@@ -330,7 +330,7 @@ what the workflow does.
 
 Examples: `Frame`, `Column`, `GroupedFrame`, `Hamt`, `KeyValue`,
 `YieldCurve`, `OrderBook`, `Decimal`, `Vocabulary`, `Json`, `JsonInt`,
-`JsonObject`, `AggSum`, `RoundHalfEven`, `Activation`, `Relu`,
+`JsonObject`, `AggSum`, `RoundTiesToEven`, `Activation`, `Relu`,
 `Sigmoid`.
 
 ADT constructors follow the same rule: `Some`, `None`, `Ok`, `Err`,

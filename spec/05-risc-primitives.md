@@ -163,9 +163,7 @@ integer `/` operator — and is **valid on integer operands only**
 zero requires an explicit sign-aware `floor`/`ceil` composition before the
 checked integer cast).
 `trunc_div(7, 2) == 3`, `trunc_div(-7, 2) == -3`,
-`trunc_div(7, -2) == -3`, `trunc_div(-8, 2) == -4`. This is the
-exact quotient semantics chelis-std's `Std.Decimal` arithmetic
-needs for scale shifts and quotient computation. `1 / 0` traps with
+`trunc_div(7, -2) == -3`, `trunc_div(-8, 2) == -4`. `1 / 0` traps with
 the `integer division or remainder by zero` diagnostic (the same
 message `mod`'s zero-divisor path emits, so the two primitives are
 consistent across both lanes). The C backend emits an explicit
@@ -2000,7 +1998,8 @@ exact ADT identity by [05-OP-34].
 > followed by its fields in index order separated by `, ` and then `)` when it
 > has two or more. A dictionary renders entries in the canonical key order above as
 > `{` followed by `R(key): R(value)` pairs separated by `, ` and then `}`;
-> `{}` is empty. An ADT renders its exact stored constructor-name bytes followed by `(`,
+> `{}` is empty. A stored constructor name is the constructor's declared source
+> spelling; a linker qualification is never stored. An ADT renders its exact stored constructor-name bytes followed by `(`,
 > its fields in index order rendered by `R` and separated by `, `, and then
 > `)`; a zero-field constructor therefore renders as `Ctor()`. An option node
 > renders as `None` when it owns no child and otherwise as `Some(` followed by
@@ -2792,9 +2791,9 @@ exact ADT identity by [05-OP-34].
 > integer/float source distinction. `JsonBigInt` carries the exact decimal
 > spelling of an integer-form source token outside i64 range ([05-OP-2]);
 > it is source-faithful text, never a float funnel, and its string field
-> compares and renders byte-exactly. Decimal invariants are checked by the
-> named [05-OP-35] operations before use; the opaque `datetime::*` and
-> `datetime/clock::*` identities hold [05-OP-73]'s invariants by construction. There is no second prelude JSON
+> compares and renders byte-exactly. The opaque `datetime::*` and
+> `datetime/clock::*` identities hold [05-OP-73]'s invariants, and the opaque
+> `decimal::Decimal` identity holds [05-OP-76]'s, by construction. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
 > ordinary constructor and the executed matching arm preserve the recursive
 > cotangent shape: differentiable float fields receive their corresponding
@@ -2804,7 +2803,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the one hundred ninety-eight final exported stdlib numeric definitions enumerated in the
+> the two hundred six final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
@@ -2814,17 +2813,14 @@ exact ADT identity by [05-OP-34].
 > Every primitive-width intermediate in a graph whose contract names a dtype
 > executes and finalizes at [04-NUM-8]'s declared width; integer primitive
 > arithmetic is checked and a composed trap propagates at its first specified
-> operation. Decimal rational computations explicitly
-> named as mathematical below use an exact internal domain; only their named
-> i64 input and final-representation boundaries can trap `Overflow`, and no
-> host integer width becomes observable. JSON access follows [05-OP-2..5]: an
+> operation. JSON access follows [05-OP-2..5]: an
 > integer-form token outside i64 ingests as `JsonBigInt` and never becomes
 > `JsonFloat`; `json_int`
 > refuses `JsonFloat` and `JsonBigInt`, `json_bigint` is [05-OP-3]'s exact
 > big-integer projection, while `json_float` performs [05-OP-3]'s named
 > i64-to-f64 widening, refuses `JsonBigInt`, and returns a stored f64
 > unchanged. The `datetime::*` and `datetime/clock::*` identities follow
-> [05-OP-73]. Index wrappers
+> [05-OP-73]. The `decimal::*` identities follow [05-OP-76]. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
 > For a differentiable element type, `list_index(xs,i)` returns an input
@@ -2857,45 +2853,6 @@ exact ADT identity by [05-OP-34].
 > Its adjoint is the derivative of that exact finite graph, not a substituted
 > library CDF. The infinities have zero cotangent and NaN propagates the
 > canonical NaN cotangent; no non-finite input traps `Domain`.
->
-> A `Decimal { coefficient, scale }` denotes the exact rational
-> `coefficient / 10^scale` and is valid for stdlib arithmetic exactly when
-> `scale >= 0`. A nonzero canonical value has no trailing base-10 zero in its
-> coefficient while `scale > 0`; canonical zero is
-> `Decimal { coefficient: 0i64, scale: 0i64 }`. Every Decimal-taking operation
-> validates `scale` before arithmetic and normalizes its result. The accepted
-> decimal grammar is ASCII space/tab/CR/LF around one optional `+` or `-` and
-> either one or more digits with an optional `.` and zero or more following
-> digits, or `.` followed by one or more digits. Exponents and internal
-> whitespace are invalid. `try_decimal` returns `None` for invalid syntax;
-> `decimal` traps `Domain`. Syntactically valid digits and their scale are
-> interpreted in exact arithmetic and normalized before either representation
-> check. Both forms trap `Overflow`, rather than returning `None`, exactly when
-> the resulting canonical coefficient or scale has no i64 representation;
-> removable trailing zeros do not cause `Overflow`.
->
-> `decimal_from_int(v)` is the canonical
-> `Decimal { coefficient: v, scale: 0i64 }`. Addition, subtraction,
-> multiplication, equality, and ordering use exact mathematical rationals;
-> no alignment power, product, or comparison converts through float.
-> Arithmetic returns the unique canonical representable pair and traps
-> `Overflow` when no such i64 coefficient/scale pair exists. The five
-> comparison callables are the ordinary exact-rational `=`, `<`, `<=`, `>`,
-> and `>=` relations named by their suffixes. `decimal_div` rejects a zero
-> divisor or negative result scale. It rounds the exact rational to the
-> requested base-10 scale: `RoundDown` truncates the magnitude toward zero,
-> `RoundUp` increases a non-integral magnitude away from zero,
-> `RoundHalfUp` rounds an exact half away from zero, and `RoundHalfEven`
-> rounds a half to an even magnitude. The rounded result is normalized and
-> traps `Overflow` when its canonical pair is unrepresentable.
->
-> `decimal_to_float` correctly rounds the exact decimal rational once to f64;
-> it is the named lossy boundary when that rational has no exact f64 image.
-> `decimal_to_string` emits the unique canonical non-exponent form: optional
-> `-`, at least one integer digit, and a fractional point followed by exactly
-> `scale` digits only when the normalized scale is nonzero. It emits zero as
-> `0` and never emits `+`, leading integer zeros, or trailing fractional
-> zeros. Decimal operations are outside AD and have no accumulator.
 >
 > JSON parsing accepts exactly one complete RFC 8259 value encoded as valid
 > Unicode scalar text, including the standard escape grammar and valid UTF-16
@@ -3273,6 +3230,83 @@ exact ADT identity by [05-OP-34].
 > `domain` failure, and its `try_` twin returns `None` there. No mode is a
 > default. A mode carries no numeric value, has no cotangent, and has no
 > accumulator.
+
+> **[05-OP-76]** `decimal(arguments...) -> result` governs exactly the `decimal::*`
+> identities of the [05-OP-34] and [05-OP-35] registries: the opaque value type `Decimal`
+> and the callables over it.
+>
+> A `Decimal` denotes the rational `c / 10^s` for an integer coefficient `c` with
+> `|c| <= 10^38 - 1` and an integer scale `s` with `0 <= s <= 38`; these rationals are the
+> value set. There is no NaN, infinity, or negative zero. A value is canonical: a nonzero
+> coefficient has no trailing decimal zero while `s > 0`, and zero has `c = 0` and
+> `s = 0`, so each rational in the value set has exactly one representation. A rational is
+> outside the value set when its canonical form needs more than 38 significant digits or
+> more than 38 fractional digits.
+>
+> `Decimal` is opaque (spec/04 §2.5): outside its module the exported producers below are
+> its only construction path. Its registered field tuple is
+> `(negative: bool, limb0: i64, limb1: i64, limb2: i64, limb3: i64, limb4: i64, scale: i64)`,
+> encoding `|c| = limb0 + limb1·10^9 + limb2·10^18 + limb3·10^27 + limb4·10^36` with each
+> limb in `[0, 10^9)` and `limb4 < 100`, the sign of `c` as `negative` (false when
+> `c = 0`), and `s` as `scale`. Because every value is canonical, [05-OP-36] structural
+> equality of two decimals is equality of the rationals they denote.
+>
+> Every callable is pure, total on its stated domain, outside AD, and has no accumulator;
+> differentiating through `decimal_from_f64`, the one callable with a float argument, is
+> a structural rejection, never a zero cotangent.
+> A failing call reports through [05-OP-60]'s failure channel with the message `<function>: <kind>: <detail>`, where
+> `<function>` is the exported callable's name, `<detail>` names the offending value, and
+> `<kind>` is `domain` when an argument or text denotes no value of the operation's domain
+> or of `Decimal` (malformed or over-long text, text or a float whose value is outside the
+> value set, a scale outside `0..38`, a zero divisor, a non-finite float, or
+> `RejectInexact` meeting a value that is not a multiple of its quantum), or `overflow`
+> when the exact result of arithmetic on decimals is outside the value set or a decimal
+> narrowed to i64 is outside i64. Every range and validity check precedes the arithmetic
+> it protects, so no [04-NUM-9] trap of a primitive escapes a call for any arguments.
+> When several checks fail, the first in this order is reported: each argument's own
+> validity from left to right, then `RejectInexact`, then the result's range. A `try_`
+> callable takes its twin's arguments, returns `Some` of the twin's result, and returns
+> `None` exactly where the twin fails `domain`; `try_decimal_to_i64` also returns `None`
+> where its twin fails `overflow`.
+>
+> The callables that take a `Rounding` are `decimal_to_i64`, `try_decimal_to_i64`,
+> `decimal_from_f64`, `try_decimal_from_f64`, `decimal_round`, `decimal_div`, and
+> `try_decimal_div`; each applies it under [05-OP-74] once to the exact rational
+> result, with the quantum `1` for the i64 conversions and `10^-n` for the others.
+>
+> `decimal(text)` accepts exactly one RFC 8259 number token,
+> `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`, of at most 1000 Unicode scalar
+> values, with no surrounding whitespace, and returns the decimal equal to the token's
+> exact value; exponent digits may carry leading zeros, and a token whose significand is
+> zero denotes zero whatever its exponent and sign. It fails `domain` for any other text,
+> a longer token, or a token whose value is outside the value set. `decimal_to_string(x)`
+> is the unique canonical text: `-` exactly when `x < 0`, the integer part's digits with
+> no leading zero (`0` when it is zero), and, exactly when the scale `s` is nonzero, `.`
+> followed by exactly `s` fractional digits; it never emits an exponent, `+`, or a
+> trailing fractional zero, so `decimal(decimal_to_string(x))` is `x`.
+> `decimal_to_fixed_string(x, n)` is the same text with exactly `n` fractional digits,
+> padding with zeros, and fails `domain` when `n` is outside `0..38` or `x` is not a
+> multiple of `10^-n`; it never rounds.
+>
+> `decimal_from_i64(v)` is exact and never fails. `decimal_to_i64(x, r)` is `x` rounded to
+> an integer by `r` and fails `overflow` when that integer is outside i64.
+> `decimal_from_f64(x, n, r)` is the exact binary value of a finite `x` rounded to a
+> multiple of `10^-n` by `r`; it fails `domain` when `x` is NaN or infinite, `n` is outside
+> `0..38`, or the rounded value is outside the value set. `decimal_to_f64(x)` and
+> `decimal_to_f32(x)` are the exact value of `x` correctly rounded once to the target
+> format with ties to even (subnormal results included); each rounds directly, never
+> through another format, and neither fails, since the value set lies within both
+> formats' finite range. They are the named lossy boundary from decimal to binary float.
+> `decimal_scale(x)` is the canonical scale.
+>
+> `decimal_add`, `decimal_sub`, and `decimal_mul` return the exact sum, difference, and
+> product and fail `overflow` when it is outside the value set. `decimal_round(x, n, r)`
+> is `x` rounded to a multiple of `10^-n` by `r`, and fails `domain` when `n` is outside
+> `0..38`; its result is always in the value set. `decimal_div(a, b, n, r)` is the exact
+> quotient `a / b` rounded to a multiple of `10^-n` by `r`; it fails `domain` when `b` is
+> zero or `n` is outside `0..38`, and `overflow` when the rounded quotient is outside the
+> value set. `decimal_lt`, `decimal_lte`, `decimal_gt`, and `decimal_gte` are the exact
+> order of the denoted rationals.
 
 ---
 
@@ -4668,8 +4702,11 @@ lie. Rendering never repairs, rounds, or rejects stored values.
 > inputs; that concrete call result becomes an owed root. A zero-parameter
 > generic definition whose result retains an unresolved type, dimension, or
 > rank parameter likewise remains a callable entry until a concrete call
-> instantiates its result. The manifest SHALL list owed roots in source
-> declaration order.
+> instantiates its result. A selected target's declarations are its entry
+> module's own: a declaration linked from another module, whether in a
+> dependency, the compiler-bundled `chelis-std`, or another module of the same
+> package, contributes no owed root. The manifest SHALL list owed roots in
+> source declaration order.
 
 > **[05-OBS-8]** A tuple-valued root SHALL expand recursively into dotted
 > positional names in depth-first order (`result.0`, `result.1.0`, ...). A

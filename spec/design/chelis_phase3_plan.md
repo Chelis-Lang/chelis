@@ -623,18 +623,13 @@ calendars, columnar kernels, and the clock after it.
 
 ### Std.Decimal
 
-Pure Chelis standard library module for fixed-point exact arithmetic.
-
-- `Decimal` type: exact representation with configurable scale.
-- Construction: `decimal("0.1")`, `decimal_from_int(cast(42, i64))`.
-- Arithmetic: `decimal_add`, `decimal_sub`, `decimal_mul`, `decimal_div` with explicit
-  rounding mode.
-- Rounding modes: `round_half_up`, `round_half_even` (banker's rounding), `round_down`,
-  `round_up`.
-- Comparison and ordering.
-- Conversion: `decimal_to_float(d)` → `Float`, `decimal_to_string(d)` → `String`.
-- Property: `0.1 + 0.2 == 0.3` is true with Decimal arithmetic.
-- Not a tensor dtype — host-value type only. Exact, not fast.
+`Std.Decimal` (#2778) is a pure Chelis standard-library module of opaque, exact
+decimals, a coefficient of at most 38 digits over a power of ten with at most 38
+fractional digits, governed by [05-OP-76]. Arithmetic is exact or fails, every
+operation that drops digits takes a `Rounding` from `Std.Rounding` ([05-OP-74]), and
+`decimal_to_f64` and `decimal_to_f32` are its named lossy boundary to binary floats.
+It is a host-value type, not a tensor dtype. `spec/design/std_decimal.md` is the
+design of record.
 
 ### Std.Nn.Generate
 
@@ -743,7 +738,7 @@ loop (`fold` where the accumulator carries step count + model parameters).
 
 All modules are pure Chelis code shipped as part of `chelis-std` via the reef package
 system. `Date` is internally an ADT with integer fields. `Decimal` is internally a
-scaled integer representation. `KVCache` is a `List` of layer caches. Optimizers and
+sign, five base-10^9 limbs, and a scale. `KVCache` is a `List` of layer caches. Optimizers and
 schedulers are pure functions over tensors and scalars. No C runtime additions needed —
 these are host-value computations (Time, Decimal, Schedule) and tensor computations
 (Generate, Optim) using existing primitives.
@@ -754,9 +749,10 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 - Date parsing: ISO 8601 round-trip
 - Date comparison: ordering works correctly across year boundaries
 - Date utilities: `Duration`, `day_of_year`, and `is_leap_year` evaluate with expected values
-- Decimal: `decimal("0.1") + decimal("0.2") == decimal("0.3")`
-- Decimal: banker's rounding matches expected behavior
-- Decimal: division with explicit rounding mode
+- Decimal: `decimal_add(decimal("0.1"), decimal("0.2"))` equals `decimal("0.3")`
+- Decimal: every `Rounding` mode, in division, rounding, and float conversion, equals
+  an independent exact-rational reference on the evaluator and in compiled C
+- Decimal: every failure reports its exact `<function>: <kind>: <detail>` message
 - Generate: greedy generation produces correct tokens for a trivial model
 - Generate: temperature sampling with the same key produces reproducible output;
   a second use of that key is rejected
@@ -773,7 +769,10 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 
 This is the owning executable oracle for the `Std.Decimal` package surface (the ML
 modules — `Schedule`, `Optim`, `Nn.Generate` — since moved to `School.*` in chelis-std
-0.4.0). The `Std.Datetime` surface's owning oracle is `std_datetime_oracle`, with its
+0.4.0). `cargo nextest run -p chelis-cli --test std_decimal_oracle` compares every
+`Std.Decimal` callable on the evaluator and in compiled C with the exact-rational
+reference `scripts/decimal_reference.py`, and `std_decimal_failures` pins its failure
+messages. The `Std.Datetime` surface's owning oracle is `std_datetime_oracle`, with its
 manual gate `std_datetime_every_day_of_the_range_in_compiled_c`. A later
 phase-completion claim still requires a fresh-context red team and any documented manual
 gates.

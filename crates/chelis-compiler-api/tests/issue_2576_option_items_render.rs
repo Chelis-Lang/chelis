@@ -1,7 +1,7 @@
 //! chelis#2576: compiled C renders an `Option` nested inside a list or a
 //! data-type value, directly or through a nested tuple, exactly as `chelis
-//! eval` does. A root's own tuple components are printed one per line by the
-//! manifested-root path, which has no `Option` case; that is chelis#2597.
+//! eval` does. A root whose value is an option, and an option component of a
+//! tuple or record root, render the same way (chelis#2597).
 //!
 //! The runtime's recursive value renderer had no arm for the `Option` value
 //! tag, so a root such as `map(fn (x: string) -> Some(x), xs)` built, printed
@@ -109,6 +109,49 @@ const CASES: &[Case] = &[
     },
 ];
 
+/// chelis#2597: the option is the root itself or one of the root's
+/// manifested components, not an item of a container.
+const ROOT_CASES: &[Case] = &[
+    Case {
+        name: "root_some_string",
+        prelude: "",
+        result: "Option[string]",
+        body: "if flag then Some(string_concat(\"ab\", \"c\")) else None",
+    },
+    Case {
+        name: "root_nested_option",
+        prelude: "",
+        result: "Option[Option[i64]]",
+        body: "if flag then Some(Some(2i64)) else Some(None)",
+    },
+    Case {
+        name: "root_some_tensor",
+        prelude: "",
+        result: "Option[tensor[3, f32]]",
+        body: "if flag then Some(to_tensor([1.0, 2.0, 3.0])) else None",
+    },
+    Case {
+        name: "tuple_component",
+        prelude: "",
+        result: "(Option[string], i64)",
+        body: "(if flag then Some(string_concat(\"ab\", \"c\")) else None, 1i64)",
+    },
+    Case {
+        name: "nested_tuple_component",
+        prelude: "",
+        result: "((Option[f32], i64), i64)",
+        body: "((if flag then Some(1.5f32) else None, 2i64), 3i64)",
+    },
+    // A call result's constructor is not statically fixed, so this record
+    // stays one bare root ([05-OBS-8]); it controls the expanded cases above.
+    Case {
+        name: "bare_record_root_with_an_option_field",
+        prelude: "type Zone =\n  | Zone { name: string, next: Option[(i64, Option[i64])] }\n",
+        result: "Zone",
+        body: "Zone { name: string_concat(\"UT\", \"C\"), next: if flag then Some((0i64, None)) else None }",
+    },
+];
+
 fn instantiate(case: &Case) -> String {
     format!(
         "{}def case(flag: bool) -> {} =\n  {}\na = case(true)\nb = case(false)\n",
@@ -170,6 +213,23 @@ fn an_option_inside_a_compiled_root_renders_as_eval_renders_it() {
         "{} of {} cases failed:\n\n{}",
         failures.len(),
         CASES.len(),
+        failures.join("\n\n")
+    );
+}
+
+// REGRESSION TEST. On `5008a9310` a root of option type failed the build and
+// an option component of a tuple or record root aborted after its label.
+#[test]
+fn an_option_root_or_root_component_renders_as_eval_renders_it() {
+    let failures: Vec<String> = ROOT_CASES
+        .iter()
+        .filter_map(|case| check(case.name, &instantiate(case)).err())
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} of {} cases failed:\n\n{}",
+        failures.len(),
+        ROOT_CASES.len(),
         failures.join("\n\n")
     );
 }

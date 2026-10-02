@@ -3383,9 +3383,9 @@ int main(void) {{
 }
 
 // spec/05-risc-primitives.md §2.1: `trunc_div` uses C/Rust truncating
-// semantics (round toward zero). This is what chelis-std's
-// `Std.Decimal::normalize` / `decimal_div_nonzero` rely on for scale
-// shifts and quotient computation. The C backend emits `int32_t /
+// semantics (round toward zero). chelis-std's `Std.Decimal` relies on it
+// for limb carries, quotient limbs, and reading the limbs of a negative
+// i64. The C backend emits `int32_t /
 // int32_t` which truncates by language definition; this exec-compile
 // test pins that contract end-to-end across every sign combination.
 // `{7,-7} / {2,-2}` ⇒ `{3, -3, -3, 3}` (round toward zero).

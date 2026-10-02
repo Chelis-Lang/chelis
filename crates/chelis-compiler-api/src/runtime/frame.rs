@@ -473,6 +473,7 @@ mod tests {
                 tensor.clone(),
                 RuntimeValue::Adt {
                     ctor: "Some".to_string(),
+                    source_name: "Some".to_string(),
                     fields: vec![tensor].into(),
                     field_names: None,
                 },

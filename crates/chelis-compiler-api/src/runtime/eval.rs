@@ -1381,11 +1381,29 @@ impl<'a> EvalContext<'a> {
         // differs from its declared order carried misaligned
         // `field_names[i]` metadata against `fields[i]`.
         self.result_producer = ResultProducer::aggregate(ordered_producers);
-        Ok(RuntimeValue::Adt {
+        Ok(self.adt_value(ctor, ordered.into(), Some(declared)))
+    }
+
+    /// An ADT value of the constructor `ctor`. It stores the constructor's
+    /// declared source spelling as the name it renders, by the rule the
+    /// compiled lane stores (chelis#2889); a constructor with no linker name
+    /// keeps the name it has.
+    fn adt_value(
+        &self,
+        ctor: &str,
+        fields: Values,
+        field_names: Option<Vec<String>>,
+    ) -> RuntimeValue {
+        RuntimeValue::Adt {
             ctor: ctor.to_string(),
-            fields: ordered.into(),
-            field_names: Some(declared),
-        })
+            source_name: self
+                .constructor_names
+                .get(ctor)
+                .cloned()
+                .unwrap_or_else(|| ctor.to_string()),
+            fields,
+            field_names,
+        }
     }
 
     fn eval_access(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
@@ -1404,6 +1422,7 @@ impl<'a> EvalContext<'a> {
                 ctor,
                 fields,
                 field_names,
+                ..
             } => {
                 let declared = self
                     .adt_fields
@@ -1599,11 +1618,7 @@ impl<'a> EvalContext<'a> {
             return Ok(RuntimeValue::List(Vec::new().into()));
         }
         if name.chars().next().is_some_and(|ch| ch.is_uppercase()) {
-            return Ok(RuntimeValue::Adt {
-                ctor: name.to_string(),
-                fields: Vec::new().into(),
-                field_names: None,
-            });
+            return Ok(self.adt_value(name, Vec::new().into(), None));
         }
         Err(format!("unknown runtime name `{name}`"))
     }
@@ -1796,11 +1811,7 @@ impl<'a> EvalContext<'a> {
                 return Ok(RuntimeValue::List(items));
             }
             self.result_producer = ResultProducer::aggregate(arg_producers);
-            return Ok(RuntimeValue::Adt {
-                ctor: name.to_string(),
-                fields: args.into(),
-                field_names: None,
-            });
+            return Ok(self.adt_value(name, args.into(), None));
         }
 
         if let Some(name) = self.active_builtin_name(func) {
@@ -3499,11 +3510,13 @@ impl<'a> EvalContext<'a> {
                 Ok(match value.trim().parse::<i64>() {
                     Ok(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
+                        source_name: "Some".to_string(),
                         fields: vec![RuntimeValue::int64(parsed)].into(),
                         field_names: None,
                     },
                     Err(_) => RuntimeValue::Adt {
                         ctor: "None".to_string(),
+                        source_name: "None".to_string(),
                         fields: Vec::new().into(),
                         field_names: None,
                     },
@@ -3514,11 +3527,13 @@ impl<'a> EvalContext<'a> {
                 Ok(match value.trim().parse::<f64>() {
                     Ok(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
+                        source_name: "Some".to_string(),
                         fields: vec![RuntimeValue::float64(parsed)].into(),
                         field_names: None,
                     },
                     Err(_) => RuntimeValue::Adt {
                         ctor: "None".to_string(),
+                        source_name: "None".to_string(),
                         fields: Vec::new().into(),
                         field_names: None,
                     },
@@ -3961,11 +3976,13 @@ impl<'a> EvalContext<'a> {
                 Ok(match dict_lookup(&dict, key) {
                     Some(value) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
+                        source_name: "Some".to_string(),
                         fields: vec![value.clone()].into(),
                         field_names: None,
                     },
                     None => RuntimeValue::Adt {
                         ctor: "None".to_string(),
+                        source_name: "None".to_string(),
                         fields: Vec::new().into(),
                         field_names: None,
                     },
@@ -5591,6 +5608,7 @@ mod legacy_capture_order_tests {
             ),
             declared_signatures: signatures,
             adt_fields: collect_adt_ctor_fields(checked.exprs()),
+            constructor_names: collect_constructor_source_names(checked.exprs()),
             adt_registry: checked.adt_registry().clone(),
             tensor_bindings: tensors,
             session: Some(chelis_ir::host::HostLoweringSession::new(checked)),

@@ -244,7 +244,7 @@ fn stdlib_closure_preserves_all_final_registered_source_identities() {
             .iter()
             .filter(|(kind, _)| kind == "std-def-numeric")
             .count(),
-        198
+        206
     );
     assert_eq!(
         expected

@@ -1161,6 +1161,17 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "scripts/decimal_differential.py",
+        "archive-name",
+        lines=(
+            '"out/libchelis_runtime.a", *self.toolchain.link_flags, "-o", "out/case"]',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "links the archive `chelis build --output out` staged in the case's output directory, by its exact path"
+        ),
+    ),
+    Row(
         "scripts/installed_artifact_canary.py",
         "archive-name",
         lines=(
@@ -1404,6 +1415,22 @@ REVIEWED: tuple[Row, ...] = (
         disposition="not-lookup",
         reason=(
             "tests that the oracle refuses an inherited variable and passes none to a run"
+        ),
+    ),
+    Row(
+        "scripts/test_decimal_differential.py",
+        "archive-name",
+        lines=(
+            '"Compile: clang -O2 -march=native out/main.c out/libchelis_runtime.a -lm -o out/main\\n")',
+            '["clang", "-O2", "-march=native", "out/main.c", "out/libchelis_runtime.a", "-lm", "-o", "out/case"])',
+            '(cwd / "out" / "libchelis_runtime.a").write_bytes(b"x")',
+            'self.assertEqual((image / "out" / "libchelis_runtime.a").exists(), keep)',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "a fixture `Compile:` line as `chelis build` prints it, naming the archive it staged, to test that the "
+            "harness reruns that command with only its output retargeted; and a fixture staged archive the harness "
+            "must delete once it has linked the program, unless artifacts are kept"
         ),
     ),
     Row(

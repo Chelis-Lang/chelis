@@ -19,8 +19,8 @@
 //! 5. reef package modules keep working: package decls are
 //!    internal-name-rewritten (`pkg__...`) before the checker runs, so a
 //!    package-scoped `def sum` is allowed and dispatches to the user def
-//!    (the stdlib's `Std.Decimal.normalize` / `Std.Test.fail` rely on
-//!    exactly this).
+//!    (the stdlib's `Std.Test.fail`, which shares the builtin `fail`'s
+//!    name, relies on exactly this).
 //!
 //! Unit-level coverage (full BUILTIN_NAMES sweep, defsig classes, dedupe,
 //! params/locals scope pins) lives in
@@ -341,7 +341,7 @@ fn issue_353_cost_rejects_and_validate_is_syntax_only() {
 /// rewrites their call sites with them) before the checker runs, so a
 /// package def neither collides with the builtin table nor
 /// mis-dispatches — the user def genuinely wins inside a package. The
-/// stdlib's `Std.Decimal.normalize` and `Std.Test.fail` rely on this.
+/// stdlib's `Std.Test.fail` relies on this.
 #[test]
 fn issue_353_reef_package_def_sum_still_checks_clean() {
     let dir = tempdir().expect("tempdir");

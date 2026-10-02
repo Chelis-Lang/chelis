@@ -383,6 +383,27 @@ pub fn linked_binding_in_module_of(type_name: &str, terminal: &str) -> Option<St
     Some(format!("pkg__{module_part}__{terminal}"))
 }
 
+/// The source spelling of the linker-named constructor `ctor` of the
+/// linker-named data type `type_name` (chelis#2880). The linker qualifies a
+/// type and its constructors with their one defining module, so the
+/// constructor's spelling is what remains after the type's module
+/// qualification, including any `__` the author wrote inside it. Removing one
+/// qualification from every constructor of a type keeps distinct constructors
+/// distinct. `None` when `type_name` is not in linker format (a lexical
+/// program, whose constructors carry their source spelling already), or when
+/// `ctor` does not carry the type's qualification.
+pub fn linked_constructor_source_name<'a>(type_name: &str, ctor: &'a str) -> Option<&'a str> {
+    let stem = type_name.strip_prefix("Pkg__")?;
+    let (module_part, _type_terminal) = stem.rsplit_once("__")?;
+    if module_part.is_empty() {
+        return None;
+    }
+    ctor.strip_prefix("Pkg__")?
+        .strip_prefix(module_part)?
+        .strip_prefix("__")
+        .filter(|source| !source.is_empty())
+}
+
 // ── De-mangle reef internal names for display (RT-1 F3) ──────────
 
 /// Best-effort de-mangle of a reef internal identifier for display in
@@ -392,11 +413,11 @@ pub fn linked_binding_in_module_of(type_name: &str, terminal: &str) -> Option<St
 /// (non-reef) identifiers carry no marker prefix and pass through
 /// unchanged.
 ///
-/// Public so the eval value renderer (chelis-compiler-api) shows the
-/// user-facing source name rather than the internal mangled form, matching the
-/// de-mangling already applied to diagnostics (chelis#399). Lowercase binding
-/// names may themselves contain `__`; the package/module casing boundary
-/// identifies where that authored terminal begins.
+/// Lowercase binding names may themselves contain `__`; the package/module
+/// casing boundary identifies where that authored terminal begins. A
+/// constructor's spelling is not recovered here: it needs its data type's
+/// qualification ([`linked_constructor_source_name`]), which both execution
+/// lanes apply (chelis#2889).
 pub fn demangle_ident(name: &str) -> String {
     if let Some(stem) = name.strip_prefix("pkg__")
         && let Some(binding) = demangle_lowercase_binding(stem)
@@ -814,6 +835,58 @@ mod tests {
     }
 
     #[test]
+    fn linked_constructor_keeps_its_whole_source_spelling() {
+        let shape = "Pkg__app__App__Main__Shape";
+        assert_eq!(
+            linked_constructor_source_name(shape, "Pkg__app__App__Main__Circle"),
+            Some("Circle")
+        );
+        // An authored `__` inside a constructor is part of its spelling, so
+        // `Foo__Bar` and `Bar` stay distinct where a terminal-segment
+        // de-mangle would collapse both to `Bar`.
+        assert_eq!(
+            linked_constructor_source_name(shape, "Pkg__app__App__Main__Foo__Bar"),
+            Some("Foo__Bar")
+        );
+        assert_eq!(
+            linked_constructor_source_name(shape, "Pkg__app__App__Main__Bar"),
+            Some("Bar")
+        );
+        assert_eq!(
+            linked_constructor_source_name(
+                "Pkg__chelis__std__Std__Time__Date",
+                "Pkg__chelis__std__Std__Time__Date"
+            ),
+            Some("Date")
+        );
+    }
+
+    #[test]
+    fn linked_constructor_needs_the_types_own_qualification() {
+        // A lexical program's type and constructors are already source names.
+        assert_eq!(linked_constructor_source_name("Shape", "Circle"), None);
+        // Another module's qualification, a bare qualification, and a
+        // lowercase binding never yield a constructor spelling.
+        for ctor in [
+            "Pkg__app__App__Other__Circle",
+            "Pkg__app__App__Main__",
+            "Pkg__app__App__Main",
+            "pkg__app__App__Main__circle",
+            "Circle",
+        ] {
+            assert_eq!(
+                linked_constructor_source_name("Pkg__app__App__Main__Shape", ctor),
+                None,
+                "{ctor}"
+            );
+        }
+        assert_eq!(
+            linked_constructor_source_name("Pkg__Shape", "Pkg__Circle"),
+            None
+        );
+    }
+
+    #[test]
     fn reef_stem_rejects_unmangled_names() {
         assert_eq!(reef_module_stem("Probability"), None);
         assert_eq!(reef_module_stem("probability"), None);
@@ -963,7 +1036,7 @@ mod tests {
         assert!(is_linker_format_name("Pkg__foo__Secret"));
         assert!(is_linker_format_name("pkg__foo__forge"));
         assert!(is_linker_format_name(
-            "Pkg__chelis__std__Std__Decimal__RoundingMode"
+            "Pkg__chelis__std__Std__Rounding__Rounding"
         ));
         // Marker prefix but no stem -> not a complete mangled name.
         assert!(!is_linker_format_name("Pkg__lonely"));

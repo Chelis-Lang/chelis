@@ -2956,7 +2956,36 @@ fn lower_roots(
             Ok(())
         })?;
     }
+    // A compiled function reads a captured top-level binding through
+    // file-scope storage when it is called, and none of this unit's
+    // operations records that read. Release each captured binding only when
+    // the unit exits: a binding without a root sink can otherwise reach its
+    // last use here before the calls that read it (chelis#2624).
+    let captured = crate::host::captured_global_names(ctx.host);
     lowerer.with_site(HostSiteKind::FunctionReturn, |lowerer| {
+        for binding in ctx.host.globals.iter().rev() {
+            let label = crate::LoadStoreName::top_level(&binding.name);
+            if !captured
+                .iter()
+                .any(|name| *name == binding.name || name == label.as_str())
+            {
+                continue;
+            }
+            let Some(Place::Owner(owner)) = lowerer.lookup(&binding.name) else {
+                continue;
+            };
+            let info = lowerer.info(owner)?;
+            if lowerer.moved.contains(&owner)
+                || info.origin != OwnerOrigin::Owned
+                || !info.class.is_heap()
+            {
+                continue;
+            }
+            lowerer.emit(Op::Drop {
+                owner: Operand::move_(owner),
+            });
+            lowerer.moved.insert(owner);
+        }
         lowerer.exit_scope()?;
         lowerer.set_terminator(Terminator::Exit)
     })?;

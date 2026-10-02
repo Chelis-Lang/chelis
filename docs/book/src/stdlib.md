@@ -2,8 +2,8 @@
 
 Chelis has compiler built-ins for tensor, scalar, collection, and host operations.
 The compiler also bundles `chelis-std`, whose modules use the `Std` prefix. In a
-Reef package, import the names you need, for example `import Std.Sort (sort)`;
-there is no separate standard-library install. The `Std` source modules and the
+Reef package or a standalone `.ch` file, import the names you need, for example
+`import Std.Sort (sort)`; there is no separate standard-library install. The `Std` source modules and the
 native runtime archive emitted by `chelis build` are different parts of the
 runtime.
 
@@ -191,10 +191,37 @@ no other datetime function takes one and it does not convert to an `Instant`. Bo
 the underlying read. The clocks run under `chelis eval` and `chelis test`;
 `chelis build` rejects them.
 
+### Exact decimals
+
+`Std.Decimal` provides `Decimal`, an exact base-10 number: a coefficient of at
+most 38 digits over a power of ten with at most 38 fractional digits, such as
+`12.5` or `-0.000001`. Every value has one canonical form, so `eq` and `neq`
+compare the numbers themselves, and `decimal_lt`, `decimal_lte`, `decimal_gt`,
+and `decimal_gte` order them. The type is opaque: obtain a value from
+`decimal(text)`, which accepts an RFC 8259 number such as `"19.99"` or
+`"1e-3"`, from `decimal_from_i64(n)`, or from `decimal_from_f64(x, places,
+mode)`, never from a record literal.
+
+`decimal_add`, `decimal_sub`, and `decimal_mul` are exact and fail rather than
+round when the result does not fit. `decimal_round`, `decimal_div`,
+`decimal_to_i64`, and `decimal_from_f64` take a `Rounding` from `Std.Rounding`,
+and all but `decimal_to_i64` also take a number of fractional places:
+`decimal_round(x, 2, RoundTiesToEven)`, `decimal_div(a, b, 10, RoundTiesToEven)`,
+`decimal_to_i64(x, RoundTowardZero)`, and `decimal_from_f64(x, 2,
+RoundTiesToEven)`, which rounds the float's exact binary value; `RejectInexact`
+fails instead of rounding. `decimal_to_f64` and `decimal_to_f32` are the one
+other conversion that drops precision, rounding once to nearest with ties to
+even. `decimal_to_string` writes the canonical text without an exponent, and
+`decimal_to_fixed_string(x, n)` writes exactly `n` fractional digits and never
+rounds. A failure reports `<function>: domain: <detail>` for an argument that
+denotes no value of its domain, including text or a float whose value lies
+outside the decimal range, or `<function>: overflow: <detail>` when the exact
+result of arithmetic lies outside that range or `decimal_to_i64`'s integer lies
+outside i64; each `try_` form returns `None` where its twin fails `domain`, and
+`try_decimal_to_i64` also where its twin fails `overflow`. The module is
+pure and runs under `chelis eval`, `chelis test`, and generated C.
+
 ### Exported but unavailable
 
-`Std.Decimal` exports types and callable names, but calling its arithmetic
-functions fails. `Std.Io.Parquet` and `Std.Io.Safetensors` also export names
-whose calls fail. Use the modules above for runnable programs; the
-[operation specification](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md)
-records the intended contract for Decimal.
+`Std.Io.Parquet` and `Std.Io.Safetensors` export names whose calls fail. Use
+the modules above for runnable programs.

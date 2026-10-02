@@ -284,6 +284,28 @@ fn non_root_heap_value_drops_at_its_verified_last_use() {
 }
 
 #[test]
+fn non_root_heap_value_a_function_captures_drops_when_the_roots_unit_exits() {
+    // A package build's library value is a non-root global that an entry
+    // function may read (chelis#2624). The function reads it through
+    // file-scope storage, so the roots unit releases it only at exit, after
+    // every root sink, rather than at its last use in this unit.
+    let mut front = front("kept = [1i64]\ndef kept_len() -> i64 = len(kept)\nout = kept_len()\n");
+    front
+        .manifest
+        .entries
+        .retain(|entry| entry.def_name == "out");
+    let manifested = ManifestedProgram::new(front.checked, front.manifest, Target::C);
+    let lowered = lower_host_ownership(&manifested, front.host).unwrap();
+    let roots = unit_text(&verify_ownership(lowered).unwrap(), "roots");
+    assert_eq!(count(&roots, "root out move"), 1, "{roots}");
+    assert_eq!(count(&roots, "drop move"), 1, "{roots}");
+    assert!(
+        line_index(&roots, "root out move") < line_index(&roots, "drop move"),
+        "the captured container must outlive every root sink:\n{roots}"
+    );
+}
+
+#[test]
 fn recursive_tail_frame_drops_precede_the_direct_call() {
     let step = unit_text(&verified_fixture("issue_1206_depth_1"), "step");
     let recursive_call = line_index(&step, "call:step");

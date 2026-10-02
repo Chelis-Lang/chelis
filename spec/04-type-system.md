@@ -138,13 +138,18 @@ Chelis-specific variants.
   integer, not a parameterization of either. **Rationale and scope limit:** no
   array-computation library carries decimal - numpy, PyTorch, and JAX all
   decline it - because it is a database and dataframe type. Chelis already
-  serves that need twice: `Std.Decimal` is the standard-library scalar type
-  (built on `trunc_div` scale shifts, see `spec/05-risc-primitives.md` §2.1),
-  and `Std.Io.Parquet` is the interop surface. These names are therefore
-  reserved for the **Arrow and parquet interchange boundary only** and are
-  explicitly NOT tensor element types. They are also the only reserved
-  names that are parameterized, which is itself a reason to keep them off that
-  path: every other `Prim` is a bare name.
+  serves that need twice: `Std.Decimal` is the standard-library exact decimal
+  scalar (`spec/05-risc-primitives.md` [05-OP-76]: at most 38 significant
+  digits, scale 0..38), and `Std.Io.Parquet` is the interop surface. These
+  names are therefore reserved for the **Arrow and parquet interchange
+  boundary only** and are explicitly NOT tensor element types. They are also
+  the only reserved names that are parameterized, which is itself a reason to
+  keep them off that path: every other `Prim` is a bare name. At that
+  boundary a `decimal128` or `decimal256` value whose exact value lies in
+  [05-OP-76]'s value set converts to that exact `Std.Decimal`; any other
+  value is a `domain` failure and is never rounded; and a `Std.Decimal`
+  value reaches a declared (precision, scale) only through an explicit
+  [05-OP-74] rounding mode.
 
 **Not reserved, and deliberately so: scaled and block-scaled formats.**
 `qint8`/`quint8` (PyTorch), the MX formats of the OCP Microscaling
@@ -3335,7 +3340,7 @@ Scope:
   checker runs and their call sites are rewritten with them, so a
   package-scoped `def sum` neither collides with the builtin table nor
   mis-dispatches — inside a package the user def genuinely wins (the
-  stdlib's `Std.Decimal.normalize` and `Std.Test.fail` rely on this).
+  stdlib's `Std.Test.fail` relies on this).
 - Function parameters and block-local bindings may reuse builtin names: they
   shadow the builtin under ordinary lexical scoping in every lane. A call to
   that unqualified name invokes the innermost local binding, including when
