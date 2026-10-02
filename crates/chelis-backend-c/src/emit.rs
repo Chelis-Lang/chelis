@@ -832,7 +832,7 @@ impl CEmitter {
                 chelis_types::unsupported::Stage::Codegen("c"),
                 chelis_types::unimplemented_rejection!(
                     1277,
-                    "the emitter marks each extent read and declaration once; see runtime_extents.md C4.4"
+                    "the emitter marks each extent read and declaration once; see runtime_extents.md C4"
                 ),
             )
         };
@@ -8134,37 +8134,37 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let Some(names) = self.runtime_dim_sites.get(&(id, axis)).cloned() else {
             return;
         };
-        for line in
+        for (name, extent_expr) in
             Self::runtime_dim_declarations(&names, extent_expr, &mut self.declared_dim_names)
         {
-            self.line(&line);
+            self.line(&format!("int64_t {name} = {extent_expr};"));
         }
     }
 
-    /// The declaration lines of the `names` not yet in `declared`, which
-    /// records them. Every name reads `extent_expr`, and after the first that
-    /// variable holds the name declared before it, so two spellings of one
-    /// extent land as `int64_t b = a;` rather than as a second read of the
-    /// same expression.
+    /// The marked name and right-hand side of each declaration of the
+    /// `names` not yet in `declared`, which records them. Every name reads
+    /// `extent_expr`, and after the first that variable holds the name
+    /// declared before it, so two spellings of one extent land as
+    /// `int64_t b = a;` rather than as a second read of the same expression.
     fn runtime_dim_declarations(
         names: &[String],
         extent_expr: &str,
         declared: &mut chelis_unord::UnordSet<String>,
-    ) -> Vec<String> {
+    ) -> Vec<(String, String)> {
         let mut extent_expr = extent_expr.to_string();
-        let mut lines = Vec::new();
+        let mut declarations = Vec::new();
         for name in names {
             if declared.contains(name) {
                 continue;
             }
             declared.insert(name.clone());
-            lines.push(format!(
-                "int64_t {} = {extent_expr};",
-                extent_declaration(name)
+            let read = extent_read(name);
+            declarations.push((
+                extent_declaration(name),
+                std::mem::replace(&mut extent_expr, read),
             ));
-            extent_expr = extent_read(name);
         }
-        lines
+        declarations
     }
 
     /// Declare supported runtime extents, then consume this operation's
@@ -9244,15 +9244,11 @@ mod tests {
                 &mut declared
             ),
             [
-                format!(
-                    "int64_t {} = chelis_tensor_shape(t4, 0);",
-                    extent_declaration("a")
+                (
+                    extent_declaration("a"),
+                    "chelis_tensor_shape(t4, 0)".to_string()
                 ),
-                format!(
-                    "int64_t {} = {};",
-                    extent_declaration("b"),
-                    extent_read("a")
-                ),
+                (extent_declaration("b"), extent_read("a")),
             ]
         );
     }
@@ -9284,8 +9280,11 @@ mod tests {
 
     // A graph built without the Deep parser can carry a mark character in a
     // span ID. The comment sanitizer escapes it, so it is no mark and the
-    // span comment keeps its escaped form. A dimension name carrying one is
-    // refused rather than read as a mark or written into the C.
+    // span comment keeps its escaped form. A dimension name carrying a
+    // malformed mark is refused rather than read as a mark or written into
+    // the C. A well-formed mark around one of the function's own extent
+    // names is not detected; chelis#2908 tracks validating such names where
+    // the graph is built.
     #[test]
     fn a_mark_character_from_a_constructed_graph_is_never_a_mark() {
         for span in [

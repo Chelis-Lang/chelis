@@ -273,9 +273,9 @@ const DOUBLED: &str = "def double_it[n](t: tensor[n, f32]) -> tensor[n, f32] = a
 
 /// Span IDs are opaque producer strings, kept verbatim in the C's
 /// `// span:` comments (spec/03 §1.1.1), and private-use characters are
-/// legal in one. Bracketing with them spells an unclosed bracket, a
-/// bracketed name that is no extent, and a bracketed extent name; none is an
-/// extent read.
+/// legal in one. In the private-use alphabet an earlier version of the
+/// extent marks used, these spell an unclosed mark, a marked name that is no
+/// extent, and a marked extent name; none is an extent read.
 const PRIVATE_USE_SPANS: &[&str] = &["n_\u{E000}001", "\u{E000}zz\u{E002}", "\u{E000}n\u{E002}"];
 
 #[test]
@@ -303,8 +303,10 @@ fn a_span_id_never_reads_or_declares_an_extent() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// The issue's program, with every span ID spelling a declaration of the
-/// extent it reads early, is still refused.
+/// The issue's program is still refused when every span ID spells the
+/// early-read extent's name: bare, as a C declaration of it, or marked as a
+/// declaration in the earlier private-use alphabet. A span ID cannot carry
+/// the C0 marks themselves (the negative twin below).
 #[test]
 fn a_span_id_does_not_hide_a_read_before_its_declaration() {
     let issue = format!("{PRELUDE}{MASKED}r_a = col_xs(masked({VALUES}).0)\n");
@@ -316,9 +318,18 @@ fn a_span_id_does_not_hide_a_read_before_its_declaration() {
         .nth(1)
         .and_then(|rest| rest.split('`').next())
         .unwrap_or_else(|| panic!("no extent named in {message}"));
-    let deep = deep_with_spans(&issue, &format!("\u{E001}{name}\u{E002}"));
-    let error = compile_c(SourceKind::Deep, &deep).expect_err("a span ID declares nothing");
-    declaration_rejection(&error, "is rendered before it is declared").unwrap();
+    for span in [
+        name.to_string(),
+        format!("int64_t {name} = 3;"),
+        format!("\u{E001}{name}\u{E002}"),
+    ] {
+        let deep = deep_with_spans(&issue, &span);
+        let Err(error) = compile_c(SourceKind::Deep, &deep) else {
+            panic!("{span:?}: a span ID declares nothing");
+        };
+        declaration_rejection(&error, "is rendered before it is declared")
+            .unwrap_or_else(|failure| panic!("{span:?}: {failure}"));
+    }
 }
 
 // The negative twin: the emitter marks extents with C0 control characters,
