@@ -179,11 +179,8 @@ its type's range. Each `try_` form other than the masked column forms returns
 `neq` compare values. Dates, times, datetimes, instants, and durations also
 have `*_lt`, `*_lte`, `*_gt`, and `*_gte` functions that order them; offsets,
 offset datetimes, and periods have no order. The module is pure and runs under
-`chelis eval`, `chelis test`, and generated C. `chelis build` refuses a program
-that projects `.0` from a masked column producer such as
-`try_dates_from_epoch_days`
-([#2883](https://github.com/Chelis-Lang/chelis/issues/2883)); destructure the
-pair instead.
+`chelis eval`, `chelis test`, and generated C, including a program that
+projects `.0` from a masked column producer such as `try_dates_from_epoch_days`.
 
 `Std.Datetime.Clock` reads the host clocks. It is a separate module, so
 nothing in `Std.Datetime` reads a clock; any code that reads one, through this
