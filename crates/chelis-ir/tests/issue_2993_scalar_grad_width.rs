@@ -72,7 +72,10 @@ fn gradient_helper<'a>(
     let HostExprKind::TensorCall { helper, args, .. } = &binding.value.kind else {
         panic!("{src}: the gradient is a tensor helper call: {value:?}");
     };
-    assert!(args.is_empty(), "{src}: a top-level gradient takes no inputs");
+    assert!(
+        args.is_empty(),
+        "{src}: a top-level gradient takes no inputs"
+    );
     let HostExprKind::Builtin { name, ty, .. } = &body.kind else {
         panic!("{src}: the gradient is projected to a scalar: {value:?}");
     };
@@ -192,7 +195,8 @@ fn f64_scalar_grad_is_the_eval_lanes_reverse_dag_at_f64() {
 
 #[test]
 fn f32_multi_parameter_gradient_tuple_is_f32() {
-    let src = "def f(x: f32, y: f32) -> f32 = mul(x, y)\nout = grad(f, wrt=(x, y))(0.5f32, 2.0f32)\n";
+    let src =
+        "def f(x: f32, y: f32) -> f32 = mul(x, y)\nout = grad(f, wrt=(x, y))(0.5f32, 2.0f32)\n";
     let (ty, _, helpers) = lowered_out(src);
     assert_eq!(
         ty,

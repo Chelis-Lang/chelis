@@ -183,10 +183,16 @@ fn gradient_code(emitted: &str) -> Vec<&str> {
     let mut code = vec![definition(emitted, "main")];
     let mut index = 0;
     while emitted.contains(&format!("p__global__tensor_{index}__private(")) {
-        code.push(definition(emitted, &format!("p__global__tensor_{index}__private")));
+        code.push(definition(
+            emitted,
+            &format!("p__global__tensor_{index}__private"),
+        ));
         index += 1;
     }
-    assert!(code.len() > 1, "a scalar gradient lowers to a tensor helper:\n{emitted}");
+    assert!(
+        code.len() > 1,
+        "a scalar gradient lowers to a tensor helper:\n{emitted}"
+    );
     code
 }
 
