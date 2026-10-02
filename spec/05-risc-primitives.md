@@ -1998,7 +1998,8 @@ exact ADT identity by [05-OP-34].
 > followed by its fields in index order separated by `, ` and then `)` when it
 > has two or more. A dictionary renders entries in the canonical key order above as
 > `{` followed by `R(key): R(value)` pairs separated by `, ` and then `}`;
-> `{}` is empty. An ADT renders its exact stored constructor-name bytes followed by `(`,
+> `{}` is empty. A stored constructor name is the constructor's declared source
+> spelling; a linker qualification is never stored. An ADT renders its exact stored constructor-name bytes followed by `(`,
 > its fields in index order rendered by `R` and separated by `, `, and then
 > `)`; a zero-field constructor therefore renders as `Ctor()`. An option node
 > renders as `None` when it owns no child and otherwise as `Some(` followed by
@@ -4699,8 +4700,11 @@ lie. Rendering never repairs, rounds, or rejects stored values.
 > inputs; that concrete call result becomes an owed root. A zero-parameter
 > generic definition whose result retains an unresolved type, dimension, or
 > rank parameter likewise remains a callable entry until a concrete call
-> instantiates its result. The manifest SHALL list owed roots in source
-> declaration order.
+> instantiates its result. A selected target's declarations are its entry
+> module's own: a declaration linked from another module, whether in a
+> dependency, the compiler-bundled `chelis-std`, or another module of the same
+> package, contributes no owed root. The manifest SHALL list owed roots in
+> source declaration order.
 
 > **[05-OBS-8]** A tuple-valued root SHALL expand recursively into dotted
 > positional names in depth-first order (`result.0`, `result.1.0`, ...). A
