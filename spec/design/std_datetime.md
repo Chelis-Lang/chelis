@@ -34,8 +34,8 @@ Shoals carries its own date layer on top of `Std.Time`, with its own defect list
 - The weekend is hardcoded to Saturday and Sunday.
 - Holiday tables answer "not a holiday" for years they do not cover.
 
-Coral's time-series index (coral#41) and Nautilus's econometrics (nautilus#92) are
-waiting on a date type that does not exist.
+Coral's time-series index (coral#41) and Nautilus's econometrics (nautilus#92) need a
+date type.
 
 Dates and times are a solved problem in the sense that mature libraries agree on most
 of the model (prior art §2 to §6). This design adopts that consensus. Where the libraries
@@ -690,12 +690,10 @@ reads O(log h) list elements.
 **Vectorized forms (decided in S2).** Each vectorized form applies the scalar algorithm to
 every element, at O(n log h) per call with nothing the horizon's length. That also keeps
 each element's failure identical to its scalar twin's by construction. The prefix-count
-gather planned above was built and measured, and four problems ruled it out:
-- A tensor cannot be sized from a scalar (#469). Every call would therefore build a
-  horizon-length `List` first, 7 304 485 elements for a full-range calendar.
-- `chelis eval` rejects `scatter_replace` (#2892).
-- Compiled C rejected the table program at internal shape invariants (#2893, #2907).
-- Compiled C panicked on one variant of it (#2906).
+gather planned above was built and measured, and ruled out, while `chelis eval` lacked
+`scatter_replace` (#2892), tensors could not be sized from a scalar (#469), so that every
+call built a horizon-length `List` first (7 304 485 elements for a full-range calendar),
+and compiled C refused or panicked on the table program (#2893, #2906, #2907).
 
 A tensor kernel can replace the per-element loop, without changing the contract, once both
 lanes lower such programs.
@@ -985,8 +983,7 @@ and every caller carries `IO`.
 
 ## 13. The `bed` repository: external data (stages S4b and S7)
 
-`bed` (as in seabed) is one new Chelis-Lang repository, private until chelis itself is
-public. It is framed broadly: it holds external data that Chelis programs consume as
+`bed` (as in seabed) is a Chelis-Lang repository. It is framed broadly: it holds external data that Chelis programs consume as
 declared inputs, meaning data whose truth is set outside any program by a legislature, a
 standards body or an exchange, and synced from that upstream on the upstream's schedule.
 Date and time data is its first content, not its definition.
@@ -1110,7 +1107,7 @@ and extends [05-HOST-2]'s list of host operations with them.
 
 **Release.** Removing `Std.Time` removes census rows, which the remediation roadmap's
 invariant 7 makes 0.19 payload by default. S1 ships in a 0.18.x patch rather than
-waiting for 0.19, by release decision, as 0.18.4 did for its ABI change. Every `Std.Time`
+waiting for 0.19, as 0.18.4 did for its ABI change. Every `Std.Time`
 callable already fails, so the removal stops no running computation. A program that only
 builds `Std.Time` records or names its types still type-checks against the fenced module
 and breaks when the module is removed. The known importers are Shoals and hello-chelis,
@@ -1179,8 +1176,8 @@ S6, Shoals keeps its own date layer.
   removed-module test does for `Std.Init` and `Std.Tokenizer`. The changelog fragment
   and docs name the replacement.
 - **Downstream.** Coral and nautilus pass `chelis check` against each new
-  standard-library bundle. Shoals and hello-chelis import `Std.Time`, so they fail
-  `chelis check` against bundles without it until their cut-overs (S6, S8, §15).
+  standard-library bundle. Shoals and hello-chelis, which import `Std.Time`, move in
+  their cut-overs (S6, S8).
 
   The first opaque type in the standard library can turn an unannotated accessor lambda
   into an `OpaqueTypeViolation` in any program that reaches the module (spec/04 §2.5), so
