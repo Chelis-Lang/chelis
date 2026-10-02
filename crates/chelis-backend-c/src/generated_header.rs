@@ -648,11 +648,15 @@ fn bind_c_definitions(
 ) -> Result<BTreeMap<String, String>, GeneratedHeaderError> {
     validate_generated_include_set(source)?;
     validate_generated_pragmas(source)?;
-    if preprocessor_conditional_depth(source)? != 0 {
+    // One scan of the source serves every export below (chelis#2637).
+    let lines = preprocessor_logical_line_spans(source);
+    let depths = ConditionalDepths::new(source, &lines)?;
+    if depths.total() != 0 {
         return Err(GeneratedHeaderError::new(
             "generated source has an unclosed preprocessor conditional",
         ));
     }
+    let directives = directive_commitment(&lines);
     let parsed = parse_c_function_definitions(source)?;
     let functions = &parsed.functions;
     let mut claimed = vec![false; functions.len()];
@@ -673,9 +677,7 @@ fn bind_c_definitions(
             )));
         }
         let (index, function) = enclosed[0];
-        if preprocessor_conditional_depth(&source[..function.start])? != 0
-            || preprocessor_conditional_depth(&source[..function.end])? != 0
-        {
+        if depths.of_prefix(function.start)? != 0 || depths.of_prefix(function.end)? != 0 {
             return Err(GeneratedHeaderError::new(format!(
                 "generated export `{source_name}` is conditionally included"
             )));
@@ -698,7 +700,7 @@ fn bind_c_definitions(
                 "generated export `{source_name}` declaration does not structurally match its C definition"
             )));
         }
-        let digest = definition_commitment(source, function, &parsed.error_context);
+        let digest = definition_commitment(&directives, source, function, &parsed.error_context);
         if enforce_digest && digest != definition.definition_digest {
             return Err(GeneratedHeaderError::new(format!(
                 "generated export `{source_name}` definition digest disagrees with its exact C definition"
@@ -729,20 +731,28 @@ fn bind_c_definitions(
     Ok(digests)
 }
 
+/// The leading part of every definition commitment in one source: the version
+/// tag and the source's preprocessor directives.
+fn directive_commitment(lines: &[LogicalLine]) -> Sha256 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"chelis-c-definition-v2\0");
+    for directive in lines
+        .iter()
+        .filter(|line| is_preprocessor_directive(&line.text))
+    {
+        hasher.update(directive.text.len().to_le_bytes());
+        hasher.update(directive.text.as_bytes());
+    }
+    hasher
+}
+
 fn definition_commitment(
+    directives: &Sha256,
     source: &str,
     function: &CFunctionDefinition,
     error_context: &str,
 ) -> String {
-    let directives = preprocessor_logical_lines(source)
-        .into_iter()
-        .filter(|line| is_preprocessor_directive(line));
-    let mut hasher = Sha256::new();
-    hasher.update(b"chelis-c-definition-v2\0");
-    for directive in directives {
-        hasher.update(directive.len().to_le_bytes());
-        hasher.update(directive.as_bytes());
-    }
+    let mut hasher = directives.clone();
     hasher.update(b"\0parser-errors\0");
     hasher.update(error_context.as_bytes());
     hasher.update(b"\0definition\0");
@@ -1292,24 +1302,76 @@ fn preprocessor_directive_name(line: &str) -> Option<String> {
 fn preprocessor_conditional_depth(source: &str) -> Result<usize, GeneratedHeaderError> {
     let mut depth = 0usize;
     for line in preprocessor_logical_lines(source) {
-        match preprocessor_directive_name(&line).as_deref() {
-            Some("if" | "ifdef" | "ifndef") => depth += 1,
-            Some("elif" | "else") if depth == 0 => {
-                return Err(GeneratedHeaderError::new(
-                    "generated source has a preprocessor branch without an opening conditional",
-                ));
-            }
-            Some("endif") => {
-                depth = depth.checked_sub(1).ok_or_else(|| {
-                    GeneratedHeaderError::new(
-                        "generated source has a preprocessor end without an opening conditional",
-                    )
-                })?;
-            }
-            _ => {}
+        if let Some(directive) = preprocessor_directive_name(&line) {
+            depth = conditional_depth_after(depth, &directive)?;
         }
     }
     Ok(depth)
+}
+
+fn conditional_depth_after(depth: usize, directive: &str) -> Result<usize, GeneratedHeaderError> {
+    match directive {
+        "if" | "ifdef" | "ifndef" => Ok(depth + 1),
+        "elif" | "else" if depth == 0 => Err(GeneratedHeaderError::new(
+            "generated source has a preprocessor branch without an opening conditional",
+        )),
+        "endif" => depth.checked_sub(1).ok_or_else(|| {
+            GeneratedHeaderError::new(
+                "generated source has a preprocessor end without an opening conditional",
+            )
+        }),
+        _ => Ok(depth),
+    }
+}
+
+/// The conditional depth after each preprocessor directive of one source, so
+/// that the depth of a prefix of it is a lookup rather than another scan.
+struct ConditionalDepths<'a> {
+    source: &'a str,
+    /// Each directive line's span in `source`, in source order.
+    spans: Vec<(usize, usize)>,
+    /// The depth before the first directive, then the depth after each one.
+    depths: Vec<usize>,
+}
+
+impl<'a> ConditionalDepths<'a> {
+    /// Fails exactly as `preprocessor_conditional_depth(source)` does, given
+    /// `lines = preprocessor_logical_line_spans(source)`.
+    fn new(source: &'a str, lines: &[LogicalLine]) -> Result<Self, GeneratedHeaderError> {
+        let mut depth = 0usize;
+        let mut spans = Vec::new();
+        let mut depths = vec![depth];
+        for line in lines {
+            if let Some(directive) = preprocessor_directive_name(&line.text) {
+                depth = conditional_depth_after(depth, &directive)?;
+                spans.push((line.start, line.end));
+                depths.push(depth);
+            }
+        }
+        Ok(Self {
+            source,
+            spans,
+            depths,
+        })
+    }
+
+    fn total(&self) -> usize {
+        self.depths[self.spans.len()]
+    }
+
+    /// `preprocessor_conditional_depth(&source[..end])`. A prefix sees the
+    /// directive lines that end within it whole and no part of the ones that
+    /// start after it, so only a prefix that ends inside a directive line,
+    /// whose truncated text could name another directive, is scanned again.
+    fn of_prefix(&self, end: usize) -> Result<usize, GeneratedHeaderError> {
+        let whole = self.spans.partition_point(|&(_, line_end)| line_end <= end);
+        match self.spans.get(whole) {
+            Some(&(line_start, _)) if line_start < end => {
+                preprocessor_conditional_depth(&self.source[..end])
+            }
+            _ => Ok(self.depths[whole]),
+        }
+    }
 }
 
 fn validate_generated_include_set(source: &str) -> Result<(), GeneratedHeaderError> {
@@ -1437,9 +1499,75 @@ fn preprocessor_logical_lines(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// One of `preprocessor_logical_lines(source)` with the span of `source` it
+/// comes from: from the source offset of its first byte to that of its line
+/// terminator, or the end of the source.
+struct LogicalLine {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+fn preprocessor_logical_line_spans(source: &str) -> Vec<LogicalLine> {
+    let (spliced, splice_origins) = splice_c_lines_tracked(source, true);
+    let (text, origins) = strip_c_comments_tracked(&spliced, splice_origins.as_deref());
+    let origins = origins.expect("a tracked pass records every output byte's origin");
+    let origin = |at: usize| origins.get(at).copied().unwrap_or(source.len());
+    let mut lines = Vec::new();
+    let mut first = 0;
+    for line in text.lines() {
+        let after = first + line.len();
+        debug_assert_eq!(&text[first..after], line);
+        lines.push(LogicalLine {
+            start: origin(first),
+            end: origin(after),
+            text: line.to_string(),
+        });
+        first = after
+            + if text[after..].starts_with("\r\n") {
+                2
+            } else {
+                usize::from(text[after..].starts_with('\n'))
+            };
+    }
+    lines
+}
+
+/// Bytes a text pass emits and, when tracked, the source offset of each.
+struct Emitted<'a> {
+    bytes: Vec<u8>,
+    origins: Option<Vec<usize>>,
+    /// The source offset of each input byte; `None` means the input is the source.
+    input_origins: Option<&'a [usize]>,
+}
+
+impl<'a> Emitted<'a> {
+    fn new(capacity: usize, track: bool, input_origins: Option<&'a [usize]>) -> Self {
+        Self {
+            bytes: Vec::with_capacity(capacity),
+            origins: track.then(|| Vec::with_capacity(capacity)),
+            input_origins,
+        }
+    }
+
+    /// Emits `byte` as coming from input byte `at`.
+    fn push(&mut self, byte: u8, at: usize) {
+        self.bytes.push(byte);
+        if let Some(origins) = &mut self.origins {
+            origins.push(self.input_origins.map_or(at, |input| input[at]));
+        }
+    }
+}
+
 fn splice_c_lines(source: &str) -> String {
+    splice_c_lines_tracked(source, false).0
+}
+
+fn splice_c_lines_tracked(source: &str, track: bool) -> (String, Option<Vec<usize>>) {
+    #[cfg(test)]
+    tests::SOURCE_SCANS.with(|scans| scans.set(scans.get() + 1));
     let bytes = source.as_bytes();
-    let mut spliced = Vec::with_capacity(bytes.len());
+    let mut spliced = Emitted::new(bytes.len(), track, None);
     let mut index = 0;
     while index < bytes.len() {
         let splice_marker_len = if bytes[index] == b'\\' {
@@ -1463,13 +1591,26 @@ fn splice_c_lines(source: &str) -> String {
                 continue;
             }
         }
-        spliced.push(bytes[index]);
+        spliced.push(bytes[index], index);
         index += 1;
     }
-    String::from_utf8(spliced).expect("splicing UTF-8 at ASCII line boundaries preserves UTF-8")
+    (
+        String::from_utf8(spliced.bytes)
+            .expect("splicing UTF-8 at ASCII line boundaries preserves UTF-8"),
+        spliced.origins,
+    )
 }
 
 fn strip_c_comments(source: &str) -> String {
+    strip_c_comments_tracked(source, None).0
+}
+
+/// Given the source offset of each byte of `source`, also returns that of each
+/// output byte; a comment's replacement space comes from its first byte.
+fn strip_c_comments_tracked(
+    source: &str,
+    origins: Option<&[usize]>,
+) -> (String, Option<Vec<usize>>) {
     #[derive(Clone, Copy)]
     enum State {
         Normal,
@@ -1479,28 +1620,28 @@ fn strip_c_comments(source: &str) -> String {
     }
 
     let bytes = source.as_bytes();
-    let mut stripped = Vec::with_capacity(bytes.len());
+    let mut stripped = Emitted::new(bytes.len(), origins.is_some(), origins);
     let mut state = State::Normal;
     let mut index = 0;
     while index < bytes.len() {
         match state {
             State::Normal if bytes[index..].starts_with(b"/*") => {
-                stripped.push(b' ');
+                stripped.push(b' ', index);
                 state = State::BlockComment;
                 index += 2;
             }
             State::Normal if bytes[index..].starts_with(b"//") => {
-                stripped.push(b' ');
+                stripped.push(b' ', index);
                 state = State::LineComment;
                 index += 2;
             }
             State::Normal if matches!(bytes[index], b'"' | b'\'') => {
-                stripped.push(bytes[index]);
+                stripped.push(bytes[index], index);
                 state = State::Quoted(bytes[index]);
                 index += 1;
             }
             State::Normal => {
-                stripped.push(bytes[index]);
+                stripped.push(bytes[index], index);
                 index += 1;
             }
             State::BlockComment if bytes[index..].starts_with(b"*/") => {
@@ -1509,37 +1650,40 @@ fn strip_c_comments(source: &str) -> String {
             }
             State::BlockComment => {
                 if bytes[index] == b'\n' {
-                    stripped.push(b'\n');
+                    stripped.push(b'\n', index);
                 }
                 index += 1;
             }
             State::LineComment => {
                 if bytes[index] == b'\n' {
-                    stripped.push(b'\n');
+                    stripped.push(b'\n', index);
                     state = State::Normal;
                 }
                 index += 1;
             }
             State::Quoted(_) if bytes[index] == b'\\' => {
-                stripped.push(bytes[index]);
+                stripped.push(bytes[index], index);
                 index += 1;
                 if index < bytes.len() {
-                    stripped.push(bytes[index]);
+                    stripped.push(bytes[index], index);
                     index += 1;
                 }
             }
             State::Quoted(quote) if bytes[index] == quote => {
-                stripped.push(bytes[index]);
+                stripped.push(bytes[index], index);
                 state = State::Normal;
                 index += 1;
             }
             State::Quoted(_) => {
-                stripped.push(bytes[index]);
+                stripped.push(bytes[index], index);
                 index += 1;
             }
         }
     }
-    String::from_utf8(stripped).expect("comment stripping preserves UTF-8 source bytes")
+    (
+        String::from_utf8(stripped.bytes).expect("comment stripping preserves UTF-8 source bytes"),
+        stripped.origins,
+    )
 }
 
 fn macro_definition_name(line: &str) -> Option<String> {
@@ -1626,11 +1770,98 @@ impl<'a> CDirectiveCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GeneratedHeader, encode_hex, render_authored_export_begin, render_authored_export_end,
-        render_declaration, render_declaration_record, render_direct_export_begin,
-        render_direct_export_end, reseal_generated_artifact, seal_generated_artifact,
-        source_digest,
+        ConditionalDepths, GeneratedHeader, encode_hex, preprocessor_conditional_depth,
+        preprocessor_logical_line_spans, preprocessor_logical_lines, render_authored_export_begin,
+        render_authored_export_end, render_declaration, render_declaration_record,
+        render_direct_export_begin, render_direct_export_end, reseal_generated_artifact,
+        seal_generated_artifact, source_digest,
     };
+
+    thread_local! {
+        /// Line-splicing passes over a source, each the start of a full scan.
+        pub(super) static SOURCE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Sources whose line splices, comments, quotes, line endings and
+    /// directive spellings make a prefix's preprocessor view differ from the
+    /// whole source's near the cut.
+    const PREPROCESSOR_SHAPES: &[&str] = &[
+        "#if A\nint f(void) { return 1; }\n#endif\nint g(void) { return 2; }\n",
+        "#ifdef A\r\n#else\r\n#endif\r\nint h;\r\n",
+        "#if \\\nA\n#endif\n??=if B\n%:endif\nint f;",
+        "/* #if A\n */ int f; // #if B\n#iffy C\n#if D /* x\n*/\n#endif\n",
+        "char *s = \"/* #if */\";\n#if E\n#elif F\n#endif\n#de??/\nfine X 1\n",
+        "#ifndef G\n#if H\n#endif\n#endif\n#endifx\nint tail",
+    ];
+
+    #[test]
+    fn logical_line_spans_carry_the_logical_lines_and_their_source_spans() {
+        for source in PREPROCESSOR_SHAPES {
+            let spans = preprocessor_logical_line_spans(source);
+            let texts: Vec<String> = spans.iter().map(|line| line.text.clone()).collect();
+            assert_eq!(texts, preprocessor_logical_lines(source), "{source:?}");
+            let mut previous_end = 0;
+            for line in &spans {
+                assert!(
+                    previous_end <= line.start && line.start <= line.end,
+                    "{source:?}"
+                );
+                assert!(line.end <= source.len(), "{source:?}");
+                previous_end = line.end;
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_depth_of_a_prefix_is_its_scanned_depth_at_every_cut() {
+        for source in PREPROCESSOR_SHAPES {
+            let lines = preprocessor_logical_line_spans(source);
+            let depths = ConditionalDepths::new(source, &lines).expect("balanced shape");
+            assert_eq!(
+                depths.total(),
+                preprocessor_conditional_depth(source).expect("balanced shape")
+            );
+            for end in (0..=source.len()).filter(|&end| source.is_char_boundary(end)) {
+                assert_eq!(
+                    depths.of_prefix(end).map_err(|error| error.to_string()),
+                    preprocessor_conditional_depth(&source[..end])
+                        .map_err(|error| error.to_string()),
+                    "{source:?} cut at {end}"
+                );
+            }
+        }
+    }
+
+    /// chelis#2637: sealing scans the source a fixed number of times, not once
+    /// or more per export.
+    #[test]
+    fn sealing_scans_the_source_a_fixed_number_of_times_whatever_its_export_count() {
+        let scans_to_seal = |exports: usize| {
+            let mut header = Vec::new();
+            let mut source = String::from("#include <stdio.h>\n");
+            for index in 0..exports {
+                let name = format!("f{index}");
+                let symbol = format!("chelis_fn_{}", encode_hex(&name));
+                let declaration = format!("int {symbol}(int s);");
+                let (record, export) = raw_export(
+                    &name,
+                    &symbol,
+                    &declaration,
+                    &format!("int {symbol}(int s) {{\n    return s + {index};\n}}"),
+                );
+                header.push(record);
+                source.push_str(&export);
+                source.push('\n');
+            }
+            SOURCE_SCANS.with(|scans| scans.set(0));
+            seal_generated_artifact("demo", &source, &header.join("\n"))
+                .expect("trivial exports seal");
+            SOURCE_SCANS.with(std::cell::Cell::get)
+        };
+        let few = scans_to_seal(2);
+        assert!(few > 0, "the counter observes the scans");
+        assert_eq!(scans_to_seal(40), few);
+    }
 
     fn declaration_record_prefix(source_name: &str) -> String {
         format!("/* chelis-declaration: {} ", encode_hex(source_name))
