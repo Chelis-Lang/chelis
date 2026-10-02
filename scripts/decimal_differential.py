@@ -277,8 +277,9 @@ row("row_order", ["string", "string"],
      "[to_string(decimal_lt(x, y)), to_string(decimal_lte(x, y)), to_string(decimal_gt(x, y)), to_string(decimal_gte(x, y))]"],
     lambda a, c: [b(ref.decimal_lt(d(a), d(c))), b(ref.decimal_lte(d(a), d(c))), b(ref.decimal_gt(d(a), d(c))),
                   b(ref.decimal_gte(d(a), d(c)))])
-# [05-OP-36] structural equality. Every row kind runs in programs of its own,
-# so a rejection of `==` on the opaque type cannot hide any other row.
+# [05-OP-36] structural equality. Outside the canary every row kind runs in
+# programs of its own, so a rejection of `==` on the opaque type cannot hide any
+# other row; in the canary's one program it fails every row.
 row("row_eq", ["string", "string"], ["[to_string(decimal(p0) == decimal(p1))]"],
     lambda a, c: [b(ref.decimal_eq(d(a), d(c)))])
 
@@ -951,17 +952,33 @@ def build_corpus(large: bool = False) -> Corpus:
 def build_canary_corpus() -> Corpus:
     """The canary corpus: a fixed hand-picked handful of the default corpus's edge inputs.
 
-    It calls every callable on the envelope's ends and on inputs whose
-    arithmetic carries from one limb into the next, rounds a tie of each sign in
-    every mode through every callable that takes a mode (except `decimal_round`
-    under `RejectInexact`, a failure, which the canary does not run), rounds a
-    tie whose floor is odd under `RoundTiesToEven` through `decimal_to_i64`,
-    `decimal_from_f64` and `decimal_div`, converts an f64 and an f32 halfway
-    case of each sign and an f32 midpoint witness pair that a conversion through
-    f64 rounds wrongly on one side, divides on one witness of each
-    long-division correction, and observes every twin. It has no seeded random inputs, so it
-    detects a defect only on the inputs it names; the default corpus is the
-    complete check.
+    It runs every row, so it calls every callable and observes every twin, in
+    one program with no failure programs and no seeded random inputs. It
+    detects a defect only where one of its expected outputs changes; the
+    default corpus is the complete check. Each defect class below changes at
+    least one of them, which `scripts/test_decimal_differential.py` checks
+    against models of the class that perturb the reference as a module with the
+    defect would compute:
+
+    - a coefficient or scale bound off by one
+    - an inner limb rendered without its leading zeros
+    - a limb carry dropped in addition
+    - a limb borrow dropped in subtraction
+    - a limb product's carry dropped in multiplication
+    - a directed rounding mode rounding as another directed mode
+    - a RoundTiesToEven tie broken toward zero, away from zero, toward positive or toward negative
+    - a RoundTiesToAway tie broken to even, toward zero, toward positive or toward negative
+    - a RejectInexact call accepting an inexact value
+    - a binary conversion tie broken toward zero, away from zero, toward positive or toward negative
+    - an f32 conversion rounding through f64
+    - a long division taking one quotient-digit correction or none
+
+    The binary conversions are `decimal_to_f64` and `decimal_to_f32`. The
+    rounding classes hold for every callable that takes a mode, except that a
+    `RejectInexact` rounding of an inexact value is a failure, which the canary
+    does not run: it meets that of `decimal_to_i64`, `decimal_from_f64` and
+    `decimal_div` only through their `try_` twins, and that of `decimal_round`,
+    which has no twin, not at all.
     """
     corpus = Corpus(twin_stride=1)
     limbs = [str(10 ** (9 * j) + delta) for j in (1, 2, 4) for delta in (-1, 0)]
@@ -971,6 +988,9 @@ def build_canary_corpus() -> Corpus:
                                              *f32_midpoint_witnesses(1)[:2]])):
         for text in texts:
             corpus.value(category, text)
+    # Halfway cases of f64 and of f32 whose even neighbour is the larger.
+    for text in ("9007199254740995", "16777219"):
+        corpus.add("float_edges", "row_floats", (text,))
     for category, texts in (("parse_accepted", ["1e-0005"]), ("parse_malformed", ["+1", "1e"]),
                             ("parse_outside", ["1e38", "1e-39"])):
         for text in texts:
@@ -993,12 +1013,16 @@ def build_canary_corpus() -> Corpus:
         corpus.to_i64("to_i64", text, mode)
     for x, n in ((0.1, 38), (5e-324, 38), (math.nan, 2)):
         corpus.from_f64("from_f64", x, n, "RoundTiesToEven")
-    corpus.round("round", "-0." + "0" * 36 + "25", 37, "RoundTiesToEven")
+    for mode in ("RoundTiesToEven", "RoundTiesToAway"):
+        corpus.round("round", "-0." + "0" * 36 + "25", 37, mode)
     for a, c in [("999999999" + "0" * k, "1" + "0" * k) for k in (0, 18)] + [
             (MAX_TEXT, "-1"), ("99999999999999999999", "99999999999999999999"), ("1e-19", "1e-19"),
             ("0." + NINES, TINY_TEXT)]:
         for op in ("add", "sub", "mul"):
             corpus.arith("arith", op, a, c)
+    # Limb products that carry, and a subtraction that borrows across limbs.
+    corpus.arith("arith", "mul", "999999999999999999", "999999999999999999")
+    corpus.arith("arith", "sub", "1000000000000000000", "1")
     for a, c, n in (("1", "3", 38), (MAX_TEXT, "0.5", 0), (TINY_TEXT, MAX_TEXT, 38)):
         corpus.div("div", a, c, n, "RoundTiesToEven")
     for category, witnesses in (("div_quotient_correction", QUOTIENT_CORRECTION_WITNESSES),

@@ -598,7 +598,9 @@ fn extreme_cases() -> Vec<(&'static str, String)> {
 /// case of `extreme_cases`: the envelope's ends, scales outside 0..38 and at
 /// the i64 limits, the i64 limits and their ties, subnormal and non-finite
 /// floats, text at the length bound or with an exponent at the i64 limit, a
-/// zero divisor, and a result past the envelope. A trap that only another
+/// zero divisor, and a result past the envelope. A scale outside 0..38 comes
+/// with a finite float and a nonzero divisor, since a non-finite float and a
+/// zero divisor are rejected before the scale. A trap that only another
 /// combination of arguments reaches is left to the complete sweep.
 fn extreme_canary_cases() -> Vec<(&'static str, String)> {
     let dec = |text: &str| format!("decimal(\"{text}\")");
@@ -638,7 +640,8 @@ fn extreme_canary_cases() -> Vec<(&'static str, String)> {
     for (float, scale, mode) in [
         ("5.0e-324f64", "38i64", "RoundTowardZero"),
         ("neg(1.7976931348623157e308f64)", "0i64", "RejectInexact"),
-        ("div(1.0f64, 0.0f64)", "i64_minimum()", "RoundTowardZero"),
+        ("div(1.0f64, 0.0f64)", "0i64", "RoundTowardZero"),
+        ("0.1f64", "i64_minimum()", "RoundTiesToEven"),
     ] {
         cases.push((
             "decimal_from_f64",
@@ -674,7 +677,8 @@ fn extreme_canary_cases() -> Vec<(&'static str, String)> {
     }
     for (numerator, denominator, scale, mode) in [
         (MAX, tiny, "0i64", "RoundTiesToEven"),
-        (MAX, "0", "39i64", "RejectInexact"),
+        (MAX, "0", "0i64", "RejectInexact"),
+        (MAX, "-3", "39i64", "RoundTiesToEven"),
         (
             "-0.00000000000000000000000000000000000001",
             "-3",

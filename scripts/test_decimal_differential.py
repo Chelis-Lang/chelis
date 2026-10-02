@@ -6,15 +6,21 @@ conforming module would print, computed from the reference, and each test then
 breaks one observation the way a defective lane could and checks that the
 comparator reports it under the right class. The generator tests check that
 the corpus is deterministic, covers each category the harness promises, and
-renders literals that denote exactly the intended inputs.
+renders literals that denote exactly the intended inputs. The canary's defect
+models perturb the reference the way a defective module would compute, and
+each must change an expected output of the canary.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 import contextlib
+from fractions import Fraction
 import functools
+import inspect
 import io
 import math
+import operator
 import os
 import random
 import re
@@ -419,42 +425,6 @@ class Canary(unittest.TestCase):
         for name in harness.DECIMAL_NAMES[1:]:
             self.assertRegex(text, rf"\b{name}\(", name)
 
-    def test_a_tie_of_each_sign_meets_every_mode(self) -> None:
-        def args(row: str) -> set[tuple]:
-            return {c.args for c in CANARY.cases if c.row == row}
-        big = "4999999999999999999999999999999999999.5"
-        for mode in harness.ROUNDINGS:
-            for sign in ("", "-"):
-                self.assertIn((sign + "2.5", mode), args("row_try_to_i64"))
-                self.assertIn((float(sign + "2.5"), 0, mode), args("row_try_from_f64"))
-                self.assertIn((sign + "5", "2", 0, mode), args("row_try_div"))
-                rounded = (sign + big, 0, mode)
-                if mode == "RejectInexact":
-                    self.assertIn(rounded, {f.args for f in CANARY.failures if f.function == "decimal_round"})
-                else:
-                    self.assertIn(rounded, args("row_round"))
-
-    def test_a_tie_with_an_odd_floor_meets_ties_to_even(self) -> None:
-        def args(row: str) -> set[tuple]:
-            return {c.args for c in CANARY.cases if c.row == row}
-        for sign in ("", "-"):
-            self.assertIn((sign + "1.5", "RoundTiesToEven"), args("row_try_to_i64"))
-            self.assertIn((float(sign + "1.5"), 0, "RoundTiesToEven"), args("row_try_from_f64"))
-            self.assertIn((sign + "3", "2", 0, "RoundTiesToEven"), args("row_try_div"))
-
-    def test_both_float_roundings_meet_a_halfway_case_of_each_sign(self) -> None:
-        floats = {c.args[0] for c in CANARY.cases if c.row == "row_floats"}
-        self.assertTrue({"9007199254740993", "-9007199254740993", "16777217", "-16777217"} <= floats)
-        for text, fmt in (("9007199254740993", ref.F64), ("16777217", ref.F32)):
-            below, above = int(text) - 1, int(text) + 1
-            self.assertEqual(ref.text_bits(str(below), fmt) + 1, ref.text_bits(str(above), fmt), text)
-
-    def test_an_f32_conversion_through_f64_fails_a_value(self) -> None:
-        def through_f64(x: ref.Decimal) -> int:
-            return struct.unpack("<I", struct.pack("<f", ref.decimal_to_f64(x)))[0]
-        values = [ref.decimal(c.args[0]) for c in CANARY.cases if c.row == "row_floats"]
-        self.assertTrue(any(ref.decimal_to_f32_bits(x) != through_f64(x) for x in values))
-
     def test_the_canary_is_one_program_with_no_failure_program(self) -> None:
         selected = canary_programs()
         self.assertEqual(len(selected), 1)
@@ -510,6 +480,254 @@ class Canary(unittest.TestCase):
         report = harness.run_all(FakeRunner(missing), canary_programs(), ("eval", "c"), 2, lambda _: None)
         self.assertEqual(report.classes, {"value": 1})
         self.assertIn("out_row_eq: no output line", report.problems[0])
+
+
+# ---------------------------------------------------------------------------
+# Defect models for the canary. A model is a set of `decimal_reference`
+# attributes to replace, so that the reference computes what a module with that
+# defect would. Magnitudes are little-endian base-10^9 limbs of the canonical
+# coefficient, as Std.Decimal stores them.
+
+LIMB = ref.LIMB_BASE
+
+
+def limb(x: int, k: int) -> int:
+    return x // LIMB**k % LIMB
+
+
+def limb_count(x: int) -> int:
+    """The limbs up to the highest nonzero one; zero has one."""
+    count = 1
+    while x >= LIMB**count:
+        count += 1
+    return count
+
+
+def limbwise(op: Callable[[int, int], int]) -> Callable[[int, int], int]:
+    """`op` limb by limb, each result reduced to its own limb, so that no carry or borrow crosses a limb."""
+    def apply(x: int, y: int) -> int:
+        return sum(op(limb(x, k), limb(y, k)) % LIMB * LIMB**k for k in range(max(limb_count(x), limb_count(y))))
+    return apply
+
+
+def carryless_product(x: int, y: int) -> int:
+    """The schoolbook product with the carry out of each limb product dropped."""
+    return sum(limb(x, i) * limb(y, j) % LIMB * LIMB ** (i + j)
+               for i in range(limb_count(x)) for j in range(limb_count(y)))
+
+
+def sums(add: Callable[[int, int], int], subtract: Callable[[int, int], int]) -> dict[str, object]:
+    """`decimal_add` and `decimal_sub` that combine the magnitudes, aligned to the wider scale,
+    with `add` when the signs agree and otherwise with `subtract`, larger minus smaller."""
+    def signed(function: str, negate: bool) -> Callable[[ref.Decimal, ref.Decimal], ref.Decimal]:
+        def call(a: ref.Decimal, b: ref.Decimal) -> ref.Decimal:
+            scale = max(a.scale, b.scale)
+            left, right = (abs(x.coefficient) * 10 ** (scale - x.scale) for x in (a, b))
+            a_negative, b_negative = a.coefficient < 0, (b.coefficient < 0) != negate
+            if a_negative == b_negative:
+                magnitude, negative = add(left, right), a_negative
+            elif left >= right:
+                magnitude, negative = subtract(left, right), a_negative
+            else:
+                magnitude, negative = subtract(right, left), b_negative
+            return ref.arithmetic(function, Fraction(-magnitude if negative else magnitude, 10**scale))
+        return call
+    return {"decimal_add": signed("decimal_add", False), "decimal_sub": signed("decimal_sub", True)}
+
+
+def product(multiply: Callable[[int, int], int]) -> dict[str, object]:
+    """`decimal_mul` that multiplies the magnitudes with `multiply`."""
+    def decimal_mul(a: ref.Decimal, b: ref.Decimal) -> ref.Decimal:
+        magnitude = multiply(abs(a.coefficient), abs(b.coefficient))
+        negative = (a.coefficient < 0) != (b.coefficient < 0)
+        return ref.arithmetic("decimal_mul", Fraction(-magnitude if negative else magnitude, 10 ** (a.scale + b.scale)))
+    return {"decimal_mul": decimal_mul}
+
+
+def long_division(corrections: int) -> Callable[[int, int], tuple[int, int]]:
+    """Std.Decimal's floor quotient and remainder of magnitudes: by a one-limb divisor
+    directly, otherwise by Knuth's algorithm D, which estimates each quotient limb from
+    the remainder's top two limbs, clamps it to 10^9 - 1 and lowers it by at most
+    `corrections` steps. A step that subtracts too much keeps only the remainder's own
+    limbs, as the limb subtraction does."""
+    def divide(num: int, den: int) -> tuple[int, int]:
+        size = limb_count(den)
+        if size == 1:
+            return divmod(num, den)
+        factor = LIMB // (limb(den, size - 1) + 1)
+        divisor, rest = den * factor, num * factor
+        lead = limb(divisor, size - 1)
+        quotient = 0
+        for position in reversed(range(limb_count(num) - size + 1)):
+            digit = min((limb(rest, position + size) * LIMB + limb(rest, position + size - 1)) // lead, LIMB - 1)
+            for _ in range(corrections):
+                if divisor * digit * LIMB**position > rest:
+                    digit -= 1
+            quotient += digit * LIMB**position
+            rest = (rest - divisor * digit * LIMB**position) % LIMB ** limb_count(rest)
+        return quotient, rest // factor
+    return divide
+
+
+def quotient(divide: Callable[[int, int], tuple[int, int]]) -> dict[str, object]:
+    """`decimal_div` that takes its magnitude quotient and remainder from `divide` and
+    rounds them by the reference. A remainder of at least the divisor counts as more
+    than half of it, as the module's comparison of twice the remainder with the
+    divisor does."""
+    def decimal_div(a: ref.Decimal, b: ref.Decimal, n: int, mode: str, function: str = "decimal_div") -> ref.Decimal:
+        if b.coefficient == 0:
+            raise ref.domain(function, "division_by_zero", "division by zero")
+        ref.check_scale(function, n)
+        shift = n + b.scale - a.scale
+        num, den = abs(a.coefficient) * 10 ** max(shift, 0), abs(b.coefficient) * 10 ** max(-shift, 0)
+        whole, remainder = divide(num, den)
+        magnitude = whole + (Fraction(remainder, den) if remainder < den else Fraction(3, 4))
+        negative = (a.coefficient < 0) != (b.coefficient < 0)
+        result = ref.canonical(ref.round_to_quantum((-magnitude if negative else magnitude) / 10**n, n, mode, function))
+        if result is None:
+            raise ref.overflow(function, "overflow", pattern=ref.OUTSIDE_RANGE)
+        return result
+    return {"decimal_div": decimal_div}
+
+
+# How a tie is broken: the magnitude it rounds to, from its floor and its sign.
+TIES: dict[str, Callable[[int, bool], int]] = {
+    "toward zero": lambda floor, negative: floor,
+    "away from zero": lambda floor, negative: floor + 1,
+    "toward positive": lambda floor, negative: floor + (not negative),
+    "toward negative": lambda floor, negative: floor + negative,
+    "to even": lambda floor, negative: floor + floor % 2,
+}
+WRONG_TIES = ("toward zero", "away from zero", "toward positive", "toward negative")
+MODE_CALLABLES = ("decimal_to_i64", "decimal_from_f64", "decimal_round", "decimal_div")
+DIRECTED = ("RoundTowardNegative", "RoundTowardPositive", "RoundTowardZero", "RoundAwayFromZero")
+
+
+def rounding(callable_name: str, mode: str, as_mode: str | None = None, tie: str | None = None) -> dict[str, object]:
+    """`round_to_quantum` where `callable_name`, or its `try_` twin, rounds under `mode`
+    as under `as_mode`, or breaks an exact tie by `TIES[tie]`."""
+    original = ref.round_to_quantum
+
+    def round_to_quantum(v: Fraction, n: int, given: str, function: str, shown=None) -> Fraction:
+        if given != mode or function.removeprefix("try_") != callable_name:
+            return original(v, n, given, function, shown)
+        floor, rest = divmod(abs(v) * 10**n, 1)
+        if tie is not None and rest == Fraction(1, 2):
+            magnitude = TIES[tie](floor, v < 0)
+            return Fraction(-magnitude if v < 0 else magnitude, 10**n)
+        return original(v, n, as_mode or given, function, shown)
+    return {"round_to_quantum": round_to_quantum}
+
+
+def binary_rounding(fmt: tuple[int, int], tie: str) -> dict[str, object]:
+    """`round_binary` that breaks an exact tie in `fmt` by `TIES[tie]`, in units in the last place."""
+    original = ref.round_binary
+
+    def round_binary(q: Fraction, given: tuple[int, int]) -> Fraction:
+        rounded = original(q, given)
+        if given != fmt or q == 0:
+            return rounded
+        precision, exponent_bits = fmt
+        lowest = 2 - 2 ** (exponent_bits - 1) - (precision - 1)
+        unit = Fraction(2) ** max(ref.floor_log2(abs(q)) - (precision - 1), lowest)
+        floor, rest = divmod(abs(q) / unit, 1)
+        if rest != Fraction(1, 2):
+            return rounded
+        magnitude = TIES[tie](floor, q < 0) * unit
+        return -magnitude if q < 0 else magnitude
+    return {"round_binary": round_binary}
+
+
+def f32_through_f64(x: ref.Decimal) -> int:
+    return struct.unpack("<I", struct.pack("<f", ref.decimal_to_f64(x)))[0]
+
+
+def unpadded_text(x: ref.Decimal) -> str:
+    """`decimal_to_string` printing each limb below the top without its leading zeros."""
+    magnitude = abs(x.coefficient)
+    digits = "".join(str(limb(magnitude, k)) for k in reversed(range(limb_count(magnitude))))
+    return ref.render(-int(digits) if x.coefficient < 0 else int(digits), x.scale)
+
+
+# Each defect class the canary's docstring names, with its models by name.
+CANARY_DEFECTS: dict[str, dict[str, dict[str, object]]] = {
+    "a coefficient or scale bound off by one": {
+        "37 digits": {"MAX_DIGITS": 37, "MAX_COEFFICIENT": 10**37 - 1},
+        "39 digits": {"MAX_DIGITS": 39, "MAX_COEFFICIENT": 10**39 - 1},
+        "scale 37": {"MAX_SCALE": 37},
+        "scale 39": {"MAX_SCALE": 39},
+    },
+    "an inner limb rendered without its leading zeros": {"unpadded": {"decimal_to_string": unpadded_text}},
+    "a limb carry dropped in addition": {"carry": sums(limbwise(operator.add), operator.sub)},
+    "a limb borrow dropped in subtraction": {"borrow": sums(operator.add, limbwise(operator.sub))},
+    "a limb product's carry dropped in multiplication": {"carry": product(carryless_product)},
+    "a directed rounding mode rounding as another directed mode": {
+        f"{name} {mode} as {other}": rounding(name, mode, as_mode=other)
+        for name in MODE_CALLABLES for mode in DIRECTED for other in DIRECTED if other != mode},
+    "a RoundTiesToEven tie broken toward zero, away from zero, toward positive or toward negative": {
+        f"{name} {tie}": rounding(name, "RoundTiesToEven", tie=tie) for name in MODE_CALLABLES for tie in WRONG_TIES},
+    "a RoundTiesToAway tie broken to even, toward zero, toward positive or toward negative": {
+        f"{name} {tie}": rounding(name, "RoundTiesToAway", tie=tie)
+        for name in MODE_CALLABLES for tie in ("to even", "toward zero", "toward positive", "toward negative")},
+    "a RejectInexact call accepting an inexact value": {
+        name: rounding(name, "RejectInexact", as_mode="RoundTowardZero") for name in MODE_CALLABLES
+        if name != "decimal_round"},
+    "a binary conversion tie broken toward zero, away from zero, toward positive or toward negative": {
+        f"f{width} {tie}": binary_rounding(fmt, tie)
+        for width, fmt in ((64, ref.F64), (32, ref.F32)) for tie in WRONG_TIES},
+    "an f32 conversion rounding through f64": {"through f64": {"decimal_to_f32_bits": f32_through_f64}},
+    "a long division taking one quotient-digit correction or none": {
+        f"{n} corrections": quotient(long_division(n)) for n in (1, 0)},
+}
+
+# The same models without their defect, which must agree with the reference.
+CONTROLS: dict[str, dict[str, object]] = {
+    "sums": sums(operator.add, operator.sub),
+    "product": product(operator.mul),
+    "long division": quotient(long_division(2)),
+    "exact division": quotient(divmod),
+    **{f"f{width} ties to even": binary_rounding(fmt, "to even") for width, fmt in ((64, ref.F64), (32, ref.F32))},
+    **{f"{name} {mode} ties {tie}": rounding(name, mode, tie=tie) for name in MODE_CALLABLES
+       for mode, tie in (("RoundTiesToEven", "to even"), ("RoundTiesToAway", "away from zero"))},
+}
+
+
+def changed_cases(patches: dict[str, object], cases: Sequence[harness.Case]) -> list[harness.Case]:
+    """The cases whose expected output the patched reference changes. A call that now
+    fails changes its case: the canary would stop with that failure."""
+    with contextlib.ExitStack() as stack:
+        for name, value in patches.items():
+            stack.enter_context(mock.patch.object(ref, name, value))
+        changed = []
+        for case in cases:
+            try:
+                outcome = tuple(harness.ROWS[case.row].expect(*case.args))
+            except ref.DecimalError as error:
+                outcome = (error.message,)
+            if outcome != case.expected:
+                changed.append(case)
+        return changed
+
+
+def docstring_classes() -> list[str]:
+    lines = inspect.cleandoc(harness.build_canary_corpus.__doc__ or "").splitlines()
+    return [line.removeprefix("- ") for line in lines if line.startswith("- ")]
+
+
+class CanaryDefects(unittest.TestCase):
+    def test_the_canary_claims_exactly_the_modelled_classes(self) -> None:
+        self.assertEqual(docstring_classes(), list(CANARY_DEFECTS))
+
+    def test_every_model_changes_an_expected_canary_output(self) -> None:
+        for defect, models in CANARY_DEFECTS.items():
+            for name, patches in models.items():
+                with self.subTest(defect=defect, model=name):
+                    self.assertTrue(changed_cases(patches, CANARY.cases))
+
+    def test_the_models_without_their_defect_agree_with_the_reference(self) -> None:
+        for name, patches in CONTROLS.items():
+            with self.subTest(name):
+                self.assertEqual(changed_cases(patches, CORPUS.cases), [])
 
 
 class Literals(unittest.TestCase):
