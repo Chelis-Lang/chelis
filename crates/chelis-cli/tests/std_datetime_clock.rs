@@ -2,8 +2,8 @@
 //!
 //! `clock_now` and `monotonic_now` are the only reads of the host in the
 //! `Std.Datetime` family. Each carries `IO`, which `chelis check` holds every
-//! caller to. `MonotonicInstant` is opaque, and `monotonic_until` is its only
-//! operation. Compiled builds reject the underlying [05-OP-75] reads, as they
+//! caller to. `MonotonicInstant` is opaque, and `monotonic_until` is the only
+//! datetime callable that takes one. Compiled builds reject the underlying [05-OP-75] reads, as they
 //! reject `process_run`, until compiled host execution lands (chelis#1297).
 //! Exact readings from a fixed clock are pinned by the evaluator's
 //! injected-clock tests in `chelis-compiler-api`; these run the real clocks.
