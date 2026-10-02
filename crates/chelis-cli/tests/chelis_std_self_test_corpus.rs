@@ -3,7 +3,8 @@
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
 //! exercise chelis-std's own available modules (Std.Tensor, Std.Io,
 //! Std.Sort, Std.Scan, Std.Process, Std.Test, Std.Datetime,
-//! Std.Datetime.Business, Std.Datetime.Clock, Std.Decimal). School provides
+//! Std.Datetime.Business, Std.Datetime.Clock, Std.Datetime.Columns,
+//! Std.Datetime.Zone, Std.Decimal). School provides
 //! the neural-network, loss, optimizer, and scheduling libraries. The corpus
 //! runs via `chelis test packages/chelis-std/tests/`; the default
 //! `cargo test --workspace` gate does not exercise it, so regressions here
@@ -24,10 +25,11 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 /// Floor on the retained chelis-std self-test corpus, set below the measured
-/// 277 passing tests, of which 56 are the Std.Datetime suite, 18 the
-/// Std.Datetime.Business suite, 4 the Std.Datetime.Clock suite, 40 the
-/// Std.Datetime.Zone suite, and 42 the Std.Decimal suite.
-const MIN_PASSED: u32 = 271;
+/// 301 passing tests, of which 56 are the Std.Datetime suite, 18 the
+/// Std.Datetime.Business suite, 4 the Std.Datetime.Clock suite, 24 the
+/// Std.Datetime.Columns suite, 40 the Std.Datetime.Zone suite, and 42 the
+/// Std.Decimal suite.
+const MIN_PASSED: u32 = 295;
 
 fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
