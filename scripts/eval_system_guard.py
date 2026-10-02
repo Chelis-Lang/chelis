@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Tripwire for recognized direct evaluator host-access syntax.
 
-The eight shipped filesystem/process evaluator builtins route through the
-mandatory typed `EvalSystem` policy boundary. This separate source scan
+The shipped filesystem, process, and clock evaluator builtins route through
+the mandatory typed `EvalSystem` policy boundary. This separate source scan
 reports conventional direct host calls and imports outside
 `runtime/system_adapter.rs`, including the tested `use std as host` and
-platform-specific filesystem spellings. It skips test-only modules.
+platform-specific filesystem spellings, and clock reads spelled
+`SystemTime::now` or `Instant::now`. It skips test-only modules.
 
 This lexical check is NOT proof that the adapter is the only possible Rust
 host-access path: for example, `extern crate std as host` and filesystem
-methods on path values derived through `.to_path_buf()` can evade it.
+methods on path values derived through `.to_path_buf()` can evade it, as can
+a clock type imported under another name or a read through `.elapsed()`.
 Those cases require type-aware analysis; a PASS only means the recognized
 patterns were absent from the scanned production sources.
 
@@ -211,6 +213,12 @@ _DIRECT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(rf"\b(?:Path|PathBuf)\s*::\s*{_PATH_EFFECT_METHOD}\s*\("),
         "qualified `Path` filesystem call",
+    ),
+    # [05-OP-75]: the clock reads belong behind the boundary too. A pure
+    # `Duration` is not a host read, so only reading `now` is reported.
+    (
+        re.compile(r"\b(?:SystemTime|Instant)\s*::\s*now\b"),
+        "direct host clock read",
     ),
 )
 

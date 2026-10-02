@@ -151,6 +151,8 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "mmap_read",
     "mmap_len",
     "process_run",
+    "clock_wall_read",
+    "clock_monotonic_read",
     "round_to",
     // Host-lane CSV I/O (chelis#903): RFC-4180-ish parse/serialize plus
     // column accessors over List[Dict[string,string]].
@@ -238,6 +240,8 @@ pub enum BuiltinSiblingCaseId {
     MmapRead,
     MmapLen,
     ProcessRun,
+    ClockWallRead,
+    ClockMonotonicRead,
     ParseCsv,
     ToCsv,
     CsvF64s,
@@ -360,6 +364,8 @@ pub(crate) const fn case_value_equality(case: BuiltinSiblingCaseId) -> ValueEqua
         | Case::MmapRead
         | Case::MmapLen
         | Case::ProcessRun
+        | Case::ClockWallRead
+        | Case::ClockMonotonicRead
         | Case::ParseCsv
         | Case::ToCsv
         | Case::CsvF64s
@@ -622,6 +628,8 @@ pub const fn case_keys(case: BuiltinSiblingCaseId) -> CaseKeys {
         | Case::MmapRead
         | Case::MmapLen
         | Case::ProcessRun
+        | Case::ClockWallRead
+        | Case::ClockMonotonicRead
         | Case::ParseCsv
         | Case::ToCsv
         | Case::CsvF64s
@@ -1804,6 +1812,28 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         name: "process_run",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ProcessRun),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // [05-OP-75]: the host clock reads. Each takes no argument, so its exact
+    // monomorphic signature leaves nothing for a specialized rule to decide.
+    BuiltinDecl {
+        name: "clock_wall_read",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ClockWallRead),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the exact nullary signature fully determines this builtin type",
+        },
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "clock_monotonic_read",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ClockMonotonicRead),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the exact nullary signature fully determines this builtin type",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -3589,6 +3619,17 @@ pub fn builtin_env() -> (Env, VarGen) {
             "process_run",
             vec![string(), list_of(string())],
             Type::Tuple(vec![Type::Prim(Prim::Int64), string(), string()]),
+        ),
+        // [05-OP-75]: `(seconds, nanoseconds)` from one host clock reading.
+        (
+            "clock_wall_read",
+            vec![],
+            Type::Tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]),
+        ),
+        (
+            "clock_monotonic_read",
+            vec![],
+            Type::Tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]),
         ),
     ] {
         env.bind(

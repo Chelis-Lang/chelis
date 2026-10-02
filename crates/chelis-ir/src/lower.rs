@@ -4353,6 +4353,8 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "mmap_read"
                         | "mmap_len"
                         | "process_run"
+                        | "clock_wall_read"
+                        | "clock_monotonic_read"
                         | "round_to"
                         | "parse_csv"
                         | "to_csv"

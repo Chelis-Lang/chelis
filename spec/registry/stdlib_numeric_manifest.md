@@ -12,6 +12,9 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `contracts::normal_cdf_contract_samples` | `()->i64` |
 | `contracts::normal_cdf_contract_seed` | `()->i64` |
 | `contracts::standard_contract_tolerance` | `()->f32` |
+| `datetime/clock::clock_now` | `()->Instant!{IO}` |
+| `datetime/clock::monotonic_now` | `()->MonotonicInstant!{IO}` |
+| `datetime/clock::monotonic_until` | `(MonotonicInstant,MonotonicInstant)->Duration` |
 | `datetime::date` | `(i64,i64,i64)->Date` |
 | `datetime::date_add_days` | `(Date,i64)->Date` |
 | `datetime::date_add_months` | `(Date,i64,DayOverflow)->Date` |

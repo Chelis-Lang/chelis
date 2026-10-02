@@ -4,8 +4,9 @@
 Positive fixtures assert that legitimate evaluator code (adapter delegation,
 raw literals mentioning host names, non-path methods) produces zero hits.
 Negative fixtures cover qualified and imported filesystem/process calls,
-platform-specific filesystem modules, aliased `std` roots, and filesystem
-methods on explicitly constructed or typed `Path`/`PathBuf` receivers.
+platform-specific filesystem modules, aliased `std` roots, filesystem
+methods on explicitly constructed or typed `Path`/`PathBuf` receivers, and
+direct host clock reads.
 """
 
 from pathlib import Path
@@ -110,6 +111,27 @@ class ClassifySourceDirectFormsTests(unittest.TestCase):
     def test_direct_std_fs_call(self):
         hits = reasons("let text = std::fs::read_to_string(path)?;")
         self.assertTrue(any("std::fs::" in reason for reason in hits), hits)
+
+    def test_direct_host_clock_reads(self):
+        for source in (
+            "let now = std::time::SystemTime::now();",
+            "let now = SystemTime::now();",
+            "let now = std::time::Instant :: now();",
+            "let origin = *ORIGIN.get_or_init(Instant::now);",
+        ):
+            hits = reasons(source)
+            self.assertTrue(
+                any("direct host clock read" in reason for reason in hits),
+                (source, hits),
+            )
+
+    def test_pure_duration_use_is_accepted(self):
+        source = """
+        use std::time::Duration;
+        // Instant::now() is read only by the adapter.
+        fn whole_seconds(distance: Duration) -> u64 { distance.as_secs() }
+        """
+        self.assertEqual(reasons(source), [])
 
     def test_direct_std_process_command(self):
         hits = reasons('let out = std::process::Command::new("echo").output()?;')

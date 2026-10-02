@@ -6,6 +6,8 @@ Each row names its governing atom.
 
 | Identity | Atom |
 |---|---|
+| `Boundary:clock_monotonic_read:ClockMonotonicRead` | [05-OP-75] |
+| `Boundary:clock_wall_read:ClockWallRead` | [05-OP-75] |
 | `Boundary:debug:DebugRecursive` | [05-OP-60] |
 | `Boundary:fail:FailString` | [05-OP-60] |
 | `Boundary:file_exists:FileExists` | [05-OP-60] |
