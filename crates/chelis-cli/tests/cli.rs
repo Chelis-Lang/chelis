@@ -5077,11 +5077,18 @@ fn reef_build_emits_shell_and_archive() {
         .args(["reef", "build", pkg.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Built chelis-std 0.4.0"));
+        .stdout(predicate::str::contains(format!(
+            "Built chelis-std {}",
+            chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
+        )));
 
+    let stem = format!(
+        "chelis-std-{}",
+        chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
+    );
     assert!(pkg.join("reef.lock").exists());
-    assert!(pkg.join("dist/chelis-std-0.4.0.chb").exists());
-    assert!(pkg.join("dist/chelis-std-0.4.0.tar.zst").exists());
+    assert!(pkg.join(format!("dist/{stem}.chb")).exists());
+    assert!(pkg.join(format!("dist/{stem}.tar.zst")).exists());
 }
 
 #[test]
