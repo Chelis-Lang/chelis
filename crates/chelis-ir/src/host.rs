@@ -19108,6 +19108,12 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
     }
 }
 
+/// Give `expr` the checked type `ty` and carry the checked context down to
+/// every subexpression (chelis#2599). A child whose type the parent fixes
+/// receives that type. Any other child is conformed by
+/// `conform_host_subexpr`, so a context deeper in the tree, such as a call's
+/// parameter types beneath `len(...)` or a fold seed beneath a callback, still
+/// reaches a bare `None` or `[]` whose type only that context fixes.
 fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
     let HostExpr {
         kind,
@@ -19121,7 +19127,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                     .into_iter()
                     .map(|item| force_host_expr_type(item, (**inner).clone()))
                     .collect(),
-                _ => items,
+                _ => conform_host_subexprs(items),
             };
             HostExprKind::List(items, ty)
         }
@@ -19132,7 +19138,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                     .zip(expected.iter())
                     .map(|(item, expected)| force_host_expr_type(item, expected.clone()))
                     .collect(),
-                _ => items,
+                _ => conform_host_subexprs(items),
             };
             HostExprKind::Tuple(items, ty)
         }
@@ -19150,7 +19156,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                     if let Some(expected) = arg_tys.get(index) {
                         force_host_expr_type(arg, expected.clone())
                     } else {
-                        arg
+                        conform_host_subexpr(arg, None)
                     }
                 })
                 .collect();
@@ -19165,13 +19171,15 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             let args = conform_builtin_arguments(&name, args, &ty);
             HostExprKind::Builtin { name, args, ty }
         }
-        HostExprKind::AdtConstruct { ctor, fields, .. } => {
-            HostExprKind::AdtConstruct { ctor, fields, ty }
-        }
+        HostExprKind::AdtConstruct { ctor, fields, .. } => HostExprKind::AdtConstruct {
+            ctor,
+            fields: conform_host_subexprs(fields),
+            ty,
+        },
         HostExprKind::AdtFieldAccess {
             base, field_index, ..
         } => HostExprKind::AdtFieldAccess {
-            base,
+            base: Box::new(conform_host_subexpr(*base, None)),
             field_index,
             ty,
         },
@@ -19193,7 +19201,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             none_expr,
             ..
         } => HostExprKind::MatchOption {
-            scrutinee,
+            scrutinee: Box::new(conform_host_subexpr(*scrutinee, None)),
             bind_name,
             some_expr: Box::new(force_host_expr_type(*some_expr, ty.clone())),
             none_expr: Box::new(force_host_expr_type(*none_expr, ty.clone())),
@@ -19205,7 +19213,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             default_expr,
             ..
         } => HostExprKind::MatchAdt {
-            scrutinee,
+            scrutinee: Box::new(conform_host_subexpr(*scrutinee, None)),
             arms: arms
                 .into_iter()
                 .map(|mut arm| {
@@ -19246,17 +19254,27 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 ty,
             }
         }
-        HostExprKind::Map { callback, list, .. } => HostExprKind::Map { callback, list, ty },
-        HostExprKind::Filter { callback, list, .. } => HostExprKind::Filter { callback, list, ty },
+        HostExprKind::Map { callback, list, .. } => HostExprKind::Map {
+            callback: conform_host_callback(callback, &list_item_type(&ty)),
+            list: Box::new(conform_host_subexpr(*list, None)),
+            ty,
+        },
+        HostExprKind::Filter { callback, list, .. } => HostExprKind::Filter {
+            callback: conform_host_callback(callback, &HostTypeTerm::Bool),
+            list: Box::new(conform_host_subexpr(*list, Some(&ty))),
+            ty,
+        },
+        // The accumulator, the seed, the callback's result and the fold's
+        // result share one checked type.
         HostExprKind::Fold {
             callback,
             init,
             list,
             ..
         } => HostExprKind::Fold {
-            callback,
-            init,
-            list,
+            callback: conform_host_callback(callback, &ty),
+            init: Box::new(conform_host_subexpr(*init, Some(&ty))),
+            list: Box::new(conform_host_subexpr(*list, None)),
             ty,
         },
         HostExprKind::RetainedInvocation {
@@ -19288,26 +19306,37 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 ty,
             }
         }
+        // A scan's result lists the accumulators, so its element type is the
+        // seed's and the callback's result type.
         HostExprKind::Scan {
             callback,
             init,
             list,
             ..
-        } => HostExprKind::Scan {
-            callback,
-            init,
-            list,
+        } => {
+            let accumulator_ty = list_item_type(&ty);
+            HostExprKind::Scan {
+                callback: conform_host_callback(callback, &accumulator_ty),
+                init: Box::new(conform_host_subexpr(*init, Some(&accumulator_ty))),
+                list: Box::new(conform_host_subexpr(*list, None)),
+                ty,
+            }
+        }
+        HostExprKind::Partition { callback, list, .. } => HostExprKind::Partition {
+            callback: conform_host_callback(callback, &HostTypeTerm::Bool),
+            list: Box::new(conform_host_subexpr(*list, None)),
             ty,
         },
-        HostExprKind::Partition { callback, list, .. } => {
-            HostExprKind::Partition { callback, list, ty }
-        }
-        HostExprKind::FlatMap { callback, list, .. } => {
-            HostExprKind::FlatMap { callback, list, ty }
-        }
-        HostExprKind::TensorCall { helper, args, .. } => {
-            HostExprKind::TensorCall { helper, args, ty }
-        }
+        HostExprKind::FlatMap { callback, list, .. } => HostExprKind::FlatMap {
+            callback: conform_host_callback(callback, &ty),
+            list: Box::new(conform_host_subexpr(*list, None)),
+            ty,
+        },
+        HostExprKind::TensorCall { helper, args, .. } => HostExprKind::TensorCall {
+            helper,
+            args: conform_host_subexprs(args),
+            ty,
+        },
         HostExprKind::ResultClaimScope { plan, body, .. } => HostExprKind::ResultClaimScope {
             plan,
             body: Box::new(force_host_expr_type(*body, ty.clone())),
@@ -19317,13 +19346,80 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             value: Box::new(force_host_expr_type(*value, ty.clone())),
             ty,
         },
-        other => other,
+        HostExprKind::SignatureEntry {
+            contract,
+            plan,
+            args,
+            positions,
+            lists,
+        } => HostExprKind::SignatureEntry {
+            contract,
+            plan,
+            args: conform_host_subexprs(args),
+            positions,
+            lists: lists
+                .into_iter()
+                .map(|entry| HostListEntry {
+                    value: conform_host_subexpr(entry.value, Some(&entry.ty)),
+                    ..entry
+                })
+                .collect(),
+        },
+        leaf @ (HostExprKind::Int(_)
+        | HostExprKind::Float(_)
+        | HostExprKind::Bool(_)
+        | HostExprKind::String(_)
+        | HostExprKind::Unit) => leaf,
     };
     HostExpr {
         kind: new_kind,
         span_id,
         merged_spans,
     }
+}
+
+/// Conform a subexpression whose parent does not force its type. A resolved
+/// own type wins; otherwise a resolved `expected` type from the parent fills
+/// the hole. An expression neither resolves is returned unchanged, so this
+/// step never writes an unresolved type over a resolved one; the unresolved
+/// node is rejected at the code-generation boundary on its own.
+fn conform_host_subexpr(expr: HostExpr, expected: Option<&HostTypeTerm>) -> HostExpr {
+    let own = host_expr_type(&expr);
+    if !own.is_unresolved() {
+        return force_host_expr_type(expr, own);
+    }
+    match expected {
+        Some(expected) if !expected.is_unresolved() => force_host_expr_type(expr, expected.clone()),
+        _ => expr,
+    }
+}
+
+fn conform_host_subexprs(exprs: Vec<HostExpr>) -> Vec<HostExpr> {
+    exprs
+        .into_iter()
+        .map(|expr| conform_host_subexpr(expr, None))
+        .collect()
+}
+
+/// Conform an inline callback's body to its result type, taking `expected`
+/// from the enclosing operation when the callback's own result type is
+/// unresolved. A named callback is a separate function the program-level pass
+/// conforms itself.
+fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> HostCallback {
+    let HostCallback { kind, ret_ty } = callback;
+    let ret_ty = if ret_ty.is_unresolved() && !expected.is_unresolved() {
+        expected.clone()
+    } else {
+        ret_ty
+    };
+    let kind = match kind {
+        HostCallbackKind::Inline { params, body } => HostCallbackKind::Inline {
+            params,
+            body: Box::new(conform_host_subexpr(*body, Some(&ret_ty))),
+        },
+        named @ HostCallbackKind::Named { .. } => named,
+    };
+    HostCallback { kind, ret_ty }
 }
 
 /// Materialize checked context into every host-program root before term
@@ -19397,7 +19493,7 @@ fn conform_builtin_arguments(
             if let Some(expected) = expected {
                 force_host_expr_type(arg, expected)
             } else {
-                arg
+                conform_host_subexpr(arg, None)
             }
         })
         .collect()
@@ -25990,6 +26086,302 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             message.contains("`Adep__Wrapped`") && message.contains("`Blib__Wrapped`"),
             "the rejection must name both candidates; got: {message}"
         );
+    }
+
+    fn option_i64() -> HostTypeTerm {
+        HostTypeTerm::Option(Box::new(HostTypeTerm::Int64))
+    }
+
+    /// `[Some(1), None]` as lowering leaves it: the list and `Some` are
+    /// typed, the bare `None` still holds an inference hole.
+    fn sibling_typed_option_list() -> HostExpr {
+        HostExpr::new(HostExprKind::List(
+            vec![
+                HostExpr::new(HostExprKind::Builtin {
+                    name: "Some".into(),
+                    args: vec![HostExpr::new(HostExprKind::Int(1))],
+                    ty: option_i64(),
+                }),
+                HostExpr::new(HostExprKind::Var("None".into(), fresh_host_inference())),
+            ],
+            HostTypeTerm::List(Box::new(option_i64())),
+        ))
+    }
+
+    fn list_items(expr: &HostExpr) -> &[HostExpr] {
+        match &expr.kind {
+            HostExprKind::List(items, _) => items,
+            other => panic!("expected a list, got {other:?}"),
+        }
+    }
+
+    // chelis#2599: a builtin with no expected-type rule fixes no type for its
+    // argument. The argument keeps its own resolved type, shaped unlike the
+    // parent's `i64`, and that type reaches the `None` inside it.
+    #[test]
+    fn a_resolved_child_keeps_its_own_type_under_a_differently_typed_parent() {
+        let forced = force_host_expr_type(
+            HostExpr::new(HostExprKind::Builtin {
+                name: "len".into(),
+                args: vec![sibling_typed_option_list()],
+                ty: fresh_host_inference(),
+            }),
+            HostTypeTerm::Int64,
+        );
+        assert_eq!(host_expr_type(&forced), HostTypeTerm::Int64);
+        let HostExprKind::Builtin { args, .. } = &forced.kind else {
+            panic!("expected the builtin, got {:?}", forced.kind);
+        };
+        assert_eq!(
+            host_expr_type(&args[0]),
+            HostTypeTerm::List(Box::new(option_i64()))
+        );
+        assert_eq!(host_expr_type(&list_items(&args[0])[1]), option_i64());
+    }
+
+    // A resolved own type wins even over a resolved expectation of another
+    // shape; the expectation fills only a hole.
+    #[test]
+    fn a_resolved_own_type_wins_over_a_resolved_expectation() {
+        let list_ty = HostTypeTerm::List(Box::new(option_i64()));
+        let kept = conform_host_subexpr(sibling_typed_option_list(), Some(&HostTypeTerm::Int64));
+        assert_eq!(host_expr_type(&kept), list_ty);
+        assert_eq!(host_expr_type(&list_items(&kept)[1]), option_i64());
+
+        let filled = conform_host_subexpr(
+            HostExpr::new(HostExprKind::Var("None".into(), fresh_host_inference())),
+            Some(&option_i64()),
+        );
+        assert_eq!(host_expr_type(&filled), option_i64());
+    }
+
+    // Nothing resolves the child, so it is returned exactly as it was: no
+    // unresolved type is written and the hole survives to the rejection.
+    #[test]
+    fn a_child_nothing_resolves_is_left_unchanged() {
+        let hole = fresh_host_inference();
+        let other_hole = fresh_host_inference();
+        let child = HostExpr::new(HostExprKind::Var("None".into(), hole.clone()));
+        assert_eq!(
+            host_expr_type(&conform_host_subexpr(child.clone(), None)),
+            hole
+        );
+        assert_eq!(
+            host_expr_type(&conform_host_subexpr(child, Some(&other_hole))),
+            hole
+        );
+    }
+
+    // A fold's unresolved seed and callback result type take the fold's
+    // type, and the callback body is conformed, which reaches the `None` in
+    // its `if`. The list keeps its own type.
+    #[test]
+    fn a_fold_conforms_its_seed_and_callback_body() {
+        let callback = HostCallback {
+            kind: HostCallbackKind::Inline {
+                params: vec![
+                    HostParam {
+                        name: "acc".into(),
+                        ty: option_i64(),
+                    },
+                    HostParam {
+                        name: "x".into(),
+                        ty: HostTypeTerm::Int64,
+                    },
+                ],
+                body: Box::new(HostExpr::new(HostExprKind::If {
+                    cond: Box::new(HostExpr::new(HostExprKind::Bool(true))),
+                    then_expr: Box::new(HostExpr::new(HostExprKind::Var(
+                        "None".into(),
+                        fresh_host_inference(),
+                    ))),
+                    else_expr: Box::new(HostExpr::new(HostExprKind::Var(
+                        "acc".into(),
+                        option_i64(),
+                    ))),
+                    ty: option_i64(),
+                })),
+            },
+            ret_ty: fresh_host_inference(),
+        };
+        let forced = force_host_expr_type(
+            HostExpr::new(HostExprKind::Fold {
+                callback,
+                init: Box::new(HostExpr::new(HostExprKind::Var(
+                    "None".into(),
+                    fresh_host_inference(),
+                ))),
+                list: Box::new(HostExpr::new(HostExprKind::Var(
+                    "xs".into(),
+                    HostTypeTerm::List(Box::new(HostTypeTerm::Int64)),
+                ))),
+                ty: fresh_host_inference(),
+            }),
+            option_i64(),
+        );
+        let HostExprKind::Fold {
+            callback,
+            init,
+            list,
+            ty,
+        } = &forced.kind
+        else {
+            panic!("expected the fold, got {:?}", forced.kind);
+        };
+        assert_eq!(ty, &option_i64());
+        assert_eq!(host_expr_type(init), option_i64());
+        assert_eq!(
+            host_expr_type(list),
+            HostTypeTerm::List(Box::new(HostTypeTerm::Int64))
+        );
+        assert_eq!(callback.ret_ty, option_i64());
+        let HostCallbackKind::Inline { body, .. } = &callback.kind else {
+            panic!("expected an inline callback");
+        };
+        let HostExprKind::If { then_expr, .. } = &body.kind else {
+            panic!("expected the callback's `if`, got {:?}", body.kind);
+        };
+        assert_eq!(host_expr_type(then_expr), option_i64());
+    }
+
+    // Every node kind hands each child to the conform pass, including the
+    // children whose type the node does not fix. Each case holds a `None`
+    // hole below such a child; conforming must fill it so the node crosses
+    // the code-generation boundary.
+    #[test]
+    fn every_node_kind_conforms_its_children() {
+        let list_ty = HostTypeTerm::List(Box::new(option_i64()));
+        let holder = HostTypeTerm::Adt("Holder".into(), Vec::new());
+        let constructed = || {
+            HostExpr::new(HostExprKind::AdtConstruct {
+                ctor: "Holder".into(),
+                fields: vec![sibling_typed_option_list()],
+                ty: holder.clone(),
+            })
+        };
+        let signature_entry = |args: Vec<HostExpr>, lists: Vec<HostListEntry>| {
+            HostExpr::new(HostExprKind::SignatureEntry {
+                contract: EntryContract::default(),
+                plan: SignatureEntryPlan::new(Vec::<HostTensorInput>::new()),
+                args,
+                positions: Vec::new(),
+                lists,
+            })
+        };
+        let cases = vec![
+            (
+                "builtin argument without an expected-type rule",
+                HostExpr::new(HostExprKind::Builtin {
+                    name: "len".into(),
+                    args: vec![sibling_typed_option_list()],
+                    ty: HostTypeTerm::Int64,
+                }),
+                HostTypeTerm::Int64,
+            ),
+            (
+                "list item under a type of another shape",
+                HostExpr::new(HostExprKind::List(
+                    vec![sibling_typed_option_list()],
+                    fresh_host_inference(),
+                )),
+                HostTypeTerm::Int64,
+            ),
+            (
+                "tuple item under a tuple of another arity",
+                HostExpr::new(HostExprKind::Tuple(
+                    vec![sibling_typed_option_list()],
+                    fresh_host_inference(),
+                )),
+                HostTypeTerm::Tuple(Vec::new()),
+            ),
+            (
+                "call argument without a parameter type",
+                HostExpr::new(HostExprKind::Call {
+                    function: "f".into(),
+                    args: vec![sibling_typed_option_list()],
+                    arg_tys: Vec::new(),
+                    ty: HostTypeTerm::Int64,
+                }),
+                HostTypeTerm::Int64,
+            ),
+            ("constructor field", constructed(), holder.clone()),
+            (
+                "field access base",
+                HostExpr::new(HostExprKind::AdtFieldAccess {
+                    base: Box::new(constructed()),
+                    field_index: 0,
+                    ty: list_ty.clone(),
+                }),
+                list_ty.clone(),
+            ),
+            (
+                "option match scrutinee",
+                HostExpr::new(HostExprKind::MatchOption {
+                    scrutinee: Box::new(HostExpr::new(HostExprKind::Builtin {
+                        name: "Some".into(),
+                        args: vec![sibling_typed_option_list()],
+                        ty: HostTypeTerm::Option(Box::new(list_ty.clone())),
+                    })),
+                    bind_name: "xs".into(),
+                    some_expr: Box::new(HostExpr::new(HostExprKind::Int(1))),
+                    none_expr: Box::new(HostExpr::new(HostExprKind::Int(0))),
+                    ty: HostTypeTerm::Int64,
+                }),
+                HostTypeTerm::Int64,
+            ),
+            (
+                "data-type match scrutinee",
+                HostExpr::new(HostExprKind::MatchAdt {
+                    scrutinee: Box::new(sibling_typed_option_list()),
+                    arms: Vec::new(),
+                    default_expr: Some(Box::new(HostExpr::new(HostExprKind::Int(0)))),
+                    ty: HostTypeTerm::Int64,
+                }),
+                HostTypeTerm::Int64,
+            ),
+            (
+                "tensor-call argument",
+                HostExpr::new(HostExprKind::TensorCall {
+                    helper: 0,
+                    args: vec![sibling_typed_option_list()],
+                    ty: HostTypeTerm::Int64,
+                }),
+                HostTypeTerm::Int64,
+            ),
+            (
+                "signature-entry argument",
+                signature_entry(vec![sibling_typed_option_list()], Vec::new()),
+                HostTypeTerm::Unit,
+            ),
+            (
+                "signature-entry list value",
+                signature_entry(
+                    Vec::new(),
+                    vec![HostListEntry {
+                        position: 0,
+                        name: "xs".into(),
+                        ty: list_ty.clone(),
+                        value: HostExpr::new(HostExprKind::List(
+                            vec![HostExpr::new(HostExprKind::Var(
+                                "None".into(),
+                                fresh_host_inference(),
+                            ))],
+                            fresh_host_inference(),
+                        )),
+                    }],
+                ),
+                HostTypeTerm::Unit,
+            ),
+        ];
+        for (name, expr, ty) in cases {
+            assert!(
+                resolve_host_expr(expr.clone()).is_err(),
+                "{name}: the case must hold an unresolved hole before conforming"
+            );
+            if let Err(error) = resolve_host_expr(force_host_expr_type(expr, ty)) {
+                panic!("{name}: conforming left the hole unresolved: {error}");
+            }
+        }
     }
 }
 
