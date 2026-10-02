@@ -321,7 +321,9 @@ fn deferred_window_shape_errors_precede_late_family_rejection() {
                     && error["expected"] == "window arity at most 1"
                     && error["got"] == "window arity 2"
                     && error["span"]["offset"].as_u64()
-                        == invalid_rank.find("reduce_window_sum(").map(|offset| offset as u64)
+                        == invalid_rank
+                            .find("reduce_window_sum(")
+                            .map(|offset| offset as u64)
             }),
             "{invalid_rank}: {report}"
         );

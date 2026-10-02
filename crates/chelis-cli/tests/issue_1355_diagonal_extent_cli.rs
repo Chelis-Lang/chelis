@@ -194,7 +194,10 @@ fn a_symbolic_pair_declared_wider_than_its_literal_axis_does_not_score_one() {
         source.find("diagonal(").map(|offset| offset as u64),
         "{error:?}"
     );
-    assert!(error["message"].as_str().unwrap().contains("axis 1"), "{error:?}");
+    assert!(
+        error["message"].as_str().unwrap().contains("axis 1"),
+        "{error:?}"
+    );
 }
 
 /// REGRESSION TEST. `chelis eval --file` refuses the same program before

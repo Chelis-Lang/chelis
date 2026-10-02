@@ -133,7 +133,10 @@ fn describe_failed_call_operand(
                 let expected = count(expected_args.len());
                 let got = count(actual_args.len());
                 return Some((
-                    format!("`{callee}` argument {} (callback): expected {expected}, got {got}", index + 1),
+                    format!(
+                        "`{callee}` argument {} (callback): expected {expected}, got {got}",
+                        index + 1
+                    ),
                     Some(expected),
                     Some(got),
                 ));

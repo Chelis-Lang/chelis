@@ -199,7 +199,7 @@ fn assert_row(row: Row) {
             got,
         } => {
             let result =
-                check_ir_program(&plain).expect_err("the rank-mismatched call must be rejected");
+                check_ir_program(&plain).expect_err("the dimension-invalid call must be rejected");
             assert!(
                 result.errors.iter().any(|error| {
                     error.kind.diagnostic_name() == "DimensionMismatch"
@@ -207,7 +207,7 @@ fn assert_row(row: Row) {
                         && error.expected.as_deref() == Some(expected)
                         && error.got.as_deref() == Some(got)
                 }),
-                "{}: missing {callee} rank mismatch from {expected} to {got}: {:#?}",
+                "{}: missing {callee} dimension mismatch from {expected} to {got}: {:#?}",
                 row.name,
                 result.errors
             );
@@ -347,7 +347,11 @@ const ROWS: &[Row] = &[
     Row {
         name: "literal reduction axis bounds remain checked",
         source: Source::Surf("def f(x: tensor[2, f32]) -> f32 = mean(x, 4i32)\n"),
-        expected: Expected::Reject("out of bounds"),
+        expected: Expected::RejectDimension {
+            callee: "mean",
+            expected: "axis in -1..1",
+            got: "4",
+        },
     },
     Row {
         name: "defsig and body mismatch remains rejected",

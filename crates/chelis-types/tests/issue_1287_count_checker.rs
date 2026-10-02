@@ -39,6 +39,18 @@ fn assert_rejects(source: &str, needle: &str) {
                     && error.message.contains("count")
                     && error.message.contains("axis")
             }
+            "out of bounds" => {
+                error.kind.diagnostic_name() == "DimensionMismatch"
+                    && error.expected.as_deref() == Some("axis in -2..2")
+                    && error.got.as_deref() == Some("2")
+                    && error.span_offset == source.find("count(")
+            }
+            "concrete-rank operand requires" => {
+                error.kind.diagnostic_name() == "DimensionMismatch"
+                    && error.expected.as_deref() == Some("positional i32 axis")
+                    && error.got.as_deref() == Some("named axis `col`")
+                    && error.span_offset == source.find("count(")
+            }
             _ => error.message.contains(needle),
         }),
         "count: missing rejection for {needle:?}, got {found:#?}"

@@ -682,7 +682,9 @@ pub(super) fn check_reduction_signature(
             errors,
             CheckError::with_types(
                 CheckErrorKind::PrecisionMismatch,
-                format!("count argument 1: expected exactly a bool tensor, got tensor precision {got}"),
+                format!(
+                    "count argument 1: expected exactly a bool tensor, got tensor precision {got}"
+                ),
                 "bool tensor".to_string(),
                 got,
                 vec!["Use count for bool tensors; numeric reductions use sum/prod_reduce.".into()],
@@ -746,7 +748,10 @@ pub(super) fn check_reduction_signature(
                     errors,
                     CheckError::with_types(
                         CheckErrorKind::DimensionMismatch,
-                        format!("{name} argument {}, axis {raw}: expected unique normalized axis, got {got}", position + 2),
+                        format!(
+                            "{name} argument {}, axis {raw}: expected unique normalized axis, got {got}",
+                            position + 2
+                        ),
                         "unique normalized axis".to_string(),
                         got,
                         vec![],
@@ -986,7 +991,9 @@ pub(super) fn check_reduction_signature(
                         errors,
                         CheckError::with_types(
                             CheckErrorKind::TypeMismatch,
-                            format!("sum argument 1: expected reducible tensor precision, got {got}; {msg}"),
+                            format!(
+                                "sum argument 1: expected reducible tensor precision, got {got}; {msg}"
+                            ),
                             "reducible tensor precision".to_string(),
                             got,
                             vec![],

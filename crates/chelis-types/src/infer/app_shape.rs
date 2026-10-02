@@ -954,7 +954,10 @@ pub(super) fn check_stride_signature(
                         CheckErrorKind::TypeMismatch,
                         with_node_provenance(
                             node,
-                            format!("stride argument {} (step): expected i64, got {got} (write 2i64)", position + 2),
+                            format!(
+                                "stride argument {} (step): expected i64, got {got} (write 2i64)",
+                                position + 2
+                            ),
                         ),
                         "i64".to_string(),
                         got,
@@ -976,7 +979,10 @@ pub(super) fn check_stride_signature(
                 errors,
                 CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    with_node_provenance(node, format!("stride argument 1: expected tensor, got {got}")),
+                    with_node_provenance(
+                        node,
+                        format!("stride argument 1: expected tensor, got {got}"),
+                    ),
                     "tensor".to_string(),
                     got,
                     vec![],
@@ -1176,7 +1182,10 @@ pub(super) fn check_pad_signature(
                 errors,
                 CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    with_node_provenance(node, format!("pad argument 1: expected tensor, got {got}")),
+                    with_node_provenance(
+                        node,
+                        format!("pad argument 1: expected tensor, got {got}"),
+                    ),
                     "tensor".to_string(),
                     got,
                     vec![],
@@ -1214,7 +1223,9 @@ pub(super) fn check_pad_signature(
                 CheckErrorKind::TypeMismatch,
                 with_node_provenance(
                     node,
-                    format!("pad argument 3 (fill): expected scalar of input tensor precision {expected}, got {got}"),
+                    format!(
+                        "pad argument 3 (fill): expected scalar of input tensor precision {expected}, got {got}"
+                    ),
                 ),
                 expected,
                 got,
@@ -1288,7 +1299,9 @@ pub(super) fn check_pad_signature(
                     CheckErrorKind::DimensionMismatch,
                     with_node_provenance(
                         node,
-                        format!("pad argument 2, axis {axis}: expected non-negative padding pair, got {got}"),
+                        format!(
+                            "pad argument 2, axis {axis}: expected non-negative padding pair, got {got}"
+                        ),
                     ),
                     "non-negative padding pair".to_string(),
                     got,
@@ -1424,7 +1437,10 @@ pub(super) fn check_reduce_window_signature(
             errors,
             CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
-                with_node_provenance(node, format!("{name} argument 2 (window_shape): expected {expected}, got {got}")),
+                with_node_provenance(
+                    node,
+                    format!("{name} argument 2 (window_shape): expected {expected}, got {got}"),
+                ),
                 expected,
                 got,
                 vec![],
@@ -1439,7 +1455,10 @@ pub(super) fn check_reduce_window_signature(
             errors,
             CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
-                with_node_provenance(node, format!("{name} argument 3 (strides): expected {expected}, got {got}")),
+                with_node_provenance(
+                    node,
+                    format!("{name} argument 3 (strides): expected {expected}, got {got}"),
+                ),
                 expected,
                 got,
                 vec![],
@@ -1458,7 +1477,10 @@ pub(super) fn check_reduce_window_signature(
                 errors,
                 CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    with_node_provenance(node, format!("{name} argument 1: expected tensor, got {got}")),
+                    with_node_provenance(
+                        node,
+                        format!("{name} argument 1: expected tensor, got {got}"),
+                    ),
                     "tensor".to_string(),
                     got,
                     vec![],
@@ -1480,7 +1502,11 @@ pub(super) fn check_reduce_window_signature(
 
     if window_shape.is_empty() || strides.is_empty() {
         let expected = "non-empty window_shape and strides";
-        let got = format!("window_shape len {}, strides len {}", window_shape.len(), strides.len());
+        let got = format!(
+            "window_shape len {}, strides len {}",
+            window_shape.len(),
+            strides.len()
+        );
         return report_at_check_site(
             errors,
             CheckError::with_types(
@@ -1525,7 +1551,13 @@ pub(super) fn check_reduce_window_signature(
             errors,
             CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                with_node_provenance(node, format!("{name} argument 2 (window_shape): expected {expected} for operand rank {}, got {got}", dims.len())),
+                with_node_provenance(
+                    node,
+                    format!(
+                        "{name} argument 2 (window_shape): expected {expected} for operand rank {}, got {got}",
+                        dims.len()
+                    ),
+                ),
                 expected,
                 got,
                 vec![],
@@ -1540,7 +1572,12 @@ pub(super) fn check_reduce_window_signature(
                 errors,
                 CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    with_node_provenance(node, format!("{name} argument 2, axis {i}: expected window extent >= 1, got {got}")),
+                    with_node_provenance(
+                        node,
+                        format!(
+                            "{name} argument 2, axis {i}: expected window extent >= 1, got {got}"
+                        ),
+                    ),
                     "window extent >= 1".to_string(),
                     got,
                     vec![],
@@ -1556,7 +1593,10 @@ pub(super) fn check_reduce_window_signature(
                 errors,
                 CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    with_node_provenance(node, format!("{name} argument 3, axis {i}: expected stride >= 1, got {got}")),
+                    with_node_provenance(
+                        node,
+                        format!("{name} argument 3, axis {i}: expected stride >= 1, got {got}"),
+                    ),
                     "stride >= 1".to_string(),
                     got,
                     vec![],
@@ -1582,7 +1622,10 @@ pub(super) fn check_reduce_window_signature(
                             CheckErrorKind::DimensionMismatch,
                             with_node_provenance(
                                 node,
-                                format!("{name} argument 2, axis {}: expected {expected}, got {got}", leading + i),
+                                format!(
+                                    "{name} argument 2, axis {}: expected {expected}, got {got}",
+                                    leading + i
+                                ),
                             ),
                             expected,
                             got,

@@ -95,6 +95,12 @@ fn matches_route_rejection(
                 && error.message.contains("broadcasts an existing axis")
                 && error.span_offset == source.find("expand(")
         }
+        "sum" => {
+            error.kind.diagnostic_name() == "DimensionMismatch"
+                && error.expected.as_deref() == Some("axis in -2..2")
+                && error.got.as_deref() == Some("7")
+                && error.span_offset == source.find("sum(")
+        }
         "stride" | "pad" => {
             let (expected, got) = if route == "stride" {
                 ("2 strides", "1 strides")
@@ -462,7 +468,7 @@ fn app_tensor_ledger_family_validates_a_late_bound_operand() {
             valid_result: "tensor[2, f32]",
             invalid_call: "sum($, 7i32)",
             invalid_result: "tensor[2, f32]",
-            diagnostic: "sum axis 7 is out of bounds for rank 2 tensor",
+            diagnostic: "axis in -2..2",
         },
         Row {
             route: "expand",
@@ -549,7 +555,7 @@ fn a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule() {
         (
             "expand",
             "def f(x: tensor[1, f32], a: i32) -> tensor[4, f32] = {\n  g = fn (v) -> expand(x, 0i32, v)\n  g(a)\n}\n",
-            "precision mismatch: expected i64, got i32",
+            "argument 1",
         ),
         (
             "cast",
@@ -567,11 +573,11 @@ fn a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule() {
                         && error.expected.as_deref() == Some("string")
                         && error.got.as_deref() == Some("i32")
                 } else if route == "expand" {
-                    error.kind.diagnostic_name() == "DimensionMismatch"
-                        && error.expected.as_deref() == Some("static or shape-sourced size")
-                        && error.got.as_deref() == Some("the symbolic dimension `v`")
+                    error.kind.diagnostic_name() == "PrecisionMismatch"
+                        && error.expected.as_deref() == Some("i64")
+                        && error.got.as_deref() == Some("i32")
                         && error.message.contains(diagnostic)
-                        && error.span_offset == program.find("expand(")
+                        && error.span_offset == program.find("g(a)")
                 } else if route == "cast" {
                     error.kind.diagnostic_name() == "CastNonTensor"
                         && error.got.as_deref() == Some("List i32")
@@ -671,7 +677,12 @@ fn assert_family_error(errors: &[CheckError], family: &str, dtype: &str) {
     );
 }
 
-fn matches_collection_rejection(error: &CheckError, route: &str, diagnostic: &str, source: &str) -> bool {
+fn matches_collection_rejection(
+    error: &CheckError,
+    route: &str,
+    diagnostic: &str,
+    source: &str,
+) -> bool {
     match route {
         "concat" => {
             error.kind.diagnostic_name() == "TypeMismatch"
@@ -717,9 +728,9 @@ fn run_cell(cell: &Cell) {
         "{route}: an invalid resolved call must be rejected"
     ));
     assert!(
-        eager
-            .iter()
-            .any(|error| { matches_collection_rejection(error, route, diagnostic, resolved_invalid) }),
+        eager.iter().any(|error| {
+            matches_collection_rejection(error, route, diagnostic, resolved_invalid)
+        }),
         "{route}: the resolved rejection must name its own rule, got:\n{}",
         summary(&eager)
     );
@@ -745,8 +756,9 @@ fn run_cell(cell: &Cell) {
         );
     } else {
         assert!(
-            late.iter()
-                .any(|error| { matches_collection_rejection(error, route, diagnostic, late_invalid) }),
+            late.iter().any(|error| {
+                matches_collection_rejection(error, route, diagnostic, late_invalid)
+            }),
             "{route}: the late-bound rejection must match the resolved rule, got:\n{}",
             summary(&late)
         );

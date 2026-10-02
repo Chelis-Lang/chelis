@@ -1246,15 +1246,28 @@ fn variadic_argmax_rejected() {
         .as_array()
         .expect("diagnostics")
         .iter()
-        .find(|error| error["kind"] == "ArityMismatch"
-            && error["message"].as_str().is_some_and(|message| message.contains("argmax_reduce")))
+        .find(|error| {
+            error["kind"] == "ArityMismatch"
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("argmax_reduce"))
+        })
         .unwrap_or_else(|| panic!("index-returning reduction must reject a second axis: {json}"));
-    assert_eq!(error["span"]["offset"], source.find("argmax_reduce(").unwrap());
+    assert_eq!(
+        error["span"]["offset"],
+        source.find("argmax_reduce(").unwrap()
+    );
     assert_eq!(error["expected"], "2 arguments");
     assert_eq!(error["got"], "3 arguments");
     let message = error["message"].as_str().unwrap();
-    assert!(message.contains("expected") && message.contains("got"), "{error}");
-    assert!(message.contains("2 arguments") && message.contains("3 arguments"), "{error}");
+    assert!(
+        message.contains("expected") && message.contains("got"),
+        "{error}"
+    );
+    assert!(
+        message.contains("2 arguments") && message.contains("3 arguments"),
+        "{error}"
+    );
 }
 
 /// NEGATIVE arity pins: the variadic dispatcher must not soften existing

@@ -444,14 +444,20 @@ fn expand_with_a_runtime_scalar_size_gets_one_verdict_on_both_ingresses() {
            (app {} (var {} expand) (var {} x) (lit {type: (t-prim {} i32)} 0) (var {} k))))",
         "expand sized by an i64 runtime scalar with no tensor source",
     );
-    assert_agree_and_reject(
-        "(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} f32)) (t-prim {} i32) \
+    let invalid = "(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} f32)) (t-prim {} i32) \
            (t-tensor {} (d-name {} *) (t-prim {} f32))))\n\
          (def {} f (fn {} (params {} x k) \
-           (app {} (var {} expand) (var {} x) (lit {type: (t-prim {} i32)} 0) (var {} k))))",
-        "expects an i64 size",
-        "expand sized by an i32 runtime scalar",
-    );
+           (app {} (var {} expand) (var {} x) (lit {type: (t-prim {} i32)} 0) (var {} k))))";
+    agreed_diagnostics(invalid, "expand sized by an i32 runtime scalar");
+    let errors = check_typed_program(&stamped(invalid))
+        .expect_err("an i32 runtime size must be rejected")
+        .errors;
+    assert!(errors.iter().any(|error| {
+        error.kind.diagnostic_name() == "TypeMismatch"
+            && error.expected.as_deref() == Some("i64")
+            && error.got.as_deref() == Some("i32")
+            && error.span_offset.is_some()
+    }));
 }
 
 #[test]

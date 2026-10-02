@@ -341,11 +341,23 @@ fn assert_bound_rejection(
     let [error] = report.errors.as_slice() else {
         panic!("expected one error for {what}, got {:?}", report.errors);
     };
-    assert!(matches!(error.kind, CheckErrorKind::DimensionMismatch), "{error:?}");
-    assert_eq!(error.expected.as_deref(), Some(format!("extent at most {bound}").as_str()));
-    assert_eq!(error.got.as_deref(), Some(format!("declared extent {declared}").as_str()));
+    assert!(
+        matches!(error.kind, CheckErrorKind::DimensionMismatch),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.expected.as_deref(),
+        Some(format!("extent at most {bound}").as_str())
+    );
+    assert_eq!(
+        error.got.as_deref(),
+        Some(format!("declared extent {declared}").as_str())
+    );
     assert_eq!(error.span_offset, source.find("diagonal("), "{error:?}");
-    assert!(error.message.contains(&format!("axis {literal_axis}")), "{error:?}");
+    assert!(
+        error.message.contains(&format!("axis {literal_axis}")),
+        "{error:?}"
+    );
 }
 
 /// REGRESSION TEST. The exact program from chelis#1739: `tensor[n, 4]` over

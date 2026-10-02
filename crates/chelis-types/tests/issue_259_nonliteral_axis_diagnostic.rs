@@ -258,12 +258,18 @@ def go[m, n](x: tensor[m, n, f32]) -> tensor[m, f32] = mean(&x, 9)
 "#;
     let deep = surf_to_deep(src);
     let rep = check_ir_program(&deep).expect_err("out-of-bounds literal axis must be rejected");
-    let msgs = messages(&rep);
     assert!(
-        msgs.iter()
-            .any(|m| m.contains("mean") && m.contains("out of bounds")),
-        "expected the out-of-bounds-axis diagnostic, got {msgs:?}"
+        rep.errors.iter().any(|error| {
+            error.kind.diagnostic_name() == "DimensionMismatch"
+                && error.expected.as_deref() == Some("axis in -2..2")
+                && error.got.as_deref() == Some("9")
+                && error.message.contains("mean")
+                && error.span_offset == src.find("mean(")
+        }),
+        "expected the out-of-range axis to identify its bound and operand, got {:?}",
+        rep.errors
     );
+    let msgs = messages(&rep);
     assert!(
         !msgs.iter().any(|m| m.contains("compile-time constant")),
         "an in-range-but-OOB literal axis is not the non-literal case; got {msgs:?}"

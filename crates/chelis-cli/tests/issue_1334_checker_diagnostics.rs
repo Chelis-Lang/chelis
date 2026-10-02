@@ -71,11 +71,7 @@ fn checked_error(source: &str, kind: &str, call: &str, expected: &str, got: &str
 #[test]
 fn specialized_application_arity_rejections_retain_source_and_actual_count() {
     for (source, callee, expected) in [
-        (
-            "out = pad(to_tensor([1.0f32]))\n",
-            "pad(",
-            "3 argument(s)",
-        ),
+        ("out = pad(to_tensor([1.0f32]))\n", "pad(", "3 argument(s)"),
         (
             "out = stride(to_tensor([1.0f32]))\n",
             "stride(",
@@ -88,7 +84,12 @@ fn specialized_application_arity_rejections_retain_source_and_actual_count() {
         ),
     ] {
         let error = checked_error(source, "ArityMismatch", callee, expected, "1 argument(s)");
-        assert!(error["message"].as_str().unwrap().contains(callee.trim_end_matches('(')));
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains(callee.trim_end_matches('('))
+        );
     }
 
     for source in [
@@ -107,7 +108,10 @@ fn specialized_application_arity_rejections_retain_source_and_actual_count() {
 fn nested_callback_arity_names_the_first_argument_and_direction() {
     let bad = "out = fold(fn (acc: i64) -> acc, 0i64, [1i64])\n";
     let error = checked_error(bad, "ArityMismatch", "fold(", "2 parameters", "1 parameter");
-    assert!(error["message"].as_str().unwrap().contains("argument 1"), "{error}");
+    assert!(
+        error["message"].as_str().unwrap().contains("argument 1"),
+        "{error}"
+    );
 
     let good = "out = fold(fn (acc: i64, item: i64) -> add(acc, item), 0i64, [1i64])\n";
     let (ok, stdout, stderr) = run("check", good);
@@ -146,8 +150,17 @@ fn reduction_rejections_name_the_axis_or_bool_tensor_requirement() {
 #[test]
 fn diagonal_rejects_a_repeated_axis_at_the_call_and_keeps_the_allowed_axis() {
     let bad = "out = diagonal(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), 0i32, 0i32)\n";
-    let error = checked_error(bad, "TypeMismatch", "diagonal(", "axis distinct from 0", "axis 0");
-    assert!(error["message"].as_str().unwrap().contains("argument 3"), "{error}");
+    let error = checked_error(
+        bad,
+        "TypeMismatch",
+        "diagonal(",
+        "axis distinct from 0",
+        "axis 0",
+    );
+    assert!(
+        error["message"].as_str().unwrap().contains("argument 3"),
+        "{error}"
+    );
 
     let good = "out = diagonal(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), 0i32, 1i32)\n";
     let (ok, stdout, stderr) = run("check", good);

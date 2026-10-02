@@ -71,11 +71,14 @@ fn contextual_selector_program(index: i64) -> Vec<Expr> {
 }
 
 fn assert_selector_contradiction(errors: &[CheckError]) {
-    let contradiction = errors.iter().find(|error| {
-        matches!(error.kind, CheckErrorKind::TypeMismatch)
-            && error.expected.as_deref() == Some("parameter `w`")
-            && error.got.as_deref() == Some("parameter `x`")
-    }).unwrap_or_else(|| panic!("missing selector contradiction: {errors:#?}"));
+    let contradiction = errors
+        .iter()
+        .find(|error| {
+            matches!(error.kind, CheckErrorKind::TypeMismatch)
+                && error.expected.as_deref() == Some("parameter `w`")
+                && error.got.as_deref() == Some("parameter `x`")
+        })
+        .unwrap_or_else(|| panic!("missing selector contradiction: {errors:#?}"));
     assert!(
         contradiction.message.contains("index 0"),
         "the operative selector must identify the rejected index: {contradiction:?}"
@@ -98,10 +101,14 @@ fn check_ir_program_rejects_contradictory_grad_selector_identity() {
 fn out_of_range_grad_selector_reports_admitted_index_and_actual_index() {
     let report = check_ir_program(&selector_program(2))
         .expect_err("two-parameter callable cannot have a selector at index 2");
-    let error = report.errors.iter().find(|error| {
-        matches!(error.kind, CheckErrorKind::ArityMismatch)
-            && error.message.contains("selector")
-    }).unwrap_or_else(|| panic!("missing selector arity error: {:?}", report.errors));
+    let error = report
+        .errors
+        .iter()
+        .find(|error| {
+            matches!(error.kind, CheckErrorKind::ArityMismatch)
+                && error.message.contains("selector")
+        })
+        .unwrap_or_else(|| panic!("missing selector arity error: {:?}", report.errors));
     assert_eq!(error.expected.as_deref(), Some("index in 0..2"));
     assert_eq!(error.got.as_deref(), Some("index 2"));
     check_ir_program(&selector_program(1))
@@ -125,13 +132,20 @@ fn check_typed_program_rejects_contradictory_grad_selector_identity() {
     let result = check_typed_program(&stamped_selector_program(0))
         .expect_err("index 0 selects `x`, not metadata `w`");
     assert_selector_contradiction(&result.errors);
-    let error = result.errors.iter().find(|error| {
-        matches!(error.kind, CheckErrorKind::TypeMismatch)
-            && error.message.contains("selector index 0")
-    }).expect("contradictory selector error");
+    let error = result
+        .errors
+        .iter()
+        .find(|error| {
+            matches!(error.kind, CheckErrorKind::TypeMismatch)
+                && error.message.contains("selector index 0")
+        })
+        .expect("contradictory selector error");
     assert_eq!(error.expected.as_deref(), Some("parameter `w`"));
     assert_eq!(error.got.as_deref(), Some("parameter `x`"));
-    assert!(error.span_offset.is_some(), "stamped Deep selector location: {error:?}");
+    assert!(
+        error.span_offset.is_some(),
+        "stamped Deep selector location: {error:?}"
+    );
 }
 
 #[test]

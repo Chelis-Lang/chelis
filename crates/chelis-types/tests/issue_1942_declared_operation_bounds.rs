@@ -49,7 +49,8 @@ fn both_ingress_diagnostics(source: &str) -> Vec<CheckError> {
         .err()
         .map_or_else(Vec::new, |report| report.errors);
     assert_eq!(
-        rendered(&typed), rendered(&ir),
+        rendered(&typed),
+        rendered(&ir),
         "the stamped and normalized checker ingresses disagree:\n{source}\n\
          typed={typed:?}\nir={ir:?}"
     );

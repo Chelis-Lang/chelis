@@ -34,39 +34,37 @@ fn rendered(errors: &[CheckError]) -> Vec<String> {
     out
 }
 
-fn agreed_diagnostics(source: &str) -> Vec<String> {
+fn agreed_errors(source: &str) -> Vec<CheckError> {
     let typed = match check_typed_program(&desugared(source)) {
         Ok(_) => Vec::new(),
-        Err(result) => rendered(&result.errors),
+        Err(result) => result.errors,
     };
     let ir = match check_ir_program(&expanded(source)) {
         Ok(_) => Vec::new(),
-        Err(result) => rendered(&result.errors),
+        Err(result) => result.errors,
     };
     assert_eq!(
-        typed, ir,
+        rendered(&typed),
+        rendered(&ir),
         "both checker ingresses must return the same diagnostics for:\n{source}"
     );
     typed
 }
 
 fn accepts(source: &str) {
-    let diagnostics = agreed_diagnostics(source);
+    let errors = agreed_errors(source);
     assert!(
-        diagnostics.is_empty(),
-        "must type-check:\n{source}\ngot {diagnostics:#?}"
+        errors.is_empty(),
+        "must type-check:\n{source}\ngot {errors:#?}"
     );
 }
 
-/// A rejection carrying a diagnostic that contains every fragment.
-fn rejects_with(source: &str, fragments: &[&str]) {
-    let diagnostics = agreed_diagnostics(source);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| fragments.iter().all(|fragment| message.contains(fragment))),
-        "expected a diagnostic containing all of {fragments:?} for:\n{source}\ngot {diagnostics:#?}"
-    );
+fn rejects_kind(source: &str, kind: &str) -> CheckError {
+    let errors = agreed_errors(source);
+    errors
+        .into_iter()
+        .find(|error| error.kind.diagnostic_name() == kind)
+        .unwrap_or_else(|| panic!("expected {kind} for:\n{source}"))
 }
 
 /// Both reads are registered builtins; an unregistered lookalike is not, so
@@ -77,10 +75,11 @@ fn the_clock_reads_are_closed_vocabulary_builtins() {
         assert!(BUILTIN_NAMES.contains(&clock), "{clock} must be a builtin");
     }
     assert!(!BUILTIN_NAMES.contains(&"clock_now"));
-    rejects_with(
+    let error = rejects_kind(
         "def f() -> (i64, i64) ! {IO} = clock_now()",
-        &["[UnboundVariable]", "clock_now"],
+        "UnboundVariable",
     );
+    assert!(error.message.contains("clock_now"));
 }
 
 /// REGRESSION TEST: the result is exactly `(i64, i64)`, destructurable into
@@ -93,14 +92,14 @@ fn the_result_is_exactly_two_i64_halves() {
             "def seconds() -> i64 ! {{IO}} = {{\n  (s, n) = {clock}()\n  s\n}}"
         ));
         for declared in ["(i64, i32)", "i64", "(i64, i64, i64)", "(f64, i64)"] {
-            rejects_with(
-                &format!("def bad() -> {declared} ! {{IO}} = {clock}()"),
-                &[
-                    "[TypeMismatch]",
-                    "body has type `() -> (i64, i64)`",
-                    &format!("declared type is `() -> {declared}`"),
-                ],
+            let source = format!("def bad() -> {declared} ! {{IO}} = {clock}()");
+            let error = rejects_kind(&source, "TypeMismatch");
+            assert_eq!(
+                error.expected.as_deref(),
+                Some(format!("() -> {declared}").as_str())
             );
+            assert_eq!(error.got.as_deref(), Some("() -> (i64, i64)"));
+            assert_eq!(error.span_offset, source.find("def bad"));
         }
     }
 }
@@ -111,10 +110,12 @@ fn the_result_is_exactly_two_i64_halves() {
 fn a_clock_read_takes_no_argument() {
     for clock in CLOCKS {
         for argument in ["0i64", "\"wall\"", "()"] {
-            rejects_with(
-                &format!("def bad() -> (i64, i64) ! {{IO}} = {clock}({argument})"),
-                &["[ArityMismatch]", "expected 0 args, got 1"],
-            );
+            let source = format!("def bad() -> (i64, i64) ! {{IO}} = {clock}({argument})");
+            let error = rejects_kind(&source, "ArityMismatch");
+            assert_eq!(error.expected.as_deref(), Some("0 arguments"));
+            assert_eq!(error.got.as_deref(), Some("1 argument"));
+            assert!(error.message.contains(clock));
+            assert_eq!(error.span_offset, source.find(clock));
         }
     }
 }
@@ -124,9 +125,9 @@ fn a_clock_read_takes_no_argument() {
 #[test]
 fn a_bare_reference_is_not_a_reading() {
     for clock in CLOCKS {
-        rejects_with(
-            &format!("def bad() -> (i64, i64) ! {{IO}} = {clock}"),
-            &["body has type `() -> () -> (i64, i64)`"],
-        );
+        let source = format!("def bad() -> (i64, i64) ! {{IO}} = {clock}");
+        let error = rejects_kind(&source, "TypeMismatch");
+        assert_eq!(error.expected.as_deref(), Some("() -> (i64, i64)"));
+        assert_eq!(error.got.as_deref(), Some("() -> () -> (i64, i64)"));
     }
 }

@@ -45,20 +45,19 @@ fn assert_checks_clean(source: &str, label: &str) {
     );
 }
 
-fn assert_rejects_with(source: &str, label: &str, needle: &str) {
-    let rep = check_ir_program(&surf_to_deep(source))
+fn assert_rejects_with(source: &str, label: &str, kind: &str, expected: &str, got: &str) {
+    let report = check_ir_program(&surf_to_deep(source))
         .err()
         .unwrap_or_else(|| panic!("{label}: must reject at check"));
-    let msgs = messages(&rep);
     assert!(
-        msgs.iter().any(|m| m.contains(needle)),
-        "{label}: expected a diagnostic containing `{needle}`, got {msgs:?}"
-    );
-    assert!(
-        !msgs
-            .iter()
-            .any(|m| m.contains("no tensor in scope carries it")),
-        "{label}: the provenance diagnostic is gone; got {msgs:?}"
+        report.errors.iter().any(|error| {
+            error.kind.diagnostic_name() == kind
+                && error.expected.as_deref() == Some(expected)
+                && error.got.as_deref() == Some(got)
+                && error.span_offset == source.find("expand(").or_else(|| source.find("insert("))
+        }),
+        "{label}: missing {kind} with expected {expected} and got {got}: {:?}",
+        report.errors
     );
 }
 
@@ -148,7 +147,9 @@ fn a_static_negative_size_is_still_a_type_error() {
         assert_rejects_with(
             &format!("out = {op}({operand}, 0, sub(1i64, 2i64))\n"),
             &format!("{op}: static negative size"),
-            "requires non-negative size, got -1",
+            "DimensionMismatch",
+            "non-negative size",
+            "-1",
         );
     }
 }
@@ -159,7 +160,9 @@ fn a_size_that_is_not_i64_is_still_a_type_error() {
         assert_rejects_with(
             &format!("def f(j: i32) = {op}({operand}, 0, j)\n"),
             &format!("{op}: i32 size"),
-            "expects an i64 size",
+            "TypeMismatch",
+            "i64",
+            "i32",
         );
     }
 }
@@ -184,12 +187,16 @@ fn an_axis_out_of_range_is_still_a_type_error() {
     assert_rejects_with(
         "def f(k: i64) = insert(to_tensor([1i64, 2i64]), 2, k)\n",
         "insert axis 2 on rank 1",
-        "out of bounds",
+        "DimensionMismatch",
+        "axis in 0..=1",
+        "2",
     );
     assert_rejects_with(
         "def f(k: i64) = expand(to_tensor([[1i64, 2i64]]), 2, k)\n",
         "expand axis 2 on rank 2",
-        "out of bounds",
+        "DimensionMismatch",
+        "axis in 0..2",
+        "2",
     );
 }
 

@@ -60,10 +60,15 @@ fn assert_size_dtype_rejected(source: &str, label: &str) {
     let rep = check_ir_program(&surf_to_deep(source))
         .err()
         .unwrap_or_else(|| panic!("{label}: a non-i64 size must reject at check"));
-    let msgs = messages(&rep);
     assert!(
-        msgs.iter().any(|m| m.contains("expects an i64 size")),
-        "{label}: expected the size-dtype diagnostic, got {msgs:?}"
+        rep.errors.iter().any(|error| {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("i64")
+                && error.got.as_deref() == Some("i32")
+                && error.span_offset == source.find("insert(")
+        }),
+        "{label}: expected the rejected size's dtype and own call site, got {:?}",
+        rep.errors
     );
 }
 
@@ -326,11 +331,14 @@ fn issue1791_a_non_i64_size_rejects_identically_in_both_positions() {
         "one program, one diagnostic, whichever position it is written in"
     );
     assert!(
-        messages(&direct)
-            .iter()
-            .any(|m| m.contains("expects an i64 size")),
-        "and it is the size-dtype diagnostic: {:?}",
-        messages(&direct)
+        direct.errors.iter().any(|error| {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("i64")
+                && error.got.as_deref() == Some("i32")
+                && error.span_offset == I32_SIZE_IN_DIRECT_POSITION.find("expand(")
+        }),
+        "the direct spelling must reject its size dtype: {:?}",
+        direct.errors
     );
 }
 

@@ -1090,12 +1090,19 @@ pub(super) fn finish_unified_app(
                         return ty;
                     }
                     Err(message) => {
-                        let error = if axis1 == axis2 && matches!(diagonal_operand, Type::Tensor(..)) {
+                        let error = if axis1 == axis2
+                            && matches!(diagonal_operand, Type::Tensor(..))
+                        {
                             let expected = format!("axis distinct from {axis1}");
                             let got = format!("axis {axis2}");
                             CheckError::with_types(
                                 CheckErrorKind::TypeMismatch,
-                                with_node_provenance(node, format!("diagonal argument 3 (axis): expected {expected}, got {got}; {message}")),
+                                with_node_provenance(
+                                    node,
+                                    format!(
+                                        "diagonal argument 3 (axis): expected {expected}, got {got}; {message}"
+                                    ),
+                                ),
                                 expected,
                                 got,
                                 vec![],
@@ -1104,7 +1111,10 @@ pub(super) fn finish_unified_app(
                             let got = diagonal_operand.to_string();
                             CheckError::with_types(
                                 CheckErrorKind::TypeMismatch,
-                                with_node_provenance(node, format!("diagonal argument 1: expected tensor, got {got}")),
+                                with_node_provenance(
+                                    node,
+                                    format!("diagonal argument 1: expected tensor, got {got}"),
+                                ),
                                 "tensor".to_string(),
                                 got,
                                 vec![],

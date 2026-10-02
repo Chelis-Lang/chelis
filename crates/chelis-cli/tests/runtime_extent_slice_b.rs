@@ -4407,13 +4407,15 @@ fn issue_1907_literal_non_positive_stride_steps_are_rejected_statically() {
         let report: serde_json::Value =
             serde_json::from_slice(&checked.stdout).expect("check JSON");
         assert!(
-            report["errors"].as_array().is_some_and(|errors| errors.iter().any(|error| {
-                error["kind"] == "DimensionMismatch"
-                    && error["expected"] == "positive step"
-                    && error["got"] == if name == "zero" { "0" } else { "-1" }
-                    && error["span"]["offset"].as_u64()
-                        == source.find("stride(").map(|offset| offset as u64)
-            })),
+            report["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|error| {
+                    error["kind"] == "DimensionMismatch"
+                        && error["expected"] == "positive step"
+                        && error["got"] == if name == "zero" { "0" } else { "-1" }
+                        && error["span"]["offset"].as_u64()
+                            == source.find("stride(").map(|offset| offset as u64)
+                })),
             "{name}: the checker identifies the invalid stride step: {report}"
         );
     }

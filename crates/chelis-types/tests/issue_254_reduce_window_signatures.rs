@@ -112,10 +112,12 @@ fn issue254_reduce_window_rejects_window_larger_than_input_dim_at_check() {
     let errors = check_reducer("reduce_window_max", &[1, 1, 2, 2], &[3, 3], &[1, 1])
         .expect_err("window > input dim must be a check-time error");
     assert!(
-        errors.iter().any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
-            && error.expected.as_deref() == Some("window extent <= 2")
-            && error.got.as_deref() == Some("3")
-            && error.span_offset.is_some()),
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.expected.as_deref() == Some("window extent <= 2")
+                && error.got.as_deref() == Some("3")
+                && error.span_offset.is_some()
+        ),
         "expected an input-vs-window extent diagnostic, got {errors:?}"
     );
 }
@@ -125,10 +127,12 @@ fn issue254_reduce_window_rejects_zero_stride_at_check() {
     let errors = check_reducer("reduce_window_max", &[1, 1, 3, 3], &[2, 2], &[1, 0])
         .expect_err("stride 0 must be a check-time error");
     assert!(
-        errors.iter().any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
-            && error.expected.as_deref() == Some("stride >= 1")
-            && error.got.as_deref() == Some("0")
-            && error.span_offset.is_some()),
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.expected.as_deref() == Some("stride >= 1")
+                && error.got.as_deref() == Some("0")
+                && error.span_offset.is_some()
+        ),
         "expected stride positivity failure, got {errors:?}"
     );
 }
@@ -138,10 +142,12 @@ fn issue254_reduce_window_rejects_zero_window_at_check() {
     let errors = check_reducer("reduce_window_max", &[1, 1, 3, 3], &[0, 2], &[1, 1])
         .expect_err("window 0 must be a check-time error");
     assert!(
-        errors.iter().any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
-            && error.expected.as_deref() == Some("window extent >= 1")
-            && error.got.as_deref() == Some("0")
-            && error.span_offset.is_some()),
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.expected.as_deref() == Some("window extent >= 1")
+                && error.got.as_deref() == Some("0")
+                && error.span_offset.is_some()
+        ),
         "expected window extent positivity failure, got {errors:?}"
     );
 }
@@ -151,10 +157,12 @@ fn issue254_reduce_window_rejects_window_arity_exceeding_rank_at_check() {
     let errors = check_reducer("reduce_window_max", &[3, 3], &[2, 2, 2], &[1, 1, 1])
         .expect_err("window arity > rank must be a check-time error");
     assert!(
-        errors.iter().any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
-            && error.expected.as_deref() == Some("window arity at most 2")
-            && error.got.as_deref() == Some("window arity 3")
-            && error.span_offset.is_some()),
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.expected.as_deref() == Some("window arity at most 2")
+                && error.got.as_deref() == Some("window arity 3")
+                && error.span_offset.is_some()
+        ),
         "expected window arity relative to input rank, got {errors:?}"
     );
 }
@@ -164,12 +172,14 @@ fn issue254_reduce_window_rejects_window_strides_length_mismatch_at_check() {
     let errors = check_reducer("reduce_window_max", &[1, 1, 3, 3], &[2, 2], &[1, 1, 1])
         .expect_err("window vs strides length mismatch must be a check-time error");
     assert!(
-        errors.iter().any(|error| matches!(error.kind, CheckErrorKind::ArityMismatch)
-            && error.expected.is_none()
-            && error.got.is_none()
-            && error.span_offset.is_some()
-            && error.message.contains("arguments 2")
-            && error.message.contains("3 (strides)")),
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::ArityMismatch)
+                && error.expected.is_none()
+                && error.got.is_none()
+                && error.span_offset.is_some()
+                && error.message.contains("arguments 2")
+                && error.message.contains("3 (strides)")),
         "equal-list-length rejection must remain symmetric, got {errors:?}"
     );
 }
@@ -184,7 +194,9 @@ def run(x) = reduce_window_max(x, [2i64, 2i64], [1i64, 1i64])
 "#;
     let errors = check_surf(src).expect_err("wrong declared output shape must NOT typecheck");
     assert!(
-        errors.iter().any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
         "expected a declared output dimension mismatch, got {errors:?}"
     );
 }
