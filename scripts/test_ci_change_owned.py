@@ -891,6 +891,10 @@ class SchemaTests(unittest.TestCase):
                 "crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs",
                 "cross_library_semantic_gap_hip_gpu",
             ),
+            (
+                "crates/chelis-cli/tests/std_json_ctor_cross_module.rs",
+                "std_json_ctor_cross_module",
+            ),
         )
         python_path = "crates/chelis-python/tests/manual_reef_context.rs"
         workspace = metadata(

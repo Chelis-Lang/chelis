@@ -6,24 +6,28 @@
 //! chelis-std source digest of the prepared graph, whose chelis-std rows carry
 //! the package version and the `<artifact::archive_sha256>` and
 //! `<artifact::shell_sha256>` identities of the bundled package. These tests
-//! repack the runtime from the same sources with a different archive mtime:
-//! the linked declarations and every source row stay the same, so only the
-//! artifact rows can tell the two runtimes apart.
+//! stage the runtime inputs as the bundle's build script does and repack them
+//! with a different archive mtime: the linked declarations and every source
+//! row stay the same, so only the artifact rows can tell the two runtimes
+//! apart.
 
 use chelis_compiler_api::stdlib_cache_key;
 use chelis_reef::{EmbeddedRuntime, pack_runtime_package, prepare_single_file_program};
-use chelis_std_bundle::{BUNDLED_CHELIS_STD_VERSION, EMBEDDED_RUNTIME};
+use chelis_std_bundle::{BUNDLED_CHELIS_STD_VERSION, EMBEDDED_RUNTIME, stage};
 use chelis_surf::ast::Decl;
 use std::path::PathBuf;
 
 const PROGRAM: &str = "import Std.Text (join)\n\n\
     def probe(parts: List[string]) -> string = join(parts, \",\")\n";
 
-/// The runtime packed from the std sources with every archive member stamped
-/// `mtime`, as a binary would embed it.
+/// The runtime packed from the std inputs the build script stages, with every
+/// archive member stamped `mtime`, as a binary would embed it.
 fn repacked_runtime(mtime: u64) -> &'static EmbeddedRuntime {
     let std_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std");
-    let packed = pack_runtime_package(&std_root, mtime).expect("pack the std sources");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let staged = scratch.path().join("chelis-std");
+    stage::stage(&std_root, &staged).expect("stage the std inputs");
+    let packed = pack_runtime_package(&staged, mtime).expect("pack the staged std inputs");
     assert_eq!(packed.package.version, BUNDLED_CHELIS_STD_VERSION);
     Box::leak(Box::new(EmbeddedRuntime::new(
         BUNDLED_CHELIS_STD_VERSION,
@@ -45,7 +49,7 @@ fn stdlib_identity(runtime: &'static EmbeddedRuntime) -> (Vec<Decl>, [u8; 32], [
 
 #[test]
 fn a_repacked_runtime_changes_the_stdlib_cache_key() {
-    let repacked = repacked_runtime(1);
+    let repacked = repacked_runtime(stage::ARCHIVE_MTIME + 1);
     assert!(repacked.archive() != EMBEDDED_RUNTIME.archive());
     assert!(repacked.shell() != EMBEDDED_RUNTIME.shell());
     assert_eq!(
@@ -74,7 +78,7 @@ fn a_repacked_runtime_changes_the_stdlib_cache_key() {
 /// entry, so the inequality above comes from the artifact identity.
 #[test]
 fn the_same_runtime_keys_the_same_stdlib_cache_entry() {
-    let repacked = repacked_runtime(0);
+    let repacked = repacked_runtime(stage::ARCHIVE_MTIME);
     assert!(repacked.archive() == EMBEDDED_RUNTIME.archive());
     assert_eq!(
         stdlib_identity(&EMBEDDED_RUNTIME),

@@ -389,10 +389,13 @@ to the local-registry path. Three consequences:
    its declared source roots, and its declared metadata files, then packs
    them with `pack_runtime_package`, the packing step `chelis reef build`
    runs. Every archive member's mtime is 0 whatever `SOURCE_DATE_EPOCH`
-   says, so the embedded pair is a function of the std sources and the
-   packing code: `chelis reef build` of the same sources writes the same
-   bytes, and no other file in the source tree enters them. The std
-   version is the one `packages/chelis-std/reef.toml` names. `chelis-reef`
+   says, so the embedded pair is a function of those inputs and the
+   packing code, and no other file in the source tree enters it.
+   `chelis reef build packages/chelis-std` writes the same pair from a
+   copy of the package holding only those inputs, with `SOURCE_DATE_EPOCH`
+   unset; it archives every file under `src/` and honours
+   `SOURCE_DATE_EPOCH`, so a stray file or a set epoch changes its output.
+   The std version is the one `packages/chelis-std/reef.toml` names. `chelis-reef`
    does not depend on the bundle: the bundle build-depends on reef, and
    only binaries and test harnesses depend on the bundle, so a library
    that forgets to pass the runtime fails to compile. No dist pair or lock

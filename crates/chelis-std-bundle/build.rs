@@ -1,12 +1,14 @@
 //! Pack the chelis-std runtime into `OUT_DIR`.
 //!
-//! The runtime's archive and shell are produced while this crate builds, by
-//! the same packing step `chelis reef build` runs, so the bytes a binary
-//! embeds always match the `packages/chelis-std` sources it was built from
-//! and nothing generated is committed. The inputs are staged first (see
-//! `build/stage.rs`), and every archive member's mtime is 0 whatever
-//! `SOURCE_DATE_EPOCH` says, so the bytes depend only on those inputs and
-//! the packing code.
+//! The runtime's archive and shell are produced while this crate builds, so
+//! the bytes a binary embeds come from the `packages/chelis-std` sources it
+//! was built from and nothing generated is committed. Only the runtime inputs
+//! are staged (see `build/stage.rs`), and every archive member's mtime is 0
+//! whatever `SOURCE_DATE_EPOCH` says, so the bytes depend only on those
+//! inputs and the packing code. The packing step is the one `chelis reef
+//! build` runs, but that command archives every file under `src/` and honours
+//! `SOURCE_DATE_EPOCH`: it writes the embedded pair from a copy of the package
+//! holding only the runtime inputs, with `SOURCE_DATE_EPOCH` unset.
 //!
 //! Outputs, read by `src/lib.rs`:
 //! - `chelis-std.tar.zst` and `chelis-std.chb`, the packed pair;

@@ -107,8 +107,8 @@ sources and print the command that fixes them.
   you to `git add` the result. One leg checks instead of generating: a
   staged file under `packages/chelis-std/dist/` or
   `crates/chelis-std-bundle/dist/`, or a staged `packages/chelis-std/reef.lock`
-  that records the bundled runtime, fails the commit with the files to
-  untrack. It never runs cargo. git runs it for
+  that records the bundled runtime, fails the commit, names the files, and
+  prints the command that untracks them. It never runs cargo. git runs it for
   `commit`, `commit --amend`, `cherry-pick --continue`, and the commit that
   concludes a conflicted merge, and a refused commit leaves the operation
   resumable; `rebase --continue` and conflict-free merges, cherry-picks, and

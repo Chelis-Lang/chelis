@@ -11,19 +11,23 @@ refuses three kinds of tracked file:
 - anything under `crates/chelis-std-bundle/dist/`, where the pair used to be
   embedded from;
 - a `reef.lock` that records a `chelis-std` dependency with source kind
-  `bundled`. Every lock reef writes records the runtime by the hashes of the
+  `bundled`, or `local_registry`, the spelling older locks use for the same
+  runtime. Every lock reef writes records the runtime by the hashes of the
   binary that wrote it, so such a lock goes stale with any std edit.
 
 It reads every tracked path and its bytes from the index and exits 1 when it
 finds one. `gate.py --fast` and CI's lint-and-unit stage run it. With
 `--tree DIR` it reads every file below DIR instead, by its path relative to
 DIR, and a symlink by its target; the pre-commit hook runs it that way on a
-copy of the staged files.
+copy of the staged files. With `--untrack` it removes each refused file from
+the index with `git rm --cached`, leaving the working tree alone; the ignore
+rules keep the files out afterwards.
 
 Usage:
 
     <managed-python> scripts/check_std_bundle_untracked.py
     <managed-python> scripts/check_std_bundle_untracked.py --tree DIR
+    <managed-python> scripts/check_std_bundle_untracked.py --untrack
 
 Acceptance is exit 0 with the final line ``std bundle tracking: PASS``.
 """
@@ -47,6 +51,14 @@ GENERATED_DIRS = (
 )
 LOCK_FILE_NAME = "reef.lock"
 RUNTIME_PACKAGE = "chelis-std"
+# Source kinds that record the compiler's own runtime. Older locks spell it
+# `local_registry`, and reef reads that entry as the bundled runtime.
+RUNTIME_SOURCE_KINDS = {
+    "bundled": "records the bundled chelis-std by the hashes of the binary that "
+    "wrote it",
+    "local_registry": "records chelis-std as `local_registry`, the older spelling "
+    "of the bundled runtime, which reef rewrites as the running binary's runtime",
+}
 PRODUCER = "crates/chelis-std-bundle/build.rs"
 
 
@@ -120,15 +132,12 @@ def lock_violation(path: str, contents: bytes) -> Violation | None:
         if not isinstance(dependency, dict):
             continue
         source = dependency.get("source")
-        if (
-            dependency.get("name") == RUNTIME_PACKAGE
-            and isinstance(source, dict)
-            and source.get("kind") == "bundled"
-        ):
+        if dependency.get("name") != RUNTIME_PACKAGE or not isinstance(source, dict):
+            continue
+        description = RUNTIME_SOURCE_KINDS.get(source.get("kind"))
+        if description is not None:
             return Violation(
-                path,
-                "records the bundled chelis-std by the hashes of the binary "
-                "that wrote it; reef writes this lock again when it is absent",
+                path, f"{description}; reef writes this lock again when it is absent"
             )
     return None
 
@@ -162,7 +171,14 @@ def main(argv: Sequence[str], *, out: TextIO = sys.stdout, err: TextIO = sys.std
         metavar="DIR",
         help="check every file below DIR, as committed, instead of the index",
     )
+    parser.add_argument(
+        "--untrack",
+        action="store_true",
+        help="remove every refused file from the index with git rm --cached",
+    )
     args = parser.parse_args(argv)
+    if args.untrack and args.tree is not None:
+        parser.error("--untrack acts on the index; it cannot take --tree")
 
     if args.tree is not None:
         if not args.tree.is_dir():
@@ -172,6 +188,14 @@ def main(argv: Sequence[str], *, out: TextIO = sys.stdout, err: TextIO = sys.std
     else:
         repo = args.repo
         found = violations(tracked_paths(repo), lambda path: staged_bytes(repo, path))
+    if found and args.untrack:
+        paths = [violation.path for violation in found]
+        _git(args.repo, "rm", "--cached", "--quiet", "--", *paths)
+        for path in paths:
+            print(f"std bundle tracking: untracked {path}", file=out)
+        found = violations(
+            tracked_paths(args.repo), lambda path: staged_bytes(args.repo, path)
+        )
     if not found:
         print("std bundle tracking: PASS", file=out)
         return 0
@@ -183,8 +207,9 @@ def main(argv: Sequence[str], *, out: TextIO = sys.stdout, err: TextIO = sys.std
         print(f"  {violation.render()}", file=err)
     print(
         f"The runtime is built from packages/chelis-std by {PRODUCER}; nothing "
-        "generated from it is committed. Untrack each file with "
-        "`git rm --cached <path>` (the ignore rules keep it out afterwards).",
+        "generated from it is committed. `scripts/check_std_bundle_untracked.py "
+        "--untrack` removes these files from the index (`git rm --cached`), and "
+        "the ignore rules keep them out afterwards.",
         file=err,
     )
     print("std bundle tracking: FAIL", file=out)

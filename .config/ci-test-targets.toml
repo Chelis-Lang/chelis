@@ -1191,6 +1191,13 @@ tracking_issue = "chelis#1824"
 
 [[manual_gate_target]]
 package = "chelis-cli"
+name = "std_json_ctor_cross_module"
+manual_gates = ["std_json_ctor_cross_module cross-module constructor suite"]
+reason = "the ignored cross-module constructor suite exceeds the default inner-loop budget"
+tracking_issue = "chelis#311"
+
+[[manual_gate_target]]
+package = "chelis-cli"
 name = "cross_library_semantic_gap_hip_gpu"
 manual_gates = ["cross_library_semantic_gap_hip_gpu suite"]
 reason = "the two ignored matmul checks require an AMD HIP GPU, hipcc, and hipBLAS unavailable to Linux PR workers"

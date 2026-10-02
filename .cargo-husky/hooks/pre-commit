@@ -27,7 +27,7 @@
 legs='conformance-assets|scripts/regenerate_conformance_assets.py AGENTS.md docs/CHELIS_SURFACE.md packages/chelis-std/SKILL.md agent-skills/ .claude/skills .codex/skills|crates/chelis-conformance/assets/skills/ crates/chelis-conformance/assets/canonical/|-|scripts/regenerate_conformance_assets.py
 reviewed-unsupported-wording|scripts/generate_reviewed_unsupported_wording_snapshot.py|crates/chelis-cli/tests/snapshots/issue_1870__reviewed__unsupported_wording.snap|-|scripts/generate_reviewed_unsupported_wording_snapshot.py
 opaque-corpus|tests/corpus/opaque_invariants/generate_corpus.py|tests/corpus/opaque_invariants/manifest.json tests/corpus/opaque_invariants/programs/|-|tests/corpus/opaque_invariants/generate_corpus.py
-std-bundle-untracked|scripts/check_std_bundle_untracked.py|packages/chelis-std/dist/ crates/chelis-std-bundle/dist/ packages/chelis-std/reef.lock|scripts/check_std_bundle_untracked.py --tree .|scripts/check_std_bundle_untracked.py'
+std-bundle-untracked|scripts/check_std_bundle_untracked.py|packages/chelis-std/dist/ crates/chelis-std-bundle/dist/ packages/chelis-std/reef.lock|scripts/check_std_bundle_untracked.py --tree .|scripts/check_std_bundle_untracked.py --untrack'
 
 set -eu
 # The path lists are split on spaces and must never be globbed.

@@ -61,6 +61,11 @@ path = "../helper"
 """
 
 
+LOCAL_REGISTRY_LOCK = BUNDLED_LOCK.replace(
+    'kind = "bundled"\ncompiler_version = "0.18.12"', 'kind = "local_registry"'
+)
+
+
 class Repository:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -73,6 +78,13 @@ class Repository:
 
     def git(self, *args: str) -> None:
         subprocess.run(["git", "-C", str(self.root), *args], check=True)
+
+    def tracked(self) -> list[str]:
+        listing = subprocess.run(
+            ["git", "-C", str(self.root), "ls-files"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        return listing.splitlines()
 
     def write(self, relative: str, text: str) -> None:
         path = self.root / relative
@@ -147,6 +159,44 @@ class StdBundleTrackingTests(unittest.TestCase):
         repo = self.repository()
         repo.track("reef.lock", BUNDLED_LOCK)
         self.assert_refused(repo, "reef.lock")
+
+    def test_tracked_lock_with_the_older_runtime_spelling_is_refused(self):
+        repo = self.repository()
+        self.assertIn('kind = "local_registry"', LOCAL_REGISTRY_LOCK)
+        repo.track("examples/probe/reef.lock", LOCAL_REGISTRY_LOCK)
+        err = self.assert_refused(repo, "examples/probe/reef.lock")
+        self.assertIn("local_registry", err)
+
+    def test_local_registry_lock_of_another_package_passes(self):
+        repo = self.repository()
+        repo.track(
+            "examples/probe/reef.lock",
+            LOCAL_REGISTRY_LOCK.replace('name = "chelis-std"', 'name = "helper"'),
+        )
+        self.assertEqual(repo.run()[0], 0)
+
+    def test_untrack_removes_every_refused_file_and_keeps_the_working_tree(self):
+        repo = self.repository()
+        repo.track("packages/chelis-std/dist/chelis-std-0.4.0.chb", "shell")
+        repo.track("examples/probe/reef.lock", BUNDLED_LOCK)
+        repo.track("examples/other/reef.lock", PATH_ONLY_LOCK)
+        code, out, err = repo.run("--untrack")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("untracked packages/chelis-std/dist/chelis-std-0.4.0.chb", out)
+        self.assertIn("untracked examples/probe/reef.lock", out)
+        self.assertTrue(out.endswith("std bundle tracking: PASS\n"))
+        self.assertEqual(repo.tracked(), ["README.md", "examples/other/reef.lock"])
+        self.assertTrue((repo.root / "packages/chelis-std/dist/chelis-std-0.4.0.chb").is_file())
+        self.assertTrue((repo.root / "examples/probe/reef.lock").is_file())
+        self.assertEqual(repo.run()[0], 0)
+
+    def test_untrack_on_a_clean_index_changes_nothing(self):
+        repo = self.repository()
+        repo.track("examples/other/reef.lock", PATH_ONLY_LOCK)
+        before = repo.tracked()
+        code, out, err = repo.run("--untrack")
+        self.assertEqual((code, err, out), (0, "", "std bundle tracking: PASS\n"))
+        self.assertEqual(repo.tracked(), before)
 
     def test_unreadable_tracked_lock_is_refused(self):
         repo = self.repository()
@@ -239,6 +289,12 @@ class StdBundleTreeTests(unittest.TestCase):
                 guard.main(["--tree", str(self.root / "absent")])
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("is not a directory", usage.getvalue())
+
+    def test_untrack_cannot_take_a_tree(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                guard.main(["--tree", str(self.root), "--untrack"])
+        self.assertEqual(raised.exception.code, 2)
 
     def test_tree_and_repo_are_exclusive(self):
         with contextlib.redirect_stderr(io.StringIO()):

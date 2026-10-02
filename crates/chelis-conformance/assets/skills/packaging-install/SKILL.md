@@ -79,9 +79,12 @@ copy is invalid because external copies do not become Nix GC roots.
 Each binary embeds the chelis-std archive and shell. `crates/chelis-std-bundle`'s
 build script stages `packages/chelis-std` (its `reef.toml`, the `.ch` files
 under its source roots, and its declared metadata files) and packs it with
-`chelis_reef::pack_runtime_package` at archive mtime 0, the packing step
-`chelis reef build` runs, ignoring `SOURCE_DATE_EPOCH`. Editing a std `.ch`
-file and rebuilding is the whole workflow; nothing generated is committed.
+`chelis_reef::pack_runtime_package` at archive mtime 0 whatever
+`SOURCE_DATE_EPOCH` says. `chelis reef build` runs the same packing step but
+archives every file under `src/` and honours `SOURCE_DATE_EPOCH`, so it writes
+the embedded pair only from a copy holding just those inputs, with the epoch
+unset. Editing a std `.ch` file and rebuilding is the whole workflow; nothing
+generated is committed.
 
 - `chelis-reef` never depends on the bundle (the bundle build-depends on reef).
   Every reef and `chelis-compiler-api` graph entry point takes the runtime as
@@ -92,7 +95,7 @@ file and rebuilding is the whole workflow; nothing generated is committed.
   a `reef.lock` recording the bundled runtime: every lock names the running
   binary's runtime hashes. `scripts/check_std_bundle_untracked.py` refuses them.
 - `bundled_chelis_std_loader`'s fixed-point test requires `chelis reef build` of
-  a fresh std copy to reproduce the embedded pair and its locks to name those
+  such a copy to reproduce the embedded pair and its locks to name those
   bytes; `scripts/check_std_bundle_reproducible.py` requires two builds to agree.
 
 ## Shim Resolution Order (first match wins)

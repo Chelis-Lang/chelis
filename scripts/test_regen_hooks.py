@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -150,6 +151,7 @@ class LegInputDeclarations(unittest.TestCase):
             row.outputs, (*check_std_bundle_untracked.GENERATED_DIRS, STD_LOCK)
         )
         self.assertEqual(row.check, ("scripts/check_std_bundle_untracked.py", "--tree", "."))
+        self.assertEqual(row.fix, ("scripts/check_std_bundle_untracked.py", "--untrack"))
 
     def test_every_hook_leg_declares_existing_inputs(self) -> None:
         """A misspelled input would make a hook skip its leg without a word."""
@@ -497,7 +499,8 @@ class RegenHookRepository(unittest.TestCase):
                 )
                 self.assertNotIn("inconsistent", result.stderr)
                 self.assertRegex(
-                    result.stderr, r"\n  fix: [^\n]* scripts/check_std_bundle_untracked\.py\n"
+                    result.stderr,
+                    r"\n  fix: [^\n]* scripts/check_std_bundle_untracked\.py --untrack\n",
                 )
                 self.assertNotIn("then: git add", result.stderr)
                 self.assertEqual(self.git("rev-parse", "HEAD"), head)
@@ -530,7 +533,14 @@ class RegenHookRepository(unittest.TestCase):
         refused = self.run_git("commit", "-m", "chore: edit the check")
         self.assertEqual(refused.returncode, 1, refused.stderr)
         self.assertIn(f"  {dist}: ", refused.stderr)
-        self.git("rm", "--quiet", "--cached", dist)
+        fix = re.search(r"\n  fix: (.*)\n", refused.stderr).group(1)
+        self.assertTrue(fix.endswith("scripts/check_std_bundle_untracked.py --untrack"), fix)
+        # The printed fix, run as the author would, untracks the file.
+        subprocess.run(
+            [sys.executable, "scripts/check_std_bundle_untracked.py", "--untrack"],
+            cwd=self.repo, env=self.env, capture_output=True, text=True, check=True,
+        )
+        self.assertTrue((self.repo / dist).is_file(), "untracking keeps the working copy")
         untracked = self.run_git("commit", "-m", "chore: untrack the generated file")
         self.assertEqual(untracked.returncode, 0, untracked.stderr)
         self.assertEqual(self.git("ls-files", "packages/chelis-std/dist/"), "")

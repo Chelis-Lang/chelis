@@ -3843,9 +3843,11 @@ pub struct PackedPackage {
 /// The runtime is its own dependency graph: it is the root, it declares no
 /// dependencies, and nothing in its graph comes from an embedded runtime, so
 /// it is packed before any runtime exists. The `chelis-std-bundle` build
-/// script produces the runtime each binary embeds this way. The packing step
-/// is the one `chelis reef build` runs, so building the same tree with that
-/// command and the same mtime yields the same bytes.
+/// script produces the runtime each binary embeds this way, from a staged
+/// copy of the runtime inputs. The packing step is the one `chelis reef
+/// build` runs, so that command writes the same bytes for a tree holding only
+/// those inputs when its archive mtime is the same (`SOURCE_DATE_EPOCH` unset
+/// gives 0).
 pub fn pack_runtime_package(root: &Path, archive_mtime: u64) -> Result<PackedPackage, String> {
     let root = canonical_root(root)?;
     let manifest = read_manifest(&root.join("reef.toml"))?;

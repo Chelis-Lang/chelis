@@ -130,8 +130,9 @@ fn bundled_chelis_std_sources_match_the_checked_in_runtime_package() {
 }
 
 /// The fixed point between the compiler and the runtime it embeds:
-/// `chelis reef build` of a fresh copy of the std sources writes exactly the
-/// embedded archive and shell, and the lock that build writes, like the lock
+/// `chelis reef build` of a copy holding only the runtime inputs, with
+/// `SOURCE_DATE_EPOCH` unset, writes exactly the embedded archive and shell,
+/// and the lock that build writes, like the lock
 /// of any package built against this runtime, names the hashes of those
 /// freshly built bytes.
 #[test]

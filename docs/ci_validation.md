@@ -464,11 +464,8 @@ gate commands remain exhaustive. To run the heavy Python checks manually use
 `.venv/bin/python scripts/ci_script_tests.py nightly`; complete census acceptance
 still requires `.venv/bin/python scripts/dtype_phase3_oracle.py`.
 
-The stdlib generator's real determinism test regenerates twice and exercises the
-production stale/unstable-output comparison against that fresh pair. Its negative
-controls and output-restoration tests remain, while a second pair of full builds
-is removed. Restored Cargo artifacts accelerate compilation; they never substitute
-for executing tests or create a numeric authority witness.
+Restored Cargo artifacts accelerate compilation; they never substitute for
+executing tests or create a numeric authority witness.
 
 The `script-tests-pr`, `script-tests-nightly` and `script-tests-census` artifacts
 retain selection and per-process JSONL timings for 14 days, including failed runs.

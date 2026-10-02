@@ -346,7 +346,8 @@ CHELIS_LINT_CHECK: list[str] = [
     ".",
 ]
 # The chelis-std runtime is packed by the bundle crate's build script; two
-# builds in fresh target directories must embed byte-identical bytes.
+# runs of it, in their own output directories of one fresh target directory,
+# must pack byte-identical bytes.
 STD_BUNDLE_REPRODUCIBILITY: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_std_bundle_reproducible.py",
