@@ -198,17 +198,23 @@ fn runtime_string_literal(value: &str) -> String {
     )
 }
 
-/// The constructor name a compiled ADT stores, and the name every tag test
-/// compares it against: the declared source spelling. A package build gives
-/// each top-level name the reef linker's private qualification
-/// (spec/04-type-system.md, "Reserved linker name format"); that identity
-/// stays inside the compiler, so every exit that renders the stored name
-/// ([05-OP-32]) prints the constructor as `chelis eval` does (chelis#2880).
-/// A data type's constructors have distinct source names, and a tag is only
-/// compared against constructors of its value's own type, so the source
-/// spelling preserves tag identity.
-fn stored_constructor_name(ctor: &str) -> String {
-    chelis_types::demangle_ident(ctor)
+/// The constructor name a compiled ADT of type `ty` stores, and the name
+/// every tag test compares it against: the declared source spelling. A
+/// package build gives each top-level name the reef linker's private
+/// qualification (spec/04-type-system.md, "Reserved linker name format");
+/// that identity stays inside the compiler, so every exit that renders the
+/// stored name ([05-OP-32]) prints the constructor as `chelis eval` does
+/// (chelis#2880). The spelling comes from removing the data type's own
+/// module qualification, which keeps every authored `__` and therefore keeps
+/// a type's distinct constructors distinct; a tag is only compared against
+/// constructors of its value's own type. A constructor that does not carry
+/// its type's qualification keeps the name it has.
+fn stored_constructor_name(ty: &HostType, ctor: &str) -> String {
+    let source = match ty {
+        HostType::Adt(type_name, _) => chelis_types::linked_constructor_source_name(type_name, ctor),
+        _ => None,
+    };
+    source.unwrap_or(ctor).to_string()
 }
 use crate::host_abi::{
     HostAbiBinding as HostBinding, HostAbiCallback as HostCallback,
@@ -9022,7 +9028,7 @@ impl<'a> HostEmitter<'a> {
         target: &str,
         ctor: &str,
         fields: &[HostExpr],
-        _ty: &HostType,
+        ty: &HostType,
     ) -> Result<(), Unsupported> {
         // A nullary variant (e.g. `Nothing`, `True`) has no payload fields.
         // ISO C forbids a zero-length array (`chelis_value adt_fields[0];`),
@@ -9057,7 +9063,7 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}chelis_string {ctor_value} = {};",
             self.indent,
-            runtime_string_literal(&stored_constructor_name(ctor))
+            runtime_string_literal(&stored_constructor_name(ty, ctor))
         ));
         self.lines.push(format!(
             "{}{target} = chelis_adt_construct({ctor_value}, {}, {});",
@@ -9145,7 +9151,8 @@ impl<'a> HostEmitter<'a> {
         }
         let arm_blocks = Self::join_completion_blocks(site, expected_arms, "ADT-match")?;
         let scrutinee_var = self.next_temp("adt");
-        self.emit_expr_to_var(scrutinee, &scrutinee_var, &host_type(scrutinee))?;
+        let scrutinee_ty = host_type(scrutinee);
+        self.emit_expr_to_var(scrutinee, &scrutinee_var, &scrutinee_ty)?;
         // Pattern bindings may shadow the authored name that originally held
         // the scrutinee. Keep the verified owner attached to this
         // compiler-generated temporary so an arm-completion drop cannot be
@@ -9167,7 +9174,7 @@ impl<'a> HostEmitter<'a> {
                 "{}{prefix} (chelis_host_string_eq_cstr({}, {:?})) {{",
                 self.indent,
                 tag_var,
-                stored_constructor_name(&arm.ctor)
+                stored_constructor_name(&scrutinee_ty, &arm.ctor)
             ));
             let nested_indent = format!("{}    ", self.indent);
             let previous = std::mem::replace(&mut self.indent, nested_indent);

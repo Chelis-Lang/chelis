@@ -518,7 +518,7 @@ impl<'a> EntryWalkers<'a> {
                         let segment = if several {
                             format!(
                                 ".{}.{field_name}",
-                                stored_constructor_name(&constructor.name)
+                                stored_constructor_name(ty, &constructor.name)
                             )
                         } else {
                             format!(".{field_name}")
@@ -886,7 +886,7 @@ static inline const char *__chelis_entry_path_text(const __chelis_entry_path *pa
                         let keyword = if position == 0 { "if" } else { "} else if" };
                         out.push(format!(
                             "    {keyword} (chelis_host_string_eq_cstr(tag, {})) {{",
-                            c_utf8_byte_literal(&stored_constructor_name(name))
+                            c_utf8_byte_literal(&stored_constructor_name(ty, name))
                         ));
                         let constructor = layout
                             .constructors

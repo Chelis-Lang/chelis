@@ -383,6 +383,27 @@ pub fn linked_binding_in_module_of(type_name: &str, terminal: &str) -> Option<St
     Some(format!("pkg__{module_part}__{terminal}"))
 }
 
+/// The source spelling of the linker-named constructor `ctor` of the
+/// linker-named data type `type_name` (chelis#2880). The linker qualifies a
+/// type and its constructors with their one defining module, so the
+/// constructor's spelling is what remains after the type's module
+/// qualification, including any `__` the author wrote inside it. Removing one
+/// qualification from every constructor of a type keeps distinct constructors
+/// distinct. `None` when `type_name` is not in linker format (a lexical
+/// program, whose constructors carry their source spelling already), or when
+/// `ctor` does not carry the type's qualification.
+pub fn linked_constructor_source_name<'a>(type_name: &str, ctor: &'a str) -> Option<&'a str> {
+    let stem = type_name.strip_prefix("Pkg__")?;
+    let (module_part, _type_terminal) = stem.rsplit_once("__")?;
+    if module_part.is_empty() {
+        return None;
+    }
+    ctor.strip_prefix("Pkg__")?
+        .strip_prefix(module_part)?
+        .strip_prefix("__")
+        .filter(|source| !source.is_empty())
+}
+
 // ── De-mangle reef internal names for display (RT-1 F3) ──────────
 
 /// Best-effort de-mangle of a reef internal identifier for display in
@@ -811,6 +832,58 @@ mod tests {
                 "{bad_terminal}"
             );
         }
+    }
+
+    #[test]
+    fn linked_constructor_keeps_its_whole_source_spelling() {
+        let shape = "Pkg__app__App__Main__Shape";
+        assert_eq!(
+            linked_constructor_source_name(shape, "Pkg__app__App__Main__Circle"),
+            Some("Circle")
+        );
+        // An authored `__` inside a constructor is part of its spelling, so
+        // `Foo__Bar` and `Bar` stay distinct where a terminal-segment
+        // de-mangle would collapse both to `Bar`.
+        assert_eq!(
+            linked_constructor_source_name(shape, "Pkg__app__App__Main__Foo__Bar"),
+            Some("Foo__Bar")
+        );
+        assert_eq!(
+            linked_constructor_source_name(shape, "Pkg__app__App__Main__Bar"),
+            Some("Bar")
+        );
+        assert_eq!(
+            linked_constructor_source_name(
+                "Pkg__chelis__std__Std__Time__Date",
+                "Pkg__chelis__std__Std__Time__Date"
+            ),
+            Some("Date")
+        );
+    }
+
+    #[test]
+    fn linked_constructor_needs_the_types_own_qualification() {
+        // A lexical program's type and constructors are already source names.
+        assert_eq!(linked_constructor_source_name("Shape", "Circle"), None);
+        // Another module's qualification, a bare qualification, and a
+        // lowercase binding never yield a constructor spelling.
+        for ctor in [
+            "Pkg__app__App__Other__Circle",
+            "Pkg__app__App__Main__",
+            "Pkg__app__App__Main",
+            "pkg__app__App__Main__circle",
+            "Circle",
+        ] {
+            assert_eq!(
+                linked_constructor_source_name("Pkg__app__App__Main__Shape", ctor),
+                None,
+                "{ctor}"
+            );
+        }
+        assert_eq!(
+            linked_constructor_source_name("Pkg__Shape", "Pkg__Circle"),
+            None
+        );
     }
 
     #[test]

@@ -98,6 +98,12 @@ fn write_file(path: &Path, contents: &str) {
 /// `app` (entry `App.Main`, sibling `App.Helpers`) with a path dependency on
 /// `drawlib`; chelis-std resolves from the toolchain.
 fn package() -> (TempDir, PathBuf) {
+    package_with(DRAWLIB, &[("src/helpers.ch", HELPERS), ("src/main.ch", ENTRY)])
+}
+
+/// `app`, holding `app_files`, with a path dependency on `drawlib`, whose
+/// `Drawlib.Draw` module is `library`.
+fn package_with(library: &str, app_files: &[(&str, &str)]) -> (TempDir, PathBuf) {
     let dir = tempdir().expect("tempdir");
     let version = env!("CARGO_PKG_VERSION");
     let app = dir.path().join("app");
@@ -108,7 +114,7 @@ fn package() -> (TempDir, PathBuf) {
              compiler = \"={version}\"\nmodule_prefix = \"Drawlib\"\n"
         ),
     );
-    write_file(&dir.path().join("drawlib/src/draw.ch"), DRAWLIB);
+    write_file(&dir.path().join("drawlib/src/draw.ch"), library);
     write_file(
         &app.join("reef.toml"),
         &format!(
@@ -117,8 +123,9 @@ fn package() -> (TempDir, PathBuf) {
              drawlib = {{ path = \"../drawlib\" }}\n"
         ),
     );
-    write_file(&app.join("src/helpers.ch"), HELPERS);
-    write_file(&app.join("src/main.ch"), ENTRY);
+    for (file, source) in app_files {
+        write_file(&app.join(file), source);
+    }
     (dir, app)
 }
 
@@ -227,6 +234,59 @@ fn package_entry_owes_no_library_root_and_leaks_no_linker_name() {
             "{lane} must not print a reef linker name:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn constructors_spelled_with_double_underscores_keep_their_identity() {
+    // The stored constructor name is the whole source spelling, so `Foo__Bar`
+    // and `Bar` remain two constructors: each match selects its own arm, and
+    // structural equality tells them apart. A terminal-segment de-mangle
+    // would store both as `Bar`.
+    let library = "module Drawlib.Draw
+export (Box, Tag, unbox, tag_value)
+type Box[a] =
+  | Box(a)
+type Tag =
+  | Old__New(i64)
+  | New(i64)
+def unbox[a](b: Box[a]) -> a =
+  match b with {
+    | Box(x) => x
+  }
+def tag_value(t: Tag) -> i64 =
+  match t with {
+    | Old__New(x) => x
+    | New(y) => add(y, 100i64)
+  }
+";
+    let entry = "module App.Main
+import Drawlib.Draw (Box, Tag, Old__New, New, unbox, tag_value)
+type T =
+  | Foo__Bar(i64)
+  | Bar(i64)
+def pick(t: T) -> i64 =
+  match t with {
+    | Foo__Bar(x) => x
+    | Bar(y) => add(y, 100i64)
+  }
+own = [Foo__Bar(1i64), Bar(2i64)]
+own_picks = [pick(Foo__Bar(3i64)), pick(Bar(4i64))]
+distinct = eq(Bar(2i64), Foo__Bar(2i64))
+lib_picks = [tag_value(Old__New(7i64)), tag_value(New(8i64))]
+boxes = [Box(1.5f64), Box(2.5f64)]
+opened = unbox(Box(9i64))
+";
+    let (dir, app) = package_with(library, &[("src/main.ch", entry)]);
+    let evaluated = chelis(dir.path(), &app, &["eval", "--file", "src/main.ch"]);
+    assert_eq!(
+        evaluated,
+        "own = [Foo__Bar(1), Bar(2)]\nown_picks = [3, 104]\ndistinct = false\n\
+         lib_picks = [7, 108]\nboxes = [Box(1.5), Box(2.5)]\nopened = 9\n"
+    );
+    let Some(compiled) = compiled_stdout(dir.path(), &app, "src/main.ch", "main") else {
+        return;
+    };
+    assert_eq!(compiled, evaluated);
 }
 
 #[test]
