@@ -58,7 +58,10 @@ pub fn strict_reference_toolchain(
 /// (Accelerate on macOS, OpenBLAS elsewhere). Transcendentals need no
 /// library: generated units carry their correctly rounded kernels
 /// (spec/design/correctly_rounded_math.md section 4.2).
-fn blas_link_flags(requirements: CodegenRequirements, link_flags: &mut Vec<String>) -> BlasProvider {
+fn blas_link_flags(
+    requirements: CodegenRequirements,
+    link_flags: &mut Vec<String>,
+) -> BlasProvider {
     if !requirements.needs_blas {
         BlasProvider::None
     } else if cfg!(target_os = "macos") {

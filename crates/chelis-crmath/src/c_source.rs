@@ -95,7 +95,9 @@ impl Kernel {
 
     /// The kernel whose entry is exactly `name`.
     pub fn from_entry(name: &str) -> Option<Kernel> {
-        Kernel::ALL.into_iter().find(|kernel| kernel.entry() == name)
+        Kernel::ALL
+            .into_iter()
+            .find(|kernel| kernel.entry() == name)
     }
 }
 

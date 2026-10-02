@@ -1306,8 +1306,20 @@ fn append_tensor_math_helpers(out: &mut Vec<String>, used: &dyn Fn(&str) -> bool
     out.push("static inline float chelis_host_finalize_bf16(float x) {".to_string());
     out.push("    return chelis_bf16_to_f32(chelis_f32_to_bf16(x));".to_string());
     out.push("}".to_string());
-    append_activation_helpers(out, Prim::F16, "f16", Some("chelis_host_finalize_f16"), used);
-    append_activation_helpers(out, Prim::Bf16, "bf16", Some("chelis_host_finalize_bf16"), used);
+    append_activation_helpers(
+        out,
+        Prim::F16,
+        "f16",
+        Some("chelis_host_finalize_f16"),
+        used,
+    );
+    append_activation_helpers(
+        out,
+        Prim::Bf16,
+        "bf16",
+        Some("chelis_host_finalize_bf16"),
+        used,
+    );
     append_activation_helpers(out, Prim::F32, "f32", None, used);
     append_activation_helpers(out, Prim::F64, "f64", None, used);
 }
@@ -7991,27 +8003,45 @@ impl<'a> HostEmitter<'a> {
                     ty,
                 ),
                 CExpressionBuiltin::Exp => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "chelis_cr_exp", "chelis_cr_expf"), [numeric_arg(0)]),
+                    EmittedExpr::call(
+                        float_math_function(ty, "chelis_cr_exp", "chelis_cr_expf"),
+                        [numeric_arg(0)],
+                    ),
                     ty,
                 ),
                 CExpressionBuiltin::Log => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "chelis_cr_log", "chelis_cr_logf"), [numeric_arg(0)]),
+                    EmittedExpr::call(
+                        float_math_function(ty, "chelis_cr_log", "chelis_cr_logf"),
+                        [numeric_arg(0)],
+                    ),
                     ty,
                 ),
                 CExpressionBuiltin::Sin => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "chelis_cr_sin", "chelis_cr_sinf"), [numeric_arg(0)]),
+                    EmittedExpr::call(
+                        float_math_function(ty, "chelis_cr_sin", "chelis_cr_sinf"),
+                        [numeric_arg(0)],
+                    ),
                     ty,
                 ),
                 CExpressionBuiltin::Cos => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "chelis_cr_cos", "chelis_cr_cosf"), [numeric_arg(0)]),
+                    EmittedExpr::call(
+                        float_math_function(ty, "chelis_cr_cos", "chelis_cr_cosf"),
+                        [numeric_arg(0)],
+                    ),
                     ty,
                 ),
                 CExpressionBuiltin::Tan => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "chelis_cr_tan", "chelis_cr_tanf"), [numeric_arg(0)]),
+                    EmittedExpr::call(
+                        float_math_function(ty, "chelis_cr_tan", "chelis_cr_tanf"),
+                        [numeric_arg(0)],
+                    ),
                     ty,
                 ),
                 CExpressionBuiltin::Atan => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "chelis_cr_atan", "chelis_cr_atanf"), [numeric_arg(0)]),
+                    EmittedExpr::call(
+                        float_math_function(ty, "chelis_cr_atan", "chelis_cr_atanf"),
+                        [numeric_arg(0)],
+                    ),
                     ty,
                 ),
                 CExpressionBuiltin::Relu
@@ -12585,7 +12615,10 @@ mod expression_dispatch_tests {
                 chelis_crmath::tanh_f64(f64::from(w)).to_bits()
             ));
         }
-        assert_eq!(got, want, "tanh helpers must equal the correctly rounded kernel");
+        assert_eq!(
+            got, want,
+            "tanh helpers must equal the correctly rounded kernel"
+        );
     }
 
     /// Extent decoding and checked allocation belong to the runtime owner.

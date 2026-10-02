@@ -2449,12 +2449,7 @@ fn exec_exp_kernel_correct_output() {
     dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(4), None);
     let dag = fuse(&dag);
 
-    let result = codegen_with_options(
-        &dag,
-        "test_exp_none",
-        CodegenOptions::default(),
-    )
-    .unwrap();
+    let result = codegen_with_options(&dag, "test_exp_none", CodegenOptions::default()).unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -3641,12 +3636,7 @@ fn exec_zero_size_tensor_does_not_crash() {
     dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(0), None);
     let dag = fuse(&dag);
 
-    let result = codegen_with_options(
-        &dag,
-        "test_exp_zero",
-        CodegenOptions::default(),
-    )
-    .unwrap();
+    let result = codegen_with_options(&dag, "test_exp_zero", CodegenOptions::default()).unwrap();
     let src = &result.c_source;
 
     let harness = format!(

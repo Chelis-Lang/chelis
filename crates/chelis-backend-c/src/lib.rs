@@ -3530,12 +3530,8 @@ int main(void) {
         for &n in &[7usize, 1024] {
             let dag = build_fused_exp_add_dag(n);
             let expected_bits = chelis_crmath::exp_f32(1.0).to_bits();
-            let result = codegen_with_options(
-                &dag,
-                "test_simd_compile",
-                CodegenOptions::default(),
-            )
-            .unwrap();
+            let result =
+                codegen_with_options(&dag, "test_simd_compile", CodegenOptions::default()).unwrap();
 
             let tmp = tempfile::tempdir().unwrap();
             stage_runtime(tmp.path());
@@ -3620,12 +3616,7 @@ int main(void) {{
             .collect();
 
         let dag = build_fused_exp_add_dag(n);
-        let result = codegen_with_options(
-            &dag,
-            "test_oracle",
-            CodegenOptions::default(),
-        )
-        .unwrap();
+        let result = codegen_with_options(&dag, "test_oracle", CodegenOptions::default()).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
         stage_runtime(tmp.path());

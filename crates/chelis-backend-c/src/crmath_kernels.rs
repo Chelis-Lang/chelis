@@ -7,7 +7,7 @@
 //! evaluator compiles. Every kernel definition is `static`, so a built static
 //! library exports no new symbol and no published header gains a declaration.
 
-use chelis_crmath::c_source::{kernel_text, Kernel};
+use chelis_crmath::c_source::{Kernel, kernel_text};
 
 /// The kernels whose entries `source` names, in amalgamation order.
 fn called_kernels(source: &str) -> Vec<Kernel> {
@@ -52,8 +52,18 @@ mod tests {
     fn links_only_called_kernels_once() {
         let source = "#include \"chelis_runtime.h\"\nfloat f(float x) { return chelis_cr_expf(chelis_cr_expf(x)) + (float)chelis_cr_tanh((double)x); }\n".to_string();
         let linked = link_called_kernels(source);
-        assert_eq!(linked.matches("static float chelis_cr_expf(float x)").count(), 1);
-        assert_eq!(linked.matches("static double chelis_cr_tanh(double x)").count(), 1);
+        assert_eq!(
+            linked
+                .matches("static float chelis_cr_expf(float x)")
+                .count(),
+            1
+        );
+        assert_eq!(
+            linked
+                .matches("static double chelis_cr_tanh(double x)")
+                .count(),
+            1
+        );
         assert!(!linked.contains("chelis_cr_exp(double"));
         assert!(!linked.contains("chelis_cr_tanhf(float"));
         assert!(linked.starts_with("#include \"chelis_runtime.h\"\n"));
@@ -68,7 +78,8 @@ mod tests {
 
     #[test]
     fn identifiers_that_only_contain_an_entry_name_do_not_link() {
-        let source = "#include \"chelis_runtime.h\"\nint my_chelis_cr_expf_count; int chelis_cr_expf2;\n";
+        let source =
+            "#include \"chelis_runtime.h\"\nint my_chelis_cr_expf_count; int chelis_cr_expf2;\n";
         assert_eq!(link_called_kernels(source.to_string()), source);
     }
 }

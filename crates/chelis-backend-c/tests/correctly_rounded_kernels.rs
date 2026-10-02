@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::process::Command;
 
-use chelis_backend_c::toolchain::{strict_reference_toolchain, CodegenRequirements};
+use chelis_backend_c::toolchain::{CodegenRequirements, strict_reference_toolchain};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
@@ -143,12 +143,21 @@ struct Route {
 /// through a permutation), and `s<k>` (each witness as a rank-0 tensor).
 fn canary_dag(precision: Prim) -> (Dag, Vec<Route>) {
     let k = WITNESSES.len();
-    let bits: Vec<u64> = WITNESSES.iter().map(|w| witness_bits(*w, precision)).collect();
+    let bits: Vec<u64> = WITNESSES
+        .iter()
+        .map(|w| witness_bits(*w, precision))
+        .collect();
     let mut dag = Dag::new();
     let decl = dag.declare("canary");
     let vector = ty(vec![k], precision);
     let scalar = ty(vec![], precision);
-    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], vector.clone(), None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vector.clone(),
+        None,
+    );
     let m = dag.add_node(
         decl,
         RiscOp::Load { name: "m".into() },
@@ -179,27 +188,51 @@ fn canary_dag(precision: Prim) -> (Dag, Vec<Route>) {
 
     let mut routes = Vec::new();
     let store = |dag: &mut Dag, label: String, value: NodeId, out: TensorType| {
-        dag.add_node(decl, RiscOp::Store { name: label.into() }, vec![value], out, None);
+        dag.add_node(
+            decl,
+            RiscOp::Store { name: label.into() },
+            vec![value],
+            out,
+            None,
+        );
     };
     for function in FUNCTIONS {
         let name = function.name();
         for (i, w) in WITNESSES.iter().enumerate() {
-            let literal = dag.add_node(decl, RiscOp::synth_const(precision, *w), vec![], scalar.clone(), None);
+            let literal = dag.add_node(
+                decl,
+                RiscOp::synth_const(precision, *w),
+                vec![],
+                scalar.clone(),
+                None,
+            );
             let value = dag.add_node(decl, function.op(), vec![literal], scalar.clone(), None);
             let label = format!("{name}_literal_{i}");
             store(&mut dag, label.clone(), value, scalar.clone());
-            routes.push(Route { label, function, inputs: vec![bits[i]] });
+            routes.push(Route {
+                label,
+                function,
+                inputs: vec![bits[i]],
+            });
 
             let value = dag.add_node(decl, function.op(), vec![rank0[i]], scalar.clone(), None);
             let label = format!("{name}_rank0_{i}");
             store(&mut dag, label.clone(), value, scalar.clone());
-            routes.push(Route { label, function, inputs: vec![bits[i]] });
+            routes.push(Route {
+                label,
+                function,
+                inputs: vec![bits[i]],
+            });
         }
 
         let value = dag.add_node(decl, function.op(), vec![x], vector.clone(), None);
         let label = format!("{name}_contiguous");
         store(&mut dag, label.clone(), value, vector.clone());
-        routes.push(Route { label, function, inputs: bits.clone() });
+        routes.push(Route {
+            label,
+            function,
+            inputs: bits.clone(),
+        });
 
         let value = dag.add_node(
             decl,
@@ -222,7 +255,11 @@ fn canary_dag(precision: Prim) -> (Dag, Vec<Route>) {
         let value = dag.add_node(decl, function.op(), vec![twice], vector.clone(), None);
         let label = format!("{name}_fused");
         store(&mut dag, label.clone(), value, vector.clone());
-        routes.push(Route { label, function, inputs: bits.clone() });
+        routes.push(Route {
+            label,
+            function,
+            inputs: bits.clone(),
+        });
     }
     (fuse(&dag), routes)
 }
@@ -261,7 +298,10 @@ fn harness(
     let c_type = c_float_type(precision);
     let dtype = dtype_macro(precision);
     let k = WITNESSES.len();
-    let bits: Vec<u64> = WITNESSES.iter().map(|w| witness_bits(*w, precision)).collect();
+    let bits: Vec<u64> = WITNESSES
+        .iter()
+        .map(|w| witness_bits(*w, precision))
+        .collect();
     let mut body = String::new();
     for (slot, label) in input_labels.iter().enumerate() {
         let (shape, values): (Vec<usize>, Vec<u64>) = if label == "x" {
@@ -269,7 +309,10 @@ fn harness(
         } else if label == "m" {
             (vec![k, 2], bits.iter().flat_map(|b| [*b, *b]).collect())
         } else if let Some(index) = label.strip_prefix('s') {
-            (vec![], vec![bits[index.parse::<usize>().expect("rank-0 label")]])
+            (
+                vec![],
+                vec![bits[index.parse::<usize>().expect("rank-0 label")]],
+            )
         } else {
             panic!("unexpected input label `{label}`");
         };
@@ -281,7 +324,11 @@ fn harness(
         let shape_init = if shape.is_empty() {
             "0".to_string()
         } else {
-            shape.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+            shape
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         writeln!(
             body,
@@ -293,8 +340,12 @@ fn harness(
         .unwrap();
     }
     let print = match precision {
-        Prim::F32 => "uint32_t b; memcpy(&b, &v[i], sizeof b); printf(\"%s %lld %08x\\n\", labels[o], (long long)i, (unsigned)b);",
-        _ => "uint64_t b; memcpy(&b, &v[i], sizeof b); printf(\"%s %lld %016llx\\n\", labels[o], (long long)i, (unsigned long long)b);",
+        Prim::F32 => {
+            "uint32_t b; memcpy(&b, &v[i], sizeof b); printf(\"%s %lld %08x\\n\", labels[o], (long long)i, (unsigned)b);"
+        }
+        _ => {
+            "uint64_t b; memcpy(&b, &v[i], sizeof b); printf(\"%s %lld %016llx\\n\", labels[o], (long long)i, (unsigned long long)b);"
+        }
     };
     let labels = output_labels
         .iter()
@@ -375,7 +426,12 @@ fn assert_routes_are_correctly_rounded(precision: Prim) {
     );
     let entry = format!("canary_{}", precision.name());
     let result = support::codegen(&dag, &entry).expect("canary codegen");
-    let main = harness(&entry, precision, &result.input_labels, &result.output_labels);
+    let main = harness(
+        &entry,
+        precision,
+        &result.input_labels,
+        &result.output_labels,
+    );
     let stdout = compile_and_run(&entry, &result.c_source, &main);
 
     let mut checked = 0usize;
@@ -432,12 +488,21 @@ fn f64_witnesses_are_correctly_rounded_on_every_c_route() {
 #[test]
 fn f32_fused_reduction_routes_are_correctly_rounded() {
     let k = WITNESSES.len();
-    let bits: Vec<u64> = WITNESSES.iter().map(|w| witness_bits(*w, Prim::F32)).collect();
+    let bits: Vec<u64> = WITNESSES
+        .iter()
+        .map(|w| witness_bits(*w, Prim::F32))
+        .collect();
     let mut dag = Dag::new();
     let decl = dag.declare("canary");
     let vector = ty(vec![k], Prim::F32);
     let scalar = ty(vec![], Prim::F32);
-    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], vector.clone(), None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vector.clone(),
+        None,
+    );
     let mut expected = Vec::new();
     for function in FUNCTIONS
         .into_iter()
@@ -446,9 +511,23 @@ fn f32_fused_reduction_routes_are_correctly_rounded() {
         let once = dag.add_node(decl, RiscOp::Neg, vec![x], vector.clone(), None);
         let twice = dag.add_node(decl, RiscOp::Neg, vec![once], vector.clone(), None);
         let value = dag.add_node(decl, function.op(), vec![twice], vector.clone(), None);
-        let max = dag.add_node(decl, RiscOp::MaxReduce { axis: 0 }, vec![value], scalar.clone(), None);
+        let max = dag.add_node(
+            decl,
+            RiscOp::MaxReduce { axis: 0 },
+            vec![value],
+            scalar.clone(),
+            None,
+        );
         let label = format!("{}_reduced", function.name());
-        dag.add_node(decl, RiscOp::Store { name: label.clone().into() }, vec![max], scalar.clone(), None);
+        dag.add_node(
+            decl,
+            RiscOp::Store {
+                name: label.clone().into(),
+            },
+            vec![max],
+            scalar.clone(),
+            None,
+        );
         let want = bits
             .iter()
             .map(|b| function.f32(f32::from_bits(u32::try_from(*b).unwrap())))
@@ -462,7 +541,12 @@ fn f32_fused_reduction_routes_are_correctly_rounded() {
         result.c_source.contains("chelis_cr_expf(") && !result.c_source.contains("chelis_cr_logf("),
         "the reduction canary carries exactly the kernels it calls"
     );
-    let main = harness(entry, Prim::F32, &result.input_labels, &result.output_labels);
+    let main = harness(
+        entry,
+        Prim::F32,
+        &result.input_labels,
+        &result.output_labels,
+    );
     let stdout = compile_and_run(entry, &result.c_source, &main);
     for (label, want) in expected {
         let line = stdout
@@ -470,18 +554,57 @@ fn f32_fused_reduction_routes_are_correctly_rounded() {
             .find(|line| line.split(' ').next() == Some(label.as_str()))
             .unwrap_or_else(|| panic!("{label} missing from:\n{stdout}"));
         let got = u64::from_str_radix(line.rsplit(' ').next().unwrap(), 16).unwrap();
-        assert_eq!(got, want, "{label}: got {got:#x}, correctly rounded {want:#x}");
+        assert_eq!(
+            got, want,
+            "{label}: got {got:#x}, correctly rounded {want:#x}"
+        );
     }
 }
 
 /// Identifiers that would route a transcendental to a host math library. Each
 /// is matched as a whole C identifier, so `chelis_cr_expf` does not match `expf`.
 const HOST_MATH_IDENTIFIERS: &[&str] = &[
-    "exp", "expf", "log", "logf", "sin", "sinf", "cos", "cosf", "tan", "tanf", "atan",
-    "atanf", "tanh", "tanhf", "pow", "powf", "erf", "erff", "exp2", "exp2f", "expm1",
-    "expm1f", "log2", "log2f", "log10", "log10f", "log1p", "log1pf", "sinh", "sinhf", "cosh",
-    "coshf", "vvexpf", "vvlogf", "vvsinf", "vvsqrtf", "vvtanhf", "CHELIS_EXPF8",
-    "CHELIS_LOGF8", "CHELIS_SINF8", "CHELIS_MATH_USE_VFORCE",
+    "exp",
+    "expf",
+    "log",
+    "logf",
+    "sin",
+    "sinf",
+    "cos",
+    "cosf",
+    "tan",
+    "tanf",
+    "atan",
+    "atanf",
+    "tanh",
+    "tanhf",
+    "pow",
+    "powf",
+    "erf",
+    "erff",
+    "exp2",
+    "exp2f",
+    "expm1",
+    "expm1f",
+    "log2",
+    "log2f",
+    "log10",
+    "log10f",
+    "log1p",
+    "log1pf",
+    "sinh",
+    "sinhf",
+    "cosh",
+    "coshf",
+    "vvexpf",
+    "vvlogf",
+    "vvsinf",
+    "vvsqrtf",
+    "vvtanhf",
+    "CHELIS_EXPF8",
+    "CHELIS_LOGF8",
+    "CHELIS_SINF8",
+    "CHELIS_MATH_USE_VFORCE",
 ];
 
 /// `source` with comments and string and character literals blanked, so
@@ -492,7 +615,9 @@ fn code_only(source: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i..].starts_with(b"/*") {
-            let end = source[i + 2..].find("*/").map_or(bytes.len(), |at| i + 2 + at + 2);
+            let end = source[i + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |at| i + 2 + at + 2);
             out.push(' ');
             i = end;
         } else if bytes[i..].starts_with(b"//") {
@@ -541,10 +666,16 @@ fn host_math_findings(source: &str) -> Vec<String> {
     for kernel in chelis_crmath::c_source::Kernel::ALL {
         let entry = kernel.entry();
         if words.contains(&entry) {
-            let float = if entry.ends_with('f') { "float" } else { "double" };
+            let float = if entry.ends_with('f') {
+                "float"
+            } else {
+                "double"
+            };
             let definition = format!("static {float} {entry}({float} x)");
             if source.matches(&definition).count() != 1 {
-                findings.push(format!("`{entry}` is called but not defined once as `{definition}`"));
+                findings.push(format!(
+                    "`{entry}` is called but not defined once as `{definition}`"
+                ));
             }
         }
     }
@@ -566,7 +697,13 @@ fn transcendental_corpus() -> Vec<(String, String)> {
         let mut dag = Dag::new();
         let decl = dag.declare("scan");
         let vector = ty(vec![3], precision);
-        let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], vector.clone(), None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vector.clone(),
+            None,
+        );
         for function in FUNCTIONS {
             let value = dag.add_node(decl, function.op(), vec![x], vector.clone(), None);
             dag.add_node(
@@ -612,7 +749,10 @@ fn host_math_scan_reports_planted_libm_call_and_missing_kernel() {
         host_math_findings(&planted).contains(&"host math identifier `expf`".to_string()),
         "the scan must report a planted `expf` call"
     );
-    let undefined = source.replace("static float chelis_cr_sinf(float x)", "static float renamed_sinf(float x)");
+    let undefined = source.replace(
+        "static float chelis_cr_sinf(float x)",
+        "static float renamed_sinf(float x)",
+    );
     assert!(
         host_math_findings(&undefined)
             .iter()

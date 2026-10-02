@@ -3673,7 +3673,9 @@ def softplus(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)
 
     let main_c = fs::read_to_string(out_dir.join("transcendental.c")).expect("emitted .c");
     assert_eq!(
-        main_c.matches("static float chelis_cr_expf(float x)").count(),
+        main_c
+            .matches("static float chelis_cr_expf(float x)")
+            .count(),
         1,
         "the unit must define the exp kernel it calls exactly once:\n{main_c}"
     );
@@ -3681,7 +3683,13 @@ def softplus(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)
         !main_c.contains("chelis_cr_logf(") && !main_c.contains("chelis_cr_exp("),
         "the unit must not carry kernels it does not call:\n{main_c}"
     );
-    for library in ["chelis_math.h", "vvexpf", "Sleef_", "CHELIS_EXPF8", "Accelerate"] {
+    for library in [
+        "chelis_math.h",
+        "vvexpf",
+        "Sleef_",
+        "CHELIS_EXPF8",
+        "Accelerate",
+    ] {
         assert!(
             !main_c.contains(library),
             "generated C must name no math library (`{library}`):\n{main_c}"

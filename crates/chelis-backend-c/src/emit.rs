@@ -1572,14 +1572,28 @@ impl CEmitter {
             }
             RiscOp::Neg => self.emit_unary(id, UnaryEmission::Neg, &node.inputs, &node.output_type),
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
-            RiscOp::Exp => self.emit_unary_func(id, "chelis_cr_expf", &node.inputs, &node.output_type),
-            RiscOp::Log => self.emit_unary_func(id, "chelis_cr_logf", &node.inputs, &node.output_type),
-            RiscOp::Sin => self.emit_unary_func(id, "chelis_cr_sinf", &node.inputs, &node.output_type),
+            RiscOp::Exp => {
+                self.emit_unary_func(id, "chelis_cr_expf", &node.inputs, &node.output_type)
+            }
+            RiscOp::Log => {
+                self.emit_unary_func(id, "chelis_cr_logf", &node.inputs, &node.output_type)
+            }
+            RiscOp::Sin => {
+                self.emit_unary_func(id, "chelis_cr_sinf", &node.inputs, &node.output_type)
+            }
             RiscOp::Sqrt => self.emit_unary_func(id, "sqrtf", &node.inputs, &node.output_type),
-            RiscOp::Cos => self.emit_unary_func(id, "chelis_cr_cosf", &node.inputs, &node.output_type),
-            RiscOp::Tan => self.emit_unary_func(id, "chelis_cr_tanf", &node.inputs, &node.output_type),
-            RiscOp::Atan => self.emit_unary_func(id, "chelis_cr_atanf", &node.inputs, &node.output_type),
-            RiscOp::Tanh => self.emit_unary_func(id, "chelis_cr_tanhf", &node.inputs, &node.output_type),
+            RiscOp::Cos => {
+                self.emit_unary_func(id, "chelis_cr_cosf", &node.inputs, &node.output_type)
+            }
+            RiscOp::Tan => {
+                self.emit_unary_func(id, "chelis_cr_tanf", &node.inputs, &node.output_type)
+            }
+            RiscOp::Atan => {
+                self.emit_unary_func(id, "chelis_cr_atanf", &node.inputs, &node.output_type)
+            }
+            RiscOp::Tanh => {
+                self.emit_unary_func(id, "chelis_cr_tanhf", &node.inputs, &node.output_type)
+            }
             RiscOp::Abs if node.output_type.precision.is_integer() => {
                 self.emit_integer_abs(id, &node.inputs, &node.output_type)
             }
@@ -5743,8 +5757,7 @@ impl CEmitter {
             self.line(&format!("{et} __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"));
         }
         for (s, step) in ops.iter().enumerate() {
-            let expr =
-                Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices, is_f64);
+            let expr = Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices, is_f64);
             self.line(&format!("{et} v{s} = {expr};"));
         }
         self.line(&format!("__out_{id}[i] = v{last};"));
@@ -11516,7 +11529,10 @@ mod tests {
         );
         dag.add_node(decl, RiscOp::Cos, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_cr_cosf("), "expected chelis_cr_cosf( in:\n{c}");
+        assert!(
+            c.contains("chelis_cr_cosf("),
+            "expected chelis_cr_cosf( in:\n{c}"
+        );
     }
 
     #[test]
@@ -11532,7 +11548,10 @@ mod tests {
         );
         dag.add_node(decl, RiscOp::Tan, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_cr_tanf("), "expected chelis_cr_tanf( in:\n{c}");
+        assert!(
+            c.contains("chelis_cr_tanf("),
+            "expected chelis_cr_tanf( in:\n{c}"
+        );
     }
 
     #[test]
@@ -11548,7 +11567,10 @@ mod tests {
         );
         dag.add_node(decl, RiscOp::Atan, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_cr_atanf("), "expected chelis_cr_atanf( in:\n{c}");
+        assert!(
+            c.contains("chelis_cr_atanf("),
+            "expected chelis_cr_atanf( in:\n{c}"
+        );
     }
 
     #[test]
