@@ -2,13 +2,14 @@
 """Check that two independent builds embed the same chelis-std runtime.
 
 `crates/chelis-std-bundle/build.rs` packs `packages/chelis-std` into the
-crate's `OUT_DIR` while the compiler builds. This check runs `cargo check` on
-the crate, which compiles and runs the build script, in two fresh target
-directories and requires the packed archive, shell, and version to be
-byte-identical. The builds differ in their target directory, so
-in every path the packer stages and writes through, and in their processes; a
-difference means the embedded runtime depends on something other than the std
-sources and the packing code.
+crate's `OUT_DIR` while the compiler builds. This check exports the committed
+`HEAD` tree with `git archive`, so no uncommitted or untracked file can reach
+it, then runs `cargo check` on the crate there, which compiles and runs the
+build script, in two fresh target directories. It requires the packed archive,
+shell, and version to be byte-identical. The builds differ in their target
+directory, so in every path the packer stages and writes through, and in their
+processes; a difference means the embedded runtime depends on something other
+than the committed std sources and the packing code.
 
 Agreement with `chelis reef build` is a separate property, owned by the
 `building_the_std_sources_reproduces_the_embedded_runtime` test in
@@ -25,11 +26,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 from typing import Sequence
 
 
@@ -67,9 +70,23 @@ def bundle_out_dir(messages: str) -> Path:
     return found[0]
 
 
-def build(target_dir: Path) -> dict[str, bytes]:
-    """Run the bundle's build script from scratch in `target_dir` and read its
-    outputs."""
+def export_head(repo: Path, destination: Path) -> Path:
+    """Write the tree `HEAD` commits in `repo` to a fresh `destination`."""
+    shutil.rmtree(destination, ignore_errors=True)
+    destination.mkdir(parents=True)
+    archive = subprocess.run(
+        ["git", "-C", str(repo), "archive", "--format=tar", "HEAD"],
+        check=True,
+        capture_output=True,
+    ).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
+        tree.extractall(destination, filter="data")
+    return destination
+
+
+def build(source: Path, target_dir: Path) -> dict[str, bytes]:
+    """Run the bundle's build script from scratch in `target_dir`, building the
+    workspace at `source`, and read its outputs."""
     shutil.rmtree(target_dir, ignore_errors=True)
     completed = subprocess.run(
         [
@@ -83,7 +100,7 @@ def build(target_dir: Path) -> dict[str, bytes]:
             "--message-format",
             "json-render-diagnostics",
         ],
-        cwd=REPO_ROOT,
+        cwd=source,
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -111,10 +128,11 @@ def differences(first: dict[str, bytes], second: dict[str, bytes]) -> list[str]:
 def main(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.parse_args(argv)
-    targets = [REPO_ROOT / TARGET_ROOT / name for name in ("first", "second")]
+    root = REPO_ROOT / TARGET_ROOT
     try:
-        builds = [build(target) for target in targets]
-    except (ReproducibilityError, OSError) as error:
+        source = export_head(REPO_ROOT, root / "source")
+        builds = [build(source, root / name) for name in ("first", "second")]
+    except (ReproducibilityError, OSError, subprocess.CalledProcessError) as error:
         print(f"std bundle reproducible: error: {error}", file=sys.stderr)
         print("std bundle reproducible: FAIL")
         return 1

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -59,6 +61,30 @@ class BundleOutDirTests(unittest.TestCase):
         messages = "\n".join([executed(BUNDLE, "/t/a"), executed(BUNDLE, "/t/b")])
         with self.assertRaises(check.ReproducibilityError):
             check.bundle_out_dir(messages)
+
+
+class ExportHeadTests(unittest.TestCase):
+    """The check builds the committed tree, never the working tree."""
+
+    def test_the_export_holds_committed_bytes_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            src = repo / "packages/chelis-std/src"
+            src.mkdir(parents=True)
+            git = ["git", "-C", str(repo)]
+            subprocess.run([*git, "init", "-q"], check=True)
+            subprocess.run([*git, "config", "user.email", "probe@example.invalid"], check=True)
+            subprocess.run([*git, "config", "user.name", "Probe"], check=True)
+            (src / "a.ch").write_text("committed\n")
+            subprocess.run([*git, "add", "."], check=True)
+            subprocess.run([*git, "commit", "-q", "-m", "init"], check=True)
+            (src / "a.ch").write_text("edited\n")
+            (src / "b.ch").write_text("untracked\n")
+            exported = check.export_head(repo, Path(tmp) / "export")
+            exported_src = exported / "packages/chelis-std/src"
+            self.assertEqual((exported_src / "a.ch").read_text(), "committed\n")
+            self.assertFalse((exported_src / "b.ch").exists())
+            self.assertFalse((exported / ".git").exists())
 
 
 class DifferencesTests(unittest.TestCase):
