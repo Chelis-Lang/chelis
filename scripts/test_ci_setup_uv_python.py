@@ -243,6 +243,153 @@ class PythonAbiVersionTest(unittest.TestCase):
                 ci_setup_uv_python.python_abi_version(fake_python)
 
 
+def _signature_for(version_stdout: str, libdir: str) -> str:
+    fake_result = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=version_stdout, stderr=""
+    )
+    with mock.patch("subprocess.run", return_value=fake_result):
+        return ci_setup_uv_python.interpreter_signature(
+            Path("/fake/.venv/bin/python"), libdir
+        )
+
+
+class InterpreterSignatureTest(unittest.TestCase):
+    """`PYO3_ENVIRONMENT_SIGNATURE` is the only input that makes PyO3 rerun
+    its build configuration when the interpreter behind an unchanged
+    `PYO3_PYTHON` path changes (chelis#2895)."""
+
+    V16 = "3.11.16 (main, Sep  2 2026, 18:00:00) [Clang 22.1.0 ]\n"
+    V17 = "3.11.17 (main, Oct  1 2026, 20:58:47) [Clang 22.1.3 ]\n"
+    LIB16 = "/tmp/uv-python-dir/cpython-3.11.16-linux-x86_64-gnu/lib"
+    LIB17 = "/tmp/uv-python-dir/cpython-3.11.17-linux-x86_64-gnu/lib"
+
+    def test_patch_release_changes_signature(self) -> None:
+        self.assertNotEqual(
+            _signature_for(self.V16, self.LIB16),
+            _signature_for(self.V17, self.LIB17),
+        )
+
+    def test_same_interpreter_keeps_signature(self) -> None:
+        # A stable signature for an unchanged interpreter keeps cached
+        # PyO3 builds valid; only a real change may trigger a rebuild.
+        self.assertEqual(
+            _signature_for(self.V17, self.LIB17),
+            _signature_for(self.V17, self.LIB17),
+        )
+
+    def test_rebuilt_release_at_same_version_changes_signature(self) -> None:
+        rebuilt = "3.11.17 (main, Oct  9 2026, 08:00:00) [Clang 22.1.4 ]\n"
+        self.assertNotEqual(
+            _signature_for(self.V17, self.LIB17),
+            _signature_for(rebuilt, self.LIB17),
+        )
+
+    def test_moved_libdir_changes_signature(self) -> None:
+        self.assertNotEqual(
+            _signature_for(self.V17, self.LIB17),
+            _signature_for(self.V17, "/elsewhere/cpython-3.11.17/lib"),
+        )
+
+    def test_signature_is_one_line_with_version_and_libdir(self) -> None:
+        multiline = "3.11.17 (main, Oct  1 2026, 20:58:47)\n[Clang 22.1.3 ]\n"
+        signature = _signature_for(multiline, self.LIB17)
+        self.assertEqual(
+            signature,
+            f"3.11.17 (main, Oct 1 2026, 20:58:47) [Clang 22.1.3 ] {self.LIB17}",
+        )
+
+    def test_queries_the_given_interpreter(self) -> None:
+        fake_python = Path("/fake/.venv/bin/python")
+        fake_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=self.V17, stderr=""
+        )
+        with mock.patch("subprocess.run", return_value=fake_result) as run:
+            ci_setup_uv_python.interpreter_signature(fake_python, self.LIB17)
+        args = run.call_args.args[0]
+        self.assertEqual(args[0], str(fake_python))
+        self.assertIn("sys.version", args[2])
+
+    def test_real_interpreter_signature_names_its_version(self) -> None:
+        python = Path(sys.executable)
+        signature = ci_setup_uv_python.interpreter_signature(python, "/some/lib")
+        self.assertTrue(signature.startswith(sys.version.split()[0] + " "))
+        self.assertTrue(signature.endswith(" /some/lib"))
+        self.assertNotIn("\n", signature)
+
+    def test_empty_stdout_raises(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "empty sys.version"):
+            _signature_for("  \n", self.LIB17)
+
+
+class SetGithubEnvTest(unittest.TestCase):
+    def _written(self, var: str, value: str, inherited: dict[str, str]) -> str:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".env") as fh:
+            github_env_path = fh.name
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {"GITHUB_ENV": github_env_path, **inherited},
+                clear=True,
+            ):
+                ci_setup_uv_python.set_github_env(var, value)
+            with open(github_env_path, encoding="utf-8") as fh:
+                return fh.read()
+        finally:
+            os.unlink(github_env_path)
+
+    def test_writes_value_verbatim_with_colons(self) -> None:
+        # A path-list merge would split the build time on ':'.
+        value = "3.11.17 (main, Oct 1 2026, 20:58:47) [Clang 22.1.3 ] /a/lib"
+        self.assertEqual(
+            self._written("SIG", value, {}),
+            f"SIG={value}\n",
+        )
+
+    def test_replaces_inherited_value(self) -> None:
+        self.assertEqual(
+            self._written("SIG", "new", {"SIG": "old"}),
+            "SIG=new\n",
+        )
+
+    def test_multiline_value_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "one line"):
+            self._written("SIG", "a\nb", {})
+
+    def test_no_github_env_is_noop(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            ci_setup_uv_python.set_github_env("SIG", "value")  # no raise
+
+
+class MainExportsTest(unittest.TestCase):
+    def _run_main(self) -> str:
+        with tempfile.TemporaryDirectory() as td:
+            github_env = Path(td) / "github_env"
+            github_env.touch()
+            libdir = "/uv/cpython-3.11.17-linux-x86_64-gnu/lib"
+            module = ci_setup_uv_python
+            with mock.patch.dict(os.environ, {"GITHUB_ENV": str(github_env)}, clear=True), \
+                    mock.patch.object(sys, "argv", ["ci_setup_uv_python.py"]), \
+                    mock.patch("platform.system", return_value="Linux"), \
+                    mock.patch.object(module, "create_venv", return_value=Path("/v/bin/python")), \
+                    mock.patch.object(module, "libdir_for", return_value=libdir), \
+                    mock.patch.object(module, "python_abi_version", return_value="3.11"), \
+                    mock.patch.object(module, "discover_python_libdirs", return_value=[Path(libdir)]), \
+                    mock.patch.object(module, "ensure_default_uv_root_mirror"), \
+                    mock.patch.object(module, "ensure_link_symlink"), \
+                    mock.patch.object(module, "interpreter_signature", return_value="3.11.17 sig"):
+                self.assertEqual(module.main(), 0)
+            return github_env.read_text(encoding="utf-8")
+
+    def test_exports_library_path_and_pyo3_signature(self) -> None:
+        self.assertEqual(
+            self._run_main().splitlines(),
+            [
+                "LD_LIBRARY_PATH=/uv/cpython-3.11.17-linux-x86_64-gnu/lib",
+                "PYO3_ENVIRONMENT_SIGNATURE=3.11.17 sig",
+            ],
+        )
+
+
 class EnsureLinkSymlinkTest(unittest.TestCase):
     """The Linux symlink path is the one that mattered for PR #184 CI;
     macOS is no-op and tested for symmetry. Use real temp dirs so the

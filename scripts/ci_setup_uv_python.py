@@ -8,6 +8,15 @@ Creates `.venv/` (using uv, which must already be installed), then writes
 load `libpython.so` / `libpython.dylib` from the uv interpreter's
 `sysconfig.LIBDIR`).
 
+It also writes `PYO3_ENVIRONMENT_SIGNATURE`, the interpreter's full version
+and lib dir, so a restored cargo target whose PyO3 build configuration came
+from a different interpreter is reconfigured instead of reused. PyO3 reruns
+its build script when that variable changes (PyO3/pyo3#2724) but not when
+the interpreter behind an unchanged `PYO3_PYTHON` path changes. Without it,
+a uv release that moves the patch version (3.11.16 to 3.11.17, chelis#2895)
+leaves the cached `-L` pointing at the previous install, which a fresh
+runner does not have, and linking `chelis-python` fails.
+
 The Python version is read from `py/pyproject.toml`'s `requires-python`
 constraint (single source of truth). It can be overridden with
 `--python <version>`.
@@ -60,6 +69,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT_PATH = REPO_ROOT / "py" / "pyproject.toml"
+PYO3_SIGNATURE_VAR = "PYO3_ENVIRONMENT_SIGNATURE"
 
 
 def runner_libpath_var() -> str:
@@ -166,6 +176,27 @@ def python_abi_version(venv_python: Path) -> str:
     if not abi:
         raise RuntimeError(f"`{venv_python}` returned empty version_info")
     return abi
+
+
+def interpreter_signature(venv_python: Path, libdir: str) -> str:
+    """Return a one-line identity of the interpreter behind `venv_python`.
+
+    Combines `sys.version` (patch release, build date, compiler) with the
+    `sysconfig.LIBDIR` that PyO3 links against, so any interpreter change
+    that could alter PyO3's build configuration changes the signature.
+    Whitespace runs collapse to one space because `$GITHUB_ENV` takes one
+    line per variable.
+    """
+    result = subprocess.run(
+        [str(venv_python), "-c", "import sys; print(sys.version)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    version = " ".join(result.stdout.split())
+    if not version:
+        raise RuntimeError(f"`{venv_python}` returned empty sys.version")
+    return f"{version} {libdir}"
 
 
 def _list_libdir(libdir: Path) -> str:
@@ -361,6 +392,26 @@ def append_to_github_env(var: str, value: str) -> None:
     print(f"{var}={deduped}")
 
 
+def set_github_env(var: str, value: str) -> None:
+    """Write `var=<value>` to `$GITHUB_ENV`, replacing any inherited value.
+
+    Unlike `append_to_github_env`, the value is opaque rather than a path
+    list: it is never split on `:` or merged with the existing value.
+    """
+    if "\n" in value or "\r" in value:
+        raise ValueError(f"{var} value must be one line: {value!r}")
+    github_env_path = os.environ.get("GITHUB_ENV")
+    if not github_env_path:
+        print(
+            "GITHUB_ENV not set; skipping env export (assuming local dry-run).",
+            file=sys.stderr,
+        )
+        return
+    with open(github_env_path, "a", encoding="utf-8") as fh:
+        fh.write(f"{var}={value}\n")
+    print(f"{var}={value}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -408,6 +459,7 @@ def main() -> int:
             "checked: " + ", ".join(str(p) for p in install_libdirs)
         )
     append_to_github_env(var, libdir)
+    set_github_env(PYO3_SIGNATURE_VAR, interpreter_signature(venv_python, libdir))
     return 0
 
 
