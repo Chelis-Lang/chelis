@@ -41,48 +41,53 @@ def euclid_rem(x: i64, y: i64) -> i64 = {
   if lt(r, 0i64) then add(r, y) else r
 }
 -- Weekmask arithmetic. Weekday index 0 is Monday; 1970-01-01 is a Thursday.
--- `mask_rank(flags, x)` counts the weekmask days from the Monday 1969-12-29
--- up to `x`, exclusive and negative before it, so a difference of two ranks
--- counts the weekmask days between them. `mask_select` inverts it on
--- weekmask days. Both are closed forms.
+-- A week table holds a weekmask's business weekdays per week, the business
+-- weekdays before each weekday index 0 through 7, and the weekday index of
+-- each business weekday in order. `mask_rank(week, x)` counts the weekmask
+-- days from the Monday 1969-12-29 up to `x`, exclusive and negative before
+-- it, so a difference of two ranks counts the weekmask days between them;
+-- `mask_select` inverts it on weekmask days. Both are closed forms.
 def weekmask_flags(w: Weekmask) -> List[bool] = [w.monday, w.tuesday, w.wednesday, w.thursday, w.friday, w.saturday, w.sunday]
 def set_flags(flags: List[bool]) -> i64 = fold(fn (acc: i64, flag: bool) -> if flag then add(acc, 1i64) else acc, 0i64, flags)
 def weekday_index(epoch_day: i64) -> i64 = epoch_day |> add(3i64) |> euclid_rem(7i64)
 def weekmask_has(flags: List[bool], epoch_day: i64) -> bool = flags |> index(weekday_index(epoch_day))
-def mask_rank(flags: List[bool], epoch_day: i64) -> i64 = {
+def week_table(w: Weekmask) -> (i64, List[i64], List[i64]) = {
+  flags = weekmask_flags(w)
+  counts = map(fn (r: i64) -> set_flags(take(flags, r)), range(0i64, 8i64))
+  (index(counts, 7i64), counts, filter(fn (i: i64) -> index(flags, i), range(0i64, 7i64)))
+}
+def mask_rank(week: (i64, List[i64], List[i64]), epoch_day: i64) -> i64 = {
   shifted = add(epoch_day, 3i64)
   shifted
   |> floor_div(7i64)
-  |> mul(set_flags(flags))
-  |> add(flags |> take(euclid_rem(shifted, 7i64)) |> set_flags)
+  |> mul(week.0)
+  |> add(index(week.1, euclid_rem(shifted, 7i64)))
 }
--- The weekday index of the business weekday with `j` business weekdays before it.
-def set_position(flags: List[bool], j: i64) -> i64 = fold(fn (acc: (i64, i64, i64), flag: bool) -> if flag then (add(acc.0, 1i64), add(acc.1, 1i64), if eq(acc.1, j) then acc.0 else acc.2) else (add(acc.0, 1i64), acc.1, acc.2), (0i64, 0i64, 0i64), flags).2
-def mask_select(flags: List[bool], mask_index: i64) -> i64 = {
-  per_week = set_flags(flags)
+def mask_select(week: (i64, List[i64], List[i64]), mask_index: i64) -> i64 =
   mask_index
-  |> floor_div(per_week)
+  |> floor_div(week.0)
   |> mul(7i64)
-  |> add(set_position(flags, euclid_rem(mask_index, per_week)))
+  |> add(index(week.2, euclid_rem(mask_index, week.0)))
   |> sub(3i64)
-}
--- Holiday search. Holidays are unique days of a horizon, which has at most
--- 7304484 < 2^23 days, so 23 halvings close every binary search below.
+-- Holiday search. Each halving of a search interval of `count` positions
+-- leaves at most half of it, so `search_steps(count)` halvings close it; a
+-- horizon has at most 7304484 < 2^23 days, and so as many holidays.
+def search_steps(count: i64) -> i64 = if lt(count, 16i64) then 5i64 else if lt(count, 1024i64) then 11i64 else if lt(count, 65536i64) then 17i64 else 23i64
 -- The number of holidays before `epoch_day`.
 def holidays_before(holidays: List[i64], epoch_day: i64) -> i64 = {
   bounds = fold(fn (acc: (i64, i64), step: i64) -> if lt(acc.0, acc.1) then {
     middle = floor_div(add(acc.0, acc.1), 2i64)
     if lt(index(holidays, middle), epoch_day) then (add(middle, 1i64), acc.1) else (acc.0, middle)
-  } else acc, (0i64, len(holidays)), range(0i64, 23i64))
+  } else acc, (0i64, len(holidays)), range(0i64, search_steps(len(holidays))))
   bounds.0
 }
 -- Business-day ranks. `business_before(cal, x)` is the number of business
 -- days in `[valid_from, x)` for `x` in `valid_from..valid_until + 1`.
 def business_before(cal: BusinessCalendar, epoch_day: i64) -> i64 = {
-  flags = weekmask_flags(cal.weekmask)
-  flags
+  week = week_table(cal.weekmask)
+  week
   |> mask_rank(epoch_day)
-  |> sub(mask_rank(flags, cal.valid_from))
+  |> sub(mask_rank(week, cal.valid_from))
   |> sub(holidays_before(cal.holidays, epoch_day))
 }
 def business_total(cal: BusinessCalendar) -> i64 = business_before(cal, add(cal.valid_until, 1i64))
@@ -92,14 +97,14 @@ def business_total(cal: BusinessCalendar) -> i64 = business_before(cal, add(cal.
 -- `j` is the least count whose next holiday lies after that day, a
 -- predicate that stays true once it holds, so a binary search finds it.
 def business_select(cal: BusinessCalendar, ordinal: i64) -> i64 = {
-  flags = weekmask_flags(cal.weekmask)
-  base = flags |> mask_rank(cal.valid_from) |> add(ordinal)
+  week = week_table(cal.weekmask)
+  base = week |> mask_rank(cal.valid_from) |> add(ordinal)
   holidays = cal.holidays
   bounds = fold(fn (acc: (i64, i64), step: i64) -> if lt(acc.0, acc.1) then {
     middle = floor_div(add(acc.0, acc.1), 2i64)
-    if flags |> mask_select(add(base, middle)) |> lt(index(holidays, middle)) then (acc.0, middle) else (add(middle, 1i64), acc.1)
-  } else acc, (0i64, len(holidays)), range(0i64, 23i64))
-  mask_select(flags, add(base, bounds.0))
+    if week |> mask_select(add(base, middle)) |> lt(index(holidays, middle)) then (acc.0, middle) else (add(middle, 1i64), acc.1)
+  } else acc, (0i64, len(holidays)), range(0i64, search_steps(len(holidays))))
+  mask_select(week, add(base, bounds.0))
 }
 -- Whether a day of the horizon is a business day.
 def is_business_at(cal: BusinessCalendar, epoch_day: i64) -> bool =
