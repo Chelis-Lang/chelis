@@ -978,21 +978,6 @@ def check_failure(failure: Failure, results: list[LaneResult], report: Report) -
     report.failures_checked += 1
 
 
-ROOT_LINE = re.compile(r"([a-z_][a-z0-9_]*)(?:\.[A-Za-z0-9_]+)* = .*")
-
-
-def dependency_root(line: str, own: set[str]) -> bool:
-    """A root another package defines, which compiled C prints and eval does not (chelis#2624).
-
-    Compiled C also prints a dependency's zero-argument definitions, such as
-    Std.Decimal's constants, as roots. Only the program's own roots are
-    compared on that lane; eval prints only the program's roots, so every
-    other line there is still a disagreement.
-    """
-    match = ROOT_LINE.fullmatch(line)
-    return match is not None and match.group(1) not in own
-
-
 def check_program(program: Program, results: list[LaneResult], report: Report) -> None:
     if program.failure is not None:
         check_failure(program.failure, results, report)
@@ -1005,8 +990,6 @@ def check_program(program: Program, results: list[LaneResult], report: Report) -
         printed, stray = parse_bindings(result.stdout)
         expected_names = {binding.name for binding in program.bindings}
         stray += [f"{name} = {value[:200]}" for name, value in printed.items() if name not in expected_names]
-        if result.lane == "c":
-            stray = [line for line in stray if not dependency_root(line, expected_names)]
         if stray:
             report.problem("stray-output", f"{program.name} [{result.lane}]: unexpected output lines: {stray[:10]}")
         for binding in program.bindings:

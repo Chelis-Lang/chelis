@@ -196,24 +196,6 @@ class Comparator(unittest.TestCase):
         report = run(stray, [program])
         self.assertEqual(report.classes, {"stray-output": 2})
 
-    def test_c_dependency_roots_are_not_compared(self) -> None:
-        # chelis#2624: compiled C prints a dependency's zero-argument definitions as roots.
-        program = first_program("row_text")
-        own = program.bindings[0].name
-        roots = "dec_base = 1000000000\ndec_zero.negative = false\ndec_zero.limb0 = 0\n"
-
-        def extra(lane, prog, status, stdout, stderr):
-            return status, stdout + roots, stderr
-
-        report = run(extra, [program])
-        self.assertEqual(report.classes, {"stray-output": 1})
-        self.assertIn("[eval]", report.problems[0])
-
-        def own_root_twice(lane, prog, status, stdout, stderr):
-            return status, stdout + f"{own}.0 = x\nnot a binding\n", stderr
-
-        self.assertEqual(run(own_root_twice, [program]).classes, {"stray-output": 2})
-
     def test_a_grid_program_that_fails_is_reported(self) -> None:
         def fail(lane, prog, status, stdout, stderr):
             return (2, "", "error: Type errors") if lane == "eval" else (status, stdout, stderr)
