@@ -3085,7 +3085,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     && !parameter.is_empty()
                     && dag.get(node.shape_deps[0]).is_some_and(|declared| {
                         matches!(declared.op, RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::Caller,
+                            site: crate::dag::ExtentWitnessSite::Caller
+                                | crate::dag::ExtentWitnessSite::LocalExpand,
                             axis: crate::dag::RtAxis::Lit(observed),
                             ..
                         } if observed == *axis)
@@ -3171,7 +3172,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         .first()
                         .and_then(|required| dag.get(*required));
                     let same_observation = node.shape_deps.len() == 1 && declared.is_some_and(|declared| {
-                    matches!(declared.op, RiscOp::ExtentWitness { site: crate::dag::ExtentWitnessSite::Caller, axis: crate::dag::RtAxis::Lit(observed), .. } if observed == *axis)
+                    matches!(declared.op, RiscOp::ExtentWitness { site: crate::dag::ExtentWitnessSite::Caller | crate::dag::ExtentWitnessSite::LocalExpand, axis: crate::dag::RtAxis::Lit(observed), .. } if observed == *axis)
                         && declared.inputs.first() == node.inputs.first()
                         && declared.id.0 < node.id.0
                 });
@@ -3306,7 +3307,13 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         || matches!(
                             crate::axis_sources::same_shape_result_agreement(dag, node.id),
                             Ok(Some(_))
-                        ))
+                        )
+                        // A claim captured after its value was produced (an
+                        // output-inferred binder's first site lowers inside
+                        // the body) sits on a `Copy` carrier of that value;
+                        // the guard derivation observes it through the
+                        // carrier's input, as for a local ascription.
+                        || matches!(node.op, RiscOp::Copy))
             });
             if required.0 >= node.id.0 || !supported {
                 errors.push(format!("result claim at node {} requires an earlier witness and a supported producing axis", node.id.0));

@@ -2505,13 +2505,21 @@ impl<'a> EvalContext<'a> {
                     .to_string(),
             );
         }
-        let producer_operation = chelis_ir::axis_sources::local_dim_guard_sites(dag)?
-            .first()
-            .map(|(_, claim)| claim.op)
-            .ok_or_else(|| {
-                "host runtime: checked local tensor ascription produced no local guard site"
-                    .to_string()
-            })?;
+        let producer_operation = match chelis_ir::axis_sources::local_dim_guard_sites(dag)?.first()
+        {
+            Some((_, claim)) => claim.op,
+            // An ascription at its binder's first producing site owes no
+            // comparison and so has no guard site; its value's producer still
+            // names the operation a later result claim reports.
+            None => chelis_ir::axis_sources::result_extent_sites(dag, roots[0])
+                .first()
+                .map(|site| site.operation())
+                .ok_or_else(|| {
+                    "host runtime: checked local tensor ascription produced neither a local \
+                     guard site nor a producing operation"
+                        .to_string()
+                })?,
+        };
         let prepared = chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(
             dag,
             &roots,

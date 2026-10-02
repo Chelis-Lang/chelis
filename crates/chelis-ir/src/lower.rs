@@ -7434,6 +7434,11 @@ enum FailMessage {
     Unusable(FailMessageDefect),
 }
 
+/// One local tensor ascription's claim tokens, by claimed axis. `None` is a
+/// claim on a binder that no witness declared when the activation started; it
+/// is resolved where the ascription's initializer lowers.
+type LocalAscriptionClaimTokens = Vec<(usize, Option<NodeId>)>;
+
 struct LowerCtx<'program> {
     host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
     host_sources: Vec<crate::host::staged::HostSource>,
@@ -7475,6 +7480,14 @@ struct LowerCtx<'program> {
     /// Binder lookup exists only in the current signature activation. Once
     /// selected, ordinary node edges carry the declaring witness's identity.
     signature_witnesses: Vec<(String, NodeId)>,
+    /// Output-inferred binders (spec/04-type-system.md section 4.4.1) that
+    /// no parameter declares, each bound to the witness of the first site in
+    /// this activation that produced its extent. Every later site naming the
+    /// binder, the declared result included, is a claim against that witness.
+    /// Activation-scoped like `signature_witnesses`, but not restored at a
+    /// `let` boundary: the binding belongs to the activation, not to the block
+    /// in which its first site happens to sit.
+    introduced_binder_witnesses: Vec<(String, NodeId)>,
     /// Every parameter witness minted by the CURRENT activation's
     /// [`LowerCtx::prepare_parameter_witnesses`], in parameter order.
     ///
@@ -7505,7 +7518,10 @@ struct LowerCtx<'program> {
     /// separate from ordinary inferred expression `type` metadata.
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
     /// Activation-local lowering tokens allocated before its body executes.
-    local_ascription_tokens: Vec<(u64, Vec<(usize, NodeId)>)>,
+    /// `None` marks a claim on a binder no witness declares yet; it is
+    /// resolved where the ascription's initializer lowers, as a claim if an
+    /// earlier site bound the binder and as that binder's first site if not.
+    local_ascription_tokens: Vec<(u64, LocalAscriptionClaimTokens)>,
     /// Scalar Bool selecting the runtime control-flow path currently being
     /// lowered. Unlike [`Self::random_path_condition`], this is present in
     /// ordinary tensor DAGs as well as transform/helper subcontexts.
@@ -7710,6 +7726,7 @@ impl<'program> LowerCtx<'program> {
             next_pin: 0,
             bindings: ValueScope::default(),
             signature_witnesses: Vec::new(),
+            introduced_binder_witnesses: Vec::new(),
             activation_witnesses: Vec::new(),
             signature_is_authored: false,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
@@ -9180,6 +9197,7 @@ impl<'program> LowerCtx<'program> {
     fn lower_initializer(&mut self, initializer: &TrappingInitializer) -> LoweredValue {
         let reference_scope = self.replace_scope(initializer.scope.clone());
         let signature_witnesses = std::mem::take(&mut self.signature_witnesses);
+        let introduced_binder_witnesses = std::mem::take(&mut self.introduced_binder_witnesses);
         let activation_witnesses = std::mem::take(&mut self.activation_witnesses);
         let local_unit_refinements = std::mem::take(&mut self.local_unit_refinements);
         let signature_is_authored = std::mem::replace(&mut self.signature_is_authored, false);
@@ -9191,6 +9209,7 @@ impl<'program> LowerCtx<'program> {
         let value = self.lower_expr(&initializer.expr);
         self.replace_scope(reference_scope);
         self.signature_witnesses = signature_witnesses;
+        self.introduced_binder_witnesses = introduced_binder_witnesses;
         self.activation_witnesses = activation_witnesses;
         self.local_unit_refinements = local_unit_refinements;
         self.signature_is_authored = signature_is_authored;
@@ -9708,6 +9727,25 @@ impl<'program> LowerCtx<'program> {
                 Some((axis, label, required, matches!(dim, DimInfo::Lit(_))))
             })
             .collect::<Vec<_>>();
+        // A named result dimension no witness declares yet is output-inferred
+        // (spec/04-type-system.md section 4.4.1). If the body binds it at a
+        // first producing site, the result is a later site and is claimed
+        // against that site once the body has lowered.
+        let first_site_claims = claim
+            .into_iter()
+            .filter(|_| !function && self.signature_is_authored)
+            .flat_map(|ty| ty.dims.iter().enumerate())
+            .filter_map(|(axis, dim)| match dim {
+                DimInfo::Named(name, _)
+                    if !name.is_empty()
+                        && name != "*"
+                        && self.signature_witness(name).is_none() =>
+                {
+                    Some((axis, extent_binder_label(name)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let mut result = self.lower_expr_unclaimed(expr, claim.filter(|_| function));
         let start = self.invocation_witnesses.len();
         for (axis, label, required, literal) in requirements {
@@ -9835,6 +9873,37 @@ impl<'program> LowerCtx<'program> {
                     );
                 }
             }
+        }
+        for (axis, label) in first_site_claims {
+            let (Some(first_site), Some(mut id)) =
+                (self.signature_witness(&label), result.as_single_node())
+            else {
+                continue;
+            };
+            let required = self.capture_result_claim(first_site, label, axis);
+            // The token is captured after the body produced its value, so the
+            // claim belongs to a carrier of that value, which the guard
+            // derivation follows back to the producer.
+            if !matches!(self.dag.get(id).map(|node| &node.op), Some(RiscOp::Copy))
+                || id.0 <= required.0
+            {
+                let ty = self
+                    .dag
+                    .get(id)
+                    .expect("returned value")
+                    .output_type
+                    .clone();
+                id = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Copy,
+                    vec![id],
+                    ty,
+                    self.current_span_id.clone(),
+                );
+                result = LoweredValue::Node(id);
+            }
+            self.dag.add_shape_dep(id, required);
+            self.invocation_witnesses.push(id);
         }
         self.retain_invocation_witnesses(result, start)
     }
@@ -10567,9 +10636,9 @@ impl<'program> LowerCtx<'program> {
                                                 &bind_kids[i + 1],
                                             )
                                         })
-                                        .map(|_| claims.clone())
+                                        .map(|ascription| (ascription.clone(), claims.clone()))
                                 });
-                        if let Some(claims) = local_claims {
+                        if let Some((ascription, pending)) = local_claims {
                             let Some(mut owner) = val_id.as_single_node() else {
                                 raise_fatal_lowering_error(
                                     format!(
@@ -10579,6 +10648,13 @@ impl<'program> LowerCtx<'program> {
                                     bind_kids[i + 1].span_id().map(str::to_owned),
                                 )
                             };
+                            let claims = self.resolve_local_ascription_claims(
+                                &ascription,
+                                pending,
+                                owner,
+                                name,
+                                bind_kids[i + 1].span_id(),
+                            );
                             for (axis, _) in &claims {
                                 self.restore_local_ascription_owner_axis(owner, *axis);
                             }
@@ -10666,10 +10742,9 @@ impl<'program> LowerCtx<'program> {
                 .outstanding_claims()
                 .iter()
                 .map(|claim| {
-                    (
-                        claim.axis(),
-                        self.local_ascription_claim_token(&ascription, claim),
-                    )
+                    let token = (!self.local_claim_awaits_first_site(&ascription, claim))
+                        .then(|| self.local_ascription_claim_token(&ascription, claim));
+                    (claim.axis(), token)
                 })
                 .collect();
             self.local_ascription_tokens
@@ -10727,6 +10802,94 @@ impl<'program> LowerCtx<'program> {
             }
         }
         contains(body, ascription)
+    }
+
+    /// Resolve an ascription's pending claims where its initializer `owner`
+    /// has lowered, and return the claims to attach to it.
+    ///
+    /// A pending claim names a binder no witness declared when the activation
+    /// started. If an earlier site has bound it since, the claim is an
+    /// ordinary claim against that site. Otherwise this ascription is the
+    /// binder's first producing site: the initializer's extent at the axis
+    /// becomes the binder's witness and owes no comparison here. Axes resolve
+    /// in order, so a binder repeated within one ascription is bound by its
+    /// first axis and claimed by the rest.
+    fn resolve_local_ascription_claims(
+        &mut self,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        pending: LocalAscriptionClaimTokens,
+        owner: NodeId,
+        binding: &str,
+        span: Option<&str>,
+    ) -> Vec<(usize, NodeId)> {
+        let id = ascription.id().get();
+        let mut claims = Vec::with_capacity(pending.len());
+        for (axis, token) in pending {
+            if let Some(token) = token {
+                claims.push((axis, token));
+                continue;
+            }
+            let claim = ascription
+                .outstanding_claims()
+                .iter()
+                .find(|claim| claim.axis() == axis)
+                .expect("a pending token names one of the ascription's claims");
+            if self.local_claim_awaits_first_site(ascription, claim) {
+                let label = Self::local_ascription_claim_label(ascription, axis, claim);
+                let witness = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LocalExpand,
+                        parameter: binding.to_string(),
+                        axis: RtAxis::Lit(
+                            i32::try_from(axis).expect("checked tensor rank fits int32"),
+                        ),
+                        requirements: Vec::new(),
+                        claims: Vec::new(),
+                    },
+                    vec![owner],
+                    TensorType {
+                        dims: Vec::new(),
+                        precision: Prim::Int64,
+                    },
+                    span.map(str::to_owned),
+                );
+                self.introduced_binder_witnesses.push((label, witness));
+                continue;
+            }
+            let token = self.local_ascription_claim_token(ascription, claim);
+            if let Some((_, recorded)) = self
+                .local_ascription_tokens
+                .iter_mut()
+                .find(|(recorded, _)| *recorded == id)
+                .and_then(|(_, tokens)| tokens.iter_mut().find(|(at, _)| *at == axis))
+            {
+                *recorded = Some(token);
+            }
+            claims.push((axis, token));
+        }
+        claims
+    }
+
+    /// Whether `claim` names a binder that no witness declares yet: an
+    /// output-inferred binder (spec/04-type-system.md section 4.4.1) whose
+    /// first producing site has not been lowered. Such a claim is resolved
+    /// where its initializer lowers.
+    fn local_claim_awaits_first_site(
+        &self,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        claim: &chelis_types::LocalAscriptionAxisClaim,
+    ) -> bool {
+        matches!(
+            claim.required_extent(),
+            chelis_types::types::Dim::Name(_) | chelis_types::types::Dim::Var(_)
+        ) && self
+            .signature_witness(&Self::local_ascription_claim_label(
+                ascription,
+                claim.axis(),
+                claim,
+            ))
+            .is_none()
     }
 
     fn discard_local_ascription_tokens_in(&mut self, body: &Expr) {
@@ -10969,12 +11132,12 @@ impl<'program> LowerCtx<'program> {
                     None,
                 )
             };
-            for (_, token) in claims {
+            for token in claims.iter().filter_map(|(_, token)| *token) {
                 let owner_count = self
                     .dag
                     .nodes()
                     .iter()
-                    .filter(|owner| owner.shape_deps.contains(token))
+                    .filter(|owner| owner.shape_deps.contains(&token))
                     .count();
                 if owner_count != 1 {
                     raise_fatal_lowering_error(
@@ -12556,6 +12719,7 @@ impl<'program> LowerCtx<'program> {
         let witness_start = self.invocation_witnesses.len();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
+        let saved_introduced_binders = std::mem::take(&mut self.introduced_binder_witnesses);
         let saved_activation_witnesses = self.activation_witnesses.clone();
         let saved_signature_is_authored = self.signature_is_authored;
         let saved_local_ascription_tokens = self.local_ascription_tokens.clone();
@@ -12897,6 +13061,7 @@ impl<'program> LowerCtx<'program> {
         self.bindings.restore_witnesses(saved.witness_snapshot());
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
+        self.introduced_binder_witnesses = saved_introduced_binders;
         self.activation_witnesses = saved_activation_witnesses;
         self.signature_is_authored = saved_signature_is_authored;
         self.local_ascription_tokens = saved_local_ascription_tokens;
@@ -12930,6 +13095,7 @@ impl<'program> LowerCtx<'program> {
         let saved_witnesses = self.bindings.witness_snapshot();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature = self.signature_witnesses.clone();
+        let saved_introduced_binders = std::mem::take(&mut self.introduced_binder_witnesses);
         let saved_activation = self.activation_witnesses.clone();
         let saved_authored = self.signature_is_authored;
         let saved_rank_substitutions = self.rank_substitutions.clone();
@@ -13049,6 +13215,7 @@ impl<'program> LowerCtx<'program> {
         self.bindings.restore_witnesses(saved_witnesses);
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature;
+        self.introduced_binder_witnesses = saved_introduced_binders;
         self.activation_witnesses = saved_activation;
         self.signature_is_authored = saved_authored;
         self.rank_substitutions = saved_rank_substitutions;
@@ -18468,6 +18635,7 @@ impl<'program> LowerCtx<'program> {
     ) {
         self.bindings.clear_witnesses();
         self.signature_witnesses.clear();
+        self.introduced_binder_witnesses.clear();
         self.activation_witnesses.clear();
         self.signature_is_authored = authored_signature;
         self.local_unit_refinements.clear();
@@ -18764,9 +18932,12 @@ impl<'program> LowerCtx<'program> {
     /// materializing a constant; a named claim needs the node itself, because
     /// its diagnostic reads the declaring parameter and axis off it.
     fn signature_witness(&self, binder: &str) -> Option<NodeId> {
-        self.signature_witnesses.iter().find_map(|(name, witness)| {
-            (name == binder || extent_binder_label(name) == binder).then_some(*witness)
-        })
+        self.signature_witnesses
+            .iter()
+            .chain(&self.introduced_binder_witnesses)
+            .find_map(|(name, witness)| {
+                (name == binder || extent_binder_label(name) == binder).then_some(*witness)
+            })
     }
 
     fn required_extent_for_claim(&mut self, dim: &DimInfo) -> Option<NodeId> {
@@ -20364,6 +20535,7 @@ impl<'program> LowerCtx<'program> {
         let witness_start = self.invocation_witnesses.len();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
+        let saved_introduced_binders = std::mem::take(&mut self.introduced_binder_witnesses);
         let saved_activation_witnesses = self.activation_witnesses.clone();
         let saved_signature_is_authored = self.signature_is_authored;
         let call_span = self.current_span_id.clone();
@@ -20473,6 +20645,7 @@ impl<'program> LowerCtx<'program> {
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
+        self.introduced_binder_witnesses = saved_introduced_binders;
         self.activation_witnesses = saved_activation_witnesses;
         self.signature_is_authored = saved_signature_is_authored;
         self.bindings = saved; // Restore scope
@@ -21341,9 +21514,14 @@ impl<'program> LowerCtx<'program> {
         // Each arm's activation, which a key-valued branch's join consumes
         // that arm's key under.
         let then_active = self.draw_activation();
+        // A binder first produced inside one arm is bound only on that arm's
+        // path, so its first-site witness does not outlive the arm.
+        let introduced_binders = self.introduced_binder_witnesses.len();
         self.if_branch_depth += 1;
         let then_value = self.lower_expr(then_expr);
         self.if_branch_depth -= 1;
+        self.introduced_binder_witnesses
+            .truncate(introduced_binders);
         let then_node = self.expect_runtime_if_branch(then_value, "then", span);
         if let Some(parent_path) = saved_random_path {
             let path_ty = TensorType {
@@ -21391,6 +21569,8 @@ impl<'program> LowerCtx<'program> {
         self.if_branch_depth += 1;
         let else_value = self.lower_expr(else_expr);
         self.if_branch_depth -= 1;
+        self.introduced_binder_witnesses
+            .truncate(introduced_binders);
         let else_node = self.expect_runtime_if_branch(else_value, "else", span);
         self.random_path_condition = saved_random_path;
         self.branch_path_condition = saved_branch_path;
