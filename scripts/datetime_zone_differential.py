@@ -32,6 +32,10 @@ through 9999, so every observation lies there. Each lane must print exactly
 these bindings and equal the expectation; agreeing with the other lane is not
 enough.
 
+Profiles: `full` runs every fixture zone and runs nightly; `canary` runs
+`CANARY_ZONES`, a zone with both a gap and a fold and `UTC`, with the
+`time_zone_utc()` check, on every pull request.
+
 The supported entry point is `crates/chelis-cli/tests/std_datetime_zone.rs`,
 which supplies the freshly built `chelis`, a published `chelis-std`, and the
 strict reference toolchain.
@@ -241,6 +245,26 @@ def utc_program() -> Program:
     return Program("UTC_nullary", "module Demo.Main\n" + IMPORTS + PRELUDE + body, {"utc_equal": "true"})
 
 
+# The zones the canary keeps: Asia/Kolkata lists both a gap and a fold among
+# few changes, and UTC lists none.
+CANARY_ZONES = ("Asia/Kolkata", "UTC")
+
+
+def canary_zones(zones: list[str]) -> list[str]:
+    """`CANARY_ZONES`, each a fixture zone, with a gap and a fold among them."""
+    missing = [name for name in CANARY_ZONES if name not in zones]
+    if missing:
+        raise AssertionError(f"canary zones missing from the fixture: {missing}")
+    found = []
+    for name in CANARY_ZONES:
+        path = FIXTURE_DIR / f"zones/{name}.tzif"
+        with path.open("rb") as handle:
+            found += changes(zoneinfo.ZoneInfo.from_file(handle, key=name), path)
+    if not any(after > before for _, before, after in found) or not any(after < before for _, before, after in found):
+        raise AssertionError("the canary zones must include a gap and a fold")
+    return list(CANARY_ZONES)
+
+
 def render(values: list[int]) -> str:
     return "[" + ", ".join(str(value) for value in values) + "]"
 
@@ -352,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--chelis", type=Path, required=True, help="the chelis binary under test")
     parser.add_argument("--reef-home", type=Path, required=True, help="a reef home with chelis-std published")
     parser.add_argument("--toolchain-json", help="strict reference toolchain: {compiler, compile_flags, link_flags}")
+    parser.add_argument("--profile", choices=("full", "canary"), required=True)
     parser.add_argument("--lanes", default="eval,c")
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--timeout", type=int, default=3600, help="seconds per lane process")
@@ -370,6 +395,8 @@ def main(argv: list[str] | None = None) -> int:
         toolchain = Toolchain(spec["compiler"], tuple(spec["compile_flags"]), tuple(spec["link_flags"]))
 
     zones = json.loads((FIXTURE_DIR / "manifest.json").read_text(encoding="utf-8"))["zones"]
+    if args.profile == "canary":
+        zones = canary_zones(zones)
     programs = [zone_program(name) for name in zones if not args.only or args.only in name]
     if not args.only or args.only in "UTC_nullary":
         programs.append(utc_program())

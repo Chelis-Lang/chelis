@@ -156,6 +156,32 @@ class HarnessTests(unittest.TestCase):
         rows = program.expected["observed_000"].strip("[]").split(", ")
         self.assertEqual(len(rows), len(queries.days) * (1 + len(ref.ROLLS) + 3 * len(queries.offsets)) + len(queries.pairs))
 
+    def test_canary_observes_a_subset_of_the_full_corpus(self) -> None:
+        full = differential.build_programs(16)
+        canary = differential.build_canary_programs()
+        def observed(programs):
+            return {(lane, k, v) for program in programs for lane in program.lanes for k, v in program.expected.items()}
+        full_failures = {program.name: program for program in full if program.failure}
+        self.assertTrue(observed(canary) <= observed(full))
+        for program in canary:
+            if program.failure:
+                self.assertEqual(program, full_failures[program.name])
+        self.assertEqual({lane for program in canary if program.expected for lane in program.lanes}, {"eval", "c"})
+        edges = ref.edge_calendars()
+        calendars = " ".join(program.body for program in canary)
+        for spec in edges[:2]:
+            self.assertIn(differential.calendar_src(spec), calendars)
+        self.assertTrue(any(program.failure and program.failure[1] is not None for program in canary))
+
+    def test_canary_rejects_a_failure_the_full_corpus_lacks(self) -> None:
+        original = differential.CANARY_FAILURES
+        differential.CANARY_FAILURES = original + ("failure_99_absent",)
+        try:
+            with self.assertRaisesRegex(AssertionError, "failure_99_absent"):
+                differential.build_canary_programs()
+        finally:
+            differential.CANARY_FAILURES = original
+
     def test_drawn_holidays_follow_the_generator(self) -> None:
         spec = ref.CalendarSpec(ref.WEEKDAYS_ONLY, 100, 199, density=500, seed=7)
         drawn = spec.holiday_args()

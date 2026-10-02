@@ -1064,8 +1064,10 @@ fn toolchain_json() -> String {
 /// (`ci-full`: 3 000 s). Together they took 1 948 s there before the
 /// `utc_texts` row, which made them about half as slow again. On a quiet
 /// local machine the eval lane takes 263 s and the C lane 189 s; at CI's
-/// observed 5.7 times that is about 1 500 s and 1 080 s.
-fn run_zone_differential(lanes: &str) {
+/// observed 5.7 times that is about 1 500 s and 1 080 s. The two full lanes
+/// therefore run nightly, and the `canary` profile runs both lanes on every
+/// pull request: a zone with both a gap and a fold, and `UTC`.
+fn run_zone_differential(profile: &str, lanes: &str, zones: &str) {
     let python =
         managed_python::managed_python(&repo_root()).unwrap_or_else(|error| panic!("{error}"));
     let chelis = assert_cmd::cargo_bin!("chelis").to_path_buf();
@@ -1076,8 +1078,8 @@ fn run_zone_differential(lanes: &str) {
         .arg(&chelis)
         .arg("--reef-home")
         .arg(&common::SHARED_REEF.reef_home)
-        .args(["--lanes", lanes]);
-    if lanes == "c" {
+        .args(["--profile", profile, "--lanes", lanes]);
+    if lanes.contains('c') {
         command.args(["--toolchain-json", &toolchain_json()]);
     }
     let started = std::time::Instant::now();
@@ -1087,7 +1089,7 @@ fn run_zone_differential(lanes: &str) {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr);
     eprintln!(
-        "zone differential on {lanes}: {:.1} s",
+        "zone differential ({profile}) on {lanes}: {:.1} s",
         started.elapsed().as_secs_f64()
     );
     assert!(
@@ -1099,17 +1101,22 @@ fn run_zone_differential(lanes: &str) {
         output.status
     );
     assert!(
-        stdout.contains("7 zones") && stdout.contains(&format!("lanes {lanes})")),
+        stdout.contains(zones) && stdout.contains(&format!("lanes {})", lanes.replace(',', "+"))),
         "{stdout}"
     );
 }
 
 #[test]
 fn std_datetime_zone_agrees_with_zoneinfo_on_eval() {
-    run_zone_differential("eval");
+    run_zone_differential("full", "eval", "7 zones");
 }
 
 #[test]
 fn std_datetime_zone_agrees_with_zoneinfo_on_c() {
-    run_zone_differential("c");
+    run_zone_differential("full", "c", "7 zones");
+}
+
+#[test]
+fn std_datetime_zone_canary_agrees_with_zoneinfo_on_eval_and_c() {
+    run_zone_differential("canary", "eval,c", "2 zones");
 }

@@ -10,13 +10,16 @@
 //! strict reference toolchain the `lane-check` gate uses, then holds the
 //! harness to its pass line.
 //!
-//! The default test is the CI profile: the range edges, seeded samples across
-//! the whole range, every policy branch, every year's Easter, and the valid and
-//! invalid text corpus on both lanes, plus every day from 1900-01-01 through
-//! 2100-12-31 in compiled C. Its column corpus puts every `Std.Datetime.Columns`
-//! callable on both lanes over seeded columns with the range edges, under every
-//! `TimeUnit`, `Rounding` mode and `DayOverflow` policy, with the failures that
-//! must name their lowest failing element. The ignored test is the manual gate in
+//! The canary runs on every pull request: four unchanged programs of the CI
+//! profile on both lanes, the first and last 400 days of the range and a
+//! domain and an overflow failure. The CI profile runs nightly:
+//! the range edges, seeded samples across the whole range, every policy
+//! branch, every year's Easter, and the valid and invalid text corpus on both
+//! lanes, plus every day from 1900-01-01 through 2100-12-31 in compiled C. Its
+//! column corpus puts every `Std.Datetime.Columns` callable on both lanes over
+//! seeded columns with the range edges, under every `TimeUnit`, `Rounding`
+//! mode and `DayOverflow` policy, with the failures that must name their
+//! lowest failing element. The ignored test is the manual gate in
 //! `docs/manual_gates.md`: every day of the range in compiled C, and every day
 //! from 1900 through 2100 on `chelis eval`.
 
@@ -82,6 +85,13 @@ fn run_harness(profile: &str, lanes: &str) -> String {
         output.status
     );
     stdout
+}
+
+#[test]
+fn std_datetime_canary_agrees_with_the_reference_on_eval_and_c() {
+    let stdout = run_harness("canary", "eval,c");
+    assert!(stdout.contains("on lanes eval+c"), "{stdout}");
+    assert!(stdout.contains(", 4 programs)"), "{stdout}");
 }
 
 #[test]
