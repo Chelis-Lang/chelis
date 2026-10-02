@@ -364,8 +364,8 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
   `quantize`, both of which double-round. A differential driver runs golden vectors
   (envelope boundaries, limb carry chains such as `999999999·10^k`, ties in every mode and
   sign, subnormal f32 results, parser edge cases, random values) through the evaluator and
-  the compiled C lane and compares them exactly. CI runs the edge corpus; a large random
-  run is a manual gate.
+  the compiled C lane and compares them exactly. Nightly CI runs the edge corpus; a large
+  random run is a manual gate.
 - **Failure corpus.** Every `domain` and `overflow` path with its exact message, extreme
   arguments with no primitive trap escaping, construction and inspection of `Decimal`
   outside the module rejected, removed names unexported, `grad` through `decimal_from_f64`

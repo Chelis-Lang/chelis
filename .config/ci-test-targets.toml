@@ -1294,6 +1294,30 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "recursive composite cotangent parity compiles and executes generated C"
 tracking_issue = "chelis#1293"
 
+# The two slowest Std.Decimal checks take minutes each on a loaded
+# package-expansion shard, and the sweep can reach the 600-second `chelis test`
+# suite timeout there. The other tests of both targets stay in pull-request CI;
+# docs/manual_gates.md has the command that runs these two on demand.
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_decimal_oracle"
+name = "std_decimal_agrees_with_the_reference_on_eval_and_c"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Std.Decimal default differential corpus builds and runs about 200 programs on eval and compiled C"
+tracking_issue = "chelis#2794"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "std_decimal_failures"
+name = "std_decimal_extreme_arguments_raise_no_primitive_trap"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Std.Decimal extreme-argument sweep evaluates 308 calls in one chelis test suite"
+tracking_issue = "chelis#2794"
+
 # Cargo metadata classifies paths under workspace package roots directly.
 # Shared roots remain fail-closed unless this file records a current,
 # evidence-backed disposition. Directory prefixes end in `/`; other rules are
