@@ -1045,7 +1045,14 @@ fn extrema_selects_left<T: Copy + PartialOrd>(
     }
 }
 
-fn canonicalize_subtraction_f32(value: f32) -> f32 {
+/// [04-NUM-2]: floating arithmetic and numeric conversion finalize every NaN
+/// they produce to the dtype's canonical quiet NaN, dropping the input
+/// payload and sign, so NaN bits never depend on the host ISA (arm64 yields
+/// `0x7fc00000` for an invalid operation, x86 `0xffc00000`, and both
+/// propagate input payloads). Only selection, which [05-OP-40] declares
+/// bit-preserving, bypasses this. The f16 and bf16 lanes compute at f32 and
+/// narrow the canonical f32 NaN to their own canonical encoding.
+fn canonical_nan_f32(value: f32) -> f32 {
     if value.is_nan() {
         f32::from_bits(0x7fc0_0000)
     } else {
@@ -1053,7 +1060,7 @@ fn canonicalize_subtraction_f32(value: f32) -> f32 {
     }
 }
 
-fn canonicalize_subtraction_f64(value: f64) -> f64 {
+fn canonical_nan_f64(value: f64) -> f64 {
     if value.is_nan() {
         f64::from_bits(0x7ff8_0000_0000_0000)
     } else {
@@ -1072,8 +1079,8 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f32::is_nan),
     };
     match op {
-        FloatBinOp::Sub => canonicalize_subtraction_f32(value),
-        _ => value,
+        FloatBinOp::Max | FloatBinOp::Min => value,
+        _ => canonical_nan_f32(value),
     }
 }
 
@@ -1088,8 +1095,8 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f64::is_nan),
     };
     match op {
-        FloatBinOp::Sub => canonicalize_subtraction_f64(value),
-        _ => value,
+        FloatBinOp::Max | FloatBinOp::Min => value,
+        _ => canonical_nan_f64(value),
     }
 }
 
@@ -1124,7 +1131,7 @@ pub fn float_binop(
 // chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
 #[allow(clippy::disallowed_methods)]
 fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
-    match op {
+    canonical_nan_f32(match op {
         FloatUnOp::Neg => -value,
         FloatUnOp::Recip => value.recip(),
         FloatUnOp::Exp => value.exp(),
@@ -1145,13 +1152,13 @@ fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
         | FloatUnOp::Gelu => {
             unreachable!("derived activations decompose before the unary primitive kernel")
         }
-    }
+    })
 }
 
 // chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
 #[allow(clippy::disallowed_methods)]
 fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
-    match op {
+    canonical_nan_f64(match op {
         FloatUnOp::Neg => -value,
         FloatUnOp::Recip => value.recip(),
         FloatUnOp::Exp => value.exp(),
@@ -1172,7 +1179,7 @@ fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
         | FloatUnOp::Gelu => {
             unreachable!("derived activations decompose before the unary primitive kernel")
         }
-    }
+    })
 }
 
 fn activation_constant(
@@ -2162,7 +2169,7 @@ fn float_vec_unop_f32<T: Copy>(
             values
                 .iter()
                 .copied()
-                .map(|value| from_f32($body(to_f32(value))))
+                .map(|value| from_f32(canonical_nan_f32($body(to_f32(value)))))
                 .collect()
         };
     }
@@ -2193,7 +2200,11 @@ fn float_vec_unop_f32<T: Copy>(
 fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
     macro_rules! map {
         ($body:expr) => {
-            values.iter().copied().map($body).collect()
+            values
+                .iter()
+                .copied()
+                .map(|value| canonical_nan_f64($body(value)))
+                .collect()
         };
     }
     match op {
@@ -2229,40 +2240,43 @@ trait ActivationElement: Copy {
     fn mul(self, rhs: Self) -> Self;
 }
 
+// Each activation step is the same primitive kernel the scalar lane uses, so
+// the tensor lane cannot drift from it, including [04-NUM-2]'s NaN
+// finalization.
 macro_rules! impl_native_activation_element {
-    ($ty:ty) => {
+    ($ty:ty, $unop:ident, $binop:ident) => {
         impl ActivationElement for $ty {
             fn constant(value: f64) -> Self {
                 value as Self
             }
 
             fn neg(self) -> Self {
-                -self
+                $unop(FloatUnOp::Neg, self)
             }
 
             // chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
             #[allow(clippy::disallowed_methods)]
             fn exp(self) -> Self {
-                self.exp()
+                $unop(FloatUnOp::Exp, self)
             }
 
             fn recip(self) -> Self {
-                self.recip()
+                $unop(FloatUnOp::Recip, self)
             }
 
             fn add(self, rhs: Self) -> Self {
-                self + rhs
+                $binop(FloatBinOp::Add, self, rhs)
             }
 
             fn mul(self, rhs: Self) -> Self {
-                self * rhs
+                $binop(FloatBinOp::Mul, self, rhs)
             }
         }
     };
 }
 
-impl_native_activation_element!(f32);
-impl_native_activation_element!(f64);
+impl_native_activation_element!(f32, apply_float_unop_f32, apply_float_binop_f32);
+impl_native_activation_element!(f64, apply_float_unop_f64, apply_float_binop_f64);
 
 macro_rules! impl_reduced_activation_element {
     ($ty:ty) => {
@@ -2272,25 +2286,33 @@ macro_rules! impl_reduced_activation_element {
             }
 
             fn neg(self) -> Self {
-                Self::from_f32(-self.to_f32())
+                Self::from_f32(apply_float_unop_f32(FloatUnOp::Neg, self.to_f32()))
             }
 
             // chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
             #[allow(clippy::disallowed_methods)]
             fn exp(self) -> Self {
-                Self::from_f32(self.to_f32().exp())
+                Self::from_f32(apply_float_unop_f32(FloatUnOp::Exp, self.to_f32()))
             }
 
             fn recip(self) -> Self {
-                Self::from_f32(self.to_f32().recip())
+                Self::from_f32(apply_float_unop_f32(FloatUnOp::Recip, self.to_f32()))
             }
 
             fn add(self, rhs: Self) -> Self {
-                Self::from_f32(self.to_f32() + rhs.to_f32())
+                Self::from_f32(apply_float_binop_f32(
+                    FloatBinOp::Add,
+                    self.to_f32(),
+                    rhs.to_f32(),
+                ))
             }
 
             fn mul(self, rhs: Self) -> Self {
-                Self::from_f32(self.to_f32() * rhs.to_f32())
+                Self::from_f32(apply_float_binop_f32(
+                    FloatBinOp::Mul,
+                    self.to_f32(),
+                    rhs.to_f32(),
+                ))
             }
         }
     };
@@ -6969,6 +6991,167 @@ mod tests {
                 assert_eq!(actual[0].to_bits(), 0x7ff8_0000_0000_0000)
             }
             _ => panic!("f64 subtraction must retain f64 storage"),
+        }
+    }
+
+    /// chelis#2964 (C8): [04-NUM-2] finalizes every NaN that floating
+    /// arithmetic or numeric conversion produces to the dtype's canonical
+    /// quiet NaN, dropping input payload and sign. Selection (`max`/`min`)
+    /// is bit-preserving by [05-OP-40] and is not covered here.
+    #[test]
+    fn every_nan_producing_float_op_finalizes_canonical_nan_at_every_storage_width() {
+        fn scalar(prim: Prim, bits: u64) -> ScalarValue {
+            let bits = match prim {
+                Prim::F16 => Bits::F16(half::f16::from_bits(bits as u16)),
+                Prim::Bf16 => Bits::Bf16(half::bf16::from_bits(bits as u16)),
+                Prim::F32 => Bits::F32(f32::from_bits(bits as u32)),
+                Prim::F64 => Bits::F64(f64::from_bits(bits)),
+                _ => unreachable!("float widths only"),
+            };
+            ScalarValue { bits }
+        }
+        fn raw_bits(value: ScalarValue) -> u64 {
+            match value.bits {
+                Bits::F16(value) => u64::from(value.to_bits()),
+                Bits::Bf16(value) => u64::from(value.to_bits()),
+                Bits::F32(value) => u64::from(value.to_bits()),
+                Bits::F64(value) => value.to_bits(),
+                _ => unreachable!("float widths only"),
+            }
+        }
+        // (prim, canonical, [negative quiet payload NaN, signaling NaN],
+        // one, +inf, -inf, zero, minus one)
+        let widths = [
+            (
+                Prim::F16,
+                0x7e00,
+                [0xfe55, 0x7c01],
+                0x3c00,
+                0x7c00,
+                0xfc00,
+                0,
+                0xbc00,
+            ),
+            (
+                Prim::Bf16,
+                0x7fc0,
+                [0xffe5, 0x7f81],
+                0x3f80,
+                0x7f80,
+                0xff80,
+                0,
+                0xbf80,
+            ),
+            (
+                Prim::F32,
+                0x7fc0_0000,
+                [0xffc5_4321, 0x7f81_2345],
+                0x3f80_0000,
+                0x7f80_0000,
+                0xff80_0000,
+                0,
+                0xbf80_0000,
+            ),
+            (
+                Prim::F64,
+                0x7ff8_0000_0000_0000,
+                [0xfff8_abcd_1234_5678, 0x7ff0_1234_5678_9abc],
+                0x3ff0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+                0xfff0_0000_0000_0000,
+                0,
+                0xbff0_0000_0000_0000,
+            ),
+        ];
+        let arithmetic = [
+            FloatBinOp::Add,
+            FloatBinOp::Sub,
+            FloatBinOp::Mul,
+            FloatBinOp::Div,
+            FloatBinOp::FloorDiv,
+        ];
+        let unary = [
+            FloatUnOp::Neg,
+            FloatUnOp::Recip,
+            FloatUnOp::Exp,
+            FloatUnOp::Log,
+            FloatUnOp::Sin,
+            FloatUnOp::Sqrt,
+            FloatUnOp::Cos,
+            FloatUnOp::Tan,
+            FloatUnOp::Atan,
+            FloatUnOp::Abs,
+            FloatUnOp::Floor,
+            FloatUnOp::Ceil,
+            FloatUnOp::Round,
+            FloatUnOp::Sigmoid,
+            FloatUnOp::Tanh,
+            FloatUnOp::Silu,
+            FloatUnOp::Gelu,
+        ];
+        for (prim, canonical, nans, one, inf, neg_inf, zero, minus_one) in widths {
+            let name = prim.name();
+            let mut binary_cases = Vec::new();
+            for op in arithmetic {
+                for nan in nans {
+                    binary_cases.push((op, nan, one));
+                    binary_cases.push((op, one, nan));
+                }
+            }
+            // Invalid operations on non-NaN operands: x86 produces the
+            // negative default NaN for these, arm64 the positive one.
+            binary_cases.extend([
+                (FloatBinOp::Add, inf, neg_inf),
+                (FloatBinOp::Sub, inf, inf),
+                (FloatBinOp::Mul, zero, inf),
+                (FloatBinOp::Mul, neg_inf, zero),
+                (FloatBinOp::Div, zero, zero),
+                (FloatBinOp::Div, inf, neg_inf),
+                (FloatBinOp::FloorDiv, zero, zero),
+            ]);
+            for (op, lhs, rhs) in binary_cases {
+                let got = raw_bits(float_binop(op, scalar(prim, lhs), scalar(prim, rhs)).unwrap());
+                assert_eq!(
+                    got, canonical,
+                    "{name} {op:?}({lhs:#x}, {rhs:#x}) gave {got:#x}"
+                );
+                let tensor = float_tensor_binop(
+                    op,
+                    &tensor_from_scalars(prim, &[scalar(prim, lhs)]),
+                    &tensor_from_scalars(prim, &[scalar(prim, rhs)]),
+                )
+                .unwrap();
+                let got = raw_bits(tensor.scalar_at(0));
+                assert_eq!(
+                    got, canonical,
+                    "{name} tensor {op:?}({lhs:#x}, {rhs:#x}) gave {got:#x}"
+                );
+            }
+            let mut unary_cases = Vec::new();
+            for op in unary {
+                for nan in nans {
+                    unary_cases.push((op, nan));
+                }
+            }
+            unary_cases.extend([
+                (FloatUnOp::Sqrt, minus_one),
+                (FloatUnOp::Log, minus_one),
+                (FloatUnOp::Sin, inf),
+                (FloatUnOp::Cos, neg_inf),
+                (FloatUnOp::Tan, inf),
+            ]);
+            for (op, input) in unary_cases {
+                let got = raw_bits(float_unop(op, scalar(prim, input)).unwrap());
+                assert_eq!(got, canonical, "{name} {op:?}({input:#x}) gave {got:#x}");
+                let tensor =
+                    float_tensor_unop(op, &tensor_from_scalars(prim, &[scalar(prim, input)]))
+                        .unwrap();
+                let got = raw_bits(tensor.scalar_at(0));
+                assert_eq!(
+                    got, canonical,
+                    "{name} tensor {op:?}({input:#x}) gave {got:#x}"
+                );
+            }
         }
     }
 
