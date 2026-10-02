@@ -115,7 +115,8 @@ sources and print the command that fixes them.
   the write command. It skips a leg with a one-line notice when the pushed
   commit is not this worktree's `HEAD`, when the leg's paths have
   uncommitted changes, or when the registry's helper is not yet built in the
-  cargo target. CI stays the authority.
+  cargo target or `Cargo.lock` is not current. It runs only checks that
+  never write into the worktree. CI stays the authority.
 
 On a branch that predates `scripts/regen_hooks.py`, both hooks do nothing.
 Without a managed venv or `uv`, pre-commit fails, naming the fix, only when

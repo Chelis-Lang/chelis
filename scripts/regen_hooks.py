@@ -61,6 +61,29 @@ EXIT_ERROR = 2
 
 # A cargo leg is warm when the binary it builds already exists under the
 # cargo target directory; otherwise its first check is a full build.
+# The legs pre-push may run: those whose --check never writes a file in the
+# worktree, not even transiently. Each was read for that property:
+#   conformance-assets, reviewed-unsupported-wording: compare and print only;
+#   opaque-corpus: regen_all regenerates into a temporary directory;
+#   rejection-registry: compares and prints; its cargo metadata, check and
+#     run calls write only the cargo target directory, which is ignored
+#     build output, and CARGO_LOCK_GUARD below keeps cargo from rewriting
+#     Cargo.lock.
+# The chelis-std bundle check rewrites and restores its outputs, and the
+# bundle is becoming a build-time artifact (chelis#2930), so it is excluded,
+# as is every tier-1 and tier-2 leg. test_regen_hooks.py executes the Python
+# checks against a copy and requires the copy to stay byte-identical.
+READ_ONLY_CHECKS = frozenset(
+    {"rejection-registry", "conformance-assets", "reviewed-unsupported-wording",
+     "opaque-corpus"}
+)
+
+# cargo rewrites an inconsistent Cargo.lock on any resolving command. Before
+# a cargo leg runs, this asks cargo, offline and without writing, whether the
+# committed lock is current; when it is not, the leg is skipped with a notice.
+CARGO_LOCK_GUARD = ("cargo", "tree", "--locked", "--offline", "--workspace",
+                    "--depth", "0", "--quiet")
+
 WARM_BINARIES: dict[str, str] = {
     "rejection-registry": "debug/rejection_source_inventory",
 }
@@ -364,6 +387,14 @@ def check_command(leg: regen_all.RegenLeg, python: str) -> str:
     return shlex.join((python, "scripts/regen_all.py", "--tier", str(leg.tier), "--check"))
 
 
+def pre_push_legs(python: str) -> list[regen_all.RegenLeg]:
+    """The manifest legs pre-push may check, in manifest order."""
+    return [
+        leg for leg in regen_all.regen_legs(python)
+        if leg.tier == 0 and leg.name in READ_ONLY_CHECKS
+    ]
+
+
 def pre_push(
     repo: Path,
     python: str,
@@ -372,9 +403,7 @@ def pre_push(
     environ: dict[str, str],
     out,
 ) -> int:
-    # Tier 0 only. The chelis-std bundle (tier 1) is moving to a build-time
-    # artifact (chelis#2930), so no hook checks dist/ or reef.lock files.
-    legs = [leg for leg in regen_all.regen_legs(python) if leg.tier == 0]
+    legs = pre_push_legs(python)
     head = git(repo, "rev-parse", "HEAD", environ=environ).strip()
     to_check: list[regen_all.RegenLeg] = []
     for update in parse_ref_updates(ref_text):
@@ -416,6 +445,18 @@ def pre_push(
                     file=out,
                 )
                 continue
+            if warm is not None:
+                guard = regen_all.launch(
+                    quiet_runner, list(CARGO_LOCK_GUARD), cwd=repo, env=environ
+                )
+                if guard.returncode != 0:
+                    print(
+                        f"pre-push: skipping {leg.name}: cargo cannot confirm "
+                        "Cargo.lock is current without rewriting it; run "
+                        f"{check_command(leg, python)}",
+                        file=out,
+                    )
+                    continue
             to_check.append(leg)
 
     if not to_check:

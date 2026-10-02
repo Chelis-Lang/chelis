@@ -11,6 +11,7 @@ environment carries no cargo target, so no test here can reach cargo.
 
 from __future__ import annotations
 
+import io
 import os
 import shlex
 import shutil
@@ -131,6 +132,49 @@ class LegInputDeclarations(unittest.TestCase):
                     )
 
 
+class PrePushReadOnly(unittest.TestCase):
+    """A hook may run only checks that never write into the worktree."""
+
+    def test_pre_push_selects_only_read_only_tier_zero_legs(self) -> None:
+        legs = regen_hooks.pre_push_legs("PY")
+        self.assertEqual(
+            [leg.name for leg in legs],
+            ["rejection-registry", "conformance-assets",
+             "reviewed-unsupported-wording", "opaque-corpus"],
+        )
+        self.assertTrue(all(leg.tier == 0 for leg in legs))
+
+    def test_python_pre_push_checks_leave_the_tree_byte_identical(self) -> None:
+        for leg in regen_hooks.pre_push_legs(sys.executable):
+            if leg.needs != "python":
+                continue
+            with self.subTest(leg=leg.name), tempfile.TemporaryDirectory() as scratch:
+                copy = Path(scratch)
+                for spec in (*leg.inputs, *leg.writes):
+                    source, target = REPO_ROOT / spec, copy / spec
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if source.is_symlink():
+                        target.symlink_to(os.readlink(source))
+                    elif source.is_dir():
+                        shutil.copytree(source, target, symlinks=True)
+                    else:
+                        shutil.copy2(source, target)
+                before = regen_hooks.tree_state(copy)
+                stamps = {p: p.lstat().st_mtime_ns for p in copy.rglob("*")}
+                result = regen_all.run_leg(
+                    leg, check=True, repo_root=copy, python=sys.executable,
+                    runner=regen_hooks.quiet_runner,
+                    environ=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+                    out=io.StringIO(), position="1/1",
+                )
+                self.assertEqual(result.status, "ok", result.detail)
+                self.assertEqual(regen_hooks.tree_state(copy), before)
+                self.assertEqual(
+                    {p: p.lstat().st_mtime_ns for p in copy.rglob("*")}, stamps,
+                    "a check rewrote a file, even if with the same bytes",
+                )
+
+
 class RegenHookRepository(unittest.TestCase):
     """Real commits and pushes through the installed templates."""
 
@@ -157,6 +201,15 @@ class RegenHookRepository(unittest.TestCase):
             )
             decoy.chmod(0o755)
         self.addCleanup(self.assert_no_decoy_or_leftover)
+        # Any cargo invocation is logged and fails; only the warm-target test
+        # expects one, and then only the read-only lock probe.
+        self.cargo_log = self.directory / "cargo-ran"
+        cargo = self.bin / "cargo"
+        cargo.write_text(
+            f'#!/bin/sh\necho "$*" >> {shlex.quote(str(self.cargo_log))}\nexit 101\n',
+            encoding="utf-8",
+        )
+        cargo.chmod(0o755)
         self.tmp = self.directory / "tmp"
         self.tmp.mkdir()
         self.env = {
@@ -589,6 +642,25 @@ class RegenHookRepository(unittest.TestCase):
         )
         # The chelis-std bundle is never a hook leg (chelis#2930).
         self.assertNotIn("std-bundle", self.first_push.stderr)
+        self.assertFalse(self.cargo_log.exists(), "a cold skip must start no cargo")
+
+    def test_pre_push_runs_no_cargo_leg_on_a_stale_lock(self) -> None:
+        """Cargo would rewrite an inconsistent Cargo.lock; probe it first."""
+        warm = self.repo / "target/debug/rejection_source_inventory"
+        warm.parent.mkdir(parents=True)
+        warm.write_text("", encoding="utf-8")
+        source = self.repo / "crates/demo/src/lib.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text('fn f() { unimplemented_rejection!("x", 1); }\n', encoding="utf-8")
+        self.git("add", str(source))
+        self.git("commit", "--quiet", "-m", "feat: cite")
+        result = self.push()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cannot confirm Cargo.lock is current", result.stderr)
+        self.assertEqual(
+            self.cargo_log.read_text(encoding="utf-8").splitlines(),
+            [" ".join(regen_hooks.CARGO_LOCK_GUARD[1:])],
+        )
 
     def test_pre_push_selects_the_registry_only_for_citation_edits(self) -> None:
         source = self.repo / "crates/demo/src/lib.rs"
