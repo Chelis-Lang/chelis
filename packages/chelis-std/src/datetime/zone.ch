@@ -37,8 +37,7 @@ type Zoned =
 -- zone name, and whether the annotation is critical.
 type ZonedText =
   | ZonedText { written: DateTime, offset: Option[Offset], zone_name: string, critical: bool }
--- Range constants are written inline, because a compiled program prints every
--- reachable nullary definition of an imported module as a root (#2624):
+-- Range constants, written inline:
 -- - unix seconds -377705030401..253402214400 (the instant range);
 -- - offsets within -86399..86399 seconds;
 -- - 12622780800 seconds in 400 Gregorian years, the period of every footer

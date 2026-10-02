@@ -21,10 +21,8 @@ with `time_zone_from_tzif`, and prints four bindings:
   with `Z`, `z` or `-00:00` (RFC 9557's unknown local offset) and an
   elective or critical annotation, `zoned_from_text` under every
   `OffsetConflict` policy, compared with `zoneinfo`'s reading of that instant;
-- for `UTC` only, a separate eval-only program checks that the file's zone
-  equals `time_zone_utc()`. Compiled C prints a reachable nullary definition as
-  extra roots (chelis#2624) and then aborts on the footer's `None` component
-  (chelis#2597), so that program has no C lane until those are fixed.
+- for `UTC` only, a separate program checks that the file's zone equals
+  `time_zone_utc()`.
 
 The expected values come from `zoneinfo` alone: offsets from `astimezone`,
 and the policies from PEP 495's `fold` (in a fold, `fold=0` is the earlier
@@ -237,10 +235,10 @@ def zone_program(name: str) -> Program:
 
 
 def utc_program() -> Program:
-    """`time_zone_utc()` equals tzdata's UTC file; eval only (chelis#2624, chelis#2597)."""
+    """`time_zone_utc()` equals tzdata's UTC file."""
     path = FIXTURE_DIR / "zones/UTC.tzif"
     body = f'utc_equal = eq(time_zone_from_tzif("UTC", read_bytes("{path.as_posix()}")), time_zone_utc())\n'
-    return Program("UTC_nullary", "module Demo.Main\n" + IMPORTS + PRELUDE + body, {"utc_equal": "true"}, ("eval",))
+    return Program("UTC_nullary", "module Demo.Main\n" + IMPORTS + PRELUDE + body, {"utc_equal": "true"})
 
 
 def render(values: list[int]) -> str:
@@ -295,7 +293,7 @@ class Runner:
             done = self.run([str(self.chelis), "eval", "--file", "src/main.ch"], app)
             return LaneResult("eval", done.returncode, done.stdout, done.stderr, "eval")
         assert self.toolchain is not None
-        build = self.run([str(self.chelis), "build", "src/main.ch", "--target", "c", "--output", "out"], app)
+        build = self.run([str(self.chelis), "build", "src/main.ch", "--target", "c", "--emit-c", "--output", "out"], app)
         if build.returncode != 0:
             return LaneResult("c", build.returncode, build.stdout, build.stderr, "build")
         link = self.run([self.toolchain.compiler, *self.toolchain.compile_flags, "-Iout", "out/main.c",
