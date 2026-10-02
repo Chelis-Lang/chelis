@@ -49,6 +49,7 @@ class ReceiptFixture:
             "changelog.yml": 103,
             "pr-contract-acknowledgements.yml": 104,
             "pr-base-retarget.yml": 105,
+            "secret-scan.yml": 107,
         }
         self.contexts = {
             "ci.yml": [
@@ -65,6 +66,7 @@ class ReceiptFixture:
                 "PR Contract Acknowledgements"
             ],
             "pr-base-retarget.yml": ["PR Base Retarget Validation"],
+            "secret-scan.yml": ["Secret scan"],
         }
         self.job_ids: dict[str, int] = {}
         next_job = 1001
@@ -430,6 +432,130 @@ class CandidateReceiptTests(unittest.TestCase):
         self.assertEqual(
             result["workflow_runs"]["pr-base-retarget.yml"]["id"], 106
         )
+
+    def secret_scan_push_run(
+        self,
+        responses: dict[str, object],
+        *,
+        conclusion: str = "success",
+        started_at: str = "2026-09-15T12:05:00Z",
+    ) -> None:
+        """Add the push-event Secret scan run every pushed head also carries."""
+        endpoint = (
+            f"repos/{self.fixture.repo_name}/commits/"
+            f"{self.fixture.repository.head_sha}/check-runs?per_page=100&page=1"
+        )
+        responses[endpoint]["check_runs"].append(
+            {
+                "id": 3001,
+                "name": "Secret scan",
+                "status": "completed",
+                "conclusion": conclusion,
+                "started_at": started_at,
+                "app": {"id": self.fixture.app_id},
+            }
+        )
+        responses[f"repos/{self.fixture.repo_name}/actions/jobs/3001"] = {
+            "id": 3001,
+            "run_id": 108,
+            "run_attempt": 1,
+            "head_sha": self.fixture.repository.head_sha,
+            "name": "Secret scan",
+            "status": "completed",
+            "conclusion": conclusion,
+        }
+        responses[f"repos/{self.fixture.repo_name}/actions/runs/108"] = {
+            "id": 108,
+            "run_attempt": 1,
+            "event": "push",
+            "path": ".github/workflows/secret-scan.yml",
+            "head_sha": self.fixture.repository.head_sha,
+            "head_repository": {"full_name": self.fixture.repo_name},
+            "status": "completed",
+            "conclusion": conclusion,
+            "pull_requests": [],
+        }
+
+    def check_run(
+        self, responses: dict[str, object], name: str
+    ) -> dict[str, object]:
+        endpoint = (
+            f"repos/{self.fixture.repo_name}/commits/"
+            f"{self.fixture.repository.head_sha}/check-runs?per_page=100&page=1"
+        )
+        return next(
+            item
+            for item in responses[endpoint]["check_runs"]
+            if item["name"] == name and item["id"] != 3001
+        )
+
+    def test_later_push_secret_scan_run_does_not_replace_pull_request_evidence(
+        self,
+    ) -> None:
+        responses = copy.deepcopy(self.fixture.responses)
+        self.secret_scan_push_run(responses)
+
+        result = self.collect(responses=responses)
+
+        by_context = {
+            entry["context"]: entry for entry in result["required_checks"]
+        }
+        self.assertEqual(
+            by_context["Secret scan"]["check_run_id"],
+            self.fixture.job_ids["Secret scan"],
+        )
+        self.assertEqual(result["workflow_runs"]["secret-scan.yml"]["id"], 107)
+
+    def test_push_secret_scan_run_alone_is_not_pull_request_evidence(
+        self,
+    ) -> None:
+        responses = copy.deepcopy(self.fixture.responses)
+        self.secret_scan_push_run(responses)
+        endpoint = (
+            f"repos/{self.fixture.repo_name}/commits/"
+            f"{self.fixture.repository.head_sha}/check-runs?per_page=100&page=1"
+        )
+        responses[endpoint]["check_runs"] = [
+            item
+            for item in responses[endpoint]["check_runs"]
+            if item["id"] != self.fixture.job_ids["Secret scan"]
+        ]
+
+        with self.assertRaisesRegex(
+            receipt.ReceiptNotReady,
+            "Secret scan: no check run from its pull request workflow",
+        ):
+            self.collect(responses=responses)
+
+    def test_failing_pull_request_secret_scan_is_not_masked_by_a_passing_push_run(
+        self,
+    ) -> None:
+        responses = copy.deepcopy(self.fixture.responses)
+        self.secret_scan_push_run(responses)
+        failing = self.check_run(responses, "Secret scan")
+        failing["conclusion"] = "failure"
+        responses[
+            f"repos/{self.fixture.repo_name}/actions/jobs/{failing['id']}"
+        ]["conclusion"] = "failure"
+
+        with self.assertRaisesRegex(
+            receipt.ReceiptNotReady, "Secret scan: latest check is failure"
+        ):
+            self.collect(responses=responses)
+
+    def test_same_named_run_from_another_workflow_stays_a_hard_error(
+        self,
+    ) -> None:
+        responses = copy.deepcopy(self.fixture.responses)
+        self.secret_scan_push_run(responses)
+        responses[f"repos/{self.fixture.repo_name}/actions/runs/108"][
+            "path"
+        ] = ".github/workflows/other.yml"
+
+        with self.assertRaisesRegex(
+            receipt.ReceiptError, "Secret scan: run path was"
+        ):
+            self.collect(responses=responses)
 
     def test_rejects_unmapped_new_required_context(self) -> None:
         responses = copy.deepcopy(self.fixture.responses)

@@ -51,6 +51,7 @@ RECEIPT_TRIGGER_WORKFLOWS = {
     "Changelog",
     "PR Contract Acknowledgements",
     "PR Base Retarget Validation",
+    "Secret scan",
 }
 def actions_events(workflow: dict) -> dict:
     return workflow.get("on", workflow.get(True))

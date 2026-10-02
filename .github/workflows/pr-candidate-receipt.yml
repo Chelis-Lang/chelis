@@ -15,6 +15,7 @@ on:
       - Changelog
       - PR Contract Acknowledgements
       - PR Base Retarget Validation
+      - Secret scan
     types: [completed]
 
 permissions:

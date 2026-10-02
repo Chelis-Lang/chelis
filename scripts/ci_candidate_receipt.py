@@ -43,6 +43,7 @@ class ReceiptNotReady(RuntimeError):
 class WorkflowContract:
     contexts: tuple[str, ...]
     identity_artifact: str | None = None
+    events: tuple[str, ...] = ("pull_request",)
 
 
 WORKFLOWS = {
@@ -66,8 +67,12 @@ WORKFLOWS = {
         contexts=("PR Contract Acknowledgements",)
     ),
     "pr-base-retarget.yml": WorkflowContract(
-        contexts=("PR Base Retarget Validation",)
+        contexts=("PR Base Retarget Validation",),
+        events=("pull_request", "pull_request_target"),
     ),
+    # Secret scan also runs on every push, so a head carries a push-event
+    # check run of the same name; only its pull_request run is evidence.
+    "secret-scan.yml": WorkflowContract(contexts=("Secret scan",)),
 }
 CONTEXT_WORKFLOW = {
     context: workflow_file
@@ -232,32 +237,67 @@ def _required_checks(
     return required
 
 
-def _latest_check_runs(
+def _check_runs_by_name(
     api: Api, repository: str, head_sha: str
-) -> dict[str, Mapping[str, Any]]:
+) -> dict[str, list[Mapping[str, Any]]]:
+    """Every check run on the head, grouped by name, latest first."""
     runs = _paged(
         api,
         f"repos/{repository}/commits/{head_sha}/check-runs",
         "check_runs",
     )
-    observed: dict[str, Mapping[str, Any]] = {}
+    observed: dict[str, list[Mapping[str, Any]]] = {}
     for run in runs:
         name = _string(run.get("name"), "check run name")
-        current = observed.get(name)
-        order = (
-            str(run.get("started_at") or ""),
-            _positive_integer(run.get("id"), f"{name} check run id"),
+        _positive_integer(run.get("id"), f"{name} check run id")
+        observed.setdefault(name, []).append(run)
+    for candidates in observed.values():
+        candidates.sort(
+            key=lambda run: (str(run.get("started_at") or ""), run["id"]),
+            reverse=True,
         )
-        if current is None:
-            observed[name] = run
-            continue
-        current_order = (
-            str(current.get("started_at") or ""),
-            _positive_integer(current.get("id"), f"{name} check run id"),
-        )
-        if order > current_order:
-            observed[name] = run
     return observed
+
+
+def _evidence_check_run(
+    *,
+    api: Api,
+    repository: str,
+    context: str,
+    candidates: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    """The latest check run that its own workflow reported for an allowed event.
+
+    A workflow that also runs on other events (Secret scan runs on every push)
+    reports a same-named check run for the head from each event; those runs are
+    not pull-request evidence and are skipped rather than compared by start
+    time against the pull_request run. A same-named run from any other workflow
+    file stays a hard error, exactly as provenance checking reports it.
+    """
+    workflow_file = CONTEXT_WORKFLOW[context]
+    contract = WORKFLOWS[workflow_file]
+    expected_path = f".github/workflows/{workflow_file}"
+    for candidate in candidates:
+        check_run_id = _positive_integer(
+            candidate.get("id"), f"{context} check run id"
+        )
+        job = _mapping(
+            api(f"repos/{repository}/actions/jobs/{check_run_id}"),
+            f"{context} workflow job",
+        )
+        run_id = _positive_integer(job.get("run_id"), f"{context} run id")
+        run = _mapping(
+            api(f"repos/{repository}/actions/runs/{run_id}"),
+            f"{context} workflow run",
+        )
+        if run.get("path") != expected_path:
+            raise ReceiptError(
+                f"{context}: run path was {run.get('path')!r}, "
+                f"expected {expected_path!r}"
+            )
+        if run.get("event") in contract.events:
+            return candidate
+    return None
 
 
 def _required_job_provenance(
@@ -317,9 +357,7 @@ def _required_job_provenance(
             f"{context}: run path was {run.get('path')!r}, "
             f"expected {expected_path!r}"
         )
-    allowed_events = {"pull_request"}
-    if workflow_file == "pr-base-retarget.yml":
-        allowed_events.add("pull_request_target")
+    allowed_events = set(WORKFLOWS[workflow_file].events)
     if run.get("event") not in allowed_events:
         raise ReceiptError(
             f"{context}: workflow event {run.get('event')!r} is not allowed"
@@ -343,15 +381,26 @@ def _required_evidence(
     pr_number: int,
     head_sha: str,
     required: Mapping[str, int],
-    observed: Mapping[str, Mapping[str, Any]],
+    observed: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> tuple[list[dict[str, object]], dict[str, Mapping[str, Any]]]:
     evidence: list[dict[str, object]] = []
     workflows: dict[str, Mapping[str, Any]] = {}
     for context in sorted(required):
-        check_run = observed.get(context)
-        if check_run is None:
+        candidates = observed.get(context)
+        if not candidates:
             raise ReceiptNotReady(
                 f"{context}: no check run was reported for this head"
+            )
+        check_run = _evidence_check_run(
+            api=api,
+            repository=repository,
+            context=context,
+            candidates=candidates,
+        )
+        if check_run is None:
+            raise ReceiptNotReady(
+                f"{context}: no check run from its pull request workflow was "
+                "reported for this head"
             )
         status = check_run.get("status")
         conclusion = check_run.get("conclusion")
@@ -573,7 +622,7 @@ def collect_receipt(
     )
     required = _required_checks(api, repository, base_ref)
 
-    observed = _latest_check_runs(api, repository, head_sha)
+    observed = _check_runs_by_name(api, repository, head_sha)
     required_evidence, workflow_runs = _required_evidence(
         api=api,
         repository=repository,

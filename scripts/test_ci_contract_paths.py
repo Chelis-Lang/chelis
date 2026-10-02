@@ -19,8 +19,9 @@ REQUIRED_WORKFLOWS = (
     "changelog.yml",
     "pr-contract-acknowledgements.yml",
     "pr-base-retarget.yml",
+    "secret-scan.yml",
 )
-SCRIPT_PATH = re.compile(r"scripts/[A-Za-z0-9_./-]+\.py")
+SCRIPT_PATH = re.compile(r"(?:\.github/)?scripts/[A-Za-z0-9_./-]+\.py")
 SCRIPT_MODULE = re.compile(r"scripts\.[A-Za-z0-9_]+")
 
 
