@@ -199,6 +199,13 @@ target, and one of them must run all its ignored tests with no name filter; the
 same rules apply, and the report lists the ignored tests, runs none, and records
 the target as a manual gate not executed in PR CI.
 
+An `ownership-ledger` integration target declares
+`required-features = ["ownership-ledger"]` in its package's `Cargo.toml` and
+needs no other list: the gate and the macOS nightly job derive their ledger
+commands from that declaration through `scripts/ownership_ledger_tests.py`. A
+ledger target in a package other than `chelis-compiler-api` or `chelis-cli`, or
+one that requires another feature, fails until it is placed there.
+
 If planning reports an unknown shared path, add a reviewed mapping to its real
 packages or existing automated owner in `.config/ci-test-targets.toml`. Do not
 add an unrelated mapping just to satisfy the planner. The standing test list is
