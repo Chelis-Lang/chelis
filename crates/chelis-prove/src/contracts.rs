@@ -1005,7 +1005,11 @@ mod tests {
         for prim in [Prim::F32, Prim::F64] {
             let radius = exp_underflow_radius(prim);
             let strict = fuzz_unary(prim, 4096, 0xE0_2026, radius, "strict", |x| {
-                if kernel("exp", x).as_f64_lossy() > 0.0 { 0.0 } else { 1.0 }
+                if kernel("exp", x).as_f64_lossy() > 0.0 {
+                    0.0
+                } else {
+                    1.0
+                }
             });
             let counterexample = strict
                 .counterexample

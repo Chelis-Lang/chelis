@@ -137,10 +137,12 @@ pub fn fuzz_smt_property(
                         scalar_from_i64("prove-fuzz-sample", declared[name], rng.next_i64(-10, 10))
                             .expect("the integer fuzz bounds fit every integer dtype")
                     }
-                    crate::solver::SmtSort::Real => {
-                        scalar_from_f64("prove-fuzz-sample", declared[name], rng.next_f64(-10.0, 10.0))
-                            .expect("every fuzz sample in [-10, 10] is finite at every float dtype")
-                    }
+                    crate::solver::SmtSort::Real => scalar_from_f64(
+                        "prove-fuzz-sample",
+                        declared[name],
+                        rng.next_f64(-10.0, 10.0),
+                    )
+                    .expect("every fuzz sample in [-10, 10] is finite at every float dtype"),
                     crate::solver::SmtSort::Bool => {
                         scalar_from_i64("prove-fuzz-sample", Prim::Bool, i64::from(rng.next_bool()))
                             .expect("boolean samples are exactly zero or one")
@@ -263,7 +265,8 @@ mod tests {
                 Box::new(SmtExpr::Var("x".into())),
             ),
         };
-        let TierCResult::Failed(Value::Object(counterexample)) = fuzz_smt_property(&prop, &declared(&[("x", Prim::Int64)]), 1, 7)
+        let TierCResult::Failed(Value::Object(counterexample)) =
+            fuzz_smt_property(&prop, &declared(&[("x", Prim::Int64)]), 1, 7)
         else {
             panic!("x != x must produce an integer counterexample")
         };

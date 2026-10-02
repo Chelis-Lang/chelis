@@ -151,7 +151,9 @@ fn evaluate_normal_cdf(
             prim.name()
         ));
     }
-    Ok((0..count).map(|index| value.data.scalar_at(index)).collect())
+    Ok((0..count)
+        .map(|index| value.data.scalar_at(index))
+        .collect())
 }
 
 #[cfg(test)]
@@ -200,11 +202,17 @@ mod tests {
         let batch = normal_cdf_batch(&[f32_scalar(1.0), f32_scalar(-2.5)]).unwrap();
         for (got, name) in batch.iter().zip(["a", "b"]) {
             assert_eq!(got.prim(), Prim::F32);
-            assert_eq!(got.as_f64_lossy().to_bits(), expected(name).as_f64_lossy().to_bits());
+            assert_eq!(
+                got.as_f64_lossy().to_bits(),
+                expected(name).as_f64_lossy().to_bits()
+            );
         }
         let c = normal_cdf(scalar_from_f64("test", Prim::F64, 0.75).unwrap()).unwrap();
         assert_eq!(c.prim(), Prim::F64);
-        assert_eq!(c.as_f64_lossy().to_bits(), expected("c").as_f64_lossy().to_bits());
+        assert_eq!(
+            c.as_f64_lossy().to_bits(),
+            expected("c").as_f64_lossy().to_bits()
+        );
     }
 
     #[test]

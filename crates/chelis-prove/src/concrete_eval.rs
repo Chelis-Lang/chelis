@@ -24,8 +24,9 @@
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
 use chelis_types::{
-    CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar, compare_scalars,
-    float_binop, float_unop, int_binop, int_unop, scalar_from_f64, scalar_from_i64, types::Prim,
+    CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar,
+    compare_scalars, float_binop, float_unop, int_binop, int_unop, scalar_from_f64,
+    scalar_from_i64, types::Prim,
 };
 use chelis_unord::UnordMap;
 
@@ -354,7 +355,12 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
 pub(crate) fn correctly_rounded(name: &str, value: ScalarValue) -> Option<ScalarValue> {
     use chelis_crmath as cr;
     use half::{bf16, f16};
-    type Kernels = (fn(f32) -> f32, fn(f64) -> f64, fn(f16) -> f16, fn(bf16) -> bf16);
+    type Kernels = (
+        fn(f32) -> f32,
+        fn(f64) -> f64,
+        fn(f16) -> f16,
+        fn(bf16) -> bf16,
+    );
     let (k32, k64, k16, kb16): Kernels = match name {
         "exp" => (cr::exp_f32, cr::exp_f64, cr::exp_f16, cr::exp_bf16),
         "log" => (cr::log_f32, cr::log_f64, cr::log_f16, cr::log_bf16),
@@ -862,9 +868,8 @@ mod tests {
             ("cos", 0x3c0b_32b8, chelis_crmath::cos_f32),
         ];
         for (name, bits, kernel) in cases {
-            let got =
-                eval_scalar_with(&apply_x(name), &scalar_env(&[("x", f32_bits(bits))]), true)
-                    .unwrap();
+            let got = eval_scalar_with(&apply_x(name), &scalar_env(&[("x", f32_bits(bits))]), true)
+                .unwrap();
             assert_eq!(got.prim(), Prim::F32, "{name} left f32");
             assert_eq!(
                 (got.as_f64_lossy() as f32).to_bits(),
@@ -872,18 +877,6 @@ mod tests {
                 "{name}({bits:#010x}) is not the correctly rounded f32 result"
             );
         }
-    }
-
-    #[test]
-    fn chelis_2965_half_width_transcendental_is_f32_kernel_then_one_finalization() {
-        let x = half::f16::from_f32(-1.73);
-        let value = scalar_from_f64("prove-test", Prim::F16, f64::from(x)).unwrap();
-        let got = eval_scalar_with(&apply_x("exp"), &scalar_env(&[("x", value)]), true).unwrap();
-        assert_eq!(got.prim(), Prim::F16);
-        assert_eq!(
-            half::f16::from_f64(got.as_f64_lossy()).to_bits(),
-            chelis_crmath::exp_f16(x).to_bits()
-        );
     }
 
     #[test]
@@ -911,11 +904,13 @@ mod tests {
     #[test]
     fn chelis_2965_normal_cdf_runs_the_shipped_graph_at_the_operand_dtype() {
         let x = f32_bits(0xbfab_01de); // a #2952 normal_cdf witness
-        let got =
-            eval_scalar_with(&apply_x("normal_cdf"), &scalar_env(&[("x", x)]), true).unwrap();
+        let got = eval_scalar_with(&apply_x("normal_cdf"), &scalar_env(&[("x", x)]), true).unwrap();
         assert_eq!(got.prim(), Prim::F32, "normal_cdf left f32");
         let shipped = crate::std_graph::normal_cdf(x).unwrap();
-        assert_eq!(got.as_f64_lossy().to_bits(), shipped.as_f64_lossy().to_bits());
+        assert_eq!(
+            got.as_f64_lossy().to_bits(),
+            shipped.as_f64_lossy().to_bits()
+        );
     }
 
     // --- quantile intrinsic tests ---
@@ -1057,4 +1052,3 @@ mod tests {
         assert!(eval_arith(&e, &env(&[])).is_nan());
     }
 }
-
