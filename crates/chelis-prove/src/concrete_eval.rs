@@ -24,7 +24,7 @@
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
 use chelis_types::{
-    CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar, compare_scalars,
+    CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar, compare_scalars,
     float_binop, float_unop, int_binop, int_unop, scalar_from_f64, scalar_from_i64, types::Prim,
 };
 use chelis_unord::UnordMap;
@@ -268,19 +268,19 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
                 ("abs", [value]) if value.prim().is_integer() => {
                     int_unop(IntUnOp::Abs, *value).ok()
                 }
-                ("exp" | "log" | "sqrt" | "sin" | "cos" | "abs", [value])
-                    if value.prim().is_float() =>
-                {
-                    let op = match name.as_str() {
-                        "exp" => FloatUnOp::Exp,
-                        "log" => FloatUnOp::Log,
-                        "sqrt" => FloatUnOp::Sqrt,
-                        "sin" => FloatUnOp::Sin,
-                        "cos" => FloatUnOp::Cos,
-                        "abs" => FloatUnOp::Abs,
-                        _ => unreachable!("matched closed unary intrinsic"),
+                ("exp" | "log" | "sin" | "cos", [value]) if value.prim().is_float() => {
+                    correctly_rounded(name, *value)
+                }
+                ("sqrt" | "abs", [value]) if value.prim().is_float() => {
+                    let op = if name == "sqrt" {
+                        FloatUnOp::Sqrt
+                    } else {
+                        FloatUnOp::Abs
                     };
                     float_unop(op, *value).ok()
+                }
+                ("normal_cdf", [value]) if value.prim().is_float() => {
+                    crate::std_graph::normal_cdf(*value).ok()
                 }
                 ("min" | "max", [lhs, rhs]) => {
                     let (lhs, rhs) = align_literal_widths(*lhs, *rhs)?;
@@ -348,23 +348,42 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
     }
 }
 
-// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
-/// Apply a whitelisted unary/binary intrinsic to its already-evaluated
-/// arguments. Out-of-grammar names and wrong arity yield `NaN` (the
-/// candidate is then rejected / the predicate is unsatisfied) rather than
-/// panicking on an out-of-bounds index (CR-13): the unary intrinsics now
-/// guard `len == 1` exactly as `min`/`max` guard `len == 2`.
+/// One correctly rounded transcendental at the operand's own dtype, through
+/// `chelis-crmath` ([05-OP-46]): the f16 and bf16 forms run the f32 kernel and
+/// finalize once, as every language lane does (chelis#2965).
+pub(crate) fn correctly_rounded(name: &str, value: ScalarValue) -> Option<ScalarValue> {
+    use chelis_crmath as cr;
+    use half::{bf16, f16};
+    type Kernels = (fn(f32) -> f32, fn(f64) -> f64, fn(f16) -> f16, fn(bf16) -> bf16);
+    let (k32, k64, k16, kb16): Kernels = match name {
+        "exp" => (cr::exp_f32, cr::exp_f64, cr::exp_f16, cr::exp_bf16),
+        "log" => (cr::log_f32, cr::log_f64, cr::log_f16, cr::log_bf16),
+        "sin" => (cr::sin_f32, cr::sin_f64, cr::sin_f16, cr::sin_bf16),
+        "cos" => (cr::cos_f32, cr::cos_f64, cr::cos_f16, cr::cos_bf16),
+        _ => return None,
+    };
+    let result = match value.element_ref() {
+        ElementRef::F32(x) => f64::from(k32(x)),
+        ElementRef::F64(x) => k64(x),
+        ElementRef::F16(x) => f64::from(k16(x)),
+        ElementRef::Bf16(x) => f64::from(kb16(x)),
+        _ => return None,
+    };
+    // The kernel result is already a value of the operand's dtype, so this
+    // finalization is exact.
+    scalar_from_f64("prove-correctly-rounded", value.prim(), result).ok()
+}
+
+/// Apply a whitelisted intrinsic that has no dtype-carrying form to its
+/// already-evaluated arguments. Out-of-grammar names and wrong arity yield
+/// `NaN` (the candidate is then rejected / the predicate is unsatisfied)
+/// rather than panicking on an out-of-bounds index (CR-13).
+///
+/// Transcendentals and `normal_cdf` are not here: they are evaluated at the
+/// operand's dtype above. `erf` has no shipped graph Chelis exports, so it is
+/// not evaluable and [`crate::inlineability::classify_fuzzability`] rejects it.
 fn apply_intrinsic(name: &str, a: &[f64]) -> f64 {
     match name {
-        "exp" if a.len() == 1 => a[0].exp(),
-        "log" if a.len() == 1 => a[0].ln(),
-        "sqrt" if a.len() == 1 => a[0].sqrt(),
-        "sin" if a.len() == 1 => a[0].sin(),
-        "cos" if a.len() == 1 => a[0].cos(),
-        "abs" if a.len() == 1 => a[0].abs(),
-        "erf" if a.len() == 1 => erf_approx(a[0]),
-        "normal_cdf" if a.len() == 1 => normal_cdf_approx(a[0]),
         "min" if a.len() == 2 => a[0].min(a[1]),
         "max" if a.len() == 2 => a[0].max(a[1]),
         // quantile(xs..., q): last argument is the quantile level q ∈ [0,1],
@@ -377,37 +396,6 @@ fn apply_intrinsic(name: &str, a: &[f64]) -> f64 {
         }
         _ => f64::NAN,
     }
-}
-
-// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
-/// Fast `erf` approximation using Abramowitz & Stegun 7.1.26 (maximum
-/// error < 1.5e-7 over the reals). This is the standard rational
-/// approximation for concrete f64 evaluation in the fuzz tier — it does
-/// NOT need to be sound for proof (that is the certified envelope's job);
-/// it only needs to be accurate enough that rejection sampling does not
-/// starve on properties involving `normal_cdf` (chelis#659).
-fn erf_approx(x: f64) -> f64 {
-    // Abramowitz & Stegun 7.1.26: erf(x) ≈ 1 - (a1*t + a2*t² + a3*t³) * exp(-x²)
-    // where t = 1 / (1 + 0.3275911 * |x|). Max error: 1.5e-7.
-    const A1: f64 = 0.254829592;
-    const A2: f64 = -0.284496736;
-    const A3: f64 = 1.421413741;
-    const A4: f64 = -1.453152027;
-    const A5: f64 = 1.061405429;
-    const P: f64 = 0.3275911;
-
-    let sign = if x >= 0.0 { 1.0 } else { -1.0 };
-    let x_abs = x.abs();
-    let t = 1.0 / (1.0 + P * x_abs);
-    let poly = ((((A5 * t + A4) * t + A3) * t + A2) * t + A1) * t;
-    sign * (1.0 - poly * (-x_abs * x_abs).exp())
-}
-
-/// Standard normal CDF: Φ(x) = ½·(1 + erf(x / √2)).
-/// Uses the same fast erf approximation for concrete evaluation.
-fn normal_cdf_approx(x: f64) -> f64 {
-    0.5 * (1.0 + erf_approx(x * std::f64::consts::FRAC_1_SQRT_2))
 }
 
 /// Quantile with linear interpolation between order statistics (numpy
@@ -725,49 +713,21 @@ mod tests {
         assert_eq!(eval_arith(&m, &env(&[])), 2.0);
     }
 
-    // --- chelis#659: erf and normal_cdf intrinsic tests ---
+    // --- chelis#659 / chelis#2965: erf and normal_cdf intrinsic tests ---
 
     #[test]
-    fn erf_zero_is_zero() {
-        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(0.0)]);
-        let result = eval_arith(&e, &env(&[]));
-        assert!(result.abs() < 1e-6, "erf(0) should be ≈0, got {result}");
-    }
-
-    #[test]
-    fn erf_large_positive_is_near_one() {
-        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(3.0)]);
-        let result = eval_arith(&e, &env(&[]));
-        assert!(
-            (result - 1.0).abs() < 1e-4,
-            "erf(3) should be ≈1.0, got {result}"
-        );
-    }
-
-    #[test]
-    fn erf_large_negative_is_near_minus_one() {
-        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(-3.0)]);
-        let result = eval_arith(&e, &env(&[]));
-        assert!(
-            (result + 1.0).abs() < 1e-4,
-            "erf(-3) should be ≈-1.0, got {result}"
-        );
-    }
-
-    #[test]
-    fn erf_is_odd_function() {
-        // erf(-x) == -erf(x) for all x
-        for &x in &[0.5, 1.0, 2.0] {
-            let pos = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(x)]);
-            let neg = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(-x)]);
-            let r_pos = eval_arith(&pos, &env(&[]));
-            let r_neg = eval_arith(&neg, &env(&[]));
-            assert!(
-                (r_pos + r_neg).abs() < 1e-7,
-                "erf({x}) + erf(-{x}) should be 0, got {}",
-                r_pos + r_neg
-            );
+    fn erf_has_no_shipped_graph_and_is_not_evaluable() {
+        // Chelis exports no `erf`, so the evaluator has nothing at a declared
+        // dtype to run; it must not fall back to a private approximation.
+        for x in [0.0, 1.0, -3.0] {
+            let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(x)]);
+            assert!(eval_arith(&e, &env(&[])).is_nan(), "erf({x}) evaluated");
         }
+        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::Var("x".into())]);
+        assert!(matches!(
+            crate::inlineability::classify_fuzzability(&e),
+            crate::inlineability::Fuzzability::NotFuzzable(_)
+        ));
     }
 
     #[test]
@@ -858,20 +818,104 @@ mod tests {
     }
 
     #[test]
-    fn erf_wrong_arity_is_nan() {
-        let e = SmtExpr::Apply("erf".into(), vec![]);
-        assert!(eval_arith(&e, &env(&[])).is_nan());
-        let e2 = SmtExpr::Apply(
-            "erf".into(),
-            vec![SmtExpr::RealLit(1.0), SmtExpr::RealLit(2.0)],
-        );
-        assert!(eval_arith(&e2, &env(&[])).is_nan());
-    }
-
-    #[test]
     fn normal_cdf_wrong_arity_is_nan() {
         let e = SmtExpr::Apply("normal_cdf".into(), vec![]);
         assert!(eval_arith(&e, &env(&[])).is_nan());
+    }
+
+    // --- chelis#2965: evaluation at the declared dtype ---
+
+    fn scalar_env(pairs: &[(&str, ScalarValue)]) -> ConcreteEnv {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), *value))
+            .collect()
+    }
+
+    fn f32_bits(bits: u32) -> ScalarValue {
+        scalar_from_f64("prove-test", Prim::F32, f64::from(f32::from_bits(bits))).unwrap()
+    }
+
+    fn apply_x(name: &str) -> SmtExpr {
+        SmtExpr::Apply(name.into(), vec![SmtExpr::Var("x".into())])
+    }
+
+    #[test]
+    fn chelis_2965_f32_transcendentals_are_correctly_rounded_at_f32() {
+        // `exp` at 0xbfdd4c4b: the MPFR-derived bits from the chelis-crmath
+        // canary fixture (#2952, where the macOS expf misrounds).
+        let got = eval_scalar_with(
+            &apply_x("exp"),
+            &scalar_env(&[("x", f32_bits(0xbfdd_4c4b))]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(got.prim(), Prim::F32);
+        assert_eq!((got.as_f64_lossy() as f32).to_bits(), 0x3e35_bda0);
+        // Inputs where the host f32 libm and the correctly rounded kernel
+        // disagree; the evaluator must agree with the kernel bit for bit.
+        type Kernel = fn(f32) -> f32;
+        let cases: [(&str, u32, Kernel); 4] = [
+            ("exp", 0xbc00_008c, chelis_crmath::exp_f32),
+            ("log", 0x3c15_d85f, chelis_crmath::log_f32),
+            ("sin", 0x3c00_155b, chelis_crmath::sin_f32),
+            ("cos", 0x3c0b_32b8, chelis_crmath::cos_f32),
+        ];
+        for (name, bits, kernel) in cases {
+            let got =
+                eval_scalar_with(&apply_x(name), &scalar_env(&[("x", f32_bits(bits))]), true)
+                    .unwrap();
+            assert_eq!(got.prim(), Prim::F32, "{name} left f32");
+            assert_eq!(
+                (got.as_f64_lossy() as f32).to_bits(),
+                kernel(f32::from_bits(bits)).to_bits(),
+                "{name}({bits:#010x}) is not the correctly rounded f32 result"
+            );
+        }
+    }
+
+    #[test]
+    fn chelis_2965_half_width_transcendental_is_f32_kernel_then_one_finalization() {
+        let x = half::f16::from_f32(-1.73);
+        let value = scalar_from_f64("prove-test", Prim::F16, f64::from(x)).unwrap();
+        let got = eval_scalar_with(&apply_x("exp"), &scalar_env(&[("x", value)]), true).unwrap();
+        assert_eq!(got.prim(), Prim::F16);
+        assert_eq!(
+            half::f16::from_f64(got.as_f64_lossy()).to_bits(),
+            chelis_crmath::exp_f16(x).to_bits()
+        );
+    }
+
+    #[test]
+    fn chelis_2965_strict_exp_positivity_is_false_at_f32_below_underflow() {
+        // exp(-104) at f32 is +0 (the correctly rounded result): the strict
+        // real-model law fails for the float operation, and `>= 0` holds.
+        let strict = SmtExpr::Cmp(
+            CmpOp::Gt,
+            Box::new(apply_x("exp")),
+            Box::new(SmtExpr::RealLit(0.0)),
+        );
+        let weak = SmtExpr::Cmp(
+            CmpOp::Ge,
+            Box::new(apply_x("exp")),
+            Box::new(SmtExpr::RealLit(0.0)),
+        );
+        let at_f32 = scalar_env(&[("x", f32_bits(0xc2d0_0000))]);
+        assert!(!eval_bool_strict(&strict, &at_f32), "exp(-104f32) > 0");
+        assert!(eval_bool_strict(&weak, &at_f32), "exp(-104f32) >= 0");
+        // The same input at f64 does not underflow: the width decides.
+        let at_f64 = env(&[("x", -104.0)]);
+        assert!(eval_bool_strict(&strict, &at_f64));
+    }
+
+    #[test]
+    fn chelis_2965_normal_cdf_runs_the_shipped_graph_at_the_operand_dtype() {
+        let x = f32_bits(0xbfab_01de); // a #2952 normal_cdf witness
+        let got =
+            eval_scalar_with(&apply_x("normal_cdf"), &scalar_env(&[("x", x)]), true).unwrap();
+        assert_eq!(got.prim(), Prim::F32, "normal_cdf left f32");
+        let shipped = crate::std_graph::normal_cdf(x).unwrap();
+        assert_eq!(got.as_f64_lossy().to_bits(), shipped.as_f64_lossy().to_bits());
     }
 
     // --- quantile intrinsic tests ---
@@ -1013,3 +1057,4 @@ mod tests {
         assert!(eval_arith(&e, &env(&[])).is_nan());
     }
 }
+

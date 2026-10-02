@@ -46,6 +46,7 @@ pub mod obligations;
 pub mod opaque;
 pub mod property_runner;
 pub mod solver;
+pub mod std_graph;
 pub mod tier_a;
 pub mod tier_b;
 pub mod tier_b_lower;
@@ -118,7 +119,9 @@ pub use engine_registry::{DischargeRegistry, no_fit_discharge};
 // consumers reach them through chelis-prove (RFC D-PRED consumer surface).
 pub use chelis_pred::{PredAmenability, predicate_free_vars};
 pub use dispatch::{DispatchOptions, dispatch_property};
-pub use from_property_spec::{PropertySpecInput, to_dispatch_amenability, to_smt_property};
+pub use from_property_spec::{
+    PropertySpecInput, declared_dtypes, to_dispatch_amenability, to_smt_property,
+};
 pub use graph_extract::{
     ExtractedGoal, GraphExtractError, box_range_goal_from_source, box_range_goal_from_wire_dag,
     box_range_goals_from_source, name_sorted_input_box,

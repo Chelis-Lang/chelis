@@ -5,6 +5,9 @@
 //! obligations, so a consumer proof can roll up through the weakest-link
 //! machinery instead of rendering an assumed invariant as pure proven.
 
+use chelis_types::{
+    FloatBinOp, FloatUnOp, ScalarValue, float_binop, float_unop, scalar_from_f64, types::Prim,
+};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -79,7 +82,17 @@ pub fn standard_contracts() -> Vec<StandardContract> {
             id: "std.exp".to_string(),
             function: "exp".to_string(),
             invariants: vec![
-                smt_invariant(EXP_POSITIVITY, "exp positivity", "forall x. exp(x) > 0"),
+                // The float operation underflows to +0 (below about -103.97 at
+                // f32), so the strict real-model `exp(x) > 0` is false for it;
+                // the contract states the float property (chelis#2965).
+                fuzz_invariant(
+                    EXP_POSITIVITY,
+                    "exp non-negativity",
+                    "forall x. exp(x) >= 0",
+                    "chelis_intrinsic.exp",
+                    4096,
+                    0xE0_2026,
+                ),
                 fuzz_invariant(
                     EXP_MONOTONICITY,
                     "exp monotonicity",
@@ -323,6 +336,9 @@ fn fuzz_discharge_evidence(
         "checked_samples": outcome.checked_samples,
         "max_error": outcome.max_error,
     });
+    if let Some(prim) = outcome.dtype {
+        evidence["dtype"] = serde_json::json!(prim.name());
+    }
     if let Some(counterexample) = outcome.counterexample {
         evidence["counterexample"] = counterexample;
     }
@@ -335,54 +351,59 @@ struct FuzzOutcome {
     max_error: f64,
     counterexample: Option<serde_json::Value>,
     domain: &'static str,
+    /// The dtype the property was evaluated at; `None` for the quantile
+    /// contracts, which bind an external library's f64 implementation.
+    dtype: Option<Prim>,
 }
 
-// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
+/// The dtype the float standard contracts are fuzz-discharged at, recorded as
+/// the evidence's `dtype`. A fuzz verdict is a statement about the function at
+/// one width: the shipped `Std.Contracts.normal_cdf` graph and the correctly
+/// rounded `exp` and `log` kernels, evaluated at this dtype exactly as a Chelis
+/// program evaluates them (chelis#2965). The discharge covers that width only:
+/// at f32 the shipped graph does not satisfy `std.normal_cdf.reflection` within
+/// [`FUZZ_TOLERANCE`].
+pub const CONTRACT_FUZZ_DTYPE: Prim = Prim::F64;
+
 fn run_fuzz_discharge(id: &str, samples: usize, seed: u64) -> FuzzOutcome {
+    let prim = CONTRACT_FUZZ_DTYPE;
     match id {
-        NORMAL_CDF_RANGE => fuzz_unary(
+        NORMAL_CDF_RANGE => fuzz_normal_cdf_range(prim, samples, seed),
+        NORMAL_CDF_REFLECTION => fuzz_normal_cdf_reflection(prim, samples, seed),
+        NORMAL_CDF_MONOTONICITY => fuzz_normal_cdf_monotonicity(prim, samples, seed),
+        EXP_POSITIVITY => fuzz_unary(
+            prim,
             samples,
             seed,
-            "normal-cdf finite f32 domain [-10, 10]",
+            exp_underflow_radius(prim),
+            "exp over finite samples spanning the underflow to +0 and the overflow to +inf",
             |x| {
-                let y = normal_cdf_erfc(x);
-                let low = 0.0_f64 - y;
-                let high = y - 1.0_f64;
-                low.max(high).max(0.0)
+                let y = kernel("exp", x).as_f64_lossy();
+                if y >= 0.0 { 0.0 } else { -y }
             },
         ),
-        NORMAL_CDF_REFLECTION => fuzz_unary(
-            samples,
-            seed,
-            "normal-cdf finite f32 domain [-10, 10]",
-            |x| (normal_cdf_erfc(-x) - (1.0 - normal_cdf_erfc(x))).abs(),
-        ),
-        NORMAL_CDF_MONOTONICITY => fuzz_ordered_pair(
-            samples,
-            seed,
-            "ordered normal-cdf finite f32 pairs in [-10, 10]",
-            |lo, hi| (normal_cdf_erfc(lo) - normal_cdf_erfc(hi)).max(0.0),
-        ),
         EXP_MONOTONICITY => fuzz_ordered_pair(
+            prim,
             samples,
             seed,
-            "ordered exp finite f32 pairs in [-10, 10]",
-            |lo, hi| (lo.exp() - hi.exp()).max(0.0),
+            "ordered exp finite pairs in [-10, 10]",
+            |lo, hi| (kernel("exp", lo).as_f64_lossy() - kernel("exp", hi).as_f64_lossy()).max(0.0),
         ),
         LOG_MONOTONICITY => fuzz_ordered_positive_pair(
+            prim,
             samples,
             seed,
-            "ordered positive f32 pairs in [1e-6, 1e6]",
-            |lo, hi| (lo.ln() - hi.ln()).max(0.0),
+            "ordered positive pairs in [1e-6, 1e6]",
+            |lo, hi| (kernel("log", lo).as_f64_lossy() - kernel("log", hi).as_f64_lossy()).max(0.0),
         ),
         LOG_ONE => {
-            let error = 1.0_f64.ln().abs();
+            let error = kernel("log", at_dtype(prim, 1.0)).as_f64_lossy().abs();
             FuzzOutcome {
                 checked_samples: samples.max(1),
                 max_error: error,
                 counterexample: counterexample_if(error, serde_json::json!({"x": 1.0})),
                 domain: "log anchor x = 1",
+                dtype: Some(prim),
             }
         }
         QUANTILE_RANGE => fuzz_quantile_range(samples, seed),
@@ -393,28 +414,90 @@ fn run_fuzz_discharge(id: &str, samples: usize, seed: u64) -> FuzzOutcome {
             max_error: f64::INFINITY,
             counterexample: Some(serde_json::json!({"unsupported_contract": id})),
             domain: "unsupported standard contract",
+            dtype: None,
         },
     }
 }
 
-fn fuzz_unary(
-    samples: usize,
-    seed: u64,
+/// A sample, rounded once to the contract dtype.
+fn at_dtype(prim: Prim, value: f64) -> ScalarValue {
+    scalar_from_f64("prove-contract-sample", prim, value)
+        .expect("contract samples are finite at every float dtype")
+}
+
+/// A correctly rounded kernel at the operand's dtype.
+fn kernel(name: &str, value: ScalarValue) -> ScalarValue {
+    crate::concrete_eval::correctly_rounded(name, value)
+        .expect("contract kernels are float transcendentals at a float dtype")
+}
+
+/// A radius past which `exp` underflows to `+0` (and overflows to `+inf`) at
+/// `prim`, so positivity samples reach the inputs where a strict `exp(x) > 0`
+/// fails at that width.
+fn exp_underflow_radius(prim: Prim) -> f64 {
+    match prim {
+        Prim::F64 => 1024.0,
+        _ => 128.0,
+    }
+}
+
+fn sample_json(value: ScalarValue) -> serde_json::Value {
+    serde_json::json!(value.as_f64_lossy())
+}
+
+/// The shipped `normal_cdf` at every input, or the evaluation failure as a
+/// counterexample: a discharge that cannot evaluate the graph fails closed.
+fn normal_cdf_values(
+    inputs: &[ScalarValue],
     domain: &'static str,
-    error: impl Fn(f64) -> f64,
-) -> FuzzOutcome {
+    prim: Prim,
+) -> Result<Vec<ScalarValue>, FuzzOutcome> {
+    crate::std_graph::normal_cdf_batch(inputs).map_err(|message| FuzzOutcome {
+        checked_samples: 0,
+        max_error: f64::INFINITY,
+        counterexample: Some(serde_json::json!({"evaluation_error": message})),
+        domain,
+        dtype: Some(prim),
+    })
+}
+
+fn signed_samples(prim: Prim, samples: usize, seed: u64, radius: f64) -> Vec<ScalarValue> {
     let mut rng = Lcg::new(seed);
+    (0..samples)
+        .map(|i| at_dtype(prim, sample_signed_domain(i, samples, &mut rng, radius)))
+        .collect()
+}
+
+fn ordered_signed_pairs(prim: Prim, samples: usize, seed: u64) -> Vec<(ScalarValue, ScalarValue)> {
+    let mut rng = Lcg::new(seed);
+    (0..samples)
+        .map(|i| {
+            let a = sample_signed_domain(i, samples, &mut rng, 10.0);
+            let b = sample_signed_domain(samples.saturating_sub(i + 1), samples, &mut rng, 10.0);
+            (at_dtype(prim, a.min(b)), at_dtype(prim, a.max(b)))
+        })
+        .collect()
+}
+
+/// Walk per-sample errors in sample order and stop at the first one above the
+/// fuzz tolerance.
+fn first_failure(
+    errors: impl Iterator<Item = (f64, serde_json::Value)>,
+    samples: usize,
+    domain: &'static str,
+    prim: Prim,
+) -> FuzzOutcome {
     let mut max_error = 0.0_f64;
-    for i in 0..samples {
-        let x = sample_signed_domain(i, samples, &mut rng, 10.0);
-        let err = error(x);
+    for (i, (err, mut witness)) in errors.enumerate() {
         max_error = max_error.max(err);
         if err > FUZZ_TOLERANCE {
+            witness["error"] = serde_json::json!(err);
             return FuzzOutcome {
                 checked_samples: i + 1,
                 max_error,
-                counterexample: Some(serde_json::json!({"x": x, "error": err})),
+                counterexample: Some(witness),
                 domain,
+                dtype: Some(prim),
             };
         }
     }
@@ -423,71 +506,130 @@ fn fuzz_unary(
         max_error,
         counterexample: None,
         domain,
+        dtype: Some(prim),
     }
+}
+
+fn fuzz_normal_cdf_range(prim: Prim, samples: usize, seed: u64) -> FuzzOutcome {
+    const DOMAIN: &str = "normal-cdf finite domain [-10, 10]";
+    let xs = signed_samples(prim, samples, seed, 10.0);
+    let ys = match normal_cdf_values(&xs, DOMAIN, prim) {
+        Ok(ys) => ys,
+        Err(outcome) => return outcome,
+    };
+    let errors = xs.iter().zip(&ys).map(|(x, y)| {
+        let y = y.as_f64_lossy();
+        let err = if (0.0..=1.0).contains(&y) {
+            0.0
+        } else if y.is_nan() {
+            f64::INFINITY
+        } else {
+            (0.0 - y).max(y - 1.0)
+        };
+        (err, serde_json::json!({"x": sample_json(*x)}))
+    });
+    first_failure(errors, samples, DOMAIN, prim)
+}
+
+fn fuzz_normal_cdf_reflection(prim: Prim, samples: usize, seed: u64) -> FuzzOutcome {
+    const DOMAIN: &str = "normal-cdf finite domain [-10, 10]";
+    let xs = signed_samples(prim, samples, seed, 10.0);
+    let mut inputs = xs.clone();
+    inputs.extend(xs.iter().map(|x| {
+        float_unop(FloatUnOp::Neg, *x).expect("negation is defined at every float dtype")
+    }));
+    let ys = match normal_cdf_values(&inputs, DOMAIN, prim) {
+        Ok(ys) => ys,
+        Err(outcome) => return outcome,
+    };
+    let one = at_dtype(prim, 1.0);
+    let errors = xs.iter().enumerate().map(|(i, x)| {
+        // `N(-x) = 1 - N(x)`, with `1 - N(x)` computed at the contract dtype as
+        // a Chelis program computes it.
+        let complement = float_binop(FloatBinOp::Sub, one, ys[i])
+            .expect("subtraction is defined at every float dtype");
+        let err = (ys[samples + i].as_f64_lossy() - complement.as_f64_lossy()).abs();
+        let err = if err.is_nan() { f64::INFINITY } else { err };
+        (err, serde_json::json!({"x": sample_json(*x)}))
+    });
+    first_failure(errors, samples, DOMAIN, prim)
+}
+
+fn fuzz_normal_cdf_monotonicity(prim: Prim, samples: usize, seed: u64) -> FuzzOutcome {
+    const DOMAIN: &str = "ordered normal-cdf finite pairs in [-10, 10]";
+    let pairs = ordered_signed_pairs(prim, samples, seed);
+    let inputs = pairs
+        .iter()
+        .flat_map(|(lo, hi)| [*lo, *hi])
+        .collect::<Vec<_>>();
+    let ys = match normal_cdf_values(&inputs, DOMAIN, prim) {
+        Ok(ys) => ys,
+        Err(outcome) => return outcome,
+    };
+    let errors = pairs.iter().enumerate().map(|(i, (lo, hi))| {
+        let err = (ys[2 * i].as_f64_lossy() - ys[2 * i + 1].as_f64_lossy()).max(0.0);
+        (
+            err,
+            serde_json::json!({"lo": sample_json(*lo), "hi": sample_json(*hi)}),
+        )
+    });
+    first_failure(errors, samples, DOMAIN, prim)
+}
+
+fn fuzz_unary(
+    prim: Prim,
+    samples: usize,
+    seed: u64,
+    radius: f64,
+    domain: &'static str,
+    error: impl Fn(ScalarValue) -> f64,
+) -> FuzzOutcome {
+    let xs = signed_samples(prim, samples, seed, radius);
+    let errors = xs
+        .iter()
+        .map(|x| (error(*x), serde_json::json!({"x": sample_json(*x)})));
+    first_failure(errors, samples, domain, prim)
 }
 
 fn fuzz_ordered_pair(
+    prim: Prim,
     samples: usize,
     seed: u64,
     domain: &'static str,
-    error: impl Fn(f64, f64) -> f64,
+    error: impl Fn(ScalarValue, ScalarValue) -> f64,
 ) -> FuzzOutcome {
-    let mut rng = Lcg::new(seed);
-    let mut max_error = 0.0_f64;
-    for i in 0..samples {
-        let a = sample_signed_domain(i, samples, &mut rng, 10.0);
-        let b = sample_signed_domain(samples.saturating_sub(i + 1), samples, &mut rng, 10.0);
-        let lo = a.min(b);
-        let hi = a.max(b);
-        let err = error(lo, hi);
-        max_error = max_error.max(err);
-        if err > FUZZ_TOLERANCE {
-            return FuzzOutcome {
-                checked_samples: i + 1,
-                max_error,
-                counterexample: Some(serde_json::json!({"lo": lo, "hi": hi, "error": err})),
-                domain,
-            };
-        }
-    }
-    FuzzOutcome {
-        checked_samples: samples,
-        max_error,
-        counterexample: None,
-        domain,
-    }
+    let pairs = ordered_signed_pairs(prim, samples, seed);
+    let errors = pairs.iter().map(|(lo, hi)| {
+        (
+            error(*lo, *hi),
+            serde_json::json!({"lo": sample_json(*lo), "hi": sample_json(*hi)}),
+        )
+    });
+    first_failure(errors, samples, domain, prim)
 }
 
 fn fuzz_ordered_positive_pair(
+    prim: Prim,
     samples: usize,
     seed: u64,
     domain: &'static str,
-    error: impl Fn(f64, f64) -> f64,
+    error: impl Fn(ScalarValue, ScalarValue) -> f64,
 ) -> FuzzOutcome {
     let mut rng = Lcg::new(seed);
-    let mut max_error = 0.0_f64;
-    for i in 0..samples {
-        let a = sample_positive_domain(i, samples, &mut rng);
-        let b = sample_positive_domain(samples.saturating_sub(i + 1), samples, &mut rng);
-        let lo = a.min(b);
-        let hi = a.max(b);
-        let err = error(lo, hi);
-        max_error = max_error.max(err);
-        if err > FUZZ_TOLERANCE {
-            return FuzzOutcome {
-                checked_samples: i + 1,
-                max_error,
-                counterexample: Some(serde_json::json!({"lo": lo, "hi": hi, "error": err})),
-                domain,
-            };
-        }
-    }
-    FuzzOutcome {
-        checked_samples: samples,
-        max_error,
-        counterexample: None,
-        domain,
-    }
+    let pairs = (0..samples)
+        .map(|i| {
+            let a = sample_positive_domain(i, samples, &mut rng);
+            let b = sample_positive_domain(samples.saturating_sub(i + 1), samples, &mut rng);
+            (at_dtype(prim, a.min(b)), at_dtype(prim, a.max(b)))
+        })
+        .collect::<Vec<_>>();
+    let errors = pairs.iter().map(|(lo, hi)| {
+        (
+            error(*lo, *hi),
+            serde_json::json!({"lo": sample_json(*lo), "hi": sample_json(*hi)}),
+        )
+    });
+    first_failure(errors, samples, domain, prim)
 }
 
 fn fuzz_quantile_range(samples: usize, seed: u64) -> FuzzOutcome {
@@ -515,6 +657,7 @@ fn fuzz_quantile_range(samples: usize, seed: u64) -> FuzzOutcome {
                     "min": min_val, "max": max_val, "error": err
                 })),
                 domain: "quantile range bounded by [min, max]",
+                dtype: None,
             };
         }
     }
@@ -523,6 +666,7 @@ fn fuzz_quantile_range(samples: usize, seed: u64) -> FuzzOutcome {
         max_error,
         counterexample: None,
         domain: "quantile range bounded by [min, max]",
+        dtype: None,
     }
 }
 
@@ -549,6 +693,7 @@ fn fuzz_quantile_monotonicity(samples: usize, seed: u64) -> FuzzOutcome {
                     "quantile_p": rp, "quantile_q": rq, "error": err
                 })),
                 domain: "quantile monotone in q: p <= q => quantile(p) <= quantile(q)",
+                dtype: None,
             };
         }
     }
@@ -557,6 +702,7 @@ fn fuzz_quantile_monotonicity(samples: usize, seed: u64) -> FuzzOutcome {
         max_error,
         counterexample: None,
         domain: "quantile monotone in q: p <= q => quantile(p) <= quantile(q)",
+        dtype: None,
     }
 }
 
@@ -584,6 +730,7 @@ fn fuzz_quantile_boundary(samples: usize, seed: u64) -> FuzzOutcome {
                     "error": err
                 })),
                 domain: "quantile boundary: q=0 -> min, q=1 -> max",
+                dtype: None,
             };
         }
     }
@@ -592,6 +739,7 @@ fn fuzz_quantile_boundary(samples: usize, seed: u64) -> FuzzOutcome {
         max_error,
         counterexample: None,
         domain: "quantile boundary: q=0 -> min, q=1 -> max",
+        dtype: None,
     }
 }
 
@@ -617,8 +765,6 @@ fn sample_signed_domain(index: usize, samples: usize, rng: &mut Lcg, radius: f64
     }
 }
 
-// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
 fn sample_positive_domain(index: usize, samples: usize, rng: &mut Lcg) -> f64 {
     match index {
         0 => 1.0,
@@ -628,7 +774,9 @@ fn sample_positive_domain(index: usize, samples: usize, rng: &mut Lcg) -> f64 {
             let denom = samples.saturating_sub(1).max(1) as f64;
             let grid = -6.0 + 12.0 * (index as f64 / denom);
             let jitter = (rng.next_unit() - 0.5) * (12.0 / denom);
-            10.0_f64.powf((grid + jitter).clamp(-6.0, 6.0))
+            // 10^g through the correctly rounded kernel, so the sample set does
+            // not depend on the host libm.
+            chelis_crmath::exp_f64((grid + jitter).clamp(-6.0, 6.0) * std::f64::consts::LN_10)
         }
     }
 }
@@ -651,33 +799,6 @@ impl Lcg {
         let bits = self.state >> 11;
         (bits as f64) * (1.0 / ((1_u64 << 53) as f64))
     }
-}
-
-fn normal_cdf_erfc(x: f64) -> f64 {
-    0.5 * erfc_approx(-x / std::f64::consts::SQRT_2)
-}
-
-fn erfc_approx(x: f64) -> f64 {
-    1.0 - erf_approx(x)
-}
-
-// chelis#2957 S6: Rust std transcendental until S6 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
-fn erf_approx(x: f64) -> f64 {
-    if x == 0.0 {
-        return 0.0;
-    }
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let ax = x.abs();
-    let p = 0.3275911_f64;
-    let a1 = 0.254829592_f64;
-    let a2 = -0.284496736_f64;
-    let a3 = 1.421413741_f64;
-    let a4 = -1.453152027_f64;
-    let a5 = 1.061405429_f64;
-    let t = 1.0 / (1.0 + p * ax);
-    let poly = (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t;
-    sign * (1.0 - poly * (-(ax * ax)).exp())
 }
 
 #[cfg(test)]
@@ -829,5 +950,85 @@ mod tests {
         ));
         let probe = registry.probe_consumer("consumer", CompositeVerdict::Proven, [EXP_POSITIVITY]);
         assert_eq!(probe.composite_verdict, CompositeVerdict::Invalid);
+    }
+
+    // --- chelis#2965: discharges at a declared dtype ---
+
+    fn evidence(id: &str) -> serde_json::Value {
+        all_invariants()
+            .into_iter()
+            .find(|invariant| invariant.id == id)
+            .unwrap_or_else(|| panic!("{id} exists"))
+            .record
+            .discharge
+            .expect("discharged")
+            .evidence
+    }
+
+    #[test]
+    fn chelis_2965_float_contracts_record_their_evaluation_dtype() {
+        for id in [
+            NORMAL_CDF_RANGE,
+            NORMAL_CDF_REFLECTION,
+            NORMAL_CDF_MONOTONICITY,
+            EXP_POSITIVITY,
+            EXP_MONOTONICITY,
+            LOG_MONOTONICITY,
+            LOG_ONE,
+        ] {
+            assert_eq!(
+                evidence(id)["dtype"],
+                CONTRACT_FUZZ_DTYPE.name(),
+                "{id} does not record the dtype it was evaluated at"
+            );
+        }
+        assert!(evidence(QUANTILE_RANGE).get("dtype").is_none());
+    }
+
+    #[test]
+    fn chelis_2965_exp_positivity_is_the_float_property() {
+        let invariant = all_invariants()
+            .into_iter()
+            .find(|invariant| invariant.id == EXP_POSITIVITY)
+            .unwrap();
+        assert_eq!(invariant.assumption, "forall x. exp(x) >= 0");
+        let discharge = invariant.record.discharge.unwrap();
+        assert_eq!(discharge.method, DischargeMethod::Fuzz);
+        assert_eq!(discharge.evidence["status"], "validated");
+    }
+
+    #[test]
+    fn chelis_2965_exp_positivity_samples_reach_underflow_where_the_strict_law_fails() {
+        // The positivity sampler at each width reaches inputs where exp
+        // underflows to +0, so the strict real-model law `exp(x) > 0` is
+        // refuted there while the restated `exp(x) >= 0` holds.
+        for prim in [Prim::F32, Prim::F64] {
+            let radius = exp_underflow_radius(prim);
+            let strict = fuzz_unary(prim, 4096, 0xE0_2026, radius, "strict", |x| {
+                if kernel("exp", x).as_f64_lossy() > 0.0 { 0.0 } else { 1.0 }
+            });
+            let counterexample = strict
+                .counterexample
+                .unwrap_or_else(|| panic!("strict exp positivity not refuted at {}", prim.name()));
+            let x = counterexample["x"].as_f64().unwrap();
+            assert!(x < -100.0, "{}: {x}", prim.name());
+            let weak = fuzz_unary(prim, 4096, 0xE0_2026, radius, "weak", |x| {
+                let y = kernel("exp", x).as_f64_lossy();
+                if y >= 0.0 { 0.0 } else { -y }
+            });
+            assert!(weak.counterexample.is_none(), "{}", prim.name());
+        }
+    }
+
+    #[test]
+    fn chelis_2965_shipped_normal_cdf_reflection_fails_at_f32() {
+        // The reason the contracts are discharged at f64: evaluated at f32 the
+        // shipped graph's `1 - N(x)` and `N(-x)` round differently by far more
+        // than the fuzz tolerance.
+        let outcome = fuzz_normal_cdf_reflection(Prim::F32, 256, 0xC0DF_2026);
+        assert!(outcome.counterexample.is_some(), "{outcome:?}");
+        assert!(outcome.max_error > FUZZ_TOLERANCE);
+        let at_f64 = fuzz_normal_cdf_reflection(Prim::F64, 256, 0xC0DF_2026);
+        assert!(at_f64.counterexample.is_none(), "{at_f64:?}");
     }
 }
