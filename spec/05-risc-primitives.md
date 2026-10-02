@@ -2764,7 +2764,7 @@ exact ADT identity by [05-OP-34].
 > access, owner flag, or free-style path; it has no accumulator and is outside
 > AD.
 >
-> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the twelve
+> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the thirteen
 > exported stdlib ADT identities enumerated in the normative registry
 > `spec/registry/stdlib_adt_identities.md`, which this atom incorporates by
 > reference, and no structurally similar successor.
@@ -2790,8 +2790,9 @@ exact ADT identity by [05-OP-34].
 > spelling of an integer-form source token outside i64 range ([05-OP-2]);
 > it is source-faithful text, never a float funnel, and its string field
 > compares and renders byte-exactly. Decimal invariants are checked by the
-> named [05-OP-35] operations before use; the opaque `datetime::*` identities
-> hold [05-OP-73]'s invariants by construction. There is no second prelude JSON
+> named [05-OP-35] operations before use; the opaque `datetime::*` and
+> `datetime/business::*` identities hold [05-OP-73]'s invariants by
+> construction. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
 > ordinary constructor and the executed matching arm preserve the recursive
 > cotangent shape: differentiable float fields receive their corresponding
@@ -2801,7 +2802,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the one hundred ninety-five final exported stdlib numeric definitions enumerated in the
+> the two hundred seventeen final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
@@ -2820,7 +2821,8 @@ exact ADT identity by [05-OP-34].
 > refuses `JsonFloat` and `JsonBigInt`, `json_bigint` is [05-OP-3]'s exact
 > big-integer projection, while `json_float` performs [05-OP-3]'s named
 > i64-to-f64 widening, refuses `JsonBigInt`, and returns a stored f64
-> unchanged. The `datetime::*` identities follow [05-OP-73]. Index wrappers
+> unchanged. The `datetime::*` and `datetime/business::*` identities follow
+> [05-OP-73]. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
 > For a differentiable element type, `list_index(xs,i)` returns an input
@@ -3035,15 +3037,17 @@ exact ADT identity by [05-OP-34].
 > from its implementation body or age.
 
 > **[05-OP-73]** `datetime(arguments...) -> result` governs exactly the
-> `datetime::*` identities of the [05-OP-34] and [05-OP-35] registries: the
-> opaque value types `Date`, `Time`, `DateTime`, `Instant`, `Offset`,
-> `OffsetDateTime`, `Duration`, `Period`, `Dates[n]`, and `Instants[n]`, and
-> the callables over them, together with the module's one callable that
-> reaches no numeric value and so has no registry row, `weekday_name`. Its
-> plain enums are `Weekday` (`Monday` through
+> `datetime::*` and `datetime/business::*` identities of the [05-OP-34] and
+> [05-OP-35] registries: the opaque value types `Date`, `Time`, `DateTime`,
+> `Instant`, `Offset`, `OffsetDateTime`, `Duration`, `Period`, `Dates[n]`,
+> `Instants[n]`, and `BusinessCalendar`, and the callables over them,
+> together with the one callable of the two modules that reaches no numeric
+> value and so has no registry row, `weekday_name`. Its plain enums are
+> `Weekday` (`Monday` through
 > `Sunday`), `DayOverflow` (`ClampToMonthEnd`, `RejectInvalidDay`), and
 > `TimeUnit` (`Hours`, `Minutes`, `Seconds`, `Milliseconds`, `Microseconds`,
-> `Nanoseconds`); every enum constructor is a valid value. `instant_to_unix_count`,
+> `Nanoseconds`), with `BusinessDayRoll` and `NonBusinessStart` defined
+> below; every enum constructor is a valid value. `instant_to_unix_count`,
 > `duration_to_count`, and `instant_round_to`, with the `try_` forms of the
 > first two, take a [05-OP-74] `Rounding`. `duration_to_seconds_f64` is the one
 > other callable that drops precision; it is a named lossy boundary with fixed
@@ -3087,7 +3091,10 @@ exact ADT identity by [05-OP-34].
 > outside its range; text outside the profile below), an argument outside the
 > operation's admitted values (an occurrence below 1 in
 > `nth_weekday_in_month`; an increment of `instant_round_to` that is not
-> positive or does not divide one day), and a `Reject` policy that fires. For
+> positive or does not divide one day; the weekmasks, horizons, holidays, and
+> dates the business-calendar paragraphs below reject), a business-calendar
+> result that its horizon does not determine, and a `Reject` policy that
+> fires. For
 > a call that could fail both ways, checks run in the order the defining
 > computation produces the quantity each one checks: `date_add_months` checks
 > the target year-month's range and then the day under its policy;
@@ -3231,6 +3238,61 @@ exact ADT identity by [05-OP-34].
 > (`PT3661S`, `-PT0.5S`, `PT0S`); and a period as months and days with zero
 > parts dropped (`P14M3D`, `-P1M`, `P0D`). Parsing a value's canonical text
 > returns that value.
+>
+> `Weekmask` is a plain record of seven `bool` fields, `monday` through
+> `sunday`, each true when that weekday is a business weekday.
+> `BusinessDayRoll` is the plain enum `Unadjusted`, `Following`, `Preceding`,
+> `ModifiedFollowing`, and `ModifiedPreceding`, and `NonBusinessStart` is
+> `RejectNonBusinessStart`, `RollStartForward`, and `RollStartBackward`. A
+> `BusinessCalendar` is a weekmask, the ascending unique epoch days of its
+> holidays, and a horizon `[valid_from, valid_until]` of dates with both ends
+> included. A day of the horizon is a business day when the weekmask includes
+> its weekday and it is not a holiday.
+> `business_calendar(w,holidays,valid_from,valid_until)` fails `domain` when
+> `w` includes no weekday, when `valid_from` is after `valid_until`, or when a
+> holiday lies outside the horizon, naming the first such holiday in list
+> order. It drops repeated holidays and holidays whose weekday `w` excludes,
+> so two calendars with the same business days, weekmask, and horizon are
+> [05-OP-36]-equal. `business_calendar_weekmask`, `business_calendar_holidays`
+> (ascending), `business_calendar_valid_from`, and
+> `business_calendar_valid_until` read a calendar.
+>
+> A calendar answers only from the days of its horizon. Each callable that
+> takes a calendar and a date, other than a `try_` form, fails `domain` for a
+> date outside the horizon, under `Unadjusted` too, except that an end of
+> `business_day_count` or `dates_business_day_count` may also be the day after
+> `valid_until`. A result exists when every choice of business days outside the
+> horizon gives the same answer and that answer lies inside the horizon;
+> otherwise such a callable fails `domain`, and its `try_` twin returns `None`
+> under the rule above. The `datetime/business::*` callables fail only
+> `domain`, and the four calendar readers never fail. `business_calendar`,
+> `is_business_day`, `business_day_roll`, `business_day_offset`,
+> `business_day_count`, `business_in_all`, and `business_in_any` each have a
+> `try_` twin, and the vectorized forms below have none.
+> `is_business_day(c,d)` tests `d`. `business_day_roll(c,d,r)` is `d` under
+> `Unadjusted`, the first business day on or after `d` under `Following`, and
+> the last one on or before `d` under `Preceding`. `ModifiedFollowing` gives
+> the `Following` day when it lies in `d`'s month and otherwise the
+> `Preceding` day; `ModifiedPreceding` gives the `Preceding` day when it lies
+> in `d`'s month and otherwise the `Following` day.
+> `business_day_offset(c,d,n,s)` first replaces a non-business `d`: under
+> `RejectNonBusinessStart` it fails `domain`, under `RollStartForward` it takes
+> the `Following` day, and under `RollStartBackward` the `Preceding` day. It
+> then moves `n` business days, later for positive `n` and earlier for
+> negative `n`, so `n = 0` gives the replaced start.
+> `business_day_count(c,a,b)` is the number of business days in `[a, b)` when
+> `a <= b` and `-business_day_count(c,b,a)` otherwise. `business_in_all(a,b)`
+> is the calendar whose business days are those of both, with the
+> intersection of the two weekmasks, and `business_in_any(a,b)` the calendar
+> whose business days are those of either, with their union. Each takes the
+> intersection of the two horizons and fails `domain` when it is empty;
+> `business_in_all` also fails `domain` when the two weekmasks share no
+> weekday. `dates_is_business_day`, `dates_business_day_roll`,
+> `dates_business_day_offset` (with a borrowed `tensor[n,i64]` of offsets),
+> and `dates_business_day_count` consume their `Dates[n]` columns and apply
+> their scalar twin to each element; where the twin fails for some element,
+> the call fails `domain` naming the lowest such element index and the twin's
+> detail there.
 >
 > Every datetime callable is outside AD and has no accumulator.
 
