@@ -245,6 +245,22 @@ outside i64; each `try_` form returns `None` where its twin fails `domain`, and
 `try_decimal_to_i64` also where its twin fails `overflow`. The module is
 pure and runs under `chelis eval`, `chelis test`, and generated C.
 
+`Std.Datetime.Zone` makes time zone rules values. `time_zone_from_tzif(name,
+bytes)` reads a TZif file (RFC 9636, version 2 or later) whose bytes the program
+supplies: the standard library holds no time zone database and never reads the
+host's. `time_zone_fixed(o)` and `time_zone_utc()` build fixed zones. A `Zoned` is
+an instant in a zone: `zoned(i, tz)` pairs them, and `zoned_from_local(dt, tz,
+policy)` resolves a local reading, where the `Disambiguation` (`EarlierInstant`,
+`LaterInstant`, `CompatibleInstant`, or `RejectNonUniqueLocal`) decides a reading
+that a daylight saving change skips or repeats. `zoned_add_duration` moves along
+the instant line and `zoned_add_period` moves the wall clock. `zoned_to_string`
+writes RFC 9557 text such as `2026-10-01T09:30:00-04:00[America/New_York]`;
+`parse_zoned_text` reads it into a plain `ZonedText` record, and
+`zoned_from_text(zt, tz, policy)` resolves that against a zone the caller
+obtained, with an `OffsetConflict` policy for a written offset the zone does not
+use there. A zone whose TZif footer is empty has no offsets from its last
+transition on, and a call that needs one there fails `domain`.
+
 ### Exported but unavailable
 
 `Std.Io.Parquet` and `Std.Io.Safetensors` export names whose calls fail. Use
