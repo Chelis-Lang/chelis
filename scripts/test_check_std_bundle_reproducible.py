@@ -2,8 +2,9 @@
 """Unit controls for `check_std_bundle_reproducible.py`.
 
 The cargo builds run in CI's lint-and-unit stage; these tests pin how the
-check finds the bundle's build-script output among cargo's messages and how it
-compares two builds, without running cargo.
+check finds the bundle's build-script output among cargo's messages, how it
+asks cargo for a second run of the build script and refuses one that did not
+happen, and how it compares the two runs, without running cargo.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_std_bundle_reproducible as check
@@ -85,6 +87,39 @@ class ExportHeadTests(unittest.TestCase):
             self.assertEqual((exported_src / "a.ch").read_text(), "committed\n")
             self.assertFalse((exported_src / "b.ch").exists())
             self.assertFalse((exported / ".git").exists())
+
+
+class BuildTwiceTests(unittest.TestCase):
+    """The second run shares the target directory and must rerun the script."""
+
+    def run_twice(self, first_dir: str, second_dir: str) -> list[tuple]:
+        outputs = {name: name.encode() for name in check.OUTPUTS}
+        calls = []
+
+        def build(source, target_dir, *extra):
+            calls.append((source, target_dir, extra))
+            return Path(first_dir if len(calls) == 1 else second_dir), dict(outputs)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(check, "build", build):
+            target = Path(tmp) / "target"
+            (target / "stale").mkdir(parents=True)
+            first, second = check.build_twice(Path("/w"), target)
+            self.assertFalse((target / "stale").exists(), "the target starts fresh")
+        self.assertEqual(first, second)
+        return calls
+
+    def test_the_second_run_reuses_the_target_with_the_bundle_option(self):
+        calls = self.run_twice("/t/build/a/out", "/t/build/b/out")
+        self.assertEqual([call[1] for call in calls], [calls[0][1]] * 2)
+        self.assertEqual(calls[0][2], ())
+        self.assertEqual(calls[1][2], ("--config", check.SECOND_RUN_CONFIG))
+        self.assertTrue(
+            check.SECOND_RUN_CONFIG.startswith(f"profile.dev.package.{check.PACKAGE}.")
+        )
+
+    def test_a_second_run_that_reports_the_first_out_dir_is_an_error(self):
+        with self.assertRaisesRegex(check.ReproducibilityError, "did not make cargo run"):
+            self.run_twice("/t/build/a/out", "/t/build/a/out")
 
 
 class DifferencesTests(unittest.TestCase):

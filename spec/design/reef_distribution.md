@@ -399,8 +399,9 @@ to the local-registry path. Three consequences:
    recording the bundled runtime is committed;
    `scripts/check_std_bundle_untracked.py` refuses one at commit time
    and in CI, and
-   `scripts/check_std_bundle_reproducible.py` requires two independent
-   builds to embed the same bytes.
+   `scripts/check_std_bundle_reproducible.py` requires two runs of the
+   bundle's build script, in separate processes and output directories,
+   to pack the same bytes.
 3. **No registry seeding required.** `chelis reef build` against a
    project that depends on chelis-std (implicitly or explicitly)
    succeeds against an empty `$CHELIS_REEF_HOME`. The bundled bytes

@@ -217,7 +217,8 @@ is compiled per pull request only by the solver-free row, and the no-default
 row compiles a strict subset of the default row. It then runs
 `cargo fmt --check`, `chelis lint --check .`, the std-bundle reproducibility
 check (`scripts/check_std_bundle_reproducible.py`, which runs the bundle build
-script in two fresh target directories and compares the packed bytes), the
+script twice in one fresh target directory, each time in its own output
+directory, and compares the packed bytes), the
 explicit rustdoc commands, the checkpoint and
 hash-order compile-fail fixtures, the configuration-closure check, both
 pipeline-core guards, the chelis#908 unrepresentable-domain oracle, the

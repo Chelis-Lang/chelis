@@ -3788,7 +3788,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "lint-rust"
 cadence = "pull_request and push"
-reason = "the Rust-policy lint-and-unit stage runs the chelis-std-bundle build script in two fresh target directories and compares the packed runtimes"
+reason = "the Rust-policy lint-and-unit stage runs the chelis-std-bundle build script twice in one fresh target directory, each time in its own output directory, and compares the packed runtimes"
 tracking_issue = "chelis#2930"
 
 [[path_rule]]
