@@ -237,7 +237,9 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         RiscOp::Sin => AgreementOp::Sin,
         RiscOp::Sqrt => AgreementOp::Sqrt,
         RiscOp::Tan => AgreementOp::Tan,
-        RiscOp::Add
+        // [05-OP-46] makes tanh correctly rounded, so the lanes agree exactly.
+        RiscOp::Tanh
+        | RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul
         | RiscOp::Div
@@ -394,6 +396,7 @@ fn agreement_operation_identity_is_derived_from_ir() {
         (RiscOp::Cos, AgreementOp::Cos),
         (RiscOp::Tan, AgreementOp::Tan),
         (RiscOp::Atan, AgreementOp::Atan),
+        (RiscOp::Tanh, AgreementOp::Exact),
     ];
     for (risc, expected) in cases {
         assert_eq!(agreement_op_for_risc(&risc), expected);
