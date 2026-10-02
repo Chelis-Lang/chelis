@@ -6578,10 +6578,8 @@ int main(void) {{
         let source = codegen(&dag, &function)
             .expect("reduced-float direct subtraction codegen")
             .c_source;
-        assert!(
-            source.contains(canonical_nan),
-            "{tag} subtraction source lacks exact canonical NaN: {source}"
-        );
+        // The runtime's narrowing store owns the canonical f16/bf16 NaN
+        // (chelis#2964); the run below checks the stored bits.
         let harness = format!(
             r#"{HARNESS_HEADER}
 #include <stdint.h>
@@ -12409,4 +12407,271 @@ fn issue_2512_an_untaken_restamping_expand_declares_its_inserted_extent_and_yiel
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// chelis#2964 (C7): an exported kernel runs under [04-NUM-2]'s IEEE
+/// default environment whatever its caller installed, and hands the
+/// caller's environment back. The host sets flush-to-zero (plus
+/// denormals-are-zero on x86_64, as `crtfastmath` does) and rounds upward,
+/// then checks a subnormal-producing and a rounding-sensitive division
+/// against round-to-nearest-even bits and its own mode after the call.
+#[test]
+fn exported_kernel_pins_ieee_default_fp_environment_and_restores_the_callers() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let ty = vec_prim(2, Prim::F32);
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Div, vec![a, b], ty, None);
+    dag.add_root(out);
+    let function = "exported_fp_env_div";
+    let source = codegen(&dag, function)
+        .expect("direct division codegen")
+        .c_source;
+    // 2^-126 / 2 is the subnormal 2^-127; -1 / 3 rounds to 0xbeaaaaab to
+    // nearest and to 0xbeaaaaaa upward.
+    let expected = [
+        (f32::MIN_POSITIVE / 2.0).to_bits(),
+        (-1.0_f32 / 3.0).to_bits(),
+    ];
+    assert_eq!(expected, [0x0040_0000, 0xbeaa_aaab]);
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <fenv.h>
+#include <stdint.h>
+#include <string.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+#if defined(__aarch64__)
+static uint64_t host_flush_state(void) {{
+    uint64_t fpcr;
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
+    return fpcr & (UINT64_C(1) << 24);
+}}
+static void host_set_flush(void) {{
+    uint64_t fpcr;
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= UINT64_C(1) << 24;
+    __asm__ __volatile__("msr fpcr, %0" : : "r"(fpcr));
+}}
+#elif defined(__x86_64__)
+static uint64_t host_flush_state(void) {{
+    uint32_t mxcsr;
+    __asm__ __volatile__("stmxcsr %0" : "=m"(mxcsr));
+    return mxcsr & UINT32_C(0x8040);
+}}
+static void host_set_flush(void) {{
+    uint32_t mxcsr;
+    __asm__ __volatile__("stmxcsr %0" : "=m"(mxcsr));
+    mxcsr |= UINT32_C(0x8040);
+    __asm__ __volatile__("ldmxcsr %0" : : "m"(mxcsr));
+}}
+#else
+#error "unsupported host architecture"
+#endif
+static int run(int base) {{
+    float a_data[2] = {{ chelis_f32_from_bits(UINT32_C(0x00800000)), -1.0f }};
+    float b_data[2] = {{ 2.0f, 3.0f }};
+    chelis_tensor *a = make_view_typed_1d(a_data, 2, CHELIS_DTYPE_F32);
+    chelis_tensor *b = make_view_typed_1d(b_data, 2, CHELIS_DTYPE_F32);
+    chelis_tensor *inputs[2] = {{ a, b }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    const float *got = (const float *)chelis_tensor_read_view(outputs[0]).data;
+    const uint32_t expected[2] = {{ UINT32_C({e0:#010x}), UINT32_C({e1:#010x}) }};
+    for (int i = 0; i < 2; ++i) {{
+        uint32_t bits = 0;
+        memcpy(&bits, &got[i], sizeof(bits));
+        if (bits != expected[i]) {{
+            printf("case %d element %d: got 0x%08x\n", base, i, (unsigned)bits);
+            return base + i;
+        }}
+    }}
+    return 0;
+}}
+int main(void) {{
+    int status = run(10);
+    if (status != 0) return status;
+    if (fesetround(FE_UPWARD) != 0) return 2;
+    host_set_flush();
+    if (host_flush_state() == 0 || fegetround() != FE_UPWARD) return 3;
+    status = run(20);
+    if (status != 0) return status;
+    if (fegetround() != FE_UPWARD) return 30;
+    if (host_flush_state() == 0) return 31;
+    puts("PASS");
+    return 0;
+}}
+"#,
+        e0 = expected[0],
+        e1 = expected[1],
+    );
+    let (ok, output) = compile_and_run_kernel_capturing(function, &source, &harness);
+    assert!(ok && output.contains("PASS"), "{output}");
+}
+
+/// chelis#2964 (C8): every direct and fused float arithmetic kernel
+/// finalizes the NaNs it produces to [04-NUM-2]'s canonical quiet NaN at
+/// every width, as eval does, instead of propagating the input payload and
+/// sign or the ISA's default NaN. Inputs carry a negative payload NaN and a
+/// signaling NaN on either side.
+#[test]
+fn direct_and_fused_float_arithmetic_finalizes_canonical_nan_at_every_width() {
+    let binary = [
+        RiscOp::Add,
+        RiscOp::Sub,
+        RiscOp::Mul,
+        RiscOp::Div,
+        RiscOp::FloorDiv,
+    ];
+    let unary = [
+        RiscOp::Neg,
+        RiscOp::Recip,
+        RiscOp::Sqrt,
+        RiscOp::Abs,
+        RiscOp::Floor,
+        RiscOp::Ceil,
+        RiscOp::Round,
+    ];
+    // (tag, prim, storage type, dtype, NaN inputs, one, canonical NaN)
+    let widths = [
+        (
+            "f32",
+            Prim::F32,
+            "uint32_t",
+            "CHELIS_DTYPE_F32",
+            ["UINT32_C(0xffc54321)", "UINT32_C(0x7f812345)"],
+            "UINT32_C(0x3f800000)",
+            "UINT32_C(0x7fc00000)",
+        ),
+        (
+            "f64",
+            Prim::F64,
+            "uint64_t",
+            "CHELIS_DTYPE_F64",
+            [
+                "UINT64_C(0xfff8abcd12345678)",
+                "UINT64_C(0x7ff0123456789abc)",
+            ],
+            "UINT64_C(0x3ff0000000000000)",
+            "UINT64_C(0x7ff8000000000000)",
+        ),
+        (
+            "f16",
+            Prim::F16,
+            "uint16_t",
+            "CHELIS_DTYPE_F16",
+            ["UINT16_C(0xfe55)", "UINT16_C(0x7c01)"],
+            "UINT16_C(0x3c00)",
+            "UINT16_C(0x7e00)",
+        ),
+        (
+            "bf16",
+            Prim::Bf16,
+            "uint16_t",
+            "CHELIS_DTYPE_BF16",
+            ["UINT16_C(0xffe5)", "UINT16_C(0x7f81)"],
+            "UINT16_C(0x3f80)",
+            "UINT16_C(0x7fc0)",
+        ),
+    ];
+    for (tag, prim, storage, dtype, nans, one, canonical) in widths {
+        for fused in [false, true] {
+            if fused && matches!(prim, Prim::F16 | Prim::Bf16) {
+                continue;
+            }
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let ty = vec_prim(2, prim);
+            let a = dag.add_node(
+                decl,
+                RiscOp::Load { name: "a".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let b = dag.add_node(
+                decl,
+                RiscOp::Load { name: "b".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let mut roots = 0;
+            for op in &binary {
+                for (lhs, rhs) in [(a, b), (b, a)] {
+                    let node = dag.add_node(decl, op.clone(), vec![lhs, rhs], ty.clone(), None);
+                    if fused {
+                        // A chained arithmetic step fuses with its producer.
+                        let chained =
+                            dag.add_node(decl, RiscOp::Mul, vec![node, b], ty.clone(), None);
+                        dag.add_root(chained);
+                    } else {
+                        dag.add_root(node);
+                    }
+                    roots += 1;
+                }
+            }
+            for op in &unary {
+                let node = dag.add_node(decl, op.clone(), vec![a], ty.clone(), None);
+                if fused {
+                    let chained = dag.add_node(decl, RiscOp::Neg, vec![node], ty.clone(), None);
+                    dag.add_root(chained);
+                } else {
+                    dag.add_root(node);
+                }
+                roots += 1;
+            }
+            let dag = if fused { fuse(&dag) } else { dag };
+            let mode = if fused { "fused" } else { "direct" };
+            let function = format!("canonical_nan_{mode}_{tag}");
+            let source = codegen(&dag, &function)
+                .expect("float arithmetic codegen")
+                .c_source;
+            let harness = format!(
+                r#"{HARNESS_HEADER}
+#include <stdint.h>
+#include <string.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {storage} a_data[2] = {{ {nan0}, {nan1} }};
+    {storage} b_data[2] = {{ {one}, {one} }};
+    chelis_tensor *a = make_view_typed_1d(a_data, 2, {dtype});
+    chelis_tensor *b = make_view_typed_1d(b_data, 2, {dtype});
+    chelis_tensor *inputs[2] = {{ a, b }};
+    chelis_tensor *outputs[{roots}] = {{ NULL }};
+    {function}(inputs, 2, outputs, {roots});
+    int failures = 0;
+    for (int k = 0; k < {roots}; ++k) {{
+        const {storage} *got = (const {storage} *)chelis_tensor_read_view(outputs[k]).data;
+        for (int i = 0; i < 2; ++i) {{
+            if (got[i] != {canonical}) {{
+                printf("output %d element %d: got 0x%llx\n", k, i, (unsigned long long)got[i]);
+                failures++;
+            }}
+        }}
+    }}
+    if (failures != 0) return 1;
+    puts("PASS");
+    return 0;
+}}
+"#,
+                nan0 = nans[0],
+                nan1 = nans[1],
+            );
+            let (ok, output) = compile_and_run_kernel_capturing(&function, &source, &harness);
+            assert!(ok && output.contains("PASS"), "{tag} {mode}:\n{output}");
+        }
+    }
 }

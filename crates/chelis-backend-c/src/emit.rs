@@ -574,6 +574,9 @@ impl CEmitter {
             e.line("}");
         }
         e.line("/* CHELIS_UNIFORM_HELPERS_END */");
+        for helper_line in crate::fp_env::helper_lines() {
+            e.line(helper_line);
+        }
         // [05-OP-31]/[05-OP-44] make every published host tensor descriptor
         // canonical row-major storage.  The old runtime ABI exposed mutable
         // stride fields and therefore needed a runtime contiguity probe; the
@@ -646,6 +649,9 @@ impl CEmitter {
             declaration.trim_end_matches(';')
         ));
         e.indent = 1;
+        if !options.static_entry {
+            e.line(crate::fp_env::ENTRY);
+        }
 
         let input_labels = Self::input_labels(dag);
         let input_slots = Self::input_slots(&input_labels);
@@ -788,6 +794,9 @@ impl CEmitter {
         for line in cleanup {
             e.lines.push(line);
         }
+        if !options.static_entry {
+            e.line(crate::fp_env::EXIT);
+        }
 
         e.indent = 0;
         e.line("}");
@@ -855,7 +864,7 @@ impl CEmitter {
                 ),
             ));
         }
-        let source = e.lines.join("\n");
+        let source = crate::fp_env::prune_unused_nan_helpers(&e.lines.join("\n"));
         if source.contains(EXTENT_MARKS) {
             return Err(unwritten_mark(
                 "a mark character remains after settling".into(),
@@ -3200,11 +3209,8 @@ impl CEmitter {
         // is never guarded; `+`/`*`/`fmaxf` never divide.
         let checked_int =
             ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/" | "%" | "shl" | "shr");
-        let canonical_nan = match ty.precision {
-            Prim::F32 => Some("chelis_f32_from_bits(UINT32_C(0x7fc00000))"),
-            Prim::F64 => Some("chelis_f64_from_bits(UINT64_C(0x7ff8000000000000))"),
-            _ => None,
-        };
+        let is_float = matches!(ty.precision, Prim::F32 | Prim::F64);
+        let is_f64 = Self::is_f64(ty);
         let elem_expr = |lhs: String, rhs: String| -> String {
             if matches!(op, "shl" | "shr") {
                 let bits = Self::integer_width(ty.precision);
@@ -3219,11 +3225,8 @@ impl CEmitter {
                 return format!("{zero} < ({lhs}) ? ({rhs}) : {zero}");
             }
             if !checked_int {
-                if op == "-"
-                    && let Some(canonical_nan) = canonical_nan
-                {
-                    let raw = format!("(({lhs}) - ({rhs}))");
-                    return format!("isnan({raw}) ? {canonical_nan} : {raw}");
+                if is_float && matches!(op, "+" | "-" | "*" | "/") {
+                    return crate::fp_env::canonical_nan(&format!("({lhs}) {op} ({rhs})"), is_f64);
                 }
                 return format!("{lhs} {op} {rhs}");
             }
@@ -3356,7 +3359,10 @@ impl CEmitter {
                      (((({av}) % chelis_int_div_guard((int64_t)({bv}))) < 0) != (({bv}) < 0))) ? 1 : 0))"
                 )
             } else {
-                format!("{floor_fn}(({et})({av}) / ({et})({bv}))")
+                crate::fp_env::canonical_nan(
+                    &format!("{floor_fn}(({et})({av}) / ({et})({bv}))"),
+                    Self::is_f64(ty),
+                )
             }
         };
         let identity = self.emit_elementwise_index_steps(id, inputs, ty);
@@ -3472,20 +3478,14 @@ impl CEmitter {
         let load = Self::reduced_to_f32_fn(ty.precision);
         let store = Self::f32_to_reduced_fn(ty.precision);
         let is_relu_adjoint = op == "chelis_relu_adjoint";
-        let canonical_nan = match ty.precision {
-            Prim::F16 => "UINT16_C(0x7e00)",
-            Prim::Bf16 => "UINT16_C(0x7fc0)",
-            _ => unreachable!("reduced-float emitter requires f16 or bf16"),
-        };
         let elem_expr = |g_raw: String| -> String {
             if is_relu_adjoint {
                 // Decode x only for the predicate and select the original
                 // f16/bf16 cotangent storage word unchanged.
                 format!("0.0f < __av ? {g_raw} : UINT16_C(0)")
-            } else if op == "-" {
-                let raw = "(__av - __bv)";
-                format!("isnan({raw}) ? {canonical_nan} : {store}({raw})")
             } else {
+                // The narrowing store finalizes any NaN to the dtype's
+                // canonical quiet NaN ([04-NUM-2]).
                 format!("{store}(__av {op} __bv)")
             }
         };
@@ -3959,7 +3959,7 @@ impl CEmitter {
                     Self::integer_width(ty.precision)
                 )
             } else {
-                op.expression(&value)
+                crate::fp_env::canonical_nan(&op.expression(&value), Self::is_f64(ty))
             }
         };
         let identity = self.emit_elementwise_index_steps(id, inputs, ty);
@@ -4101,7 +4101,9 @@ impl CEmitter {
         self.line("#pragma omp parallel for simd");
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
-        self.line(&format!("__out_{id}[i] = {one} / __in_a_{id}[i];"));
+        let recip =
+            crate::fp_env::canonical_nan(&format!("{one} / __in_a_{id}[i]"), Self::is_f64(ty));
+        self.line(&format!("__out_{id}[i] = {recip};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -4111,7 +4113,9 @@ impl CEmitter {
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!("int64_t idx = i * t{id}_input{a}_step;"));
-        self.line(&format!("__out_{id}[i] = {one} / __in_a_{id}[idx];"));
+        let recip =
+            crate::fp_env::canonical_nan(&format!("{one} / __in_a_{id}[idx]"), Self::is_f64(ty));
+        self.line(&format!("__out_{id}[i] = {recip};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -4140,7 +4144,7 @@ impl CEmitter {
                 // stored bits for NaN and -0 and replace only x < +0.
                 format!("({value}) < {zero} ? {zero} : ({value})")
             } else {
-                format!("{f}({value})")
+                crate::fp_env::canonical_nan(&format!("{f}({value})"), is_f64)
             }
         };
         let identity = self.emit_elementwise_index_steps(id, inputs, ty);
@@ -5593,7 +5597,22 @@ impl CEmitter {
     ///
     /// Callers admit only f32 and f64; `emit_fused_reduce` still passes
     /// `false` because its accumulator path stays f32-only.
+    /// [04-NUM-2]: every arithmetic step finalizes its NaN to the canonical
+    /// quiet NaN. Extrema are selection and keep their operand's bits.
     fn scalar_step_expr(
+        op: &FusedStepOp,
+        resolve: &dyn Fn(&FusedInput) -> String,
+        inputs: &[FusedInput],
+        is_f64: bool,
+    ) -> String {
+        let raw = Self::scalar_step_raw_expr(op, resolve, inputs, is_f64);
+        match op {
+            FusedStepOp::MaxElem | FusedStepOp::MinElem => raw,
+            _ => crate::fp_env::canonical_nan(&raw, is_f64),
+        }
+    }
+
+    fn scalar_step_raw_expr(
         op: &FusedStepOp,
         resolve: &dyn Fn(&FusedInput) -> String,
         inputs: &[FusedInput],
@@ -5625,13 +5644,7 @@ impl CEmitter {
             FusedStepOp::Sub => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
-                let raw = format!("(({a}) - ({b}))");
-                let canonical_nan = if is_f64 {
-                    "chelis_f64_from_bits(UINT64_C(0x7ff8000000000000))"
-                } else {
-                    "chelis_f32_from_bits(UINT32_C(0x7fc00000))"
-                };
-                format!("isnan({raw}) ? {canonical_nan} : {raw}")
+                format!("({a}) - ({b})")
             }
             FusedStepOp::Mul => {
                 let a = resolve(&inputs[0]);
@@ -5752,10 +5765,7 @@ impl CEmitter {
             FusedStepOp::Sub => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
-                let raw = format!("_mm256_sub_ps({a}, {b})");
-                format!(
-                    "_mm256_blendv_ps({raw}, _mm256_set1_ps(chelis_f32_from_bits(UINT32_C(0x7fc00000))), _mm256_cmp_ps({raw}, {raw}, _CMP_UNORD_Q))"
-                )
+                format!("_mm256_sub_ps({a}, {b})")
             }
             FusedStepOp::Mul => {
                 let a = resolve(&inputs[0]);
@@ -6022,6 +6032,13 @@ impl CEmitter {
             for (s, step) in ops.iter().enumerate() {
                 let expr = Self::simd_step_expr(&step.op, &resolve_simd, &step.input_indices);
                 self.line(&format!("__m256 __v{s} = {expr};"));
+                // [04-NUM-2]: arithmetic lanes finalize NaN to the canonical
+                // quiet NaN; extrema select and keep their operand's bits.
+                if !matches!(step.op, FusedStepOp::MaxElem | FusedStepOp::MinElem) {
+                    self.line(&format!(
+                        "__v{s} = _mm256_blendv_ps(__v{s}, _mm256_set1_ps(chelis_f32_from_bits(UINT32_C(0x7fc00000))), _mm256_cmp_ps(__v{s}, __v{s}, _CMP_UNORD_Q));"
+                    ));
+                }
             }
             self.line(&format!("_mm256_storeu_ps(__out_{id} + __i, __v{last});"));
             self.indent -= 1;
@@ -7850,8 +7867,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 FusedStepOp::Sub => {
                     let a = resolve(&step.input_indices[0]);
                     let b = resolve(&step.input_indices[1]);
-                    let raw = format!("(({a}) - ({b}))");
-                    format!("isnan({raw}) ? chelis_f32_from_bits(UINT32_C(0x7fc00000)) : {raw}")
+                    format!("({a}) - ({b})")
                 }
                 FusedStepOp::Mul => {
                     let a = resolve(&step.input_indices[0]);
@@ -7938,6 +7954,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     let a = resolve(&step.input_indices[0]);
                     format!("rintf({a})")
                 }
+            };
+            // [04-NUM-2]: arithmetic finalizes NaN to the canonical quiet
+            // NaN; extrema select and keep their operand's bits.
+            let expr = match step.op {
+                FusedStepOp::MaxElem | FusedStepOp::MinElem => expr,
+                _ => crate::fp_env::canonical_nan(&expr, false),
             };
             self.line(&format!("float v{s} = {expr};"));
         }

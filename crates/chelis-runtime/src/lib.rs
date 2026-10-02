@@ -316,6 +316,9 @@ macro_rules! runtime_fail {
     }};
 }
 
+// Declared after `runtime_fail!` so the module can use it.
+mod fp_env;
+
 /// Arithmetic used by runtime tensor loops whose operation is governed by
 /// [04-NUM-3]. Float implementations retain IEEE arithmetic; signed integer
 /// implementations detect overflow explicitly so behavior is identical in

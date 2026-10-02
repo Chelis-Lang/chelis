@@ -623,9 +623,10 @@ pub(crate) fn emit_host_abi_program(
     if helper_requirements.needs_math_header {
         out.push("#include \"chelis_math.h\"".to_string());
     }
+    out.extend(crate::fp_env::helper_lines().map(str::to_string));
     out.push(String::new());
     out.extend(body);
-    Ok(out.join("\n"))
+    Ok(crate::fp_env::prune_unused_nan_helpers(&out.join("\n")))
 }
 
 fn global_tensor_helper_name(program_name: &str, index: usize) -> String {
@@ -2094,12 +2095,12 @@ fn append_helper(
             }
             continue;
         }
-        if line == "/* CHELIS_UNIFORM_HELPERS_BEGIN */" {
+        if line == "/* CHELIS_UNIFORM_HELPERS_BEGIN */" || line == crate::fp_env::HELPERS_BEGIN {
             skipping_helper_prelude = true;
             continue;
         }
         if skipping_helper_prelude {
-            if line == "/* CHELIS_UNIFORM_HELPERS_END */" {
+            if line == "/* CHELIS_UNIFORM_HELPERS_END */" || line == crate::fp_env::HELPERS_END {
                 skipping_helper_prelude = false;
             }
             continue;
@@ -3371,6 +3372,7 @@ fn emit_function(
             &declaration,
         ));
         out.push(format!("{} {{", declaration.trim_end_matches(';')));
+        out.push(format!("    {}", crate::fp_env::ENTRY));
         out.extend(exported_entry.iter().cloned());
         let wrapper_receipt = if entry_work.extent_at_body && delegated_entry_guards.is_empty() {
             let group = entry_groups
@@ -3425,6 +3427,7 @@ fn emit_function(
         out.push(
             "    __chelis_host_result_origin_arena_destroy(__chelis_origin_arena);".to_string(),
         );
+        out.push(format!("    {}", crate::fp_env::EXIT));
         out.push("    return __result;".to_string());
         out.push("}".to_string());
         out.push(crate::generated_header::render_authored_export_end(
@@ -3487,6 +3490,11 @@ fn emit_main(
     external_helpers: &UnordSet<String>,
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
+    // The process starts in the IEEE default environment; entering keeps a
+    // custom C runtime or preloaded library from changing that. A trap
+    // aborts, and returning from main ends the process, so there is no
+    // caller state to restore.
+    out.push(format!("    {}", crate::fp_env::ENTRY));
     append_invocation_origin_context(out);
     // chelis#840: the globals emitter needs the same original-to-emitted
     // function-name map as function bodies, or a global calling a def

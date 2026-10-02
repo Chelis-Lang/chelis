@@ -618,10 +618,10 @@ static inline float chelis_bf16_to_f32(uint16_t bits) {
 static inline uint16_t chelis_f32_to_bf16(float v) {
     uint32_t bits;
     memcpy(&bits, &v, sizeof(bits));
-    /* NaN: preserve the most-significant mantissa bit so the result is
-     * still a NaN (not silently coerced to inf). */
+    /* NaN: [04-NUM-2]'s canonical quiet bf16 NaN, whatever the input's
+     * sign and payload (chelis#2964). */
     if ((bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0) {
-        return (uint16_t)((bits >> 16) | 0x0040u);
+        return (uint16_t)0x7FC0u;
     }
     /* Round-to-nearest-even on the discarded 16 mantissa bits. */
     uint32_t lsb = (bits >> 16) & 1u;
@@ -667,9 +667,10 @@ static inline uint16_t chelis_f32_to_f16(float v) {
     int32_t exp = (int32_t)((bits >> 23) & 0xFFu) - 127 + 15;
     uint32_t mant = bits & 0x007FFFFFu;
     if (((bits >> 23) & 0xFFu) == 0xFFu) {
-        /* Inf / NaN: preserve. */
+        /* NaN: [04-NUM-2]'s canonical quiet f16 NaN, whatever the
+         * input's sign and payload (chelis#2964). Inf keeps its sign. */
         if (mant != 0u) {
-            return (uint16_t)(sign | 0x7E00u);
+            return (uint16_t)0x7E00u;
         }
         return (uint16_t)(sign | 0x7C00u);
     }

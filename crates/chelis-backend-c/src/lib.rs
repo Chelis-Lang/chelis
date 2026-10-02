@@ -3,6 +3,7 @@
 pub mod blas;
 mod emit;
 mod emitted_expr;
+mod fp_env;
 mod generated_header;
 mod host_abi;
 mod host_emit;
@@ -4207,6 +4208,9 @@ int main(void) {{
             .arg("-o")
             .arg(so_path.to_str().unwrap())
             .arg("-lm");
+        // Exported entry points call the runtime's floating-point
+        // environment guard (chelis#2964), so the library links it.
+        add_runtime_link(&mut cmd, tmp.path());
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
