@@ -2780,8 +2780,9 @@ def validate_normative_contract(
             "The offset is absent when it is written `Z`, `z`, or with a `-` sign and value zero",
             "When the offset is absent, every policy gives the instant that the written "
             "date and time denote at offset zero",
-            "A key that two tags give different values fails `domain` when either tag is "
-            "critical",
+            "A key that two suffix tags give different values fails `domain` when either "
+            "tag is critical",
+            "Otherwise an elective tag whose key an earlier tag gives is ignored",
         ),
         "05-OP-74": (
             "governs exactly the seven constructors of the standard-library plain enum "

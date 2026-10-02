@@ -46,6 +46,11 @@ def header_bytes(version: i64, counts: List[i64]) -> List[i64] = flat_bytes([[84
 def tzif_file(version: i64, times: List[i64], indices: List[i64], offsets: List[i64], footer: string) -> List[i64] = flat_bytes([header_bytes(version, [0i64, 0i64, 0i64, 0i64, 1i64, 1i64]), [0i64, 0i64, 0i64, 0i64, 0i64, 0i64, 0i64], header_bytes(version, [0i64, 0i64, 0i64, len(times), len(offsets), 4i64]), flat_bytes(map(fn (t: i64) -> big_endian(t, 8i64), times)), indices, flat_bytes(map(fn (o: i64) -> concat(big_endian(o, 4i64), [0i64, 0i64]), offsets)), [76i64, 77i64, 84i64, 0i64, 10i64], codes_of(footer), [10i64]])
 def two_gaps() -> TimeZone = time_zone_from_tzif("Etc/Two_Gaps", tzif_file(50i64, [1000000000i64, 1000000600i64, 1000001200i64], [1i64, 2i64, 1i64], [0i64, 10800i64, -3600i64], "TGA-3"))
 def local(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> DateTime = datetime(date(year, month, day), time(hour, minute, second, 0i64))
+def accepted(text: string) -> bool =
+  match try_parse_zoned_text(text) with {
+    | Some(_) => true
+    | None => false
+  }
 "#;
 
 /// (test name, expression, exact failure message).
@@ -291,6 +296,11 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
         r#"parse_zoned_text: domain: "2026-11-01T01:30:00-04:00[America/New_York]x" has text after its annotations"#,
     ),
     (
+        "parse_critical_repeat_of_unknown_key",
+        r#"parse_zoned_text("2026-01-01T00:00:00Z[UTC][foo=a][!foo=a]")"#,
+        r#"parse_zoned_text: domain: "2026-01-01T00:00:00Z[UTC][foo=a][!foo=a]" has the unknown critical annotation "foo=a""#,
+    ),
+    (
         "parse_critical_duplicate_key",
         r#"parse_zoned_text("2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][u-ca=gregory]")"#,
         r#"parse_zoned_text: domain: "2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][u-ca=gregory]" gives the critical key "u-ca" two values"#,
@@ -441,6 +451,10 @@ const EXACT_RESULTS: &[(&str, &str)] = &[
         r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][u-ca=hebrew]").zone_name, "UTC", "the first tag decides")"#,
     ),
     (
+        "elective_repeat_of_unknown_key",
+        r#"assert_eq(parse_zoned_text("2026-01-01T00:00:00Z[UTC][foo=a][foo=a]").zone_name, "UTC", "an elective repeat is ignored")"#,
+    ),
+    (
         "critical_duplicate_same_value",
         r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][!u-ca=iso8601][!u-ca=iso8601]").zone_name, "UTC", "one value")"#,
     ),
@@ -579,6 +593,94 @@ fn std_datetime_zone_text_results_are_exact() {
             "{name}: `{expression}` must pass"
         );
     }
+}
+
+/// A suffix tag: (key, value, critical).
+type Tag = (&'static str, &'static str, bool);
+
+/// RFC 9557 §3.3 for the module's one recognized key, `u-ca`, written
+/// independently of the parser: every critical tag names a recognized key; a
+/// key that two tags give different values is erroneous when either is
+/// critical; otherwise the first tag with a key decides, and the first `u-ca`
+/// must name a calendar the module supports.
+fn suffix_tags_accepted(tags: &[Tag]) -> bool {
+    if tags
+        .iter()
+        .any(|(key, _, critical)| *critical && *key != "u-ca")
+    {
+        return false;
+    }
+    for (index, (key, value, critical)) in tags.iter().enumerate() {
+        for (other_key, other_value, other_critical) in &tags[index + 1..] {
+            if key == other_key && value != other_value && (*critical || *other_critical) {
+                return false;
+            }
+        }
+    }
+    match tags.iter().find(|(key, _, _)| *key == "u-ca") {
+        Some((_, value, _)) => matches!(*value, "iso8601" | "gregory"),
+        None => true,
+    }
+}
+
+/// Every single tag and every ordered pair of tags over an unrecognized key
+/// and `u-ca`, each value, and both flags, after a zone annotation.
+#[test]
+fn std_datetime_zone_suffix_tags_follow_rfc_9557() {
+    let mut tags: Vec<Tag> = Vec::new();
+    for critical in [false, true] {
+        for value in ["a", "b"] {
+            tags.push(("foo", value, critical));
+        }
+        for value in ["iso8601", "gregory", "hebrew"] {
+            tags.push(("u-ca", value, critical));
+        }
+    }
+    let render = |sequence: &[Tag]| -> String {
+        sequence
+            .iter()
+            .map(|(key, value, critical)| {
+                format!("[{}{key}={value}]", if *critical { "!" } else { "" })
+            })
+            .collect()
+    };
+    let mut sequences: Vec<Vec<Tag>> = tags.iter().map(|tag| vec![*tag]).collect();
+    for first in &tags {
+        for second in &tags {
+            sequences.push(vec![*first, *second]);
+        }
+    }
+    let cases: Vec<(String, String, bool)> = sequences
+        .iter()
+        .enumerate()
+        .map(|(index, sequence)| {
+            let expected = suffix_tags_accepted(sequence);
+            (
+                format!("tags_{index:03}"),
+                format!(
+                    "assert_eq(accepted(\"2022-07-08T00:14:07Z[Europe/London]{}\"), {expected}, \"accepted\")",
+                    render(sequence)
+                ),
+                expected,
+            )
+        })
+        .collect();
+    assert!(cases.iter().any(|case| case.2) && cases.iter().any(|case| !case.2));
+    let expressions: Vec<(String, String)> = cases
+        .iter()
+        .map(|(name, expression, _)| (name.clone(), expression.clone()))
+        .collect();
+    let outcomes = run_expression_suite("datetime-zone-suffix-tags-2862", &expressions);
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter(|(name, _, _)| outcomes.get(name) != Some(&None))
+        .map(|(_, expression, expected)| format!("{expression} (RFC 9557 accepts: {expected})"))
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "suffix tags against RFC 9557 §3.3:\n{}",
+        wrong.join("\n")
+    );
 }
 
 /// Every call below passes, or fails `domain` or `overflow` under its own

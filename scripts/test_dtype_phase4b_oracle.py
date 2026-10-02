@@ -3150,6 +3150,14 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("OP-73.*When the offset is absent")
 
+    def test_zone_first_tag_rule_is_elective_only(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "Otherwise an elective tag whose key",
+            "Otherwise a tag whose key",
+        )
+        self.assert_contract_fails("OP-73.*Otherwise an elective tag")
+
     def test_zone_daylight_start_prevails_at_a_tie(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),

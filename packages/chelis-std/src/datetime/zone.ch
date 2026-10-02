@@ -675,8 +675,9 @@ def is_suffix_values(values: string) -> bool = {
 -- name, critical). The first annotation names the zone; each later one is a
 -- `key=value` tag.
 -- Whether an earlier tag gives `key` another value while it or this tag is
--- critical, which RFC 9557 §3.3 makes erroneous. Otherwise a repeated key
--- keeps its first tag's value and the later tag is ignored.
+-- critical, which RFC 9557 §3.3 makes erroneous. Every critical tag must name
+-- the recognized key `u-ca`, whatever its position; past those checks, a
+-- repeated key keeps its first tag's value and the later tag is ignored.
 def conflicting_tag(seen: List[(string, string, bool)], key: string, value: string, critical: bool) -> bool =
   fold(fn (acc: bool, tag: (string, string, bool)) -> tag.0
   |> eq(key)
@@ -700,7 +701,7 @@ def annotation_reading(text: string, start: i64) -> (string, string, bool) = {
         if key
         |> is_key
         |> and(is_suffix_values(value))
-        |> not then (joined([quoted(text), " has an invalid annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4, acc.5) else if conflicting_tag(acc.5, key, value, critical) then (joined([quoted(text), " gives the critical key ", quoted(key), " two values"]), acc.1, acc.2, acc.3, acc.4, acc.5) else if fold(fn (found: bool, tag: (string, string, bool)) -> or(found, eq(tag.0, key)), false, acc.5) then ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), acc.5) else if eq(key, "u-ca") then if value |> eq("iso8601") |> or(eq(value, "gregory")) then ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), append(acc.5, (key, value, critical))) else (joined([quoted(text), " names the calendar ", quoted(value), ", not iso8601 or gregory"]), acc.1, acc.2, acc.3, acc.4, acc.5) else if critical then (joined([quoted(text), " has the unknown critical annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4, acc.5) else ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), append(acc.5, (key, value, critical)))
+        |> not then (joined([quoted(text), " has an invalid annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4, acc.5) else if critical |> and(neq(key, "u-ca")) then (joined([quoted(text), " has the unknown critical annotation ", quoted(body)]), acc.1, acc.2, acc.3, acc.4, acc.5) else if conflicting_tag(acc.5, key, value, critical) then (joined([quoted(text), " gives the critical key ", quoted(key), " two values"]), acc.1, acc.2, acc.3, acc.4, acc.5) else if fold(fn (found: bool, tag: (string, string, bool)) -> or(found, eq(tag.0, key)), false, acc.5) then ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), acc.5) else if eq(key, "u-ca") then if value |> eq("iso8601") |> or(eq(value, "gregory")) then ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), append(acc.5, (key, value, critical))) else (joined([quoted(text), " names the calendar ", quoted(value), ", not iso8601 or gregory"]), acc.1, acc.2, acc.3, acc.4, acc.5) else ("", add(close, 1i64), acc.2, acc.3, add(acc.4, 1i64), append(acc.5, (key, value, critical)))
       }
     }
   }, ("", start, "", false, 0i64, []), range(0i64, size))

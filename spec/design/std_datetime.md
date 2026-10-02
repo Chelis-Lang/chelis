@@ -875,8 +875,9 @@ compares `zoned_instant` and `time_zone_name`.
   - The suffix tags `u-ca=iso8601` and `u-ca=gregory` are accepted. Other calendars are
     rejected, unknown elective tags are ignored, and unknown critical tags are rejected.
     A key that two tags give different values is rejected when either tag is critical
-    (RFC 9557 §3.3); otherwise the first tag with a key decides and later ones are
-    ignored.
+    (RFC 9557 §3.3), and every critical tag must be one the module recognizes, whatever
+    its position. Otherwise the first tag with a key decides and later elective ones
+    are ignored.
 
 **Decisions recorded by S4a.**
 - **Representation.** `TimeZone { name: string, initial_offset: i64, transitions:
