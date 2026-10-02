@@ -205,7 +205,12 @@ pub fn verify_compiler(
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            format!(
+                "native compiler `{}` printed no --version text",
+                path.display()
+            )
+        })?
         .to_string();
 
     let macros = tool_command(&path)
