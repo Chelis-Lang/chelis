@@ -62,19 +62,44 @@ const POSITIVE: &[Case] = &[
     // whose argument is that projection.
     Case {
         name: "projections_inside_a_validating_accessor",
-        body: "def checked_days[n](c: Col[n]) -> tensor[n, i64] = {\n  bad = first_false(to_list(gte(c.days, filled(c.days, 0i64))))\n  if gte(bad, 0i64) then fail(\"checked_days: domain: negative day\") else c.days\n}\ndef before[n](a: Col[n], b: Col[n]) -> tensor[n, bool] = lt(checked_days(a), checked_days(b))\ndef run(seed: i64) -> List[bool] = to_list(before(col(to_tensor([1i64, 5i64])), col(to_tensor([2i64, 3i64]))))\nresult = run(0i64)\n",
+        body: "def before[n](a: Col[n], b: Col[n]) -> tensor[n, bool] = lt(checked_days(a), checked_days(b))\ndef run(seed: i64) -> List[bool] = to_list(before(col(to_tensor([1i64, 5i64])), col(to_tensor([2i64, 3i64]))))\nresult = run(0i64)\n",
     },
     // The control the issue names: the operands bound to names first.
     Case {
         name: "operands_bound_to_names",
         body: "def before[n](a: Col[n], b: Col[n]) -> tensor[n, bool] = {\n  x = col_days(a)\n  y = col_days(b)\n  lt(x, y)\n}\ndef run(seed: i64) -> List[bool] = to_list(before(col(to_tensor([1i64, 5i64])), col(to_tensor([2i64, 3i64]))))\nresult = run(0i64)\n",
     },
+    // The operand's type, not its spelling, classifies it: projections of a
+    // tuple of records, one bound to a name first, and an `if` operand.
+    Case {
+        name: "projections_of_a_tuple_of_records",
+        body: "def before[n](p: (Col[n], Col[n])) -> tensor[n, bool] = lt(col_days(p.0), col_days(p.1))\ndef run(seed: i64) -> List[bool] = to_list(before((col(to_tensor([1i64, 5i64])), col(to_tensor([2i64, 3i64])))))\nresult = run(0i64)\n",
+    },
+    Case {
+        name: "tuple_projection_bound_to_a_name",
+        body: "def before[n](p: (Col[n], Col[n])) -> tensor[n, bool] = {\n  a = p.0\n  lt(col_days(a), col_days(p.1))\n}\ndef run(seed: i64) -> List[bool] = to_list(before((col(to_tensor([1i64, 5i64])), col(to_tensor([2i64, 3i64])))))\nresult = run(0i64)\n",
+    },
+    Case {
+        name: "branch_operand",
+        body: "def before[n](a: Col[n], t: &tensor[n, i64]) -> tensor[n, bool] = lt(if true then col_days(a) else col_days(a), t)\ndef run(seed: i64) -> List[bool] = to_list(before(col(to_tensor([1i64, 5i64])), to_tensor([2i64, 3i64])))\nresult = run(0i64)\n",
+    },
 ];
 
-const FIRST_OPERAND_FAILS: Case = Case {
-    name: "first_operand_fails",
-    body: "def checked_days[n](c: Col[n]) -> tensor[n, i64] = {\n  bad = first_false(to_list(gte(c.days, filled(c.days, 0i64))))\n  if gte(bad, 0i64) then fail(\"checked_days: domain: negative day\") else c.days\n}\ndef before[n](a: Col[n], b: Col[n]) -> tensor[n, bool] = lt(checked_days(a), checked_days(b))\ndef run(seed: i64) -> List[bool] = to_list(before(col(to_tensor([1i64, -5i64])), col(to_tensor([2i64, 3i64]))))\nresult = run(0i64)\n",
-};
+/// Each program's first operand fails its own validation.
+const FIRST_OPERAND_FAILS: &[Case] = &[
+    Case {
+        name: "first_operand_fails",
+        body: "def before[n](a: Col[n], b: Col[n]) -> tensor[n, bool] = lt(checked_days(a), checked_days(b))\ndef run(seed: i64) -> List[bool] = to_list(before(col(to_tensor([1i64, -5i64])), col(to_tensor([2i64, 3i64]))))\nresult = run(0i64)\n",
+    },
+    Case {
+        name: "first_tuple_projection_fails",
+        body: "def before[n](p: (Col[n], Col[n])) -> tensor[n, bool] = lt(checked_days(p.0), checked_days(p.1))\ndef run(seed: i64) -> List[bool] = to_list(before((col(to_tensor([1i64, -5i64])), col(to_tensor([2i64, 3i64])))))\nresult = run(0i64)\n",
+    },
+    Case {
+        name: "branch_operand_fails",
+        body: "def before[n](a: Col[n], t: &tensor[n, i64]) -> tensor[n, bool] = lt(if true then checked_days(a) else col_days(a), t)\ndef run(seed: i64) -> List[bool] = to_list(before(col(to_tensor([1i64, -5i64])), to_tensor([2i64, 3i64])))\nresult = run(0i64)\n",
+    },
+];
 
 /// An earlier operand whose addition overflows, before a record-reading
 /// operand that also fails or prints. Only the earlier failure may be seen.
@@ -85,6 +110,11 @@ const ORDER_TWINS: &[(&str, &str, &str)] = &[
         "earlier_trap_before_a_failing_operand",
         CHECKED_DAYS,
         "def before[n](b: Col[n], t: &tensor[n, i64]) -> tensor[n, bool] = lt(add(t, filled(t, 9223372036854775807i64)), checked_days(b))\ndef run(seed: i64) -> List[bool] = to_list(before(col(to_tensor([-1i64, 3i64])), to_tensor([1i64, 2i64])))\nresult = run(0i64)\n",
+    ),
+    (
+        "earlier_trap_before_a_failing_branch_operand",
+        CHECKED_DAYS,
+        "def before[n](b: Col[n], t: &tensor[n, i64]) -> tensor[n, bool] = lt(add(t, filled(t, 9223372036854775807i64)), if true then checked_days(b) else col_days(b))\ndef run(seed: i64) -> List[bool] = to_list(before(col(to_tensor([-1i64, 3i64])), to_tensor([1i64, 2i64])))\nresult = run(0i64)\n",
     ),
     (
         "earlier_trap_before_a_printing_operand",
@@ -103,7 +133,7 @@ const HOST_LANE_TWIN: (&str, &str, &str) = (
 const EARLIER_TRAP: &str = "numeric trap: overflow in add at i64";
 
 fn source(case: &Case) -> String {
-    format!("{PRELUDE}{}", case.body)
+    format!("{PRELUDE}{CHECKED_DAYS}{}", case.body)
 }
 
 fn request(source: &str) -> EvalRequest {
@@ -154,7 +184,8 @@ fn check_positive(case: &Case) -> Result<(), String> {
 }
 
 // REGRESSION TEST. On `4a53cc7bd` the C build refused the first four
-// programs with `no tensor emission arm for this op`.
+// programs with `no tensor emission arm for this op`, and on `637c680cc`
+// the last three.
 #[test]
 fn record_reading_operands_compile_as_eval_runs_them() {
     let failures: Vec<String> = POSITIVE
@@ -166,21 +197,26 @@ fn record_reading_operands_compile_as_eval_runs_them() {
 
 #[test]
 fn a_failing_operand_fails_first_in_both_lanes() {
-    let source = source(&FIRST_OPERAND_FAILS);
-    let refused = eval(request(&source)).expect_err("the evaluator must refuse");
-    let refused = refused
-        .errors
-        .iter()
-        .map(|diagnostic| diagnostic.message.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        refused.contains("checked_days: domain: negative day"),
-        "{refused}"
-    );
-    let generated = ownership_support::emit(&source, FIRST_OPERAND_FAILS.name);
-    let stderr = ownership_support::run_failure_stderr(&generated, "");
-    assert_eq!(stderr.trim_end(), "checked_days: domain: negative day");
+    let mut failures = Vec::new();
+    for case in FIRST_OPERAND_FAILS {
+        let source = source(case);
+        let refused = eval(request(&source))
+            .expect_err("the evaluator must refuse")
+            .errors
+            .iter()
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !refused.contains("checked_days: domain: negative day") {
+            failures.push(format!("{}: eval reported {refused}", case.name));
+        }
+        let generated = ownership_support::emit(&source, case.name);
+        let stderr = ownership_support::run_failure_stderr(&generated, "");
+        if stderr.trim_end() != "checked_days: domain: negative day" {
+            failures.push(format!("{}: C reported {stderr:?}", case.name));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 // REGRESSION TEST. Before every earlier operand that does work was hoisted

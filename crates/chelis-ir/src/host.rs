@@ -16166,7 +16166,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     // arguments, so this two-tensor boundary is specific to matmul.
     let hoist_matmul_operands = kids.len() == 3 && direct_var_name(&kids[0]) == Some("matmul");
     let host_operand = |arg: &Expr| {
-        should_keep_tensor_expr_in_host_lane(arg) || operand_reads_host_record(arg, scope)
+        should_keep_tensor_expr_in_host_lane(arg) || operand_reads_host_record(arg, program, scope)
     };
     if !hoist_matmul_operands && !kids.iter().skip(1).any(host_operand) {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
@@ -16247,30 +16247,78 @@ fn operand_does_work(expr: &Expr) -> bool {
     }
 }
 
-/// Whether an operand reads a record value the host lane holds
-/// (computed_tensor_host_admission.md): a projection of a record-typed
-/// name, or an application with such an argument, such as an accessor
-/// `col_days(a)` or a helper `filled(c.days, 0i64)`. The tensor execution
-/// lane has no record carrier, so a helper over the whole operation cannot
-/// read the field, and the operation would otherwise fall back to host
-/// emission, which has no tensor arm. The operand's typed producer fact is
-/// therefore Host: it is evaluated once, in source order, and enters the
-/// operation as a typed input, exactly as if bound to a name. Callable
-/// arguments are not entered, so no binder inside the operand can shadow
-/// the name the scope types.
-fn operand_reads_host_record(expr: &Expr, scope: &UnordMap<String, HostTypeTerm>) -> bool {
-    if let Some(path) = record_projection_path(expr) {
-        return path
-            .first()
-            .and_then(|base| scope.get(base))
-            .is_some_and(|ty| matches!(ty, HostTypeTerm::Adt(..)));
+/// Whether an operand reads an ADT value the host lane holds
+/// (computed_tensor_host_admission.md): the operand is a name of such a
+/// type, or some subterm's type holds an ADT value, such as a record-typed
+/// name in an accessor `col_days(a)`, a tuple of records projected in
+/// `col_days(p.0)`, or a branch of an `if`. The tensor execution lane has no
+/// ADT carrier, so a helper over the whole operation cannot read the value,
+/// and the operation would otherwise fall back to host emission, which has
+/// no tensor arm. The operand's typed producer fact is therefore Host: it is
+/// evaluated once, in source order, and enters the operation as a typed
+/// input, exactly as if bound to a name. The operand's own type is what the
+/// operation consumes, not what the operand reads, so an ADT constructed in
+/// place for a definition's activation stays there.
+fn operand_reads_host_record(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> bool {
+    if let Expr::MetaExpr(meta, _) = expr {
+        return operand_reads_host_record(&meta.expr, program, scope);
     }
-    let Some((DeepTag::App, _, kids)) = stamped_parts(expr) else {
+    match stamped_parts(expr) {
+        Some((DeepTag::Var | DeepTag::Fn, _, _)) => subterm_holds_adt(expr, program, scope),
+        Some((_, _, kids)) => kids
+            .iter()
+            .any(|kid| subterm_holds_adt(kid, program, scope)),
+        None => false,
+    }
+}
+
+/// Whether `expr` or one of its subterms has a type that holds an ADT value.
+/// A name is typed by the scope, and every other subterm by its checked
+/// type. Callable values are not entered, so no binder inside one can shadow
+/// the name the scope types.
+fn subterm_holds_adt(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> bool {
+    if let Expr::MetaExpr(meta, _) = expr {
+        return subterm_holds_adt(&meta.expr, program, scope);
+    }
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         return false;
     };
-    kids.iter()
-        .skip(1)
-        .any(|actual| operand_reads_host_record(actual, scope))
+    match tag {
+        DeepTag::Var => kids
+            .first()
+            .and_then(symbol_name)
+            .and_then(|name| scope.get(name))
+            .is_some_and(holds_adt_value),
+        DeepTag::Fn => false,
+        _ => {
+            checked_type_expr(expr)
+                .and_then(|ty| decode_expanded_host_type_expr(program, ty))
+                .is_some_and(|ty| holds_adt_value(&ty))
+                || kids
+                    .iter()
+                    .any(|kid| subterm_holds_adt(kid, program, scope))
+        }
+    }
+}
+
+/// Whether a value of `ty` holds an ADT value, directly or inside a tuple,
+/// list, option or dictionary.
+fn holds_adt_value(ty: &HostTypeTerm) -> bool {
+    match ty {
+        HostTypeTerm::Adt(..) => true,
+        HostTypeTerm::Tuple(items) => items.iter().any(holds_adt_value),
+        HostTypeTerm::List(item) | HostTypeTerm::Option(item) => holds_adt_value(item),
+        HostTypeTerm::Dict(key, value) => holds_adt_value(key) || holds_adt_value(value),
+        _ => false,
+    }
 }
 
 fn host_fn_signature(ty: &HostTypeTerm) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
