@@ -290,6 +290,12 @@ fn empty_runtime_basis_has_an_empty_cotangent() {
     assert_both(&source, &[], "empty_basis");
 }
 
+// The false `n` claim still fails on both lanes. The trap names `where`, the
+// operation the mapped `if` lowers to, which owns the declared-result guard as
+// a same-shape producer (chelis#2642); it named `range` before. Neither is the
+// name spec/04 §4.7 requires, the returned builtin `to_tensor`: the pin moves
+// from one non-conforming producer to another, and chelis#2922 tracks naming
+// `to_tensor`. The exact line is pinned so that any further change fails here.
 #[test]
 fn captured_cotangent_keeps_the_false_forward_range_claim() {
     let source = format!(
@@ -329,10 +335,9 @@ fn captured_cotangent_keeps_the_false_forward_range_claim() {
         assert!(!result.status.success(), "{result:?}");
         let text = String::from_utf8_lossy(&result.stderr);
         assert!(
-            text.contains("numeric trap: domain in range at i64"),
+            text.contains("claimed = 2, where axis 0 = 3\nnumeric trap: domain in where at i64"),
             "{text}"
         );
-        assert!(text.contains("axis 0"), "{text}");
     }
 }
 

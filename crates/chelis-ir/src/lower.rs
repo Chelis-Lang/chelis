@@ -19415,8 +19415,13 @@ impl<'program> LowerCtx<'program> {
         };
         // A checked caller view renames the diagnostic of an existing exact
         // obligation, never its declaring witness or physical result extent.
+        // A same-shape producer owns its result claim (runtime_extents.md,
+        // #1948), so the walk stops there rather than passing to an operand.
         let (mut origin, mut origin_axis) = (id, axis);
-        while let Some(crate::axis_sources::AxisSource::InputAxis {
+        while !matches!(
+            crate::axis_sources::same_shape_result_agreement(&self.dag, origin),
+            Ok(Some(_))
+        ) && let Some(crate::axis_sources::AxisSource::InputAxis {
             input,
             axis: RtAxis::Lit(source_axis),
         }) = crate::axis_sources::output_axis_sources(&self.dag, origin).get(origin_axis)

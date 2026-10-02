@@ -273,21 +273,6 @@ fn static_axis_extent(
     }
 }
 
-fn node_shapes_semantically_equivalent(
-    dag: &Dag,
-    left: NodeId,
-    right: NodeId,
-    relevant_shape_sources: &[NodeId],
-) -> bool {
-    let (Some(left_node), Some(right_node)) = (dag.get(left), dag.get(right)) else {
-        return false;
-    };
-    left_node.output_type.dims.len() == right_node.output_type.dims.len()
-        && (0..left_node.output_type.dims.len()).all(|axis| {
-            axis_extents_semantically_equivalent(dag, left, right, axis, relevant_shape_sources)
-        })
-}
-
 /// The origin `left`'s and `right`'s extents on `axis` both resolve to, when
 /// it is one and the same origin.
 pub(crate) fn shared_axis_origin(
@@ -347,20 +332,6 @@ pub(crate) fn axis_extents_semantically_equivalent(
                 relevant_shape_sources,
             ))
             .is_some_and(|(left_extent, right_extent)| left_extent == right_extent)
-}
-
-fn node_types_semantically_equivalent(
-    dag: &Dag,
-    left: NodeId,
-    right: NodeId,
-    relevant_shape_sources: &[NodeId],
-) -> bool {
-    dag.get(left)
-        .zip(dag.get(right))
-        .is_some_and(|(left_node, right_node)| {
-            left_node.output_type.precision == right_node.output_type.precision
-                && node_shapes_semantically_equivalent(dag, left, right, relevant_shape_sources)
-        })
 }
 
 fn has_anonymous_dims(node: &crate::dag::DagNode) -> bool {
@@ -2207,21 +2178,15 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 } else if let (Some(lhs), Some(rhs)) =
                     (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
                 {
-                    let shape_participants = [node.inputs[0], node.inputs[1], node.id];
                     if lhs.output_type.precision != rhs.output_type.precision {
                         errors.push(format!(
                             "comparison at node {} has mismatched precision {:?} vs {:?}",
                             node.id.0, lhs.output_type.precision, rhs.output_type.precision
                         ));
                     }
-                    if !node_shapes_semantically_equivalent(
-                        dag,
-                        node.inputs[0],
-                        node.inputs[1],
-                        &shape_participants,
-                    ) {
+                    if extents_contradict(&lhs.output_type.dims, &rhs.output_type.dims) {
                         errors.push(format!(
-                            "comparison at node {} requires exactly matching operand shape",
+                            "comparison at node {} has contradicting operand shapes",
                             node.id.0
                         ));
                     }
@@ -2257,12 +2222,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         ));
                     }
                     if !anonymous_output_has_input_authority(dag, node)
-                        || !node_shapes_semantically_equivalent(
-                            dag,
-                            node.id,
-                            node.inputs[0],
-                            &shape_participants,
-                        )
+                        || extents_contradict(&node.output_type.dims, &lhs.output_type.dims)
+                        || extents_contradict(&node.output_type.dims, &rhs.output_type.dims)
                     {
                         errors.push(format!(
                             "comparison at node {} output shape must match its operands",
@@ -2282,12 +2243,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         expected
                     ));
                 } else {
-                    let shape_participants = node
-                        .inputs
-                        .iter()
-                        .copied()
-                        .chain(std::iter::once(node.id))
-                        .collect::<Vec<_>>();
                     let inputs = node
                         .inputs
                         .iter()
@@ -2301,20 +2256,20 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                 node.id.0
                             ));
                         }
-                        if !anonymous_output_has_input_authority(dag, node)
-                            || !node_shapes_semantically_equivalent(
-                                dag,
-                                input.id,
-                                node.id,
-                                &shape_participants,
-                            )
-                        {
-                            errors.push(format!(
-                                "logical {} at node {} requires exactly matching shape",
-                                kind.surf_name(),
-                                node.id.0
-                            ));
-                        }
+                    }
+                    let shapes = inputs
+                        .iter()
+                        .map(|input| input.output_type.dims.as_slice())
+                        .chain(std::iter::once(node.output_type.dims.as_slice()))
+                        .collect::<Vec<_>>();
+                    if !anonymous_output_has_input_authority(dag, node)
+                        || any_extents_contradict(&shapes)
+                    {
+                        errors.push(format!(
+                            "logical {} at node {} output shape must match its operands",
+                            kind.surf_name(),
+                            node.id.0
+                        ));
                     }
                     if node.output_type.precision != Prim::Bool {
                         errors.push(format!(
@@ -2387,49 +2342,37 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         "where at node {} has {} inputs (expected 3)",
                         node.id.0, arity
                     ));
-                } else if let (Some(condition), Some(then_value), Some(_)) = (
+                } else if let (Some(condition), Some(then_value), Some(else_value)) = (
                     dag.get(node.inputs[0]),
                     dag.get(node.inputs[1]),
                     dag.get(node.inputs[2]),
                 ) {
-                    let shape_participants =
-                        [node.inputs[0], node.inputs[1], node.inputs[2], node.id];
                     if condition.output_type.precision != Prim::Bool {
                         errors.push(format!(
                             "where at node {} condition must be Bool",
                             node.id.0
                         ));
                     }
-                    if !node_types_semantically_equivalent(
-                        dag,
-                        node.inputs[1],
-                        node.inputs[2],
-                        &shape_participants,
-                    ) {
+                    if then_value.output_type.precision != else_value.output_type.precision {
                         errors.push(format!(
-                            "where at node {} branches must have exactly matching type",
+                            "where at node {} branches must have one dtype",
                             node.id.0
                         ));
                     }
-                    if !node_types_semantically_equivalent(
-                        dag,
-                        node.id,
-                        node.inputs[1],
-                        &shape_participants,
-                    ) {
+                    if node.output_type.precision != then_value.output_type.precision {
                         errors.push(format!(
-                            "where at node {} output must match its branches",
+                            "where at node {} output must have its branches' dtype",
                             node.id.0
                         ));
                     }
-                    if !node_shapes_semantically_equivalent(
-                        dag,
-                        node.inputs[0],
-                        node.inputs[1],
-                        &shape_participants,
-                    ) {
+                    if any_extents_contradict(&[
+                        &condition.output_type.dims,
+                        &then_value.output_type.dims,
+                        &else_value.output_type.dims,
+                        &node.output_type.dims,
+                    ]) {
                         errors.push(format!(
-                            "where at node {} condition and branches must have exactly matching shape",
+                            "where at node {} has condition, branch and output shapes that contradict",
                             node.id.0
                         ));
                     }
@@ -4397,6 +4340,19 @@ fn extents_contradict(observed: &[DimInfo], required: &[DimInfo]) -> bool {
                 (Some(observed), Some(required)) if observed != required
             )
         })
+}
+
+/// Whether any two of a same-shape operation's `shapes` contradict
+/// ([`extents_contradict`]). A comparison, a logical operation and `where`
+/// check their operands' agreement before indexing them, as arithmetic does,
+/// so their verifier refuses only a contradiction and leaves an extent the
+/// graph cannot prove to that check (runtime_extents.md C2.3, chelis#2642).
+fn any_extents_contradict(shapes: &[&[DimInfo]]) -> bool {
+    shapes.iter().enumerate().any(|(index, left)| {
+        shapes[index + 1..]
+            .iter()
+            .any(|right| extents_contradict(left, right))
+    })
 }
 
 /// Verify the ONNX `ScatterElements` structural contract

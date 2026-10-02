@@ -145,6 +145,11 @@ path = "tests/issue_2599_contextual_nullary_host_types.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_2642_comparison_operand_extents"
+path = "tests/issue_2642_comparison_operand_extents.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "issue_2781_loop_result_captured_by_a_loop"
 path = "tests/issue_2781_loop_result_captured_by_a_loop.rs"
 required-features = ["ownership-ledger"]

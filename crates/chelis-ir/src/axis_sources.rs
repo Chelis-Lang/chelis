@@ -255,7 +255,12 @@ fn shape_preserving(dag: &Dag, node: &DagNode) -> Vec<AxisSource> {
 /// `Realize`, or `Store` forwards an existing value rather than becoming the
 /// primitive named by a declared-result guard. Casts remain in the set because
 /// spec/04 §4.7 gives a cast the placement of its input while retaining the
-/// cast as the primitive that produced the returned value.
+/// cast as the primitive that produced the returned value. Comparisons,
+/// logical operations and `where` are in the set although their result dtype
+/// is `bool` or the branches': their operands' extents are proved equal only
+/// where the graph proves them, so each needs the run-time agreement check,
+/// and a declared result extent on one is checked by it (chelis#2642). The
+/// WireDag admission set (`schema/dag_domains.rs`) lists them too.
 pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
     matches!(
         op,
@@ -267,6 +272,9 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
             | RiscOp::TruncDiv
             | RiscOp::Mod
             | RiscOp::Bitwise(_)
+            | RiscOp::Compare(_)
+            | RiscOp::Logical(_)
+            | RiscOp::Where
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
