@@ -7,9 +7,10 @@ import Std.Rounding (Rounding, RoundTowardNegative, RoundTowardPositive, RoundTo
 -- Every kernel composes i64 tensor primitives, and every value a kernel
 -- passes to a trapping primitive is in range or replaced first, so no
 -- primitive numeric trap escapes a call. A call fails as a whole, naming
--- the lowest failing element, except the masked `try_` forms, which never
--- fail. Columns are consumed; tensor arguments that are only read are
--- borrowed.
+-- the lowest failing element. The masked `try_` forms instead mark an
+-- element that denotes no value in their mask; they fail only when their
+-- tensor arguments differ in length. Columns are consumed; tensor arguments
+-- that are only read are borrowed.
 @opaque
 type Durations[n] =
   | Durations { seconds: tensor[n, i64], nanoseconds: tensor[n, i64] }

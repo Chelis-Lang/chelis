@@ -1129,8 +1129,8 @@ holiday tables.
 
 [05-OP-35] gains one sentence routing their semantics to a new atom, "`datetime::*`
 identities follow [05-OP-73]", as JSON access already follows [05-OP-2..5]. S2 extends the
-sentence and the atom's scope to the `datetime/business::*` identities, and S4a to the
-`datetime/zone::*` identities. The capacity
+sentence and the atom's scope to the `datetime/business::*` identities, S3 to the
+`datetime/columns::*` identities, and S4a to the `datetime/zone::*` identities. The capacity
 census, the frozen-contract oracle (`scripts/dtype_phase4b_oracle.py`) and the registry
 bijection test then need no new structure.
 
