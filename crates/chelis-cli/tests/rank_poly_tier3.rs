@@ -2977,21 +2977,34 @@ fn form3_bias_broadcast_c_is_byte_deterministic() {
 /// chelis#469 axis-side separation (rlronan's shared-walker constraint, the
 /// #364 sibling): the extent-side static-arithmetic fold must NOT leak into
 /// the reduction/softmax/gather AXIS path. `extract_int_for_dim` (the shared
-/// axis walker) is deliberately left un-widened; the fold lives only in
-/// `fold_static_size` on the extent path. A static-arithmetic reduction axis
-/// (`sum(x, sub(cast(2, i32), cast(1, i32)))`) therefore stays REJECTED at
-/// check ("axis must be a compile-time constant or a named axis") — proving the
-/// extent fold did not silently widen the axis contract.
+/// axis walker) remains un-widened. `fold_static_size` applies only to
+/// extents: a computed reduction axis remains invalid, while the
+/// corresponding literal axis is admitted.
 #[test]
 fn static_arith_reduction_axis_still_rejected_at_check() {
-    let json = check_json(
-        "def f(x: &tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, sub(cast(2, i32), cast(1, i32)))\n",
+    let source = "def f(x: &tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, sub(cast(2, i32), cast(1, i32)))\n";
+    let json = check_json(source);
+    let errors = json["errors"].as_array().expect("checker errors");
+    let error = errors
+        .iter()
+        .find(|error| error["kind"] == "DimensionMismatch")
+        .expect("computed reduction axis must reject at check");
+    assert_eq!(
+        error["expected"],
+        "compile-time constant or named axis of the operand"
     );
-    assert_rejected_with(
-        &json,
-        "axis must be a compile-time constant or a named axis",
-        "static-arithmetic reduction axis must stay rejected at check (chelis#469/#364 \
-         extent-vs-axis separation)",
+    assert_eq!(error["got"], "a non-constant expression");
+    assert_eq!(
+        error["span"]["offset"],
+        source.find("sum(").expect("authored reduction call")
+    );
+    let message = error["message"].as_str().expect("human diagnostic");
+    assert!(message.contains("sum argument 2 (axis)"));
+    assert!(message.contains(error["expected"].as_str().unwrap()));
+    assert!(message.contains(error["got"].as_str().unwrap()));
+    assert_clean(
+        &check_json("def f(x: &tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, 1i32)\n"),
+        "literal reduction axis remains admitted",
     );
 }
 

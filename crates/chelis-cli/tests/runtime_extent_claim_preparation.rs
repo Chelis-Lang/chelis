@@ -48,6 +48,7 @@ enum Expected {
     ExactTargetDivisionByZero,
     EntryShapeMismatch(&'static str),
     Reject(&'static str),
+    RejectReductionAxisBounds { rank: usize, axis: i64 },
 }
 
 fn vector(n: usize) -> Input {
@@ -328,7 +329,7 @@ fn cases() -> Vec<Case> {
         1512,
         "def f(x: tensor[1, f32]) -> tensor[f32] = sum(expand(x, 0i32, 3i64), 1i32)\n",
         None,
-        Expected::Reject("out of bounds"),
+        Expected::RejectReductionAxisBounds { rank: 1, axis: 1 },
     );
     add(
         "validation.permute.good",
@@ -939,6 +940,49 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
         }
         return failures;
     }
+    if let Expected::RejectReductionAxisBounds { rank, axis } = case.expected {
+        let errors = check["errors"].as_array().expect("checker errors");
+        let expected = format!("axis in -{rank}..{rank}");
+        let got = axis.to_string();
+        let call_offset = case.source.find("sum(").expect("authored reduction call");
+        let diagnostic = errors.iter().find(|error| {
+            error["kind"] == "DimensionMismatch"
+                && error["expected"] == expected
+                && error["got"] == got
+                && error["span"]["offset"] == call_offset
+                && error["message"].as_str().is_some_and(|message| {
+                    message.contains("sum argument 2")
+                        && message.contains(&format!("axis {axis}"))
+                        && message.contains(&expected)
+                        && message.contains(&got)
+                })
+        });
+        if check["success"] != false || diagnostic.is_none() {
+            failures.push(format!(
+                "{}.check: expected a located, directional sum-axis bounds rejection: {errors:?}",
+                case.id
+            ));
+        }
+        for lane in ["eval", "c"] {
+            let run = &observation[lane];
+            if !run.is_null()
+                && (run["success"] != false
+                    || !run["stderr"].as_str().is_some_and(|stderr| {
+                        diagnostic
+                            .and_then(|error| error["message"].as_str())
+                            .is_some_and(|message| {
+                                stderr.contains("DimensionMismatch:") && stderr.contains(message)
+                            })
+                    }))
+            {
+                failures.push(format!(
+                    "{}.{}: expected the same checker rejection, not execution",
+                    case.id, lane
+                ));
+            }
+        }
+        return failures;
+    }
     if check["success"] != true || check["score"] != 1.0 || check["errors"] != json!([]) {
         failures.push(format!("{}.check: expected score 1 and no errors", case.id));
     }
@@ -1030,7 +1074,7 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
             Expected::EntryShapeMismatch(context) => {
                 run["stage"] == "execute" && run["success"] == false && stderr.contains(context)
             }
-            Expected::Reject(_) => unreachable!(),
+            Expected::Reject(_) | Expected::RejectReductionAxisBounds { .. } => unreachable!(),
         };
         if !satisfied {
             failures.push(format!("{}.{}: contract not met: {run}", case.id, lane));

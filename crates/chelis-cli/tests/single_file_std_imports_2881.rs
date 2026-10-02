@@ -183,20 +183,54 @@ fn single_file_selective_sort_import_resolves_in_eval_check_and_build() {
 
 #[test]
 fn single_file_selective_sort_import_binds_the_module_function_not_the_builtin() {
-    let imported = single_file(
-        "sort_imported",
-        &format!("import Std.Sort (sort)\n{SORT_I64_AXIS}"),
+    let source = format!("import Std.Sort (sort)\n{SORT_I64_AXIS}");
+    let imported = single_file("sort_imported", &source);
+    let imported_check = imported.check().failure();
+    let report: serde_json::Value =
+        serde_json::from_slice(&imported_check.get_output().stdout).expect("checker emits JSON");
+    let error = report["errors"]
+        .as_array()
+        .expect("checker errors")
+        .iter()
+        .find(|error| error["kind"] == "PrecisionMismatch")
+        .expect("declared Std.Sort.sort parameter rejects i64 axis");
+    assert_eq!(error["expected"], "i32");
+    assert_eq!(error["got"], "i64");
+    assert_eq!(
+        error["span"]["offset"],
+        source.find("sort(to_tensor").expect("authored call")
     );
-    imported.eval().failure().stderr(
-        contains("PrecisionMismatch: precision mismatch: expected i32, got i64")
-            .and(contains("sort expects i32 axis").not()),
-    );
+    let message = error["message"].as_str().expect("human diagnostic");
+    assert!(message.contains("`Std.Sort.sort` argument 2"));
+    assert!(message.contains("expected i32, got i64"));
+    imported
+        .eval()
+        .failure()
+        .stderr(contains("PrecisionMismatch: `Std.Sort.sort` argument 2"));
 
     let builtin = single_file("sort_builtin", SORT_I64_AXIS);
+    let builtin_check = builtin.check().failure();
+    let report: serde_json::Value =
+        serde_json::from_slice(&builtin_check.get_output().stdout).expect("checker emits JSON");
+    let error = report["errors"]
+        .as_array()
+        .expect("checker errors")
+        .iter()
+        .find(|error| error["kind"] == "TypeMismatch")
+        .expect("intrinsic sort rejects i64 axis independently");
+    assert_eq!(error["expected"], "i32");
+    assert_eq!(error["got"], "i64");
+    assert_eq!(
+        error["span"]["offset"],
+        SORT_I64_AXIS.find("sort(to_tensor").expect("authored call")
+    );
+    assert!(error["message"].as_str().is_some_and(|message| {
+        message.contains("sort argument 2 (axis)") && !message.contains("Std.Sort")
+    }));
     builtin
         .eval()
         .failure()
-        .stderr(contains("sort expects i32 axis, got i64"));
+        .stderr(contains("TypeMismatch: sort argument 2 (axis)"));
 }
 
 #[test]

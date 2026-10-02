@@ -110,6 +110,24 @@ fn describe_failed_call_operand(
     subst: &Subst,
     kind: &CheckErrorKind,
 ) -> Option<(String, Option<String>, Option<String>)> {
+    // Linker names are not authored call names. Peel off the recovered
+    // terminal before decoding the module so an authored `__` stays intact.
+    let source_name = crate::opacity::demangle_ident(callee);
+    let module = callee
+        .strip_prefix("pkg__")
+        .or_else(|| callee.strip_prefix("Pkg__"))
+        .and_then(|stem| stem.strip_suffix(&source_name))
+        .and_then(|stem| stem.strip_suffix("__"))
+        .map(|stem| crate::opacity::demangle_module(&stem.replace("__", ".")))
+        .filter(|module| {
+            module
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        });
+    let callee = module
+        .map(|module| format!("{module}.{source_name}"))
+        .unwrap_or(source_name);
     let Type::Fn(params, _) = subst.apply(func_ty) else {
         return None;
     };
