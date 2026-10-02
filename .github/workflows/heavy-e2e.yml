@@ -203,8 +203,8 @@ jobs:
             target/agents/native-execution-integration
             target/agents/native-owner-integration
             target/graph-fixture-target
-          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Run script integration tests
         run: python scripts/ci_script_tests.py nightly
@@ -219,7 +219,7 @@ jobs:
             target/agents/native-execution-integration
             target/agents/native-owner-integration
             target/graph-fixture-target
-          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
 
       - name: Upload script selection and timings
         if: always()
@@ -275,8 +275,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: target/agents/729-capacity-rustdoc
-          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-
 
       - name: Restore census control builds
         uses: actions/cache/restore@v4
@@ -285,8 +285,8 @@ jobs:
             target/agents/wire-codec-rustdoc
             target/agents/native-bindings-driver
             target/graph-fixture-target
-          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Dtype Phase 0-3 oracle
         env:
@@ -314,7 +314,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: target/agents/729-capacity-rustdoc
-          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
 
       - name: Save census control builds
         if: ${{ success() && github.ref == 'refs/heads/main' }}
@@ -324,7 +324,7 @@ jobs:
             target/agents/wire-codec-rustdoc
             target/agents/native-bindings-driver
             target/graph-fixture-target
-          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
 
       - name: Upload census subprocess timings
         if: always()
