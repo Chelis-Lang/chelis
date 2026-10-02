@@ -160,8 +160,8 @@ fn bound<'a>(bindings: &'a UnordMap<String, RuntimeValue>, name: &str) -> &'a Ru
     match matches.as_slice() {
         [value] => value,
         [] => {
-            let keys: Vec<&String> = sorted.iter().map(|(key, _)| *key).collect();
-            panic!("no binding for `{name}` among {keys:?}")
+            let keys: Vec<&str> = sorted.iter().map(|(key, _)| key.as_str()).collect();
+            panic!("no binding for `{name}` among [{}]", keys.join(", "))
         }
         _ => panic!("`{name}` is bound {} times", matches.len()),
     }
