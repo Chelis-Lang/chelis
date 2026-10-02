@@ -2393,6 +2393,24 @@ reason = "script-unit enters the project CI profile before executing runtime and
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "scripts/ci_setup_uv_python.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the script suite verifies current-interpreter library setup and PyO3 cache identity shared by hosted, Devenv and gate consumers"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_setup_uv_python.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered script suite runs interpreter signature and authoritative library setup regressions"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
 prefix = "scripts/ci_devenv.py"
 disposition = "owner"
 workflow = "ci.yml"

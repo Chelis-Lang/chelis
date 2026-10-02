@@ -17,6 +17,8 @@ import sys
 import tempfile
 import uuid
 
+from ci_setup_uv_python import pyo3_environment_signature
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE_MARKER = "CHELIS_CI_PROJECT_ENVIRONMENT_CAPTURED"
@@ -33,6 +35,7 @@ def capture(destination: Path) -> None:
             or Path(sys.prefix) != environment):
         raise RuntimeError("project Python, activated venv and PYO3_PYTHON disagree")
     values = dict(os.environ, VIRTUAL_ENV=str(environment))
+    values["PYO3_ENVIRONMENT_SIGNATURE"] = pyo3_environment_signature(interpreter, environ=values)
     destination.write_text(json.dumps(values), encoding="utf-8")
     print(CAPTURE_MARKER, flush=True)
 

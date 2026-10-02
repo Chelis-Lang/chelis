@@ -278,7 +278,7 @@ class OwnedInterpreterTests(unittest.TestCase):
         scripts = checkout / "scripts"
         scripts.mkdir(parents=True)
         here = Path(__file__).resolve().parent
-        for name in ("gate.py", "unrepresentable_domain_oracle.py"):
+        for name in ("gate.py", "unrepresentable_domain_oracle.py", "ci_setup_uv_python.py"):
             shutil.copy2(here / name, scripts / name)
         wrapper = checkout / ".venv" / "bin" / "python"
         wrapper.parent.mkdir(parents=True)
@@ -388,6 +388,23 @@ class OwnedInterpreterTests(unittest.TestCase):
 
 
 class GateEnvironmentTests(unittest.TestCase):
+    def test_current_interpreter_replaces_stale_pyo3_signature(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            environment = gate.gate_environment(
+                {"PYO3_ENVIRONMENT_SIGNATURE": "stale"},
+                executable=Path(sys.executable), repo_root=Path(tmp),
+            )
+            self.assertTrue(environment["PYO3_ENVIRONMENT_SIGNATURE"].startswith("chelis-pyo3-v1-"))
+            repeated = gate.gate_environment(environment, executable=Path(sys.executable), repo_root=Path(tmp))
+            self.assertEqual(environment["PYO3_ENVIRONMENT_SIGNATURE"], repeated["PYO3_ENVIRONMENT_SIGNATURE"])
+
+    def test_discovery_override_is_not_forwarded_to_gate_children(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "PYO3_NO_PYTHON"):
+                gate.gate_environment(
+                    {"PYO3_NO_PYTHON": "1"}, executable=Path(sys.executable), repo_root=Path(tmp),
+                )
+
     def test_valid_explicit_pyo3_python_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1319,11 +1319,11 @@ class ListOutputTests(unittest.TestCase):
 
         # `gate_environment` probes the interpreter through subprocess.run,
         # which also reaches Popen; only the gate's own child commands
-        # carry an explicit `env`, so let everything else through.
+        # stream output; interpreter identity queries must reach real Python.
         real_popen = gate.subprocess.Popen
 
         def fake_popen(command, *args, **kwargs):
-            if "env" not in kwargs:
+            if "env" not in kwargs or command[1:3] == ["-I", "-c"]:
                 return real_popen(command, *args, **kwargs)
             seen.append(dict(kwargs["env"]))
             return _Stub()
@@ -1358,6 +1358,7 @@ class ListOutputTests(unittest.TestCase):
         self.assertEqual(len(seen), 2)
         for environment in seen:
             self.assertEqual(environment[gate.ORACLE_BINARY_ENV], expected)
+            self.assertTrue(environment["PYO3_ENVIRONMENT_SIGNATURE"].startswith("chelis-pyo3-v1-"))
 
     def test_run_commands_exports_no_handoff_without_a_preceding_build(self):
         seen, _ = self._recorded_child_environments(
@@ -1373,12 +1374,12 @@ class ListOutputTests(unittest.TestCase):
         # oracle reaches it costs a whole workspace clippy, fmt, the lint
         # pass, three rustdoc stages and two guards first.
         launched: list[list[str]] = []
-        # Only the gate's own child commands carry an explicit `env`;
-        # `gate_environment`'s interpreter probe must still run.
+        # Interpreter identity queries must still run with their explicit env;
+        # the gate's child commands must not launch.
         real_popen = gate.subprocess.Popen
 
         def record(command, *args, **kwargs):
-            if "env" not in kwargs:
+            if "env" not in kwargs or command[1:3] == ["-I", "-c"]:
                 return real_popen(command, *args, **kwargs)
             launched.append(list(command))
             raise AssertionError("no command may launch")
