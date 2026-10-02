@@ -441,9 +441,9 @@ class Literals(unittest.TestCase):
 class Invocation(unittest.TestCase):
     def test_the_printed_compile_command_is_retargeted(self) -> None:
         stdout = ("Wrote out/main.c and out/main.h\n"
-                  "Compile: clang -O2 -march=native out/main.c -Lout -lchelis_runtime -lm -o out/main\n")
+                  "Compile: clang -O2 -march=native out/main.c out/libchelis_runtime.a -lm -o out/main\n")
         self.assertEqual(harness.printed_compile_command(stdout),
-                         ["clang", "-O2", "-march=native", "out/main.c", "-Lout", "-lchelis_runtime", "-lm", "-o", "out/case"])
+                         ["clang", "-O2", "-march=native", "out/main.c", "out/libchelis_runtime.a", "-lm", "-o", "out/case"])
         self.assertIsNone(harness.printed_compile_command("Wrote out/main.c\n"))
 
     def test_the_binary_comes_from_the_flag_or_the_environment(self) -> None:
