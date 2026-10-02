@@ -1347,7 +1347,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--large", action="store_true", help="the manual gate's large seeded corpus")
     parser.add_argument("--lanes", default="eval,c")
     parser.add_argument("--toolchain-json", help="C toolchain {compiler, compile_flags, link_flags}; default: the "
-                        "command chelis build prints")
+                        "command chelis build --emit-c prints")
     parser.add_argument("--reef-home", type=Path, help="a reef home with chelis-std published (default: publish this "
                         "checkout's packages/chelis-std into a fresh one)")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4, help="parallel runs (default: the CPU count)")

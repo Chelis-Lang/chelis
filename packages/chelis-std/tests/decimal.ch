@@ -383,9 +383,9 @@ def test_to_f32_rounds_once() -> unit ! { Test } = {
   assert_eq(single("0"), 0.0f64, "zero")
 }
 def test_to_f32_differs_from_double_rounding() -> unit ! { Test } = {
-  _ = assert_eq(cast(decimal_to_f64(decimal("1.000000059604644775390625000001")), f32), cast(1.0f64, f32), "through f64 the value lands on a tie")
+  _ = assert_eq(cast(decimal_to_f64(decimal("1.000000059604644775390625000001")), f32), 1.0f32, "through f64 the value lands on a tie")
   _ = assert_false(eq(single("1.000000059604644775390625000001"), 1.0f64), "the direct rounding is not 1")
-  _ = assert_eq(cast(decimal_to_f64(decimal("16777215.4999999999")), f32), cast(16777216.0f64, f32), "through f64 a value below a tie lands on it")
+  _ = assert_eq(cast(decimal_to_f64(decimal("16777215.4999999999")), f32), 16777216.0f32, "through f64 a value below a tie lands on it")
   assert_false(eq(single("16777215.4999999999"), 16777216.0f64), "the direct rounding stays below")
 }
 def test_from_f64_is_exact_then_rounded() -> unit ! { Test } = {
