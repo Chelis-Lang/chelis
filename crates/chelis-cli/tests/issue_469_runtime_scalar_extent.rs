@@ -954,3 +954,130 @@ fn a_value_named_like_a_precision_binder_sizes_by_the_value_on_both_lanes() {
         "out = 5",
     );
 }
+
+/// A function-literal parameter hides every fact lowering recorded about an
+/// enclosing binding of the same name. Each row binds `ln = shape(t, 0)` (3),
+/// or a two-element list `rows`, and then a function literal whose parameter of
+/// that name receives 5 (or three rows). Lowering used to resolve the size
+/// through the enclosing binding's `shape(...)` fact before reading the
+/// checker's stamp, so C silently printed 3 rows where eval printed 5, and
+/// `reshape` and `concat` over a shadowed name read the stale list or extent.
+/// The controls rename the parameter, pass a static argument, or call a
+/// top-level function whose declaring scope never held the enclosing binding.
+#[test]
+fn a_function_literal_parameter_hides_an_enclosing_bindings_facts_on_both_lanes() {
+    let call = "out = f(to_tensor([1i64, 2i64, 3i64]), to_tensor([1i64, 2i64]), \
+                tensor_to_scalar(sum(to_tensor([2i64, 3i64]), 0)))\n";
+    let five_by_two = "out = tensor(shape=[5, 2], data=[1, 2, 1, 2, 1, 2, 1, 2, 1, 2])";
+    let lambda = |shape_binding: &str, body: &str| {
+        format!(
+            "def f(t: tensor[3, i64], x: tensor[2, i64], k: i64) = {{\n\
+               {shape_binding}\n\
+               {body}\n\
+             }}\n{call}"
+        )
+    };
+    let rows = [
+        (
+            "lambda_shadow_shape",
+            lambda(
+                "ln = shape(t, 0)",
+                "h = fn (ln: i64) -> insert(x, 0, ln)\n  h(k)",
+            ),
+            five_by_two.to_string(),
+        ),
+        (
+            "lambda_shadow_shape_expand",
+            lambda(
+                "ln = shape(t, 0)",
+                "h = fn (ln: i64) -> expand(insert(x, 0, 1i64), 0, ln)\n  h(k)",
+            ),
+            five_by_two.to_string(),
+        ),
+        (
+            "lambda_shadow_shape_cast",
+            lambda(
+                "ln = shape(t, 0)",
+                "h = fn (ln: i64) -> insert(x, 0, cast(ln, i64))\n  h(k)",
+            ),
+            five_by_two.to_string(),
+        ),
+        (
+            "lambda_shadow_shape_alias",
+            lambda(
+                "a = shape(t, 0)\n  ln = a",
+                "h = fn (ln: i64) -> insert(x, 0, ln)\n  h(k)",
+            ),
+            five_by_two.to_string(),
+        ),
+        (
+            "lambda_shadow_shape_higher_order",
+            format!(
+                "def app(g: (i64) -> tensor[*, 2, i64], v: i64) = g(v)\n{}",
+                lambda(
+                    "ln = shape(t, 0)",
+                    "app(fn (ln: i64) -> insert(x, 0, ln), k)",
+                )
+            ),
+            five_by_two.to_string(),
+        ),
+        (
+            "lambda_shadow_shape_twice",
+            lambda(
+                "ln = shape(t, 0)",
+                "h = fn (y: tensor[2, i64], ln: i64) -> insert(y, 0, ln)\n  \
+                 concat([h(x, k), h(x, 1i64)], 0)",
+            ),
+            "out = tensor(shape=[6, 2], data=[1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2])".to_string(),
+        ),
+        (
+            "lambda_shadow_shape_reshape",
+            "def f(t: tensor[3, i64], y: tensor[10, i64], k: i64) = {\n\
+               ln = shape(t, 0)\n\
+               h = fn (ln: i64) -> reshape(y, [ln, 2i64])\n\
+               h(k)\n\
+             }\n\
+             out = f(to_tensor([1i64, 2i64, 3i64]), to_tensor([1i64, 2i64, 3i64, 4i64, 5i64, 6i64, 7i64, 8i64, 9i64, 10i64]), tensor_to_scalar(sum(to_tensor([2i64, 3i64]), 0)))\n"
+                .to_string(),
+            "out = tensor(shape=[5, 2], data=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])".to_string(),
+        ),
+        (
+            "lambda_shadow_list_concat",
+            "def f(a: tensor[2, i64]) = {\n\
+               rows = [a, a]\n\
+               h = fn (rows: List[tensor[2, i64]]) -> concat(rows, 0)\n\
+               h([a, a, a])\n\
+             }\n\
+             out = f(to_tensor([1i64, 2i64]))\n"
+                .to_string(),
+            "out = tensor(shape=[6], data=[1, 2, 1, 2, 1, 2])".to_string(),
+        ),
+        (
+            "lambda_renamed_parameter",
+            lambda(
+                "ln = shape(t, 0)",
+                "h = fn (m: i64) -> insert(x, 0, m)\n  h(k)",
+            ),
+            five_by_two.to_string(),
+        ),
+        (
+            "lambda_static_argument",
+            lambda(
+                "ln = shape(t, 0)",
+                "h = fn (ln: i64) -> insert(x, 0, ln)\n  h(4i64)",
+            ),
+            "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])".to_string(),
+        ),
+        (
+            "top_level_callee_parameter",
+            format!(
+                "def g(y: tensor[2, i64], ln: i64) = insert(y, 0, ln)\n{}",
+                lambda("ln = shape(t, 0)", "g(x, k)")
+            ),
+            five_by_two.to_string(),
+        ),
+    ];
+    for (stem, source, expected) in rows {
+        assert_lanes_agree(stem, &source, &expected);
+    }
+}

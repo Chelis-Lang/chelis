@@ -1333,7 +1333,7 @@ fn lower_program_with_context_inner(
         }
     }
     let library_scope = LexicalScope {
-        bindings: ctx.bindings.clone(),
+        bindings: ctx.bindings.without_facts(),
         ..LexicalScope::default()
     };
     let library_values = ctx
@@ -2134,7 +2134,7 @@ pub(crate) fn try_lower_staged_host_region(
         }
         // A staged host region's inputs are the partition's, not an author's.
         ctx.prepare_parameter_witnesses(&names, &types, None, None, false);
-        ctx.binding_witnesses.clear();
+        ctx.bindings.clear_witnesses();
         ctx.prepare_local_ascription_tokens(expr, None);
         // Do not infer equality between repeated spellings in the machine-built
         // parameter list above. The returned result type is nevertheless the
@@ -2256,7 +2256,7 @@ fn lower_subexpr_program_inner_impl(
     );
     // Kernel inputs already have structural interface-axis carriers. Keep
     // those reads intact; explicit checked claims still use signature witnesses.
-    ctx.binding_witnesses.clear();
+    ctx.bindings.clear_witnesses();
     ctx.prepare_local_ascription_tokens(expr, None);
     ctx.declaration_root_claim = authored_signature;
     let value = ctx.lower_expr_with_claim(expr, result_claim, authored_signature);
@@ -6496,15 +6496,248 @@ enum CallableScope {
     Lexical(std::sync::Arc<LexicalScope>),
 }
 
+/// What lowering recorded about one bound name's value, besides the value.
+#[derive(Clone, Default)]
+struct ValueFacts {
+    /// Issue #368: the pinned host list or list literal the name is bound
+    /// to, lowered again where `concat` or a host list read uses it.
+    list: Option<Expr>,
+    /// chelis#369: the underlying `shape(operand, axis)` application the
+    /// name is bound to, directly or through an alias or `cast`, so a size
+    /// naming it reads the operand's extent (the `tensor_full_like` idiom).
+    shape: Option<Expr>,
+    /// chelis#469/#528: the compile-time integer the name is bound to, so a
+    /// size naming it const-folds.
+    static_size: Option<i64>,
+    /// The node bound and its declaring shape witnesses. The node comparison
+    /// in [`LowerCtx::binding_witnesses_for_expr`] keeps a rebound value from
+    /// reusing them.
+    witnesses: Option<(NodeId, Vec<NodeId>)>,
+}
+
+/// The value bindings of one lexical scope, each with the facts lowering
+/// recorded about its value.
+///
+/// A name's facts are replaced whenever the name is bound: [`Self::insert`]
+/// drops them and [`Self::insert_with_facts`] replaces them with the new
+/// binding's, so no binder (a `let`, a pattern, a function or function-literal
+/// parameter) can leave an enclosing binding's fact visible under the name it
+/// shadows. Lowering used to keep each fact in its own name-keyed table beside
+/// the values, which every binder had to clear by hand, and a function-literal
+/// parameter did not clear the shape table (chelis#469).
+#[derive(Clone, Default)]
+struct ValueScope {
+    values: UnordMap<String, LoweredValue>,
+    facts: UnordMap<String, ValueFacts>,
+}
+
+impl ValueScope {
+    fn get<Q>(&self, name: &Q) -> Option<&LoweredValue>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.values.get(name)
+    }
+
+    fn contains_key<Q>(&self, name: &Q) -> bool
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.values.contains_key(name)
+    }
+
+    fn to_sorted(&self) -> Vec<(&String, &LoweredValue)> {
+        self.values.to_sorted()
+    }
+
+    /// Bind `name` to `value` with no facts.
+    fn insert(&mut self, name: String, value: LoweredValue) -> Option<LoweredValue> {
+        self.facts.remove(&name);
+        self.values.insert(name, value)
+    }
+
+    /// Bind `name` to `value` with `facts`, replacing every fact of the
+    /// binding it shadows.
+    fn insert_with_facts(&mut self, name: String, value: LoweredValue, facts: ValueFacts) {
+        self.facts.insert(name.clone(), facts);
+        self.values.insert(name, value);
+    }
+
+    /// A binder of `name` that binds no lowered value (a callable): its
+    /// facts replace the shadowed binding's.
+    fn replace_facts(&mut self, name: &str, facts: ValueFacts) {
+        self.facts.insert(name.to_string(), facts);
+    }
+
+    fn facts<Q>(&self, name: &Q) -> Option<&ValueFacts>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.facts.get(name)
+    }
+
+    fn list<Q>(&self, name: &Q) -> Option<&Expr>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.facts(name)?.list.as_ref()
+    }
+
+    fn shape<Q>(&self, name: &Q) -> Option<&Expr>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.facts(name)?.shape.as_ref()
+    }
+
+    fn static_size<Q>(&self, name: &Q) -> Option<i64>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.facts(name)?.static_size
+    }
+
+    fn witnesses<Q>(&self, name: &Q) -> Option<&(NodeId, Vec<NodeId>)>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.facts(name)?.witnesses.as_ref()
+    }
+
+    /// Record the declaring shape witnesses of the value `name` is already
+    /// bound to.
+    fn set_witnesses(&mut self, name: &str, witnesses: (NodeId, Vec<NodeId>)) {
+        self.facts.entry(name.to_string()).or_default().witnesses = Some(witnesses);
+    }
+
+    /// Every binding's witnesses, as one activation saves them.
+    fn witness_snapshot(&self) -> UnordMap<String, (NodeId, Vec<NodeId>)> {
+        self.facts
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(name, facts)| Some((name.clone(), facts.witnesses.clone()?)))
+            .collect()
+    }
+
+    /// Replace every binding's witnesses with `snapshot`.
+    fn restore_witnesses(&mut self, snapshot: UnordMap<String, (NodeId, Vec<NodeId>)>) {
+        self.clear_witnesses();
+        for (name, witnesses) in snapshot.into_sorted() {
+            self.set_witnesses(&name, witnesses);
+        }
+    }
+
+    fn clear_witnesses(&mut self) {
+        let names = self
+            .facts
+            .to_sorted()
+            .into_iter()
+            .filter(|(_, facts)| facts.witnesses.is_some())
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        for name in names {
+            if let Some(facts) = self.facts.get_mut(&name) {
+                facts.witnesses = None;
+            }
+        }
+    }
+
+    /// Give `alias` everything `name` is bound to, its facts included.
+    /// Whether `name` had a value or a fact.
+    fn alias(&mut self, name: &str, alias: &str) -> bool {
+        let (value, facts) = self.entry_of(name);
+        self.put_alias(alias, value, facts)
+    }
+
+    /// [`Self::alias`], binding `alias` in `target`.
+    fn alias_into(&self, name: &str, alias: &str, target: &mut Self) -> bool {
+        let (value, facts) = self.entry_of(name);
+        target.put_alias(alias, value, facts)
+    }
+
+    fn entry_of(&self, name: &str) -> (Option<LoweredValue>, Option<ValueFacts>) {
+        (
+            self.values.get(name).cloned(),
+            self.facts.get(name).cloned(),
+        )
+    }
+
+    fn put_alias(
+        &mut self,
+        alias: &str,
+        value: Option<LoweredValue>,
+        facts: Option<ValueFacts>,
+    ) -> bool {
+        let bound = value.is_some() || facts.is_some();
+        if let Some(value) = value {
+            self.values.insert(alias.to_string(), value);
+        }
+        if let Some(facts) = facts {
+            self.facts.insert(alias.to_string(), facts);
+        }
+        bound
+    }
+
+    /// These bindings' facts, each passed through `keep`, with no values:
+    /// the start of this scope rebased into another graph, whose values are
+    /// added back with [`Self::rebase_value`].
+    fn facts_only(&self, keep: impl Fn(&ValueFacts) -> ValueFacts) -> Self {
+        Self {
+            values: UnordMap::new(),
+            facts: self
+                .facts
+                .to_sorted()
+                .into_iter()
+                .map(|(name, facts)| (name.clone(), keep(facts)))
+                .collect(),
+        }
+    }
+
+    /// Set the value of a binding rebased into another graph, keeping the
+    /// facts [`Self::facts_only`] carried over for it.
+    fn rebase_value(&mut self, name: String, value: LoweredValue) {
+        self.values.insert(name, value);
+    }
+
+    /// The values alone, without any fact.
+    fn without_facts(&self) -> Self {
+        Self {
+            values: self.values.clone(),
+            facts: UnordMap::new(),
+        }
+    }
+
+    /// The scope with every binding's witnesses dropped.
+    fn without_witnesses(mut self) -> Self {
+        self.clear_witnesses();
+        self
+    }
+}
+
+impl<Q> std::ops::Index<&Q> for ValueScope
+where
+    String: std::borrow::Borrow<Q>,
+    Q: Ord + ?Sized,
+{
+    type Output = LoweredValue;
+
+    fn index(&self, name: &Q) -> &LoweredValue {
+        &self.values[name]
+    }
+}
+
 /// Every name-keyed table of one lexical scope. [`LowerCtx`] keeps these as
 /// separate fields; `capture_scope` and `replace_scope` move them together.
 #[derive(Clone, Default)]
 struct LexicalScope {
-    bindings: UnordMap<String, LoweredValue>,
-    list_bindings: UnordMap<String, Expr>,
-    shape_bindings: UnordMap<String, Expr>,
-    static_size_bindings: UnordMap<String, i64>,
-    binding_witnesses: UnordMap<String, (NodeId, Vec<NodeId>)>,
+    bindings: ValueScope,
     local_callables: UnordMap<String, CallableExpr>,
     fn_typed_params: UnordSet<String>,
 }
@@ -7235,34 +7468,10 @@ struct LowerCtx<'program> {
     interface_loads: UnordSet<String>,
     /// Counter for the aliases [`LowerCtx::pin_free_names`] mints.
     next_pin: usize,
-    bindings: UnordMap<String, LoweredValue>,
-    list_bindings: UnordMap<String, Expr>,
-    /// chelis#369: `let`-bound names whose value is a `shape(operand,
-    /// axis)` application, keyed by the bound name and holding the raw
-    /// `shape(...)` Deep `Expr`. The canonical `tensor_full_like` idiom
-    /// writes `len = shape(x, 0)` then `expand(s, 0, cast(len, i32))`,
-    /// so the `expand` size argument is a `var len` reference, not a
-    /// direct `shape(...)` app. Without this map the size-recovery path
-    /// [`Self::shape_app_operand_axis_resolved`] cannot see through the
-    /// `let` indirection and the extent silently defaults to `Lit(1)`,
-    /// producing the `Lit(n) vs Lit(1)` backward-DAG verification failure.
-    /// Saved/restored across binding scopes exactly like `list_bindings`.
-    shape_bindings: UnordMap<String, Expr>,
-    /// chelis#469/#528: `let`-bound names whose value const-folds to a
-    /// compile-time integer (a literal, `cast(N, _)`, or integer arithmetic
-    /// over such values, the static values the checker also folds through
-    /// `let` bindings). Lets a later
-    /// `expand(s, axis, cast(len, i32))` (or `len` used directly) recover
-    /// the concrete extent instead of the pre-fix size-1 default — the exact
-    /// eval-`[7]`-vs-C-`[1]` silent miscompile #469 exists to prevent when a
-    /// `let`-bound static size reaches the backend. Re-binding a name to a
-    /// non-static value drops its stale entry (shadowing symmetry, mirroring
-    /// `shape_bindings`). Saved/restored across binding scopes.
-    static_size_bindings: UnordMap<String, i64>,
-    /// Lexical binding plus its declaring shape witnesses. Alias bindings
-    /// forward this metadata; rebinding replaces it and scope exit restores it.
-    /// The node comparison prevents a shadowed value reusing an outer witness.
-    binding_witnesses: UnordMap<String, (NodeId, Vec<NodeId>)>,
+    /// The lexical value bindings and the facts recorded about each value
+    /// (a list literal, a `shape(...)` source, a static integer, declaring
+    /// shape witnesses); see [`ValueScope`].
+    bindings: ValueScope,
     /// Binder lookup exists only in the current signature activation. Once
     /// selected, ordinary node edges carry the declaring witness's identity.
     signature_witnesses: Vec<(String, NodeId)>,
@@ -7499,11 +7708,7 @@ impl<'program> LowerCtx<'program> {
             top_level: LexicalScope::default(),
             interface_loads: UnordSet::new(),
             next_pin: 0,
-            bindings: UnordMap::new(),
-            list_bindings: UnordMap::new(),
-            shape_bindings: UnordMap::new(),
-            static_size_bindings: UnordMap::new(),
-            binding_witnesses: UnordMap::new(),
+            bindings: ValueScope::default(),
             signature_witnesses: Vec::new(),
             activation_witnesses: Vec::new(),
             signature_is_authored: false,
@@ -7615,36 +7820,10 @@ impl<'program> LowerCtx<'program> {
             let alias = format!("__chelis_pinned_{}_{name}", self.next_pin);
             let top = &mut self.top_level;
             let mut bound = false;
-            bound |= pin(
-                &mut self.bindings,
-                top_level.then_some(&mut top.bindings),
-                &name,
-                &alias,
-            );
-            bound |= pin(
-                &mut self.list_bindings,
-                top_level.then_some(&mut top.list_bindings),
-                &name,
-                &alias,
-            );
-            bound |= pin(
-                &mut self.shape_bindings,
-                top_level.then_some(&mut top.shape_bindings),
-                &name,
-                &alias,
-            );
-            bound |= pin(
-                &mut self.static_size_bindings,
-                top_level.then_some(&mut top.static_size_bindings),
-                &name,
-                &alias,
-            );
-            bound |= pin(
-                &mut self.binding_witnesses,
-                top_level.then_some(&mut top.binding_witnesses),
-                &name,
-                &alias,
-            );
+            if top_level {
+                self.bindings.alias_into(&name, &alias, &mut top.bindings);
+            }
+            bound |= self.bindings.alias(&name, &alias);
             bound |= pin(
                 &mut self.local_callables,
                 top_level.then_some(&mut top.local_callables),
@@ -7689,10 +7868,6 @@ impl<'program> LowerCtx<'program> {
     fn capture_scope(&self) -> LexicalScope {
         LexicalScope {
             bindings: self.bindings.clone(),
-            list_bindings: self.list_bindings.clone(),
-            shape_bindings: self.shape_bindings.clone(),
-            static_size_bindings: self.static_size_bindings.clone(),
-            binding_witnesses: self.binding_witnesses.clone(),
             local_callables: self.local_callables.clone(),
             fn_typed_params: self.fn_typed_params.clone(),
         }
@@ -7703,22 +7878,11 @@ impl<'program> LowerCtx<'program> {
     fn replace_scope(&mut self, scope: LexicalScope) -> LexicalScope {
         let LexicalScope {
             bindings,
-            list_bindings,
-            shape_bindings,
-            static_size_bindings,
-            binding_witnesses,
             local_callables,
             fn_typed_params,
         } = scope;
         LexicalScope {
             bindings: std::mem::replace(&mut self.bindings, bindings),
-            list_bindings: std::mem::replace(&mut self.list_bindings, list_bindings),
-            shape_bindings: std::mem::replace(&mut self.shape_bindings, shape_bindings),
-            static_size_bindings: std::mem::replace(
-                &mut self.static_size_bindings,
-                static_size_bindings,
-            ),
-            binding_witnesses: std::mem::replace(&mut self.binding_witnesses, binding_witnesses),
             local_callables: std::mem::replace(&mut self.local_callables, local_callables),
             fn_typed_params: std::mem::replace(&mut self.fn_typed_params, fn_typed_params),
         }
@@ -8143,7 +8307,7 @@ impl<'program> LowerCtx<'program> {
         let mut rebase = ScopeRebase::default();
         // A top-level callee reached inside the body resolves in the
         // parent's top level, as it would outside the transform.
-        subctx.top_level = self.rebase_scope(subctx, &self.top_level, &mut rebase);
+        subctx.top_level = self.rebase_scope(subctx, &self.top_level, &mut rebase, false);
         let scope = match &function.scope {
             CallableScope::Declaration => subctx.top_level.clone(),
             CallableScope::Lexical(captured) => {
@@ -8158,11 +8322,11 @@ impl<'program> LowerCtx<'program> {
         };
         for (name, value) in scope
             .bindings
-            .into_sorted()
+            .to_sorted()
             .into_iter()
-            .filter(|(name, _)| !shadowed.contains(name))
+            .filter(|(name, _)| !shadowed.contains(*name))
         {
-            subctx.bindings.insert(name, value);
+            subctx.bindings.insert(name.clone(), value.clone());
         }
         for (name, callable) in scope
             .local_callables
@@ -8216,15 +8380,24 @@ impl<'program> LowerCtx<'program> {
         subctx: &mut LowerCtx,
         scope: &LexicalScope,
         rebase: &mut ScopeRebase,
+        keep_expression_facts: bool,
     ) -> LexicalScope {
+        // A static integer stays true in the sub-context. Host list and shape
+        // facts are expressions over names, lowered again where they are
+        // read, so they are kept only where those names stay meaningful.
         let mut rebased = LexicalScope {
-            static_size_bindings: scope.static_size_bindings.clone(),
+            bindings: scope.bindings.facts_only(|facts| ValueFacts {
+                list: keep_expression_facts.then(|| facts.list.clone()).flatten(),
+                shape: keep_expression_facts.then(|| facts.shape.clone()).flatten(),
+                static_size: facts.static_size,
+                witnesses: None,
+            }),
             fn_typed_params: scope.fn_typed_params.clone(),
             ..LexicalScope::default()
         };
         for (name, value) in scope.bindings.to_sorted() {
             if let Some(load) = self.rebase_binding(subctx, value, rebase) {
-                rebased.bindings.insert(name.clone(), load);
+                rebased.bindings.rebase_value(name.clone(), load);
             }
         }
         for (name, callable) in scope.local_callables.to_sorted() {
@@ -8341,7 +8514,7 @@ impl<'program> LowerCtx<'program> {
         if let Some(rebased) = rebase.scopes.get(&key) {
             return CallableScope::Lexical(rebased.clone());
         }
-        let rebased = std::sync::Arc::new(self.rebase_scope(subctx, captured, rebase));
+        let rebased = std::sync::Arc::new(self.rebase_scope(subctx, captured, rebase, false));
         rebase.scopes.insert(key, rebased.clone());
         CallableScope::Lexical(rebased)
     }
@@ -8806,9 +8979,10 @@ impl<'program> LowerCtx<'program> {
     /// every earlier declaration bound, with no enclosing function's
     /// witnesses.
     fn declaration_scope(&self) -> LexicalScope {
+        let scope = self.capture_scope();
         LexicalScope {
-            binding_witnesses: UnordMap::new(),
-            ..self.capture_scope()
+            bindings: scope.bindings.without_witnesses(),
+            ..scope
         }
     }
 
@@ -8824,9 +8998,7 @@ impl<'program> LowerCtx<'program> {
         initializer: &TrappingInitializer,
         rebase: &mut ScopeRebase,
     ) -> TrappingInitializer {
-        let mut scope = self.rebase_scope(subctx, &initializer.scope, rebase);
-        scope.list_bindings = initializer.scope.list_bindings.clone();
-        scope.shape_bindings = initializer.scope.shape_bindings.clone();
+        let scope = self.rebase_scope(subctx, &initializer.scope, rebase, true);
         TrappingInitializer {
             expr: initializer.expr.clone(),
             scope,
@@ -10257,15 +10429,17 @@ impl<'program> LowerCtx<'program> {
         if !name.is_empty() {
             // A `def` is a top-level declaration: each entry it makes is also
             // part of the scope every top-level function body resolves in.
-            if self.is_host_list_expr(&kids[1]) {
-                let recorded = self.pin_free_names(&kids[1], true);
-                self.list_bindings.insert(name.clone(), recorded.clone());
-                self.top_level.list_bindings.insert(name.clone(), recorded);
-            }
-            self.bindings.insert(name.clone(), body_id.clone());
+            let facts = ValueFacts {
+                list: self
+                    .is_host_list_expr(&kids[1])
+                    .then(|| self.pin_free_names(&kids[1], true)),
+                ..ValueFacts::default()
+            };
+            self.bindings
+                .insert_with_facts(name.clone(), body_id.clone(), facts.clone());
             self.top_level
                 .bindings
-                .insert(name.clone(), body_id.clone());
+                .insert_with_facts(name.clone(), body_id.clone(), facts);
             if let Some(mut callable) = self.resolve_declaration_callable(&kids[1]) {
                 if let CallableExpr::Plain(function) = &mut callable
                     && let Some(signature) = self.program_signatures.get(&name)
@@ -10290,14 +10464,10 @@ impl<'program> LowerCtx<'program> {
             );
         }
         let saved = self.bindings.clone();
-        let saved_witnesses = self.binding_witnesses.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
         let saved_signature_is_authored = self.signature_is_authored;
-        let saved_list_bindings = self.list_bindings.clone();
-        let saved_shape_bindings = self.shape_bindings.clone();
-        let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         // kids[0] = (bind {} name1 expr1 name2 expr2 ...)
@@ -10321,13 +10491,16 @@ impl<'program> LowerCtx<'program> {
                     // falls back to the rank-0 host placeholder. Gated on the
                     // non-host check so it does not change `is_host_list_expr`
                     // routing for `to_list`/`map`/`filter` bindings.
+                    // The facts are read against the scope before this
+                    // binding, and the binding below replaces every fact
+                    // of the one it shadows.
+                    let mut facts = ValueFacts::default();
                     if self.is_host_list_expr(&bind_kids[i + 1])
                         || collect_cons_chain(&bind_kids[i + 1]).is_some()
                     {
                         // chelis#2603: it is lowered again where `name` is
                         // used, so its names are pinned to their meaning here.
-                        let recorded = self.pin_free_names(&bind_kids[i + 1], false);
-                        self.list_bindings.insert(name.clone(), recorded);
+                        facts.list = Some(self.pin_free_names(&bind_kids[i + 1], false));
                     }
                     // chelis#369/#469: remember a `len = shape(operand, axis)`
                     // binding — OR a `let`-to-`let` alias / use-site `cast` of
@@ -10339,36 +10512,25 @@ impl<'program> LowerCtx<'program> {
                     // and records the UNDERLYING `shape(...)` app, so recovery
                     // binds the `shape_dep` liveness edge to the actual source
                     // tensor and axis (mirroring how `fold_static_size`
-                    // recurses `static_size_bindings` for the static path). A
-                    // re-binding of `name` to anything else must drop any stale
-                    // shape entry so shadowing never recovers a wrong extent.
+                    // follows static bindings for the static path).
                     if let Some(shape_app) = self.resolve_shape_binding_source(&bind_kids[i + 1]) {
                         // chelis#2603: a directly bound `shape(...)` is lowered
                         // again at its use, so its operand is pinned here; an
                         // alias's recorded app was pinned where it was bound.
-                        let recorded = if shape_app_operand_axis(&bind_kids[i + 1]).is_some() {
-                            self.pin_free_names(&shape_app, false)
-                        } else {
-                            shape_app
-                        };
-                        self.shape_bindings.insert(name.clone(), recorded);
-                    } else {
-                        self.shape_bindings.remove(name);
+                        facts.shape =
+                            Some(if shape_app_operand_axis(&bind_kids[i + 1]).is_some() {
+                                self.pin_free_names(&shape_app, false)
+                            } else {
+                                shape_app
+                            });
                     }
                     // chelis#469/#528: remember a `len = <static int>` binding
                     // (a literal, `cast(N, _)`, or integer arithmetic over
                     // such, following prior static bindings) so a later
                     // `expand(s, axis, cast(len, i32))` const-folds the
-                    // extent instead of the size-1 default. Re-binding to a
-                    // non-static value drops any stale entry (shadowing
-                    // symmetry, mirroring `shape_bindings`).
-                    if let Some(value) = self.fold_static_size(&bind_kids[i + 1]) {
-                        self.static_size_bindings.insert(name.clone(), value);
-                    } else {
-                        self.static_size_bindings.remove(name);
-                    }
+                    // extent instead of the size-1 default.
+                    facts.static_size = self.fold_static_size(&bind_kids[i + 1]);
                     if let Some(callable) = self.callable_binding_expr(&bind_kids[i + 1]) {
-                        self.binding_witnesses.remove(name);
                         // Preserve the function value at its binding position
                         // as well as its native inlining identity. Host scalar
                         // expressions can then capture aliases through the
@@ -10380,8 +10542,11 @@ impl<'program> LowerCtx<'program> {
                                 None
                             }
                         });
-                        if let Some(value) = value {
-                            self.bindings.insert(name.clone(), value);
+                        match value {
+                            Some(value) => {
+                                self.bindings.insert_with_facts(name.clone(), value, facts)
+                            }
+                            None => self.bindings.replace_facts(name, facts),
                         }
                         self.local_callables.insert(name.clone(), callable);
                     } else {
@@ -10452,15 +10617,9 @@ impl<'program> LowerCtx<'program> {
                                 self.invocation_witnesses.push(owner);
                             }
                         }
-                        if let Some((input, witnesses)) = witnesses
-                            && val_id.as_single_node() == Some(input)
-                        {
-                            self.binding_witnesses
-                                .insert(name.clone(), (input, witnesses));
-                        } else {
-                            self.binding_witnesses.remove(name);
-                        }
-                        self.bindings.insert(name.clone(), val_id);
+                        facts.witnesses =
+                            witnesses.filter(|(input, _)| val_id.as_single_node() == Some(*input));
+                        self.bindings.insert_with_facts(name.clone(), val_id, facts);
                     }
                 }
                 i += 2;
@@ -10470,14 +10629,10 @@ impl<'program> LowerCtx<'program> {
         let result = self.lower_expr(&kids[1]);
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.bindings = saved; // Restore scope
-        self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
         self.signature_is_authored = saved_signature_is_authored;
-        self.list_bindings = saved_list_bindings;
-        self.shape_bindings = saved_shape_bindings;
-        self.static_size_bindings = saved_static_size_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -11892,9 +12047,10 @@ impl<'program> LowerCtx<'program> {
                     // Preserve a statically known integer through the fresh
                     // Load so an imported list_index/take_list/skip_list
                     // wrapper can select the correct primal positions.
-                    if let Some(value) = self.static_i64_from_node(*actual) {
-                        subctx.static_size_bindings.insert(name.clone(), value);
-                    }
+                    let facts = ValueFacts {
+                        static_size: self.static_i64_from_node(*actual),
+                        ..ValueFacts::default()
+                    };
                     subctx.interface_loads.insert(name.clone());
                     let load = subctx.dag.add_node(
                         subctx.owner(),
@@ -11916,9 +12072,11 @@ impl<'program> LowerCtx<'program> {
                     }
                     remap_formal_types.push(param_ty.clone());
                     remap_actual_types.push(node_type(self, *actual));
-                    subctx
-                        .bindings
-                        .insert(name.clone(), LoweredValue::Node(load));
+                    subctx.bindings.insert_with_facts(
+                        name.clone(),
+                        LoweredValue::Node(load),
+                        facts,
+                    );
                 }
                 None => raise_fatal_lowering_error(
                     format!("gradient parameter {index} has no actual argument mapping"),
@@ -12396,7 +12554,6 @@ impl<'program> LowerCtx<'program> {
         };
         let saved = self.bindings.clone();
         let witness_start = self.invocation_witnesses.len();
-        let saved_witnesses = self.binding_witnesses.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
@@ -12404,9 +12561,6 @@ impl<'program> LowerCtx<'program> {
         let saved_local_ascription_tokens = self.local_ascription_tokens.clone();
         self.local_ascription_tokens.clear();
         let call_span = self.current_span_id.clone();
-        let saved_list_bindings = self.list_bindings.clone();
-        let saved_shape_bindings = self.shape_bindings.clone();
-        let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         let saved_dim_substitutions = self.dim_substitutions.clone();
@@ -12496,12 +12650,14 @@ impl<'program> LowerCtx<'program> {
             // erase the only evidence that `model` in `apply(model, x)` is an
             // unresolved outer callable.
             self.fn_typed_params.remove(name);
-            if let Some(value) = static_size {
-                self.static_size_bindings.insert(name.clone(), value);
-            } else {
-                self.static_size_bindings.remove(name);
-            }
+            // The parameter replaces every fact of a same-named binding in
+            // the scope the body resolves in.
+            let facts = ValueFacts {
+                static_size,
+                ..ValueFacts::default()
+            };
             if let Some(callable) = callable {
+                self.bindings.replace_facts(name, facts);
                 match callable {
                     // Preserve structural incompleteness when an unresolved
                     // outer function parameter is forwarded through a helper.
@@ -12528,7 +12684,7 @@ impl<'program> LowerCtx<'program> {
                     authored_formal_type_exprs.push(authored_formal_expr.clone());
                     actual_types.push(actual_ty);
                 }
-                self.bindings.insert(name.clone(), arg_id);
+                self.bindings.insert_with_facts(name.clone(), arg_id, facts);
             }
         }
         self.dim_substitutions
@@ -12738,7 +12894,7 @@ impl<'program> LowerCtx<'program> {
         }
         self.validate_local_ascription_token_ownership();
         let result = self.retain_invocation_witnesses(result, witness_start);
-        self.binding_witnesses = saved_witnesses;
+        self.bindings.restore_witnesses(saved.witness_snapshot());
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
@@ -12754,9 +12910,6 @@ impl<'program> LowerCtx<'program> {
             }
         }
         self.bindings = saved;
-        self.list_bindings = saved_list_bindings;
-        self.shape_bindings = saved_shape_bindings;
-        self.static_size_bindings = saved_static_size_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         self.dim_substitutions = saved_dim_substitutions;
@@ -12774,7 +12927,7 @@ impl<'program> LowerCtx<'program> {
         params: &[String],
         body: &Expr,
     ) -> LoweredValue {
-        let saved_witnesses = self.binding_witnesses.clone();
+        let saved_witnesses = self.bindings.witness_snapshot();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature = self.signature_witnesses.clone();
         let saved_activation = self.activation_witnesses.clone();
@@ -12893,7 +13046,7 @@ impl<'program> LowerCtx<'program> {
         }
         self.validate_local_ascription_token_ownership();
         let result = self.retain_invocation_witnesses(result, start);
-        self.binding_witnesses = saved_witnesses;
+        self.bindings.restore_witnesses(saved_witnesses);
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature;
         self.activation_witnesses = saved_activation;
@@ -12923,15 +13076,13 @@ impl<'program> LowerCtx<'program> {
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
             // Same shadowing rationale as `lower_plain_callable_app`.
             self.fn_typed_params.remove(name);
-            if let Some(value) = arg_id
-                .as_single_node()
-                .and_then(|node| self.static_i64_from_node(node))
-            {
-                self.static_size_bindings.insert(name.clone(), value);
-            } else {
-                self.static_size_bindings.remove(name);
-            }
-            self.bindings.insert(name.clone(), arg_id);
+            let facts = ValueFacts {
+                static_size: arg_id
+                    .as_single_node()
+                    .and_then(|node| self.static_i64_from_node(node)),
+                ..ValueFacts::default()
+            };
+            self.bindings.insert_with_facts(name.clone(), arg_id, facts);
         }
         let result = self.lower_resolved_body(fn_expr, &param_names, body);
         if let Some(ret_ty_expr) = fn_expr.result_type() {
@@ -16883,14 +17034,14 @@ impl<'program> LowerCtx<'program> {
 
     fn resolved_list_expr(&self, expr: &Expr) -> Expr {
         bare_var_name(expr)
-            .and_then(|name| self.list_bindings.get(&name).cloned())
+            .and_then(|name| self.bindings.list(&name).cloned())
             .unwrap_or_else(|| expr.clone())
     }
 
     fn is_host_list_expr(&self, expr: &Expr) -> bool {
         if bare_var_name(expr)
             .as_deref()
-            .is_some_and(|name| self.list_bindings.contains_key(name))
+            .is_some_and(|name| self.bindings.list(name).is_some())
         {
             return true;
         }
@@ -17837,9 +17988,7 @@ impl<'program> LowerCtx<'program> {
     /// arithmetic walker the checker uses. Axis folding remains on the
     /// narrower [`extract_int_for_dim`] path.
     fn fold_static_size(&self, expr: &Expr) -> Option<i64> {
-        chelis_types::fold_static_int_expr(expr, |name| {
-            self.static_size_bindings.get(name).copied()
-        })
+        chelis_types::fold_static_int_expr(expr, |name| self.bindings.static_size(name))
     }
 
     /// chelis#620: resolve an already-lowered `if` condition to a
@@ -17856,7 +18005,7 @@ impl<'program> LowerCtx<'program> {
     ///
     /// Works at the DAG-node level, not the Deep-expression level, because by
     /// the time `lower_if` runs, inlined-function parameters are already
-    /// bound to lowered nodes (`static_size_bindings` is only populated by
+    /// bound to lowered nodes (a binding's static-integer fact is only recorded by
     /// `lower_let`, never at param-binding time), and the comparison/boolean
     /// surface retains direct `Compare` and `Logical` identities.
     /// Zero-divisor `FloorDiv`/`TruncDiv` refuses the fold rather than folding
@@ -18097,7 +18246,7 @@ impl<'program> LowerCtx<'program> {
             return Some(n);
         }
         // A shape(...) read (direct app, or a bare/cast-wrapped var recorded
-        // in `shape_bindings`) of a statically-sized operand axis folds to
+        // in a binding's shape fact) of a statically-sized operand axis folds to
         // that extent; a symbolic extent fails the fold.
         if let Some((operand, axis)) = self.shape_app_operand_axis_resolved(expr) {
             let operand_id = self.lower_expr(&operand).as_single_node()?;
@@ -18111,10 +18260,7 @@ impl<'program> LowerCtx<'program> {
         match tag {
             // A bare `var` bound to a static value by a prior `let`. (A
             // shape-bound var was already handled above.)
-            DeepTag::Var => self
-                .static_size_bindings
-                .get(&bare_var_name(expr)?)
-                .copied(),
+            DeepTag::Var => self.bindings.static_size(&bare_var_name(expr)?),
             DeepTag::Cast => self.fold_shape_derived_static_size(kids.first()?, sources),
             DeepTag::App => {
                 let op = bare_var_name(kids.first()?)?;
@@ -18215,7 +18361,7 @@ impl<'program> LowerCtx<'program> {
 
     /// Leaf recognizer for [`Self::is_shape_derived_arith_dim`]: a static
     /// int (literal / `(lit ...)` / cast-wrapped), a `shape(operand, axis)`
-    /// read (direct or a `shape_bindings` alias), a bound runtime rank-zero
+    /// read (direct or a shape-fact alias), a bound runtime rank-zero
     /// integer node (parameter, helper result, or local computed alias),
     /// a `let`-bound static var, or a nested app of the same language.
     fn is_shape_derived_arith_leaf(&self, expr: &Expr) -> bool {
@@ -18229,8 +18375,9 @@ impl<'program> LowerCtx<'program> {
             return false;
         };
         match tag {
-            DeepTag::Var => bare_var_name(expr)
-                .is_some_and(|name| self.static_size_bindings.contains_key(&name)),
+            DeepTag::Var => {
+                bare_var_name(expr).is_some_and(|name| self.bindings.static_size(&name).is_some())
+            }
             DeepTag::Cast => kids
                 .first()
                 .is_some_and(|inner| self.is_shape_derived_arith_leaf(inner)),
@@ -18292,7 +18439,7 @@ impl<'program> LowerCtx<'program> {
     /// this holds, and has nothing to read when it does not (chelis#469).
     fn names_a_value(&self, name: &str) -> bool {
         self.bindings.contains_key(name)
-            || self.static_size_bindings.contains_key(name)
+            || self.bindings.static_size(name).is_some()
             || self.program_defs.contains_key(name)
             || self.program_types.contains_key(name)
             || self.program_signatures.contains_key(name)
@@ -18319,7 +18466,7 @@ impl<'program> LowerCtx<'program> {
         span: Option<String>,
         authored_signature: bool,
     ) {
-        self.binding_witnesses.clear();
+        self.bindings.clear_witnesses();
         self.signature_witnesses.clear();
         self.activation_witnesses.clear();
         self.signature_is_authored = authored_signature;
@@ -18445,8 +18592,7 @@ impl<'program> LowerCtx<'program> {
                 self.activation_witnesses.push(witness);
                 self.invocation_witnesses.push(witness);
             }
-            self.binding_witnesses
-                .insert(name.clone(), (input, witnesses));
+            self.bindings.set_witnesses(name, (input, witnesses));
         }
     }
 
@@ -18456,7 +18602,7 @@ impl<'program> LowerCtx<'program> {
             expr = children.first()?;
         }
         let name = bare_var_name(expr)?;
-        let binding @ (input, _) = self.binding_witnesses.get(&name)?;
+        let binding @ (input, _) = self.bindings.witnesses(&name)?;
         (self.bindings.get(&name)?.as_single_node()? == *input).then_some(binding)
     }
 
@@ -19524,7 +19670,7 @@ impl<'program> LowerCtx<'program> {
     /// returns `None` — at which point the caller silently defaults the
     /// extent to `Lit(1)`, the `Lit(n) vs Lit(1)` backward-DAG failure this
     /// issue tracks. Here, when the stripped expression is a `var <name>`
-    /// recorded in [`Self::shape_bindings`] as a `shape(operand, axis)`
+    /// recorded as a binding's shape fact ([`ValueFacts::shape`]), a `shape(operand, axis)`
     /// binding, recover the operand/axis from that bound app instead.
     ///
     /// Returns the *operand* `Expr` by value (cloned from the binding when
@@ -19540,7 +19686,7 @@ impl<'program> LowerCtx<'program> {
         // app for `let`-to-`let` aliases too (chelis#469 RT-3), a single
         // lookup here resolves a whole alias chain to its real source.
         let name = bare_var_name(strip_cast_wrappers(expr))?;
-        let bound = self.shape_bindings.get(&name)?;
+        let bound = self.bindings.shape(&name)?;
         let (operand, axis) = shape_app_operand_axis(bound)?;
         Some((operand.clone(), axis))
     }
@@ -19551,7 +19697,7 @@ impl<'program> LowerCtx<'program> {
     /// `shape(...)` app `Expr` when:
     ///   - the value IS a `shape(...)` app (possibly `cast`-wrapped), or
     ///   - the value is a bare / `cast`-wrapped `var` already recorded in
-    ///     [`Self::shape_bindings`] (an alias of an earlier shape name).
+    ///     a binding's shape fact (an alias of an earlier shape name).
     ///
     /// Returning the UNDERLYING app (not the alias name) is the safety
     /// property: the recovered extent and its `shape_dep` liveness edge bind
@@ -19559,14 +19705,14 @@ impl<'program> LowerCtx<'program> {
     /// the wrong `Load`. Because each recorded alias already points at the
     /// underlying app, a chain (`a = shape(x, 0); c = a; d = cast(c, i32)`)
     /// resolves in one lookup per link at bind time. Mirrors how
-    /// [`Self::fold_static_size`] recurses [`Self::static_size_bindings`] for
+    /// [`Self::fold_static_size`] recurses static-integer facts for
     /// the static path (`j = k; ...` folds through the alias).
     fn resolve_shape_binding_source(&self, value: &Expr) -> Option<Expr> {
         if shape_app_operand_axis(value).is_some() {
             return Some(value.clone());
         }
         let alias = bare_var_name(strip_cast_wrappers(value))?;
-        self.shape_bindings.get(&alias).cloned()
+        self.bindings.shape(&alias).cloned()
     }
 
     fn lower_handle_effect(&mut self, meta: &Metadata, kids: &[Expr]) -> LoweredValue {
@@ -20216,15 +20362,11 @@ impl<'program> LowerCtx<'program> {
         }
         let saved = self.bindings.clone();
         let witness_start = self.invocation_witnesses.len();
-        let saved_witnesses = self.binding_witnesses.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
         let saved_signature_is_authored = self.signature_is_authored;
         let call_span = self.current_span_id.clone();
-        let saved_list_bindings = self.list_bindings.clone();
-        let saved_shape_bindings = self.shape_bindings.clone();
-        let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
@@ -20329,15 +20471,11 @@ impl<'program> LowerCtx<'program> {
             self.preserve_declared_result(&result, ty, None);
         }
         let result = self.retain_invocation_witnesses(result, witness_start);
-        self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
         self.signature_is_authored = saved_signature_is_authored;
         self.bindings = saved; // Restore scope
-        self.list_bindings = saved_list_bindings;
-        self.shape_bindings = saved_shape_bindings;
-        self.static_size_bindings = saved_static_size_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -21667,17 +21805,12 @@ impl<'program> LowerCtx<'program> {
                         );
                     }
                     let saved = self.bindings.clone();
-                    let saved_list_bindings = self.list_bindings.clone();
-                    let saved_shape_bindings = self.shape_bindings.clone();
-                    let saved_static_size_bindings = self.static_size_bindings.clone();
                     let saved_callables = self.local_callables.clone();
                     let saved_fn_typed_params = self.fn_typed_params.clone();
                     for (name, value) in binds {
                         // Pattern binds shadow every same-named outer
-                        // binding class, mirroring `lower_plain_callable_app`.
-                        self.list_bindings.remove(&name);
-                        self.shape_bindings.remove(&name);
-                        self.static_size_bindings.remove(&name);
+                        // binding class, mirroring `lower_plain_callable_app`;
+                        // binding the value replaces the name's facts.
                         self.local_callables.remove(&name);
                         self.fn_typed_params.remove(&name);
                         self.bindings.insert(name, value);
@@ -21689,9 +21822,6 @@ impl<'program> LowerCtx<'program> {
                     }
                     let value = self.lower_expr(body);
                     self.bindings = saved;
-                    self.list_bindings = saved_list_bindings;
-                    self.shape_bindings = saved_shape_bindings;
-                    self.static_size_bindings = saved_static_size_bindings;
                     self.local_callables = saved_callables;
                     self.fn_typed_params = saved_fn_typed_params;
                     return value;
@@ -24793,7 +24923,7 @@ mod tests {
     /// size referencing the re-bound name does not recover the old shape
     /// extent 3 — it folds to the NEW static value (5) instead (chelis#469/
     /// #528 static-value shadowing symmetry). Guards the shadowing
-    /// path in `lower_let` for both `shape_bindings` and `static_size_bindings`.
+    /// path in `lower_let` for both the shape and the static-integer fact.
     #[test]
     fn issue_369_expand_shadowed_let_binding_does_not_leak_stale_shape() {
         // len = shape(x, 0)          -- shape binding
@@ -26597,8 +26727,14 @@ mod tests {
             LinearityInfo::default(),
         ).declared_for_test();
         let caller = ctx.lower_expr(&parse("(cast {} (lit {} 3) i64)"));
-        ctx.bindings.insert("n".into(), caller.clone());
-        ctx.static_size_bindings.insert("n".into(), 3);
+        ctx.bindings.insert_with_facts(
+            "n".into(),
+            caller.clone(),
+            ValueFacts {
+                static_size: Some(3),
+                ..ValueFacts::default()
+            },
+        );
         let root = ctx
             .lower_expr(&parse(
                 "(app {} (var {} repeat) (cast {} (lit {} 1) i64) (var {} n))",
@@ -26607,8 +26743,8 @@ mod tests {
         let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
             .expect("static count remains caller-owned");
         assert_eq!(values[&root].to_f64_lossy_vec(), vec![7.0; 3]);
-        assert_eq!(ctx.static_size_bindings["n"], 3);
-        assert!(!ctx.static_size_bindings.contains_key("count"));
+        assert_eq!(ctx.bindings.static_size("n"), Some(3));
+        assert_eq!(ctx.bindings.static_size("count"), None);
         assert_eq!(ctx.bindings["n"].as_single_node(), caller.as_single_node());
     }
 
