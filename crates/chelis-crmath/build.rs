@@ -6,7 +6,12 @@
 //! passes the strict profile explicitly. The amalgamation's `#error` guards fail the
 //! build if fast math or excess precision still reaches the compiler.
 
-const AMBIENT_FLAG_VARIABLES: &[&str] = &["CFLAGS", "TARGET_CFLAGS", "HOST_CFLAGS", "CCC_OVERRIDE_OPTIONS"];
+const AMBIENT_FLAG_VARIABLES: &[&str] = &[
+    "CFLAGS",
+    "TARGET_CFLAGS",
+    "HOST_CFLAGS",
+    "CCC_OVERRIDE_OPTIONS",
+];
 
 fn is_ambient_flag_variable(key: &str) -> bool {
     AMBIENT_FLAG_VARIABLES.contains(&key) || key.starts_with("CFLAGS_")

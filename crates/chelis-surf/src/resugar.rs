@@ -3182,7 +3182,8 @@ pub(crate) fn round_integer_at_float_width(value: i64, suffix: LiteralSuffix) ->
         };
     }
 
-    let target = (rounded as f64) * 2_f64.powi(shift as i32);
+    // `shift <= 63`, so the power of two is exact.
+    let target = (rounded as f64) * (1_u64 << shift) as f64;
     if value.is_negative() { -target } else { target }
 }
 
