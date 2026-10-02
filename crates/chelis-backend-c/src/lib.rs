@@ -3905,8 +3905,9 @@ int main(void) {{
         dag.add_node(decl, RiscOp::Tan, vec![x], scalar_f32(), None);
         let result = codegen(&dag, "test_tan").unwrap();
         let src = &result.c_source;
+        // [04-NUM-2]: the call's NaN is finalized by the canonical-NaN helper.
         assert!(
-            src.contains("= chelis_cr_tanf("),
+            src.contains("__chelis_nan_f32(chelis_cr_tanf("),
             "tan must call `chelis_cr_tanf(`; got:\n{src}"
         );
         assert!(

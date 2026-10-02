@@ -2457,7 +2457,8 @@ fn exec_exp_kernel_correct_output() {
         "generated C must not include chelis_math.h"
     );
     assert!(
-        src.contains("static float chelis_cr_expf(float x)") && src.contains("= chelis_cr_expf("),
+        src.contains("static float chelis_cr_expf(float x)")
+            && src.contains("__chelis_nan_f32(chelis_cr_expf("),
         "generated C must define and call the carried exp kernel"
     );
     assert!(
