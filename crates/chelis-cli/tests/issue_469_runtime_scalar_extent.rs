@@ -424,3 +424,120 @@ fn two_different_runtime_extents_meeting_elementwise_trap_on_both_lanes() {
         assert!(!text.contains("out = "), "{lane}: {text}");
     }
 }
+
+/// Section 4.7.2: a size name that denotes both a value binding and an
+/// in-scope dimension is a type error. Here the local `n` shadows the binder
+/// `n`; eval used to print the local's 3 while C printed the operand's 2.
+/// Check rejects it, and so do eval and build, which check first. The
+/// checker's rows for every spelling are in
+/// `crates/chelis-types/tests/issue_469_runtime_scalar_extent_check.rs`.
+#[test]
+fn a_size_name_that_is_both_a_value_and_a_dimension_is_rejected_on_every_command() {
+    let dir = tempdir().expect("tempdir");
+    let stem = "ambiguous";
+    let path = write_fixture(
+        &dir,
+        stem,
+        "def f[n](x: tensor[n, i64], m: i64) -> i64 = {\n  n = m\n  y = insert(x, 0, n)\n  shape(y, 0)\n}\n\
+         out = f(to_tensor([1i64, 2i64]), 3i64)\n",
+    );
+    let needle = "insert size names `n`, which is both a value of type i64 and a dimension \
+                  binder of the enclosing definition, so the extent it denotes is ambiguous";
+    for (command, output) in [
+        ("check", check(&path)),
+        ("eval", eval(&path)),
+        ("build", build_and_run(&dir, stem, &path)),
+    ] {
+        let text = combined(&output);
+        assert!(!output.status.success(), "{command} must reject: {text}");
+        assert!(text.contains(needle), "{command}: {text}");
+        assert!(!text.contains("out = "), "{command}: {text}");
+    }
+}
+
+/// The renamed twins of the ambiguous spellings: once the value and the
+/// dimension have different names, each one means what it says, on both
+/// lanes.
+#[test]
+fn renamed_values_and_dimensions_execute_on_both_lanes() {
+    let operand = "to_tensor([1i64, 2i64])";
+    for (stem, source, expected) in [
+        (
+            "renamed_local",
+            format!(
+                "def f[n](x: tensor[n, i64], m: i64) -> i64 = {{\n  k = m\n  y = insert(x, 0, k)\n  shape(y, 0)\n}}\n\
+                 out = f({operand}, 3i64)\n"
+            ),
+            "out = 3".to_string(),
+        ),
+        (
+            "renamed_parameter",
+            format!(
+                "def f[n](x: tensor[n, i64], k: i64) = insert(x, 0, k)\nout = f({operand}, 3i64)\n"
+            ),
+            THREE_BY_TWO.to_string(),
+        ),
+        (
+            "renamed_static_global",
+            format!(
+                "h = 5i64\n\
+                 def f[n](x: tensor[n, i64]) -> i64 = shape(insert(x, 0, h), 0)\n\
+                 out = f({operand})\n"
+            ),
+            "out = 5".to_string(),
+        ),
+        (
+            "renamed_binder",
+            format!(
+                "n = 5i64\n\
+                 def f[d](x: tensor[d, i64]) -> i64 = shape(insert(x, 0, n), 0)\n\
+                 out = f({operand})\n"
+            ),
+            "out = 5".to_string(),
+        ),
+        (
+            "renamed_runtime_global",
+            format!(
+                "def g(k: i64) -> i64 = add(k, 1i64)\n\
+                 h = g(4i64)\n\
+                 def f[n](x: tensor[n, i64]) = insert(x, 0, h)\n\
+                 out = f({operand})\n"
+            ),
+            "tensor(shape=[5, 2], data=[1, 2, 1, 2, 1, 2, 1, 2, 1, 2])".to_string(),
+        ),
+        (
+            "renamed_computed_local",
+            format!(
+                "def f[n](x: tensor[n, i64]) -> i64 = {{\n  m = add(shape(x, 0), 1i64)\n  \
+                 tensor_to_scalar(sum(sum(insert(x, 0, m), 0), 0))\n}}\n\
+                 out = f({operand})\n"
+            ),
+            "out = 9".to_string(),
+        ),
+    ] {
+        assert_lanes_agree(stem, &source, &expected);
+    }
+}
+
+/// A size name that is neither a value nor a dimension has no extent to read.
+/// Lowering keeps its fatal error for it on both lanes rather than reading the
+/// name as an unbound runtime input.
+#[test]
+fn a_size_name_that_is_neither_a_value_nor_a_dimension_is_a_lowering_error_on_both_lanes() {
+    let dir = tempdir().expect("tempdir");
+    let stem = "unbound";
+    let path = write_fixture(
+        &dir,
+        stem,
+        "def f(x: tensor[2, i64]) = insert(x, 0, zz)\nout = f(to_tensor([1i64, 2i64]))\n",
+    );
+    let needle = "`insert` size resolves to `zz`, but no in-scope tensor axis supplies that extent";
+    for (lane, output) in [
+        ("eval", eval(&path)),
+        ("c", build_and_run(&dir, stem, &path)),
+    ] {
+        let text = combined(&output);
+        assert!(!output.status.success(), "{lane} must reject: {text}");
+        assert!(text.contains(needle), "{lane}: {text}");
+    }
+}

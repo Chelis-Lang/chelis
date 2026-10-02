@@ -860,6 +860,12 @@ pub(super) fn check_expand_signature(
     if arg_tys.len() != 3 && arg_tys.len() != 4 {
         return report_builtin_arity_bare(errors, builtin, "3 or 4 arguments", arg_tys.len());
     }
+    if let Some(error) = arg_exprs
+        .get(2)
+        .and_then(|size| ambiguous_size_name_error(builtin, size, env, subst))
+    {
+        return report(errors, error);
+    }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
     let (input_dims, input_prec) = match input_ty {

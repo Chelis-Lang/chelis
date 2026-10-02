@@ -206,3 +206,134 @@ fn a_literal_claim_a_literal_size_refutes_is_still_a_type_error() {
         );
     }
 }
+
+/// Section 4.7.2: a name in the size that denotes both a value binding and an
+/// in-scope dimension is a type error. The checker, lowering and eval each
+/// picked one reading of such a name, and they did not pick the same one, so
+/// these programs printed different extents on eval and C, or returned an
+/// extent other than the one requested, with no diagnostic. Every occurrence
+/// counts, bare or under `cast` and arithmetic.
+const AMBIGUOUS_SIZE_NAMES: [(&str, &str, &str); 10] = [
+    (
+        "a local shadowing the binder, declared result",
+        "def f[n](x: tensor[n, i64], m: i64) -> tensor[n, n, i64] = {\n  n = m\n  insert(x, 0, n)\n}\n\
+         out = f(to_tensor([1i64, 2i64]), 3i64)\n",
+        "a dimension binder of the enclosing definition",
+    ),
+    (
+        "a local shadowing the binder, shape read",
+        "def f[n](x: tensor[n, i64], m: i64) -> i64 = {\n  n = m\n  y = insert(x, 0, n)\n  shape(y, 0)\n}\n\
+         out = f(to_tensor([1i64, 2i64]), 3i64)\n",
+        "a dimension binder of the enclosing definition",
+    ),
+    (
+        "a parameter spelled like the binder",
+        "def f[n](x: tensor[n, i64], n: i64) -> tensor[n, n, i64] = insert(x, 0, n)\n\
+         out = f(to_tensor([1i64, 2i64]), 3i64)\n",
+        "a dimension binder of the enclosing definition",
+    ),
+    (
+        "a static top-level binding spelled like the binder",
+        "n = 5i64\n\
+         def f[n](x: tensor[n, i64]) -> i64 = shape(insert(x, 0, n), 0)\n\
+         out = f(to_tensor([1i64, 2i64]))\n",
+        "a dimension binder of the enclosing definition",
+    ),
+    (
+        "a runtime top-level binding spelled like the binder, shape read",
+        "def g(k: i64) -> i64 = add(k, 1i64)\n\
+         n = g(4i64)\n\
+         def f[n](x: tensor[n, i64]) -> i64 = shape(insert(x, 0, n), 0)\n\
+         out = f(to_tensor([1i64, 2i64]))\n",
+        "a dimension binder of the enclosing definition",
+    ),
+    (
+        "a runtime top-level binding spelled like the binder, tensor result",
+        "def g(k: i64) -> i64 = add(k, 1i64)\n\
+         n = g(4i64)\n\
+         def f[n](x: tensor[n, i64]) = insert(x, 0, n)\n\
+         out = f(to_tensor([1i64, 2i64]))\n",
+        "a dimension binder of the enclosing definition",
+    ),
+    (
+        "a local computed from the extent it shadows",
+        "def f[n](x: tensor[n, i64]) = {\n  n = add(shape(x, 0), 1i64)\n  insert(x, 0, n)\n}\n\
+         out = f(to_tensor([1i64, 2i64]))\n",
+        "a dimension binder of the enclosing definition",
+    ),
+    (
+        "a local computed from the extent it shadows, reduced",
+        "def f[n](x: tensor[n, i64]) -> i64 = {\n  n = add(shape(x, 0), 1i64)\n  \
+         tensor_to_scalar(sum(sum(insert(x, 0, n), 0), 0))\n}\n\
+         out = f(to_tensor([1i64, 2i64]))\n",
+        "a dimension binder of the enclosing definition",
+    ),
+    (
+        "the ambiguous name under arithmetic",
+        "def f[n](x: tensor[n, i64], n: i64) = insert(x, 0, add(n, 1i64))\n\
+         out = f(to_tensor([1i64, 2i64]), 3i64)\n",
+        "a dimension binder of the enclosing definition",
+    ),
+    (
+        "the ambiguous name under a cast",
+        "def f[n](x: tensor[n, i64], n: i32) = insert(x, 0, cast(n, i64))\n\
+         out = f(to_tensor([1i64, 2i64]), 3i32)\n",
+        "a dimension binder of the enclosing definition",
+    ),
+];
+
+#[test]
+fn a_size_name_that_is_both_a_value_and_a_dimension_is_a_type_error() {
+    for (label, source, dimension) in AMBIGUOUS_SIZE_NAMES {
+        for op in ["insert", "expand"] {
+            // `expand` broadcasts a unit axis, so its twin first inserts one.
+            let source = if op == "expand" {
+                source.replace("insert(x, 0, ", "expand(insert(x, 0, 1i64), 0, ")
+            } else {
+                source.to_string()
+            };
+            let rep = check_ir_program(&surf_to_deep(&source))
+                .err()
+                .unwrap_or_else(|| panic!("{op}: {label}: must reject at check"));
+            let msgs = messages(&rep);
+            assert!(
+                msgs.iter().any(|m| m.contains(&format!(
+                    "{op} size names `n`, which is both a value of type"
+                )) && m.contains(dimension)
+                    && m.contains("ambiguous")),
+                "{op}: {label}: expected the ambiguous-name diagnostic, got {msgs:?}"
+            );
+        }
+    }
+}
+
+/// The renamed twins of the rows above: once the value and the dimension have
+/// different names, each program checks clean. Their executed agreement on
+/// eval and C is in the CLI suite.
+#[test]
+fn renaming_either_meaning_checks_clean() {
+    for (label, source) in [
+        (
+            "a renamed local",
+            "def f[n](x: tensor[n, i64], m: i64) -> i64 = {\n  k = m\n  y = insert(x, 0, k)\n  shape(y, 0)\n}\n",
+        ),
+        (
+            "a renamed parameter",
+            "def f[n](x: tensor[n, i64], k: i64) = insert(x, 0, add(k, 1i64))\n",
+        ),
+        (
+            "a renamed top-level binding",
+            "h = 5i64\ndef f[n](x: tensor[n, i64]) -> i64 = shape(insert(x, 0, h), 0)\n",
+        ),
+        (
+            "a renamed binder",
+            "n = 5i64\ndef f[d](x: tensor[d, i64]) -> i64 = shape(insert(x, 0, n), 0)\n",
+        ),
+        (
+            "the dimension itself, unshadowed",
+            "def f[n](x: tensor[n, i64]) -> tensor[n, n, i64] = insert(x, 0, n)\n",
+        ),
+    ] {
+        assert_checks_clean(source, label);
+    }
+}

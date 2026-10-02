@@ -171,6 +171,56 @@ pub(super) fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
     kids.first().and_then(symbol_name)
 }
 
+/// The type error for an `expand`/`insert` size that names something both a
+/// value and a dimension (spec/04-type-system.md section 4.7.2).
+///
+/// A size expression reads values, and a bare name in it may also preserve a
+/// dimension's identity. When one name occurrence denotes both a value binding
+/// (a parameter, a local or a top-level binding) and an in-scope dimension (a
+/// binder of the enclosing definition, or a dimension a tensor type in scope
+/// carries), the two readings can give different extents, and nothing in the
+/// program says which is meant. Every free name of the size counts, under
+/// `cast` and arithmetic as well as bare, so no spelling of the size can pick
+/// a reading silently (chelis#469).
+pub(super) fn ambiguous_size_name_error(
+    builtin: &str,
+    size: &deep::Expr,
+    env: &Env,
+    subst: &Subst,
+) -> Option<CheckError> {
+    crate::linearity::free_runtime_variables(size)
+        .into_iter()
+        .find_map(|name| {
+            let value = match env.top_level_value_visibility(&name) {
+                TopLevelValueVisibility::Visible => env.lookup(&name),
+                TopLevelValueVisibility::NotYetDeclared { shadowed } => shadowed,
+            }?;
+            let dimension = if env
+                .type_resolution_binders()
+                .is_some_and(|binders| binders.dim_vars.contains_key(&name))
+            {
+                "a dimension binder of the enclosing definition"
+            } else if env.tensor_carries_dim_with_subst(&name, subst) {
+                "a dimension carried by a tensor type in scope"
+            } else {
+                return None;
+            };
+            let value_ty = subst.apply(&value.body);
+            Some(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "{builtin} size names `{name}`, which is both a value of type {value_ty} \
+                     and {dimension}, so the extent it denotes is ambiguous \
+                     (spec/04-type-system.md \u{00a7}4.7.2)"
+                ),
+                vec![format!(
+                    "Rename the value or the dimension so `{name}` has one meaning; \
+                     `shape(t, axis)` reads a tensor's extent explicitly."
+                )],
+            ))
+        })
+}
+
 /// Record, or clear, the folded value of a value binding used as an extent.
 ///
 /// A binding whose right-hand side folds to a checked integer constant lets a

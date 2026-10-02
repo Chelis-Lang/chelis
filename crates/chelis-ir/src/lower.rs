@@ -15540,7 +15540,9 @@ impl<'program> LowerCtx<'program> {
                     //     section 4.7.2 forbids refusing an extent for its
                     //     provenance (chelis#469). The identity recognized here
                     //     is a refinement; missing it yields a fresh extent
-                    //     under the section 4.7 guards, never a rejection.
+                    //     under the section 4.7 guards, never a rejection. A
+                    //     name that is neither a dimension nor a value has no
+                    //     extent to read at all, and stays a fatal error.
                     else if let Some(name) = bare_var_name(strip_cast_wrappers(size_arg)) {
                         if let Some(value) =
                             self.dim_substitutions.get(&name).and_then(|dim| match dim {
@@ -15570,8 +15572,16 @@ impl<'program> LowerCtx<'program> {
                                     },
                                 )),
                             }
-                        } else {
+                        } else if self.names_a_value(&name) {
                             self.lower_one_bound(size_arg, &mut inputs, "expand size")
+                        } else {
+                            raise_fatal_lowering_error(
+                                format!(
+                                    "`{callee}` size resolves to `{name}`, but no in-scope tensor axis supplies that extent. Use an i64 literal or a shape(tensor, i32-axis) read. Tracked by Chelis-Lang/chelis#469"
+                                ),
+                                Some(app_span),
+                                self.current_span_id.clone(),
+                            )
                         }
                     }
                     // (4) chelis#1379: every other checked integer size is an
@@ -18224,6 +18234,21 @@ impl<'program> LowerCtx<'program> {
                 .position(|dim| matches!(dim, DimInfo::Named(n, _) if n == name))?;
             Some((node.id, axis, node.output_type.dims[axis].clone()))
         })
+    }
+
+    /// True when `name` reads a value here: a local or parameter binding, a
+    /// graph input, a folded static size, or a top-level declaration. An
+    /// `expand`/`insert` size naming such a value lowers as dataflow; a name
+    /// that is none of these, and no dimension either, has nothing to read
+    /// (chelis#469).
+    fn names_a_value(&self, name: &str) -> bool {
+        self.bindings.contains_key(name)
+            || self.interface_loads.contains(name)
+            || self.static_size_bindings.contains_key(name)
+            || self.program_defs.contains_key(name)
+            || self.program_types.contains_key(name)
+            || self.program_signatures.contains_key(name)
+            || LoadStoreName::top_level_source_for_label(name).is_ok_and(|source| source.is_some())
     }
 
     /// Recover an `expand` extent from a `shape(operand, axis)` size
