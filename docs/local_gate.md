@@ -143,35 +143,27 @@ rather than skipping it.
 conformance skill assets, and the opaque-invariants corpus) and
 `cargo fmt --all`, then `ci_change_owned.py classify-paths` over the changed
 set, `chelis lint --check .`, `scripts/eval_system_guard.py` over the evaluator
-source, `cargo clippy -p <crate> --tests -- -D warnings` for each changed crate,
+source, `scripts/check_std_bundle_untracked.py` over the index,
+`cargo clippy -p <crate> --tests -- -D warnings` for each changed crate,
 one `cargo nextest run` over the drift tripwires (atom
 partition, generated dtype header, compiler pins, opaque corpus,
 loud-unsupported, payload census, bundled std loader, conformance manifest,
 asset drift, skill-set uniformity, phase-3 gate inventory, stack-guard
 coverage, runtime-extent target manifest), and, when a `packages/chelis-std/`
-or `crates/chelis-std-bundle/` path changed, `regen_all.py --tier 1` right
-after tier 0 (so every check sees the regenerated bundle) and
+or `crates/chelis-std-bundle/` path changed,
 `cargo nextest run -p chelis-std-bundle --lib` after the tripwires.
 
-One further conditional leg runs last: when a std path, **any `reef.lock`**, or
-the **root `Cargo.toml`** changed, `cargo nextest run -p chelis-reef --lib` over
-`bundled_chelis_std_lock_hashes_match_embedded_artifacts` and
-`embedded_bundle_rlib_matches_disk`. Those two are the halves of the
-bundled-lock invariant: every committed bundled `reef.lock` must pin the
-embedded bundle's hashes, and the compiled `chelis-std-bundle` rlib must embed
-the bytes that are on disk. They are lib unit tests in `chelis-reef`, and the
-changed-crate stage never selects that crate, because the paths that invalidate
-them belong to other crates (`crates/chelis-cli/tests/fixtures/**/reef.lock`) or
-to no crate at all (`examples/**/reef.lock`, and the root `Cargo.toml` whose
-workspace version `chelis-reef` inherits and feeds into the comparison). A
-fourth trigger is `crates/chelis-reef/` itself, because `--fast` runs clippy
-rather than nextest per changed crate, so editing the discovery walk would
-otherwise never run the guard. The trigger is
-a **superset** of the std one and matches locks by basename rather than by a path
-prefix, because the guard discovers its lock set by walking the tree: a lock
-committed at a new path is in scope the moment it exists. The guard reports
-**every** drifted lock in one run, not the first, so a change that drifts several
-locks costs one CI round rather than one per lock.
+The chelis-std runtime each binary embeds is packed from `packages/chelis-std`
+by `crates/chelis-std-bundle/build.rs` while the compiler builds, so a std edit
+needs no regeneration step: the next build carries it. The bundled std loader
+tripwire builds a fresh copy of the std sources with `chelis reef build` and
+requires the embedded pair and the locks it writes to agree with those bytes,
+and the bundle crate's tests check the input selection and the pinned archive
+mtime. `scripts/check_std_bundle_untracked.py` refuses a tracked file under
+`packages/chelis-std/dist/` or `crates/chelis-std-bundle/dist/`, and a tracked
+`reef.lock` that records the bundled runtime: every lock reef writes names the
+running binary's runtime, so a committed one goes stale with the first std
+edit.
 
 Every writer runs before every check, and the path classification is the first
 check because it is the cheapest row that can reject a push: it is the
@@ -201,9 +193,9 @@ only the working tree, so an in-place crate rename can be ambiguous to the
 planner and clean here.
 
 `--fast` exits non-zero for any failing stage (fmt, regeneration, path
-classification, lint, evaluator source guard, per-crate clippy, the tripwire
-run, the std-bundle self-test, or the bundled-lock guard) and never for a file
-it fixed; a regenerated `dist/` or `reef.lock` is reported as a changed file to
+classification, lint, evaluator source guard, std-bundle tracking guard,
+per-crate clippy, the tripwire run, or the bundle crate's tests) and never for
+a file it fixed; a regenerated artifact is reported as a changed file to
 commit, never as a failure. Changed files are reported from content hashes of
 the porcelain set before and after the run, so a file that was already dirty
 and that fmt changed further is still listed. It never runs a workspace clippy
@@ -221,8 +213,10 @@ is CI-owned through `gate.py lint-and-unit`, because
 the dep-info in the worktree's target, `crates/chelis-prove/src/clarabel_sos.rs`
 is compiled per pull request only by the solver-free row, and the no-default
 row compiles a strict subset of the default row. It then runs
-`cargo fmt --check`, `chelis lint --check .`, the deterministic std-bundle
-regeneration check, the explicit rustdoc commands, the checkpoint and
+`cargo fmt --check`, `chelis lint --check .`, the std-bundle reproducibility
+check (`scripts/check_std_bundle_reproducible.py`, which runs the bundle build
+script in two fresh target directories and compares the packed bytes), the
+explicit rustdoc commands, the checkpoint and
 hash-order compile-fail fixtures, the configuration-closure check, both
 pipeline-core guards, the chelis#908 unrepresentable-domain oracle, the
 runtime-representation oracle, and
@@ -279,10 +273,10 @@ with a final `ORACLE: PASS` line.
 ## Regeneration
 
 `scripts/regen_all.py` is the regeneration entry point on its own as well.
-Default tiers 0 and 1 write (tier 1 is the std bundle and needs cargo);
-`--check` reports every stale artifact; `--full` adds tier 2, the capacity
-census and the runtime-representation inventory. The Python-binding baseline
-stores only stable reviewed rows, flags, authorities, and contracts; current
+Tier 0 writes by default; `--check` reports every stale artifact; `--full`
+adds tier 1, the capacity census and the runtime-representation inventory.
+The chelis-std runtime has no leg: the compiler build packs it. The
+Python-binding baseline stores only stable reviewed rows, flags, authorities, and contracts; current
 graph identities are execution evidence from the dedicated binding acceptance
 test and are never persisted or regenerated. Full regeneration exits 2 naming
 the manual action when a census row lands with citation `TODO` or the

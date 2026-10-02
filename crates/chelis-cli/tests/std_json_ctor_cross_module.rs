@@ -5,10 +5,10 @@
 //! chelis#157 made the reef linker mangle, rewrite, and *export* ADT
 //! constructor names as module symbols, so a downstream program can
 //! `import Std.Io.Json (JsonInt)` and pattern-match on `JsonInt`. But
-//! the capability is only usable for std constructors once the prebuilt
-//! chelis-std bundle is regenerated to carry the exported, mangled
-//! constructor symbols in its shell (`.chb`). The bundle is served from
-//! the embedded bytes in `crates/chelis-std-bundle` whenever the
+//! the capability is only usable for std constructors once the
+//! chelis-std bundle carries the exported, mangled constructor symbols
+//! in its shell (`.chb`). The bundle is served from the embedded bytes
+//! `crates/chelis-std-bundle` packs at build time whenever the
 //! consumer depends on the bundled version, so this test exercises the
 //! shell that ships inside the chelis binary, not a publish-time copy.
 //!

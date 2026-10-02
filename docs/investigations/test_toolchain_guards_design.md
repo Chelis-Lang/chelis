@@ -153,7 +153,7 @@ charset checker was added: that would be a second source of truth for
   - `cargo clippy --workspace --all-targets --no-default-features -- -D warnings`
   - `cargo fmt --all -- --check`
   - `cargo run -p chelis-cli --bin chelis --quiet -- lint --check .`
-  - `<managed-python> scripts/regenerate_chelis_std_bundle.py --debug --check`
+  - `<managed-python> scripts/check_std_bundle_reproducible.py`
   - `cargo test -p chelis-types --doc`
   - `cargo test -p chelis-compiler-api --doc`
   - `cargo test -p chelis-pipeline-core --doc`

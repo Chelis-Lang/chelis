@@ -4,8 +4,9 @@
 //! `phaseA_bundled_chelis_std_loader_property_oracle`, which is the
 //! single comprehensive oracle for the architectural correction that
 //! makes chelis-std's bytes reachable from the chelis binary itself
-//! (via `chelis-std-bundle` + `include_bytes!`) and synthesized into
-//! every project's lockfile via `compiler =` pin.
+//! (packed from `packages/chelis-std` by `chelis-std-bundle` while the
+//! binary builds) and synthesized into every project's lockfile via
+//! `compiler =` pin.
 //!
 //! Sub-cases (asserted in one test so the oracle is one entrypoint):
 //!

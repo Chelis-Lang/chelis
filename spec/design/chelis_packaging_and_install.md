@@ -63,6 +63,13 @@ Layer 2  ORCHESTRATION              `chelis reef setup` + unified `reef doctor`
 | Binary artifacts (translators, toolchain) | `reef install` | `reef.lock` (Binary) | #468 |
 | One-command reproduce + health | `reef setup` / `doctor` | composes all | this doc |
 
+The chelis-std runtime is packed from `packages/chelis-std` by
+`crates/chelis-std-bundle/build.rs` while the compiler builds, and each binary
+embeds it. A lock records it by the hashes of the running binary's runtime, so
+the compiler repository commits neither the runtime pair nor a lock recording
+it ([`reef_distribution.md`](reef_distribution.md), Item 7, "Bundling and
+lockfile synthesis").
+
 ## 3. The lockfile-ownership rule
 
 `reef.lock` records **exactly the artifacts reef itself fetches and

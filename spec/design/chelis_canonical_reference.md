@@ -202,9 +202,9 @@ own `compiler =` pin, regardless of whether `chelis-std` appears in
 against the compiler's bundled runtime version: matching is recorded as
 `Bundled` (idempotent with the synthesized entry), mismatching surfaces a
 typed error naming both versions. The runtime bytes themselves are
-compile-time-embedded into the chelis binary via `include_bytes!()` in
-`crates/chelis-std-bundle`; the loader serves them directly without
-consulting the local registry. Auto-fetch from GitHub is intentionally
+packed from `packages/chelis-std` while the compiler builds and embedded in
+the chelis binary by `crates/chelis-std-bundle`; the loader serves them
+directly without consulting the local registry. Auto-fetch from GitHub is intentionally
 disabled for the runtime; `reef install --bootstrap chelis-std` is
 rejected with a typed error explaining the runtime is compiler-bundled.
 

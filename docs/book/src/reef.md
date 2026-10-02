@@ -101,8 +101,10 @@ fetched files with the lockfile hashes and reports mismatches.
 - `chelis reef install --from-github ORG/REPO@vX.Y.Z` fetches a package from
   a GitHub release and records its origin in the local registry.
 - `chelis reef install --from-monorepo PATH` installs package artifacts already
-  built under a Chelis source checkout's `packages/` directory. Such local
-  installs have no GitHub origin for later lockfile fetching.
+  built under a Chelis source checkout's `packages/` directory; the checkout
+  commits none, so run `chelis reef build` in each package first. Such local
+  installs have no GitHub origin for later lockfile fetching. The bundled
+  `chelis-std` needs no install: every compiler embeds it.
 - `chelis reef install --bootstrap` uses the toolchain's fixed list of
   shell release tags. You can supply explicit `ORG/REPO@TAG` entries
   instead.

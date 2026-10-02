@@ -366,12 +366,12 @@ it the same way Rust programs depend on `core`/`std`. Concretely:
   and integrity comes from the compiler binary itself.
 
 **Bundling and lockfile synthesis (Phase A correction).** The runtime
-bytes — both the source archive (`.tar.zst`) and the shell
-(`.chb`) — are baked into the chelis binary at compile time via
-`include_bytes!()` in the `chelis-std-bundle` crate. The reef loader
-checks for chelis-std specifically and serves bytes from the embedded
-bundle; everything else falls through to the local-registry path.
-Two consequences:
+bytes, both the source archive (`.tar.zst`) and the shell (`.chb`), are
+baked into each chelis binary. The `chelis-std-bundle` crate packs them
+while the binary builds and exposes them as an `EmbeddedRuntime`, which
+every reef graph entry point takes as an explicit parameter. The reef
+loader serves chelis-std from that runtime; everything else falls through
+to the local-registry path. Three consequences:
 
 1. **Project-driven blanket synthesis.** Every reef.toml has a
    `compiler =` pin, and that pin IS the runtime declaration.
@@ -382,21 +382,24 @@ Two consequences:
    listing path: when chelis-std is in the dep graph, the same
    `Bundled` entry is produced; when absent, the lockfile-build step
    appends it after iterating the graph. The `archive_sha256` and
-   `shell_sha256` fields come from the embedded bundle bytes for
-   both paths so the recorded entry is byte-identical.
-2. **Compile-time embedding, not two-stage build.** Bundle artifacts
-   (`crates/chelis-std-bundle/dist/chelis-std-<version>.{tar.zst,chb}`)
-   are committed to the repo. The pipeline is "regenerate artifacts ->
-   commit -> build"; `scripts/regenerate_chelis_std_bundle.py` is the
-   canonical regen entry. It pins `SOURCE_DATE_EPOCH=0` for every subprocess
-   so the committed bundle identity does not depend on an ambient Devenv or
-   release-shell value; general `chelis reef build` invocations continue to
-   honor the caller's epoch. Its `--check` mode compares all five committed
-   outputs with a first generation, compares that first generation with a
-   second, and restores the exact committed inputs; it is part of both the
-   hosted `lint-rust` worker and `gate.py --validation`. The bundle crate's build.rs
-   verifies the dist files exist and emits `cargo:rerun-if-changed=` so cargo
-   invalidates the bundle when the bytes change.
+   `shell_sha256` fields come from the embedded runtime for both paths
+   so the recorded entry is byte-identical.
+2. **Build-time packing, nothing committed.** The bundle crate's build
+   script stages `packages/chelis-std/reef.toml`, the `.ch` files under
+   its declared source roots, and its declared metadata files, then packs
+   them with `pack_runtime_package`, the packing step `chelis reef build`
+   runs. Every archive member's mtime is 0 whatever `SOURCE_DATE_EPOCH`
+   says, so the embedded pair is a function of the std sources and the
+   packing code: `chelis reef build` of the same sources writes the same
+   bytes, and no other file in the source tree enters them. The std
+   version is the one `packages/chelis-std/reef.toml` names. `chelis-reef`
+   does not depend on the bundle: the bundle build-depends on reef, and
+   only binaries and test harnesses depend on the bundle, so a library
+   that forgets to pass the runtime fails to compile. No dist pair or lock
+   recording the bundled runtime is committed;
+   `scripts/check_std_bundle_untracked.py` refuses one in CI, and
+   `scripts/check_std_bundle_reproducible.py` requires two independent
+   builds to embed the same bytes.
 3. **No registry seeding required.** `chelis reef build` against a
    project that depends on chelis-std (implicitly or explicitly)
    succeeds against an empty `$CHELIS_REEF_HOME`. The bundled bytes
