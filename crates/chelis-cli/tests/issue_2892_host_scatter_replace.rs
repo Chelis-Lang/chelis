@@ -91,6 +91,15 @@ def run(seed: i64) -> List[i64] = put(to_tensor([0i64, 0i64, 0i64]), sub(to_tens
 result = run(0i64)
 ";
 
+/// The five-argument `scatter` shares the interpreter's scatter, so its
+/// out-of-range index is reported by scatter's bounds check too, in both
+/// modes.
+const SCATTER_MODE_OUT_OF_RANGE: &str = "module Demo.Main
+def put(base: tensor[3, i64], positions: tensor[1, i64]) -> List[i64] = to_list(scatter(base, positions, to_tensor([7i64]), 0i32, \"MODE\"))
+def run(seed: i64) -> List[i64] = put(to_tensor([0i64, 0i64, 0i64]), add(to_tensor([3i64]), to_tensor([seed])))
+result = run(0i64)
+";
+
 const ACCEPTED: &[(&str, &str, &str)] = &[
     ("issue_repro", ISSUE_REPRO, "result = [9, 0, 7]"),
     (
@@ -169,9 +178,13 @@ fn eval_file_and_compiled_c_print_the_same_scatter_replace_values() {
 #[test]
 fn eval_file_rejects_a_runtime_index_outside_the_axis() {
     let dir = tempdir().expect("tempdir");
+    let scatter_replace_mode = SCATTER_MODE_OUT_OF_RANGE.replace("MODE", "replace");
+    let scatter_add_mode = SCATTER_MODE_OUT_OF_RANGE.replace("MODE", "add");
     for (name, source, index) in [
         ("runtime_out_of_range", RUNTIME_OUT_OF_RANGE, 3),
         ("runtime_negative", RUNTIME_NEGATIVE, -1),
+        ("scatter_replace_mode", scatter_replace_mode.as_str(), 3),
+        ("scatter_add_mode", scatter_add_mode.as_str(), 3),
     ] {
         let out = eval_file(dir.path(), name, source);
         let stderr = String::from_utf8_lossy(&out.stderr);
