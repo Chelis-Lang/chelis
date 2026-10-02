@@ -892,9 +892,10 @@ compares `zoned_instant` and `time_zone_name`.
   the zone read from tzdata's `UTC` file. `time_zone_fixed(o)` is named `±HH:MM`, with
   `:SS` only when nonzero and `+00:00` for zero; `parse_zoned_text` reads such a numeric
   annotation, `:SS` included, as the zone name.
-- **`RejectOffsetMismatch`** fails `overflow` when `local − offset` is outside the instant
-  range, then wherever `zoned_from_local`'s computation of the candidates fails, then
-  `domain` unless `local − offset` is a candidate (§5's order). So a written zone text
+- **`RejectOffsetMismatch`** checks, in order: the `overflow` of `zoned_from_local`'s
+  computation of the candidates, then whether `local − offset` is inside the instant range
+  (`overflow`), then that computation's `domain` failures, then whether `local − offset`
+  is a candidate (`domain`). Every `overflow` comes before any `domain`, as §5 requires. So a written zone text
   round-trips under `UseWrittenOffset`, but not always under `RejectOffsetMismatch`: near
   the end of a zone with an empty footer, or near the range edge, computing the candidates
   fails.
