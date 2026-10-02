@@ -32,9 +32,10 @@ through 9999, so every observation lies there. Each lane must print exactly
 these bindings and equal the expectation; agreeing with the other lane is not
 enough.
 
-Profiles: `full` runs every fixture zone and runs nightly; `canary` runs
-`CANARY_ZONES`, a zone with both a gap and a fold and `UTC`, with the
-`time_zone_utc()` check, on every pull request.
+Profiles: `full` runs every fixture zone and the `time_zone_utc()` check,
+and runs nightly; `canary` runs `CANARY_ZONES`, a zone with both a gap and
+a fold and `UTC`, on every pull request. Each compiled C program builds the
+standard library, so the canary keeps to two.
 
 The supported entry point is `crates/chelis-cli/tests/std_datetime_zone.rs`,
 which supplies the freshly built `chelis`, a published `chelis-std`, and the
@@ -398,7 +399,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.profile == "canary":
         zones = canary_zones(zones)
     programs = [zone_program(name) for name in zones if not args.only or args.only in name]
-    if not args.only or args.only in "UTC_nullary":
+    if args.profile == "full" and (not args.only or args.only in "UTC_nullary"):
         programs.append(utc_program())
     print(f"corpus: {len(programs)} programs, {sum(p.source.count(',') for p in programs)} inputs", flush=True)
     report = Report()
