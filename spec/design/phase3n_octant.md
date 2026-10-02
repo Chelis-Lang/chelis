@@ -160,7 +160,7 @@ here, not silently dropped:
 - **Monte Carlo expectation lowering** — deferred to 3o (depends on
   `Shoals.Pricing`).
 - **Yield curve / day count lowering** — deferred to 3o (depends on
-  `Shoals.Curves` and `Std.Time`).
+  `Shoals.Curves` and `Std.Datetime`).
 - **Greek pattern rendering** (`grad(price, wrt=spot) → Δ`) — deferred to 3o
   because it needs the finance variable-name conventions that land with
   Shoals context.
@@ -201,7 +201,7 @@ Extend Octant with finance-notation lowering and the interactive notebook:
    (`\mathbb{E}[f(S_T)]`) through `Shoals.Pricing`, including variance
    reduction choice and random key threading.
 3. LLM-assisted lowering of calibration objectives through `Nautilus.Optim`.
-4. Yield curve / day count lowering through `Shoals.Curves` and `Std.Time`.
+4. Yield curve / day count lowering through `Shoals.Curves` and `Std.Datetime`.
 5. Greek rendering pattern matches in `Octant.Render`:
    `grad(price, wrt=spot) → \Delta`, `grad(price, wrt=vol) → \mathcal{V}`,
    `grad(price, wrt=rate) → \rho`, `grad(price, wrt=T) → \Theta`, configurable.
@@ -214,7 +214,7 @@ Extend Octant with finance-notation lowering and the interactive notebook:
 
 - `3l: Shoals` green — needed for `Shoals.Stochastic`, `Shoals.Pricing`,
   `Shoals.Curves`.
-- `3i` green — `Std.Time` is a direct dependency of the yield curve / day
+- `3i` green — `Std.Datetime` is a direct dependency of the yield curve / day
   count lowering path, not only a transitive dependency through `Shoals`.
   Called out explicitly so the 3o start gate is unambiguous.
 - `3n: Octant (Part A)` green.

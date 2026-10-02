@@ -610,23 +610,14 @@ The checked-in illustrative Reef package at
 inference. Includes date/time types, exact decimal arithmetic, autoregressive generation
 with KV caching, optimizer variants, and learning rate scheduling.
 
-### Std.Time
+### Std.Datetime
 
-Pure Chelis standard library module for dates and durations.
-Its public callables currently raise an explicit #2779 error until the
-exact [05-OP-35] calendar and duration behavior is implemented. The surface
-below is the intended contract, not a current acceptance claim.
-
-- `Date` type: year, month, day. Constructed via
-  `date(cast(2024, i64), cast(1, i64), cast(15, i64))`.
-- `Duration` type: days, hours, minutes, seconds. Constructed via
-  `duration(cast(1, i64), cast(2, i64), cast(3, i64), cast(4, i64))`.
-- Arithmetic: `add_days(date, n)`, `sub_days(date, n)`, `days_between(date1, date2)`.
-- Comparison and ordering on dates.
-- Formatting: `date_to_string(date)` → ISO 8601 (`"2024-01-15"`).
-- Parsing: `parse_date(string)` → `Option[Date]`.
-- Queries: `day_of_week(date)`, `day_of_year(date)`, `is_leap_year(year)`.
-- No timezone handling in v1 — UTC only. Timezone support deferred.
+`Std.Datetime` (#2859), the successor of `Std.Time`, is a pure Chelis
+standard-library module of opaque, validated dates, times, instants, offsets,
+durations, periods, and date and instant columns over years -9999..9999, governed
+by [05-OP-73]. Its rounding modes come from `Std.Rounding` ([05-OP-74]).
+`spec/design/std_datetime.md` is the design of record and stages zones, business
+calendars, columnar kernels, and the clock after it.
 
 ### Std.Decimal
 
@@ -778,10 +769,10 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 
 `cargo test -p chelis-cli --test std_package_acceptance -- --ignored --nocapture`
 
-This is the owning executable oracle for the `Std.Decimal` package surface and
-the #2779 `Std.Time` rejection (the ML
+This is the owning executable oracle for the `Std.Decimal` package surface (the ML
 modules — `Schedule`, `Optim`, `Nn.Generate` — since moved to `School.*` in chelis-std
-0.4.0). A later
+0.4.0). The `Std.Datetime` surface's owning oracle is `std_datetime_oracle`, with its
+manual gate `std_datetime_every_day_of_the_range_in_compiled_c`. A later
 phase-completion claim still requires a fresh-context red team and any documented manual
 gates.
 
@@ -1028,7 +1019,7 @@ last documented core blockers for the first Nautilus shell release.
 primitives and domain applications. The scipy analogue for Chelis — `scipy.stats` +
 `scipy.optimize` + `scipy.integrate` + `scipy.linalg` + `scipy.special` under one shell.
 
-**Prerequisite:** 3h (core numeric primitives), 3i (`Std.Time` for time-series stats),
+**Prerequisite:** 3h (core numeric primitives), 3i and `Std.Datetime` (#2859) for time-series stats,
 3j-pre (compiler release binary, expanded `Std.Nn`/`Std.Loss`/`Std.Init` surface).
 
 ### Implementation Strategy
@@ -1289,7 +1280,7 @@ curves, stochastic processes, order books. Built entirely on `chelis-std` + `nau
 `coral`. Contains only finance-specific logic.
 
 **Prerequisite:** 3j (nautilus — distributions, optimization, SDE solvers), 3k (coral —
-for loading/manipulating financial data), 3i (Std.Time for dates, Std.Decimal for cash
+for loading/manipulating financial data), 3i and Std.Datetime (#2859) for dates, Std.Decimal for cash
 amounts).
 
 ### Key Design Decision: Instruments as Dicts, Not Closed ADTs
@@ -1309,7 +1300,7 @@ requires understanding the type system's extension points).
 |---|---|---|
 | `Shoals.Pricing` | Black-Scholes analytical, Heston semi-analytical, SABR calibration, Monte Carlo engines with variance reduction. Greeks via `grad` for free — write the pricing function, `grad(price, wrt=(spot, vol, rate))` gives delta/vega/rho automatically. | `Nautilus.Distributions`, `Nautilus.SDE`, explicit keys, cumsum |
 | `Shoals.Risk` | VaR (parametric, historical, Monte Carlo), CVaR/expected shortfall, stress testing, scenario generation | `Nautilus.Stats`, sort/quantile, explicit keys |
-| `Shoals.Curves` | Yield curve construction (bootstrap from market instruments), interpolation (linear, cubic, Nelson-Siegel), day count conventions (ACT/360, ACT/365, 30/360) | `Nautilus.Interpolation`, `Nautilus.Roots`, `Std.Time` |
+| `Shoals.Curves` | Yield curve construction (bootstrap from market instruments), interpolation (linear, cubic, Nelson-Siegel), day count conventions (ACT/360, ACT/365, 30/360) | `Nautilus.Interpolation`, `Nautilus.Roots`, `Std.Datetime` |
 | `Shoals.Stochastic` | SDE models: GBM, Heston, SABR, jump-diffusion. Path generation using cumsum + `Nautilus.SDE`. Variance reduction (antithetic, control variates). | `Nautilus.SDE`, explicit keys, cumsum, einsum |
 | `Shoals.Orderbook` | Limit order book representation (price-priority sorted collections), matching logic, bid/ask spread computation, VWAP | Host-side collections, sort, `Std.Decimal` |
 
@@ -1506,7 +1497,7 @@ rendering pattern matches, and the `Octant.Notebook` cell runtime. Provenance
 extends to cover the new node kinds using the `3n` contract.
 
 **Prerequisite:** `3l` (shoals — `Shoals.Stochastic`, `Shoals.Pricing`,
-`Shoals.Curves`) green, `3i` green (`Std.Time` is a direct dependency of the
+`Shoals.Curves`) green, `3i` green (`Std.Datetime` is a direct dependency of the
 yield curve / day count lowering path, not only a transitive dep through
 `shoals`), **and** `3n` (octant Part A) green.
 
@@ -1516,7 +1507,7 @@ Full design: `chelis_octant_design.md`. Sub-phase contract: `phase3n_octant.md`.
 
 | Module | Contents | Key Dependencies |
 |---|---|---|
-| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization, time grid, noise strategy), Monte Carlo expectation → `Shoals.Pricing` (variance reduction, explicit keys), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. Boundary rule: if LaTeX specifies the *what* but not the *how*, the coding model fills in the *how*. | `Shoals.Stochastic`, `Shoals.Pricing`, `Shoals.Curves`, `Nautilus.Optim`, `Std.Time` |
+| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization, time grid, noise strategy), Monte Carlo expectation → `Shoals.Pricing` (variance reduction, explicit keys), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. Boundary rule: if LaTeX specifies the *what* but not the *how*, the coding model fills in the *how*. | `Shoals.Stochastic`, `Shoals.Pricing`, `Shoals.Curves`, `Nautilus.Optim`, `Std.Datetime` |
 | `Octant.Render` (finance additions) | Greek pattern matches — `grad(price, wrt=spot) → \Delta`, `grad(price, wrt=vol) → \mathcal{V}`, `grad(price, wrt=rate) → \rho`, `grad(price, wrt=T) → \Theta`. Configurable variable-name conventions. | 3n render surface |
 | `Octant.Notebook` | Cell runtime — formula, parameter, execution, Greek cells. Not a Jupyter kernel. Cells produce Deep, execution runs compiled C, rendering is mathematical notation. UI layer (web / VS Code / Cove extension / standalone) is a separate implementation decision. | full 3n Octant surface |
 | `Octant.Provenance` (extension) | Same contract as 3n, applied to the new SDE / MC / calibration / curve node kinds. No Deep node produced by Octant lowering may be missing a span. | 3n provenance surface |
@@ -1632,7 +1623,7 @@ The refreshed skill should teach:
 - list/tensor bridge (`pad_sequences`, `stack`, `to_tensor`)
 - file I/O and `IO` effect
 - CSV/JSON parsing
-- `Std.Time` and `Std.Decimal` host-program idioms
+- `Std.Datetime` and `Std.Decimal` host-program idioms
 - package imports (`Std.*`, `Nautilus.*`, `Coral.*`, `Shoals.*`)
 - dataframe operations (`coral`), including NaN handling and Parquet I/O
 - numerical methods (`nautilus`), including the nalgebra-backed LinAlg surface
@@ -1772,7 +1763,7 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 (The ML modules in this block — `Std.Nn.Generate`, AdamW/LAMB optimizers, schedulers —
 since moved to `School.*` in chelis-std 0.4.0; `Std.Time` / `Std.Decimal` stayed.)
 
-- `Std.Time` and `Std.Decimal` stay standard-library scoped rather than leaking
+- `Std.Datetime` and `Std.Decimal` stay standard-library scoped rather than leaking
   compiler-intrinsic assumptions
 - generation keeps the pure greedy path (`generate`) distinct from the keyed
   sampled path (`generate_with`)

@@ -344,8 +344,16 @@ EXPECTED_OP_MANIFESTS = {
         """\
 | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
 | `decimal::Decimal` | `Decimal { coefficient: i64, scale: i64 }` |
-| `time::Date` | `Date { year: i64, month: i64, day: i64 }` |
-| `time::Duration` | `Duration { days: i64, hours: i64, minutes: i64, seconds: i64 }` |""".splitlines()
+| `datetime::Date` | `Date { epoch_day: i64 }` |
+| `datetime::Time` | `Time { nanosecond_of_day: i64 }` |
+| `datetime::DateTime` | `DateTime { epoch_day: i64, nanosecond_of_day: i64 }` |
+| `datetime::Instant` | `Instant { unix_second: i64, nanosecond: i64 }` |
+| `datetime::Offset` | `Offset { seconds: i64 }` |
+| `datetime::OffsetDateTime` | `OffsetDateTime { instant: Instant, offset: Offset }` |
+| `datetime::Duration` | `Duration { second: i64, nanosecond: i64 }` |
+| `datetime::Period` | `Period { months: i64, days: i64 }` |
+| `datetime::Dates` | `Dates { epoch_days: tensor[n,i64] }` |
+| `datetime::Instants` | `Instants { unix_seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
@@ -353,6 +361,144 @@ EXPECTED_OP_MANIFESTS = {
 | `contracts::normal_cdf_contract_samples` | `()->i64` |
 | `contracts::normal_cdf_contract_seed` | `()->i64` |
 | `contracts::standard_contract_tolerance` | `()->f32` |
+| `datetime::date` | `(i64,i64,i64)->Date` |
+| `datetime::date_add_days` | `(Date,i64)->Date` |
+| `datetime::date_add_months` | `(Date,i64,DayOverflow)->Date` |
+| `datetime::date_add_period` | `(Date,Period,DayOverflow)->Date` |
+| `datetime::date_day` | `(Date)->i64` |
+| `datetime::date_day_of_year` | `(Date)->i64` |
+| `datetime::date_days_until` | `(Date,Date)->i64` |
+| `datetime::date_epoch_day` | `(Date)->i64` |
+| `datetime::date_from_epoch_day` | `(i64)->Date` |
+| `datetime::date_from_iso_week` | `(i64,i64,Weekday)->Date` |
+| `datetime::date_gt` | `(Date,Date)->bool` |
+| `datetime::date_gte` | `(Date,Date)->bool` |
+| `datetime::date_iso_week` | `(Date)->(i64,i64)` |
+| `datetime::date_lt` | `(Date,Date)->bool` |
+| `datetime::date_lte` | `(Date,Date)->bool` |
+| `datetime::date_month` | `(Date)->i64` |
+| `datetime::date_period_until` | `(Date,Date)->Period` |
+| `datetime::date_to_string` | `(Date)->string` |
+| `datetime::date_weekday` | `(Date)->Weekday` |
+| `datetime::date_year` | `(Date)->i64` |
+| `datetime::dates_epoch_days` | `(Dates[n])->tensor[n,i64]` |
+| `datetime::dates_from_epoch_days` | `(tensor[n,i64])->Dates[n]` |
+| `datetime::datetime` | `(Date,Time)->DateTime` |
+| `datetime::datetime_add_duration` | `(DateTime,Duration)->DateTime` |
+| `datetime::datetime_add_period` | `(DateTime,Period,DayOverflow)->DateTime` |
+| `datetime::datetime_date` | `(DateTime)->Date` |
+| `datetime::datetime_gt` | `(DateTime,DateTime)->bool` |
+| `datetime::datetime_gte` | `(DateTime,DateTime)->bool` |
+| `datetime::datetime_lt` | `(DateTime,DateTime)->bool` |
+| `datetime::datetime_lte` | `(DateTime,DateTime)->bool` |
+| `datetime::datetime_time` | `(DateTime)->Time` |
+| `datetime::datetime_to_instant_at` | `(DateTime,Offset)->Instant` |
+| `datetime::datetime_to_string` | `(DateTime)->string` |
+| `datetime::datetime_until` | `(DateTime,DateTime)->Duration` |
+| `datetime::days_in_month` | `(i64,i64)->i64` |
+| `datetime::days_in_year` | `(i64)->i64` |
+| `datetime::duration` | `(i64,i64)->Duration` |
+| `datetime::duration_add` | `(Duration,Duration)->Duration` |
+| `datetime::duration_from_count` | `(i64,TimeUnit)->Duration` |
+| `datetime::duration_gt` | `(Duration,Duration)->bool` |
+| `datetime::duration_gte` | `(Duration,Duration)->bool` |
+| `datetime::duration_lt` | `(Duration,Duration)->bool` |
+| `datetime::duration_lte` | `(Duration,Duration)->bool` |
+| `datetime::duration_mul` | `(Duration,i64)->Duration` |
+| `datetime::duration_nanosecond` | `(Duration)->i64` |
+| `datetime::duration_negate` | `(Duration)->Duration` |
+| `datetime::duration_second` | `(Duration)->i64` |
+| `datetime::duration_sub` | `(Duration,Duration)->Duration` |
+| `datetime::duration_to_count` | `(Duration,TimeUnit,Rounding)->i64` |
+| `datetime::duration_to_seconds_f64` | `(Duration)->f64` |
+| `datetime::duration_to_string` | `(Duration)->string` |
+| `datetime::easter_sunday_gregorian` | `(i64)->Date` |
+| `datetime::easter_sunday_orthodox` | `(i64)->Date` |
+| `datetime::instant_add_duration` | `(Instant,Duration)->Instant` |
+| `datetime::instant_from_unix` | `(i64,i64)->Instant` |
+| `datetime::instant_from_unix_count` | `(i64,TimeUnit)->Instant` |
+| `datetime::instant_gt` | `(Instant,Instant)->bool` |
+| `datetime::instant_gte` | `(Instant,Instant)->bool` |
+| `datetime::instant_lt` | `(Instant,Instant)->bool` |
+| `datetime::instant_lte` | `(Instant,Instant)->bool` |
+| `datetime::instant_nanosecond` | `(Instant)->i64` |
+| `datetime::instant_round_to` | `(Instant,Duration,Rounding)->Instant` |
+| `datetime::instant_to_datetime_at` | `(Instant,Offset)->DateTime` |
+| `datetime::instant_to_string` | `(Instant)->string` |
+| `datetime::instant_to_unix_count` | `(Instant,TimeUnit,Rounding)->i64` |
+| `datetime::instant_unix_second` | `(Instant)->i64` |
+| `datetime::instant_until` | `(Instant,Instant)->Duration` |
+| `datetime::instants_from_unix` | `(tensor[n,i64],tensor[n,i64])->Instants[n]` |
+| `datetime::instants_nanoseconds` | `(Instants[n])->tensor[n,i64]` |
+| `datetime::instants_unix_seconds` | `(Instants[n])->tensor[n,i64]` |
+| `datetime::is_leap_year` | `(i64)->bool` |
+| `datetime::last_weekday_in_month` | `(i64,i64,Weekday)->Date` |
+| `datetime::nth_weekday_in_month` | `(i64,i64,Weekday,i64)->Option[Date]` |
+| `datetime::offset_datetime` | `(Instant,Offset)->OffsetDateTime` |
+| `datetime::offset_datetime_instant` | `(OffsetDateTime)->Instant` |
+| `datetime::offset_datetime_local` | `(OffsetDateTime)->DateTime` |
+| `datetime::offset_datetime_offset` | `(OffsetDateTime)->Offset` |
+| `datetime::offset_datetime_to_string` | `(OffsetDateTime)->string` |
+| `datetime::offset_from_seconds` | `(i64)->Offset` |
+| `datetime::offset_seconds` | `(Offset)->i64` |
+| `datetime::offset_to_string` | `(Offset)->string` |
+| `datetime::parse_date` | `(string)->Date` |
+| `datetime::parse_datetime` | `(string)->DateTime` |
+| `datetime::parse_duration` | `(string)->Duration` |
+| `datetime::parse_instant` | `(string)->Instant` |
+| `datetime::parse_offset` | `(string)->Offset` |
+| `datetime::parse_offset_datetime` | `(string)->OffsetDateTime` |
+| `datetime::parse_period` | `(string)->Period` |
+| `datetime::parse_time` | `(string)->Time` |
+| `datetime::period` | `(i64,i64)->Period` |
+| `datetime::period_days` | `(Period)->i64` |
+| `datetime::period_months` | `(Period)->i64` |
+| `datetime::period_mul` | `(Period,i64)->Period` |
+| `datetime::period_negate` | `(Period)->Period` |
+| `datetime::period_to_string` | `(Period)->string` |
+| `datetime::time` | `(i64,i64,i64,i64)->Time` |
+| `datetime::time_add_duration` | `(Time,Duration)->(i64,Time)` |
+| `datetime::time_from_nanosecond_of_day` | `(i64)->Time` |
+| `datetime::time_gt` | `(Time,Time)->bool` |
+| `datetime::time_gte` | `(Time,Time)->bool` |
+| `datetime::time_hour` | `(Time)->i64` |
+| `datetime::time_lt` | `(Time,Time)->bool` |
+| `datetime::time_lte` | `(Time,Time)->bool` |
+| `datetime::time_minute` | `(Time)->i64` |
+| `datetime::time_nanosecond` | `(Time)->i64` |
+| `datetime::time_nanosecond_of_day` | `(Time)->i64` |
+| `datetime::time_second` | `(Time)->i64` |
+| `datetime::time_to_string` | `(Time)->string` |
+| `datetime::time_until` | `(Time,Time)->Duration` |
+| `datetime::try_date` | `(i64,i64,i64)->Option[Date]` |
+| `datetime::try_date_add_months` | `(Date,i64,DayOverflow)->Option[Date]` |
+| `datetime::try_date_add_period` | `(Date,Period,DayOverflow)->Option[Date]` |
+| `datetime::try_date_from_epoch_day` | `(i64)->Option[Date]` |
+| `datetime::try_date_from_iso_week` | `(i64,i64,Weekday)->Option[Date]` |
+| `datetime::try_dates_from_epoch_days` | `(tensor[n,i64])->(Dates[n],tensor[n,bool])` |
+| `datetime::try_datetime_add_period` | `(DateTime,Period,DayOverflow)->Option[DateTime]` |
+| `datetime::try_duration_to_count` | `(Duration,TimeUnit,Rounding)->Option[i64]` |
+| `datetime::try_instant_from_unix` | `(i64,i64)->Option[Instant]` |
+| `datetime::try_instant_from_unix_count` | `(i64,TimeUnit)->Option[Instant]` |
+| `datetime::try_instant_to_unix_count` | `(Instant,TimeUnit,Rounding)->Option[i64]` |
+| `datetime::try_instants_from_unix` | `(tensor[n,i64],tensor[n,i64])->(Instants[n],tensor[n,bool])` |
+| `datetime::try_offset_from_seconds` | `(i64)->Option[Offset]` |
+| `datetime::try_parse_date` | `(string)->Option[Date]` |
+| `datetime::try_parse_datetime` | `(string)->Option[DateTime]` |
+| `datetime::try_parse_duration` | `(string)->Option[Duration]` |
+| `datetime::try_parse_instant` | `(string)->Option[Instant]` |
+| `datetime::try_parse_offset` | `(string)->Option[Offset]` |
+| `datetime::try_parse_offset_datetime` | `(string)->Option[OffsetDateTime]` |
+| `datetime::try_parse_period` | `(string)->Option[Period]` |
+| `datetime::try_parse_time` | `(string)->Option[Time]` |
+| `datetime::try_period` | `(i64,i64)->Option[Period]` |
+| `datetime::try_time` | `(i64,i64,i64,i64)->Option[Time]` |
+| `datetime::try_time_from_nanosecond_of_day` | `(i64)->Option[Time]` |
+| `datetime::try_weekday_from_iso_number` | `(i64)->Option[Weekday]` |
+| `datetime::weekday_from_iso_number` | `(i64)->Weekday` |
+| `datetime::weekday_iso_number` | `(Weekday)->i64` |
+| `datetime::weekday_on_or_after` | `(Date,Weekday)->Date` |
+| `datetime::weekday_on_or_before` | `(Date,Weekday)->Date` |
 | `decimal::decimal` | `(string)->Decimal` |
 | `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
 | `decimal::decimal_div` | `(Decimal,Decimal,i64,RoundingMode)->Decimal` |
@@ -405,23 +551,7 @@ EXPECTED_OP_MANIFESTS = {
 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
 | `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
 | `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
-| `test::assert_shape` | `(&tensor[..r,p],List[i64],string)->unit!{Test}` |
-| `time::add_days` | `(Date,i64)->Date` |
-| `time::date` | `(i64,i64,i64)->Date` |
-| `time::date_gt` | `(Date,Date)->bool` |
-| `time::date_gte` | `(Date,Date)->bool` |
-| `time::date_lt` | `(Date,Date)->bool` |
-| `time::date_lte` | `(Date,Date)->bool` |
-| `time::date_to_string` | `(Date)->string` |
-| `time::day_of_week` | `(Date)->DayOfWeek` |
-| `time::day_of_week_name` | `(Date)->string` |
-| `time::day_of_year` | `(Date)->i64` |
-| `time::days_between` | `(Date,Date)->i64` |
-| `time::duration` | `(i64,i64,i64,i64)->Duration` |
-| `time::is_leap_year` | `(i64)->bool` |
-| `time::parse_date` | `(string)->Option[Date]` |
-| `time::sub_days` | `(Date,i64)->Date` |
-| `time::try_date` | `(i64,i64,i64)->Option[Date]` |""".splitlines()
+| `test::assert_shape` | `(&tensor[..r,p],List[i64],string)->unit!{Test}` |""".splitlines()
     ),
     "05-OP-44": tuple(
         """\
@@ -745,10 +875,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 73 or len(set(identities)) != 73:
+    if len(identities) != 195 or len(set(identities)) != 195:
         violations.append(
-            "[05-OP-35] stdlib numeric manifest must have exactly seventy-three "
-            "unique identities"
+            "[05-OP-35] stdlib numeric manifest must have exactly one hundred "
+            "ninety-five unique identities"
         )
 
 
@@ -2289,8 +2419,8 @@ def validate_normative_contract(
             "exported stdlib ADT identities enumerated in the normative registry",
             "`io/json::Json`",
             "`decimal::Decimal`",
-            "`time::Date`",
-            "`time::Duration`",
+            "`datetime::Date`",
+            "`datetime::Instants`",
             "accepts every representable declared field tuple",
             "validation and normalization belong to named stdlib functions",
             "A public signature is numeric when any reachable field of an admitted ADT",
@@ -2307,7 +2437,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the seventy-three final exported stdlib numeric definitions",
+            "exactly the one hundred ninety-five final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "
@@ -2329,8 +2459,9 @@ def validate_normative_contract(
             "`tensor/construct::stack` | "
             "`(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "Every primitive-width intermediate in a graph whose contract names a dtype",
-            "Decimal rational and calendar ordinal computations explicitly named as "
-            "mathematical below use an exact internal domain",
+            "Decimal rational computations explicitly named as mathematical below "
+            "use an exact internal domain",
+            "The `datetime::*` identities follow [05-OP-73]",
             "integer primitive arithmetic is checked",
             "JSON access follows [05-OP-2..5]",
             "Numeric tokens follow [05-OP-2]",
@@ -2393,7 +2524,6 @@ def validate_normative_contract(
             "interpreted in exact arithmetic and normalized before either "
             "representation check",
             "removable trailing zeros do not cause `Overflow`",
-            "proleptic Gregorian calendar",
             "NaN is unequal to every value, including itself",
             "Test tolerances have the same active float dtype as the values",
             "`assert_close_tensor` admits exactly one common active float dtype `p`",
@@ -2416,11 +2546,6 @@ def validate_normative_contract(
             "width and is close exactly when that difference is less than or equal "
             "to the converted tolerance",
             "without invoking a shell",
-            "`days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`",
-            "final normalized `days` field has no i64 representation",
-            "A negative year uses `-` followed by exactly "
-            "`max(4, digits(|year|))` decimal digits",
-            "`|year|` is the exact mathematical magnitude rather than an i64 `abs`",
             "No callable derives authority from its implementation body or age",
         ),
         "05-OP-36": (
@@ -2534,6 +2659,41 @@ def validate_normative_contract(
             "float forms use the exact `ReduceWindowGrad` graph",
             "No target-specific rank, reducer, dtype, first-order-only, host-fallback, "
             "alias, or compatibility identity belongs to this atom",
+        ),
+        "05-OP-73": (
+            "governs exactly the `datetime::*` identities of the [05-OP-34] and "
+            "[05-OP-35] registries",
+            "The calendar is proleptic Gregorian with astronomical year numbering",
+            "The timescale is POSIX: every day has exactly 86 400 seconds",
+            "-4 371 587..2 932 896",
+            "-377 705 030 401..253 402 214 400",
+            "Each value type is opaque (spec/04 §2.5)",
+            "the message `<function>: <kind>: <detail>`",
+            "Every range and validity check precedes the arithmetic it protects",
+            "returns `None` exactly where the twin fails `domain`, and fails "
+            "exactly where the twin fails `overflow`",
+            "`date_days_until(a,b)` is `epoch_day(b) - epoch_day(a)`",
+            "fails `domain` when the normalized second leaves i64",
+            "negation fails only for the second `i64::MIN` with nanosecond 0",
+            "a whole part `w` and a fraction `f` of the same sign",
+            "`f64(w) + f64(f) / 1e9`",
+            "judged as a whole value rather than component by component",
+            "the week-year lies in -9999..9999",
+            "take a [05-OP-74] `Rounding`",
+            "negative years as `-` and six digits",
+            "`-000000` is not a year",
+            "Parsing a value's canonical text returns that value",
+        ),
+        "05-OP-74": (
+            "governs exactly the seven constructors of the standard-library plain enum "
+            "`Rounding`",
+            "with no intermediate rounding",
+            "`RoundTowardNegative` the largest `k·q <= v`",
+            "`RoundTowardPositive` the smallest `k·q >= v`",
+            "`RoundTowardZero` whichever of those two is nearer zero",
+            "`RoundTiesToEven` the nearest multiple, an exact tie taking the even `k`",
+            "`RejectInexact` selects `v` when it is a multiple and otherwise rejects",
+            "No mode is a default",
         ),
         "05-OP-40": (
             "active\n> signed-integer or float dtype",

@@ -343,7 +343,9 @@ impl Printer {
 
     fn fmt_map(&self, map: &MetaMap, indent: usize) -> String {
         let flat = render_flat(Flat::Map(map));
-        if indent + flat.len() <= self.max_width {
+        // An empty map has no entry to break before, so `{}` stays flat at any
+        // indent; breaking it would print only its closing brace.
+        if map.entries.is_empty() || indent + flat.len() <= self.max_width {
             return flat;
         }
 
@@ -549,6 +551,38 @@ mod tests {
             print_expr(&expr),
             "(app {}\n  (var {} mean)\n  (app {}\n    (var {} neg)\n    (app {}\n      (var {} sum)\n      (var {} very_long_intermediate_name)\n      (lit {type: (t-prim {} i32)} 0))))"
         );
+    }
+
+    #[test]
+    fn empty_metadata_past_the_line_width_prints_flat_and_reparses() {
+        // Nest broken `app` nodes until a `params` node's empty metadata
+        // starts beyond the line width, as deeply nested Surf produces.
+        let mut expr = node(
+            "fn",
+            vec![],
+            vec![
+                node("params", vec![], vec![sym("__chelis_pipe")]),
+                node("var", vec![], vec![sym("__chelis_pipe")]),
+            ],
+        );
+        for _ in 0..45 {
+            expr = node(
+                "app",
+                vec![],
+                vec![
+                    node("var", vec![], vec![sym("a_long_enough_function_name")]),
+                    expr,
+                ],
+            );
+        }
+        let printed = print_expr(&expr);
+        assert!(
+            printed.contains("(params {}"),
+            "empty metadata must keep both braces:\n{printed}"
+        );
+        let reparsed = crate::parser::parse_str(&printed).expect("printed Deep reparses");
+        assert_eq!(reparsed.len(), 1);
+        assert_eq!(print_expr(&reparsed[0]), printed);
     }
 
     #[test]

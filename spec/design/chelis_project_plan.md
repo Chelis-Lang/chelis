@@ -33,7 +33,7 @@ below.
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | HIP backend and validator available; [target gates](../../docs/phase_oracles.md) |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
-| **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, file I/O, CSV/JSON, `Std.Time`/`Std.Decimal`, SKILL.md v2 |  |
+| **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, file I/O, CSV/JSON, `Std.Datetime`/`Std.Decimal`, SKILL.md v2 |  |
 | **4** | Agent coding research: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
 | **5** | Advanced backends + research: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU, sparse tensors, complex numbers, research type features, Lean formalization |  |
 
@@ -510,11 +510,13 @@ Standard library modules for real model training and inference:
 
 (The ML modules in this section — `Std.Nn.Generate`, `Std.Optim`, `Std.Schedule` —
 since moved to `School.Nn.Generate` / `School.Optim` / `School.Schedule` in chelis-std
-0.4.0; `Std.Time` and `Std.Decimal` stayed in `chelis-std`.)
+0.4.0; `Std.Decimal` and `Std.Datetime`, the successor of `Std.Time` (#2859), are in `chelis-std`.)
 
-- **`Std.Time`:** Date and duration types. Date arithmetic, comparison,
-  formatting/parsing (ISO 8601). UTC only in v1. The callables are currently
-  fenced by #2779 pending exact [05-OP-35] behavior.
+- **`Std.Datetime`:** Opaque dates, times, instants, offsets, durations, periods, and
+  date/instant columns over years -9999..9999, with month arithmetic, comparison, and
+  RFC 3339-based text forms under [05-OP-73], and the shared `Std.Rounding` modes
+  under [05-OP-74]. It succeeds `Std.Time` (#2859); zones, business calendars, and
+  the clock are later stages of `spec/design/std_datetime.md`.
 - **`Std.Decimal`:** Fixed-point exact arithmetic. Configurable precision, banker's
   rounding. Host-value type, not tensor dtype.
 - **`Std.Nn.Generate`:** Autoregressive generation with KV cache management. Greedy and
@@ -552,7 +554,7 @@ Prerequisite gate for both `nautilus` and `coral`. Not itself a shell.
   `cargo test -p chelis-cli --test std_package_acceptance` (the original
   `std_nn_build_acceptance` suite was removed when the `Std.Nn`/`Std.Loss`/`Std.Optim` ML
   surface moved to the downstream School library in chelis-std 0.4.0, #331; the in-repo
-  oracle now covers `Std.Decimal` and verifies the `Std.Time` #2779 rejection)
+  oracle covers `Std.Decimal` and `Std.Datetime`)
 
 ### 3j: Nautilus — Numerical Methods, Statistics, and Optimization
 
@@ -634,7 +636,7 @@ rationale and the pure-Chelis-vs-Rust-runtime decision point are covered in
 
 ### 3l: Shoals — Finance
 
-A reef package. Depends on `chelis-std` (`Std.Time`, `Std.Decimal`) + `nautilus` +
+A reef package. Depends on `chelis-std` (`Std.Datetime`, `Std.Decimal`) + `nautilus` +
 `coral`. Contains only finance-specific logic — nothing a non-finance programmer would
 need. Greeks via `grad` for free. Reproducible Monte Carlo via explicit keys. Typed
 market data via named tensor dimensions.

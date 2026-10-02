@@ -2,13 +2,13 @@
 //!
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
 //! exercise chelis-std's own available modules (Std.Tensor, Std.Io,
-//! Std.Sort, Std.Scan, Std.Process, Std.Test). Std.Time and Std.Decimal
-//! are fenced under #2779 and #2778; School provides
+//! Std.Sort, Std.Scan, Std.Process, Std.Test, Std.Datetime). Std.Decimal
+//! is fenced under #2778; School provides
 //! the neural-network, loss, optimizer, and scheduling libraries. The corpus
 //! runs via `chelis test packages/chelis-std/tests/`; the default
 //! `cargo test --workspace` gate does not exercise it, so regressions here
 //! otherwise surface only when somebody invokes the CLI manually.
-//! The Std.Time and Std.Decimal success tests were removed with their fences;
+//! The Std.Decimal success tests were removed with its fence;
 //! `std_package_acceptance` checks the errors.
 //!
 //! This test wires the corpus into the default workspace gate. It stages
@@ -28,7 +28,7 @@ use tempfile::tempdir;
 /// Floor on the retained chelis-std self-test corpus, set below the measured
 /// 117 passing tests after the Time and Decimal suites moved to explicit
 /// rejection checks in std_package_acceptance.
-const MIN_PASSED: u32 = 110;
+const MIN_PASSED: u32 = 166;
 
 fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

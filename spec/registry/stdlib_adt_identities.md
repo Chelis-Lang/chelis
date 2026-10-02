@@ -10,5 +10,13 @@ identity; row order is not semantic and no ordinal is part of any identity.
 |---|---|
 | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
 | `decimal::Decimal` | `Decimal { coefficient: i64, scale: i64 }` |
-| `time::Date` | `Date { year: i64, month: i64, day: i64 }` |
-| `time::Duration` | `Duration { days: i64, hours: i64, minutes: i64, seconds: i64 }` |
+| `datetime::Date` | `Date { epoch_day: i64 }` |
+| `datetime::Time` | `Time { nanosecond_of_day: i64 }` |
+| `datetime::DateTime` | `DateTime { epoch_day: i64, nanosecond_of_day: i64 }` |
+| `datetime::Instant` | `Instant { unix_second: i64, nanosecond: i64 }` |
+| `datetime::Offset` | `Offset { seconds: i64 }` |
+| `datetime::OffsetDateTime` | `OffsetDateTime { instant: Instant, offset: Offset }` |
+| `datetime::Duration` | `Duration { second: i64, nanosecond: i64 }` |
+| `datetime::Period` | `Period { months: i64, days: i64 }` |
+| `datetime::Dates` | `Dates { epoch_days: tensor[n,i64] }` |
+| `datetime::Instants` | `Instants { unix_seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |

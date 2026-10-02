@@ -704,7 +704,7 @@ cargo test -p chelis-cli --test coral_prerequisites -- --ignored --nocapture
 | Dependency | What it provides | Status |
 |---|---|---|
 | `chelis v0.1.7` | Compiler, `libchelis_runtime.a`, all tensor primitives (gather, scatter, argsort, where, cumsum, concat, sort, einsum) | Shipped |
-| `chelis-std` | Std.Io.Csv, Std.Io.Json, Std.Time, Dict, List operations | Shipped |
+| `chelis-std` | Std.Io.Csv, Std.Io.Json, Std.Datetime, Dict, List operations | Shipped |
 | `nautilus` (optional) | Nautilus.Stats for `describe` | Shipped (v0.1.0) |
 | `parquet2` Rust crate | Parquet read/write in runtime | Not yet integrated — Phase B |
 
@@ -753,7 +753,7 @@ No upstream blockers for Phase A. Everything Coral needs for the core DataFrame,
 - **Streaming / out-of-core** — Coral is in-memory only. No chunked reading, no spilling to disk.
 - **String column methods** — str.contains, str.split, regex. Host-side string operations are not the priority.
 - **Excel I/O** — via a Rust crate (calamine) in the runtime. Low priority.
-- **Time series index** — datetime-indexed DataFrames with resample/shift/lag. Would depend on Std.Time. Useful for finance but not in the first implementation.
+- **Time series index** — datetime-indexed DataFrames with resample/shift/lag. Would depend on Std.Datetime's date and instant columns (coral#41). Useful for finance but not in the first implementation.
 - **GPU benchmarks** — benchmark Coral on HIP to validate the "GPU-accelerated columns" claim. Requires a real workload + GPU hardware.
 
 ---
