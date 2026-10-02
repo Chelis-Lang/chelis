@@ -18,9 +18,6 @@ use assert_cmd::Command;
 use std::path::Path;
 use tempfile::tempdir;
 
-#[path = "common/mod.rs"]
-mod common;
-
 const MUL_OVERFLOW: &str = "numeric trap: overflow in mul at i32";
 
 /// A dead reference in a body that also binds a dead local `y`.
@@ -175,10 +172,6 @@ fn a_function_body_reads_a_top_level_value_as_its_global_holds_it_in_c() {
             continue;
         }
         let out_dir = directory.path().join(&out_dir);
-        if !common::link_generated(&out_dir, &format!("{stem}.c"), &stem).success() {
-            failures.push(format!("C {row}: the generated C does not compile"));
-            continue;
-        }
         let ran = std::process::Command::new(out_dir.join(&stem))
             .output()
             .unwrap();

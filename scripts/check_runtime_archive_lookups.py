@@ -488,17 +488,6 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
-        "crates/chelis-cli/tests/issue_1753_grad_result_order_cli.rs",
-        "archive-name",
-        lines=(
-            '.args(["-O2", "order.c", "libchelis_runtime.a", "-lm", "-o"])',
-        ),
-        disposition="not-lookup",
-        reason=(
-            "links the archive `chelis build` staged in the output directory it compiles in"
-        ),
-    ),
-    Row(
         "crates/chelis-cli/tests/issue_1771_callable_selected_result_claims.rs",
         "archive-name",
         lines=(
@@ -518,17 +507,6 @@ REVIEWED: tuple[Row, ...] = (
         disposition="not-lookup",
         reason=(
             "links the archive `chelis build` staged in its build directory"
-        ),
-    ),
-    Row(
-        "crates/chelis-cli/tests/issue_1975_fused_zero_cotangents_cli.rs",
-        "archive-name",
-        lines=(
-            '.args(["-O2", "zero.c", "libchelis_runtime.a", "-lm", "-o"])',
-        ),
-        disposition="not-lookup",
-        reason=(
-            "links the archive `chelis build` staged in the output directory it compiles in"
         ),
     ),
     Row(

@@ -186,7 +186,6 @@ fn invalid_empty_rate_traps_in_eval_and_c_and_a_runtime_rate_builds() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(common::link_generated(&invalid_out, "dropout.c", "dropout").success());
     let run = std::process::Command::new(invalid_out.join("dropout"))
         .output()
         .unwrap();

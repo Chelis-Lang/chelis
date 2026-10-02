@@ -111,7 +111,6 @@ fn bounded_function_value_chain_lambda_and_field_calls_execute_on_eval_and_c() {
             "{}",
             String::from_utf8_lossy(&built.stderr)
         );
-        assert!(common::link_generated(&output_dir, &format!("{stem}.c"), &stem).success());
         let run = std::process::Command::new(output_dir.join(&stem))
             .output()
             .unwrap();

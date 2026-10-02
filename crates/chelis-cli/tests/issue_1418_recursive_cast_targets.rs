@@ -47,7 +47,6 @@ fn parity(root: &Path, reef: Option<&Path>, file: &str, expected: &str) {
     );
     success(&built);
     let name = Path::new(file).file_stem().unwrap().to_str().unwrap();
-    assert!(common::link_generated(&root.join("out"), &format!("{name}.c"), name).success());
     let native = Command::new(root.join("out").join(name)).output().unwrap();
     success(&native);
     assert_eq!(native.stdout, evaluated.stdout);

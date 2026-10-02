@@ -60,17 +60,6 @@ fn native_control(source: &str, expected: &str) {
         temp.path(),
         &["build", "order.ch", "--target", "c", "--output", "native"],
     ));
-    let native = temp.path().join("native");
-    let binary = native.join("order-run");
-    let mut cc = Command::new("cc");
-    cc.current_dir(&native)
-        .args(["-O2", "order.c", "libchelis_runtime.a", "-lm", "-o"])
-        .arg(&binary);
-    if cfg!(target_os = "macos") {
-        cc.args(["-framework", "Accelerate"]);
-    } else {
-        cc.args(["-lpthread", "-ldl"]);
-    }
-    run(&mut cc);
+    let binary = temp.path().join("native").join("order");
     assert_eq!(run(&mut Command::new(&binary)).trim(), expected);
 }

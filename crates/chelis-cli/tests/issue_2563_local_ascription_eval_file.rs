@@ -13,9 +13,6 @@
 use assert_cmd::Command;
 use std::path::Path;
 
-#[path = "common/mod.rs"]
-mod common;
-
 const GRAD_BODY: &str = "def h(x: tensor[*, f32]) -> tensor[f32] = {
   y: tensor[3, f32] = pad(x, [[0i64, 0i64]], 0.0f32)
   sum(y, 0i32)
@@ -215,7 +212,8 @@ fn a_taken_arms_local_ascription_traps_in_eval_file() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
-/// The whole-program C lane: `chelis build --target c`, linked and run.
+/// The whole-program C lane: `chelis build --target c` and its published
+/// executable.
 /// Its stdout on success, or its build or run output on failure.
 fn c_file(directory: &Path, stem: &str, source: &str) -> Result<String, String> {
     let path = directory.join(format!("{stem}.ch"));
@@ -235,8 +233,6 @@ fn c_file(directory: &Path, stem: &str, source: &str) -> Result<String, String> 
     if !built.status.success() {
         return Err(format!("build: {}", text(&built)));
     }
-    let linked = common::link_generated(&out_dir, &format!("{stem}.c"), stem);
-    assert!(linked.success(), "{stem}: link failed: {linked}");
     let run = std::process::Command::new(out_dir.join(stem))
         .output()
         .unwrap();

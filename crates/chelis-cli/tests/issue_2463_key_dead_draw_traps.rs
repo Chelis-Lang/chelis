@@ -9,7 +9,6 @@
 //! witness also traps evaluated inside its reef package, the
 //! `compile_reef_context` + `eval_in_context` lane (spec/03 §4.4: a
 //! binding's initializer is evaluated whether or not the binding is read).
-mod common;
 
 use assert_cmd::Command;
 use chelis_compiler_api::{compile_reef_context, eval_in_context};
@@ -125,7 +124,6 @@ fn assert_c_traps(directory: &Path, path: &str, stem: &str, trap: &str) {
         ],
     );
     assert!(built.status.success(), "{}", text(&built));
-    assert!(common::link_generated(&out, &format!("{stem}.c"), stem).success());
     let run = std::process::Command::new(out.join(stem)).output().unwrap();
     let run_text = text(&run);
     assert!(
