@@ -266,6 +266,8 @@ pub(crate) fn emit_host_abi_program(
     let key_callable_helpers_index = body.len();
     append_tensor_print_helper(&mut body);
     body.push(String::new());
+    append_option_print_helper(&mut body);
+    body.push(String::new());
     append_tensor_math_helpers(&mut body);
     body.push(String::new());
     // Authored functions are published in the generated header with external
@@ -1915,6 +1917,32 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
     out.push("    if (size > limit) { printf(\", ...\"); }".to_string());
     out.push("    printf(\"])\");".to_string());
     out.push("}".to_string());
+}
+
+/// Render an option at a top-level exit (chelis#2597). [05-OP-32] spells an
+/// option node exactly as its ADT rule spells a one-field `Some` constructor,
+/// and `None` as the bare constructor name, so a present payload renders
+/// through the runtime's own recursive ADT rendering: the bytes match an
+/// option nested inside a list, tuple or data-type value.
+fn append_option_print_helper(out: &mut Vec<String>) {
+    out.extend(
+        [
+            "static void chelis_host_print_option(const chelis_option *option) {",
+            "    if (!chelis_option_is_some(option)) {",
+            "        printf(\"None\");",
+            "        return;",
+            "    }",
+            "    chelis_value payload = chelis_option_unwrap(option);",
+            "    chelis_string ctor = chelis_string_from_cstr(\"Some\");",
+            "    chelis_adt *some = chelis_adt_construct(ctor, &payload, 1);",
+            "    chelis_string_release(ctor);",
+            "    chelis_value_release(payload);",
+            "    chelis_print_adt(some);",
+            "    chelis_adt_release(some);",
+            "}",
+        ]
+        .map(str::to_string),
+    );
 }
 
 fn append_tensor_reshape_helper(out: &mut Vec<String>) {
@@ -10207,6 +10235,10 @@ impl<'a> HostEmitter<'a> {
                 "{}chelis_print_dict({}); printf(\"\\n\");",
                 self.indent, value
             )),
+            HostType::Option(_) => self.lines.push(format!(
+                "{}chelis_host_print_option({}); printf(\"\\n\");",
+                self.indent, value
+            )),
             HostType::Unit => self
                 .lines
                 .push(format!("{}printf(\"()\\n\");", self.indent)),
@@ -10327,6 +10359,10 @@ impl<'a> HostEmitter<'a> {
             HostType::Dict(_, _) => self
                 .lines
                 .push(format!("{}chelis_print_dict({});", self.indent, value)),
+            HostType::Option(_) => self.lines.push(format!(
+                "{}chelis_host_print_option({});",
+                self.indent, value
+            )),
             HostType::Unit => self.lines.push(format!("{}printf(\"()\");", self.indent)),
             // chelis#730 Phase 1 (census row 4): same contract as
             // `emit_print_value` - an unclassifiable labeled root is a
@@ -10438,6 +10474,11 @@ impl<'a> HostEmitter<'a> {
             ("TUPLE", "chelis_print_tuple", "chelis_tuple_borrow_value"),
             ("DICT", "chelis_print_dict", "chelis_dict_borrow_value"),
             ("ADT", "chelis_print_adt", "chelis_adt_borrow_value"),
+            (
+                "OPTION",
+                "chelis_host_print_option",
+                "chelis_option_borrow_value",
+            ),
         ] {
             self.lines.push(format!(
                 "{}case CHELIS_VALUE_{tag}: {printer}({accessor}({value})); break;",
