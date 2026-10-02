@@ -158,6 +158,7 @@ The author has handed off the worktree and will not write or build there during
 verification. Re-run your exact reproduction against this head. Report closed or not
 closed, the commands you ran, and the head.
 Deliver by: <SendMessage to <name> | final report>.
+Acknowledge this message and confirm what you will do.
 ```
 
 ## Finding Discipline
