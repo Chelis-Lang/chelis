@@ -22,12 +22,6 @@
 # contention-independent unit/integration coverage they sit on top of stays
 # on the per-PR gate.
 #
-# Two Std.Decimal rows belong to the set for their duration rather than their
-# kind: the default differential corpus and the extreme-argument sweep each
-# take minutes on a loaded shard, and the sweep can reach the 600-second
-# `chelis test` suite timeout there (chelis#2794). The other Std.Decimal tests
-# stay on the per-PR gate.
-#
 # Every profile disables fail-fast so one failure cannot hide later failures.
 # Gate commands also pass `--no-fail-fast` explicitly; the profile setting
 # extends the same diagnostic behavior to direct and non-gate CI invocations.
@@ -65,8 +59,6 @@ default-filter = '''
         + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
         + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
         + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
-        + (binary_id(/^chelis-cli::std_decimal_oracle$/) & test(/^std_decimal_agrees_with_the_reference_on_eval_and_c$/))
-        + (binary_id(/^chelis-cli::std_decimal_failures$/) & test(/^std_decimal_extreme_arguments_raise_no_primitive_trap$/))
     )
 '''
 
@@ -142,8 +134,6 @@ default-filter = '''
         + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
         + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
         + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
-        + (binary_id(/^chelis-cli::std_decimal_oracle$/) & test(/^std_decimal_agrees_with_the_reference_on_eval_and_c$/))
-        + (binary_id(/^chelis-cli::std_decimal_failures$/) & test(/^std_decimal_extreme_arguments_raise_no_primitive_trap$/))
         + binary_id(/^chelis-backend-c::exec_compile$/)
         + binary_id(/^chelis-backend-c::host_emit_dtype_dispatch$/)
         + binary_id(/^chelis-cli::capacity_census_tripwire$/)
@@ -230,8 +220,6 @@ default-filter = '''
     + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
     + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
     + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
-    + (binary_id(/^chelis-cli::std_decimal_oracle$/) & test(/^std_decimal_agrees_with_the_reference_on_eval_and_c$/))
-    + (binary_id(/^chelis-cli::std_decimal_failures$/) & test(/^std_decimal_extreme_arguments_raise_no_primitive_trap$/))
 '''
 # chelis#1831: see the backstop note above `[profile.ci]`.
 slow-timeout = { period = "60s", terminate-after = 50 }

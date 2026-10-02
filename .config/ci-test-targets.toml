@@ -150,10 +150,10 @@ cadence = "pull_request and push"
 reason = "script-unit executes the reference's positive and negative rows and its NumPy differential"
 tracking_issue = "chelis#2860"
 
-# chelis#2778: the Std.Decimal reference and differential harness. The
-# chelis-cli `std_decimal_oracle` target runs both against eval and native C;
+# chelis#2778: the Std.Decimal reference and differential harness.
 # script-unit runs the reference's tests and the harness's generator and
-# comparator tests on every pull request.
+# comparator tests on every pull request; the chelis-cli `std_decimal_oracle`
+# differential itself runs nightly (see its test exclusion below).
 [[path_rule]]
 prefix = "scripts/decimal_reference.py"
 disposition = "packages"
