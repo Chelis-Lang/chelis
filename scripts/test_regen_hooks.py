@@ -249,6 +249,13 @@ class RegenHookRepository(unittest.TestCase):
             GIT_COMMITTER_EMAIL="hook@example.invalid",
             GIT_CONFIG_NOSYSTEM="1",
             GIT_CONFIG_GLOBAL=os.devnull,
+            # `git commit` starts a detached `git maintenance run --auto`, which
+            # can still be writing under .git when the scratch tree is removed.
+            GIT_CONFIG_COUNT="2",
+            GIT_CONFIG_KEY_0="maintenance.auto",
+            GIT_CONFIG_VALUE_0="false",
+            GIT_CONFIG_KEY_1="gc.auto",
+            GIT_CONFIG_VALUE_1="0",
             TMPDIR=str(self.tmp),
         )
         self.git("init", "--quiet", "--template=", "--initial-branch=main", str(self.repo), cwd=self.directory)
