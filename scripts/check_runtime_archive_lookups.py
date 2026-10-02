@@ -1128,6 +1128,17 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "scripts/check_single_compile.py",
+        "archive-name",
+        lines=(
+            'RUNTIME_ARCHIVE = "libchelis_runtime.a"',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "the runtime archive's name, which the single-compile guard compares compile arguments with; it reads no file"
+        ),
+    ),
+    Row(
         "scripts/datetime_business_differential.py",
         "archive-name",
         lines=(
@@ -1420,6 +1431,19 @@ REVIEWED: tuple[Row, ...] = (
             "a fixture `Compile:` line as `chelis build` prints it, naming the archive it staged, to test that the "
             "harness reruns that command with only its output retargeted; and a fixture staged archive the harness "
             "must delete once it has linked the program, unless artifacts are kept"
+        ),
+    ),
+    Row(
+        "scripts/test_check_single_compile.py",
+        "archive-name",
+        lines=(
+            '\'    cc.current_dir(&native).args(["-O2", "order.c", "libchelis_runtime.a", "-lm", "-o"]);\\n\'',
+            '\'    Command::new("cc").args(["main.c", "libchelis_runtime.a", "-o", "main"]).status().unwrap();\\n\'',
+            '\'        .arg(out.join("libchelis_runtime.a"))\\n\'',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "fixture Rust source the single-compile guard scans; nothing reads or links it"
         ),
     ),
     Row(
