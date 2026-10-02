@@ -6192,28 +6192,28 @@ impl<'a> HostEmitter<'a> {
             let count = frame.result_axes.len();
             let indent = self.indent.clone();
             let axis = site.axis;
+            // The site's extent is read where it is used rather than held in
+            // a local, so this emitter spells no element type of its own.
+            let extent = format!("chelis_tensor_shape({target}, {axis})");
             self.lines.push(format!("{indent}{{"));
-            self.lines.push(format!(
-                "{indent}    const int64_t __chelis_site_extent = chelis_tensor_shape({target}, {axis});"
-            ));
             self.lines
                 .push(format!("{indent}    if ({frame_name}.count == 0) {{"));
             for index in 0..count {
                 self.lines.push(format!(
-                    "{indent}        {axes}[{index}].required = __chelis_site_extent; {axes}[{index}].source = {}; {axes}[{index}].source_axis = {axis};",
+                    "{indent}        {axes}[{index}].required = {extent}; {axes}[{index}].source = {}; {axes}[{index}].source_axis = {axis};",
                     c_string_literal(&site.binding)
                 ));
             }
             self.lines
                 .push(format!("{indent}        {frame_name}.count = {count};"));
             self.lines.push(format!(
-                "{indent}    }} else if ({axes}[0].required != __chelis_site_extent) {{"
+                "{indent}    }} else if ({axes}[0].required != {extent}) {{"
             ));
             self.lines.push(format!(
                 "{indent}        if ({origin} == NULL || {origin}->child_count != -1 || {origin}->op == NULL || {origin}->trap == NULL) {{ fprintf(stderr, \"host runtime: an extent claim reached a tensor without producer provenance\\n\"); abort(); }}"
             ));
             self.lines.push(format!(
-                "{indent}        fprintf(stderr, \"extent `%s`: claimed = %lld, %s axis %lld = %lld\\n\", {}, (long long){axes}[0].required, {origin}->op, (long long){axis}, (long long)__chelis_site_extent);",
+                "{indent}        fprintf(stderr, \"extent `%s`: claimed = %lld, %s axis %lld = %lld\\n\", {}, (long long){axes}[0].required, {origin}->op, (long long){axis}, (long long){extent});",
                 c_string_literal(&site.binder)
             ));
             self.lines.push(format!(
