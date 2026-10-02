@@ -718,7 +718,8 @@ Two costs outside this module show up in the measurements:
 - In a debug build of the runtime, compiled C rescans a `bool` tensor's whole storage on
   every element read (#2903), so there building a column with `dates_from_epoch_days` and
   reading a `bool` result grow quadratically in the column's length beyond about 10 000
-  elements; the vectorized forms' own work stays linear. A release build
+  elements. `dates_business_day_roll` and `dates_business_day_offset` pay it again building
+  their result columns; each form's per-element work stays linear. A release build
   of the runtime does not rescan.
 - In `chelis eval`, each `index` into a `List` copies the list (#2335), so the binary
   searches cost O(h) per probe there.
