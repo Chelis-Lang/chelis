@@ -77,6 +77,64 @@ class RenameTests(unittest.TestCase):
         self.assertNotIn('#include "dint.h"', out)
 
 
+class ContractCleanTests(unittest.TestCase):
+    """The reduction to the generated-C contract that `chelis build` units satisfy."""
+
+    def test_portable_arm_replaces_x86_and_errno_conditionals(self):
+        text = (
+            "a;\n#ifdef __x86_64__\n__m128d r;\n#if defined(__clang__)\nx;\n#else\ny;\n#endif\n"
+            "#else\nportable;\n#endif\n#ifdef CORE_MATH_SUPPORT_ERRNO\nerrno = EDOM;\n#endif\nb;\n"
+        )
+        self.assertEqual(vcm.keep_portable_arms(text), "a;\nportable;\nb;\n")
+
+    def test_rounding_switch_keeps_only_the_nearest_case(self):
+        text = (
+            "  switch (fegetround()) {\n  case FE_TONEAREST:\n    hi += lo ? md : hi & md;\n    break;\n"
+            "  case FE_DOWNWARD:\n    hi += a;\n    break;\n  case FE_UPWARD:\n    hi += b;\n    break;\n  }\n"
+        )
+        out = vcm.contract_clean(text, "t")
+        self.assertIn("  hi += lo ? md : hi & md;\n", out)
+        self.assertNotIn("FE_", out)
+        self.assertNotIn("fegetround", out)
+
+    def test_attributes_pragmas_raises_and_fenv_are_dropped(self):
+        text = (
+            "#include <stdint.h>\n#include <fenv.h> // raise\n#pragma STDC FENV_ACCESS ON\n"
+            "static __attribute__((cold,noinline)) double f(double x){\n  feraiseexcept(FE_INVALID);\n  return x;\n}\n"
+        )
+        out = vcm.contract_clean(text, "t")
+        self.assertEqual(out, "#include <stdint.h>\nstatic double f(double x){\n  return x;\n}\n")
+
+    def test_surviving_forbidden_construct_is_rejected(self):
+        for text, what in [
+            ('__asm__("frintn %d0, %d1":"=w"(ix):"w"(x));\n', "__asm"),
+            ("static __attribute__((always_inline)) int f(void);\n", "__attribute"),
+            ("int m = fegetround();\n", "fegetround"),
+            ("int m = FE_UPWARD;\n", "environment macro"),
+        ]:
+            with self.subTest(what=what), self.assertRaisesRegex(vcm.VendorError, what):
+                vcm.contract_clean(text, "t")
+
+    def test_include_outside_the_contract_is_rejected(self):
+        with self.assertRaisesRegex(vcm.VendorError, "x86intrin"):
+            vcm.contract_clean("#include <x86intrin.h>\n", "t")
+
+    def test_forbidden_words_in_comments_are_allowed(self):
+        text = "return 0.0f/0.0f; // to raise FE_INVALID via __asm\n"
+        self.assertEqual(vcm.contract_clean(text, "t"), text)
+
+    def test_checked_in_amalgamation_satisfies_the_contract(self):
+        text = vcm.AMALGAMATION.read_text(encoding="utf-8")
+        code = vcm._code_tokens(text)
+        for token in vcm._FORBIDDEN_TOKENS:
+            self.assertNotIn(token, code)
+        self.assertFalse(any(t.startswith("FE_") for t in code))
+        includes = {re.sub(r"\s*//.*$", "", m).split("include", 1)[1].strip()
+                    for m in re.findall(r"^[ \t]*#[ \t]*include\b[^\n]*$", text, re.MULTILINE)}
+        self.assertLessEqual(includes, vcm.CONTRACT_INCLUDES)
+        self.assertNotRegex(text, r"#[ \t]*pragma[ \t]+STDC")
+
+
 class RepositoryTests(unittest.TestCase):
     def test_checked_in_amalgamation_is_current(self):
         self.assertEqual(vcm.generate(), vcm.AMALGAMATION.read_text(encoding="utf-8"))

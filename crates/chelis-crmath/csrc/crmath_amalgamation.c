@@ -68,21 +68,17 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 typedef union {float f; uint32_t u;} chelis_cr_expf__b32u32_u;
 typedef union {double f; uint64_t u;} chelis_cr_expf__b64u64_u;
 
-float chelis_cr_expf__cr_expf(float x){
+static float chelis_cr_expf__cr_expf(float x){
   static const double c[] =
     {0x1.62e42fefa39efp-1, 0x1.ebfbdff82c58fp-3, 0x1.c6b08d702e0edp-5,
      0x1.3b2ab6fb92e5ep-7, 0x1.5d886e6d54203p-10, 0x1.430976b8ce6efp-13};
@@ -123,16 +119,10 @@ float chelis_cr_expf__cr_expf(float x){
       double y = 0x1p-149 + (z + 0x1.9d1d9fccf477p+6)*0x1.71547652b82edp-150;
       y = __builtin_fmax(y, 0x1p-151);
       float r = y;
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      errno = ERANGE;
-#endif
       return r;
     }
     if(!(t.u>>31) && t.u>0x42b17217u){ // x > 0x1.62e42ep+6
       float r = 0x1p127f * 0x1p127f;
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      errno = ERANGE; // overflow
-#endif
       return r;
     }
   }
@@ -149,11 +139,6 @@ float chelis_cr_expf__cr_expf(float x){
     r = s + w*((c[0] + h*c[1]) + h2*((c[2] + h*c[3]) + h2*(c[4] + h*c[5])));
     ub = r;
   }
-#ifdef CORE_MATH_SUPPORT_ERRNO
-  // for x <= -0x1.5d58ap+6, exp(x) underflows, whatever the rounding mode
-  if (x <= -0x1.5d58ap+6f)
-    errno = ERANGE; // underflow
-#endif
   return ub;
 }
 
@@ -193,37 +178,27 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 typedef union {float f; uint32_t u;} chelis_cr_logf__b32u32_u;
 typedef union {double f; uint64_t u;} chelis_cr_logf__b64u64_u;
-static __attribute__((noinline)) float chelis_cr_logf__as_special(float x){
+static float chelis_cr_logf__as_special(float x){
   chelis_cr_logf__b32u32_u t = {.f = x};
   uint32_t ux = t.u, ax = ux<<1;
   if(ax == 0u){ // +/-0.0
-#ifdef CORE_MATH_SUPPORT_ERRNO
-    errno = ERANGE;
-#endif
     return -1.0f/0.0f; // to raise FE_DIVBYZERO
   }
   if(ux == 0x7f800000u) return x; // +inf
   if(ax > 0xff000000u) return x + x; // nan
-#ifdef CORE_MATH_SUPPORT_ERRNO
-  errno = EDOM;
-#endif
   return 0.0f/0.0f; // to raise FE_INVALID and return nan
 }
 
-float chelis_cr_logf__cr_logf(float x){
+static float chelis_cr_logf__cr_logf(float x){
   static const double tr[] = {
     0x1p+0, 0x1.f81f82p-1, 0x1.f07c1fp-1, 0x1.e9131acp-1,
     0x1.e1e1e1ep-1, 0x1.dae6077p-1, 0x1.d41d41dp-1, 0x1.cd85689p-1,
@@ -336,16 +311,12 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 /* __builtin_roundeven was introduced in gcc 10:
    https://gcc.gnu.org/gcc-10/changes.html,
@@ -358,15 +329,6 @@ static double
 chelis_cr_sinf__roundeven_finite (double x)
 {
   double ix;
-# if (defined(__GNUC__) || defined(__clang__)) && (defined(__AVX__) || defined(__SSE4_1__) || (__ARM_ARCH >= 8))
-#  if defined __AVX__
-   __asm__("vroundsd $0x8,%1,%1,%0":"=x"(ix):"x"(x));
-#  elif __ARM_ARCH >= 8
-   __asm__ ("frintn %d0, %d1":"=w"(ix):"w"(x));
-#  else /* __SSE4_1__ */
-   __asm__("roundsd $0x8,%1,%0":"=x"(ix):"x"(x));
-#  endif
-# else
   ix = __builtin_round (x); /* nearest, away from 0 */
   if (__builtin_fabs (ix - x) == 0.5)
   {
@@ -379,21 +341,16 @@ chelis_cr_sinf__roundeven_finite (double x)
     if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
       ix = v.f;
   }
-# endif
   return ix;
 }
 #endif
 
 typedef union {float f; uint32_t u;} chelis_cr_sinf__b32u32_u;
 typedef union {double f; uint64_t u;} chelis_cr_sinf__b64u64_u;
-#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14 && __BITINT_MAXWIDTH__ && __BITINT_MAXWIDTH__ >= 128)
-typedef unsigned _BitInt(128) chelis_cr_sinf__u128;
-#else
 typedef unsigned __int128 chelis_cr_sinf__u128;
-#endif
 typedef uint64_t chelis_cr_sinf__u64;
 
-static double __attribute__((noinline)) chelis_cr_sinf__rbig(uint32_t u, int *q){
+static double chelis_cr_sinf__rbig(uint32_t u, int *q){
   static const chelis_cr_sinf__u64 ipi[] = {0xfe5163abdebbc562, 0xdb6295993c439041, 0xfc2757d1f534ddc0, 0xa2f9836e4e441529};
   int e = (u>>23)&0xff, i;
   chelis_cr_sinf__u64 m = (u&(~0u>>9))|1<<23;
@@ -443,7 +400,7 @@ static inline float chelis_cr_sinf__add_sign(float x, float rh, float rl){
   return sgn*rh + sgn*rl;
 }
 
-static float __attribute__((noinline)) chelis_cr_sinf__as_sinf_database(float x, double r){
+static float chelis_cr_sinf__as_sinf_database(float x, double r){
   static const struct {union{float arg; uint32_t uarg;}; float rh, rl;} st[] = {
     {{0x1.33333p+13}, -0x1.63f4bap-2, -0x1p-27},
     {{0x1.75b8a2p-1}, 0x1.55688ap-1, -0x1p-26},
@@ -471,14 +428,11 @@ static const double chelis_cr_sinf__tb[] =
    -0x1p+0, -0x1.f6297cff75cbp-1, -0x1.d906bcf328d46p-1, -0x1.a9b66290ea1a3p-1,
    -0x1.6a09e667f3bcdp-1, -0x1.1c73b39ae68c8p-1, -0x1.87de2a6aea963p-2, -0x1.8f8b83c69a60bp-3};
 
-static float __attribute__((noinline)) chelis_cr_sinf__as_sinf_big(float x){
+static float chelis_cr_sinf__as_sinf_big(float x){
   chelis_cr_sinf__b32u32_u t = {.f = x};
   uint32_t ax = t.u<<1;
   if(__builtin_expect(ax>=0xffu<<24, 0)){ // nan or +-inf
     if(ax<<8) return x + x; // nan
-#ifdef CORE_MATH_SUPPORT_ERRNO
-    errno = EDOM;
-#endif
     return 0.0f/0.0f; // to raise FE_INVALID
   }
   int ia;
@@ -491,7 +445,7 @@ static float __attribute__((noinline)) chelis_cr_sinf__as_sinf_big(float x){
   return r;
 }
 
-float chelis_cr_sinf__cr_sinf(float x){
+static float chelis_cr_sinf__cr_sinf(float x){
   chelis_cr_sinf__b32u32_u t = {.f = x};
   uint32_t ax = t.u<<1;
   int ia;
@@ -503,16 +457,6 @@ float chelis_cr_sinf__cr_sinf(float x){
 	if (__builtin_expect(ax==0u, 0))
 	  return x;
         float res = __builtin_fmaf(-x, __builtin_fabsf(x), x);
-#ifdef CORE_MATH_SUPPORT_ERRNO
-        /* The Taylor expansion of sin(x) at x=0 is x - x^3/6 + o(x^3).
-           For |x| > 2^-126 we have no underflow, whatever the rounding mode.
-           For |x| < 2^-126, since |sin(x)| < |x|, we always have underflow.
-           For |x| = 2^-126, we have underflow for rounding towards zero,
-           i.e., when sin(x) rounds to nextbelow(2^-126).
-           In summary, we have underflow whenever |x|<2^-126 or |res|<2^-126. */
-        if (__builtin_fabsf (x) < 0x1p-126f || __builtin_fabsf (res) < 0x1p-126f)
-          errno = ERANGE; // underflow
-#endif
         return res;
       }
       return (-0x1.555556p-3f*x)*(x*x) + x;
@@ -570,16 +514,12 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 /* __builtin_roundeven was introduced in gcc 10:
    https://gcc.gnu.org/gcc-10/changes.html,
@@ -592,15 +532,6 @@ static double
 chelis_cr_cosf__roundeven_finite (double x)
 {
   double ix;
-# if (defined(__GNUC__) || defined(__clang__)) && (defined(__AVX__) || defined(__SSE4_1__) || (__ARM_ARCH >= 8))
-#  if defined __AVX__
-   __asm__("vroundsd $0x8,%1,%1,%0":"=x"(ix):"x"(x));
-#  elif __ARM_ARCH >= 8
-   __asm__ ("frintn %d0, %d1":"=w"(ix):"w"(x));
-#  else /* __SSE4_1__ */
-   __asm__("roundsd $0x8,%1,%0":"=x"(ix):"x"(x));
-#  endif
-# else
   ix = __builtin_round (x); /* nearest, away from 0 */
   if (__builtin_fabs (ix - x) == 0.5)
   {
@@ -613,21 +544,16 @@ chelis_cr_cosf__roundeven_finite (double x)
     if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
       ix = v.f;
   }
-# endif
   return ix;
 }
 #endif
 
 typedef union {float f; uint32_t u;} chelis_cr_cosf__b32u32_u;
 typedef union {double f; uint64_t u;} chelis_cr_cosf__b64u64_u;
-#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14 && __BITINT_MAXWIDTH__ && __BITINT_MAXWIDTH__ >= 128)
-typedef unsigned _BitInt(128) chelis_cr_cosf__u128;
-#else
 typedef unsigned __int128 chelis_cr_cosf__u128;
-#endif
 typedef uint64_t chelis_cr_cosf__u64;
 
-static double __attribute__((noinline)) chelis_cr_cosf__rbig(uint32_t u, int *q){
+static double chelis_cr_cosf__rbig(uint32_t u, int *q){
   static const chelis_cr_cosf__u64 ipi[] = {0xfe5163abdebbc562, 0xdb6295993c439041, 0xfc2757d1f534ddc0, 0xa2f9836e4e441529};
   int e = (u>>23)&0xff, i;
   chelis_cr_cosf__u64 m = (u&(~0u>>9))|1<<23;
@@ -672,7 +598,7 @@ static inline double chelis_cr_cosf__rltl0(double x, int *q){
   return idh - id;
 }
 
-static float __attribute__((noinline)) chelis_cr_cosf__as_cosf_database(float x, double r){
+static float chelis_cr_cosf__as_cosf_database(float x, double r){
   static const struct {union{float arg; uint32_t uarg;}; float rh, rl;} st[] = {
     {{0x1.2d97c8p+2}, 0x1.99bc5cp-27, -0x1p-52},
     {{0x1.4555p+51}, 0x1.115d7ep-1, -0x1p-26},
@@ -701,14 +627,11 @@ static const double chelis_cr_cosf__tb[] =
    0x0p+0, 0x1.8f8b83c69a60bp-3, 0x1.87de2a6aea963p-2, 0x1.1c73b39ae68c8p-1,
    0x1.6a09e667f3bcdp-1, 0x1.a9b66290ea1a3p-1, 0x1.d906bcf328d46p-1, 0x1.f6297cff75cbp-1};
 
-static float __attribute__((noinline)) chelis_cr_cosf__as_cosf_big(float x){
+static float chelis_cr_cosf__as_cosf_big(float x){
   chelis_cr_cosf__b32u32_u t = {.f = x};
   uint32_t ax = t.u<<1;
   if(__builtin_expect(ax>=0xffu<<24, 0)){ // nan or +-inf
     if(ax<<8) return x + x; // nan
-#ifdef CORE_MATH_SUPPORT_ERRNO
-    errno = EDOM;
-#endif
     return 0.0f/0.0f; // to raise FE_INVALID
   }
   int ia;
@@ -723,7 +646,7 @@ static float __attribute__((noinline)) chelis_cr_cosf__as_cosf_big(float x){
   return r;
 }
 
-float chelis_cr_cosf__cr_cosf(float x){
+static float chelis_cr_cosf__cr_cosf(float x){
   chelis_cr_cosf__b32u32_u t = {.f = x};
   uint32_t ax = t.u<<1;
   int ia;
@@ -788,17 +711,12 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#include <fenv.h> // for feraiseexcept, FE_INVALID
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 /* __builtin_roundeven was introduced in gcc 10:
    https://gcc.gnu.org/gcc-10/changes.html,
@@ -811,15 +729,6 @@ static double
 chelis_cr_tanf__roundeven_finite (double x)
 {
   double ix;
-# if (defined(__GNUC__) || defined(__clang__)) && (defined(__AVX__) || defined(__SSE4_1__) || (__ARM_ARCH >= 8))
-#  if defined __AVX__
-   __asm__("vroundsd $0x8,%1,%1,%0":"=x"(ix):"x"(x));
-#  elif __ARM_ARCH >= 8
-   __asm__ ("frintn %d0, %d1":"=w"(ix):"w"(x));
-#  else /* __SSE4_1__ */
-   __asm__("roundsd $0x8,%1,%0":"=x"(ix):"x"(x));
-#  endif
-# else
   ix = __builtin_round (x); /* nearest, away from 0 */
   if (__builtin_fabs (ix - x) == 0.5)
   {
@@ -832,18 +741,13 @@ chelis_cr_tanf__roundeven_finite (double x)
     if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
       ix = v.f;
   }
-# endif
   return ix;
 }
 #endif
 
 typedef union {float f; uint32_t u;} chelis_cr_tanf__b32u32_u;
 typedef union {double f; uint64_t u;} chelis_cr_tanf__b64u64_u;
-#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14 && __BITINT_MAXWIDTH__ && __BITINT_MAXWIDTH__ >= 128)
-typedef unsigned _BitInt(128) chelis_cr_tanf__u128;
-#else
 typedef unsigned __int128 chelis_cr_tanf__u128;
-#endif
 typedef uint64_t chelis_cr_tanf__u64;
 
 
@@ -860,7 +764,7 @@ static inline double chelis_cr_tanf__rltl(float z, int *q){
 
 // argument reduction
 // same as rltl, but for |x| >= 2^28
-static double __attribute__((noinline)) chelis_cr_tanf__rbig(uint32_t u, int *q){
+static double chelis_cr_tanf__rbig(uint32_t u, int *q){
   static const chelis_cr_tanf__u64 ipi[] = {0xfe5163abdebbc562, 0xdb6295993c439041, 0xfc2757d1f534ddc0, 0xa2f9836e4e441529};
   int e = (u>>23)&0xff, i;
   chelis_cr_tanf__u64 m = (u&(~0u>>9))|1<<23;
@@ -893,25 +797,13 @@ static double __attribute__((noinline)) chelis_cr_tanf__rbig(uint32_t u, int *q)
   return z;
 }
 
-float chelis_cr_tanf__cr_tanf(float x){
+static float chelis_cr_tanf__cr_tanf(float x){
   chelis_cr_tanf__b32u32_u t = {.f = x};
   int e = (t.u>>23)&0xff, i;
   double z;
   if (__builtin_expect(e<127+28, 1)){ // |x| < 2^28
     if (__builtin_expect(e<115, 0)){ // |x| < 2^-13
       if (__builtin_expect(e<102, 0)) { // |x| < 2^-26
-#ifdef CORE_MATH_SUPPORT_ERRNO
-        /* The Taylor expansion of tan(x) at x=0 is x + x^3/3 + o(x^3),
-           thus for |x| >= 2^-126 we have no underflow, whatever the
-           rounding mode.
-           For |x| < 2^-126 and rounding towards zero, we have underflow.
-           For x = nextbelow(2^-126) = 0x1.fffffcp-127, tan(x) would round
-           upward to 0x1.fffffep-127 with unbounded exponent range, which is
-           not representable, thus we have underflow too.
-           In summary, we have underflow whenever |x| < 2^-126. */
-        if (x != 0 && __builtin_fabsf (x) < 0x1p-126f)
-          errno = ERANGE; // underflow
-#endif
 	return __builtin_fmaf(x, __builtin_fabsf(x), x);
       }
       float x2 = x*x;
@@ -922,10 +814,6 @@ float chelis_cr_tanf__cr_tanf(float x){
     z = chelis_cr_tanf__rbig(t.u, &i);
   } else {
     if(t.u<<9) return x + x; // nan
-#ifdef CORE_MATH_SUPPORT_ERRNO
-    errno = EDOM;
-#endif
-    feraiseexcept(FE_INVALID);
     return __builtin_nanf("tinf"); // inf
   }
   double z2 = z*z, z4 = z2*z2;
@@ -999,22 +887,18 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 typedef union {float f; uint32_t u;} chelis_cr_atanf__b32u32_u;
 typedef union {double f; uint64_t u;} chelis_cr_atanf__b64u64_u;
 typedef uint64_t chelis_cr_atanf__u64;
 
-float chelis_cr_atanf__cr_atanf(float x){
+static float chelis_cr_atanf__cr_atanf(float x){
   const double pi2 = 0x1.921fb54442d18p+0;
   chelis_cr_atanf__b32u32_u t = {.f = x};
   int e = (t.u>>23)&0xff, gt = e>=127;
@@ -1027,16 +911,6 @@ float chelis_cr_atanf__cr_atanf(float x){
     if (__builtin_expect(e<127-25, 0)){ // |x| < 2^-25
       if(!(t.u<<1)) return x;
       float res = __builtin_fmaf(-x, __builtin_fabsf(x), x);
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      /* The Taylor expansion of atan(x) at x=0 is x - x^3/3 + o(x^3).
-         For |x| > 2^-126 we have no underflow, whatever the rounding mode.
-         For |x| < 2^-126, since |atan(x)| < |x|, we always have underflow.
-         For |x| = 2^-126, we have underflow for rounding towards zero,
-         i.e., when atan(x) rounds to nextbelow(2^-126).
-         In summary, we have underflow whenever |x|<2^-126 or |res|<2^-126. */
-      if (__builtin_fabsf (x) < 0x1p-126f || __builtin_fabsf (res) < 0x1p-126f)
-        errno = ERANGE; // underflow
-#endif
       return res;
     }
     return __builtin_fmaf(-0x1.5555555555555p-2f*x, x*x, x);
@@ -1127,20 +1001,16 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 typedef union {float f; uint32_t u;} chelis_cr_tanhf__b32u32_u;
 
-float chelis_cr_tanhf__cr_tanhf(float x){
+static float chelis_cr_tanhf__cr_tanhf(float x){
   double z = x;
   chelis_cr_tanhf__b32u32_u t = {.f = x};
   uint32_t ux = t.u;
@@ -1154,16 +1024,6 @@ float chelis_cr_tanhf__cr_tanhf(float x){
     if (__builtin_expect(e<102, 0)){ // |x| < 2^-26
       if(__builtin_expect((ux<<1)==0, 0)) return x;
       float res = __builtin_fmaf(-x, __builtin_fabsf(x), x);
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      /* The Taylor expansion of tanh(x) at x=0 is x - x^3/3 + o(x^3).
-         For |x| > 2^-126 we have no underflow, whatever the rounding mode.
-         For |x| < 2^-126, since |tanh(x)| < |x|, we always have underflow.
-         For |x| = 2^-126, we have underflow for rounding towards zero,
-         i.e., when atan(x) rounds to nextbelow(2^-126).
-         In summary, we have underflow whenever |x|<2^-126 or |res|<2^-126. */
-      if (__builtin_fabsf (x) < 0x1p-126f || __builtin_fabsf (res) < 0x1p-126f)
-        errno = ERANGE; // underflow
-#endif
       return res;
     }
     float x2 = x*x;
@@ -1226,20 +1086,12 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
-#include <fenv.h> // for feraiseexcept, FE_UNDERFLOW
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 /* __builtin_roundeven was introduced in gcc 10:
    https://gcc.gnu.org/gcc-10/changes.html,
@@ -1252,15 +1104,6 @@ static double
 chelis_cr_exp__roundeven_finite (double x)
 {
   double ix;
-# if (defined(__GNUC__) || defined(__clang__)) && (defined(__AVX__) || defined(__SSE4_1__) || (__ARM_ARCH >= 8))
-#  if defined __AVX__
-   __asm__("vroundsd $0x8,%1,%1,%0":"=x"(ix):"x"(x));
-#  elif __ARM_ARCH >= 8
-   __asm__ ("frintn %d0, %d1":"=w"(ix):"w"(x));
-#  else /* __SSE4_1__ */
-   __asm__("roundsd $0x8,%1,%0":"=x"(ix):"x"(x));
-#  endif
-# else
   ix = __builtin_round (x); /* nearest, away from 0 */
   if (__builtin_fabs (ix - x) == 0.5)
   {
@@ -1273,7 +1116,6 @@ chelis_cr_exp__roundeven_finite (double x)
     if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
       ix = v.f;
   }
-# endif
   return ix;
 }
 #endif
@@ -1349,42 +1191,17 @@ static inline double chelis_cr_exp__opolydd(double xh, double xl, int n, const d
 }
 
 static inline double chelis_cr_exp__as_ldexp(double x, chelis_cr_exp__i64 i){
-#ifdef __x86_64__
-    __m128i sb; sb[0] = (uint64_t)i<<52;
-#if defined(__clang__)
-    __m128d r = _mm_set_sd(x);
-#else
-    __m128d r; asm("":"=x"(r):"0"(x));
-#endif
-    r = (__m128d)_mm_add_epi64(sb, (__m128i)r);
-    return r[0];
-#else
     chelis_cr_exp__b64u64_u ix = {.f = x};
     ix.u += (uint64_t)i<<52;
     return ix.f;
-#endif
 }
 
 // sets the exponent of a binary64 number to 0 (subnormal range)
 static inline double chelis_cr_exp__as_todenormal(double x){
-#ifdef __x86_64__
-    __m128i sb = {~(chelis_cr_exp__u64)0>>12, 0};
-#if defined(__clang__)
-    __m128d r = _mm_set_sd(x);
-#else
-    __m128d r; asm("":"=x"(r):"0"(x));
-#endif
-    r = _mm_and_pd(r, (__m128d)sb);
-    // forces the underflow exception
-    _mm_setcsr (_mm_getcsr () | _MM_EXCEPT_UNDERFLOW);
-    return r[0];
-#else
     chelis_cr_exp__b64u64_u ix = {.f = x};
     ix.u &= ~(chelis_cr_exp__u64)0>>12;
     // forces the underflow exception
-    feraiseexcept (FE_UNDERFLOW);
     return ix.f;
-#endif
 }
 
 static const double chelis_cr_exp__db[] = {
@@ -1403,7 +1220,7 @@ static const double chelis_cr_exp__db[] = {
   -0x1.8f80e06f3a04cp+4, -0x1.59f038076039cp+6, -0x1.981587ad4542fp+7,
 };
 
-static double __attribute__((noinline)) chelis_cr_exp__as_exp_database(double x, double f){
+static double chelis_cr_exp__as_exp_database(double x, double f){
   chelis_cr_exp__b64u64_u ix = {.f = x};
   int a = 0, b = sizeof(chelis_cr_exp__db)/sizeof(chelis_cr_exp__db[0]) - 1, m = (a + b)/2;
   const chelis_cr_exp__b64u64_u *c = (const chelis_cr_exp__b64u64_u*)chelis_cr_exp__db;
@@ -1500,7 +1317,7 @@ static const double chelis_cr_exp__t1[][2] = {
   {0x1.4a47a505b3a46p-54, 0x1.02b338c811703p+0}, {0x1.e47120223468p-54, 0x1.02be6e199c811p+0},
 };
 
-static double __attribute__((cold,noinline)) chelis_cr_exp__as_exp_accurate(double x){
+static double chelis_cr_exp__as_exp_accurate(double x){
   static const double ch[][2] =
     {{0x1p+0, 0}, {0x1p-1, 0x1.712f72ecec2cfp-99}, {0x1.5555555555555p-3, 0x1.5555555554d07p-57},
      {0x1.5555555555555p-5, 0x1.55194d28275dap-59}, {0x1.1111111111111p-7, 0x1.12faa0e1c0f7bp-63},
@@ -1555,7 +1372,7 @@ static double __attribute__((cold,noinline)) chelis_cr_exp__as_exp_accurate(doub
   return fh;
 }
 
-double chelis_cr_exp__cr_exp(double x){
+static double chelis_cr_exp__cr_exp(double x){
   chelis_cr_exp__b64u64_u ix = {.f = x};
   chelis_cr_exp__u64 aix = ix.u & (~(chelis_cr_exp__u64)0>>1);
   // exp(x) rounds to 1 to nearest for |x| <= 0x1p-54
@@ -1570,16 +1387,10 @@ double chelis_cr_exp__cr_exp(double x){
 	return x; // x = inf
     }
     if(!(ix.u>>63)){ // x >= 0x1.62e42fefa39fp+9
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      errno = ERANGE;
-#endif
       volatile double z = 0x1p1023;
       return z*z;
     }
     if (aix>=0x40874910d52d3052ull) { // x <= -0x1.74910d52d3052p+9
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      errno = ERANGE; // underflow
-#endif
       volatile double z = 0x1p-1022;
       return z * z;
     }
@@ -1605,9 +1416,6 @@ double chelis_cr_exp__cr_exp(double x){
   double eps = 1.64e-19;
   if(__builtin_expect(ix.u>0xc086232bdd7abcd2ull, 0)){
     // subnormal case: x < -0x1.6232bdd7abcd2p+9
-#ifdef CORE_MATH_SUPPORT_ERRNO
-    errno = ERANGE; // underflow
-#endif
     ix.u = (1-ie)<<52;
     double e;
     fh = chelis_cr_exp__fasttwosum(ix.f, fh, &e);
@@ -1660,9 +1468,6 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 /* begin inlined src/binary64/log/dint.h */
 /* Correctly-rounded power function for two binary64 values.
 
@@ -1712,11 +1517,7 @@ SOFTWARE.
 #ifndef chelis_cr_log__UINT128_T
 #define chelis_cr_log__UINT128_T
 
-#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14 && __BITINT_MAXWIDTH__ && __BITINT_MAXWIDTH__ >= 128)
-typedef unsigned _BitInt(128) chelis_cr_log__u128;
-#else
 typedef unsigned __int128 chelis_cr_log__u128;
-#endif
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 typedef union {
@@ -2463,7 +2264,6 @@ static const chelis_cr_log__dint64_t chelis_cr_log__P_2[] = {
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 typedef union { double f; uint64_t u; } chelis_cr_log__d64u64;
 
@@ -3075,7 +2875,7 @@ chelis_cr_log__cr_log_accurate (double x)
   return chelis_cr_log__dint_tod (&Y);
 }
 
-double
+static double
 chelis_cr_log__cr_log (double x)
 {
   chelis_cr_log__d64u64 v = {.f = x};
@@ -3089,15 +2889,9 @@ chelis_cr_log__cr_log (double x)
     {
       /* f(x<0) is NaN, f(+/-0) is -Inf and raises DivByZero */
       if (x < 0) {
-#ifdef CORE_MATH_SUPPORT_ERRNO
-        errno = EDOM;
-#endif
         return 0.0 / 0.0;
       }
       else {
-#ifdef CORE_MATH_SUPPORT_ERRNO
-        errno = ERANGE; // pole error
-#endif
         return 1.0 / -0.0;
       }
     }
@@ -3297,23 +3091,14 @@ SOFTWARE.
 
 #include <stdint.h>
 #include <inttypes.h>
-#include <fenv.h> // for fegetround, FE_TONEAREST, FE_DOWNWARD, FE_UPWARD
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
-#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14 && __BITINT_MAXWIDTH__ && __BITINT_MAXWIDTH__ >= 128)
-typedef unsigned _BitInt(128) chelis_cr_sin__u128;
-#else
 typedef unsigned __int128 chelis_cr_sin__u128;
-#endif
 
 typedef uint64_t chelis_cr_sin__u64;
 
@@ -4008,7 +3793,7 @@ static const chelis_cr_sin__u128 chelis_cr_sin__C2u[64] = {
 };
 
 // accurate path for |x| >= 2^31
-static double __attribute__((cold,noinline))
+static double 
 chelis_cr_sin__sin_large_accurate (double x)
 {
   chelis_cr_sin__u128 r;
@@ -4132,7 +3917,7 @@ chelis_cr_sin__cr_sin_moderate (double x, int sbit)
 
 // fast path for |x| >= 2^31
 // ax = |x| and eps is the error bound for the rounding test
-static double __attribute__((noinline))
+static double 
 chelis_cr_sin__cr_sin_large (double x)
 {
   double ax = __builtin_fabs(x);
@@ -4164,7 +3949,7 @@ chelis_cr_sin__cr_sin_large (double x)
   return chelis_cr_sin__sin_large_accurate (x);
 }
 
-double
+static double
 chelis_cr_sin__cr_sin (double x)
 {
   chelis_cr_sin__b64u64_u t = {.f = x};
@@ -4178,20 +3963,12 @@ chelis_cr_sin__cr_sin (double x)
     /* We have underflow when 0 < |x| < 2^-1022 or when |x| = 2^-1022
        and rounding towards zero. */
     double res = __builtin_fma (x, -0x1p-54, x);
-#ifdef CORE_MATH_SUPPORT_ERRNO
-    if ((t.u<<1)<(1ull<<53) || __builtin_fabs (res) < 0x1p-1022)
-      errno = ERANGE; // underflow
-#endif
     return res;
   }
   int e = (t.u>>52)&0x7ff;
   if (__builtin_expect(e < 1054, 1)) return chelis_cr_sin__cr_sin_moderate(x, t.u>>63); // |x| < 2^31
   if (__builtin_expect (e == 0x7ff, 0)) /* NaN, +Inf and -Inf. */
     {
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      if ((t.u<<1) == 0x7ffull<<53) // +/-Inf
-        errno = EDOM;
-#endif
       return x - x; // raises invalid
     }
   // now |x| >= 2^31
@@ -4234,25 +4011,16 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#include <fenv.h> // for fegetround, FE_TONEAREST, FE_DOWNWARD, FE_UPWARD
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 /******************** code copied from dint.h and pow.[ch] *******************/
 
-#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14 && __BITINT_MAXWIDTH__ && __BITINT_MAXWIDTH__ >= 128)
-typedef unsigned _BitInt(128) chelis_cr_cos__u128;
-#else
 typedef unsigned __int128 chelis_cr_cos__u128;
-#endif
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 typedef union {
@@ -4544,17 +4312,8 @@ static inline void chelis_cr_cos__subnormalize_dint(chelis_cr_cos__dint64_t *a) 
   uint64_t md = (a->hi >> (ex - 1)) & 0x1;
   uint64_t lo = (a->hi & (~0ull >> ex)) || a->lo;
 
-  switch (fegetround()) {
-  case FE_TONEAREST:
-    hi += lo ? md : hi & md;
-    break;
-  case FE_DOWNWARD:
-    hi += a->sgn & (md | lo);
-    break;
-  case FE_UPWARD:
-    hi += (!a->sgn) & (md | lo);
-    break;
-  }
+  /* round to nearest, the only mode Chelis runs in */
+  hi += lo ? md : hi & md;
 
   a->hi = hi << ex;
   a->lo = 0;
@@ -6066,7 +5825,7 @@ chelis_cr_cos__cos_fast (double *h, double *l, double x)
 }
 
 /* Assume x is a regular number and x > 0x1.6a09e667f3bccp-27. */
-__attribute__((cold))
+
 static double
 chelis_cr_cos__cos_accurate (double x)
 {
@@ -6229,7 +5988,7 @@ chelis_cr_cos__cos_accurate (double x)
   return y;
 }
 
-double
+static double
 chelis_cr_cos__cr_cos (double x)
 {
   chelis_cr_cos__b64u64_u t = {.f = x};
@@ -6237,10 +5996,6 @@ chelis_cr_cos__cr_cos (double x)
 
   if (__builtin_expect (e == 0x7ff, 0)) /* NaN, +Inf and -Inf. */
     {
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      if ((t.u << 1) == 0x7ffull<<53) // Inf
-        errno = EDOM;
-#endif
       if ((t.u << 1) == 0x7ffull<<53) // Inf
         return 0.0 / 0.0; // raise invalid flag
       return x + x; // return qNaN
@@ -6313,25 +6068,16 @@ SOFTWARE.
 
 #include <stdint.h>
 #include <inttypes.h>
-#include <fenv.h> // for fegetround, FE_TONEAREST, FE_DOWNWARD, FE_UPWARD
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 /******************** code copied from dint.h and pow.[ch] *******************/
 
-#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14 && __BITINT_MAXWIDTH__ && __BITINT_MAXWIDTH__ >= 128)
-typedef unsigned _BitInt(128) chelis_cr_tan__u128;
-#else
 typedef unsigned __int128 chelis_cr_tan__u128;
-#endif
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 typedef union {
@@ -6751,17 +6497,8 @@ static inline void chelis_cr_tan__subnormalize_dint(chelis_cr_tan__dint64_t *a) 
   uint64_t md = (a->hi >> (ex - 1)) & 0x1;
   uint64_t lo = (a->hi & (~0ull >> ex)) || a->lo;
 
-  switch (fegetround()) {
-  case FE_TONEAREST:
-    hi += lo ? md : hi & md;
-    break;
-  case FE_DOWNWARD:
-    hi += a->sgn & (md | lo);
-    break;
-  case FE_UPWARD:
-    hi += (!a->sgn) & (md | lo);
-    break;
-  }
+  /* round to nearest, the only mode Chelis runs in */
+  hi += lo ? md : hi & md;
 
   a->hi = hi << ex;
   a->lo = 0;
@@ -8529,7 +8266,7 @@ chelis_cr_tan__tan_accurate (double x)
   return y;
 }
 
-double
+static double
 chelis_cr_tan__cr_tan (double x)
 {
   chelis_cr_tan__b64u64_u t = {.f = x};
@@ -8538,9 +8275,6 @@ chelis_cr_tan__cr_tan (double x)
   if (__builtin_expect (e == 0x7ff, 0)) /* NaN, +Inf and -Inf. */
   {
     if ((t.u << 1) == 0x7ffull<<53) { // +/-Inf
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      errno = EDOM;
-#endif
       return x - x; // raises invalid
     }
     return x + x; // NaN
@@ -8567,10 +8301,6 @@ chelis_cr_tan__cr_tan (double x)
       /* We have underflow exactly when 0 < |x| < 2^-1022:
          for RNDU, tan(2^-1022-2^-1074) would round to 2^-1022-2^-1075
          with unbounded exponent range */
-#ifdef CORE_MATH_SUPPORT_ERRNO
-    if (x != 0 && __builtin_fabs (x) < 0x1p-1022)
-      errno = ERANGE; // underflow
-#endif
     return __builtin_fma (x, 0x1p-54, x);
   }
 
@@ -8620,16 +8350,12 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 typedef union {double f; uint64_t u;} chelis_cr_atan__b64u64_u;
 typedef uint64_t chelis_cr_atan__u64;
@@ -8751,7 +8477,7 @@ static const uint16_t chelis_cr_atan__c[31][3] = {
 // this routine might be called for 0x1p-27 <= |x|
 // a is the approximation of atan(x) from the fast path
 // thus 0x1p-27 <= |a| <= pi/2
-static double __attribute__((cold,noinline)) chelis_cr_atan__as_atan_refine2(double x, double a){
+static double chelis_cr_atan__as_atan_refine2(double x, double a){
   static const double ch[][2] = {
     {-0x1.5555555555555p-2, -0x1.5555555555555p-56}, {0x1.999999999999ap-3, -0x1.999999999bcb8p-57},
     {-0x1.2492492492492p-3, -0x1.249242093c016p-57}};
@@ -8822,7 +8548,7 @@ static double __attribute__((cold,noinline)) chelis_cr_atan__as_atan_refine2(dou
   return v1 + v0;
 }
 
-double chelis_cr_atan__cr_atan(double x){
+static double chelis_cr_atan__cr_atan(double x){
   static const double ch[] = {0x1p+0, -0x1.555555555552bp-2, 0x1.9999999069c2p-3, -0x1.248d2c8444ac6p-3};
   chelis_cr_atan__b64u64_u t = {.f = x};
   chelis_cr_atan__u64 at = t.u&(~(chelis_cr_atan__u64)0>>1); // at encodes |x|
@@ -8836,10 +8562,6 @@ double chelis_cr_atan__cr_atan(double x){
       /* We have underflow when 0 < |x| < 2^-1022 or when |x| = 2^-1022
          and rounding towards zero. */
       double res = __builtin_fma (-0x1p-54, x, x);
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      if (__builtin_fabs (x) < 0x1p-1022 || __builtin_fabs (res) < 0x1p-1022)
-        errno = ERANGE; // underflow
-#endif
       return res;
     }
     double x2 = x*x, x3 = x*x2, x4 = x2*x2;
@@ -8919,24 +8641,17 @@ SOFTWARE.
 */
 
 #include <stdint.h>
-#ifdef CORE_MATH_SUPPORT_ERRNO
-#include <errno.h>
-#endif
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
 
-#pragma STDC FENV_ACCESS ON
 
 typedef uint64_t chelis_cr_tanh__u64;
 typedef union {double f; chelis_cr_tanh__u64 u;} chelis_cr_tanh__b64u64_u;
 
-static __attribute__((noinline)) double chelis_cr_tanh__as_tanh_database(double, double);
+static double chelis_cr_tanh__as_tanh_database(double, double);
 
 static inline double chelis_cr_tanh__fasttwosum(double x, double y, double *e){
   double s = x + y, z = s - x;
@@ -8981,7 +8696,7 @@ static inline double chelis_cr_tanh__polydd(double xh, double xl, int n, const d
   return ch;
 }
 
-static double __attribute__((noinline)) chelis_cr_tanh__as_exp_accurate(double x, double t, double th, double tl, double *l){
+static double chelis_cr_tanh__as_exp_accurate(double x, double t, double th, double tl, double *l){
   static const double ch[][2] = {
     {0x1p+0, 0x1.6c16bd194535dp-94}, {0x1p-1, -0x1.8259d904fd34fp-93},
     {0x1.5555555555555p-3, 0x1.53e93e9f26e62p-57}};
@@ -8999,7 +8714,7 @@ static double __attribute__((noinline)) chelis_cr_tanh__as_exp_accurate(double x
   return vh;
 }
 
-static double __attribute__((noinline)) chelis_cr_tanh__as_tanh_zero(double x){ // |x|<0.25
+static double chelis_cr_tanh__as_tanh_zero(double x){ // |x|<0.25
     static const double ch[][2] = {
         {-0x1.5555555555555p-2, -0x1.5555555554cc4p-56},
         {0x1.1111111111111p-3, 0x1.111110f8c0178p-59},
@@ -9036,7 +8751,7 @@ static double __attribute__((noinline)) chelis_cr_tanh__as_tanh_zero(double x){ 
   return y0 + y1;
 }
 
-static __attribute__((noinline)) double chelis_cr_tanh__as_tanh_database(double x, double f){
+static double chelis_cr_tanh__as_tanh_database(double x, double f){
   static const double db[][3] = {
     {0x1.ac343b179fec4p-3, 0x1.a612499c53078p-3,  0x1p-57},
     {0x1.00764a988bf73p-2, 0x1.f676484c0703bp-3, -0x1p-104},
@@ -9066,7 +8781,7 @@ static __attribute__((noinline)) double chelis_cr_tanh__as_tanh_database(double 
   return f;
 }
 
-double chelis_cr_tanh__cr_tanh(double x){
+static double chelis_cr_tanh__cr_tanh(double x){
   /*
     The function tanh(x) is approximated by minimax polynomial for
     |x|<0.25.  For other values we use this identity tanh(|x|) = 1 -
@@ -9157,17 +8872,10 @@ double chelis_cr_tanh__cr_tanh(double x){
   const double s = -0x1.71547652b82fep+13;
   double v0 = __builtin_fma(ax, s, 0x1.8000004p+25);
   chelis_cr_tanh__b64u64_u jt = {.f = v0};
-#if defined(__x86_64__)
-  __m128d v = _mm_set_sd (v0);
-  __m128i tt = {~((1<<27)-1l), 0};
-  v = _mm_and_pd(v,(__m128d)tt);
-  double t = v[0] - 0x1.8p25;
-#else
   chelis_cr_tanh__b64u64_u v = {.f = v0};
   uint64_t tt = ~((1<<27)-1l);
   v.u &= tt;
   double t = v.f - 0x1.8p25;
-#endif
   int64_t i1 = (jt.u>>27)&0x3f, i0 = (jt.u>>33)&0x3f, ie = (int64_t)(jt.u<<13)>>52;
   const chelis_cr_tanh__b64u64_u sp = {.u = (uint64_t)(1023 + ie)<<52};
   static const double ch[] = {0x1p+1, 0x1p+1, 0x1.55555557e54ffp+0, 0x1.55555553a12f4p-1};
@@ -9179,11 +8887,6 @@ double chelis_cr_tanh__cr_tanh(double x){
           /* We have underflow when 0 < |x| < 2^-1022 or when |x| = 2^-1022
              and rounding towards zero. */
           double res = __builtin_fma (x, -0x1p-55, x);
-#ifdef CORE_MATH_SUPPORT_ERRNO
-          if (__builtin_fabs (x) < 0x1p-1022 ||
-              __builtin_fabs (res) < 0x1p-1022)
-            errno = ERANGE; // underflow
-#endif
           return res;
       } // endif |x| <= 0x1.d12ed0af1a27fp-27
       static const double c[] = {

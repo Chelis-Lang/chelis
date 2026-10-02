@@ -15,7 +15,18 @@ every lane compiles:
 2. the kernel's external entry (`cr_expf`) is declared `static` before its
    definition, so every definition has internal linkage;
 3. a `static` entry `chelis_cr_<name>` calls the kernel and replaces any NaN
-   result with [04-NUM-2]'s canonical quiet NaN.
+   result with [04-NUM-2]'s canonical quiet NaN;
+4. the kernel text is reduced to the generated-C contract that built programs
+   must satisfy, because `chelis build` emits these same bytes into every unit
+   that calls a kernel (design section 4.2). `contract_clean` drops what the
+   contract forbids and what Chelis never observes: the `errno` blocks, the
+   floating-point exception raises, `<fenv.h>`, the `FENV_ACCESS` pragma, the
+   `noinline`/`cold` attributes, the inline-assembly `roundeven` arms (the
+   portable fallback beside them stays), and the x86-64 SSE intrinsic arms (the
+   portable arm beside each stays). The dynamic rounding-mode switch keeps only
+   its round-to-nearest case, which Chelis pins at every entry (design section
+   6). Values are unchanged: every dropped arm computes the same bits as the
+   arm that stays.
 
 The amalgamation opens with `#error` guards against fast math, finite-math-only,
 and excess-precision evaluation.
@@ -179,6 +190,109 @@ def inline_local_includes(text: str, kernel: Kernel, read) -> str:
     return _LOCAL_INCLUDE.sub(splice, text)
 
 
+# --- generated-C contract ------------------------------------------------------
+
+_DIRECTIVE = re.compile(r"^[ \t]*#[ \t]*(if|ifdef|ifndef|elif|else|endif)\b")
+
+# Conditionals whose `#else` arm is the portable C one; the arm before it is the
+# x86-64 SSE intrinsic or inline-assembly form, `errno` support (no `#else`), or
+# `unsigned _BitInt(128)`, which the contract's C grammar does not parse and
+# which is the same 128-bit unsigned arithmetic as the `unsigned __int128` arm.
+_PORTABLE_ARM_CONDITIONALS = (
+    "#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14 && __BITINT_MAXWIDTH__ && __BITINT_MAXWIDTH__ >= 128)",
+    "#if defined(__x86_64__)",
+    "#ifdef __x86_64__",
+    "#ifdef CORE_MATH_SUPPORT_ERRNO",
+    "# if (defined(__GNUC__) || defined(__clang__)) && (defined(__AVX__) || defined(__SSE4_1__) || (__ARM_ARCH >= 8))",
+)
+
+_ROUNDING_SWITCH = re.compile(
+    r"([ \t]*)switch \(fegetround\(\)\) \{\n"
+    r"[ \t]*case FE_TONEAREST:\n"
+    r"(?P<body>(?:(?![ \t]*break;).*\n)+?)"
+    r"[ \t]*break;\n"
+    r"(?:[ \t]*case FE_(?:DOWNWARD|UPWARD|TOWARDZERO):\n(?:(?![ \t]*break;).*\n)*?[ \t]*break;\n)+"
+    r"\1\}\n"
+)
+_ATTRIBUTE = re.compile(r"__attribute__\(\((?:cold|noinline)(?:,(?:cold|noinline))*\)\)[ \t]*")
+_RAISE = re.compile(r"^[ \t]*feraiseexcept[ \t]*\([A-Z_]+\);[^\n]*\n", re.MULTILINE)
+_DROPPED_LINES = re.compile(
+    r"^[ \t]*(?:#[ \t]*pragma[ \t]+STDC[ \t]+FENV_ACCESS[ \t]+ON|#[ \t]*include[ \t]*<fenv\.h>)[^\n]*\n",
+    re.MULTILINE,
+)
+# What the reduced text may still include; `generated_header.rs` admits each.
+CONTRACT_INCLUDES = {"<float.h>", "<inttypes.h>", "<stdint.h>", "<stdio.h>", "<string.h>"}
+_FORBIDDEN_TOKENS = ("__attribute", "__attribute__", "__asm", "__asm__", "asm", "_Pragma", "__declspec", "fegetround",
+                     "feraiseexcept", "errno", "_mm_setcsr")
+
+
+def keep_portable_arms(text: str) -> str:
+    """Replace every conditional in `_PORTABLE_ARM_CONDITIONALS` with its `#else`
+    arm (or nothing when it has none)."""
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].rstrip() not in _PORTABLE_ARM_CONDITIONALS:
+            out.append(lines[i])
+            i += 1
+            continue
+        depth, j, else_at = 0, i + 1, None
+        while True:
+            if j >= len(lines):
+                raise VendorError(f"unterminated conditional {lines[i]!r}")
+            m = _DIRECTIVE.match(lines[j])
+            kind = m.group(1) if m else None
+            if kind in ("if", "ifdef", "ifndef"):
+                depth += 1
+            elif kind == "endif":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif kind == "elif" and depth == 0:
+                raise VendorError(f"unexpected #elif in {lines[i]!r}")
+            elif kind == "else" and depth == 0:
+                else_at = j
+            j += 1
+        if else_at is not None:
+            out.extend(keep_portable_arms("\n".join(lines[else_at + 1 : j])).split("\n"))
+        i = j + 1
+    return "\n".join(out)
+
+
+def contract_clean(text: str, origin: str) -> str:
+    """Reduce one kernel's text to the generated-C contract (module docstring, item 4)."""
+    text = keep_portable_arms(text)
+    text = _ROUNDING_SWITCH.sub(lambda m: _reindent(m.group("body"), m.group(1)), text)
+    text = _RAISE.sub("", text)
+    text = _DROPPED_LINES.sub("", text)
+    text = _ATTRIBUTE.sub("", text)
+    code = _code_tokens(text)
+    for token in _FORBIDDEN_TOKENS:
+        if token in code:
+            raise VendorError(f"{origin}: `{token}` survives the generated-C reduction")
+    if any(token.startswith("FE_") for token in code):
+        raise VendorError(f"{origin}: a floating-point environment macro survives")
+    for m in _INCLUDE_LINE.finditer(text):
+        target = re.sub(r"\s*//.*$", "", m.group()).split("include", 1)[1].strip()
+        if target not in CONTRACT_INCLUDES:
+            raise VendorError(f"{origin}: include {target} is outside the generated-C contract")
+    return text
+
+
+def _reindent(body: str, indent: str) -> str:
+    """The round-to-nearest case body, moved out of its `case` to `indent`."""
+    lines = [line for line in body.split("\n") if line.strip()]
+    shift = min(len(line) - len(line.lstrip()) for line in lines) - len(indent)
+    kept = "\n".join(line[shift:] for line in lines)
+    return f"{indent}/* round to nearest, the only mode Chelis runs in */\n{kept}\n"
+
+
+def _code_tokens(text: str) -> set[str]:
+    """Identifier tokens outside comments and literals."""
+    return {m.group() for m in _TOKEN.finditer(text) if m.lastgroup == "ident"}
+
+
 # --- manifest -----------------------------------------------------------------
 
 
@@ -281,12 +395,20 @@ static {ctype} {entry}({ctype} x) {{
 
 def kernel_text(kernel: Kernel, names: list[str], read) -> str:
     raw = read(kernel.path)
-    text = inline_local_includes(raw, kernel, read)
+    text = contract_clean(inline_local_includes(raw, kernel, read), kernel.path)
     rename = set(names)
     if kernel.upstream_entry not in rename:
         raise VendorError(f"{kernel.name}: entry {kernel.upstream_entry} missing from identifiers")
     body = rename_identifiers(text, rename, kernel.prefix)
     inner = kernel.prefix + kernel.upstream_entry
+    # The definition itself says `static`, not only the declaration before it,
+    # so a reader of the unit that does not apply C's linkage carry-over (the
+    # generated-C binder) sees internal linkage too.
+    body, count = re.subn(
+        rf"^(?=(?:float|double)\s+{re.escape(inner)}\s*\()", "static ", body, flags=re.MULTILINE
+    )
+    if count == 0:
+        raise VendorError(f"{kernel.name}: no definition of {kernel.upstream_entry} found")
     nan = "chelis_cr_canonical_nanf" if kernel.width == 32 else "chelis_cr_canonical_nan"
     return "".join(
         [

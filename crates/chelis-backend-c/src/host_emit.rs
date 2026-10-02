@@ -1178,7 +1178,7 @@ fn append_activation_helpers(
     let lowerings: [(&str, ActivationLowering); 3] = [
         ("sigmoid", chelis_ir::tier2::lower_sigmoid),
         ("silu", chelis_ir::tier2::lower_silu),
-        ("gelu", chelis_ir::tier2::lower_gelu),
+        ("gelu", lower_gelu_through_sigmoid),
     ];
     for (name, lower) in lowerings {
         if !used(&format!("chelis_host_{name}_{suffix}")) {
@@ -1190,6 +1190,36 @@ fn append_activation_helpers(
         out.extend(activation_body(prim, lower, &finalize));
         out.push("}".to_string());
     }
+}
+
+/// spec/05 §3.3's `gelu`: `mul(x, sigmoid(mul(const(2.0), u)))` with
+/// `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and
+/// `c = sqrt(2/pi)`, the sigmoid being `tier2`'s. The `0.5*x*(1+tanh(u))`
+/// spelling `tier2::lower_gelu` still builds cancels for negative `x` and
+/// overflows to `inf` for large finite `x` (chelis#2997); this graph gives `x`
+/// and `-0` there. When `tier2::lower_gelu` adopts the same graph, this
+/// function is replaced by it so both lanes again share one definition.
+fn lower_gelu_through_sigmoid(
+    owner: chelis_ir::dag::Owner,
+    dag: &mut chelis_ir::dag::Dag,
+    x: chelis_ir::dag::NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> chelis_ir::dag::NodeId {
+    let node = |dag: &mut chelis_ir::dag::Dag, op: RiscOp, inputs: Vec<chelis_ir::dag::NodeId>| {
+        dag.add_node(owner, op, inputs, ty.clone(), parent_span.map(str::to_owned))
+    };
+    let c = node(dag, RiscOp::synth_const(ty.precision, 0.7978845608028654), vec![]);
+    let k = node(dag, RiscOp::synth_const(ty.precision, 0.044715), vec![]);
+    let x_squared = node(dag, RiscOp::Mul, vec![x, x]);
+    let x_cubed = node(dag, RiscOp::Mul, vec![x_squared, x]);
+    let scaled_cube = node(dag, RiscOp::Mul, vec![k, x_cubed]);
+    let sum = node(dag, RiscOp::Add, vec![x, scaled_cube]);
+    let u = node(dag, RiscOp::Mul, vec![c, sum]);
+    let two = node(dag, RiscOp::synth_const(ty.precision, 2.0), vec![]);
+    let two_u = node(dag, RiscOp::Mul, vec![two, u]);
+    let sigmoid = chelis_ir::tier2::lower_sigmoid(owner, dag, two_u, ty, parent_span);
+    node(dag, RiscOp::Mul, vec![x, sigmoid])
 }
 
 type ActivationLowering = fn(
@@ -12618,6 +12648,177 @@ mod expression_dispatch_tests {
         assert_eq!(
             got, want,
             "tanh helpers must equal the correctly rounded kernel"
+        );
+    }
+
+    /// spec/05 §3.3's gelu graph at operand width, through `chelis-crmath`'s
+    /// exp: each primitive computes at f32 and `finalize` rounds it to the
+    /// operand dtype before the next primitive reads it.
+    fn gelu_reference_f32(
+        x: f32,
+        finalize: &dyn Fn(f32) -> f32,
+        constant: &dyn Fn(f64) -> f32,
+    ) -> f32 {
+        let c = constant(0.7978845608028654);
+        let k = constant(0.044715);
+        let two = constant(2.0);
+        let one = constant(1.0);
+        let x_squared = finalize(x * x);
+        let x_cubed = finalize(x_squared * x);
+        let u = finalize(c * finalize(x + finalize(k * x_cubed)));
+        let two_u = finalize(two * u);
+        let exp_neg = finalize(chelis_crmath::exp_f32(finalize(-two_u)));
+        let sigmoid = finalize(1.0 / finalize(one + exp_neg));
+        finalize(x * sigmoid)
+    }
+
+    fn gelu_reference_f64(x: f64) -> f64 {
+        let u = 0.7978845608028654 * (x + 0.044715 * ((x * x) * x));
+        x * (1.0 / (1.0 + chelis_crmath::exp_f64(-(2.0 * u))))
+    }
+
+    /// chelis#2997: the host gelu helpers follow spec/05 §3.3's
+    /// `x*sigmoid(2u)` graph bit for bit, so gelu of a large finite input is
+    /// that input (the old `0.5*x*(1+tanh(u))` helper overflowed to `inf`).
+    /// Checked over every finite f16, at bf16/f32/f64 max finite, and at the
+    /// negative inputs where the tanh spelling cancels.
+    #[test]
+    fn gelu_helpers_follow_the_pinned_sigmoid_graph() {
+        use half::{bf16, f16};
+        let mut helpers = Vec::new();
+        append_tensor_math_helpers(&mut helpers, &|_| true);
+        let mut main = String::from(
+            "#include \"chelis_runtime.h\"\n#include <stdio.h>\n#include <string.h>\n",
+        );
+        main.push_str(&helpers.join("\n"));
+        main.push_str(concat!(
+            "\nint main(void) {\n",
+            "    for (uint32_t b = 0; b < 65536u; b++) {\n",
+            "        if ((b & 0x7c00u) == 0x7c00u) continue;\n",
+            "        float y = chelis_host_gelu_f16(chelis_f16_to_f32((uint16_t)b));\n",
+            "        printf(\"f16 %04x %04x\\n\", (unsigned)b, (unsigned)chelis_f32_to_f16(y));\n",
+            "    }\n",
+        ));
+        let bf16_max = bf16::MAX.to_f32();
+        main.push_str(&format!(
+            "    {{ float y = chelis_host_gelu_bf16(chelis_f32_from_bits(UINT32_C(0x{:08x}))); uint32_t o; memcpy(&o, &y, 4); printf(\"bf16 %08x\\n\", (unsigned)o); }}\n",
+            bf16_max.to_bits()
+        ));
+        let f32_inputs = [f32::MAX, -3.0, -4.0, -5.0, -6.0, -9.336, 2.5, -0.5];
+        for x in f32_inputs {
+            main.push_str(&format!(
+                "    {{ float y = chelis_host_gelu_f32(chelis_f32_from_bits(UINT32_C(0x{:08x}))); uint32_t o; memcpy(&o, &y, 4); printf(\"f32 %08x\\n\", (unsigned)o); }}\n",
+                x.to_bits()
+            ));
+        }
+        let f64_inputs = [f64::MAX, -3.0, -4.0, -5.0, -6.0, -9.336, 2.5, -0.5];
+        for x in f64_inputs {
+            main.push_str(&format!(
+                "    {{ double y = chelis_host_gelu_f64(chelis_f64_from_bits(UINT64_C(0x{:016x}))); uint64_t o; memcpy(&o, &y, 8); printf(\"f64 %016llx\\n\", (unsigned long long)o); }}\n",
+                x.to_bits()
+            ));
+        }
+        main.push_str("    return 0;\n}\n");
+        let main = crate::crmath_kernels::link_called_kernels(main);
+
+        let dir = tempfile::tempdir().unwrap();
+        let staged = chelis_runtime_bundle::stage(dir.path()).unwrap();
+        std::fs::write(dir.path().join("main.c"), &main).unwrap();
+        let toolchain = crate::toolchain::strict_reference_toolchain(
+            crate::toolchain::c_compiler(),
+            crate::toolchain::CodegenRequirements::default(),
+        );
+        let bin = dir.path().join("gelu");
+        let compiled = std::process::Command::new(&toolchain.compiler)
+            .args(&toolchain.compile_flags)
+            .arg("-std=c11")
+            .arg("-I")
+            .arg(dir.path())
+            .arg(dir.path().join("main.c"))
+            .arg(&staged.archive)
+            .args(&toolchain.link_flags)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let run = std::process::Command::new(&bin).output().unwrap();
+        assert!(run.status.success());
+        let stdout = String::from_utf8(run.stdout).unwrap();
+
+        let f16_finalize = |v: f32| f16::from_f32(v).to_f32();
+        let f16_constant = |v: f64| f16::from_f64(v).to_f32();
+        let mut f16_rows = 0;
+        let mut mismatches = Vec::new();
+        for line in stdout.lines().filter(|line| line.starts_with("f16 ")) {
+            let mut fields = line.split(' ').skip(1);
+            let input = u16::from_str_radix(fields.next().unwrap(), 16).unwrap();
+            let got = u16::from_str_radix(fields.next().unwrap(), 16).unwrap();
+            let x = f16::from_bits(input).to_f32();
+            let want =
+                f16::from_f32(gelu_reference_f32(x, &f16_finalize, &f16_constant)).to_bits();
+            f16_rows += 1;
+            if got != want {
+                mismatches.push(format!(
+                    "f16 gelu({input:#06x}): got {got:#06x}, graph {want:#06x}"
+                ));
+            }
+        }
+        assert_eq!(f16_rows, 63488, "every finite f16 input");
+        assert!(
+            stdout.lines().any(|line| line == "f16 7bff 7bff"),
+            "gelu(65504) must be 65504 (chelis#2997)"
+        );
+
+        let bf16_line = stdout.lines().find(|line| line.starts_with("bf16 ")).unwrap();
+        let got = u32::from_str_radix(&bf16_line[5..], 16).unwrap();
+        assert_eq!(
+            got,
+            bf16_max.to_bits(),
+            "gelu(bf16 max) must be bf16 max (chelis#2997)"
+        );
+
+        let f32_rows: Vec<u32> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("f32 "))
+            .map(|bits| u32::from_str_radix(bits, 16).unwrap())
+            .collect();
+        for (x, got) in f32_inputs.iter().zip(&f32_rows) {
+            let want = gelu_reference_f32(*x, &|v| v, &|v| v as f32).to_bits();
+            if *got != want {
+                mismatches.push(format!("f32 gelu({x}): got {got:#010x}, graph {want:#010x}"));
+            }
+        }
+        assert_eq!(
+            f32_rows[0],
+            f32::MAX.to_bits(),
+            "gelu(f32 max) must be f32 max (chelis#2997)"
+        );
+        let f64_rows: Vec<u64> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("f64 "))
+            .map(|bits| u64::from_str_radix(bits, 16).unwrap())
+            .collect();
+        for (x, got) in f64_inputs.iter().zip(&f64_rows) {
+            let want = gelu_reference_f64(*x).to_bits();
+            if *got != want {
+                mismatches.push(format!("f64 gelu({x}): got {got:#018x}, graph {want:#018x}"));
+            }
+        }
+        assert_eq!(
+            f64_rows[0],
+            f64::MAX.to_bits(),
+            "gelu(f64 max) must be f64 max (chelis#2997)"
+        );
+        assert!(
+            mismatches.is_empty(),
+            "{} mismatches:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
         );
     }
 

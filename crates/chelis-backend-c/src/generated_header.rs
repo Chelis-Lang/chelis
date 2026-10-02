@@ -1379,10 +1379,14 @@ fn validate_generated_include_set(source: &str) -> Result<(), GeneratedHeaderErr
         "\"chelis_blas.h\"",
         "\"chelis_runtime.h\"",
         "<assert.h>",
+        // ISO C; the correctly rounded kernels read FLT_EVAL_METHOD (chelis#2957).
+        "<float.h>",
         "<inttypes.h>",
         "<math.h>",
         "<pthread.h>",
         "<stdio.h>",
+        // ISO C; the correctly rounded kernels use its exact-width integers (chelis#2957).
+        "<stdint.h>",
         "<stdlib.h>",
         "<string.h>",
     ];

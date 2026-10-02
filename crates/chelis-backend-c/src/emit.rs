@@ -2848,6 +2848,16 @@ impl CEmitter {
         matches!(ty.precision, Prim::F64)
     }
 
+    /// A libm transcendental name. Emission never names one: every
+    /// transcendental is a carried `chelis_cr_*` kernel ([05-OP-46]).
+    fn is_host_math_transcendental(func: &str) -> bool {
+        matches!(
+            func,
+            "exp" | "expf" | "log" | "logf" | "sin" | "sinf" | "cos" | "cosf" | "tan" | "tanf"
+                | "atan" | "atanf" | "tanh" | "tanhf" | "pow" | "powf" | "erf" | "erff"
+        )
+    }
+
     /// Double-precision equivalent of a single-precision C math symbol used
     /// by the emitter. Transcendentals name the correctly rounded kernels the
     /// generated unit carries ([05-OP-46]); `sqrt` and the rounding helpers
@@ -4134,6 +4144,11 @@ impl CEmitter {
 
     // ---- Unary func (chelis_cr_expf, ..., sqrtf) ----
     fn emit_unary_func(&mut self, id: usize, func: &str, inputs: &[NodeId], ty: &TensorType) {
+        assert!(
+            !Self::is_host_math_transcendental(func),
+            "`{func}` is a host math library transcendental; [05-OP-46] requires the \
+             correctly rounded `chelis_cr_*` kernel (chelis#2957)"
+        );
         if Self::is_reduced_float(ty) {
             self.emit_unary_func_reduced_f(id, func, inputs, ty);
             return;
