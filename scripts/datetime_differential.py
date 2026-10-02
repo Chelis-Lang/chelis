@@ -1879,9 +1879,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.only:
         programs = [program for program in programs if re.search(args.only, program.name)]
     programs = [program for program in programs if set(program.lanes) & set(lanes)]
-    summary = (f"{len(corpus.days)} days in day rows, {len(corpus.bulk)} grids, {len(corpus.values)} values, "
-               f"{len(corpus.columns)} column values, "
-               f"{len(corpus.failures)} failure cases, {len(programs)} programs")
+    if args.profile == "canary":
+        summary = (f"canary: {sum(len(p.bindings) for p in programs)} bindings, "
+                   f"{sum(p.failure is not None for p in programs)} failure cases, {len(programs)} programs")
+    else:
+        summary = (f"{len(corpus.days)} days in day rows, {len(corpus.bulk)} grids, {len(corpus.values)} values, "
+                   f"{len(corpus.columns)} column values, "
+                   f"{len(corpus.failures)} failure cases, {len(programs)} programs")
     print(f"corpus: {summary}", flush=True)
     if args.list:
         for program in programs:

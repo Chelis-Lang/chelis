@@ -91,7 +91,10 @@ fn run_harness(profile: &str, lanes: &str) -> String {
 fn std_datetime_canary_agrees_with_the_reference_on_eval_and_c() {
     let stdout = run_harness("canary", "eval,c");
     assert!(stdout.contains("on lanes eval+c"), "{stdout}");
-    assert!(stdout.contains(", 4 programs)"), "{stdout}");
+    assert!(
+        stdout.contains("canary: 2 bindings, 2 failure cases, 4 programs)"),
+        "{stdout}"
+    );
 }
 
 #[test]

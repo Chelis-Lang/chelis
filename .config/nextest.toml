@@ -35,11 +35,6 @@
 # fast-suite exclusion and the nightly inclusion via the `heavy-e2e` filterset
 # below being negated in `default`/`ci` and used positively in `nightly`.
 #
-# A module's own sweep or eval-and-C differential whose full run costs minutes
-# belongs to the same set: a small canary of it runs per pull request, and the
-# full test runs nightly. A test this filter removes runs on demand only with
-# `--ignore-default-filter`; a plain `-E` cannot select it.
-#
 # Grep targets if this needs revisiting:
 #   - real chelis build + gcc + run / reef build / reef install
 
@@ -64,11 +59,6 @@ default-filter = '''
         + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
         + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
         + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
-        + (binary_id(/^chelis-cli::std_datetime_oracle$/) & test(/^std_datetime_agrees_with_the_reference_on_eval_and_c$/))
-        + (binary_id(/^chelis-cli::std_datetime_business_oracle$/) & test(/^std_datetime_business_agrees_with_the_reference_on_eval_and_c$/))
-        + (binary_id(/^chelis-cli::std_datetime_zone$/) & test(/^std_datetime_zone_agrees_with_zoneinfo_on_eval$/))
-        + (binary_id(/^chelis-cli::std_datetime_zone$/) & test(/^std_datetime_zone_agrees_with_zoneinfo_on_c$/))
-        + (binary_id(/^chelis-cli::std_datetime_failures$/) & test(/^std_datetime_extreme_arguments_raise_no_primitive_trap$/))
     )
 '''
 
@@ -144,11 +134,6 @@ default-filter = '''
         + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
         + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
         + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
-        + (binary_id(/^chelis-cli::std_datetime_oracle$/) & test(/^std_datetime_agrees_with_the_reference_on_eval_and_c$/))
-        + (binary_id(/^chelis-cli::std_datetime_business_oracle$/) & test(/^std_datetime_business_agrees_with_the_reference_on_eval_and_c$/))
-        + (binary_id(/^chelis-cli::std_datetime_zone$/) & test(/^std_datetime_zone_agrees_with_zoneinfo_on_eval$/))
-        + (binary_id(/^chelis-cli::std_datetime_zone$/) & test(/^std_datetime_zone_agrees_with_zoneinfo_on_c$/))
-        + (binary_id(/^chelis-cli::std_datetime_failures$/) & test(/^std_datetime_extreme_arguments_raise_no_primitive_trap$/))
         + binary_id(/^chelis-backend-c::exec_compile$/)
         + binary_id(/^chelis-backend-c::host_emit_dtype_dispatch$/)
         + binary_id(/^chelis-cli::capacity_census_tripwire$/)
@@ -235,11 +220,6 @@ default-filter = '''
     + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
     + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
     + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
-    + (binary_id(/^chelis-cli::std_datetime_oracle$/) & test(/^std_datetime_agrees_with_the_reference_on_eval_and_c$/))
-    + (binary_id(/^chelis-cli::std_datetime_business_oracle$/) & test(/^std_datetime_business_agrees_with_the_reference_on_eval_and_c$/))
-    + (binary_id(/^chelis-cli::std_datetime_zone$/) & test(/^std_datetime_zone_agrees_with_zoneinfo_on_eval$/))
-    + (binary_id(/^chelis-cli::std_datetime_zone$/) & test(/^std_datetime_zone_agrees_with_zoneinfo_on_c$/))
-    + (binary_id(/^chelis-cli::std_datetime_failures$/) & test(/^std_datetime_extreme_arguments_raise_no_primitive_trap$/))
 '''
 # chelis#1831: see the backstop note above `[profile.ci]`.
 slow-timeout = { period = "60s", terminate-after = 50 }
