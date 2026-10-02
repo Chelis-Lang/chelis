@@ -818,9 +818,11 @@ fn user_smt_property_json_carries_real_arith_model_and_refutation_model() {
     );
 }
 
+/// Prove the put-call parity property over `width` binders under the bundled
+/// `std.normal_cdf.reflection` contract and return the property records and
+/// whether the run exited successfully.
 #[cfg(feature = "smt")]
-#[test]
-fn prove_k1_parity_consumes_bundled_normal_cdf_contract() {
+fn prove_parity_with_cdf_contract(width: &str) -> (Vec<serde_json::Value>, bool, String) {
     let dir = tempdir().expect("tempdir");
     let root = dir.path().join("myapp");
     write_file(
@@ -839,15 +841,18 @@ chelis-std = {{ version = "0.4.0" }}
         ),
     );
     let entry = root.join("src/proofs.ch");
+    // Suffixed literals keep the property's spelled float widths to `width`.
     write_file(
         &entry,
-        r#"module App.Proofs
+        &format!(
+            r#"module App.Proofs
 import Std.Contracts (normal_cdf)
-@property put_call_parity_with_cdf_contract forall(s: f32, k: f32, disc: f32, d1: f32, d2: f32)
-  where s >= 0.0, k >= 0.0, disc >= 0.0, disc <= 1.0:
+@property put_call_parity_with_cdf_contract forall(s: {width}, k: {width}, disc: {width}, d1: {width}, d2: {width})
+  where s >= 0.0{width}, k >= 0.0{width}, disc >= 0.0{width}, disc <= 1.0{width}:
   (((s * normal_cdf(d1)) - (k * (disc * normal_cdf(d2)))) - ((k * (disc * normal_cdf(-d2))) - (s * normal_cdf(-d1)))) == (s - (k * disc))
   with contract = "std.normal_cdf.reflection"
-"#,
+"#
+        ),
     );
 
     let output = Command::cargo_bin("chelis")
@@ -861,13 +866,25 @@ import Std.Contracts (normal_cdf)
         ])
         .output()
         .expect("run prove");
-    assert!(
-        output.status.success(),
+    let transcript = format!(
         "stdout={}\nstderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let props = property_records(&output.stdout);
+    (
+        property_records(&output.stdout),
+        output.status.success(),
+        transcript,
+    )
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn prove_k1_parity_consumes_bundled_normal_cdf_contract() {
+    // chelis#2965: the reflection contract is fuzz-discharged per width; at
+    // f64 the shipped graph satisfies it, so an f64 consumer is validated.
+    let (props, success, transcript) = prove_parity_with_cdf_contract("f64");
+    assert!(success, "{transcript}");
     assert_eq!(props.len(), 1, "records: {props:?}");
     let prop = &props[0];
     assert_eq!(prop["name"], "put_call_parity_with_cdf_contract");
@@ -900,8 +917,32 @@ import Std.Contracts (normal_cdf)
         assumptions
             .iter()
             .any(|a| a["name"] == "std.normal_cdf.reflection"
-                && a["discharge"]["evidence"]["implementation"] == "Std.Contracts.normal_cdf"),
+                && a["discharge"]["evidence"]["implementation"] == "Std.Contracts.normal_cdf"
+                && a["discharge"]["evidence"]["dtype"] == "f64"),
         "reflection assumption must name bundled implementation: {prop}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn prove_parity_at_f32_does_not_inherit_a_reflection_false_at_f32() {
+    // chelis#2965: at f32 the shipped normal_cdf graph's N(-x) and 1 - N(x)
+    // round apart by far more than the fuzz tolerance, so the f32 discharge of
+    // the reflection contract fails and the consumer is not validated.
+    let (props, success, transcript) = prove_parity_with_cdf_contract("f32");
+    assert!(!success, "{transcript}");
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let prop = &props[0];
+    assert_eq!(prop["status"], "failed", "{prop}");
+    assert_eq!(prop["composite_verdict"], "failed", "{prop}");
+    let assumptions = prop["assumptions"].as_array().expect("assumptions array");
+    assert!(
+        assumptions
+            .iter()
+            .any(|a| a["name"] == "std.normal_cdf.reflection"
+                && a["discharge"]["evidence"]["status"] == "failed"
+                && a["discharge"]["evidence"]["dtype"] == "f32"),
+        "the f32 reflection discharge must be the failed record: {prop}"
     );
 }
 

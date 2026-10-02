@@ -94,8 +94,8 @@ pub use composition::{
 };
 pub use concrete_eval::{eval_arith, eval_bool};
 pub use contracts::{
-    ContractInvariant, StandardContract, standard_contract_registry,
-    standard_contract_registry_with_prover, standard_contracts,
+    CONTRACT_FLOAT_WIDTHS, ContractInvariant, StandardContract, standard_contract_registry,
+    standard_contract_registry_with_prover, standard_contracts_at,
 };
 pub use discharge::{
     Discharge, DischargeEngine, DischargeError, Goal, GoalError, GoalShape, IntervalBox, IrHandle,

@@ -24,9 +24,8 @@
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
 use chelis_types::{
-    CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar,
-    compare_scalars, float_binop, float_unop, int_binop, int_unop, scalar_from_f64,
-    scalar_from_i64, types::Prim,
+    CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar, compare_scalars,
+    float_binop, float_unop, int_binop, int_unop, scalar_from_f64, scalar_from_i64, types::Prim,
 };
 use chelis_unord::UnordMap;
 
@@ -349,35 +348,18 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
     }
 }
 
-/// One correctly rounded transcendental at the operand's own dtype, through
-/// `chelis-crmath` ([05-OP-46]): the f16 and bf16 forms run the f32 kernel and
-/// finalize once, as every language lane does (chelis#2965).
+/// One transcendental at the operand's own dtype, through the evaluator's
+/// float kernel ([`float_unop`]), which every language lane shares and which
+/// is correctly rounded ([05-OP-46]; chelis#2965).
 pub(crate) fn correctly_rounded(name: &str, value: ScalarValue) -> Option<ScalarValue> {
-    use chelis_crmath as cr;
-    use half::{bf16, f16};
-    type Kernels = (
-        fn(f32) -> f32,
-        fn(f64) -> f64,
-        fn(f16) -> f16,
-        fn(bf16) -> bf16,
-    );
-    let (k32, k64, k16, kb16): Kernels = match name {
-        "exp" => (cr::exp_f32, cr::exp_f64, cr::exp_f16, cr::exp_bf16),
-        "log" => (cr::log_f32, cr::log_f64, cr::log_f16, cr::log_bf16),
-        "sin" => (cr::sin_f32, cr::sin_f64, cr::sin_f16, cr::sin_bf16),
-        "cos" => (cr::cos_f32, cr::cos_f64, cr::cos_f16, cr::cos_bf16),
+    let op = match name {
+        "exp" => FloatUnOp::Exp,
+        "log" => FloatUnOp::Log,
+        "sin" => FloatUnOp::Sin,
+        "cos" => FloatUnOp::Cos,
         _ => return None,
     };
-    let result = match value.element_ref() {
-        ElementRef::F32(x) => f64::from(k32(x)),
-        ElementRef::F64(x) => k64(x),
-        ElementRef::F16(x) => f64::from(k16(x)),
-        ElementRef::Bf16(x) => f64::from(kb16(x)),
-        _ => return None,
-    };
-    // The kernel result is already a value of the operand's dtype, so this
-    // finalization is exact.
-    scalar_from_f64("prove-correctly-rounded", value.prim(), result).ok()
+    float_unop(op, value).ok()
 }
 
 /// Apply a whitelisted intrinsic that has no dtype-carrying form to its

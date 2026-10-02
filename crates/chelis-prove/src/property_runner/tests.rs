@@ -1401,3 +1401,49 @@ fn beacon_pipe_goal_must_end_in_bare_tensor_to_scalar() {
         "the canonical pipe goal reaches past the bridge matcher"
     );
 }
+
+// --- chelis#2965: contract verdicts resolve at the consumer's float widths ---
+
+fn widths_of(source: &str) -> Vec<Prim> {
+    let decls = flatten_module_decls(&chelis_surf::parser::parse_str(source).expect("parses"));
+    let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
+    property_float_widths(&decls, &properties[0])
+}
+
+#[test]
+fn chelis_2965_f32_binders_resolve_contracts_at_f32_only() {
+    let widths = widths_of(
+        "module M\n@property p forall(x: f32):\n  (x <= x)\n  with contract = \"std.normal_cdf.range\"\n",
+    );
+    assert_eq!(widths, vec![Prim::F32]);
+}
+
+#[test]
+fn chelis_2965_every_spelled_width_in_reachable_functions_is_a_consumer_width() {
+    // An f64 binder narrowed to f32 inside a reached helper evaluates the
+    // contract-bound call at f32 as well, so the f32 verdict must apply.
+    let widths = widths_of(
+        "module M\ndef narrow(x: f64) -> f32 = cast(x, f32)\n@property p forall(x: f64):\n  (narrow(x) <= narrow(x))\n  with contract = \"std.normal_cdf.range\"\n",
+    );
+    assert!(
+        widths.contains(&Prim::F64) && widths.contains(&Prim::F32),
+        "{widths:?}"
+    );
+    // An unreached helper does not widen the set.
+    let widths = widths_of(
+        "module M\ndef unused(x: f64) -> f16 = cast(x, f16)\n@property p forall(x: f64):\n  (x <= x)\n  with contract = \"std.normal_cdf.range\"\n",
+    );
+    assert_eq!(widths, vec![Prim::F64]);
+}
+
+#[test]
+fn chelis_2965_spelled_widths_cover_suffixes_and_the_unsuffixed_literal_default() {
+    assert_eq!(spelled_float_widths("x: f64"), vec![Prim::F64]);
+    assert_eq!(
+        spelled_float_widths("1.5bf16 + 2f16"),
+        vec![Prim::Bf16, Prim::F16]
+    );
+    assert_eq!(spelled_float_widths("add(x, 1.0)"), vec![Prim::F32]);
+    assert_eq!(spelled_float_widths("1e-3"), vec![Prim::F32]);
+    assert!(spelled_float_widths("xf32 + count_f64 + 3").is_empty());
+}
