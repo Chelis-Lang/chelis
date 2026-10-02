@@ -2,8 +2,8 @@
 
 Chelis has compiler built-ins for tensor, scalar, collection, and host operations.
 The compiler also bundles `chelis-std`, whose modules use the `Std` prefix. In a
-Reef package, import the names you need, for example `import Std.Sort (sort)`;
-there is no separate standard-library install. The `Std` source modules and the
+Reef package or a standalone `.ch` file, import the names you need, for example
+`import Std.Sort (sort)`; there is no separate standard-library install. The `Std` source modules and the
 native runtime archive emitted by `chelis build` are different parts of the
 runtime.
 
