@@ -49,8 +49,9 @@ About 25 production sites compute a transcendental, and eval and C are written
 independently per op.
 
 - Eval: Rust `f32::exp` and friends in `crates/chelis-types/src/dtype_semantics.rs`;
-  f64-then-narrow in `crates/chelis-ir/src/optimize.rs` constant folding and in the host
-  softmax (`crates/chelis-compiler-api/src/runtime/host_ops.rs`).
+  f64-then-narrow in the host softmax
+  (`crates/chelis-compiler-api/src/runtime/host_ops.rs`). The f64 constant folder in
+  `crates/chelis-ir/src/optimize.rs` has no production caller, only tests.
 - C: libm names in `crates/chelis-backend-c/src/host_emit.rs` and `emit.rs`; vForce
   (`vforce_func`) and Sleef (`sleef_macro`, `simd_step_expr`) routes selected by
   `MathLib::detect()` in `crates/chelis-backend-c/src/lib.rs`.
@@ -82,8 +83,8 @@ or a secondary summary.
 | Rust std | `f32::exp`: "Unspecified precision ... can even differ within the same execution"; `sqrt`, `mul_add` correctly rounded ([docs](https://doc.rust-lang.org/std/primitive.f32.html)) | none | platform libm; NaN bits non-deterministic by RFC 3514 ([RFC](https://rust-lang.github.io/rfcs/3514-float-semantics.html)) |
 | WebAssembly | IEEE core ops; no transcendentals; deterministic profile canonicalizes NaNs ([profiles](https://webassembly.github.io/spec/core/appendix/profiles.html)) | everywhere for core ops | host or toolchain supplies transcendentals |
 | C23 / IEEE 754-2019 | C23 reserves `cr_` names for correctly rounded functions ([N2715](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n2715.htm)); IEEE 754-2019 recommends correct rounding (clause not re-verified) | standard text | none mandated |
-| glibc | CORE-MATH correctly rounded float functions from 2.41 (`tanhf`, `atanf`, `erff`, `cbrtf`, `expm1f`, `log1pf`, ...), first double functions in 2.43; `expf`, `logf`, `sinf`, `cosf`, `powf` are not on the list ([2.41](https://www.phoronix.com/news/GNU-C-Library-2.41-Features), [2.42](https://lists.gnu.org/archive/html/info-gnu/2025-07/msg00011.html)) | per version | varies by glibc version and CPU variant |
-| LLVM libc | correctly rounded in all rounding modes by default ([docs](https://libc.llvm.org/math/index.html)); MSVC adopting it under `/Zc:cmath` for "identical results across platforms and versions" ([blog](https://devblogs.microsoft.com/cppblog/bringing-correctly-rounded-math-to-production-with-llvm-libc/)) | everywhere | fast path plus bounded wide-integer fallback |
+| glibc | CORE-MATH correctly rounded float functions from 2.41 (`tanhf`, `atanf`, `erff`, `cbrtf`, `expm1f`, `log1pf`, ...), first double functions in a later release (not re-verified); `expf`, `logf`, `sinf`, `cosf`, `powf` are not on the list ([2.41](https://www.phoronix.com/news/GNU-C-Library-2.41-Features), [2.42](https://lists.gnu.org/archive/html/info-gnu/2025-07/msg00011.html)) | per version | varies by glibc version and CPU variant |
+| LLVM libc | aims to be correctly rounded, in all rounding modes for most functions and in the default mode for some ([docs](https://libc.llvm.org/math/index.html)); MSVC adopting it under `/Zc:cmath` for "identical results across platforms and versions" ([blog](https://devblogs.microsoft.com/cppblog/bringing-correctly-rounded-math-to-production-with-llvm-libc/)) | everywhere | fast path plus bounded wide-integer fallback |
 | CORE-MATH | correctly rounded, all rounding modes, binary32 and binary64 ([project](https://core-math.gitlabpages.inria.fr/)) | everywhere | claims lower average cycles than glibc on its benchmarks |
 | RLIBM | correctly rounded float, one polynomial for all rounding modes; 1.1x faster than glibc float libm ([arXiv 2104.04043](https://arxiv.org/abs/2104.04043)) | everywhere | polynomials fitted to rounding intervals |
 
@@ -185,9 +186,13 @@ the choice of C compiler stop mattering numerically. The vForce and Sleef routes
 through one definition; the eval f64 funnels compute at the declared width. A vectorized
 binary32 kernel is admissible later if it passes the exhaustive oracle.
 
-**GPU cost and the approximate tier.** Correct rounding does not exclude GPUs: they
-execute IEEE `+ - * /`, `sqrt` and FMA exactly when fast math and contraction are off, so
-a correctly rounded algorithm built from them gives CPU bits on a GPU. What any
+**GPU cost and the approximate tier.** Correct rounding does not by itself exclude
+GPUs. CUDA and HIP execute IEEE `+ - * /`, `sqrt` and FMA exactly when fast math,
+contraction and flush-to-zero are off, so a correctly rounded algorithm built from them
+gives CPU bits there. Metal does not: the MSL specification permits f32 subnormal
+flushing and round-toward-zero independently of fast math, and Metal has no f64, so a
+Metal lane cannot promise CPU bits for any computation that reaches subnormals, with or
+without transcendentals. What any
 CPU-equals-GPU bitwise promise excludes, under option C as much as option D, is the
 hardware special-function units (MUFU-class `exp2`, `sin`, `rcp` approximations) and
 vendor fast math. Correct rounding costs more than a pinned f32 graph on GPUs, because
@@ -233,10 +238,21 @@ Future-proof: the rule is decided fully now even if binary64 lands after binary3
 **Decisions (2026-10-02).**
 
 - `tanh` becomes a correctly rounded primitive. The spec's `2*sigmoid(2x)-1` form loses
-  620 ULP at 1e-3 and 14,932 ULP at 1e-5 in both lanes; an accurate graph would itself
-  need a new `expm1` primitive, and correctly rounded `tanh` implementations exist
-  (CORE-MATH, glibc 2.41 `tanhf`). `sigmoid`, `silu` and `gelu` stay graphs: with exact
-  leaves they have no cancellation of the `tanh` kind.
+  620 ULP at 1e-3 and 14,932 ULP at 1e-5 in both lanes, and the loss is unbounded as x
+  approaches 0 (the formula returns 0 at 1e-8). An accurate graph would itself need a new
+  `expm1` primitive, and correctly rounded `tanh` implementations exist (CORE-MATH,
+  glibc 2.41 `tanhf`).
+- `sigmoid` and `silu` stay graphs: with correctly rounded leaves they stay within about
+  2.3 ULP of the exact functions (measured by the round-1 review).
+- `gelu` stays a graph, but its current graph `0.5*x*(1+tanh(u))`, with
+  `u = sqrt(2/pi)*(x + 0.044715*x^3)`, cancels for negative x even with a correctly
+  rounded `tanh`: 176 ULP at -3, 4,354 ULP at -4, 30% relative error at -5, and 0 instead
+  of -8.4e-11 at -6 (measured by the round-1 review). The lanes still agree, because
+  `gelu` is defined as its graph. The algebraically equal graph `x*sigmoid(2u)`, using
+  `0.5*(1+tanh(u)) = sigmoid(2u)`, has no `1 + tanh` subtraction. Measured at f32 with exact leaves it stays within 7 ULP
+  on [-6, 10]; the worst case on [-10, -2] is 148 ULP at -9.336, which comes from the
+  rounding of `u` amplified by `exp(2u)`, not from cancellation. The spec amendment
+  should adopt it.
 - The approximate tier is the planned GPU route, not part of the first spec amendment.
   Adding a new, separately named op later breaks no existing program, and no released
   lane needs it yet (HIP and Metal are experimental). Its bound is an accuracy promise
@@ -248,6 +264,11 @@ Future-proof: the rule is decided fully now even if binary64 lands after binary3
   owning issue, never a narrowed rule.
 - GPU lanes (experimental) need Chelis-owned device kernels for the exact tier; until
   then HIP and Metal are fenced on the known-issues page (#1170).
+- `[04-NUM-8]` says no lane shall compute at any width other than the declared
+  arithmetic width. Read literally, that forbids a binary32 kernel that evaluates in f64
+  and rounds once. The amendment must state that a correctly rounded primitive's result
+  is defined by its value, and the precision a kernel uses internally to produce that
+  value is not an operation width.
 - Option D reverses the #1311 decision and the non-goals in `dtype_semantics.md` and
   `faithful_observation.md`. That decision rested on correct rounding being work no
   vendor library does; section 4 shows that premise no longer holds for CPUs.
@@ -265,3 +286,17 @@ Future-proof: the rule is decided fully now even if binary64 lands after binary3
   corpus.
 - Eval and C are bit-equal on `sigmoid`, `silu`, `gelu`, `softmax` and `normal_cdf` over
   the #2952 and #2959 probe sets.
+- Binary64: each function checked against MPFR on random inputs plus the published
+  hard-to-round cases, in eval and in a built executable.
+- FP environment (C7): a static library called from a host that set flush-to-zero and a
+  non-default rounding mode returns the same bits as a clean process, and the host's
+  mode is restored afterwards.
+- NaN canonicalization (C8): add, multiply, divide and the transcendental unary ops on
+  NaN operands produce the canonical NaN bit pattern in both lanes on arm64 and x86_64,
+  while ops the spec defines as payload-preserving (for example `relu`, `[05-OP-43]`)
+  keep the operand's bits.
+- Prove fuzzing (C9): fuzz and invariant-sample evaluation at a property's declared
+  dtype agree bitwise with eval on the same inputs.
+- Eval widths (B1-B4): f32 `softmax` agrees bitwise with C; i64 `cumsum`, `clamp` and
+  scatter-add at 2^53+1 are exact; `clamp` with lo > hi or a NaN bound traps Domain in
+  both lanes.
