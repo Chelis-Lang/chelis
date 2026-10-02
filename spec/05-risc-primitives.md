@@ -3204,7 +3204,7 @@ exact ADT identity by [05-OP-34].
 > duration or period whose value lies outside its type.
 > `parse_instant` converts any offset exactly, and `parse_offset_datetime`
 > keeps the written offset, `Z` and `-00:00` being offset zero. Each
-> `*_to_string` emits its value's one canonical text: years 0..9999 as four
+> `*_to_string` other than `zoned_to_string` emits its value's one canonical text: years 0..9999 as four
 > digits and negative years as `-` and six digits; `T` as the separator; a
 > fraction with trailing zeros removed and omitted when zero; offset zero as
 > `Z` and any other offset as `±HH:MM`, with `:SS` only when nonzero;
@@ -3282,6 +3282,7 @@ exact ADT identity by [05-OP-34].
 > [05-OP-75]'s message `clock_wall_read: io: <detail>` or
 > `clock_monotonic_read: io: <detail>`, naming the builtin rather than
 > `clock_now` or `monotonic_now`; `io` is the kind of exactly these failures.
+>
 > A `TimeZone` is a name, an initial offset, a strictly increasing list of
 > transitions, each a unix second and the offset in force from it on, and a
 > footer rule that may be absent; two zones are equal exactly when all four are,
