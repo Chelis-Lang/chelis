@@ -1449,7 +1449,7 @@ fn gextra_library_keyed_draw_from_new_code_agrees_across_context_and_monolith() 
         if rejects {
             for (lane, error) in [
                 ("monolithic", mono.err().expect("keyless call rejects")),
-                ("context", inctx.err().expect("keyless call rejects")),
+                ("context", inctx.expect_err("keyless call rejects")),
             ] {
                 assert_eq!(error.stage, "check", "{lane}: {error:?}");
                 assert!(
