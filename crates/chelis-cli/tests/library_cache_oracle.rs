@@ -138,7 +138,11 @@ fn build_c(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) -> (Vec<
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    cmd.arg("build").arg(entry).arg("-o").arg(out.path());
+    cmd.arg("build")
+        .arg("--emit-c")
+        .arg(entry)
+        .arg("-o")
+        .arg(out.path());
     cmd.assert().success();
     let c = fs::read(out.path().join("main.c")).expect("main.c emitted");
     let h = fs::read(out.path().join("main.h")).expect("main.h emitted");
@@ -415,7 +419,11 @@ fn build_capture(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) ->
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    cmd.arg("build").arg(entry).arg("-o").arg(out.path());
+    cmd.arg("build")
+        .arg("--emit-c")
+        .arg(entry)
+        .arg("-o")
+        .arg(out.path());
     let output = cmd.output().expect("run chelis build");
     (
         output.status.success(),
@@ -665,7 +673,11 @@ fn build_probe(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) -> B
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    cmd.arg("build").arg(entry).arg("-o").arg(out.path());
+    cmd.arg("build")
+        .arg("--emit-c")
+        .arg(entry)
+        .arg("-o")
+        .arg(out.path());
     let output = cmd.output().expect("run chelis build");
     let ok = output.status.success();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

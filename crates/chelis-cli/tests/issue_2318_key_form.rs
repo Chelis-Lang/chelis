@@ -65,7 +65,14 @@ fn build(dir: &Path, stem: &str, source: &str) -> std::path::PathBuf {
     let out_dir = dir.join(format!("{stem}-out"));
     write_file(&path, source);
     chelis()
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+        ])
         .arg(&out_dir)
         .assert()
         .success();
@@ -158,7 +165,14 @@ fn keyless_2318_programs_are_arity_errors_at_check() {
             "{stem}: expected uniform_like's retired-spelling error: {report}"
         );
         chelis()
-            .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+            .args([
+                "build",
+                "--emit-c",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+            ])
             .arg(dir.path().join(format!("{stem}-out")))
             .assert()
             .failure();

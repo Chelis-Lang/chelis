@@ -524,8 +524,10 @@ AST contract. `spec/02-surf-syntax.md` §0.1 is the authority.
 - Type system: no implicit precision promotion, named tensor dimensions match by name,
   no implicit broadcasting (explicit `expand` only), integer literals default to `i32`
   and float literals to `f32`.
-- `chelis build` emits C, a header, runtime artifacts, and compile flags; `--target hip`
-  emits host code with embedded kernel strings. Neither invokes the native compiler.
+- `chelis build` invokes the native compiler for C, HIP, or Metal and produces an
+  executable or static library, retaining sources and runtime artifacts. `--emit-c`
+  stops after source emission. CPU is the acceptance priority; GPU targets remain
+  prerelease. See `docs/book/src/backends.md`.
 
 ## The Chelis-Lang Repositories
 

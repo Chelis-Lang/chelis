@@ -91,6 +91,7 @@ fn c_main(program: &str, name: &str) -> (String, String) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

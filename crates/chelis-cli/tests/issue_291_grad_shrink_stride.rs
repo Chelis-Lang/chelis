@@ -102,6 +102,7 @@ fn run_build_c(source: &str, stem: &str) -> (tempfile::TempDir, PathBuf, std::pr
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

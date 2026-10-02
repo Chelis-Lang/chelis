@@ -876,6 +876,7 @@ fn run_case(
         executable,
         &[
             "build".into(),
+            "--emit-c".into(),
             "--target".into(),
             "c".into(),
             "--output".into(),

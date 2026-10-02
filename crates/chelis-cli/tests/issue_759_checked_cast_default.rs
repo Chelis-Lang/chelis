@@ -346,6 +346,7 @@ fn c_lane_build(program: &str, name: &str) -> Result<(TempDir, std::path::PathBu
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

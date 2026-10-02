@@ -144,6 +144,7 @@ fn transformer_block_traceability_state_is_locked() {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             "../../examples/transformer_block.ch",
             "--target",
             "c",

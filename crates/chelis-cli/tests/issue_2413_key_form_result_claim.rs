@@ -313,7 +313,7 @@ fn entry_c(shape: &Shape, extent: usize, name: &str) -> Outcome {
     let built = Command::cargo_bin("chelis")
         .expect("chelis")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", "--allow-style-violations"])
+        .args(["build", "--emit-c", "--allow-style-violations"])
         .arg(&path)
         .args(["--target", "c", "-o"])
         .arg(&staged)

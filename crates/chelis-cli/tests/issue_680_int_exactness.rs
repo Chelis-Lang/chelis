@@ -167,6 +167,7 @@ fn build_run_int(dir: &TempDir, program: &str, name: &str) -> i64 {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -582,6 +583,7 @@ fn unsupported_builtin_never_silently_emits_a_zero_stub() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

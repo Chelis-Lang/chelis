@@ -42,6 +42,7 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",

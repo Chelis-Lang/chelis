@@ -28,6 +28,7 @@ fn assert_local_actual_refused(source: &str, expected_eval: &str, name: &str) {
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             source_path.to_str().unwrap(),
             "--target",
             "c",

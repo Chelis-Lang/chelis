@@ -372,6 +372,7 @@ fn canonical_sum_preserves_integer_trap_occurrence_in_eval_and_c() {
                 .unwrap()
                 .env("CHELIS_STYLE_GATE_DISABLE", "1")
                 .arg("build")
+                .arg("--emit-c")
                 .arg(&path)
                 .args(["--target", "c", "--output"])
                 .arg(&out_dir)

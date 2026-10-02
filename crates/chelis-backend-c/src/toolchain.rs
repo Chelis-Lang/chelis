@@ -92,7 +92,7 @@ fn resolve_toolchain(requirements: CodegenRequirements, override_vars: &[&str]) 
     // revisit this branch but keep the Accelerate link unconditional.
     let openmp_enabled = requirements.wants_openmp && is_real_gcc(&compiler);
 
-    let mut compile_flags = vec!["-march=native".to_string()];
+    let mut compile_flags = vec!["-march=native".to_string(), "-ffp-contract=off".to_string()];
     let mut link_flags = vec!["-lm".to_string()];
     if !cfg!(target_os = "macos") {
         link_flags.push("-lpthread".to_string());
@@ -142,13 +142,21 @@ fn resolve_compiler(override_vars: &[&str]) -> String {
             return override_cc;
         }
     }
-    if cfg!(target_os = "macos") {
-        return "clang".to_string();
+    let candidates = if cfg!(target_os = "macos") {
+        ["clang", "cc", "gcc"]
+    } else {
+        ["gcc", "clang", "cc"]
+    };
+    for compiler in candidates {
+        if Command::new(compiler)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return compiler.into();
+        }
     }
-    if is_real_gcc("gcc") {
-        return "gcc".to_string();
-    }
-    "gcc".to_string()
+    candidates[0].into()
 }
 
 pub fn is_real_gcc(bin: &str) -> bool {

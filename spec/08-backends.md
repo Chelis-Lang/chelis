@@ -434,11 +434,31 @@ Chelis has no Cranelift-based backend.
 
 ## 7. Backend Selection
 
-Command surface:
+Native build command surface:
 
 - `chelis build app.ch`
 - `chelis build app.ch --target hip`
 - `chelis build app.ch --target metal`
+
+`chelis build` SHALL invoke the selected target's native compiler and produce an
+executable when the checked root manifest requires an observation entry point, or
+a static library without a process entry when it does not. Compilation SHALL use
+the target's required support sources and compiler/linker flags; host arithmetic
+SHALL disable implicit floating-point contraction (`-ffp-contract=off`). Executable
+linking SHALL name the carried staged runtime archive by path (§2.1).
+Static libraries contain the compiled module and support objects; their consumers
+link the carried runtime archive and the target's reported native dependencies.
+
+`--emit-c` SHALL emit only the generated C-family sources, headers, runtime support,
+and compile guidance, without requiring a native compiler or archiver. It applies
+to C, HIP C++, and Metal Objective-C++ output. Both modes retain generated sources.
+The output option selects the existing output directory or explicit source filename;
+the executable uses that source stem and the library uses `lib<source-stem>.a`.
+
+A native tool failure SHALL fail the build, name the failing tool and stage, and
+preserve its diagnostics. Missing-tool diagnostics SHALL explain how to install
+it. A failed build SHALL NOT replace a previously published native artifact;
+success SHALL be reported only after the new native artifact exists.
 
 Integration backends (§5) add further targets.
 

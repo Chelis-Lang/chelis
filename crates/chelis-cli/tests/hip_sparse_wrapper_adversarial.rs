@@ -42,6 +42,7 @@ fn try_build_to_hip(source: &str, name: &str) -> (bool, Option<String>, Option<S
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "hip",

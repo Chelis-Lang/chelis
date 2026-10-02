@@ -38,7 +38,7 @@ that the unimplemented command or Nix acceptance check passes.
 |---|---|---|
 | Exact comparator | `chelis_types::agreement::compare_exact_observations` | Accepts UTF-8 text; compare complete stdout without the lossy decoding and line splitting in `parity.rs`. |
 | Eval lane | `chelis eval --file <program> --target c` | `--target c` selects the same target-aware root manifest as the C build. |
-| C emit lane | `chelis build <program> --target c --output <dir>` | Emits C, headers, and a staged runtime; its printed `Compile:` recipe uses the non-reference product profile. |
+| C emit lane | `chelis build <program> --target c --emit-c --output <dir>` | Emits C, headers, and a staged runtime; its printed `Compile:` recipe uses the non-reference product profile. |
 | Build/link/run patterns | `crates/chelis-cli/tests/parity.rs`; `scripts/core_fragment_parity_receipt.py` | The former uses the shared resolver; the latter runs the emitted recipe through a shell. Neither is a hermetic runner to copy unchanged. |
 | Locked flake | `flake.nix`, `flake.lock` | Already present and locked. |
 | Check scaffolding | `nix/checks.nix`, `nix/contracts.nix` | `supportedSystems` includes `x86_64-linux`; `runtimeConsumers.x86_64-linux = "OpenBLAS"`. |
@@ -96,7 +96,7 @@ reusable CLI.
 ### PD2. The gate needs a separate strict compile/link profile
 
 `chelis_backend_c::toolchain::runtime_toolchain` currently inserts
-`-march=native` and honors `CHELIS_CC`; `chelis build` prints that resolver's
+`-march=native` and honors `CHELIS_CC`; `chelis build --emit-c` prints that resolver's
 recipe. The reference gate cannot execute or copy this printed shell command:
 the portable profile forbids `-march=native`, and a hostile `CHELIS_CC` changes
 the printed compiler without changing the generated C. The narrower

@@ -128,6 +128,7 @@ fn assert_build_clean(path: &PathBuf) {
     Command::cargo_bin("chelis")
         .expect("binary")
         .arg("build")
+        .arg("--emit-c")
         .arg(path)
         .arg("-o")
         .arg(out_dir.path())

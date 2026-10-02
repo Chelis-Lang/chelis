@@ -31,7 +31,14 @@ fn build_app(reef_home: &std::path::Path, app: &std::path::Path, stem: &str) -> 
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home)
         .current_dir(app)
-        .args(["build", "src/main.ch", "--target", "c", "--output"])
+        .args([
+            "build",
+            "--emit-c",
+            "src/main.ch",
+            "--target",
+            "c",
+            "--output",
+        ])
         .arg(&out)
         .assert()
         .success();

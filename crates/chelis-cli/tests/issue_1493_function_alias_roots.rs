@@ -45,6 +45,7 @@ fn function_alias_program_checks_evaluates_and_builds_its_concrete_result() {
         assert_eq!(String::from_utf8(evaluated.stdout).unwrap(), "user = 1\n");
         let built = Command::new(env!("CARGO_BIN_EXE_chelis"))
             .arg("build")
+            .arg("--emit-c")
             .arg(&file)
             .args(["--target", "c", "-o"])
             .arg(dir.path())
@@ -78,6 +79,7 @@ fn ordinary_aliases_have_distinct_roots_on_eval_and_c() {
         assert_eq!(String::from_utf8(result.stdout).unwrap(), expected);
         let built = Command::new(env!("CARGO_BIN_EXE_chelis"))
             .arg("build")
+            .arg("--emit-c")
             .arg(&file)
             .args(["--target", "c", "-o"])
             .arg(dir.path())

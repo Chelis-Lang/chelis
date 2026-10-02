@@ -32,6 +32,7 @@ fn build_c(program: &str, name: &str) -> Result<CArtifacts, (String, Vec<String>
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().expect("utf-8 path"),
             "--target",
             "c",

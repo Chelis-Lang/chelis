@@ -79,6 +79,7 @@ fn build_ok(source: &str, stem: &str) -> (TempDir, PathBuf) {
     chelis()
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

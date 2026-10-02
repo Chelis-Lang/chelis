@@ -82,6 +82,7 @@ fn c_preserves_f32_subnormal_ingress_bits() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

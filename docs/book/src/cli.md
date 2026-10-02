@@ -15,7 +15,7 @@ forms.
 | `chelis surf FILE.dp` | Prints canonical Surf for Deep input. |
 | `chelis validate --surf FILE.ch` | Checks Surf syntax against the conformance grammar. Use `--deep` for Deep or `--desugar` to validate the Deep form of Surf input. |
 | `chelis eval --file FILE` | Evaluates a `.ch` or `.dp` file. `chelis eval 'EXPR'` evaluates an inline expression. |
-| `chelis build FILE.ch --target c --output out/` | Writes source and runtime artifacts for a target. |
+| `chelis build FILE.ch --target c --output out/` | Builds a native executable or static library for a target. |
 | `chelis test` | Runs tests in the current Reef package; see [Testing](testing.md). |
 | `chelis prove` | Checks properties; see [Checking Properties](proving.md). |
 | `chelis reef` | Manages packages; see [Reef and Packages](reef.md). |
@@ -73,7 +73,12 @@ errors still fail.
 chelis build app.ch --target c --output out/
 ```
 
-`c` is the default target. `hip` and `metal` are also available. `build` writes generated
-source and the runtime support and compile flags needed for the selected target; compiling that
-source with a platform toolchain is a separate step. A `.dp` input takes the Deep path
-automatically. See [Backends](backends.md) for target outputs and platform requirements.
+`c` is the default target. `hip` and `metal` are also available. `build` invokes
+its native toolchain and produces an executable for observable programs, or a
+static library for definitions-only modules. It retains generated sources and
+runtime support. Run `./out/app` after the example above.
+
+Add `--emit-c` to stop after source emission and runtime staging, without requiring
+a native compiler. This flag also applies to HIP and Metal source. A `.dp` input
+takes the Deep path automatically. See [Backends](backends.md) for artifact names,
+compiler overrides, library linking, and platform requirements.

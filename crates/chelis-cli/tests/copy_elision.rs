@@ -53,6 +53,7 @@ fn build_copy_elision_c_source() -> String {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             "../../examples/illustrative/copy_elision_probe.ch",
             "--target",
             "c",

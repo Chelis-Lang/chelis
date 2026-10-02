@@ -84,7 +84,7 @@ fn eval_and_c(stem: &str, source: &str) -> (String, String) {
     let out = dir.path().join("out");
     let build = Command::cargo_bin("chelis")
         .unwrap()
-        .args(["build", path, "--target", "c", "--output"])
+        .args(["build", "--emit-c", path, "--target", "c", "--output"])
         .arg(&out)
         .output()
         .unwrap();
@@ -343,6 +343,7 @@ fn state_tuple_result_claim_rejects_each_wrong_axis_in_both_lanes() {
         let build = Command::cargo_bin("chelis")
             .unwrap()
             .arg("build")
+            .arg("--emit-c")
             .arg(&file)
             .args(["--target", "c", "--output"])
             .arg(&out)
@@ -435,6 +436,7 @@ def main() -> tensor[*, f32] = reshape(to_tensor([1.0f32, 2.0f32]), [extent(tens
     let build = Command::cargo_bin("chelis")
         .unwrap()
         .arg("build")
+        .arg("--emit-c")
         .arg(&file)
         .args(["--target", "c", "--output"])
         .arg(&out)

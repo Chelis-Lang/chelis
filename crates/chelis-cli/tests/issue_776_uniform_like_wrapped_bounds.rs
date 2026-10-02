@@ -83,6 +83,7 @@ fn c_sampled(program: &str, name: &str) -> Vec<f64> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -270,6 +271,7 @@ fn pad_cast_wrapped_fill_emits_declared_bits_not_silent_zero() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -310,6 +312,7 @@ fn pad_runtime_fill_build_fails_loudly() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

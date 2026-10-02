@@ -46,6 +46,7 @@ fn surf_c_build_rejects_device_requests_at_exit_one_without_artifacts() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 source.to_str().unwrap(),
                 "--target",
                 "c",
@@ -89,6 +90,7 @@ fn deep_c_build_has_the_same_rejection_and_artifact_absence() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 source.to_str().unwrap(),
                 "--target",
                 "c",
@@ -138,6 +140,7 @@ fn nested_device_requests_cannot_hide_behind_host_regions() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 source.to_str().unwrap(),
                 "--target",
                 "c",
@@ -165,6 +168,7 @@ fn nested_device_requests_cannot_hide_behind_host_regions() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",
@@ -203,6 +207,7 @@ fn unpinned_and_explicit_host_c_programs_still_emit_artifacts() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 source.to_str().unwrap(),
                 "--target",
                 "c",

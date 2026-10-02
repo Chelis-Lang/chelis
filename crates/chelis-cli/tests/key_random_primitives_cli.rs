@@ -39,6 +39,7 @@ fn c_app(reef_home: &Path, app_pkg: &Path, name: &str) -> Output {
         .current_dir(app_pkg)
         .args([
             "build",
+            "--emit-c",
             "src/main.ch",
             "--target",
             "c",

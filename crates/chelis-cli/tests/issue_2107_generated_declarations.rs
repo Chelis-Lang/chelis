@@ -53,6 +53,7 @@ fn build_package() -> BuiltPackage {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             package.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",

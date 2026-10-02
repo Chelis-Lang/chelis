@@ -64,6 +64,7 @@ fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -430,6 +431,7 @@ out = f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -475,6 +477,7 @@ out = f(to_tensor([3.0, 4.0]))\n";
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "hip",
