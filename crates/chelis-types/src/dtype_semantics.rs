@@ -5763,13 +5763,13 @@ mod tests {
 
     #[test]
     fn float_kernels_compute_at_declared_arithmetic_width() {
-        // This f32 input is a one-ulp witness on macOS: native expf and
-        // f64-exp-then-narrow differ. The contract assertion is against the
-        // platform f32 operation itself, not a hard-coded libm result.
+        // [05-OP-46]: f32 `exp` is the correctly rounded f32 operation, which
+        // chelis-crmath computes, not an f64 exp narrowed afterwards. (This
+        // input was a one-ulp witness where macOS libm expf misrounds.)
         let x = f32::from_bits(1_040_209_326);
         let input = scalar_from_f64("test", Prim::F32, f64::from(x)).unwrap();
         let got = float_unop(FloatUnOp::Exp, input).unwrap();
-        assert_eq!(got.as_f64_lossy(), f64::from(x.exp()));
+        assert_eq!(got.as_f64_lossy(), f64::from(chelis_crmath::exp_f32(x)));
 
         let lhs = scalar_from_f64("test", Prim::F32, f64::from(0.1_f32)).unwrap();
         let rhs = scalar_from_f64("test", Prim::F32, f64::from(0.2_f32)).unwrap();
@@ -5878,7 +5878,7 @@ mod tests {
             float_tensor_unop(FloatUnOp::Exp, &input)
                 .unwrap()
                 .to_f64_lossy_vec(),
-            vec![f64::from(x.exp())]
+            vec![f64::from(chelis_crmath::exp_f32(x))]
         );
 
         let lo = finalize_tensor(
