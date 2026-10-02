@@ -305,9 +305,18 @@ fn bind_top_level_callable(
 /// before substituting a callee body into a different lexical scope. The
 /// linearity walk honors function parameters, block locals and patterns; a
 /// same-spelled binder anywhere inside the body remains an ordinary local.
+///
+/// An `expand`/`insert` size the checker stamped as the body's own dimension
+/// is not a value read, so its name is never renamed to a top-level value of
+/// the same spelling (chelis#469). Within one checked definition a stamped
+/// dimension name reads no value at all: a value visible there under the
+/// same name makes the size ambiguous, a type error, and a later top-level
+/// value is not visible ([04-INF-4]).
 fn qualify_top_level_value_reads(program: &HostLoweringSession<'_>, expr: &Expr) -> Expr {
+    let dimensions = stamped_dimension_size_names(expr);
     let renames = chelis_types::linearity::free_runtime_variables(expr)
         .into_iter()
+        .filter(|name| !dimensions.contains(name))
         .filter(|name| {
             program.def_named(name).is_some_and(|(_, body)| {
                 !matches!(stamped_parts(body), Some((DeepTag::Fn, _, _)))
@@ -323,6 +332,19 @@ fn qualify_top_level_value_reads(program: &HostLoweringSession<'_>, expr: &Expr)
         })
         .collect::<BTreeMap<_, _>>();
     chelis_types::linearity::rename_free_runtime_variables(expr, &renames)
+}
+
+/// Every name an `expand`/`insert` size in `expr` reads as a stamped dimension.
+fn stamped_dimension_size_names(expr: &Expr) -> BTreeSet<String> {
+    fn walk(expr: &Expr, names: &mut BTreeSet<String>) {
+        if let Some(name) = crate::lower::app_stamped_dimension_size(expr) {
+            names.insert(name);
+        }
+        visit_semantic_expr_children(expr, |child| walk(child, names));
+    }
+    let mut names = BTreeSet::new();
+    walk(expr, &mut names);
+    names
 }
 
 /// Each top-level fn's directly called top-level fns.

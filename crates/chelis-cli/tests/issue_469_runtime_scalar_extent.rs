@@ -917,3 +917,27 @@ fn a_pattern_binder_shadows_an_outer_static_size_on_both_lanes() {
         ],
     );
 }
+
+/// A callee's own dimension `n` keeps its meaning when a top-level value `n` is
+/// declared after the callee, which [04-INF-4] makes invisible inside it. Host
+/// inlining used to qualify the size `n` as a read of that later value before
+/// lowering saw the checker's stamp: C then sized the axis by the value and
+/// trapped, a shape mismatch for the static value and a claim of 2 against 5
+/// for the runtime one, while eval printed 2.
+#[test]
+fn a_later_top_level_value_never_replaces_a_callee_dimension_on_both_lanes() {
+    let callee = "def g[n](x: tensor[n, i64]) -> i64 = shape(insert(x, 0, n), 0)\n";
+    for (stem, value) in [
+        ("later_static_toplevel", "5i64"),
+        (
+            "later_runtime_toplevel",
+            "tensor_to_scalar(sum(to_tensor([2i64, 3i64]), 0))",
+        ),
+    ] {
+        assert_lanes_agree(
+            stem,
+            &format!("{callee}n = {value}\nout = g(to_tensor([1i64, 2i64]))\n"),
+            "out = 2",
+        );
+    }
+}

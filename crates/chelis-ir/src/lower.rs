@@ -374,6 +374,41 @@ fn unsupported_lowering_message(tag: &str) -> String {
     )
 }
 
+/// The name a bare `expand`/`insert` size reads as a dimension, when the
+/// checker read it as one: the result axis the size sets carries the size's
+/// own name (chelis#469). The checker stamps that name only for a dimension of
+/// the definition the size is written in, and spec/04-type-system.md section
+/// 4.7.2 makes a name that is both a value and such a dimension a type error,
+/// so this stamp is the one record of the decision. Lowering's size arm and
+/// host inlining's top-level qualification ([`app_stamped_dimension_size`])
+/// both read it here; neither re-decides it by name lookup.
+fn stamped_dimension_size(size_arg: &Expr, result_dims: &[DimInfo], axis: usize) -> Option<String> {
+    let name = bare_var_name(strip_cast_wrappers(size_arg))?;
+    matches!(result_dims.get(axis), Some(DimInfo::Named(stamped, _)) if *stamped == name)
+        .then_some(name)
+}
+
+/// [`stamped_dimension_size`] for a checked positional `expand`/`insert`
+/// application, read from its stamped result type before it is lowered.
+/// `None` for any other expression, and for the named-axis `insert` form,
+/// whose axis is resolved only against the lowered operand.
+pub(crate) fn app_stamped_dimension_size(expr: &Expr) -> Option<String> {
+    let (DeepTag::App, meta, kids) = stamped_parts(expr)? else {
+        return None;
+    };
+    let (callee, args) = kids.split_first()?;
+    if !matches!(bare_var_name(callee)?.as_str(), "expand" | "insert") {
+        return None;
+    }
+    let axis = usize::try_from(extract_int_for_dim(args.get(1)?)?).ok()?;
+    let result = LowerCtx::formal_param_type_for_call(
+        meta.ty()?.expression(),
+        &UnordMap::new(),
+        &UnordMap::new(),
+    );
+    stamped_dimension_size(args.get(2)?, &result.dims, axis)
+}
+
 /// If `expr` is exactly `(var {} name)`, return the symbol name. Used by
 /// `lower_pipe` to detect bare-var pipe stages that should be lowered as
 /// unary applications (Item 2c — see
@@ -15554,10 +15589,8 @@ impl<'program> LowerCtx<'program> {
                     //     dimension with a source nor a value has no extent to
                     //     read, and stays a fatal error.
                     else if let Some(name) = bare_var_name(strip_cast_wrappers(size_arg)) {
-                        let stamped_dimension = matches!(
-                            ty.dims.get(axis),
-                            Some(DimInfo::Named(stamped, _)) if *stamped == name
-                        );
+                        let stamped_dimension =
+                            stamped_dimension_size(size_arg, &ty.dims, axis).is_some();
                         if !stamped_dimension && self.names_a_value(&name) {
                             self.lower_one_bound(size_arg, &mut inputs, "expand size")
                         } else if stamped_dimension
