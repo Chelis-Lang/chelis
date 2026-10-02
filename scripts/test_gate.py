@@ -73,10 +73,7 @@ PR_PACKAGE_EXPANSION_YML = (
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
-DEVENV_SETUP_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@"
-    "0b5faba5025fade929194b46a9e52e43fec63462"
-)
+DEVENV_SETUP_ACTION = "./.github/actions/vendor/ci/actions/setup-devenv"
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CARCARA_FULL_SUITE_COMMAND = (
@@ -501,7 +498,7 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "22bb60c2b83fcbfb653b74d3366418937adb23e43d34e7ba1d767204d854f217"
+    "894b49911f105fb5941e460a1ff25555882af56221eca3f3932a41bdcff10763"
 )
 
 

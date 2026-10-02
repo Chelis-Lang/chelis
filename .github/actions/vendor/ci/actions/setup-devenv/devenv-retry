@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${CHELIS_DEVENV_BIN:?CHELIS_DEVENV_BIN is not set}"
+: "${RUNNER_TEMP:?RUNNER_TEMP is not set}"
+
+if [[ ! -x $CHELIS_DEVENV_BIN ]]; then
+  printf 'The configured Devenv binary is not executable.\n' >&2
+  exit 64
+fi
+
+retry_root=$(mktemp -d "$RUNNER_TEMP/chelis-devenv-retry.XXXXXX")
+trap 'rm -rf "$retry_root"' EXIT
+
+max_attempts=3
+attempt=1
+original_args=("$@")
+command_args=("$@")
+invalid_store_path="^error: path '/nix/store/[0-9a-z]{32}-[^']+' is not valid$"
+ansi_sgr=$'\033''\[[0-9;]*m'
+
+has_invalid_store_path() {
+  local log_path=$1
+  local line normalized leading
+  local LC_ALL=C
+
+  while IFS= read -r line || [[ -n $line ]]; do
+    normalized=$line
+    while [[ $normalized =~ $ansi_sgr ]]; do
+      normalized=${normalized/"${BASH_REMATCH[0]}"/}
+    done
+    leading=${normalized%%[![:space:]]*}
+    normalized=${normalized#"$leading"}
+    if [[ $normalized =~ $invalid_store_path ]]; then
+      return 0
+    fi
+  done < "$log_path"
+
+  return 1
+}
+
+while true; do
+  stderr_log="$retry_root/stderr-$attempt.log"
+  stderr_pipe="$retry_root/stderr-$attempt.pipe"
+  mkfifo "$stderr_pipe"
+  tee "$stderr_log" < "$stderr_pipe" >&2 &
+  tee_pid=$!
+
+  set +e
+  NO_COLOR=1 "$CHELIS_DEVENV_BIN" "${command_args[@]}" 2> "$stderr_pipe"
+  status=$?
+  set -e
+  wait "$tee_pid"
+  rm -f "$stderr_pipe"
+
+  if ((status == 0)); then
+    exit 0
+  fi
+
+  if ! has_invalid_store_path "$stderr_log"; then
+    exit "$status"
+  fi
+
+  if ((attempt == max_attempts)); then
+    printf 'Devenv failed after %s invalid-store-path attempts.\n' "$max_attempts" >&2
+    exit "$status"
+  fi
+
+  printf 'Retry Devenv with a refreshed evaluation cache.\n' >&2
+  ((attempt += 1))
+  command_args=(--refresh-eval-cache "${original_args[@]}")
+done

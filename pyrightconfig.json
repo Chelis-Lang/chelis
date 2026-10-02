@@ -1,5 +1,6 @@
 {
   "include": [
+    ".github/actions/vendor/ci",
     ".github/scripts",
     "docs/archive/mascot",
     "bindings/python",

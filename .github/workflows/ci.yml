@@ -677,7 +677,7 @@ jobs:
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
-        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
 
@@ -747,7 +747,7 @@ jobs:
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
-        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
 
@@ -835,7 +835,7 @@ jobs:
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
-        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
 
@@ -1022,7 +1022,7 @@ jobs:
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
-        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
 
@@ -1210,7 +1210,7 @@ jobs:
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
-        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
 
@@ -1363,7 +1363,7 @@ jobs:
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
-        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
 
@@ -1575,7 +1575,7 @@ jobs:
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
-        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
 
@@ -1798,6 +1798,6 @@ jobs:
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
-        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
