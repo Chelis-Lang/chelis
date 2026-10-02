@@ -2766,7 +2766,7 @@ exact ADT identity by [05-OP-34].
 > access, owner flag, or free-style path; it has no accumulator and is outside
 > AD.
 >
-> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the seventeen
+> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the eighteen
 > exported stdlib ADT identities enumerated in the normative registry
 > `spec/registry/stdlib_adt_identities.md`, which this atom incorporates by
 > reference, and no structurally similar successor.
@@ -2805,7 +2805,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the two hundred fifty final exported stdlib numeric definitions enumerated in the
+> the two hundred eighty-one final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
