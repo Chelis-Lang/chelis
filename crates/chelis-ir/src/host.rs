@@ -12156,17 +12156,16 @@ fn dual_eval_app(
             ))
         }
         ("div", 2) => {
-            // (u/v)' = (u'v - uv') / v^2
+            // (u/v)' = u'/v - (q v')/v with q = u/v: the same rounded
+            // operations as the reverse-mode adjoint (`grad.rs`, `Div`:
+            // g/b and g y / b), so a lane taking either mode agrees.
             let ty = ty()?;
-            let num_l = scalar_builtin("mul", vec![dv(&args[0]), v(&args[1])], &ty);
-            let num_r = scalar_builtin("mul", vec![v(&args[0]), dv(&args[1])], &ty);
-            let num = scalar_builtin("sub", vec![num_l, num_r], &ty);
-            let den = scalar_builtin("mul", vec![v(&args[1]), v(&args[1])], &ty);
-            Some(dual(
-                scalar_builtin("div", vec![v(&args[0]), v(&args[1])], &ty),
-                scalar_builtin("div", vec![num, den], &ty),
-                ty,
-            ))
+            let quotient = scalar_builtin("div", vec![v(&args[0]), v(&args[1])], &ty);
+            let through_u = scalar_builtin("div", vec![dv(&args[0]), v(&args[1])], &ty);
+            let q_dv = scalar_builtin("mul", vec![quotient.clone(), dv(&args[1])], &ty);
+            let through_v = scalar_builtin("div", vec![q_dv, v(&args[1])], &ty);
+            let deriv = scalar_builtin("sub", vec![through_u, through_v], &ty);
+            Some(dual(quotient, deriv, ty))
         }
         ("neg", 1) => {
             let ty = ty()?;
