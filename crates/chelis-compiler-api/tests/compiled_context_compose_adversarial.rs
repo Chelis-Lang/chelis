@@ -1430,9 +1430,10 @@ fn gextra_library_keyed_draw_from_new_code_agrees_across_context_and_monolith() 
             false,
         ),
     ] {
+        let mono_source = format_library_plus_snippet(&root, snippet);
         let mono = prepare_eval(EvalRequest {
             source_kind: SourceKind::Surf,
-            source: format_library_plus_snippet(&root, snippet),
+            source: mono_source.clone(),
             bindings: BTreeMap::new(),
         });
         let inctx = check_in_context(&ctx, snippet);
@@ -1447,10 +1448,19 @@ fn gextra_library_keyed_draw_from_new_code_agrees_across_context_and_monolith() 
              snippet={snippet}, errors={errors:?}"
         );
         if rejects {
-            for (lane, error) in [
-                ("monolithic", mono.err().expect("keyless call rejects")),
-                ("context", inctx.expect_err("keyless call rejects")),
+            for (lane, error, source) in [
+                (
+                    "monolithic",
+                    mono.err().expect("keyless call rejects"),
+                    mono_source.as_str(),
+                ),
+                ("context", inctx.expect_err("keyless call rejects"), snippet),
             ] {
+                let caller = source.find("def caller").expect("source contains caller");
+                let call_offset = u64::try_from(
+                    caller + source[caller..].find(" = ").expect("caller has a body") + " = ".len(),
+                )
+                .expect("source call offset fits u64");
                 assert_eq!(error.stage, "check", "{lane}: {error:?}");
                 assert!(
                     error.errors.iter().any(|diagnostic| {
@@ -1458,7 +1468,9 @@ fn gextra_library_keyed_draw_from_new_code_agrees_across_context_and_monolith() 
                             && diagnostic.expected.as_deref() == Some("2 arguments")
                             && diagnostic.got.as_deref() == Some("1 argument")
                             && diagnostic.message.contains("lib_drop")
-                            && diagnostic.span.is_some()
+                            && diagnostic
+                                .span
+                                .is_some_and(|span| span.offset() == call_offset)
                     }),
                     "{lane}: keyless library call must reject with its authored arity and call site: {error:?}"
                 );
