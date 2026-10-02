@@ -1,0 +1,53 @@
+#!/bin/sh
+{
+# The whole file is one brace group opened on line 2, so any truncated copy
+# is an unterminated compound command that sh rejects loudly rather than a
+# valid program that does nothing (see .githooks/commit-msg).
+#
+# Tracked template for the pre-push hook, installed by copy into the COMMON
+# git hooks directory exactly as commit-msg is, and for the same reasons: it
+# names no worktree, resolves its repository at run time, and uses the
+# committing worktree's managed Python with the commit-msg precedence
+# (chelis#1409). It runs scripts/regen_hooks.py, which checks, without
+# writing, the derived artifacts whose inputs the push changes.
+# Neither hook writes anything; git's --no-verify is the only bypass.
+
+set -eu
+
+hook=pre-push
+repo_root=$(git rev-parse --show-toplevel)
+repo_root=$(CDPATH='' cd "$repo_root" && pwd -P)
+script="$repo_root/scripts/regen_hooks.py"
+
+# The hooks directory is shared by every worktree, so this also runs on
+# branches that predate the script. They have nothing to check: exit quietly,
+# unlike commit-msg, whose checker every live branch carries.
+if [ ! -f "$script" ]; then
+    exit 0
+fi
+
+# An activated profile must belong to the committing worktree, not its caller.
+if [ -n "${DEVENV_STATE:-}" ]; then
+    state=$(CDPATH='' cd "$DEVENV_STATE" 2>/dev/null && pwd -P) || state=
+    case "$state" in
+        "$repo_root/.devenv/"*)
+            if [ -x "$state/venv/bin/python" ]; then
+                exec "$state/venv/bin/python" "$script" "$hook" "$@"
+            fi
+            ;;
+    esac
+fi
+
+if [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
+    exec "$repo_root/.devenv/state/venv/bin/python" "$script" "$hook" "$@"
+elif [ -x "$repo_root/.venv/bin/python" ]; then
+    exec "$repo_root/.venv/bin/python" "$script" "$hook" "$@"
+elif command -v uv >/dev/null 2>&1; then
+    unset UV_PYTHON_PREFERENCE
+    exec uv run --managed-python --python 3.11 --no-project python "$script" "$hook" "$@"
+fi
+
+printf '%s\n' "$hook hook: no managed Python interpreter is available." >&2
+printf '%s\n' 'Enter Devenv, run: uv venv --python 3.11, or install uv.' >&2
+exit 2
+}

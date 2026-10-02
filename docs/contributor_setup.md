@@ -90,6 +90,36 @@ installs it on shell entry. Do not set `core.hooksPath`: that setting is
 shared across worktrees while the tracked hook belongs to a branch. The
 hook finds this checkout's managed Python or uses uv.
 
+Two more tracked hooks, `.githooks/pre-commit` and `.githooks/pre-push`, are
+installed the same two ways and run `scripts/regen_hooks.py` with the same
+interpreter. Neither writes or stages anything; they report derived artifacts
+that disagree with their sources and print the command that fixes them. They
+select legs from `scripts/regen_all.py` by each leg's declared `inputs`.
+
+- **pre-commit** runs when a staged change touches the inputs of a
+  pure-Python generator, such as `AGENTS.md`, `docs/CHELIS_SURFACE.md`,
+  `packages/chelis-std/SKILL.md`, or `agent-skills/` for the embedded
+  conformance assets. It runs the generator on a private copy of the staged
+  content, so partial staging, `git commit <paths>`, and `git commit -a` are
+  judged by what they commit. When a source and its derived output disagree,
+  it names both, prints the write command, and asks you to `git add` the
+  result. It never runs cargo. git runs it for `commit`, `commit --amend`,
+  `cherry-pick --continue`, and the commit that concludes a conflicted
+  merge; a refused commit leaves the operation resumable. `rebase --continue`
+  and conflict-free merges, cherry-picks, and rebases do not run it.
+- **pre-push** runs the `--check` form of each tier-0 and tier-1 leg whose
+  inputs or outputs the push changes, including the rejection registry (only
+  for spec edits or Rust edits that add or remove an
+  `unimplemented_rejection!` line) and the chelis-std bundle. On staleness it
+  fails the push and prints the write command. It skips a leg with a
+  one-line notice when the pushed commit is not this worktree's `HEAD`, when
+  the leg's paths have uncommitted changes, or when the leg needs cargo and
+  its binary is not yet built in the cargo target. CI stays the authority.
+
+On a branch that predates `scripts/regen_hooks.py`, both hooks do nothing.
+Without a managed Python they fail the way commit-msg does, naming the fix.
+`git commit --no-verify` and `git push --no-verify` are the emergency bypass.
+
 ## Optional Devenv shell
 
 The native path above works without Devenv. The optional shell supplies
