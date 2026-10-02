@@ -3158,6 +3158,14 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("OP-73.*Otherwise an elective tag")
 
+    def test_zone_zero_period_keeps_the_zoned_value(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "returns `z` when\n> `p` is zero",
+            "re-resolves `z` when\n> `p` is zero",
+        )
+        self.assert_contract_fails("OP-73.*returns `z` when `p` is zero")
+
     def test_zone_daylight_start_prevails_at_a_tie(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),

@@ -253,9 +253,10 @@ an instant in a zone: `zoned(i, tz)` pairs them, and `zoned_from_local(dt, tz,
 policy)` resolves a local reading, where the `Disambiguation` (`EarlierInstant`,
 `LaterInstant`, `CompatibleInstant`, or `RejectNonUniqueLocal`) decides a reading
 that a daylight saving change skips or repeats. `zoned_add_duration` moves along
-the instant line and `zoned_add_period` moves the wall clock. `zoned_to_string`
-writes RFC 9557 text such as `2026-10-01T09:30:00-04:00[America/New_York]`, with an
-offset whose seconds are nonzero written `±HH:MM:SS` as the text profile allows;
+the instant line and `zoned_add_period` moves the wall clock, keeping the value
+unchanged for a zero period. `zoned_to_string` writes RFC 9557 text such as
+`2026-10-01T09:30:00-04:00[America/New_York]`, with an offset whose seconds are
+nonzero written `±HH:MM:SS` as the text profile allows;
 `parse_zoned_text` reads it into a plain `ZonedText` record, and
 `zoned_from_text(zt, tz, policy)` resolves that against a zone the caller
 obtained, with an `OffsetConflict` policy for a written offset the zone does not

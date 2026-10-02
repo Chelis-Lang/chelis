@@ -605,7 +605,16 @@ def zoned_add_duration(z: Zoned, d: Duration) -> Zoned = {
     |> fail
   }
 }
-def zoned_add_period(z: Zoned, p: Period, overflow: DayOverflow, disambiguation: Disambiguation) -> Zoned = {
+-- A zero period returns `z` itself under every policy: re-resolving its
+-- wall reading would move the later occurrence of a fold, or fail near the
+-- end of a zone's coverage, for an addition that changes nothing.
+def zoned_add_period(z: Zoned, p: Period, overflow: DayOverflow, disambiguation: Disambiguation) -> Zoned =
+  if p
+  |> period_months
+  |> eq(0i64)
+  |> and(eq(period_days(p), 0i64)) then z else wall_clock_period(z, p, overflow, disambiguation)
+-- `p` added to the wall reading of `z`, re-resolved under `disambiguation`.
+def wall_clock_period(z: Zoned, p: Period, overflow: DayOverflow, disambiguation: Disambiguation) -> Zoned = {
   local = zoned_local(z)
   d = datetime_date(local)
   current =

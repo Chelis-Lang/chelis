@@ -198,7 +198,8 @@ exceptions to it:
   - `zoned_add_duration` (§11): the instant range, then coverage;
   - `zoned_from_local` and `zoned_from_text` (§11): every `overflow` check before any
     `domain` check;
-  - `zoned_add_period` (§11): as `datetime_add_period`, then as `zoned_from_local`.
+  - `zoned_add_period` (§11) with a nonzero period: as `datetime_add_period`, then as
+    `zoned_from_local`. A zero period makes no check.
   No other S1 or S4a callable can fail both ways for one input; `instant_to_unix_count`
   follows the same order as `duration_to_count`, but only its nanosecond counts can leave
   i64, and those are always exact.
@@ -837,7 +838,11 @@ compares `zoned_instant` and `time_zone_name`.
 - `zoned_add_duration(z, d) -> Zoned` moves along the instant timeline.
 - `zoned_add_period(z, p, overflow: DayOverflow, disambiguation) -> Zoned` adds `p` to the
   local date and keeps the local time, then re-resolves with `disambiguation`. Date units
-  move on the wall clock and time units on the instant line (prior art §6).
+  move on the wall clock and time units on the instant line (prior art §6). A zero period
+  (`P0D`) returns `z` itself, whatever `overflow` and `disambiguation` are, as Temporal
+  returns the same instant when the date part is zero. Re-resolving would move the later
+  occurrence of a fold under `EarlierInstant`, and fail it under `RejectNonUniqueLocal`
+  or near the end of a zone's coverage, for an addition that changes nothing.
 - **Text.** `zoned_to_string` emits RFC 9557 text,
   `2026-10-01T09:30:00-04:00[America/New_York]`, extended as §8.8 extends RFC 3339: an
   offset whose seconds are nonzero, such as a local mean time offset, is written

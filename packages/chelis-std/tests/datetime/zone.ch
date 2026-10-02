@@ -187,6 +187,19 @@ def test_a_period_moves_on_the_wall_clock() -> unit ! { Test } = {
   _ = assert_eq(zoned_to_string(zoned_add_period(before, period(0i64, 1i64), ClampToMonthEnd, EarlierInstant)), "2026-03-08T01:30:00-05:00[America/New_York]", "into the gap, earlier")
   assert_eq(zoned_to_string(zoned_add_period(before, period(1i64, 0i64), RejectInvalidDay, RejectNonUniqueLocal)), "2026-04-07T02:30:00-04:00[America/New_York]", "a month later")
 }
+def test_adding_a_zero_period_keeps_the_instant() -> unit ! { Test } = {
+  later = zoned(instant_from_unix(1793514600i64, 0i64), new_york())
+  _ = assert_eq(zoned_add_period(later, period(0i64, 0i64), ClampToMonthEnd, EarlierInstant), later, "P0D keeps the later 01:30")
+  _ = assert_eq(zoned_add_period(later, period(0i64, 0i64), RejectInvalidDay, RejectNonUniqueLocal), later, "P0D under every policy")
+  edge = zoned(instant_from_unix(999999999i64, 0i64), short_lived())
+  assert_eq(zoned_add_period(edge, period(0i64, 0i64), ClampToMonthEnd, CompatibleInstant), edge, "P0D just before an empty footer")
+}
+def test_a_nonzero_period_into_a_fold_follows_the_policy() -> unit ! { Test } = {
+  before = zoned(instant_from_unix(1793424600i64, 0i64), new_york())
+  _ = assert_eq(instant_unix_second(zoned_instant(zoned_add_period(before, period(0i64, 1i64), ClampToMonthEnd, EarlierInstant))), 1793511000i64, "P1D, the first 01:30")
+  _ = assert_eq(instant_unix_second(zoned_instant(zoned_add_period(before, period(0i64, 1i64), ClampToMonthEnd, LaterInstant))), 1793514600i64, "P1D, the second 01:30")
+  assert_eq(instant_unix_second(zoned_instant(zoned_add_period(before, period(0i64, 1i64), ClampToMonthEnd, CompatibleInstant))), 1793511000i64, "P1D, compatible")
+}
 def test_text_round_trips() -> unit ! { Test } = {
   z = zoned(instant_from_unix(1793514600i64, 0i64), new_york())
   _ = assert_eq(zoned_to_string(z), "2026-11-01T01:30:00-05:00[America/New_York]", "RFC 9557 text")

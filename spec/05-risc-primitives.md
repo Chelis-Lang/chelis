@@ -3073,8 +3073,9 @@ exact ADT identity by [05-OP-34].
 > then its rounding policy, then the result's range; `zoned_add_duration`
 > checks the instant range and then coverage; `zoned_from_local` and
 > `zoned_from_text` make every `overflow` check before any `domain` check; and
-> `zoned_add_period` checks as `datetime_add_period` does and then as
-> `zoned_from_local` does. Every range and
+> `zoned_add_period` with a nonzero period checks as `datetime_add_period` does
+> and then as `zoned_from_local` does, while a zero period makes no check.
+> Every range and
 > validity check precedes the arithmetic it protects, so no [04-NUM-9] trap of
 > a primitive escapes a call for any arguments. Except for the masked column
 > forms below, a `try_` callable takes its twin's arguments, returns `Some` of
@@ -3336,7 +3337,8 @@ exact ADT identity by [05-OP-34].
 > give `dt - o_b`; when more than one change satisfies this, every policy fails
 > `domain`. `RejectNonUniqueLocal` fails `domain` in a fold and in a gap.
 > `zoned_add_duration(z,d)` adds `d` to the instant and fails `overflow` outside
-> the instant range. `zoned_add_period(z,p,overflow,policy)` applies
+> the instant range. `zoned_add_period(z,p,overflow,policy)` returns `z` when
+> `p` is zero, whatever `overflow` and `policy` are. Otherwise it applies
 > `datetime_add_period` with `overflow` to the local reading, failing as it
 > fails, and resolves the result as `zoned_from_local` does with `policy`.
 >

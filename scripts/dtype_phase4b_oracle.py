@@ -2777,6 +2777,8 @@ def validate_normative_contract(
             "with offset zero written `+00:00`",
             "any other critical tag fail `domain`, and any other elective tag is ignored",
             "resolves the record against `tz` whatever its name",
+            "`zoned_add_period(z,p,overflow,policy)` returns `z` when `p` is zero, "
+            "whatever `overflow` and `policy` are",
             "The offset is absent when it is written `Z`, `z`, or with a `-` sign and value zero",
             "When the offset is absent, every policy gives the instant that the written "
             "date and time denote at offset zero",

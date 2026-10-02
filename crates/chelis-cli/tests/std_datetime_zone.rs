@@ -251,6 +251,16 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
         r#"zoned_add_period: domain: 2026-03-08T02:30:00 does not exist in "America/New_York": the transition at unix second 1772953200 skips it"#,
     ),
     (
+        "add_period_into_fold_rejected",
+        "zoned_add_period(zoned(instant_from_unix(1793424600i64, 0i64), new_york()), period(0i64, 1i64), ClampToMonthEnd, RejectNonUniqueLocal)",
+        r#"zoned_add_period: domain: 2026-11-01T01:30:00 occurs 2 times in "America/New_York", at offsets -04:00, -05:00"#,
+    ),
+    (
+        "add_period_at_coverage_end",
+        "zoned_add_period(zoned(instant_from_unix(999999999i64, 0i64), short_lived()), period(0i64, 1i64), ClampToMonthEnd, EarlierInstant)",
+        r#"zoned_add_period: domain: 2001-09-10T01:46:39 needs offsets at or after unix second 1000000000, the last transition of "Etc/Short_Lived", whose footer is empty"#,
+    ),
+    (
         "add_period_end",
         "zoned_add_period(zoned_from_local(local(9999i64, 12i64, 30i64, 23i64, 59i64, 59i64), time_zone_utc(), EarlierInstant), period(0i64, 1i64), ClampToMonthEnd, EarlierInstant)",
         "zoned_add_period: overflow: 9999-12-31T23:59:59 at offset +00:00 is outside the supported instant range",
@@ -465,6 +475,62 @@ const EXACT_RESULTS: &[(&str, &str)] = &[
         r#"assert_eq(parse_zoned_text("2026-01-01T00:00:00Z[UTC][foo=a][foo=a]").zone_name, "UTC", "an elective repeat is ignored")"#,
     ),
     (
+        "zero_period_in_fold_earlierinstant",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(1793514600i64, 0i64), new_york()), period(0i64, 0i64), ClampToMonthEnd, EarlierInstant), zoned(instant_from_unix(1793514600i64, 0i64), new_york()), "P0D keeps the later 01:30")"#,
+    ),
+    (
+        "zero_period_in_fold_laterinstant",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(1793514600i64, 0i64), new_york()), period(0i64, 0i64), ClampToMonthEnd, LaterInstant), zoned(instant_from_unix(1793514600i64, 0i64), new_york()), "P0D keeps the later 01:30")"#,
+    ),
+    (
+        "zero_period_in_fold_compatibleinstant",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(1793514600i64, 0i64), new_york()), period(0i64, 0i64), ClampToMonthEnd, CompatibleInstant), zoned(instant_from_unix(1793514600i64, 0i64), new_york()), "P0D keeps the later 01:30")"#,
+    ),
+    (
+        "zero_period_in_fold_rejectnonuniquelocal",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(1793514600i64, 0i64), new_york()), period(0i64, 0i64), ClampToMonthEnd, RejectNonUniqueLocal), zoned(instant_from_unix(1793514600i64, 0i64), new_york()), "P0D keeps the later 01:30")"#,
+    ),
+    (
+        "zero_period_reject_invalid_day",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(1793514600i64, 0i64), new_york()), period(0i64, 0i64), RejectInvalidDay, RejectNonUniqueLocal), zoned(instant_from_unix(1793514600i64, 0i64), new_york()), "P0D under RejectInvalidDay")"#,
+    ),
+    (
+        "zero_period_at_range_end",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(253402214400i64, 999999999i64), kiritimati()), period(0i64, 0i64), ClampToMonthEnd, RejectNonUniqueLocal), zoned(instant_from_unix(253402214400i64, 999999999i64), kiritimati()), "P0D at the last instant")"#,
+    ),
+    (
+        "zero_period_at_range_start",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(-377705030401i64, 0i64), new_york()), period(0i64, 0i64), ClampToMonthEnd, RejectNonUniqueLocal), zoned(instant_from_unix(-377705030401i64, 0i64), new_york()), "P0D at the first instant")"#,
+    ),
+    (
+        "zero_period_at_coverage_end",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(999999999i64, 0i64), short_lived()), period(0i64, 0i64), ClampToMonthEnd, EarlierInstant), zoned(instant_from_unix(999999999i64, 0i64), short_lived()), "P0D just before an empty footer")"#,
+    ),
+    (
+        "one_day_into_fold_earlierinstant",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(1793424600i64, 0i64), new_york()), period(0i64, 1i64), ClampToMonthEnd, EarlierInstant), zoned(instant_from_unix(1793511000i64, 0i64), new_york()), "P1D re-resolves in the fold")"#,
+    ),
+    (
+        "one_day_into_fold_laterinstant",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(1793424600i64, 0i64), new_york()), period(0i64, 1i64), ClampToMonthEnd, LaterInstant), zoned(instant_from_unix(1793514600i64, 0i64), new_york()), "P1D re-resolves in the fold")"#,
+    ),
+    (
+        "one_day_into_fold_compatibleinstant",
+        r#"assert_eq(zoned_add_period(zoned(instant_from_unix(1793424600i64, 0i64), new_york()), period(0i64, 1i64), ClampToMonthEnd, CompatibleInstant), zoned(instant_from_unix(1793511000i64, 0i64), new_york()), "P1D re-resolves in the fold")"#,
+    ),
+    (
+        "one_day_into_gap_earlierinstant",
+        r#"assert_eq(zoned_to_string(zoned_add_period(zoned(instant_from_unix(1772868600i64, 0i64), new_york()), period(0i64, 1i64), ClampToMonthEnd, EarlierInstant)), "2026-03-08T01:30:00-05:00[America/New_York]", "P1D into the gap")"#,
+    ),
+    (
+        "one_day_into_gap_laterinstant",
+        r#"assert_eq(zoned_to_string(zoned_add_period(zoned(instant_from_unix(1772868600i64, 0i64), new_york()), period(0i64, 1i64), ClampToMonthEnd, LaterInstant)), "2026-03-08T03:30:00-04:00[America/New_York]", "P1D into the gap")"#,
+    ),
+    (
+        "one_day_into_gap_compatibleinstant",
+        r#"assert_eq(zoned_to_string(zoned_add_period(zoned(instant_from_unix(1772868600i64, 0i64), new_york()), period(0i64, 1i64), ClampToMonthEnd, CompatibleInstant)), "2026-03-08T03:30:00-04:00[America/New_York]", "P1D into the gap")"#,
+    ),
+    (
         "elective_after_two_values",
         r#"assert_eq(parse_zoned_text("2022-07-08T00:14:07Z[UTC][u-ca=iso8601][u-ca=gregory][u-ca=iso8601]").zone_name, "UTC", "elective tags only")"#,
     ),
@@ -650,8 +716,8 @@ fn std_datetime_zone_text_results_are_exact() {
         .iter()
         .map(|(name, expression)| (name.to_string(), expression.to_string()))
         .collect();
-    // Locally the one run, 23 cases, takes 24.9 s: (24.9 - 8) / 23 = 0.73 s a
-    // case. The limit is 10 × (8 + 23 × 0.8) = 264 s.
+    // Locally the one run of 23 cases took 24.9 s: (24.9 - 8) / 23 = 0.73 s a
+    // case. With 37 cases the limit is 10 × (8 + 37 × 0.8) = 376 s.
     let outcomes = run_expression_suite("datetime-zone-results-2862", &expressions, 0.8);
     for (name, expression) in EXACT_RESULTS {
         assert_eq!(
