@@ -626,3 +626,181 @@ fn callee_dimensions_and_renamed_values_keep_their_meaning_on_both_lanes() {
         assert_lanes_agree(stem, source, expected);
     }
 }
+
+/// The size-path regression corpus. Each program names a size whose reading
+/// a caller could capture: through inlining three deep, a function literal,
+/// `map`, `vmap` and `grad`, a `cast` or arithmetic, a callee's own dimension
+/// beside a caller's value, and a top-level value read by a callee whose caller
+/// has a dimension of the same spelling. Lowering reads a size as a dimension
+/// only where the checker stamped it as one, in the size's own definition, so
+/// every row prints the same bytes on both lanes. The top-level rows used to
+/// print the caller's extent in C (`w6b`), or trap on eval while C printed the
+/// caller's extent (`w6`, `w6c`).
+#[test]
+fn size_names_read_in_their_own_definition_on_both_lanes() {
+    for (stem, source, expected) in [
+        (
+            "size_dim_control",
+            "def f[n](x: tensor[n, i64]) = insert(x, 0, n)\n\
+             out = f(to_tensor([1i64, 2i64, 3i64]))\n",
+            "out = tensor(shape=[3, 3], data=[1, 2, 3, 1, 2, 3, 1, 2, 3])",
+        ),
+        (
+            "size_rename_control",
+            "def f[n](x: tensor[n, i64], m: i64) -> i64 = {\n\
+               k = m\n\
+               shape(insert(x, 0, k), 0)\n\
+             }\n\
+             out = f(to_tensor([1i64, 2i64]), 3i64)\n",
+            "out = 3",
+        ),
+        (
+            "size_vmap",
+            "def g(b: tensor[3, 2, i64], k: i64) = vmap(fn (r: tensor[2, i64]) -> insert(r, 0, k))(b)\n\
+             def f[k](x: tensor[k, i64]) = g(to_tensor([[1i64, 2i64], [3i64, 4i64], [5i64, 6i64]]), tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = tensor(shape=[3, 4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2, 3, 4, 3, 4, 3, 4, 3, 4, 5, 6, 5, 6, 5, 6, 5, 6])",
+        ),
+        (
+            "size_static_caller_leak",
+            "def g[n](x: tensor[n, i64]) -> i64 = shape(insert(x, 0, n), 0)\n\
+             def f() -> i64 = {\n\
+               n = 5i64\n\
+               g(to_tensor([1i64, 2i64]))\n\
+             }\n\
+             out = f()\n",
+            "out = 2",
+        ),
+        (
+            "size_runtime_caller_leak",
+            "def g[n](x: tensor[n, i64]) = insert(x, 0, n)\n\
+             def f(n: i64) = g(to_tensor([1i64, 2i64]))\n\
+             out = f(tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n",
+            "out = tensor(shape=[2, 2], data=[1, 2, 1, 2])",
+        ),
+        (
+            "size_caller_param_leak_shape",
+            "def g[n](x: tensor[n, i64]) -> i64 = shape(insert(x, 0, n), 0)\n\
+             def f(n: i64) -> i64 = add(g(to_tensor([1i64, 2i64])), mul(n, 0i64))\n\
+             out = f(tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n",
+            "out = 2",
+        ),
+        (
+            "size_three_deep",
+            "def h(t: tensor[2, i64], k: i64) = insert(t, 0, k)\n\
+             def g(t: tensor[2, i64], k: i64) = h(t, k)\n\
+             def f[k](x: tensor[k, i64]) = g(to_tensor([1i64, 2i64]), tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])",
+        ),
+        (
+            "size_three_deep_middle_dim",
+            "def h(t: tensor[2, i64], k: i64) = insert(t, 0, k)\n\
+             def g[k](y: tensor[k, i64], j: i64) = h(to_tensor([1i64, 2i64]), j)\n\
+             def f(x: tensor[3, i64]) = g(to_tensor([9i64]), tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n\
+             out = f(to_tensor([1i64, 2i64, 3i64]))\n",
+            "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])",
+        ),
+        (
+            "size_three_deep_expand",
+            "def h(t: tensor[1, i64], k: i64) = expand(t, 0, k)\n\
+             def g(t: tensor[1, i64], k: i64) = h(t, k)\n\
+             def f[k](x: tensor[k, i64]) = g(to_tensor([7i64]), tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = tensor(shape=[4], data=[7, 7, 7, 7])",
+        ),
+        (
+            "size_lambda_capture",
+            "def g(k: i64) -> i64 = {\n\
+               h = fn (t: tensor[2, i64]) -> shape(insert(t, 0, k), 0)\n\
+               h(to_tensor([1i64, 2i64]))\n\
+             }\n\
+             def f[k](x: tensor[k, i64]) -> i64 = g(tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = 4",
+        ),
+        (
+            "size_lambda_capture_tensor",
+            "def g(k: i64) = {\n\
+               h = fn (t: tensor[2, i64]) -> insert(t, 0, k)\n\
+               h(to_tensor([1i64, 2i64]))\n\
+             }\n\
+             def f[k](x: tensor[k, i64]) = g(tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])",
+        ),
+        (
+            "size_lambda_map",
+            "def g(k: i64) -> List[i64] = map(fn (i: i64) -> shape(insert(to_tensor([1i64, 2i64]), 0, k), 0), [1i64, 2i64])\n\
+             def f[k](x: tensor[k, i64]) -> List[i64] = g(tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = [4, 4]",
+        ),
+        (
+            "size_toplevel_after",
+            "def g(t: tensor[2, i64]) = insert(t, 0, kk)\n\
+             def f[kk](x: tensor[kk, i64]) = g(to_tensor([1i64, 2i64]))\n\
+             kk = tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])",
+        ),
+        (
+            "size_toplevel_before",
+            "kk = tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0))\n\
+             def g(t: tensor[2, i64]) = insert(t, 0, kk)\n\
+             def f[kk](x: tensor[kk, i64]) = g(to_tensor([1i64, 2i64]))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])",
+        ),
+        (
+            "size_toplevel_static_after",
+            "def g(t: tensor[2, i64]) = insert(t, 0, kk)\n\
+             def f[kk](x: tensor[kk, i64]) = g(to_tensor([1i64, 2i64]))\n\
+             kk = 4i64\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])",
+        ),
+        (
+            "size_toplevel_no_caller_dim",
+            "kk = tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0))\n\
+             def g(t: tensor[2, i64]) = insert(t, 0, kk)\n\
+             def f(x: tensor[3, i64]) = g(to_tensor([1i64, 2i64]))\n\
+             out = f(to_tensor([1i64, 2i64, 3i64]))\n",
+            "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])",
+        ),
+        (
+            "size_cast",
+            "def g(t: tensor[2, i64], k: i32) = insert(t, 0, cast(k, i64))\n\
+             def f[k](x: tensor[k, i64]) = g(to_tensor([1i64, 2i64]), cast(tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)), i32))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])",
+        ),
+        (
+            "size_arith",
+            "def g(t: tensor[2, i64], k: i64) = insert(t, 0, add(k, 0i64))\n\
+             def f[k](x: tensor[k, i64]) = g(to_tensor([1i64, 2i64]), tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n\
+             out = f(to_tensor([1i64, 2i64]))\n",
+            "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])",
+        ),
+        (
+            "size_grad",
+            "def loss(x: tensor[2, f32], k: i64) -> f32 = tensor_to_scalar(sum(sum(insert(x, 0, k), 0), 0))\n\
+             def loss4(x: tensor[2, f32]) -> f32 = loss(x, tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0)))\n\
+             def f[k](y: tensor[k, f32]) -> tensor[2, f32] = grad(loss4)(to_tensor([1.0, 2.0]))\n\
+             out = f(to_tensor([1.0, 2.0]))\n",
+            "out = tensor(shape=[2], data=[4.0, 4.0])",
+        ),
+        (
+            "size_grad_k",
+            "def lossk(x: tensor[2, f32]) -> f32 = {\n\
+               k = tensor_to_scalar(sum(to_tensor([2i64, 2i64]), 0))\n\
+               tensor_to_scalar(sum(sum(insert(x, 0, k), 0), 0))\n\
+             }\n\
+             def f[k](y: tensor[k, f32]) -> tensor[2, f32] = grad(lossk)(to_tensor([1.0, 2.0]))\n\
+             out = f(to_tensor([1.0, 2.0]))\n",
+            "out = tensor(shape=[2], data=[4.0, 4.0])",
+        ),
+    ] {
+        assert_lanes_agree(stem, source, expected);
+    }
+}

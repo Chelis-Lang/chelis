@@ -15531,45 +15531,48 @@ impl<'program> LowerCtx<'program> {
                             })),
                         }
                     }
-                    // (3) A bare `var` naming a §4.7.2 Form-2 symbolic dim (an
-                    //     in-scope tensor dimension, or a monomorphized dim
-                    //     substitution) keeps that identity. A name with
-                    //     neither, such as a scalar parameter, a local or
-                    //     top-level binding, or a `cast` over one, is a runtime
-                    //     value: it lowers through arm (4)'s dataflow, because
-                    //     section 4.7.2 forbids refusing an extent for its
-                    //     provenance (chelis#469). The identity recognized here
-                    //     is a refinement; missing it yields a fresh extent
-                    //     under the section 4.7 guards, never a rejection. A
-                    //     name that is neither a dimension nor a value has no
-                    //     extent to read at all, and stays a fatal error.
-                    //
-                    //     A value this activation can see is read first.
-                    //     Section 4.7.2 makes "a name occurring anywhere in
-                    //     `size` that denotes both a value binding [...] and an
-                    //     in-scope dimension" a type error, so within one
-                    //     definition a name the activation's own scope binds
-                    //     as a value is never also a dimension. The dimension
-                    //     tables below are not scoped to the activation: a
-                    //     caller's binder stays visible in them while a callee
-                    //     is inlined. A dimension reading of such a name can
-                    //     only be a caller's binder leaking in, and reading it
-                    //     would size the callee's axis by the caller's extent
-                    //     (chelis#469).
+                    // (3) A bare `var` size is read as a dimension only when
+                    //     the checker read it as one: the result axis it sizes
+                    //     carries the size's own name. The checker stamps that
+                    //     name only for a dimension of the definition the size
+                    //     is written in, a binder of that definition or a dim a
+                    //     tensor type in its scope carries, and section 4.7.2
+                    //     makes a name that is both a value and such a
+                    //     dimension a type error. So within one definition a
+                    //     name is one or the other, and the stamp, made in that
+                    //     definition's own scope, decides which. Every other
+                    //     name, a parameter, a local, a capture, a top-level
+                    //     binding or a `cast` over one, is a runtime value and
+                    //     lowers through arm (4)'s dataflow. The dimension
+                    //     tables below are not scoped to the activation (a
+                    //     caller's binder stays visible while a callee is
+                    //     inlined, chelis#2954), so they are consulted only for
+                    //     a stamped dimension, never to decide whether a name is
+                    //     one (chelis#469). For a stamped dimension the
+                    //     substitution and tensor-source identities are
+                    //     refinements. A name that is neither a stamped
+                    //     dimension with a source nor a value has no extent to
+                    //     read, and stays a fatal error.
                     else if let Some(name) = bare_var_name(strip_cast_wrappers(size_arg)) {
-                        if self.activation_binds_value(&name) {
+                        let stamped_dimension = matches!(
+                            ty.dims.get(axis),
+                            Some(DimInfo::Named(stamped, _)) if *stamped == name
+                        );
+                        if !stamped_dimension && self.names_a_value(&name) {
                             self.lower_one_bound(size_arg, &mut inputs, "expand size")
-                        } else if let Some(value) =
-                            self.dim_substitutions.get(&name).and_then(|dim| match dim {
-                                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
-                                    Some(*value)
-                                }
-                                DimInfo::Named(_, None) => None,
-                            })
+                        } else if stamped_dimension
+                            && let Some(value) =
+                                self.dim_substitutions.get(&name).and_then(|dim| match dim {
+                                    DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                                        Some(*value)
+                                    }
+                                    DimInfo::Named(_, None) => None,
+                                })
                         {
                             RtDim::Lit(value)
-                        } else if let Some((src, source_axis, _)) =
-                            self.tensor_source_for_symbol(&name)
+                        } else if stamped_dimension
+                            && let Some((src, source_axis, _)) =
+                                self.tensor_source_for_symbol(&name)
                         {
                             let tensor = inputs.len();
                             inputs.push(src);
@@ -15587,8 +15590,6 @@ impl<'program> LowerCtx<'program> {
                                     },
                                 )),
                             }
-                        } else if self.names_a_value(&name) {
-                            self.lower_one_bound(size_arg, &mut inputs, "expand size")
                         } else {
                             raise_fatal_lowering_error(
                                 format!(
@@ -18251,21 +18252,14 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
-    /// True when the current activation's own scope binds `name` as a value:
-    /// one of its parameters or locals, a value its function literal captured
-    /// where it was written, or a top-level value declared so far. These are
-    /// the tables chelis#2588 swaps per activation, so a caller activation's
-    /// values are never consulted.
-    fn activation_binds_value(&self, name: &str) -> bool {
-        self.bindings.contains_key(name) || self.static_size_bindings.contains_key(name)
-    }
-
-    /// True when `name` reads a value here: [`Self::activation_binds_value`],
-    /// or a top-level declaration the program names. An `expand`/`insert`
-    /// size naming such a value lowers as dataflow; a name that is none of
-    /// these, and no dimension either, has nothing to read (chelis#469).
+    /// True when `name` reads a value here: a parameter, local or captured
+    /// binding of the current scope, a folded static size, or a top-level
+    /// declaration. It decides nothing about dimensions; an `expand`/`insert`
+    /// size the checker did not read as a dimension lowers as dataflow when
+    /// this holds, and has nothing to read when it does not (chelis#469).
     fn names_a_value(&self, name: &str) -> bool {
-        self.activation_binds_value(name)
+        self.bindings.contains_key(name)
+            || self.static_size_bindings.contains_key(name)
             || self.program_defs.contains_key(name)
             || self.program_types.contains_key(name)
             || self.program_signatures.contains_key(name)

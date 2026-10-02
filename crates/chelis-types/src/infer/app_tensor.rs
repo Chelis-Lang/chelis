@@ -1099,20 +1099,19 @@ pub(super) fn check_expand_signature(
         // fresh runtime extent, and a literal or named claim over it is
         // checked at run time.
         None => {
-            // A bare `var` naming a genuine §4.7.2 Form-2 symbolic dim — a
-            // declared dim parameter (not a value binding) or a dim carried
-            // by an in-scope tensor — stamps the named dim into the output so
-            // declared results refer to it by name. Every other materializable
-            // spelling (`shape(...)` reads, static arithmetic, `cast`-wrapped,
-            // and `let`-bound sizes) defers the output dim slot to
-            // the declared return-type / call-context via unification.
+            // A bare `var` naming a dimension of this definition, a binder of
+            // the enclosing definition or a dim carried by a tensor type in
+            // scope, stamps the named dim into the output so declared results
+            // refer to it by name. Every other spelling, a value included,
+            // gives a fresh extent that the declared return type or call
+            // context may claim through unification. The stamp is the one
+            // record of the reading: lowering reads a size as a dimension only
+            // where this axis carries the size's own name, so no later stage
+            // re-decides it in another scope (chelis#469). A name that is
+            // neither a dimension here nor a value has nothing to read, and
+            // lowering rejects it.
             match arg_exprs.get(2).and_then(symbolic_dim_ref_name) {
-                Some(name)
-                    if env.lookup(name).is_none()
-                        || env.tensor_carries_dim_with_subst(name, subst) =>
-                {
-                    Dim::Name(name.to_string())
-                }
+                Some(name) if definition_dimension(env, name, subst) => Dim::Name(name.to_string()),
                 _ => Dim::Wildcard,
             }
         }

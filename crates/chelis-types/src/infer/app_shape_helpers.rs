@@ -171,6 +171,20 @@ pub(super) fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
     kids.first().and_then(symbol_name)
 }
 
+/// True when `name` is a dimension binder of the enclosing definition.
+fn definition_binds_dimension(env: &Env, name: &str) -> bool {
+    env.type_resolution_binders()
+        .is_some_and(|binders| binders.dim_vars.contains_key(name))
+}
+
+/// True when `name` is a dimension of the definition being checked: a binder
+/// of the enclosing definition, or a dimension a tensor type in scope carries
+/// (spec/04-type-system.md section 4.7.2, "an in-scope symbolic dimension may
+/// preserve its name").
+pub(super) fn definition_dimension(env: &Env, name: &str, subst: &Subst) -> bool {
+    definition_binds_dimension(env, name) || env.tensor_carries_dim_with_subst(name, subst)
+}
+
 /// The type error for an `expand`/`insert` size that names something both a
 /// value and a dimension (spec/04-type-system.md section 4.7.2).
 ///
@@ -195,10 +209,7 @@ pub(super) fn ambiguous_size_name_error(
                 TopLevelValueVisibility::Visible => env.lookup(&name),
                 TopLevelValueVisibility::NotYetDeclared { shadowed } => shadowed,
             }?;
-            let dimension = if env
-                .type_resolution_binders()
-                .is_some_and(|binders| binders.dim_vars.contains_key(&name))
-            {
+            let dimension = if definition_binds_dimension(env, &name) {
                 "a dimension binder of the enclosing definition"
             } else if env.tensor_carries_dim_with_subst(&name, subst) {
                 "a dimension carried by a tensor type in scope"
