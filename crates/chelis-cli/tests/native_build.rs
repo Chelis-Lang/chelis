@@ -491,3 +491,56 @@ fn hard_linked_generated_source_or_header_cannot_overwrite_input() {
         assert_eq!(fs::read(&file).unwrap(), original);
     }
 }
+
+/// chelis#2962: the C compiler runs in an allowlisted environment, so variables
+/// a driver reads cannot change the build, and a compiler that does not apply
+/// the pinned floating-point profile is refused rather than recorded.
+#[cfg(unix)]
+#[test]
+fn c_build_ignores_compiler_environment_and_refuses_profile_changing_wrapper() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("growth.ch");
+    fs::write(&file, "y = exp(cast(0.3, f32))\n").unwrap();
+    let shadow = dir.path().join("shadow");
+    fs::create_dir(&shadow).unwrap();
+    fs::write(shadow.join("math.h"), "#error shadow math.h was used\n").unwrap();
+    let run = |out: &Path| {
+        let result = Process::new(out.join("growth")).output().unwrap();
+        assert!(result.status.success());
+        result.stdout
+    };
+
+    let clean = dir.path().join("clean");
+    build(&file, &clean)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Compiler: "));
+    let hostile = dir.path().join("hostile");
+    build(&file, &hostile)
+        .env("CCC_OVERRIDE_OPTIONS", "+-ffast-math +-O0")
+        .env("NIX_CFLAGS_COMPILE", "-ffast-math -O0")
+        .env("CPATH", &shadow)
+        .env("C_INCLUDE_PATH", &shadow)
+        .assert()
+        .success();
+    assert_eq!(run(&clean), run(&hostile));
+
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let real =
+        chelis_backend_c::toolchain::verify_compiler(&toolchain.compiler, &toolchain.compile_flags)
+            .unwrap()
+            .path;
+    let wrapper = dir.path().join("fast-cc");
+    fs::write(
+        &wrapper,
+        format!("#!/bin/sh\nexec '{}' \"$@\" -ffast-math\n", real.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    build(&file, &dir.path().join("fast"))
+        .env("CHELIS_CC", &wrapper)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("__FAST_MATH__"));
+}

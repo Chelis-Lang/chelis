@@ -58,7 +58,7 @@ impl NativeBuild {
                 let mut command = self.executable_command(&artifact);
                 print_command("Compile", &mut command);
             } else {
-                let mut archive = Command::new(&archiver);
+                let mut archive = self.tool(&archiver);
                 archive.arg("rcs").arg(&artifact);
                 for source in &self.sources {
                     let object = source.with_extension("o");
@@ -70,6 +70,17 @@ impl NativeBuild {
                 self.print_link_requirements();
             }
             return Ok(());
+        }
+
+        // The C compiler is a declared input: record which one ran, and refuse
+        // one whose wrapper or configuration changes the pinned profile.
+        if self.target == "c" {
+            let identity = chelis_backend_c::toolchain::verify_compiler(
+                &self.compiler.to_string_lossy(),
+                &self.compile_flags,
+            )
+            .map_err(|error| format!("native compile: {error}"))?;
+            println!("Compiler: {identity}");
         }
 
         // Same filesystem as the destination: rename publishes only a complete
@@ -95,7 +106,7 @@ impl NativeBuild {
                 true,
             )?;
         } else {
-            let mut archive = Command::new(archiver);
+            let mut archive = self.tool(&archiver);
             archive.arg("rcs").arg(&product);
             for (index, source) in self.sources.iter().enumerate() {
                 let object = scratch.path().join(format!("source-{index}.o"));
@@ -126,8 +137,20 @@ impl NativeBuild {
         Ok(())
     }
 
+    /// Native tools run with an allowlisted environment, so variables such as
+    /// `CCC_OVERRIDE_OPTIONS` or `CPATH` cannot change the compile. hipcc is
+    /// the exception: ROCm locates its installation through the environment,
+    /// and the HIP lane's environment contract is not yet decided.
+    fn tool(&self, program: &OsStr) -> Command {
+        if self.target == "hip" {
+            Command::new(program)
+        } else {
+            chelis_backend_c::toolchain::tool_command(program)
+        }
+    }
+
     fn executable_command(&self, product: &Path) -> Command {
-        let mut command = Command::new(&self.compiler);
+        let mut command = self.tool(&self.compiler);
         command
             .args(&self.compile_flags)
             .args(&self.sources)
@@ -139,7 +162,7 @@ impl NativeBuild {
     }
 
     fn object_command(&self, source: &Path, object: &Path) -> Command {
-        let mut command = Command::new(&self.compiler);
+        let mut command = self.tool(&self.compiler);
         command
             .args(&self.compile_flags)
             .arg("-c")
@@ -150,7 +173,7 @@ impl NativeBuild {
     }
 
     fn print_link_requirements(&self) {
-        let mut command = Command::new(&self.compiler);
+        let mut command = self.tool(&self.compiler);
         command.arg(&self.runtime_archive).args(&self.link_flags);
         print_command("Link requirements (after module archive)", &mut command);
     }

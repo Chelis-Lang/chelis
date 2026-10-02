@@ -62,8 +62,16 @@ HIP honors `CHELIS_HIPCC` and otherwise uses `hipcc`; Metal honors
 `CHELIS_METAL_CXX` and otherwise uses `clang++`. Static libraries use
 `CHELIS_AR` or `ar`. Each override is one executable name or path, without
 embedded arguments. An invalid explicit override fails rather than choosing
-another tool. Host compilation uses `-O2 -ffp-contract=off` and the target's
-other required flags.
+another tool. Host compilation uses one pinned profile, `-O2 -ffp-contract=off
+-fno-fast-math` with no `-march` (the instruction set is the compiler's
+configured default, never the build machine's CPU), plus the target's other
+required flags. Native tools run with an environment cleared down to `PATH` and
+`TMPDIR`, so variables such as `CCC_OVERRIDE_OPTIONS`, `NIX_CFLAGS_COMPILE`,
+`CPATH`, or `SDKROOT` cannot change a compile; `hipcc` is the exception and
+keeps its environment. The C compiler is a declared input: the build prints
+`Compiler: <path> (<version>)`, and refuses a compiler, for example a wrapper
+script, that predefines `__FAST_MATH__`, a nonzero `__FINITE_MATH_ONLY__`, or no
+`__OPTIMIZE__` under the profile.
 
 Static libraries contain module and support objects, with no process entry.
 Consumers include the generated header, link the module archive followed by the

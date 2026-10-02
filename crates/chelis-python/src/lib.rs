@@ -1312,9 +1312,18 @@ fn compile_shared_library_inner(
         .filter(openmp_dropped)
         .collect();
 
-    let mut command = Command::new(&compiler);
+    // The C compiler runs with the allowlisted environment and the pinned
+    // profile's own optimisation level, as `chelis build` does; hipcc keeps
+    // its environment, which ROCm uses to locate its installation.
+    let mut command = match artifact.compile_result.target {
+        CompileTarget::C => chelis_backend_c::toolchain::tool_command(&compiler),
+        CompileTarget::Hip => {
+            let mut command = Command::new(&compiler);
+            command.arg("-O3");
+            command
+        }
+    };
     command.current_dir(root);
-    command.arg("-O3");
     command.arg("-shared");
     command.arg("-fPIC");
     // Silence the now-unrecognized `#pragma omp ...` lines the serial build
