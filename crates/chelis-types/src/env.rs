@@ -47,33 +47,6 @@ pub(crate) fn generalize_sweep_env_visits() -> usize {
     GENERALIZE_SWEEP_ENV_VISITS.with(std::cell::Cell::get)
 }
 
-/// Provenance of a let-bound `int`-valued name, tracked so a runtime
-/// `expand` size can be checked for materializability (chelis#397/#469).
-///
-/// A runtime `expand` size has a backend representation only when its
-/// extent is recoverable: either it folds to a compile-time constant, or
-/// it provably derives from an in-scope tensor's `shape(t, axis)` read.
-/// A *truly sourceless* runtime scalar (a bare `i32`/`i64` parameter)
-/// has neither, so it must be rejected at check time to keep
-/// check↔build↔eval in sync. The discriminator is PROVENANCE, not the
-/// surface spelling: `let-bound`, `cast`-wrapped, and arithmetic spellings
-/// all reduce to one of these classes. The inline `shape(...)` and
-/// in-scope-tensor-dim spellings are recognized syntactically at the
-/// expand site; this map only records what a `let` binding carries forward
-/// so a later `expand(b, 0, a_dim)` can recover `a_dim`'s class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SizeProvenance {
-    /// The value folds to a compile-time constant (a literal, `cast(N,_)`,
-    /// or integer arithmetic over such values). The host runtime and the
-    /// evaluator can compute it; it is a materializable extent.
-    Static,
-    /// The value provably derives from an in-scope tensor's
-    /// `shape(t, axis)` read — directly, through `cast`, through integer
-    /// arithmetic, or transitively through another shape-provenance
-    /// binding. The backend reads the extent from that tensor's shape.
-    ShapeSourced,
-}
-
 /// The checker identities owned by one declaration binder list.
 ///
 /// A `defsig` binder list is intentionally unkinded: the same source spelling
@@ -251,21 +224,18 @@ pub struct Env {
     /// current restriction, which a body constraint may already have narrowed.
     #[serde(skip)]
     active_declared_type_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>>,
-    /// chelis#397/#469: provenance of `let`-bound `int`-valued names, so a
-    /// runtime `expand` size built from a `let` binding can be checked for
-    /// materializability. Cloned at every lexical scope boundary along with
-    /// `bindings` (so it has correct lexical scoping for free) and dropped
-    /// from serialization (it is a check-time-only analysis artifact).
-    #[serde(skip)]
-    size_provenance: UnordMap<String, SizeProvenance>,
-    /// Exact values for the `Static` subset of `size_provenance`.
+    /// Exact folded values of value bindings that are checked integer
+    /// constants, so an `expand`/`insert` size naming one types a literal
+    /// extent. Cloned at every lexical scope boundary along with `bindings`
+    /// (so it has correct lexical scoping for free) and dropped from
+    /// serialization (it is a check-time-only analysis artifact).
     #[serde(skip)]
     static_size_values: UnordMap<String, i64>,
     /// chelis#631: literal element counts of `let`-bound list expressions,
     /// so `concat(rows, axis)` can size its concat axis through the
     /// binding (a list's length is not part of its type). Same
     /// lexical-scoping-by-`Clone` and add-symmetric mark/clear discipline
-    /// as `size_provenance`; check-time-only, dropped from serialization.
+    /// as `static_size_values`; check-time-only, dropped from serialization.
     #[serde(skip)]
     list_literal_lens: UnordMap<String, usize>,
     /// chelis#1134 / [04-INF-4]: flattened declaration index of every
@@ -390,39 +360,20 @@ impl Env {
         self.exact_stdlib_expected_result.as_ref()
     }
 
-    /// Record the size provenance of a `let`-bound name (chelis#397/#469).
-    pub fn mark_size_provenance(&mut self, name: &str, prov: SizeProvenance) {
-        self.size_provenance.insert(name.to_string(), prov);
-        self.static_size_values.remove(name);
-    }
-
     /// Record one checked, fully folded integer extent binding.
     pub fn mark_static_size_value(&mut self, name: &str, value: i64) {
-        self.size_provenance
-            .insert(name.to_string(), SizeProvenance::Static);
         self.static_size_values.insert(name.to_string(), value);
     }
 
-    /// Clear any recorded size provenance for `name` (chelis#397/#469).
+    /// Clear any recorded static extent value for `name`.
     ///
-    /// The provenance map is add-symmetric: it must be CLEARED at every
-    /// binding site whose RHS is sourceless, and at every value-parameter
-    /// bind, so a name that re-binds (or shadows an outer name) to a
-    /// sourceless runtime scalar does not inherit a stale `ShapeSourced`/
-    /// `Static` entry. Without this, `len = shape(x, 0); len = k;
-    /// expand(b, 0, len)` (BLOCKER B — a re-bind) and a sourceless value
-    /// parameter `d` that shadows an outer shape-sourced `d` (BLOCKER C — a
-    /// shadow inherited through the derived `Clone`) would both be wrongly
-    /// accepted at check, materializing a runtime extent that contradicts
-    /// the checked type (a check↔eval divergence / check-clean-fails-build).
-    pub fn clear_size_provenance(&mut self, name: &str) {
-        self.size_provenance.remove(name);
+    /// The map is add-symmetric: it must be CLEARED at every binding site
+    /// whose RHS does not fold, and at every value-parameter bind, so a name
+    /// that re-binds (or shadows an outer name) to a runtime value does not
+    /// inherit a stale constant. Without this, `len = 3i64; len = k;
+    /// expand(b, 0, len)` would type extent 3 while executing `k`.
+    pub fn clear_static_size_value(&mut self, name: &str) {
         self.static_size_values.remove(name);
-    }
-
-    /// The recorded size provenance of a name, if any (chelis#397/#469).
-    pub fn size_provenance(&self, name: &str) -> Option<SizeProvenance> {
-        self.size_provenance.get(name).copied()
     }
 
     /// Exact checked value of a previously folded lexical extent.
@@ -437,7 +388,7 @@ impl Env {
 
     /// Clear any recorded list-literal length for `name` (chelis#631).
     ///
-    /// Add-symmetric like [`Self::clear_size_provenance`]: cleared at
+    /// Add-symmetric like [`Self::clear_static_size_value`]: cleared at
     /// every binding site whose RHS is not a list literal and at every
     /// value-parameter bind, so a re-bind or shadow does not inherit a
     /// stale length and mis-size a later `concat`.

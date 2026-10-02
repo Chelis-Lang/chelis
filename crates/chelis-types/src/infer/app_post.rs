@@ -444,22 +444,11 @@ pub(super) fn finish_unified_app(
                 let axis_is_dim_name = kids.get(2).is_some_and(|arg| {
                     symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
                 });
-                // chelis#397/#469: classify the size by PROVENANCE
-                // (static / shape-sourced / sourceless), following
-                // `let`/`cast`/arithmetic to a tensor shape source.
-                // A truly sourceless runtime scalar is rejected at
-                // check so it never reaches the build/eval-only
-                // rejection (a check-clean program must build).
-                let size_class = kids
-                    .get(3)
-                    .map(|arg| classify_expand_size(arg, env, adt_reg, subst))
-                    .unwrap_or(SizeClass::Unknown);
                 if owes_shape_replay {
                     product.defer_shape_check(
                         DeferredShapeRule::Expand {
                             builtin: callee,
                             axis_is_dim_name,
-                            size_class,
                             env: Box::new(env.clone()),
                         },
                         kids[1..].to_vec(),
@@ -474,7 +463,6 @@ pub(super) fn finish_unified_app(
                     &arg_tys,
                     &result_ty,
                     axis_is_dim_name,
-                    size_class,
                     env,
                     subst,
                     errors,

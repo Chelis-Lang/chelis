@@ -849,7 +849,6 @@ pub(super) fn check_expand_signature(
     arg_tys: &[Type],
     result_ty: &Type,
     axis_is_dim_name: bool,
-    size_class: SizeClass,
     env: &Env,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
@@ -1087,24 +1086,13 @@ pub(super) fn check_expand_signature(
                 ),
             );
         }
-        // A non-literal runtime size. chelis#397/#469: discriminate by
-        // PROVENANCE (computed by the caller as `size_class`), not by the
-        // surface spelling. A size whose value provably folds to a constant
-        // (`Static`) or derives from an in-scope tensor's `shape(t, axis)`
-        // read / dimension name (`ShapeSourced`) is materializable; a truly
-        // sourceless runtime scalar (`Sourceless` — a bare `i32`/`i64`
-        // parameter, a `cast`/arithmetic over one, or a `let` bound to such)
-        // has no backend representation and is rejected here so check, build,
-        // and eval all agree (a check-clean program must build). The walk
-        // unifies the four spellings the #397 red team found drifting:
-        // bare-`var`, `cast(var, _)`, `let`-bound, and arithmetic.
+        // A non-literal runtime size. spec/04-type-system.md section 4.7.2
+        // admits any `i64` size and forbids rejecting an extent because of
+        // its provenance (chelis#469), so no spelling is refused here: a
+        // parameter, binding, cast, call result or arithmetic size is a
+        // fresh runtime extent, and a literal or named claim over it is
+        // checked at run time.
         None => {
-            if size_class == SizeClass::Sourceless {
-                return report(
-                    errors,
-                    sourceless_expand_size_error(builtin, arg_exprs.get(2)),
-                );
-            }
             // A bare `var` naming a genuine §4.7.2 Form-2 symbolic dim — a
             // declared dim parameter (not a value binding) or a dim carried
             // by an in-scope tensor — stamps the named dim into the output so

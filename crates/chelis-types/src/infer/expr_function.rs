@@ -72,7 +72,7 @@ pub(super) fn infer_fn(
         // `Clone` of `env`) from an outer name it shadows, so a sourceless
         // value parameter `d` shadowing an outer shape-sourced `d` (BLOCKER C)
         // is not wrongly treated as a materializable extent.
-        fn_env.clear_size_provenance(pname);
+        fn_env.clear_static_size_value(pname);
         // chelis#631: same for a shadowed list-literal length.
         fn_env.clear_list_literal_len(pname);
         param_types.push(ty);
@@ -299,7 +299,7 @@ pub(super) fn infer_def_body_with_sig(
         fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a fresh parameter has no size provenance; clear any
         // entry inherited from an outer name it shadows (BLOCKER C).
-        fn_env.clear_size_provenance(pname);
+        fn_env.clear_static_size_value(pname);
         // chelis#631: same for a shadowed list-literal length.
         fn_env.clear_list_literal_len(pname);
         param_types.push(ty);
@@ -631,35 +631,12 @@ pub(super) fn infer_let(
                     subst.name_generic_parameters(&scheme, name, &UnordMap::new());
                     scheme
                 };
-                // chelis#397/#469: record the size provenance of this binding
-                // BEFORE binding it (so `classify_expand_size` resolves it
-                // against the binding's RHS, not its own name) so a later
-                // `expand(b, 0, name)` can recover whether `name` is a
-                // materializable extent (static / shape-sourced) or a
-                // sourceless runtime scalar. Bound BEFORE `let_env.bind` so
-                // the RHS is classified against the pre-binding scope, and
-                // transitively through earlier bindings in the same block.
-                // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so
-                // a re-bind to a sourceless RHS — `len = shape(x, 0); len = k`
-                // (BLOCKER B) — does not inherit the earlier shape-sourced entry.
-                match classify_expand_size(rhs_expr, &let_env, adt_reg, subst) {
-                    SizeClass::Static => {
-                        if let Some(value) =
-                            fold_static_int_expr(rhs_expr, |bound| let_env.static_size_value(bound))
-                        {
-                            let_env.mark_static_size_value(name, value);
-                        } else {
-                            let_env.mark_size_provenance(name, crate::env::SizeProvenance::Static);
-                        }
-                    }
-                    SizeClass::ShapeSourced => {
-                        let_env
-                            .mark_size_provenance(name, crate::env::SizeProvenance::ShapeSourced);
-                    }
-                    SizeClass::Sourceless | SizeClass::Unknown => {
-                        let_env.clear_size_provenance(name)
-                    }
-                }
+                // Record the folded value of a static extent binding BEFORE
+                // binding it, so the RHS folds against the pre-binding scope
+                // and a later `expand(b, 0, name)` types a literal extent. A
+                // binding that does not fold CLEARS any earlier value, so a
+                // re-bind (`len = 3i64; len = k`) does not inherit it.
+                note_static_size_binding(&mut let_env, name, rhs_expr);
                 // chelis#631: same discipline for list-literal lengths.
                 note_list_literal_binding(&mut let_env, name, rhs_expr);
                 let_env.bind_lexical(name.to_string(), scheme);
