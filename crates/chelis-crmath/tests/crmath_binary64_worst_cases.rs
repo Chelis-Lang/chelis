@@ -15,27 +15,15 @@ const FIXTURE: &str = "binary64_worst_cases.txt";
 fn api_matches_mpfr_on_sampled_worst_cases() {
     let rows = read_fixture(FIXTURE);
     let bad = mismatches(&rows, api_bits);
-    assert!(
-        bad.is_empty(),
-        "{} of {} worst cases differ:\n{}",
-        bad.len(),
-        rows.len(),
-        bad.join("\n")
-    );
+    assert!(bad.is_empty(), "{} of {} worst cases differ:\n{}", bad.len(), rows.len(), bad.join("\n"));
 }
 
 #[test]
 fn sample_covers_every_function_at_f64() {
     let rows = read_fixture(FIXTURE);
     for function in FUNCTIONS {
-        let count = rows
-            .iter()
-            .filter(|r| r.function == function && r.width == 64)
-            .count();
-        assert_eq!(
-            count, 256,
-            "{function}: expected 128 worst cases and their negations"
-        );
+        let count = rows.iter().filter(|r| r.function == function && r.width == 64).count();
+        assert_eq!(count, 256, "{function}: expected 128 worst cases and their negations");
     }
 }
 

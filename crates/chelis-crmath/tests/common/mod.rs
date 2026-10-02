@@ -17,9 +17,7 @@ pub struct Row {
 }
 
 pub fn read_fixture(name: &str) -> Vec<Row> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let rows: Vec<Row> = text
         .lines()

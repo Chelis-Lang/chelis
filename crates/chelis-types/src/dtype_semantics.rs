@@ -2129,8 +2129,6 @@ pub fn float_relu_adjoint(
     }
 }
 
-// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
 fn float_vec_unop_f32<T: Copy>(
     op: FloatUnOp,
     values: &[T],
@@ -2167,8 +2165,6 @@ fn float_vec_unop_f32<T: Copy>(
     }
 }
 
-// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
-#[allow(clippy::disallowed_methods)]
 fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
     macro_rules! map {
         ($body:expr) => {
@@ -3306,9 +3302,6 @@ pub fn finalize_scalar(
 /// The exact integer reading of a wide intermediate for the integer/bool
 /// rows: an `Int` passes through; a `Float` must be finite and integral
 /// (else `Domain`) and inside i64 (else `Overflow`).
-/// 2^63, exactly.
-const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
-
 fn int_wide(op: &'static str, prim: Prim, raw: RawScalar) -> Result<i64, NumericTrap> {
     match raw {
         RawScalar::Int(i) => Ok(i),
@@ -3319,7 +3312,7 @@ fn int_wide(op: &'static str, prim: Prim, raw: RawScalar) -> Result<i64, Numeric
             // Any integral f64 strictly below 2^63 is exactly
             // representable in i64; 2^63 itself (= the f64 image of many
             // out-of-range integers) is not.
-            if x < -TWO_POW_63 || x >= TWO_POW_63 {
+            if x < -(2f64.powi(63)) || x >= 2f64.powi(63) {
                 return Err(NumericTrap::Overflow { op, prim });
             }
             Ok(x as i64)

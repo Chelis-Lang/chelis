@@ -78,10 +78,7 @@ fn every_f32_nan_result_is_canonical() {
     for (name, wrapped, _) in F32_KERNELS {
         for bits in NAN_OPERANDS_F32 {
             let got = wrapped(f32::from_bits(bits)).to_bits();
-            assert_eq!(
-                got, CANONICAL_F32,
-                "{name}_f32({bits:#010x}) gave {got:#010x}"
-            );
+            assert_eq!(got, CANONICAL_F32, "{name}_f32({bits:#010x}) gave {got:#010x}");
         }
     }
     for (name, x) in DOMAIN_NAN_OPERANDS {
@@ -96,10 +93,7 @@ fn every_f64_nan_result_is_canonical() {
     for (name, wrapped, _) in F64_KERNELS {
         for bits in NAN_OPERANDS_F64 {
             let got = wrapped(f64::from_bits(bits)).to_bits();
-            assert_eq!(
-                got, CANONICAL_F64,
-                "{name}_f64({bits:#018x}) gave {got:#018x}"
-            );
+            assert_eq!(got, CANONICAL_F64, "{name}_f64({bits:#018x}) gave {got:#018x}");
         }
     }
     for (name, x) in DOMAIN_NAN_OPERANDS {
@@ -127,17 +121,11 @@ fn every_half_nan_result_is_canonical() {
     for (index, (k16, kbf16)) in kernels.iter().enumerate() {
         for bits in f16_operands {
             let got = k16(f16::from_bits(bits)).to_bits();
-            assert_eq!(
-                got, CANONICAL_F16,
-                "kernel {index} f16({bits:#06x}) gave {got:#06x}"
-            );
+            assert_eq!(got, CANONICAL_F16, "kernel {index} f16({bits:#06x}) gave {got:#06x}");
         }
         for bits in bf16_operands {
             let got = kbf16(bf16::from_bits(bits)).to_bits();
-            assert_eq!(
-                got, CANONICAL_BF16,
-                "kernel {index} bf16({bits:#06x}) gave {got:#06x}"
-            );
+            assert_eq!(got, CANONICAL_BF16, "kernel {index} bf16({bits:#06x}) gave {got:#06x}");
         }
     }
 }
@@ -152,19 +140,13 @@ fn raw_upstream_kernels_do_not_canonicalize() {
             .iter()
             .map(|&bits| raw(f32::from_bits(bits)).to_bits())
             .find(|&got| got != CANONICAL_F32);
-        assert!(
-            witness.is_some(),
-            "raw {name}f canonicalized every NaN operand"
-        );
+        assert!(witness.is_some(), "raw {name}f canonicalized every NaN operand");
     }
     for (name, _, raw) in F64_KERNELS {
         let witness = NAN_OPERANDS_F64
             .iter()
             .map(|&bits| raw(f64::from_bits(bits)).to_bits())
             .find(|&got| got != CANONICAL_F64);
-        assert!(
-            witness.is_some(),
-            "raw {name} canonicalized every NaN operand"
-        );
+        assert!(witness.is_some(), "raw {name} canonicalized every NaN operand");
     }
 }
