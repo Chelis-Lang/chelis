@@ -31,6 +31,7 @@ import decimal_reference as ref  # noqa: E402
 from decimal_differential import FloatBits, LaneResult, Program  # noqa: E402
 
 CORPUS = harness.build_corpus()
+CANARY = harness.build_canary_corpus()
 
 
 def shortest(element: FloatBits) -> str:
@@ -400,6 +401,101 @@ class Generator(unittest.TestCase):
         selected = programs()[:5]
         harness.run_all(runner, selected, ("eval", "c"), 1, lambda _: None)
         self.assertEqual(sorted(runner.calls), sorted((lane, p.name) for p in selected for lane in ("eval", "c")))
+
+
+def canary_programs() -> list[Program]:
+    return harness.make_programs(CANARY, 100, 0, combined=True)
+
+
+class Canary(unittest.TestCase):
+    def test_the_canary_is_deterministic(self) -> None:
+        again = harness.build_canary_corpus()
+        self.assertEqual([(c.row, c.args, c.expected) for c in again.cases],
+                         [(c.row, c.args, c.expected) for c in CANARY.cases])
+
+    def test_every_row_and_callable_runs(self) -> None:
+        self.assertEqual({c.row for c in CANARY.cases}, set(harness.ROWS))
+        text = "\n".join(p.source for p in canary_programs())
+        for name in harness.DECIMAL_NAMES[1:]:
+            self.assertRegex(text, rf"\b{name}\(", name)
+
+    def test_a_tie_of_each_sign_meets_every_mode(self) -> None:
+        def args(row: str) -> set[tuple]:
+            return {c.args for c in CANARY.cases if c.row == row}
+        big = "4999999999999999999999999999999999999.5"
+        for mode in harness.ROUNDINGS:
+            for sign in ("", "-"):
+                self.assertIn((sign + "2.5", mode), args("row_try_to_i64"))
+                self.assertIn((float(sign + "2.5"), 0, mode), args("row_try_from_f64"))
+                self.assertIn((sign + "5", "2", 0, mode), args("row_try_div"))
+                rounded = (sign + big, 0, mode)
+                if mode == "RejectInexact":
+                    self.assertIn(rounded, {f.args for f in CANARY.failures if f.function == "decimal_round"})
+                else:
+                    self.assertIn(rounded, args("row_round"))
+
+    def test_both_float_roundings_meet_a_halfway_case_of_each_sign(self) -> None:
+        floats = {c.args[0] for c in CANARY.cases if c.row == "row_floats"}
+        self.assertTrue({"9007199254740993", "-9007199254740993", "16777217", "-16777217"} <= floats)
+        for text, fmt in (("9007199254740993", ref.F64), ("16777217", ref.F32)):
+            below, above = int(text) - 1, int(text) + 1
+            self.assertEqual(ref.text_bits(str(below), fmt) + 1, ref.text_bits(str(above), fmt), text)
+
+    def test_the_canary_is_one_program_with_no_failure_program(self) -> None:
+        selected = canary_programs()
+        self.assertEqual(len(selected), 1)
+        self.assertFalse(any(p.failure for p in selected))
+
+    def test_every_row_has_one_binding_in_the_program(self) -> None:
+        selected = canary_programs()
+        rows = [binding.row for p in selected for binding in p.bindings]
+        self.assertEqual(sorted(rows), sorted(harness.ROWS))
+        self.assertEqual(sum(len(b.cases) for p in selected for b in p.bindings), len(CANARY.cases))
+        for p in selected:
+            self.assertEqual(p.name, p.image)
+            for binding in p.bindings:
+                self.assertEqual(binding.name, f"out_{binding.row}")
+                self.assertIn(f"{binding.name} = {{", p.source)
+            others = set(harness.ROWS) - {b.row for b in p.bindings}
+            for row in others:
+                self.assertNotIn(f"out_{row} =", p.source)
+
+    def test_each_block_reads_its_own_lines(self) -> None:
+        for p in canary_programs():
+            first = 0
+            lines = p.inputs.split("\n")
+            for binding in p.bindings:
+                params = harness.ROWS[binding.row].params
+                block = [line for case in binding.cases for line in harness.case_lines(params, case.args)]
+                self.assertEqual(lines[first:first + len(block)], block)
+                self.assertIn(f"add({first}i64, mul(k, {len(params)}i64))", p.source)
+                self.assertIn(f"range(0i64, {len(binding.cases)}i64)", p.source)
+                first += len(block)
+            self.assertEqual(first, len(lines))
+
+    def test_a_conforming_module_passes_the_canary(self) -> None:
+        report = harness.run_all(FakeRunner(), canary_programs(), ("eval", "c"), 2, lambda _: None)
+        self.assertEqual(report.problems, [])
+        self.assertEqual(report.cases, len(CANARY.cases))
+        self.assertEqual(report.failures_checked, 0)
+        self.assertTrue(harness.summary(report, ("eval", "c"), "canary").endswith("on lanes eval+c; canary corpus)"))
+
+    def test_a_wrong_or_missing_row_in_a_shared_program_is_named(self) -> None:
+        def wrong(lane, program, status, stdout, stderr):
+            if lane == "c":
+                stdout = re.sub(r"^(out_row_round = \[)[^,\]]*", r"\g<1>7", stdout, flags=re.M)
+            return status, stdout, stderr
+        report = harness.run_all(FakeRunner(wrong), canary_programs(), ("eval", "c"), 2, lambda _: None)
+        self.assertEqual(report.classes, {"value": 1})
+        self.assertIn("[c] out_row_round[0]", report.problems[0])
+
+        def missing(lane, program, status, stdout, stderr):
+            if lane == "eval":
+                stdout = "".join(line for line in stdout.splitlines(True) if not line.startswith("out_row_eq = "))
+            return status, stdout, stderr
+        report = harness.run_all(FakeRunner(missing), canary_programs(), ("eval", "c"), 2, lambda _: None)
+        self.assertEqual(report.classes, {"value": 1})
+        self.assertIn("out_row_eq: no output line", report.problems[0])
 
 
 class Literals(unittest.TestCase):

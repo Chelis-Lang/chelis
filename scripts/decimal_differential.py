@@ -13,7 +13,8 @@ Observations:
 - Each row function and each failing function is one program that reads its
   inputs from `cases.txt` at run time, so the C lane builds it once and runs
   the binary once per case file, and the eval lane evaluates it once per case
-  file.
+  file. The canary instead runs every row in one program, where row `r` reads
+  its own block of the case file and prints `out_r`.
 - A grid run maps a row function over a chunk of input tuples and prints a
   flat `List[string]`. Each case contributes a fixed number of elements: a decimal as its canonical text, an `Option` as that
   text or `None`, an i64 or bool through `to_string`, and a float through
@@ -36,7 +37,9 @@ that need the quotient digit's second correction or its clamp, the parser's
 accepted and rejected spellings, and seeded random values, which take one
 rounding mode per scale in rotation); `--large` adds many more seeded random
 cases, crosses each with every mode, observes every twin, and samples more
-failures, for the manual gate of `docs/manual_gates.md`.
+failures, for the manual gate of `docs/manual_gates.md`; `--canary` is a few
+hand-picked edge inputs with no failure programs, for pull-request CI, run in
+one program that covers every row.
 
 The supported entry point is `crates/chelis-cli/tests/std_decimal_oracle.rs`,
 which supplies the freshly built binary, a published standard library and the
@@ -449,6 +452,22 @@ def failure_source(function: str) -> str:
     """The program that makes the one failing call the case file describes."""
     reads = field_reads(FAILURE_EXPRS[function], 0)
     return program_source([f"{FAILURE_ROOT} = {{", "  lines = cases()", f"  [{failure_call(function, reads)}]", "}"])
+
+
+def combined_grid_source(blocks: Sequence[tuple[str, int, int]]) -> str:
+    """One program mapping each row function over its own block of the case file.
+
+    A block is `(row, first line, case count)`, and row `r` prints `out_r`.
+    """
+    body = []
+    for row_name, first, count in blocks:
+        kind = ROWS[row_name]
+        width = len(kind.params)
+        reads = field_reads(kind.params, f"add({first}i64, mul(k, {width}i64))")
+        argument = reads[0] if width == 1 else "(" + ", ".join(reads) + ")"
+        body += [f"out_{row_name} = {{", "  lines = cases()",
+                 f"  flat_map(fn (k: i64) -> {row_name}({argument}), range(0i64, {count}i64))", "}"]
+    return program_source(body)
 
 
 # ---------------------------------------------------------------------------
@@ -929,6 +948,62 @@ def build_corpus(large: bool = False) -> Corpus:
     return corpus
 
 
+def build_canary_corpus() -> Corpus:
+    """The canary corpus: a fixed hand-picked handful of the default corpus's edge inputs.
+
+    It calls every callable on the envelope's ends and on inputs whose
+    arithmetic carries from one limb into the next, rounds a tie of each sign in
+    every mode through every callable that takes a mode (except `decimal_round`
+    under `RejectInexact`, a failure, which the canary does not run), converts
+    an f64 and an f32 halfway case of each sign, divides on one witness of each
+    long-division correction, and observes every twin. It has no seeded random inputs, so it
+    detects a defect only on the inputs it names; the default corpus is the
+    complete check.
+    """
+    corpus = Corpus(twin_stride=1)
+    limbs = [str(10 ** (9 * j) + delta) for j in (1, 2, 4) for delta in (-1, 0)]
+    for category, texts in (("envelope", [MAX_TEXT, "-" + MAX_TEXT, TINY_TEXT, "-" + TINY_TEXT, "0." + NINES]),
+                            ("limbs", limbs), ("removable_zeros", ["-0.000e-5"]),
+                            ("float_edges", ["9007199254740993", "-9007199254740993", "16777217", "-16777217",
+                                             f32_midpoint_witnesses(1)[0]])):
+        for text in texts:
+            corpus.value(category, text)
+    for category, texts in (("parse_accepted", ["1e-0005"]), ("parse_malformed", ["+1", "1e"]),
+                            ("parse_outside", ["1e38", "1e-39"])):
+        for text in texts:
+            corpus.parse(category, text)
+    for text, n in (("1.25", 2), (MAX_TEXT, 0), (TINY_TEXT, 38)):
+        corpus.fixed("fixed", text, n)
+    for v in (I64_MAX, I64_MIN):
+        corpus.from_i64("from_i64", v)
+    for sign in (1, -1):
+        for mode in ROUNDINGS:
+            corpus.to_i64("to_i64", ("-" if sign < 0 else "") + "2.5", mode)
+            corpus.from_f64("from_f64", sign * 2.5, 0, mode)
+            corpus.round("round", ("-" if sign < 0 else "") + "4999999999999999999999999999999999999.5", 0, mode)
+            corpus.div("div", str(5 * sign), "2", 0, mode)
+    for text, mode in (("9223372036854775807.5", "RoundTowardZero"), ("-9223372036854775808.5", "RoundTiesToEven"),
+                       (TINY_TEXT, "RoundAwayFromZero")):
+        corpus.to_i64("to_i64", text, mode)
+    for x, n in ((0.1, 38), (5e-324, 38), (math.nan, 2)):
+        corpus.from_f64("from_f64", x, n, "RoundTiesToEven")
+    corpus.round("round", "-0." + "0" * 36 + "25", 37, "RoundTiesToEven")
+    for a, c in [("999999999" + "0" * k, "1" + "0" * k) for k in (0, 18)] + [
+            (MAX_TEXT, "-1"), ("99999999999999999999", "99999999999999999999"), ("1e-19", "1e-19"),
+            ("0." + NINES, TINY_TEXT)]:
+        for op in ("add", "sub", "mul"):
+            corpus.arith("arith", op, a, c)
+    for a, c, n in (("1", "3", 38), (MAX_TEXT, "0.5", 0), (TINY_TEXT, MAX_TEXT, 38)):
+        corpus.div("div", a, c, n, "RoundTiesToEven")
+    for category, witnesses in (("div_quotient_correction", QUOTIENT_CORRECTION_WITNESSES),
+                                ("div_quotient_clamp", QUOTIENT_CLAMP_WITNESSES)):
+        a, c, n = witnesses[0]
+        corpus.div(category, a, c, n, "RoundTiesToEven")
+    for a, c in (("1.5", "1.50"), ("-0", "0"), (MAX_TEXT, "-" + MAX_TEXT), ("2", "10")):
+        corpus.order("order", a, c)
+    return corpus
+
+
 # ---------------------------------------------------------------------------
 # Programs.
 
@@ -978,20 +1053,34 @@ def representative_failures(failures: list[Failure], per_path: int) -> list[Fail
     return sorted(chosen, key=lambda f: f.name)
 
 
-def make_programs(corpus: Corpus, chunk: int, failures_per_path: int) -> list[Program]:
-    """A run per `chunk` cases of a row, and per sampled failure."""
+def make_programs(corpus: Corpus, chunk: int, failures_per_path: int, combined: bool = False) -> list[Program]:
+    """A run per `chunk` cases of a row, and per sampled failure.
+
+    With `combined`, one program runs every case of every row instead, so the
+    C lane builds once however many rows there are.
+    """
     programs = []
     by_row: dict[str, list[Case]] = {}
     for case in corpus.cases:
         by_row.setdefault(case.row, []).append(case)
-    for row_name, cases in by_row.items():
-        source = grid_source(row_name)
-        params = ROWS[row_name].params
-        for k in range(0, len(cases), chunk):
-            group = tuple(cases[k:k + chunk])
-            inputs = "\n".join(line for case in group for line in case_lines(params, case.args))
-            programs.append(Program(f"{row_name}_{k // chunk:04d}", row_name, source, inputs,
-                                    (Binding(GRID_ROOT, row_name, group),)))
+    if not combined:
+        for row_name, cases in by_row.items():
+            source = grid_source(row_name)
+            params = ROWS[row_name].params
+            for k in range(0, len(cases), chunk):
+                group = tuple(cases[k:k + chunk])
+                inputs = "\n".join(line for case in group for line in case_lines(params, case.args))
+                programs.append(Program(f"{row_name}_{k // chunk:04d}", row_name, source, inputs,
+                                        (Binding(GRID_ROOT, row_name, group),)))
+    elif by_row:
+        blocks: list[tuple[str, int, int]] = []
+        lines: list[str] = []
+        bindings = []
+        for row_name, cases in by_row.items():
+            blocks.append((row_name, len(lines), len(cases)))
+            lines += [line for case in cases for line in case_lines(ROWS[row_name].params, case.args)]
+            bindings.append(Binding(f"out_{row_name}", row_name, tuple(cases)))
+        programs.append(Program("rows", "rows", combined_grid_source(blocks), "\n".join(lines), tuple(bindings)))
     sources: dict[str, str] = {}
     for failure in representative_failures(corpus.failures, failures_per_path):
         source = sources.setdefault(failure.function, failure_source(failure.function))
@@ -1344,7 +1433,9 @@ def resolve_chelis(flag: Path | None) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--chelis", type=Path, help="the chelis binary under test (default: $CHELIS_BIN)")
-    parser.add_argument("--large", action="store_true", help="the manual gate's large seeded corpus")
+    profile = parser.add_mutually_exclusive_group()
+    profile.add_argument("--large", action="store_true", help="the manual gate's large seeded corpus")
+    profile.add_argument("--canary", action="store_true", help="the small hand-picked corpus pull-request CI runs")
     parser.add_argument("--lanes", default="eval,c")
     parser.add_argument("--toolchain-json", help="C toolchain {compiler, compile_flags, link_flags}; default: the "
                         "command chelis build --emit-c prints")
@@ -1363,9 +1454,10 @@ def main(argv: list[str] | None = None) -> int:
     lanes = args.lanes.split(",")
     if not lanes or any(lane not in BOTH for lane in lanes):
         parser.error("--lanes is a comma-separated subset of eval,c")
-    corpus = build_corpus(args.large)
-    per_path = args.failures_per_path or (12 if args.large else 3)
-    programs = make_programs(corpus, args.chunk, per_path)
+    profile = "large" if args.large else "canary" if args.canary else "default"
+    corpus = build_canary_corpus() if args.canary else build_corpus(args.large)
+    per_path = args.failures_per_path or {"large": 12, "canary": 0, "default": 3}[profile]
+    programs = make_programs(corpus, args.chunk, per_path, combined=args.canary)
     if args.only:
         programs = [p for p in programs if re.search(args.only, p.name)]
     if args.list:
@@ -1397,7 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
         print(problem)
     if len(report.problems) > 200:
         print(f"... {len(report.problems) - 200} more problems")
-    print(summary(report, lanes, "large" if args.large else "default"))
+    print(summary(report, lanes, profile))
     return 1 if report.problems else 0
 
 
