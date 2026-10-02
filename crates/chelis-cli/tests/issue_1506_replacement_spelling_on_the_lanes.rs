@@ -19,7 +19,7 @@
 mod common;
 
 use assert_cmd::Command;
-use common::{gcc_available, link_generated};
+use common::gcc_available;
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -69,8 +69,9 @@ fn eval(path: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
-/// Build to C, link, run. Returns whether it exited zero plus combined output.
-fn build_link_run(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
+/// Build natively and run the published executable. Returns whether it exited
+/// zero plus combined output.
+fn build_and_run(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
     let path = fixture(dir, stem, source);
     let out_dir = dir.path().join(format!("{stem}-out"));
     let build = chelis(&[
@@ -87,11 +88,9 @@ fn build_link_run(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
         "build failed: {}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let linked = link_generated(&out_dir, &format!("{stem}.c"), stem);
-    assert!(linked.success(), "link failed: {linked}");
     let run = StdCommand::new(out_dir.join(stem))
         .output()
-        .expect("run the linked binary");
+        .expect("run the published executable");
     let mut combined = String::from_utf8_lossy(&run.stdout).to_string();
     combined.push_str(&String::from_utf8_lossy(&run.stderr));
     (run.status.success(), combined)
@@ -116,7 +115,7 @@ fn the_literal_size_replacement_executes_on_both_lanes() {
         gcc_available(),
         "C compiler required for both-lane acceptance"
     );
-    let (ran, output) = build_link_run(&dir, "literal", LITERAL_SIZE);
+    let (ran, output) = build_and_run(&dir, "literal", LITERAL_SIZE);
     assert!(ran, "the literal-size replacement must run on C: {output}");
     assert!(
         output.contains("shape=[3], data=[false, true, true]"),
@@ -138,7 +137,7 @@ fn the_symbolic_size_replacement_executes_on_both_lanes() {
         evaluated.contains("shape=[3], data=[false, true, true]"),
         "{evaluated}"
     );
-    let (ran, output) = build_link_run(&dir, "symbolic", SYMBOLIC_SIZE_DEF);
+    let (ran, output) = build_and_run(&dir, "symbolic", SYMBOLIC_SIZE_DEF);
     assert!(
         ran && output.contains("shape=[3], data=[false, true, true]"),
         "{output}"
@@ -165,7 +164,7 @@ fn the_folded_symbolic_size_replacement_executes_on_both_lanes() {
         evaluated.contains("shape=[3], data=[false, true, true]"),
         "{evaluated}"
     );
-    let (ran, output) = build_link_run(&dir, "folded", SYMBOLIC_SIZE_FOLDED);
+    let (ran, output) = build_and_run(&dir, "folded", SYMBOLIC_SIZE_FOLDED);
     assert!(
         ran && output.contains("shape=[3], data=[false, true, true]"),
         "{output}"

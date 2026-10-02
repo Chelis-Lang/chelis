@@ -15,7 +15,6 @@
 //! `def main`, with an overflowing and a non-overflowing argument. Every
 //! program's eval verdict must equal its compiled C verdict, and the two
 //! root forms must agree with each other.
-mod common;
 
 use assert_cmd::Command;
 use std::path::Path;
@@ -166,7 +165,6 @@ fn c_verdict(directory: &Path, path: &str, stem: &str) -> Verdict {
         ],
     );
     assert!(built.status.success(), "{}", text(&built));
-    assert!(common::link_generated(&out, &format!("{stem}.c"), stem).success());
     verdict(&std::process::Command::new(out.join(stem)).output().unwrap())
 }
 

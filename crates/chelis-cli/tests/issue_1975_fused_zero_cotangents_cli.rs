@@ -27,19 +27,7 @@ fn native(path: &Path, source: &str) -> PathBuf {
         path,
         &["build", "zero.ch", "--target", "c", "--output", "native"],
     ));
-    let dir = path.join("native");
-    let binary = dir.join("zero-run");
-    let mut cc = Command::new("cc");
-    cc.current_dir(&dir)
-        .args(["-O2", "zero.c", "libchelis_runtime.a", "-lm", "-o"])
-        .arg(&binary);
-    if cfg!(target_os = "macos") {
-        cc.args(["-framework", "Accelerate"]);
-    } else {
-        cc.args(["-lpthread", "-ldl"]);
-    }
-    run(&mut cc);
-    binary
+    path.join("native").join("zero")
 }
 
 fn agrees(source: &str, expected: &str) {

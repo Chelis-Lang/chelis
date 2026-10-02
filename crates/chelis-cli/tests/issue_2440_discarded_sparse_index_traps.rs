@@ -33,7 +33,6 @@
 //! the one this issue is about: discarded behaves as consumed. When
 //! chelis#1636 lands, the evaluator rows tighten without this file changing
 //! shape.
-mod common;
 
 use assert_cmd::Command;
 use std::path::Path;
@@ -159,7 +158,6 @@ fn c_verdict(directory: &Path, path: &str, stem: &str) -> Verdict {
         ],
     );
     assert!(built.status.success(), "{}", text(&built));
-    assert!(common::link_generated(&out, &format!("{stem}.c"), stem).success());
     verdict(&std::process::Command::new(out.join(stem)).output().unwrap())
 }
 

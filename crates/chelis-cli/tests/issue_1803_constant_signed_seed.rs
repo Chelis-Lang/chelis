@@ -90,7 +90,6 @@ fn canonical_signed_constants_execute_exact_split_draws_in_surf_and_deep() {
                     "--output",
                     out_dir.to_str().unwrap(),
                 ]));
-                assert!(common::link_generated(&out_dir, "sample.c", "sample").success());
                 let compiled = success(
                     std::process::Command::new(out_dir.join("sample"))
                         .output()
@@ -203,7 +202,6 @@ fn a_shadowed_neg_in_a_seed_draws_from_the_closures_value() {
         "--output",
         out_dir.to_str().unwrap(),
     ]));
-    assert!(common::link_generated(&out_dir, "shadow.c", "shadow").success());
     let compiled = success(
         std::process::Command::new(out_dir.join("shadow"))
             .output()

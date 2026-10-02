@@ -2,7 +2,7 @@
 //! spec/05 [05-OP-65]); a result permutation cannot retype its input.
 mod common;
 
-use common::{gcc_available, link_generated};
+use common::gcc_available;
 use std::{
     fs,
     path::Path,
@@ -82,7 +82,6 @@ out = candidate(to_tensor([{}]))
         dir.path(),
     );
     assert!(built.status.success(), "{built:?}");
-    assert!(link_generated(&out, "fixture.c", "fixture").success());
     let native = run(&out.join("fixture"), &[], dir.path());
     for (lane, result) in [("eval", eval), ("c", native)] {
         let stdout = String::from_utf8_lossy(&result.stdout);

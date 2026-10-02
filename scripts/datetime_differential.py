@@ -1368,7 +1368,7 @@ class Runner:
     def c_lane(self, program: Program) -> LaneResult:
         assert self.toolchain is not None
         app = self.app(program, "c")
-        build = self.run([str(self.chelis), "build", "src/main.ch", "--target", "c", "--output", "out"], app)
+        build = self.run([str(self.chelis), "build", "--emit-c", "src/main.ch", "--target", "c", "--output", "out"], app)
         if build.returncode != 0:
             return LaneResult("c", build.returncode, build.stdout, build.stderr, "build")
         link = self.run([self.toolchain.compiler, *self.toolchain.compile_flags, "-Iout", "out/main.c",

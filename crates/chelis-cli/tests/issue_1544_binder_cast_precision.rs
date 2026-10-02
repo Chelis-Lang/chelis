@@ -145,8 +145,6 @@ fn a_single_type_stamp_gives_one_answer_on_both_lanes() {
         "the emitted C must carry the f32 narrow plan"
     );
 
-    let status = common::link_generated(&out_dir, "dup_type.c", "dup_type");
-    assert!(status.success(), "link failed: {status}");
     let native = std::process::Command::new(out_dir.join("dup_type"))
         .output()
         .expect("compiled binary should run");
@@ -211,8 +209,6 @@ fn a_single_type_stamp_gives_one_answer_on_the_tensor_lane() {
             out_dir.to_str().expect("utf8"),
         ],
     ));
-    let status = common::link_generated(&out_dir, "dup_tensor.c", "dup_tensor");
-    assert!(status.success(), "link failed: {status}");
     let native = std::process::Command::new(out_dir.join("dup_tensor"))
         .output()
         .expect("compiled binary should run");
