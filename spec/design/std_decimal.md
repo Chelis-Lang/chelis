@@ -325,22 +325,17 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
   contract, citing [05-OP-74] for rounding, [05-OP-59] for `to_float`, [05-OP-60] for
   `fail` and [05-OP-36] for equality. Its neighbours are [05-OP-73] (Std.Datetime),
   [05-OP-74] (rounding) and [05-OP-75] (the clock).
-- [05-OP-35] loses its Decimal paragraphs and its "Decimal rational computations … exact
-  internal domain" sentence and gains "The `decimal::*` identities follow [05-OP-76]"; its
-  count changes.
-- [05-OP-34]'s sentence "Decimal invariants are checked by the named [05-OP-35] operations
-  before use" is replaced: `decimal::Decimal` joins the opaque identities that hold their
-  governing atom's invariants by construction, using the opaque-identity sentence
-  Std.Datetime adds.
+- [05-OP-35] routes the `decimal::*` identities
+  to [05-OP-76] and counts them in its manifest.
+- [05-OP-34] lists `decimal::Decimal` among the opaque identities that hold their
+  governing atom's invariants by construction.
 - [05-OP-74] defines all seven `Rounding` modes, `RejectInexact` included, and [05-OP-73]
   states what each Std.Datetime callable that takes a `Rounding` does under
   `RejectInexact` (a `domain` failure when the value is not a whole number of units or
   increments).
-- `stdlib_numeric_manifest.md` replaces the 14 `decimal::*` rows; `stdlib_adt_identities.md`
-  reshapes `decimal::Decimal`.
-- spec/04 §1.1.1 states the interchange rule (§10) and drops "built on `trunc_div` scale
-  shifts"; spec/04's `Std.Decimal.normalize` example, spec/01's `RoundHalfEven` example and
-  spec/05's `trunc_div` note are updated.
+- `stdlib_numeric_manifest.md` carries one row per `decimal::*` callable, and
+  `stdlib_adt_identities.md` gives `decimal::Decimal` its fixed-limb shape.
+- spec/04 §1.1.1 states the interchange rule (§10).
 
 ## 13. Implementation notes
 
@@ -387,6 +382,7 @@ The design is #2872, structural equality on ADT values is #2876, and the impleme
 
 The only code consumer is hello-chelis's decimal example, which constructs
 `Decimal { coefficient, scale }` directly and stops compiling under opacity; it is
-rewritten against the new surface. Shoals plans an order book on `Std.Decimal`. Removing
+rewritten against the new surface when hello-chelis moves to a compiler that ships it.
+Shoals plans an order book on `Std.Decimal`. Removing
 the old callables, `RoundingMode` and the old field shape is a breaking change to a
 surface that #2806 had fenced.

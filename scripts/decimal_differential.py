@@ -1022,7 +1022,7 @@ class LaneResult:
 
 
 def printed_compile_command(build_stdout: str) -> list[str] | None:
-    """The `Compile: ...` command `chelis build --target c` prints, retargeted to `out/case`."""
+    """The `Compile: ...` command `chelis build --emit-c` prints, retargeted to `out/case`."""
     for line in build_stdout.splitlines():
         if line.startswith("Compile: "):
             argv = shlex.split(line[len("Compile: "):])
