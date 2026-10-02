@@ -57,8 +57,16 @@ fn assert_rejects_axis(source: &str, op: &str, axis_dtype: &str) {
         "{op} with a {axis_dtype} axis must be rejected, but checked clean"
     );
     assert!(
-        errors.iter().any(|e| e.message.contains("i32 axis")),
-        "{op} rejection must name the i32 axis contract; got:\n{}",
+        errors.iter().any(|error| {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("i32")
+                && error.got.as_deref() == Some(axis_dtype)
+                && error
+                    .message
+                    .contains(op.split_whitespace().next().unwrap_or(op))
+                && error.message.contains("axis")
+        }),
+        "{op} must reject a {axis_dtype} axis as i32; got:\n{}",
         errors_summary(&errors)
     );
 }

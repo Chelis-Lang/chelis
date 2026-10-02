@@ -2666,6 +2666,26 @@ Each element of `errors` carries:
 > extent, so a consumer that reasons about ranges cannot tell whether the
 > compiler measured one.
 
+> **[04-FIT-27]** For a checker rejection of `to_list`,
+> `tensor_to_scalar`, `copy`, `cast`, `expand` (axis or size), `shrink`
+> (arity, tensor, or bounds), `reshape` (shape type, tensor input, or
+> element count), or a function application's argument count or
+> tensor-dimension match, the diagnostic SHALL retain the available
+> location of the rejecting call or offending operand, not substitute a
+> containing declaration or unrelated argument. Its message SHALL name
+> the callee and rejected argument position; a per-axis mismatch SHALL
+> name the axis as well.
+> When that check knows a directional requirement and the value that failed
+> it, the diagnostic SHALL carry both in `expected` and `got`, and the human
+> message SHALL use those same values. The requirement is the operation's
+> admitted input, the callee parameter, or a declared type; `got` is the
+> actual operand or inferred body. Symmetric unification alone establishes
+> neither direction and SHALL NOT assign one: a caller that cannot establish
+> the direction leaves the pair absent instead of reversing or inventing it.
+> This diagnostic rule does not decide whether an unresolved type variable
+> should be rejected; the check's existing admission rule still decides that.
+
+
 #### Example
 
 Illustrative of the shape only; the atoms above are normative.

@@ -490,24 +490,45 @@ pub(super) fn reject_non_int32_axis(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<(), Type> {
+    reject_non_int32_axis_at(
+        op,
+        axis_ty,
+        None,
+        CheckSite::Node(node),
+        node,
+        subst,
+        errors,
+    )
+}
+
+fn reject_non_int32_axis_at(
+    op: &str,
+    axis_ty: &Type,
+    position: Option<usize>,
+    site: CheckSite<'_>,
+    node: &DeepNode,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(), Type> {
     let rejection = |other: &Type, errors: &mut DiagnosticSink<'_>| {
-        report(
+        let slot =
+            position.map_or_else(|| "axis".to_string(), |at| format!("argument {at} (axis)"));
+        report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
-                with_node_provenance(node, format!("{op} expects i32 axis, got {other}")),
+                with_node_provenance(node, format!("{op} {slot}: expected i32, got {other}")),
+                "i32".to_string(),
+                other.to_string(),
                 vec![],
             ),
+            site,
         )
     };
     match subst.apply(axis_ty) {
         Type::Prim(Prim::Int32) | Type::Error(_) => Ok(()),
-        // chelis#2523, [05-DIM-3]: an axis-domain argument IS `i32`, so an
-        // axis whose type is still a variable is constrained to `i32` rather
-        // than admitted. Admitting it skipped the gate for good: an authored
-        // binder never binds, and a lambda parameter bound to `i64` later was
-        // never revisited. The constraint pins an authored binder, which its
-        // declaration's rigidity check reports ([04-INF-6]).
+        // An unresolved axis is constrained to i32, not rejected or silently
+        // accepted; the original Type::Var boundary remains unchanged.
         Type::Var(var) => match unify(&Type::Var(var), &Type::Prim(Prim::Int32), subst) {
             Ok(()) => Ok(()),
             Err(_) => Err(rejection(&Type::Var(var), errors)),
@@ -524,6 +545,7 @@ pub(super) fn enforce_registered_axis_dtypes(
     op: &str,
     arg_tys: &[Type],
     node: &DeepNode,
+    site: CheckSite<'_>,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<(), Type> {
@@ -535,13 +557,21 @@ pub(super) fn enforce_registered_axis_dtypes(
         builtins::AxisArgumentLayout::Fixed(slots) => {
             for &slot in slots {
                 if let Some(axis_ty) = arg_tys.get(slot) {
-                    reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
+                    reject_non_int32_axis_at(
+                        op,
+                        axis_ty,
+                        Some(slot + 1),
+                        site,
+                        node,
+                        subst,
+                        errors,
+                    )?;
                 }
             }
         }
         builtins::AxisArgumentLayout::VariadicFrom(first) => {
-            for axis_ty in arg_tys.iter().skip(first) {
-                reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
+            for (slot, axis_ty) in arg_tys.iter().enumerate().skip(first) {
+                reject_non_int32_axis_at(op, axis_ty, Some(slot + 1), site, node, subst, errors)?;
             }
         }
     }

@@ -53,7 +53,9 @@ fn report_par_fence(node: &DeepNode, source_span: &Span, errors: &mut Diagnostic
 ///
 /// Both `DeepTag::Copy` arms were byte-identical apart from how they spelled
 /// the list, so they were two chances to fix a bug once (chelis#1489).
+#[allow(clippy::too_many_arguments)]
 fn infer_copy(
+    expr: &deep::Expr,
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
@@ -91,16 +93,22 @@ fn infer_copy(
                         tv,
                         DeferredOperandGate::Copy {
                             result: Box::new(result.clone()),
+                            location: TypeDiagnosticLocation::from_expr(expr),
                         },
                     );
                     result
                 }
                 _ => report(
                     errors,
-                    CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        format!("copy requires tensor input, got {resolved}"),
-                        vec!["Wrap only tensor values in copy".to_string()],
+                    at_check_site(
+                        expr,
+                        CheckError::with_types(
+                            CheckErrorKind::TypeMismatch,
+                            format!("copy argument 1: expected tensor, got {resolved}"),
+                            "tensor".to_string(),
+                            resolved.to_string(),
+                            vec!["Wrap only tensor values in copy".to_string()],
+                        ),
                     ),
                 ),
             },
@@ -365,7 +373,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                         malformed_form(node, "realize", "one wrapped expression", errors)
                     }
                 }
-                DeepTag::Copy => infer_copy(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Copy => infer_copy(expr, node, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Borrow => {
                     let kids = node.children_slice();
                     if let Some(inner) = kids.first() {
@@ -575,20 +583,25 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             result
         } else {
             if let Err(error) = unify(&result, &declared, subst) {
-                let mut diagnostic = CheckError::new(
+                let expected = subst.apply(&declared);
+                let got = subst.apply(&result);
+                let mut diagnostic = CheckError::with_types(
                     check_error_kind_from_type_error_kind(&error.kind),
                     format!(
-                        "expression ascription does not match value: {}",
-                        error.message
+                        "expression ascription does not match value: expected {expected}, got {got}"
                     ),
+                    expected.to_string(),
+                    got.to_string(),
                     vec![format!(
                         "Declared expression type is {declared}; inferred value type is {result}"
                     )],
                 );
                 if let Some(location) =
                     TypeDiagnosticLocation::from_expr(authored_type.expression())
-                        .or_else(|| TypeDiagnosticLocation::from_expr(expr))
                 {
+                    diagnostic = location.attach(diagnostic);
+                }
+                if let Some(location) = TypeDiagnosticLocation::from_expr(expr) {
                     diagnostic = location.attach(diagnostic);
                 }
                 errors.push(diagnostic);

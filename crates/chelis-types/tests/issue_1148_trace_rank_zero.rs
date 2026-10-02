@@ -12,10 +12,6 @@ use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_ir_program;
 use chelis_types::errors::CheckErrorKind;
 
-const SCALAR_SIGNATURE_MISMATCH: &str = "def 'f' body doesn't match declared signature: \
-body has type `(tensor[4, 4, f32]) -> tensor[, f32]`, declared type is \
-`(tensor[4, 4, f32]) -> f32`";
-
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
     chelis_macros::expand_program(
@@ -52,8 +48,14 @@ fn matrix_trace_rejects_scalar_return_signature() {
     };
     assert!(matches!(error.kind, CheckErrorKind::TypeMismatch));
     assert_eq!(
-        error.message, SCALAR_SIGNATURE_MISMATCH,
-        "the negative must prove rank-zero tensor[, f32] body versus scalar f32 declaration"
+        error.expected.as_deref(),
+        Some("(tensor[4, 4, f32]) -> f32"),
+        "the declared return is scalar"
+    );
+    assert_eq!(
+        error.got.as_deref(),
+        Some("(tensor[4, 4, f32]) -> tensor[, f32]"),
+        "the inferred return is a rank-zero tensor"
     );
 }
 
@@ -69,9 +71,13 @@ fn wrong_trace_input_type_mismatch_is_not_signature_evidence() {
         );
     };
     assert!(matches!(error.kind, CheckErrorKind::TypeMismatch));
-    assert_eq!(error.message, "trace expects tensor input, got f32");
+    assert!(
+        error.message.contains("trace") && error.message.contains("f32"),
+        "the operation must reject its scalar operand: {error:?}"
+    );
     assert_ne!(
-        error.message, SCALAR_SIGNATURE_MISMATCH,
-        "a generic TypeMismatch must not stand in for the declared-signature contract"
+        error.expected.as_deref(),
+        Some("(tensor[4, 4, f32]) -> f32"),
+        "an invalid trace input must not be reported as a declared-return mismatch"
     );
 }

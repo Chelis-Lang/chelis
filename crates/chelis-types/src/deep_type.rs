@@ -71,12 +71,10 @@ impl TypeUseSite {
     }
 }
 
-/// Source location owned by one type-resolution node. Explicit producer span
-/// metadata wins; otherwise the structural AST range is retained and exposed
-/// through a stable `source:<start>..<end>` identifier as well as the byte
-/// offset. A nested node with an explicitly unknown `0..0` span remains
-/// unknown rather than inheriting its parent's location.
-#[derive(Debug, Clone, Default)]
+/// Source location owned by one checked node. Its structural range supplies a
+/// coordinate when measured, while only an explicit producer identity supplies
+/// an identity; a range does not mint an external source name ([04-FIT-16]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TypeDiagnosticLocation {
     span_offset: Option<usize>,
     span_id: Option<String>,
@@ -85,26 +83,39 @@ pub(crate) struct TypeDiagnosticLocation {
 impl TypeDiagnosticLocation {
     pub(crate) fn from_expr(expr: &deep::Expr) -> Option<Self> {
         let structural = expr.span();
-        let explicit_id = expr.span_id().map(str::to_string);
-        let span_offset = explicit_id
-            .as_deref()
-            .and_then(span_offset_from_id)
-            .or_else(|| (structural.len > 0).then_some(structural.offset));
-        let span_id = explicit_id.or_else(|| {
-            (structural.len > 0)
-                .then(|| format!("source:{}..{}", structural.offset, structural.end()))
-        });
+        Self::from_parts(expr.span_id(), structural)
+    }
+
+    pub(crate) fn from_parts(span_id: Option<&str>, structural: chelis_deep::Span) -> Option<Self> {
+        // An opaque producer ID never establishes a coordinate. The `surf:`
+        // producer alone guarantees a checked-source byte range when the
+        // structural carrier has no measured extent.
+        let span_offset = (structural.len > 0)
+            .then_some(structural.offset)
+            .or_else(|| span_id.and_then(span_offset_from_id));
+        let span_id = span_id.map(str::to_string);
         (span_offset.is_some() || span_id.is_some()).then_some(Self {
             span_offset,
             span_id,
         })
     }
 
+    /// Node-only inference routes retain metadata but not their enclosing
+    /// `Expr`'s structural span. Preserve the supplied identity independently
+    /// of whether it encodes a byte coordinate.
+    pub(crate) fn from_node(node: &chelis_deep::node::Node) -> Option<Self> {
+        let span_id = node.meta().span_id()?.value().to_string();
+        Some(Self {
+            span_offset: span_offset_from_id(&span_id),
+            span_id: Some(span_id),
+        })
+    }
+
     pub(crate) fn attach(&self, mut error: CheckError) -> CheckError {
-        if error.span_offset.is_none() {
+        // A location belongs to one node: filling either missing component on
+        // an already located error would mix two different source nodes.
+        if error.span_offset.is_none() && error.span_id.is_none() {
             error.span_offset = self.span_offset;
-        }
-        if error.span_id.is_none() {
             error.span_id.clone_from(&self.span_id);
         }
         error
@@ -117,10 +128,8 @@ impl TypeDiagnosticLocation {
 
 fn span_offset_from_id(span_id: &str) -> Option<usize> {
     span_id
-        .rfind(':')
-        .map(|index| &span_id[index + 1..])
-        .unwrap_or(span_id)
-        .split_once("..")
+        .strip_prefix("surf:")
+        .and_then(|range| range.split_once(".."))
         .and_then(|(start, _)| start.parse::<usize>().ok())
 }
 
@@ -1188,5 +1197,38 @@ fn render_expr(expr: &deep::Expr) -> String {
         deep::Expr::Node(node, _) => node.tag().as_str().to_string(),
         deep::Expr::BareList(_, _) => "(...)".to_string(),
         deep::Expr::UnknownForm(data) => format!("({})", data.head),
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_location_tests {
+    use super::TypeDiagnosticLocation;
+    use crate::errors::{CheckError, CheckErrorKind};
+    use chelis_deep::Span;
+
+    #[test]
+    fn fallback_location_never_combines_coordinates_from_two_different_nodes() {
+        let opaque = TypeDiagnosticLocation::from_parts(Some("octant:line:7"), Span::new(0, 0))
+            .expect("authored producer identity");
+        let measured = TypeDiagnosticLocation::from_parts(None, Span::new(42, 4))
+            .expect("measured byte coordinate");
+        let make_error = || CheckError::new(CheckErrorKind::Other, "failure".into(), vec![]);
+
+        let result = measured.attach(opaque.attach(make_error()));
+        assert_eq!(result.span_id.as_deref(), Some("octant:line:7"));
+        assert_eq!(
+            result.span_offset, None,
+            "offset belongs to a different node"
+        );
+
+        let result = opaque.attach(measured.attach(make_error()));
+        assert_eq!(result.span_id, None, "identity belongs to a different node");
+        assert_eq!(result.span_offset, Some(42));
+
+        let complete = TypeDiagnosticLocation::from_parts(Some("surf:73..77"), Span::new(73, 4))
+            .expect("single source node has both location fields");
+        let result = measured.attach(complete.attach(make_error()));
+        assert_eq!(result.span_offset, Some(73));
+        assert_eq!(result.span_id.as_deref(), Some("surf:73..77"));
     }
 }

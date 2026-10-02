@@ -585,7 +585,7 @@ fn unreachable_dep_type_error_rejected_in_both_cache_regimes() {
 #[test]
 fn unreachable_eval_only_type_error_rejected_in_all_build_cache_modes() {
     let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_broken(x: f64) -> f64 = add(round_to(x, cast(2, i32)), cast(1, i32))\ndef dep_wrapper(x: f64) -> f64 = dep_broken(x)\ndef dep_outer(x: f64) -> f64 = dep_wrapper(x)\n";
-    assert_selected_semantic_error_in_all_build_modes(dependency, &["precision mismatch"], true);
+    assert_selected_semantic_error_in_all_build_modes(dependency, &["add", "f64", "i32"], true);
 }
 
 #[test]

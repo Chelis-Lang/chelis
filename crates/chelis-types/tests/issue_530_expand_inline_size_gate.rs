@@ -374,50 +374,47 @@ fn issue1791_a_shape_sourced_size_in_pipe_position_still_checks_clean() {
 /// sourceless named-axis size reached the lowerer from that spelling.
 #[test]
 fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
-    let needle = "the named-axis insert form requires a compile-time literal size";
+    let assert_literal_size = |source: &str| {
+        let report = check_ir_program(&surf_to_deep(source))
+            .expect_err("a sourceless named-axis size must reject");
+        assert!(
+            report.errors.iter().any(|error| {
+                error.kind.diagnostic_name() == "DimensionMismatch"
+                    && error.message.contains("insert")
+                    && error.message.contains("argument 3")
+                    && error.message.contains("stampable onto the new named dim")
+                    && error.expected.as_deref() == Some("compile-time literal size")
+                    && error.got.is_some()
+                    && error
+                        .span_offset
+                        .is_some_and(|offset| offset < source.len())
+            }),
+            "named-axis insertion must reject its non-literal size: {:?}",
+            report.errors
+        );
+    };
 
-    // Direct position, four-argument anchored form: the lock.
-    let anchored = check_ir_program(&surf_to_deep(
+    // Direct position, four-argument anchored form.
+    assert_literal_size(
         "def g[n, m](b: tensor[n, f32], k: i32) -> tensor[m, n, f32] = \
          insert(b, m, cast(k, i64), n)\n",
-    ))
-    .expect_err("the named-axis form requires a literal size");
-    assert!(
-        messages(&anchored).iter().any(|m| m.contains(needle)),
-        "the form's own diagnostic is unchanged in direct position: {:?}",
-        messages(&anchored)
     );
 
-    // Pipe position, three-argument named form: the regression.
-    let named_in_pipe = check_ir_program(&surf_to_deep(
+    // Pipe position, three-argument named form.
+    assert_literal_size(
         "sig f[m]: i32 -> tensor[m, 1, f32]\n\
          def f(k: i32) = {\n  \
          a_dim = k |> cast(i64)\n  \
          [0.25f32] |> to_tensor |> insert(m, a_dim)\n\
          }\n",
-    ))
-    .expect_err("a sourceless named-axis size must reject in pipe position too");
-    assert!(
-        messages(&named_in_pipe).iter().any(|m| m.contains(needle)),
-        "and it is the SAME diagnostic there, not the provenance one: {:?}",
-        messages(&named_in_pipe)
     );
 
-    // Pipe position, four-argument anchored form: the spelling that checked
-    // clean on the base.
-    let anchored_in_pipe = check_ir_program(&surf_to_deep(
+    // Pipe position, four-argument anchored form.
+    assert_literal_size(
         "sig f[m]: i32 -> tensor[m, 1, f32]\n\
          def f(k: i32) = {\n  \
          a_dim = k |> cast(i64)\n  \
          [0.25f32] |> to_tensor |> insert(m, a_dim, n)\n\
          }\n",
-    ))
-    .expect_err("the anchored form rejects in pipe position too");
-    assert!(
-        messages(&anchored_in_pipe)
-            .iter()
-            .any(|m| m.contains(needle)),
-        "{:?}",
-        messages(&anchored_in_pipe)
     );
 }

@@ -1128,7 +1128,7 @@
     },
     {
       "file": "static_value.rs",
-      "function": "reject_non_int32_axis",
+      "function": "reject_non_int32_axis_at",
       "ordinal": 1,
       "pattern": "Type::Var(var)",
       "disposition": "constrains_the_variable",

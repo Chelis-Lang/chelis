@@ -995,19 +995,39 @@ fn int64_binding_fanout_keeps_both_reads_exact_and_equal() {
 // future change does not quietly make them another silent f64 path.
 // ===========================================================================
 
-/// `copy(x)` on an i64 scalar is rejected at check time:
-///   "copy requires tensor input, got i64"
-/// Locked as a LOUD failure. If copy ever accepts scalars it must not route
-/// them through f64.
+/// `copy(x)` on an i64 scalar must reject at check time rather than taking a
+/// lossy scalar-to-f64 runtime path.
 #[test]
 fn copy_of_int64_scalar_is_rejected_loudly() {
-    let err = eval_program_first_line(
-        "module M.Main\nx = cast(9007199254740993, i64)\ny = copy(x)\nout = print(y)\n",
-    )
-    .expect_err("copy of an i64 scalar should be rejected");
+    let source = "module M.Main\nx = cast(9007199254740993, i64)\ny = copy(x)\nout = print(y)\n";
+    let err =
+        eval_program_first_line(source).expect_err("copy of an i64 scalar should be rejected");
     assert!(
-        err.contains("copy requires tensor input"),
-        "copy(i64) must fail loudly with a clear diagnostic, got: {err}"
+        err.contains("TypeMismatch") && err.contains("copy"),
+        "{err}"
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("p.ch");
+    write_file(&path, source);
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("check scalar-copy rejection");
+    assert_eq!(output.status.code(), Some(2));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("check JSON");
+    assert!(
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "TypeMismatch"
+                    && error["expected"] == "tensor"
+                    && error["got"] == "i64"
+                    && error["span"]["offset"] == source.find("copy(").unwrap()
+            })),
+        "copy must retain its directional operand and authored call: {report}"
     );
 }
 

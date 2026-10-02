@@ -64,12 +64,10 @@ fn assert_one_located_ascription_mismatch(source: &str, message_fragment: &str) 
         );
         let error = mismatches[0];
         assert!(
-            error.span_offset.is_some(),
-            "{ingress} ascription mismatch must carry span_offset: {error:?}"
-        );
-        assert!(
-            error.span_id.is_some(),
-            "{ingress} ascription mismatch must carry span_id: {error:?}"
+            error
+                .span_offset
+                .is_some_and(|offset| offset < source.len()),
+            "{ingress} ascription mismatch must point into its source: {error:?}"
         );
     }
 }

@@ -281,9 +281,8 @@ def f(x: tensor[1, 3, 4, 8, f32], k: tensor[8, 3, 5, 3, f32]) -> tensor[1, 8, 1,
     );
 }
 
-/// EXPECT (RT-205 F4): conv with non-rank-4 input tensor is
-/// rejected at check time. Pinned by the validator's rank guard so
-/// the error fires before the back-end lowering pass.
+/// EXPECT (RT-205 F4): conv rejects an input/kernel rank disagreement at
+/// check time, before the back-end lowering pass.
 #[test]
 fn red_team_205_f4_rank3_input_rejected() {
     let src = r#"
@@ -294,11 +293,16 @@ def f(x: tensor[3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6,
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for rank-3 input");
     assert!(
+        rep.errors.iter().any(|e| {
+            matches!(
+                e.kind,
+                chelis_types::errors::CheckErrorKind::DimensionMismatch
+            ) && e.expected.as_deref() == Some("rank 3")
+                && e.got.as_deref() == Some("rank 4")
+                && e.message.contains("conv argument 2 (kernel)")
+        }),
+        "expected the rank disagreement on the kernel, got {:?}",
         rep.errors
-            .iter()
-            .any(|e| e.message.contains("equal input/kernel ranks")),
-        "expected rank-4-input error, got {:?}",
-        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
 
@@ -678,12 +682,8 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// EXPECT (RT-205 round-2 F2 negative parity): a rank-changing
 /// reduction wrapper (`sum(conv(...), 1)`) MUST NOT be handled by
 /// the passthrough arm because sum reduces rank. Downstream
-/// `conv(&y, ...)` must still be rejected; this pins that the
-/// passthrough fix is shape-preserving only, not a blanket "trust
-/// the inner op's output" path.
-///
-/// PP9 deletes the symbolic-metadata diagnostic and its cascade side channel.
-/// The ordinary type mismatch still rejects this rank-changing wrapper.
+/// `conv(&y, ...)` must still reject the rank mismatch, not inherit the
+/// original convolution's rank.
 #[test]
 fn red_team_205_round2_f2_sum_wrapped_chained_conv_still_rejected() {
     let src = r#"
@@ -696,13 +696,16 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for sum-wrapped chain");
     assert!(
-        rep.errors
-            .iter()
-            .any(|e| e.message.contains("dimension mismatch")
-                || e.message.contains("body doesn't match declared signature")
-                || e.message.contains("equal input/kernel ranks")),
+        rep.errors.iter().any(|e| {
+            matches!(
+                e.kind,
+                chelis_types::errors::CheckErrorKind::DimensionMismatch
+            ) && e.expected.as_deref() == Some("rank 3")
+                && e.got.as_deref() == Some("rank 4")
+                && e.message.contains("conv argument 2 (kernel)")
+        }),
         "expected rejection of sum-wrapped chain, got {:?}",
-        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        rep.errors
     );
 }
 
@@ -733,12 +736,9 @@ def f[h](x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8
     check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
-/// EXPECT (RT-205 round-2 F4): a rank-5 input tensor produces
-/// exactly ONE rank-4 diagnostic, not two. Before the fix the HM
-/// signature check and the validator's own rank guard both emitted
-/// their own version of "rank-4 input ... got rank 5", confusing
-/// the user. The validator now suppresses its rank diagnostic when
-/// the HM-side has already emitted the equivalent.
+/// EXPECT (RT-205 round-2 F4): a rank-5 input with a rank-4 kernel
+/// produces exactly ONE diagnostic naming the kernel disagreement.
+/// The validator must not repeat the HM-side rank check.
 #[test]
 fn red_team_205_round2_f4_rank5_input_single_diagnostic() {
     let src = r#"
@@ -748,22 +748,27 @@ def f(x: tensor[1, 3, 8, 8, 2, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8,
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for rank-5 input");
-    let rank4_errors: Vec<_> = rep
+    let rank_errors: Vec<_> = rep
         .errors
         .iter()
-        .filter(|e| e.message.contains("equal input/kernel ranks"))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                chelis_types::errors::CheckErrorKind::DimensionMismatch
+            ) && e.expected.as_deref() == Some("rank 5")
+                && e.got.as_deref() == Some("rank 4")
+                && e.message.contains("conv argument 2 (kernel)")
+        })
         .collect();
     assert_eq!(
-        rank4_errors.len(),
+        rank_errors.len(),
         1,
-        "expected exactly 1 rank-4 input diagnostic, got {:?}",
-        rank4_errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        "expected one kernel rank error: {rep:?}"
     );
 }
 
-/// EXPECT (RT-205 round-2 F4): same dedup for rank-5 kernel. The
-/// HM-side and validator both check kernel rank; only one diagnostic
-/// should reach the user.
+/// EXPECT (RT-205 round-2 F4): likewise, a rank-5 kernel with a rank-4
+/// input produces one directional rank diagnostic.
 #[test]
 fn red_team_205_round2_f4_rank5_kernel_single_diagnostic() {
     let src = r#"
@@ -773,16 +778,22 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, 2, f32]) -> tensor[1, 8,
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for rank-5 kernel");
-    let rank4_errors: Vec<_> = rep
+    let rank_errors: Vec<_> = rep
         .errors
         .iter()
-        .filter(|e| e.message.contains("equal input/kernel ranks"))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                chelis_types::errors::CheckErrorKind::DimensionMismatch
+            ) && e.expected.as_deref() == Some("rank 4")
+                && e.got.as_deref() == Some("rank 5")
+                && e.message.contains("conv argument 2 (kernel)")
+        })
         .collect();
     assert_eq!(
-        rank4_errors.len(),
+        rank_errors.len(),
         1,
-        "expected exactly 1 rank-4 kernel diagnostic, got {:?}",
-        rank4_errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        "expected one kernel rank error: {rep:?}"
     );
 }
 
@@ -817,17 +828,13 @@ def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16
 }
 
 /// EXPECT (RT-205 round-3 F-A negative parity): when the
-/// relu-wrapped first conv is FINE but the second conv has an
-/// independent issue (wrong kernel rank), both diagnostics still
-/// fire. The dedup must not suppress legitimately independent
-/// errors.
+/// relu-wrapped first conv is valid but the second conv has an
+/// independent issue (wrong kernel rank), which must still be reported.
 #[test]
 fn red_team_205_round3_f_a_independent_second_failure_not_suppressed() {
     // First conv: clean. relu(conv(...)) registers y as
-    // tensor[1, 8, 6, 6, f32]. Second conv: kernel is rank 3
-    // (tensor[8, 3, 3, f32]) instead of rank 4, so HM + validator
-    // both surface the kernel rank-4 error. There's no f64 cascade
-    // here, so we just count any errors with "rank-4 kernel" wording.
+    // tensor[1, 8, 6, 6, f32]. The second kernel is rank 3 while
+    // its input is rank 4.
     let src = r#"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = relu(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]))
@@ -838,11 +845,16 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure on second conv kernel rank");
     assert!(
+        rep.errors.iter().any(|e| {
+            matches!(
+                e.kind,
+                chelis_types::errors::CheckErrorKind::DimensionMismatch
+            ) && e.expected.as_deref() == Some("rank 4")
+                && e.got.as_deref() == Some("rank 3")
+                && e.message.contains("conv argument 2 (kernel)")
+        }),
+        "expected a rank mismatch on the second kernel, got {:?}",
         rep.errors
-            .iter()
-            .any(|e| e.message.contains("equal input/kernel ranks")),
-        "expected rank-4 kernel error on second call, got {:?}",
-        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
 

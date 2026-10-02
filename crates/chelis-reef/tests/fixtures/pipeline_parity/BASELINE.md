@@ -38,14 +38,10 @@ only; `expected_shell.json` and `expected_hashes.txt` are no longer asserted.
 - archive: `c440b1362a9a4f2a256ab0e41b2d220d159c16570eaf32eaf9256acd2c0a6f7e`
 - shell: `01310dfed2b16b7d034aa641948aa7b8c1ed354d93e5d9d1df2c28f06f8b2b8f`
 
-The rejected capture recorded the complete type, effect, and linearity error output.
-Those baselines pin source span offsets, which are deterministic, so the rejected test
-stays active. The files under `rejected/` preserve the exact text and order.
+The rejected capture once pinned complete type, effect, and linearity Debug
+strings, including incidental diagnostic wording and span offsets. Issue #1334
+retired those absolute text snapshots. The active rejected-package test checks
+the three rejection boundaries and the offending source entities instead.
 
-## Effect fixture moved to IO (chelis#2413)
-
-The effect rejection fixture used a keyless `dropout` to perform `Random`. Randomness
-is no longer an effect: a draw takes an explicit key, and a keyless `dropout` is an
-arity error. `rejected/effects.ch` now performs `IO` through `debug`, and
-`rejected/expected_effects.txt` changes only the effect name, `{Random}` to `{IO}`; the
-mangled function name and the sentence are unchanged.
+The effect fixture now uses `debug` to perform `IO`: randomness has no effect
+or handler, and keyless `dropout` is an arity error (chelis#2413).

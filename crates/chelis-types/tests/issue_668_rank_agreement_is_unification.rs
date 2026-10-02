@@ -32,15 +32,13 @@
 //! `12c04c66a`, the base this branch sits on, for exactly that reason.
 //!
 //! Every verdict assertion, rejections and acceptances alike, is a
-//! DISPOSITION LOCK: measured on both trees, the deletion changes no
-//! accept/reject verdict and no unification diagnostic in this file. Their job
-//! is to hold unification to what it does today, so a later change that
-//! weakens the tensor arm cannot pass by re-introducing a side channel that
-//! happens to reject the same programs. The pull request's mutation receipt
-//! establishes that they measure unification: with `unify`'s ground-row length
-//! check disabled, every `tensor rank mismatch` row goes red at BOTH
-//! ingresses. The scalar-beside-tensor rows do not, and are not claimed to:
-//! they are rejected by the type constructor, not by the rank comparison.
+//! DISPOSITION LOCK: the retired rank validator changes neither accept/reject
+//! verdict nor unification's decision. Rejected calls now expose the matching
+//! argument's directional ranks without pinning the wording of the unifier's
+//! internal error. The pull request's mutation receipt establishes that
+//! unification is decisive: disabling `unify`'s ground-row length check makes
+//! every unequal-rank row green at BOTH ingresses. The scalar-beside-tensor
+//! rows do not depend on that check; they reject by type constructor.
 //!
 //! # What is not claimed
 //!
@@ -124,17 +122,37 @@ fn agreed_diagnostics(source: &str, label: &str) -> Vec<String> {
     ir
 }
 
-/// DISPOSITION LOCK on unification's rejection, at both ingresses.
-///
-/// `needle` is the exact `unify` text, so a rejection that started arriving
-/// from somewhere else with a different message fails here.
+/// DISPOSITION LOCK on a tensor rank disagreement or scalar/tensor refusal.
+/// Rank fixtures name the input ranks; assert their directional structured
+/// fields rather than binding the contract to a unifier's wording.
 fn assert_rejects_with(source: &str, needle: &str, label: &str) {
     let diagnostics = agreed_diagnostics(source, label);
-    assert!(
-        diagnostics.iter().any(|m| m.contains(needle)),
-        "{label}: both ingresses must reject with a diagnostic containing \
-         {needle:?}; got {diagnostics:?}"
-    );
+    if let Some(rank_pair) = needle.strip_prefix("tensor rank mismatch: ") {
+        let (expected, got) = rank_pair
+            .split_once(" dims vs ")
+            .expect("rank-pair fixture");
+        let got = got.strip_suffix(" dims").expect("rank-pair fixture suffix");
+        let expected = format!("rank-{expected} tensor");
+        let got = format!("rank-{got} tensor");
+        let exprs = deep(source);
+        for checked in [check_ir_program(&exprs), check_typed_program(&exprs)] {
+            let report = checked.expect_err("unequal tensor ranks must reject");
+            assert!(
+                report.errors.iter().any(|error| {
+                    error.kind.diagnostic_name() == "DimensionMismatch"
+                        && error.expected.as_deref() == Some(&expected)
+                        && error.got.as_deref() == Some(&got)
+                }),
+                "{label}: expected {expected} / {got}; got {:?}",
+                report.errors
+            );
+        }
+    } else {
+        assert!(
+            diagnostics.iter().any(|m| m.contains(needle)),
+            "{label}: both ingresses must reject the scalar/tensor pair; got {diagnostics:?}"
+        );
+    }
 }
 
 /// DISPOSITION LOCK on acceptance, at both ingresses. Negative parity for

@@ -69,15 +69,18 @@ fn otherwise_unconsumed_expand_materializes_its_context_free_default() {
 
 #[test]
 fn otherwise_unconsumed_expand_rejects_axis_beyond_trailing_position() {
-    let errors = typecheck("t = expand(to_tensor([0.5f32]), 2, 8i64)");
+    let source = "t = expand(to_tensor([0.5f32]), 2, 8i64)";
+    let errors = typecheck(source);
     assert!(
         errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::DimensionMismatch)
-                && error
-                    .message
-                    .contains("expand axis 2 is out of bounds for rank 1 tensor")
+                && error.message.contains("expand")
+                && error.message.contains("argument 2")
+                && error.expected.as_deref() == Some("axis in 0..1")
+                && error.got.as_deref() == Some("2")
+                && error.span_offset == source.find("expand(")
         }),
-        "an axis beyond the sole trailing insertion position must fail:\n{}",
+        "the illegal axis must identify the existing rank-1 range and its call:\n{}",
         summary(&errors)
     );
 }
@@ -413,8 +416,7 @@ fn cast_rejects_genuinely_unresolved_operand() {
     let errors = typecheck("def f(x) = cast(x, f64)");
     assert!(
         errors.iter().any(|error| {
-            matches!(error.kind, CheckErrorKind::CastNonTensor)
-                && error.message.contains("cast requires tensor or prim type")
+            matches!(error.kind, CheckErrorKind::CastNonTensor) && error.message.contains("cast")
         }),
         "an unconstrained operand must not be guessed to be a tensor:\n{}",
         summary(&errors)
@@ -431,8 +433,7 @@ c = cast(identity, f64)
     );
     assert!(
         errors.iter().any(|error| {
-            matches!(error.kind, CheckErrorKind::CastNonTensor)
-                && error.message.contains("cast requires tensor or prim type")
+            matches!(error.kind, CheckErrorKind::CastNonTensor) && error.message.contains("cast")
         }),
         "a function operand must remain outside the cast domain:\n{}",
         summary(&errors)

@@ -1969,10 +1969,17 @@ fn vmap_callee_dim_conflict_stays_rejected_not_ice() {
     let source = "def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
          def inner(x: &tensor[seq, 4, f32]) -> tensor[4, f32] = reduce_seq(x)\n\
          out = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
-    assert_rejected_with(
-        &check_json(source),
-        "dimension mismatch",
-        "#351 negative: conflicting concrete dim through the vmapped callee",
+    let report = check_json(source);
+    assert!(
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["expected"] == "4"
+                    && error["got"] == "3"
+                    && error["span"]["offset"].as_u64().is_some()
+            })),
+        "#351 negative: conflicting concrete dim through the vmapped callee: {report}"
     );
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "vmap_dim_conflict");

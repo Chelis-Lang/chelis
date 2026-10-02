@@ -16,6 +16,7 @@ use super::*;
 /// they are rejected here with a targeted diagnostic.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_reduction_app(
+    expr: &deep::Expr,
     node: &DeepNode,
     fname: &str,
     env: &mut Env,
@@ -65,25 +66,32 @@ pub(super) fn infer_reduction_app(
     // generic application's registered axis-dtype gate. Apply the same
     // registry here so every Count axis is i32, including concrete
     // multi-axis calls whose constant values are otherwise extractable.
-    if let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, subst, errors) {
+    if let Err(rejected) =
+        enforce_registered_axis_dtypes(fname, &arg_tys, node, CheckSite::Expr(expr), subst, errors)
+    {
         return rejected;
     }
 
     let result_ty = Type::Var(vg.fresh_tvar());
-    check_reduction_signature(fname, &kids[1..], &arg_tys, &result_ty, subst, errors)
+    check_reduction_signature(
+        CheckSite::Expr(expr),
+        fname,
+        &kids[1..],
+        &arg_tys,
+        &result_ty,
+        subst,
+        errors,
+    )
 }
 
-/// chelis#339: infer the 4-arg anchored named-axis expand form
-/// `expand(x, new, size, anchor)` (spec/04-type-system.md §4.5.3). The
-/// builtin scheme is arity-3, so this form bypasses the generic HM arity
-/// check (the `infer_permute_app` pattern). The `new` and `anchor` slots
-/// carry dimension *names*, not bound values — like a named reduction
-/// axis they are typed as `i32` axes rather than inferred, and
-/// `check_expand_signature` reads the actual names back from the arg
-/// exprs.
+/// chelis#339: infer anchored named-axis `insert(x, new, size, anchor)`.
+/// The 4-argument insert bypasses its arity-3 HM scheme. Malformed calls
+/// to either `insert` or `expand` also use this route for callee-specific
+/// arity diagnostics; valid 3-argument calls use the generic scheme.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_expand_app(
     callee: &'static str,
+    expr: &deep::Expr,
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
@@ -93,18 +101,23 @@ pub(super) fn infer_expand_app(
     product: &mut InferenceProduct,
 ) -> Type {
     let kids = node.children_slice();
-    if kids.len() != 5 {
-        return report(
+    if kids.len() != 5 || callee == "expand" {
+        let expected = if callee == "expand" {
+            "3 arguments"
+        } else {
+            "3 or 4 arguments"
+        };
+        let got = kids.len().saturating_sub(1);
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
-                format!(
-                    "{callee} expects (tensor, axis, size) or the named-axis form \
-                 (tensor, name, size, anchor), got {} arguments",
-                    kids.len() - 1
-                ),
+                format!("{callee}: expected {expected}, got {got} arguments"),
+                expected.to_string(),
+                format!("{got} arguments"),
                 vec![],
             ),
+            CheckSite::Expr(expr),
         );
     }
 
@@ -154,18 +167,21 @@ pub(super) fn infer_expand_app(
     match size_ty {
         Type::Prim(Prim::Int64) | Type::Var(_) | Type::Error(_) => {}
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
                     with_node_provenance(
                         node,
                         format!(
-                            "{callee} expects an i64 size (write Ni64 or cast(N, i64)), got {other}"
+                            "{callee} argument 3 (size): expected i64 (write Ni64 or cast(N, i64)), got {other}"
                         ),
                     ),
+                    "i64".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                CheckSite::Expr(expr),
             );
         }
     }
@@ -175,6 +191,7 @@ pub(super) fn infer_expand_app(
     });
     let result_ty = Type::Var(vg.fresh_tvar());
     check_expand_signature(
+        CheckSite::Expr(expr),
         callee,
         &kids[1..],
         &arg_tys,
@@ -188,6 +205,7 @@ pub(super) fn infer_expand_app(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_permute_app(
+    expr: &deep::Expr,
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
@@ -198,13 +216,19 @@ pub(super) fn infer_permute_app(
 ) -> Type {
     let kids = node.children_slice();
     if kids.len() < 2 {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
-                "permute expects a tensor followed by one or more axis indices".to_string(),
+                format!(
+                    "permute: expected at least 1 argument (tensor), got {} arguments",
+                    kids.len().saturating_sub(1)
+                ),
+                "at least 1 argument".to_string(),
+                format!("{} arguments", kids.len().saturating_sub(1)),
                 vec![],
             ),
+            CheckSite::Expr(expr),
         );
     }
 
@@ -223,6 +247,7 @@ pub(super) fn infer_permute_app(
     route_arg_tys.extend(axis_tys);
     defer_or_check_shape_route(
         ShapeRouteKind::Permute,
+        CheckSite::Expr(expr),
         node,
         kids,
         route_arg_tys,
@@ -239,47 +264,54 @@ pub(super) fn infer_permute_app(
 /// copy of the rule could drop what the original path did on the way to it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_permute_signature(
+    site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
     arg_tys: &[Type],
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    let input_ty = arg_tys[0].clone();
-    let axis_tys: Vec<Type> = arg_tys[1..].to_vec();
-
-    for axis_ty in &axis_tys {
+    for (axis_offset, axis_ty) in arg_tys[1..].iter().enumerate() {
         let resolved = subst.apply(axis_ty);
         match resolved {
             Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
             other => {
-                return report(
+                return report_at_check_site(
                     errors,
-                    CheckError::new(
+                    CheckError::with_types(
                         CheckErrorKind::TypeMismatch,
                         with_node_provenance(
                             node,
-                            format!("permute expects i32 axis indices, got {other}"),
+                            format!(
+                                "permute argument {} (axis): expected i32, got {other}",
+                                axis_offset + 2
+                            ),
                         ),
+                        "i32".to_string(),
+                        other.to_string(),
                         vec![],
                     ),
+                    site,
                 );
             }
         }
     }
 
-    let input_ty = type_for_readonly_check(&input_ty, subst);
+    let input_ty = type_for_readonly_check(&arg_tys[0], subst);
     let Type::Tensor(dims, prec) = input_ty else {
         if matches!(input_ty, Type::Var(_) | Type::Error(_)) {
             return input_ty;
         }
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
-                format!("permute expects tensor input, got {input_ty}"),
+                format!("permute argument 1 (input): expected tensor, got {input_ty}"),
+                "tensor".to_string(),
+                input_ty.to_string(),
                 vec![],
             ),
+            site,
         );
     };
 
@@ -297,46 +329,62 @@ pub(super) fn check_permute_signature(
     };
 
     if axes.len() != dims.len() {
-        return report(
+        let expected = format!("{} axis indices", dims.len());
+        let got = format!("{} axis indices", axes.len());
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
                 format!(
-                    "permute expects {} axis indices for rank {} tensor, got {}",
-                    dims.len(),
-                    dims.len(),
-                    axes.len()
+                    "permute arguments 2.. (axes): expected {expected} for rank {} tensor, got {got}",
+                    dims.len()
                 ),
+                expected,
+                got,
                 vec![],
             ),
+            site,
         );
     }
 
     let mut seen = UnordSet::new();
     let mut reordered = Vec::with_capacity(dims.len());
-    for axis in axes {
+    for (axis_offset, axis) in axes.into_iter().enumerate() {
         if axis < 0 || axis as usize >= dims.len() {
-            return report(
+            let expected = format!("axis in 0..{}", dims.len());
+            let got = format!("axis {axis}");
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "permute axis {axis} is out of bounds for rank {} tensor",
+                        "permute argument {} (axis): expected {expected} for rank {} tensor, got {got}",
+                        axis_offset + 2,
                         dims.len()
                     ),
+                    expected,
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
         let axis = axis as usize;
         if !seen.insert(axis) {
-            return report(
+            let got = format!("axis {axis}");
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    format!("permute axis {axis} appears more than once"),
+                    format!(
+                        "permute argument {} (axis): expected unique axis, got repeated {got}",
+                        axis_offset + 2
+                    ),
+                    "unique axis".to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
         reordered.push(dims[axis].clone());
@@ -347,6 +395,7 @@ pub(super) fn check_permute_signature(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_reshape_app(
+    expr: &deep::Expr,
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
@@ -357,13 +406,19 @@ pub(super) fn infer_reshape_app(
 ) -> Type {
     let kids = node.children_slice();
     if kids.len() < 2 || kids.len() > 3 {
-        return report(
+        let got = kids.len().saturating_sub(1);
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
-                "reshape expects a tensor and an optional shape list".to_string(),
+                format!(
+                    "reshape expects 1 or 2 arguments (tensor and optional shape list), got {got} arguments"
+                ),
+                "1 or 2 arguments".to_string(),
+                format!("{got} arguments"),
                 vec![],
             ),
+            CheckSite::Expr(expr),
         );
     }
 
@@ -375,23 +430,24 @@ pub(super) fn infer_reshape_app(
         let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
         let expected_shape_ty = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
         if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
-            // spec/04 §4.7.5: the slot-mismatch diagnostic names the fix, and
-            // its direction states the slot's demand rather than a
-            // unification-order artifact (chelis#916).
-            return report(
+            // The target slot's demand is not a unification-order artifact.
+            let got = subst.apply(&shape_ty).to_string();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::PrecisionMismatch,
                     with_node_provenance(
                         node,
                         format!(
-                            "reshape expects an i64 shape list (write i64-suffixed \
-                             elements, e.g. 2i64, or cast(..., i64)), got {}",
-                            subst.apply(&shape_ty)
+                            "reshape argument 2 (shape): expected List i64 (write i64-suffixed \
+                             elements, e.g. 2i64, or cast(..., i64)), got {got}"
                         ),
                     ),
+                    "List i64".to_string(),
+                    got,
                     vec![],
                 ),
+                CheckSite::Expr(expr),
             );
         }
         arg_tys.push(shape_ty);
@@ -405,8 +461,12 @@ pub(super) fn infer_reshape_app(
                 // it here rather than only on the replay. Relocating a
                 // decision is how a check silently stops happening.
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
-                if let Err(error) = validate_reshape_target_dims(&dims, subst) {
-                    return report(errors, error.into());
+                if let Some(value) = negative_reshape_target_extent(&dims, subst) {
+                    return report_negative_reshape_target_extent(
+                        errors,
+                        value,
+                        CheckSite::Expr(expr),
+                    );
                 }
             }
             // The input is still a variable, so neither its domain, the
@@ -416,6 +476,7 @@ pub(super) fn infer_reshape_app(
             // any operand the variable later became).
             defer_or_check_shape_route(
                 ShapeRouteKind::Reshape { input_var_name },
+                CheckSite::Expr(expr),
                 node,
                 kids,
                 arg_tys,
@@ -426,6 +487,7 @@ pub(super) fn infer_reshape_app(
             )
         }
         _ => check_reshape_signature(
+            CheckSite::Expr(expr),
             node,
             kids,
             input_var_name.as_deref(),
@@ -449,6 +511,7 @@ pub(super) fn infer_reshape_app(
 /// data element dtype, which `reshape` reads as that dtype's rank-0 tensor.
 /// Any other operand is rejected here, however it reached the call.
 pub(super) fn check_reshape_signature(
+    site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
     input_var_name: Option<&str>,
@@ -464,16 +527,21 @@ pub(super) fn check_reshape_signature(
         }
         Type::Error(witness) => return propagate(witness),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
                     with_node_provenance(
                         node,
-                        format!("reshape expects tensor input, got {other}"),
+                        format!(
+                            "reshape expects tensor input, got {other} (argument 1: expected tensor or data-element scalar)"
+                        ),
                     ),
+                    "tensor or data-element scalar".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
@@ -484,31 +552,36 @@ pub(super) fn check_reshape_signature(
     let Type::Tensor(dims, _) = input else {
         // A scalar operand: the target is checked on its own.
         let target = reshape_output_dims(shape_expr, input_var_name, &[], subst);
-        if let Err(error) = validate_reshape_target_dims(&target, subst) {
-            return report(errors, error.into());
+        if let Some(value) = negative_reshape_target_extent(&target, subst) {
+            return report_negative_reshape_target_extent(errors, value, site);
         }
         return Type::Tensor(target, precision);
     };
     let target = reshape_output_dims(shape_expr, input_var_name, &dims, subst);
-    if let Err(error) = validate_reshape_target_dims(&target, subst) {
-        return report(errors, error.into());
+    if let Some(value) = negative_reshape_target_extent(&target, subst) {
+        return report_negative_reshape_target_extent(errors, value, site);
     }
     if subst.static_dim_products_match(&dims, &target) == Some(false) {
         let input_numel = subst.static_dim_product(&dims);
         let target_numel = subst.static_dim_product(&target);
-        return report(
-            errors,
-            CheckError::new(
+        let error = match (input_numel, target_numel) {
+            (Some(input), Some(target)) => CheckError::with_types(
                 CheckErrorKind::DimensionMismatch,
-                match (target_numel, input_numel) {
-                    (Some(target), Some(input)) => {
-                        format!("reshape target has {target} elements but input tensor has {input}")
-                    }
-                    _ => "reshape target element count does not match input tensor".to_string(),
-                },
+                format!(
+                    "reshape target has {target} elements but input tensor has {input} (argument 2: expected {input} elements, got {target} elements)"
+                ),
+                format!("{input} elements"),
+                format!("{target} elements"),
                 vec![],
             ),
-        );
+            _ => CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "reshape argument 2 (shape): target element count does not match input tensor"
+                    .to_string(),
+                vec![],
+            ),
+        };
+        return report_at_check_site(errors, error, site);
     }
     Type::Tensor(target, precision)
 }
@@ -527,6 +600,7 @@ pub(super) fn check_reshape_signature(
 /// at `crates/chelis-ir/src/lower.rs:4635-4647` reads bounds from `args[1]`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_shrink_app(
+    expr: &deep::Expr,
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
@@ -537,12 +611,20 @@ pub(super) fn infer_shrink_app(
 ) -> Type {
     let kids = node.children_slice();
     if kids.len() != 3 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            "shrink expects a tensor and a list of [start, end] bounds pairs, one pair per axis"
-                .to_string(),
-            vec![],
-        ));
+        return report_at_check_site(
+            errors,
+            CheckError::with_types(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "shrink: expected 2 arguments (tensor and bounds pairs), got {} arguments",
+                    kids.len().saturating_sub(1)
+                ),
+                "2 arguments".to_string(),
+                format!("{} arguments", kids.len().saturating_sub(1)),
+                vec![],
+            ),
+            CheckSite::Expr(expr),
+        );
     }
 
     let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
@@ -556,6 +638,7 @@ pub(super) fn infer_shrink_app(
     let route_arg_tys = vec![input_ty, bounds_ty];
     defer_or_check_shape_route(
         ShapeRouteKind::Shrink,
+        CheckSite::Expr(expr),
         node,
         kids,
         route_arg_tys,
@@ -572,6 +655,7 @@ pub(super) fn infer_shrink_app(
 /// copy of the rule could drop what the original path did on the way to it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_shrink_signature(
+    site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
     arg_tys: &[Type],
@@ -586,20 +670,24 @@ pub(super) fn check_shrink_signature(
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
     let expected_bounds_ty = Type::Adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&bounds_ty, &expected_bounds_ty, subst) {
-        return report(
+        let actual_bounds_ty = subst.apply(&bounds_ty);
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "shrink expects a list of [start, end] i64 bounds pairs \
-                         (write 0i64 or cast(..., i64) on each bound), got {}",
-                        subst.apply(&bounds_ty)
+                        "shrink argument 2 (bounds): expected {expected_bounds_ty}, got {} \
+                         (write 0i64 or cast(..., i64) on each bound)",
+                        actual_bounds_ty
                     ),
                 ),
+                expected_bounds_ty.to_string(),
+                actual_bounds_ty.to_string(),
                 vec![],
             ),
+            site,
         );
     }
 
@@ -608,13 +696,19 @@ pub(super) fn check_shrink_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    with_node_provenance(node, format!("shrink expects tensor input, got {other}")),
+                    with_node_provenance(
+                        node,
+                        format!("shrink argument 1: expected tensor, got {other}"),
+                    ),
+                    "tensor".to_string(),
+                    other.to_string(),
                     vec![],
                 ),
+                site,
             );
         }
     };
@@ -637,33 +731,54 @@ pub(super) fn check_shrink_signature(
             return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
         }
         PairListShape::Malformed { axis, reason } => {
-            return report(
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::TypeMismatch,
-                    with_node_provenance(node, format!("shrink axis {axis} pair {reason}")),
+                    with_node_provenance(
+                        node,
+                        format!(
+                            "shrink argument 2 (bounds), axis {axis}: expected a [start, end] pair, got {reason}"
+                        ),
+                    ),
+                    "[start, end] pair".to_string(),
+                    reason,
                     vec![],
                 ),
+                site,
             );
         }
     };
 
     if bounds.len() != dims.len() {
-        return report(
+        return report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "shrink expects {} bounds pairs for rank {} tensor, got {}",
+                        "shrink argument 2 (bounds): expected {} bounds pair{} for rank {} tensor, got {} bounds pair{}",
                         dims.len(),
+                        if dims.len() == 1 { "" } else { "s" },
                         dims.len(),
-                        bounds.len()
+                        bounds.len(),
+                        if bounds.len() == 1 { "" } else { "s" }
                     ),
+                ),
+                format!(
+                    "{} bounds pair{}",
+                    dims.len(),
+                    if dims.len() == 1 { "" } else { "s" }
+                ),
+                format!(
+                    "{} bounds pair{}",
+                    bounds.len(),
+                    if bounds.len() == 1 { "" } else { "s" }
                 ),
                 vec![],
             ),
+            site,
         );
     }
 
@@ -682,48 +797,64 @@ pub(super) fn check_shrink_signature(
             continue;
         };
         if *start < 0 || *end < 0 {
-            return report(
+            let got = format!("start {start}, end {end}");
+            return report_at_check_site(
                 errors,
-                CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    with_node_provenance(
-                        node,
-                        format!("shrink axis {axis} bound [{start}, {end}] has negative endpoint"),
-                    ),
-                    vec![],
-                ),
-            );
-        }
-        if *start >= *end {
-            return report(
-                errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
                     with_node_provenance(
                         node,
                         format!(
-                            "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
+                            "shrink argument 2 (bounds), axis {axis}: expected non-negative endpoints, got {got}"
                         ),
                     ),
+                    "non-negative endpoints".to_string(),
+                    got,
                     vec![],
                 ),
+                site,
+            );
+        }
+        if *start >= *end {
+            let expected = format!("end > start {start}");
+            let got = format!("end {end}");
+            return report_at_check_site(
+                errors,
+                CheckError::with_types(
+                    CheckErrorKind::DimensionMismatch,
+                    with_node_provenance(
+                        node,
+                        format!(
+                            "shrink argument 2 (bounds), axis {axis}: expected {expected}, got {got} (empty or inverted)"
+                        ),
+                    ),
+                    expected,
+                    got,
+                    vec![],
+                ),
+                site,
             );
         }
         if let Some(input_dim) = subst.observe_dim(dim).known_extent()
             && *end > input_dim
         {
-            return report(
+            let expected = format!("end <= {input_dim}");
+            let got = format!("end {end}");
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
                     with_node_provenance(
                         node,
                         format!(
-                            "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {input_dim}"
+                            "shrink argument 2 (bounds), axis {axis}: expected {expected}, got {got} (out of range)"
                         ),
                     ),
+                    expected,
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
         out_dims.push(Dim::Lit(end - start));
@@ -780,6 +911,7 @@ pub(super) fn infer_stride_app(
     route_arg_tys.extend(stride_tys);
     defer_or_check_shape_route(
         ShapeRouteKind::Stride,
+        CheckSite::Node(node),
         node,
         kids,
         route_arg_tys,
@@ -956,6 +1088,7 @@ pub(super) fn infer_pad_app(
     let route_arg_tys = vec![input_ty, padding_ty, fill_ty];
     defer_or_check_shape_route(
         ShapeRouteKind::Pad,
+        CheckSite::Node(node),
         node,
         kids,
         route_arg_tys,
@@ -1185,6 +1318,7 @@ pub(super) fn infer_reduce_window_app(
         ShapeRouteKind::ReduceWindow {
             name: name.to_string(),
         },
+        CheckSite::Node(node),
         node,
         kids,
         route_arg_tys.clone(),
@@ -1203,6 +1337,7 @@ pub(super) fn infer_reduce_window_app(
     product.record_call_operand_contracts(&func_ty, Some(name), &route_arg_tys, env, subst);
     if let Err(rejected) = unify_checked_call_contract(
         expr,
+        Some(name),
         &func_ty,
         &route_arg_tys,
         None,
@@ -1711,19 +1846,31 @@ pub(super) fn reshape_output_dims(
         .collect()
 }
 
-fn validate_reshape_target_dims(dims: &[Dim], subst: &Subst) -> Result<(), TypeError> {
-    if let Some(value) = dims.iter().find_map(|dim| {
+fn negative_reshape_target_extent(dims: &[Dim], subst: &Subst) -> Option<i64> {
+    dims.iter().find_map(|dim| {
         subst
             .observe_dim(dim)
             .literal_extent()
             .filter(|value| *value < 0)
-    }) {
-        return Err(TypeError {
-            kind: TypeErrorKind::DimensionMismatch,
-            message: format!("reshape target extents must be non-negative, got {value}"),
-        });
-    }
-    Ok(())
+    })
+}
+
+fn report_negative_reshape_target_extent(
+    errors: &mut DiagnosticSink<'_>,
+    value: i64,
+    site: CheckSite<'_>,
+) -> Type {
+    report_at_check_site(
+        errors,
+        CheckError::with_types(
+            CheckErrorKind::DimensionMismatch,
+            format!("reshape argument 2 (shape): expected non-negative target extent, got {value}"),
+            "non-negative target extent".to_string(),
+            value.to_string(),
+            vec![],
+        ),
+        site,
+    )
 }
 
 /// Recognize a single dim-list element from a reshape shape list.

@@ -78,12 +78,13 @@ fn wrong_declared_extent_does_not_score_one() {
         panic!("expected exactly one error, got {errors:?}");
     };
     assert_eq!(error["kind"].as_str(), Some("DimensionMismatch"));
-    let message = error["message"].as_str().expect("message string");
-    assert!(
-        message.contains("body has type `(tensor[3, 4, f32]) -> tensor[3, f32]`")
-            && message.contains("declared type is `(tensor[3, 4, f32]) -> tensor[4, f32]`"),
-        "the diagnostic must name the inferred tensor[3, f32] against the \
-         declared tensor[4, f32], got {message}"
+    assert_eq!(
+        error["expected"], "(tensor[3, 4, f32]) -> tensor[4, f32]",
+        "the declared extent is 4"
+    );
+    assert_eq!(
+        error["got"], "(tensor[3, 4, f32]) -> tensor[3, f32]",
+        "the inferred diagonal extent is 3"
     );
 }
 

@@ -2333,7 +2333,7 @@ fn static_reshape_folding_preserves_declaring_input_contract() {
             } else {
                 // Concrete incompatible arguments are static type errors;
                 // only the externally supplied input reaches an ABI check.
-                Expected::Reject("dimension mismatch")
+                Expected::Reject("axis 0")
             };
         }
         let observed = observe(&case);

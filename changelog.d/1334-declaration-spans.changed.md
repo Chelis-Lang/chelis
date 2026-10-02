@@ -1,0 +1,1 @@
+`chelis deep` now retains authored `surf:` spans on declarations as well as expressions, so a declaration's location survives Surf-to-Deep conversion. See [#1334](https://github.com/Chelis-Lang/chelis/issues/1334).

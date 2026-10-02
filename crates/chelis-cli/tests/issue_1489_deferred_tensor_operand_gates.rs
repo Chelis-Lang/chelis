@@ -109,10 +109,18 @@ fn an_operand_resolved_to_a_non_tensor_is_still_rejected() {
         \x20 1i32\n\
          }\n",
     );
-    let found = messages(&report);
     assert!(
-        found.iter().any(|m| m.contains("copy requires tensor")),
-        "copy of a unit value must still be rejected by name; got {found:?}"
+        report["errors"]
+            .as_array()
+            .is_some_and(
+                |errors| errors.iter().any(|error| error["kind"] == "TypeMismatch"
+                    && error["expected"] == "tensor"
+                    && error["got"] == "()"
+                    && error["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("copy")))
+            ),
+        "copy of a unit value must still be rejected by name; got {report}"
     );
 }
 
@@ -169,8 +177,15 @@ fn a_never_resolved_declared_parameter_is_named_not_numbered() {
 /// differ in unrelated ways. What must never differ is whether the GATE
 /// objected to the operand.
 fn gate_rejected(report: &serde_json::Value) -> bool {
-    messages(report).iter().any(|m| {
-        m.contains("copy requires tensor input") || m.contains("cast requires tensor or prim type")
+    report["errors"].as_array().is_some_and(|errors| {
+        errors.iter().any(|error| {
+            error["kind"] == "CastNonTensor"
+                || (error["kind"] == "TypeMismatch"
+                    && error["expected"] == "tensor"
+                    && error["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("copy")))
+        })
     })
 }
 
@@ -521,12 +536,13 @@ fn a_host_slot_rejection_names_the_resolved_type_not_an_identity() {
 /// file passing while these two programs check clean at score 1.
 #[test]
 fn a_constraint_survives_its_variable_being_aliased_to_another() {
-    for (call, ret, gate) in [
-        ("copy(w)", "unit", "copy requires tensor input, got ()"),
+    for (call, ret, kind, expected) in [
+        ("copy(w)", "unit", "TypeMismatch", "tensor"),
         (
             "cast(w, f64)",
             "f64",
-            "cast requires tensor or prim type, got ()",
+            "CastNonTensor",
+            "tensor or numeric/bool scalar",
         ),
     ] {
         let report = check_json(&format!(
@@ -535,11 +551,17 @@ fn a_constraint_survives_its_variable_being_aliased_to_another() {
              def probe(x: unit) -> {ret} =\n\
             \x20 apply_it(fn (v) -> apply_it(fn (w) -> {call}, v), x)\n"
         ));
-        let found = messages(&report);
         assert!(
-            found.iter().any(|m| m == gate),
+            report["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|error| error["kind"] == kind
+                    && error["expected"] == expected
+                    && error["got"] == "()"
+                    && error["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains(call.split('(').next().unwrap())))),
             "{call}: a constraint re-suspended onto an aliased variable must \
-             still reject a non-tensor operand; got {found:?}"
+             still reject a non-tensor operand; got {report}"
         );
     }
 }
@@ -557,7 +579,7 @@ fn a_constraint_survives_its_variable_being_aliased_to_another() {
 ///
 /// What this asserts, exactly: no message carries the slot's own
 /// "<name> expects" wording. It deliberately does NOT assert a clean report.
-/// The `f32` row still reports `precision mismatch: expected f32, got f64`,
+/// The `f32` row still reports a precision conflict between `f32` and `f64`,
 /// because the eager arm hard-codes an `f64` result while `[05-OP-1]` makes the
 /// result follow the operand; that divergence is chelis#1295's, predates this
 /// change, and is unaffected by it. Asserting emptiness here would pin

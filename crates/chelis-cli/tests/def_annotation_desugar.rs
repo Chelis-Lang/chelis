@@ -119,10 +119,8 @@ fn def_two_independent_precision_tvars_accepted() {
 fn def_precision_name_not_in_quantifier_list_errors() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("not_in_quantifier.ch");
-    write_file(
-        &path,
-        "def f[a, b](x: &tensor[3, p]) -> &tensor[3, p] = x\n",
-    );
+    let source = "def f[a, b](x: &tensor[3, p]) -> &tensor[3, p] = x\n";
+    write_file(&path, source);
 
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().cloned().unwrap_or_default();
@@ -147,9 +145,13 @@ fn def_precision_name_not_in_quantifier_list_errors() {
         "the repeated undeclared primitive spelling must have one declaration-owned diagnostic: {errors:?}"
     );
     assert_eq!(
-        errors[0].get("span_id").and_then(|span| span.as_str()),
-        Some("source:26..27"),
-        "the declaration owner must retain the first useful source location: {errors:?}"
+        errors[0]["span"]["offset"],
+        source.find("p]").unwrap(),
+        "the declaration owner must retain the first useful source coordinate: {errors:?}"
+    );
+    assert!(
+        errors[0].get("span_id").is_none(),
+        "a type spelling with no authored external identity must not invent one: {errors:?}"
     );
     assert!(
         all_are_unknown_primitive,

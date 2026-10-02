@@ -52,20 +52,41 @@ pub(super) fn validate_deferred_tensor_operands(
                 gate,
                 expected,
                 settled,
-            } => errors.push(CheckError::new(
-                gate.kind(),
-                format!(
-                    "{} result does not match the type this call produces once its \
-                     operand is known: expected {expected}, got {settled}",
-                    gate.noun()
-                ),
-                gate.suggestions(),
-            )),
-            OperandGateFailure::Rejected { gate, resolved } => errors.push(CheckError::new(
-                gate.kind(),
-                gate.message(&subject_for(&resolved, declared_type_names)),
-                gate.suggestions(),
-            )),
+            } => {
+                let mut error = CheckError::with_types(
+                    gate.kind(),
+                    format!(
+                        "{} result does not match the type this call produces once its \
+                         operand is known: expected {expected}, got {settled}",
+                        gate.noun()
+                    ),
+                    expected.to_string(),
+                    settled.to_string(),
+                    gate.suggestions(),
+                );
+                if let Some(location) = gate.location() {
+                    error = location.attach(error);
+                }
+                errors.push(error);
+            }
+            OperandGateFailure::Rejected { gate, resolved } => {
+                let subject = subject_for(&resolved, declared_type_names);
+                let expected = gate.expected_operand();
+                let mut error = CheckError::with_types(
+                    gate.kind(),
+                    format!(
+                        "{}; argument 1: expected {expected}, got {subject}",
+                        gate.message(&subject)
+                    ),
+                    expected,
+                    subject,
+                    gate.suggestions(),
+                );
+                if let Some(location) = gate.location() {
+                    error = location.attach(error);
+                }
+                errors.push(error);
+            }
         }
     }
     // A consumed checked collection contract that still has an unresolved
@@ -97,11 +118,22 @@ pub(super) fn validate_deferred_tensor_operands(
     // Whatever is left never had its operand bound to anything.
     for (tv, gate) in subst.take_deferred_tensor_operands() {
         let resolved = subst.apply(&Type::Var(tv));
-        errors.push(CheckError::new(
+        let subject = subject_for(&resolved, declared_type_names);
+        let expected = gate.expected_operand();
+        let mut error = CheckError::with_types(
             gate.kind(),
-            gate.message(&subject_for(&resolved, declared_type_names)),
+            format!(
+                "{}; argument 1: expected {expected}, got {subject}",
+                gate.message(&subject)
+            ),
+            expected,
+            subject,
             gate.suggestions(),
-        ));
+        );
+        if let Some(location) = gate.location() {
+            error = location.attach(error);
+        }
+        errors.push(error);
     }
 }
 

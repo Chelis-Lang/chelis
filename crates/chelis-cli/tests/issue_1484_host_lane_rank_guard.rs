@@ -77,6 +77,14 @@ fn run_eval(source: &str, stem: &str) -> std::process::Output {
         .expect("run chelis eval")
 }
 
+fn rank_disagreement(text: &str) -> bool {
+    text.contains("tensor shapes must match for elementwise op")
+        || text.contains("tensor rank mismatch")
+        || (text.contains("DimensionMismatch")
+            && text.contains("rank-2 tensor")
+            && text.contains("rank-1 tensor"))
+}
+
 /// `chelis build --target c`, link the emitted translation unit with the
 /// host C compiler, run it, and return the process output. `None` when the
 /// machine has no host C compiler, so the build/run leg skips cleanly.
@@ -111,8 +119,7 @@ fn build_link_run(source: &str, stem: &str) -> Option<std::process::Output> {
         // the call, that is where a provable rank disagreement is caught.
         let stderr = String::from_utf8_lossy(&built.stderr);
         assert!(
-            stderr.contains("tensor rank mismatch")
-                || stderr.contains("tensor shapes must match for elementwise op"),
+            rank_disagreement(&stderr),
             "`{stem}`: the build refused for a reason other than the rank \
              disagreement this row is about: {stderr}"
         );
@@ -148,8 +155,7 @@ fn assert_both_lanes_reject(source: &str, stem: &str, guard_needle: &str) {
     // prove is a check error, not a deferred one. The elementwise message is
     // still accepted for the operands whose rank is not fixed until then.
     assert!(
-        eval_err.contains("tensor shapes must match for elementwise op")
-            || eval_err.contains("tensor rank mismatch"),
+        rank_disagreement(&eval_err),
         "{stem}: eval must name the shape or rank mismatch; stderr={eval_err}"
     );
 

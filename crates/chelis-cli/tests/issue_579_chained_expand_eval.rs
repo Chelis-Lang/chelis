@@ -624,8 +624,8 @@ fn issue_579_scalar_param_expand_agrees_in_eval_without_rank_ice() {
 
 /// Negative parity for the positive bn1d case: broadcasting over the WRONG
 /// axis (extent read from `x` axis 0 but inserted at axis 1, ascribed
-/// `[3, 2]`) makes the following `mul` shape-invalid and must be rejected at
-/// check with a dimension-mismatch reason.
+/// `[3, 2]`) makes the following `mul` shape-invalid. The error identifies
+/// the mismatched operand extent at the `mul` call.
 #[test]
 fn issue_579_wrong_axis_broadcast_rejected_at_check() {
     let source = "def bad(x: &tensor[2, 3, f32], g: &tensor[3, f32]) -> tensor[2, 3, f32] = {\n\
@@ -634,10 +634,15 @@ fn issue_579_wrong_axis_broadcast_rejected_at_check() {
         }\n\
         out = bad(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([10.0, 20.0, 30.0]))\n";
     let json = check_json(source);
-    let errors = check_errors(&json, "wrong-axis broadcast check");
+    let errors = json["errors"].as_array().expect("check errors array");
     assert!(
-        errors.iter().any(|m| m.contains("dimension mismatch")),
-        "wrong-axis broadcast must fail check with a dimension mismatch, got {errors:?}"
+        errors.iter().any(|error| {
+            error["kind"] == "DimensionMismatch"
+                && error["expected"] == "2"
+                && error["got"] == "3"
+                && error["span"]["offset"] == source.find("mul(x, gb)").unwrap()
+        }),
+        "wrong-axis broadcast must fail check at the mismatched axis: {errors:?}"
     );
 }
 
@@ -651,9 +656,21 @@ fn issue_579_out_of_bounds_insert_axis_fails_eval_with_targeted_reason() {
         out = bad(to_tensor([1.0, 2.0, 3.0]))\n";
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_579_axis_oob");
+    let report = check_json(source);
     assert!(
-        stderr.contains("insert") && stderr.contains("out of bounds"),
-        "out-of-bounds insert axis must fail with the targeted insert reason, got: {stderr}"
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["expected"] == "axis in 0..=1"
+                    && error["got"] == "3"
+                    && error["span"]["offset"] == source.find("insert(").unwrap()
+            })),
+        "invalid insert axis must reject at the call: {report}"
+    );
+    assert!(
+        stderr.contains("DimensionMismatch") && stderr.contains("insert"),
+        "eval must surface the targeted insert rejection: {stderr}"
     );
     assert!(
         !stderr.contains("internal compiler error"),

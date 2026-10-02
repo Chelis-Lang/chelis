@@ -137,7 +137,7 @@ const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
     ),
     (
         "def bad[p: Float](k: p) -> p = tensor_to_scalar(k)",
-        "tensor_to_scalar expects tensor input, got f32",
+        "tensor_to_scalar",
         "`p := f32`",
     ),
     (
@@ -152,7 +152,7 @@ const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
     ),
     (
         "def bad[p: Float](k: p) -> List[p] = to_list(k)",
-        "to_list expects Tensor input, got f32",
+        "to_list",
         "`p := f32`",
     ),
     // A tensor-only check that lives in the dtype-admissibility replay.

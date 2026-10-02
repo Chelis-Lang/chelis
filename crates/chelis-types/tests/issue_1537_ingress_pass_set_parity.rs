@@ -29,6 +29,11 @@ enum Source {
 enum Expected {
     Accept,
     Reject(&'static str),
+    RejectDimension {
+        callee: &'static str,
+        expected: &'static str,
+        got: &'static str,
+    },
     RejectAtAdmission(&'static str),
 }
 
@@ -188,6 +193,25 @@ fn assert_row(row: Row) {
             "{} must reject with {needle:?}: {plain_diagnostics:#?}",
             row.name
         ),
+        Expected::RejectDimension {
+            callee,
+            expected,
+            got,
+        } => {
+            let result =
+                check_ir_program(&plain).expect_err("the rank-mismatched call must be rejected");
+            assert!(
+                result.errors.iter().any(|error| {
+                    error.kind.diagnostic_name() == "DimensionMismatch"
+                        && error.message.contains(callee)
+                        && error.expected.as_deref() == Some(expected)
+                        && error.got.as_deref() == Some(got)
+                }),
+                "{}: missing {callee} rank mismatch from {expected} to {got}: {:#?}",
+                row.name,
+                result.errors
+            );
+        }
     }
 }
 
@@ -299,7 +323,11 @@ const ROWS: &[Row] = &[
     Row {
         name: "elementwise rank mismatch remains a type error",
         source: Source::Surf("def f(a: tensor[2, 3, f32], b: tensor[3, f32]) = add(a, b)\n"),
-        expected: Expected::Reject("rank mismatch"),
+        expected: Expected::RejectDimension {
+            callee: "add",
+            expected: "rank-2 tensor",
+            got: "rank-1 tensor",
+        },
     },
     Row {
         name: "unknown Deep tag has one ordinary checker owner",

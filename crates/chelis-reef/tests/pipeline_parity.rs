@@ -1,5 +1,7 @@
 use chelis_reef::{BuildOptions, build_package_with_options, package_schema, verify_artifact_pair};
 use chelis_shell::read_shell;
+use chelis_surf::{desugar::desugar_program, parser::parse_str};
+use chelis_types::{check_typed_program, errors::CheckErrorKind};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,12 +19,6 @@ const TYPE_REJECTION_SOURCE: &str = include_str!("fixtures/pipeline_parity/rejec
 const EFFECT_REJECTION_SOURCE: &str = include_str!("fixtures/pipeline_parity/rejected/effects.ch");
 const LINEARITY_REJECTION_SOURCE: &str =
     include_str!("fixtures/pipeline_parity/rejected/linearity.ch");
-const EXPECTED_TYPE_REJECTION: &str =
-    include_str!("fixtures/pipeline_parity/rejected/expected_type.txt");
-const EXPECTED_EFFECT_REJECTION: &str =
-    include_str!("fixtures/pipeline_parity/rejected/expected_effects.txt");
-const EXPECTED_LINEARITY_REJECTION: &str =
-    include_str!("fixtures/pipeline_parity/rejected/expected_linearity.txt");
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -60,14 +56,10 @@ fn baseline_records_the_pre_migration_revision() {
     assert!(BASELINE_PROVENANCE.contains("before the core extraction"));
 }
 
-// chelis#1198: the package `archive_sha256` (and the `shell_sha256` derived
-// from it) are nondeterministic across runs -- macOS local, macOS CI, and Linux
-// CI each produced a different value for the same source under the same
-// `SOURCE_DATE_EPOCH` -- so the exact archive/shell snapshot cannot be pinned.
-// Ignored pending the conversion to a relative monolithic-vs-layered oracle in
-// chelis#1198 (which also tracks the underlying archive-nondeterminism). The
-// rejected-error baselines below remain deterministic (source span offsets) and
-// stay active.
+// chelis#1198: artifact archive hashes are nondeterministic across runs,
+// so the accepted pre-migration snapshot stays ignored. Rejected snapshots
+// likewise pinned diagnostic wording and incidental offsets; the active
+// rejection test checks the three observable failure boundaries instead.
 #[test]
 #[ignore = "nondeterministic package archive hash; see chelis#1198"]
 fn accepted_package_outputs_match_the_pre_migration_baseline() {
@@ -137,35 +129,50 @@ fn accepted_package_outputs_match_the_pre_migration_baseline() {
 }
 
 #[test]
-fn rejected_package_errors_match_the_pre_migration_baseline() {
-    let cases = [
-        ("type", TYPE_REJECTION_SOURCE, EXPECTED_TYPE_REJECTION),
-        (
-            "effects",
-            EFFECT_REJECTION_SOURCE,
-            EXPECTED_EFFECT_REJECTION,
-        ),
-        (
-            "linearity",
-            LINEARITY_REJECTION_SOURCE,
-            EXPECTED_LINEARITY_REJECTION,
-        ),
-    ];
-    let actual = cases
+fn rejected_packages_keep_type_effect_and_linearity_boundaries() {
+    let (_directory, root) = rejected_package_fixture(TYPE_REJECTION_SOURCE);
+    build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+        .expect_err("both unbound names must reject the package");
+    let decls = parse_str(TYPE_REJECTION_SOURCE).expect("rejected package source must parse");
+    let exprs = desugar_program(&decls).expect("rejected package source must desugar");
+    let report = check_typed_program(&exprs).expect_err("both unbound names must reject at check");
+    let mut unbound = report
+        .errors
         .iter()
-        .map(|(_name, source, _)| {
-            let (_directory, root) = rejected_package_fixture(source);
-            let error = build_package_with_options(
-                &root,
-                &BuildOptions { auto_fetch: false },
-                &chelis_std_bundle::EMBEDDED_RUNTIME,
-            )
-            .expect_err("the rejected package must fail");
-            format!("{error}\n")
+        .filter_map(|error| match &error.kind {
+            CheckErrorKind::UnboundVariable { identifier } => Some(identifier.as_str()),
+            _ => None,
         })
         .collect::<Vec<_>>();
+    unbound.sort_unstable();
+    assert_eq!(unbound, ["missing_first", "missing_second"]);
 
-    for ((name, _, expected), actual) in cases.into_iter().zip(actual) {
-        assert_eq!(actual, expected, "{name} rejection changed");
-    }
+    let (_directory, root) = rejected_package_fixture(EFFECT_REJECTION_SOURCE);
+    let effect = build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+        .expect_err("undeclared IO must reject");
+    assert!(
+        effect.contains("effects `{}`") && effect.contains("effects `{IO}`"),
+        "the undeclared effect must be identified: {effect}"
+    );
+
+    let (_directory, root) = rejected_package_fixture(LINEARITY_REJECTION_SOURCE);
+    let linearity = build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+        .expect_err("using both consumed tensors must reject");
+    assert_eq!(
+        linearity.matches("already consumed by realize").count(),
+        2,
+        "both consumed values must be reported: {linearity}"
+    );
 }

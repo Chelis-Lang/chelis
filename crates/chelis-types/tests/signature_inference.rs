@@ -416,9 +416,12 @@ def wrong() -> f32 =
     )
     .expect_err("fixed tensor extent must remain enforced");
     assert!(
-        err.errors
-            .iter()
-            .any(|error| error.message.contains("Lit(3) vs Lit(2)")),
+        err.errors.iter().any(|error| {
+            error.kind.diagnostic_name() == "DimensionMismatch"
+                && error.expected.as_deref() == Some("3")
+                && error.got.as_deref() == Some("2")
+                && error.message.contains("`fixed` argument 1, axis 0")
+        }),
         "fixed-rank negative control must fail for the actual extent mismatch: {:?}",
         err.errors
     );

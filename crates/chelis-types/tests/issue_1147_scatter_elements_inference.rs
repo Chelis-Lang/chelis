@@ -3,18 +3,22 @@
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
+use chelis_types::errors::CheckError;
 
-fn diagnostics(source: &str) -> Vec<String> {
+fn typecheck_errors(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
     let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
-        Err(result) => result
-            .errors
-            .iter()
-            .map(|error| format!("{:?}: {}", error.kind, error.message))
-            .collect(),
+        Err(result) => result.errors,
     }
+}
+
+fn diagnostics(source: &str) -> Vec<String> {
+    typecheck_errors(source)
+        .iter()
+        .map(|error| format!("{:?}: {}", error.kind, error.message))
+        .collect()
 }
 
 fn assert_rejected(source: &str, needle: &str) {
@@ -42,7 +46,17 @@ fn valid_scatter_elements_is_accepted() {
 #[test]
 fn string_axis_is_rejected() {
     let source = format!("{PREFIX}  scatter_elements(data, indices, updates, \"zero\")\n");
-    assert_rejected(&source, "i32 axis");
+    let errors = typecheck_errors(&source);
+    assert!(
+        errors.iter().any(|error| {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("i32")
+                && error.got.as_deref() == Some("string")
+                && error.message.contains("scatter_elements")
+                && error.message.contains("argument 4")
+        }),
+        "scatter_elements must reject a string axis as i32: {errors:#?}"
+    );
 }
 
 #[test]
