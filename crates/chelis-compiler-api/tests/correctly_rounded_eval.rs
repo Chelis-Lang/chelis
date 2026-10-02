@@ -219,7 +219,8 @@ macro_rules! reference_graphs {
                 let erf = |x: $t| -> $t {
                     let ax = if x < 0.0 { -x } else { x };
                     if ax < k(0.00001) {
-                        return x * k(1.1283791670955126);
+                        // The library spells 2/sqrt(pi) as 1.1283791670955126.
+                        return x * k(std::f64::consts::FRAC_2_SQRT_PI);
                     }
                     let t = 1.0 / (1.0 + k(0.3275911) * ax);
                     let poly = t
@@ -238,6 +239,9 @@ macro_rules! reference_graphs {
 
 reference_graphs!(ref32, f32, chelis_crmath::exp_f32, chelis_crmath::tanh_f32);
 reference_graphs!(ref64, f64, chelis_crmath::exp_f64, chelis_crmath::tanh_f64);
+
+/// An activation's surface name and its reference.
+type Case<T> = (&'static str, fn(T) -> T);
 
 fn assert_bits(op: &str, dtype: &str, inputs: &[u64], got: &[u64], want: &[u64]) {
     assert_eq!(got.len(), want.len());
@@ -258,7 +262,7 @@ fn assert_bits(op: &str, dtype: &str, inputs: &[u64], got: &[u64], want: &[u64])
 fn f32_activations_match_the_correctly_rounded_reference_bit_for_bit() {
     let inputs = inputs_f32();
     let bits: Vec<u64> = inputs.iter().map(|x| u64::from(x.to_bits())).collect();
-    let cases: [(&str, fn(f32) -> f32); 4] = [
+    let cases: [Case<f32>; 4] = [
         ("tanh", ref32::tanh),
         ("sigmoid", ref32::sigmoid),
         ("silu", ref32::silu),
@@ -279,7 +283,7 @@ fn f32_activations_match_the_correctly_rounded_reference_bit_for_bit() {
 fn f64_activations_match_the_correctly_rounded_reference_bit_for_bit() {
     let inputs = inputs_f64(f64::MAX);
     let bits: Vec<u64> = inputs.iter().map(|x| x.to_bits()).collect();
-    let cases: [(&str, fn(f64) -> f64); 4] = [
+    let cases: [Case<f64>; 4] = [
         ("tanh", ref64::tanh),
         ("sigmoid", ref64::sigmoid),
         ("silu", ref64::silu),
