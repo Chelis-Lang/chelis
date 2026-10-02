@@ -245,6 +245,7 @@ bad = grad(loss, wrt=xs)(values, runtime_index)
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",
@@ -313,6 +314,7 @@ bad = grad(loss, wrt=xs)(values, runtime_count)
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",

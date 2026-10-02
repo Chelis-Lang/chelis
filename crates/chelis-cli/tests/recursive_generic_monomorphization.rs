@@ -254,6 +254,7 @@ fn build_ok(source: &str, stem: &str) -> (TempDir, PathBuf) {
     chelis()
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -274,6 +275,7 @@ fn build_err(source: &str, stem: &str) -> (TempDir, PathBuf, String) {
     let assert = chelis()
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -634,6 +636,7 @@ fn polymorphic_recursion_rejection_is_lane_uniform() {
     let build_assert = chelis()
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -899,6 +902,7 @@ fn package_defs_with_one_terminal_name_keep_distinct_specializations() {
         .current_dir(dir.path())
         .args([
             "build",
+            "--emit-c",
             main.strip_prefix(dir.path()).unwrap().to_str().unwrap(),
             "--target",
             "c",

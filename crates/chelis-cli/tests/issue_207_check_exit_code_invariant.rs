@@ -341,7 +341,7 @@ fn rt_wave1_207_empty_file_build_rejects_with_same_message() {
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(outdir.path())
-        .args(["build", tmp.path().to_str().expect("path utf8")])
+        .args(["build", "--emit-c", tmp.path().to_str().expect("path utf8")])
         .output()
         .expect("run chelis build");
     let combined = format!(

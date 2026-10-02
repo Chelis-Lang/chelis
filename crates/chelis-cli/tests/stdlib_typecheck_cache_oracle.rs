@@ -143,6 +143,7 @@ fn assert_std_module_build_is_host_only_rejected(
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &cache_home)
         .arg("build")
+        .arg("--emit-c")
         .arg(source)
         .arg("-o")
         .arg(out_dir.path())
@@ -197,6 +198,9 @@ fn run_capture(
         cmd.env(k, v);
     }
     cmd.arg(subcommand).arg(file);
+    if subcommand == "build" {
+        cmd.arg("--emit-c");
+    }
     if let Some(dir) = out_dir {
         cmd.arg("-o").arg(dir);
     }

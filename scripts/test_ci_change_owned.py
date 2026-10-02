@@ -879,6 +879,7 @@ class SchemaTests(unittest.TestCase):
         )
 
         cli_paths = (
+            ("crates/chelis-cli/tests/coral_prerequisites.rs", "coral_prerequisites"),
             (
                 "crates/chelis-cli/tests/chelis_std_self_test_corpus.rs",
                 "chelis_std_self_test_corpus",
@@ -960,6 +961,7 @@ class SchemaTests(unittest.TestCase):
                 owned.Identity(
                     "chelis-cli", "issue_1417_stdlib_dtype_family_bounds"
                 ),
+                owned.Identity("chelis-cli", "issue_1205_front_end_performance"),
             },
         )
         device_entry_owner = config.manual_only_targets[

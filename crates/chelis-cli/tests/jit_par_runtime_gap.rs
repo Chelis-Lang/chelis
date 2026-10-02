@@ -198,6 +198,7 @@ fn build_c_and_run(out_dir: &Path, src_path: &Path) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -274,6 +275,7 @@ fn build_c_par_tensor_is_fenced_before_emission() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src.to_str().unwrap(),
             "--target",
             "c",

@@ -137,13 +137,16 @@ source of truth.
 
 ### Output Artifacts
 
-`chelis build` for C or HIP now emits:
+`chelis build` for C or HIP retains these generated and staged artifacts:
 
 - generated program source (`.c` / `_hip.cpp`)
 - generated function header when applicable
 - `chelis_runtime.h`
 - `libchelis_runtime.a`
 - `chelis_hip_runtime.h` for HIP builds
+
+It also invokes the native toolchain to produce an executable or static library;
+`--emit-c` selects source-only emission (`spec/08-backends.md` §7).
 
 It no longer emits `chelis_runtime.c`.
 When a generated object-mode header would otherwise export a source-level

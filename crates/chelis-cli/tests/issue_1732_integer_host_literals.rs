@@ -38,6 +38,7 @@ fn check_eval_and_run_kind(source: &str, expected: &str, extension: &str) {
     assert_eq!(String::from_utf8(evaluated.stdout).unwrap(), expected);
     let built = Command::new(env!("CARGO_BIN_EXE_chelis"))
         .arg("build")
+        .arg("--emit-c")
         .arg(&file)
         .args(["--target", "c", "--output"])
         .arg(dir.path())

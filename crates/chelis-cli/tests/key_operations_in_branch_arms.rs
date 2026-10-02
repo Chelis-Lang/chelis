@@ -166,6 +166,7 @@ fn a_selected_split_keys_still_traps_on_a_negative_count() {
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",

@@ -83,6 +83,7 @@ fn build_c(source: &str, stem: &str) -> (TempDir, std::path::PathBuf) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -227,6 +228,7 @@ fn issue_667_grad_stride_operand_mismatch_is_a_diagnostic() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

@@ -208,6 +208,7 @@ fn eval_and_build_reject_forward_values_before_execution_or_lowering() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().expect("UTF-8 fixture path"),
             "--target",
             "c",

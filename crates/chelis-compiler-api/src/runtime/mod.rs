@@ -36,7 +36,7 @@ pub use shared_values::{Entries, Values};
 mod tests;
 mod transforms;
 
-pub(crate) use host_ops::collect_adt_ctor_fields;
+pub(crate) use host_ops::{collect_adt_ctor_fields, collect_constructor_source_names};
 // The [05-OBS-1] single renderer: compiler.rs uses it to pre-render each
 // evaluated root's display text while the dtype tags still exist (the wire
 // schema's `ExecutionValue` does not carry them), so the CLI's labeled-root
@@ -177,7 +177,18 @@ pub enum RuntimeValue {
     Dict(Entries),
     Tuple(Values),
     Adt {
+        /// The constructor's identity in the checked program: the linker
+        /// name in a package build, which pattern matching and field lookup
+        /// compare against. Two types may share a source spelling, so the
+        /// identity cannot be the spelling.
         ctor: String,
+        /// The constructor's declared source spelling, the name every exit
+        /// renders ([05-OBS-7]). It is the spelling the compiled lane stores,
+        /// derived by the same rule
+        /// ([`chelis_types::linked_constructor_source_name`] against the
+        /// constructor's declared type); in a program without linker names it
+        /// equals `ctor`.
+        source_name: String,
         /// Field values in DECLARED order (the deftype's field order),
         /// not source or alphabetical order.
         fields: Values,
@@ -615,6 +626,8 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     // names correctly.
     let mut adt_fields = collect_adt_ctor_fields(library_exprs);
     adt_fields.merge(collect_adt_ctor_fields(program.exprs()));
+    let mut constructor_names = collect_constructor_source_names(library_exprs);
+    constructor_names.merge(collect_constructor_source_names(program.exprs()));
 
     let mut top_level_defs = UnordMap::new();
     let mut top_level_order = Vec::new();
@@ -673,6 +686,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
         declared_signatures,
         adt_registry: program.adt_registry().clone(),
         adt_fields,
+        constructor_names,
         tensor_bindings,
         session: Some(chelis_ir::host::HostLoweringSession::new(eval_program)),
         active_declaration_names: Vec::new(),
@@ -1002,14 +1016,16 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
                     RuntimeValue::Tuple(items) => ExecutionValue::Tuple {
                         value: converted.split_off(converted.len() - items.len()),
                     },
-                    // De-mangle the reef-linked `Pkg__..__Ctor` form to the bare,
-                    // user-facing constructor name. This is the eval `--json` ABI
-                    // surface; decode (`decode_adt_value`) already keys on bare
-                    // constructor names, so emitting bare here makes the encode/decode
-                    // round-trip consistent and stops internal mangling leaking to
-                    // consumers (chelis#399).
-                    RuntimeValue::Adt { ctor, fields, .. } => ExecutionValue::Adt {
-                        ctor: chelis_types::demangle_ident(ctor),
+                    // The eval `--json` ABI surface carries the stored source
+                    // spelling, never the linker name (chelis#399, chelis#2889);
+                    // decode (`decode_adt_value`) keys on source names, so the
+                    // encode/decode round trip stays consistent.
+                    RuntimeValue::Adt {
+                        source_name,
+                        fields,
+                        ..
+                    } => ExecutionValue::Adt {
+                        ctor: source_name.clone(),
                         fields: converted.split_off(converted.len() - fields.len()),
                     },
                     RuntimeValue::Dict(entries) => {
@@ -1165,6 +1181,10 @@ struct EvalContext<'a> {
     /// alone cannot reveal whether the parameter type has a float leaf.
     adt_registry: chelis_types::adt::AdtRegistry,
     adt_fields: UnordMap<String, Vec<String>>,
+    /// Each linker-named constructor's declared source spelling, keyed by
+    /// its linker name (`collect_constructor_source_names`); an ADT value
+    /// built here stores it as the name it renders.
+    constructor_names: UnordMap<String, String>,
     tensor_bindings: &'a UnordMap<String, RuntimeTensorValue>,
     /// The host-lowering session over the checked program under evaluation.
     /// The kernel decision for a def application is read through it by

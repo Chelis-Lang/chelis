@@ -135,7 +135,7 @@ def require_unavailable_root(
 ) -> None:
     """Require the self-bound program to fail through [05-UNS-1]."""
 
-    cmd = [str(chelis), "build", str(source), "--output", str(output_dir)]
+    cmd = [str(chelis), "build", "--emit-c", str(source), "--output", str(output_dir)]
     print("+ " + " ".join(cmd))
     try:
         result = subprocess.run(
@@ -206,7 +206,7 @@ def main() -> int:
         source.write_text(ADD_PROGRAM, encoding="utf-8")
 
         print("Generating manifested C callable")
-        run([chelis, "build", source, "--output", output_dir], timeout=30)
+        run([chelis, "build", "--emit-c", source, "--output", output_dir], timeout=30)
 
         driver = output_dir / "driver.c"
         driver.write_text(DRIVER_C, encoding="utf-8")

@@ -62,6 +62,7 @@ fn build_to_hip(source: &str, name: &str) -> String {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "hip",
@@ -280,6 +281,7 @@ fn hip_pentaop_scatter_add_wrapper_does_not_emit_kernel_scatter_add() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "hip",

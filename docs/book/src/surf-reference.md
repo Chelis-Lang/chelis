@@ -303,6 +303,10 @@ exported name, and `import M` makes only qualified access (`M.name`) available. 
 reference works for values, constructors, and types, and is the way to disambiguate two
 modules that export the same name.
 
+A file outside every Reef package imports from the compiler-bundled `chelis-std` (`Std.*`)
+under the same rules. Importing any other module needs a `reef.toml` package manifest, and an
+import that names no reachable module is a `chelis check` error.
+
 With no `export` declaration, every top-level `def` and `type` is public. Once any `export`
 appears, only the listed names are public. Exporting a type also exports its constructors.
 

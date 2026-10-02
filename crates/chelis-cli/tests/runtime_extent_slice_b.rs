@@ -314,6 +314,7 @@ fn build_c(path: &Path, out_dir: &Path) -> std::process::Output {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",
@@ -893,6 +894,7 @@ fn no_environment_variable_disables_the_named_claim_guard() {
         .env("CHELIS_NO_STAGED_CLAIM", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",
@@ -1058,6 +1060,7 @@ fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",
@@ -1121,6 +1124,7 @@ to_tensor([7.0f32, 8.0f32, 9.0f32]))\n";
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             example.to_str().unwrap(),
             "--target",
@@ -2391,6 +2395,7 @@ fn a_local_unit_extent_claim_with_shrink_rejects_hip_host_fallback() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().unwrap(),
             "--target",
@@ -5830,6 +5835,7 @@ fn a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds() {
     let out_dir = dir.path().join("lint_fix-out");
     let built = styled(&[
         "build",
+        "--emit-c",
         path.to_str().unwrap(),
         "--target",
         "c",
@@ -8496,6 +8502,7 @@ fn a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds() {
     let out_dir = dir.path().join("lint_fix_call-out");
     let built = styled(&[
         "build",
+        "--emit-c",
         path.to_str().unwrap(),
         "--target",
         "c",

@@ -2469,6 +2469,151 @@ fn try_lower_compiled_program_with_lane_overrides(
     ))
 }
 
+/// Top-level bindings referenced by name inside at least one compiled host
+/// function body (issue #352), in `program.globals` order, deduped. A
+/// function reads such a binding through file-scope storage at call time:
+/// C emission hoists every listed name to file scope, and ownership keeps
+/// every listed binding live until the roots unit exits.
+///
+/// Deliberately an over-approximation: the walk records every `Var` name
+/// without subtracting binders (params, let names, match bindings).
+/// Hoisting a binding that is shadowed inside a function body is harmless
+/// in C -- the local declaration shadows the file-scope static -- and only
+/// postpones its release, while missing a genuine capture reproduces the
+/// undeclared-identifier build break, or a read of a released binding.
+pub fn captured_global_names<T>(program: &HostProgram<T>) -> Vec<String> {
+    let mut referenced: UnordSet<String> = UnordSet::new();
+    for function in &program.functions {
+        collect_host_var_names(&function.body, &mut referenced);
+    }
+    let mut seen: UnordSet<String> = UnordSet::new();
+    program
+        .globals
+        .iter()
+        .flat_map(|binding| {
+            [
+                binding.name.clone(),
+                LoadStoreName::top_level(&binding.name).as_str().to_string(),
+            ]
+            .into_iter()
+            .filter(|name| referenced.contains(name))
+        })
+        .filter(|name| seen.insert(name.clone()))
+        .collect()
+}
+
+/// Record every `Var` name referenced anywhere in `expr`, including
+/// let-binding values, match arms, and inline-callback bodies. Exhaustive
+/// over `HostExprKind` so a new variant forces this walk to be revisited.
+pub fn collect_host_var_names<T>(expr: &HostExpr<T>, out: &mut UnordSet<String>) {
+    match &expr.kind {
+        HostExprKind::ResultClaimScope { body, .. } => collect_host_var_names(body, out),
+        HostExprKind::FormalIngress { value, .. } => collect_host_var_names(value, out),
+        HostExprKind::Int(_)
+        | HostExprKind::Float(_)
+        | HostExprKind::Bool(_)
+        | HostExprKind::String(_)
+        | HostExprKind::Unit => {}
+        HostExprKind::Var(name, _) => {
+            out.insert(name.clone());
+        }
+        HostExprKind::List(items, _) | HostExprKind::Tuple(items, _) => {
+            for item in items {
+                collect_host_var_names(item, out);
+            }
+        }
+        HostExprKind::Call { args, .. }
+        | HostExprKind::Builtin { args, .. }
+        | HostExprKind::TensorCall { args, .. } => {
+            for arg in args {
+                collect_host_var_names(arg, out);
+            }
+        }
+        HostExprKind::SignatureEntry { args, lists, .. } => {
+            for arg in args.iter().chain(lists.iter().map(|entry| &entry.value)) {
+                collect_host_var_names(arg, out);
+            }
+        }
+        HostExprKind::AdtConstruct { fields, .. } => {
+            for field in fields {
+                collect_host_var_names(field, out);
+            }
+        }
+        HostExprKind::AdtFieldAccess { base, .. } => collect_host_var_names(base, out),
+        HostExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_host_var_names(cond, out);
+            collect_host_var_names(then_expr, out);
+            collect_host_var_names(else_expr, out);
+        }
+        HostExprKind::MatchOption {
+            scrutinee,
+            some_expr,
+            none_expr,
+            ..
+        } => {
+            collect_host_var_names(scrutinee, out);
+            collect_host_var_names(some_expr, out);
+            collect_host_var_names(none_expr, out);
+        }
+        HostExprKind::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            collect_host_var_names(scrutinee, out);
+            for arm in arms {
+                collect_host_var_names(&arm.expr, out);
+            }
+            if let Some(default_expr) = default_expr {
+                collect_host_var_names(default_expr, out);
+            }
+        }
+        HostExprKind::Let { bindings, body, .. }
+        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+            for binding in bindings {
+                collect_host_var_names(&binding.value, out);
+            }
+            collect_host_var_names(body, out);
+        }
+        HostExprKind::Map { callback, list, .. }
+        | HostExprKind::Filter { callback, list, .. }
+        | HostExprKind::Partition { callback, list, .. }
+        | HostExprKind::FlatMap { callback, list, .. } => {
+            collect_callback_var_names(callback, out);
+            collect_host_var_names(list, out);
+        }
+        HostExprKind::Fold {
+            callback,
+            init,
+            list,
+            ..
+        }
+        | HostExprKind::Scan {
+            callback,
+            init,
+            list,
+            ..
+        } => {
+            collect_callback_var_names(callback, out);
+            collect_host_var_names(init, out);
+            collect_host_var_names(list, out);
+        }
+    }
+}
+
+fn collect_callback_var_names<T>(callback: &HostCallback<T>, out: &mut UnordSet<String>) {
+    match &callback.kind {
+        HostCallbackKind::Named { .. } => {}
+        HostCallbackKind::Inline { body, .. } => collect_host_var_names(body, out),
+    }
+}
+
 pub fn host_program_requires_host_backend(program: &ConcreteHostProgram) -> bool {
     if !program.globals.is_empty() {
         return true;

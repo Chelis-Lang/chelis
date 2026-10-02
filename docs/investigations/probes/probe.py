@@ -38,7 +38,7 @@ def lane_check(path):
 
 def lane_build(path, target):
     out_dir = Path(path).with_suffix("") .as_posix() + f"-{target}-out"
-    r = run([CHELIS, "build", str(path), "--target", target, "--output", out_dir])
+    r = run([CHELIS, "build", "--emit-c", str(path), "--target", target, "--output", out_dir])
     return r, Path(out_dir)
 
 

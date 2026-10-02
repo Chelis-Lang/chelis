@@ -343,7 +343,7 @@ EXPECTED_OP_MANIFESTS = {
     "05-OP-34": tuple(
         """\
 | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
-| `decimal::Decimal` | `Decimal { coefficient: i64, scale: i64 }` |
+| `decimal::Decimal` | `Decimal { negative: bool, limb0: i64, limb1: i64, limb2: i64, limb3: i64, limb4: i64, scale: i64 }` |
 | `datetime/business::BusinessCalendar` | `BusinessCalendar { weekmask: Weekmask, holidays: List[i64], valid_from: i64, valid_until: i64 }` |
 | `datetime::Date` | `Date { epoch_day: i64 }` |
 | `datetime::Time` | `Time { nanosecond_of_day: i64 }` |
@@ -528,18 +528,26 @@ EXPECTED_OP_MANIFESTS = {
 | `datetime::weekday_on_or_before` | `(Date,Weekday)->Date` |
 | `decimal::decimal` | `(string)->Decimal` |
 | `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
-| `decimal::decimal_div` | `(Decimal,Decimal,i64,RoundingMode)->Decimal` |
-| `decimal::decimal_eq` | `(Decimal,Decimal)->bool` |
-| `decimal::decimal_from_int` | `(i64)->Decimal` |
+| `decimal::decimal_div` | `(Decimal,Decimal,i64,Rounding)->Decimal` |
+| `decimal::decimal_from_f64` | `(f64,i64,Rounding)->Decimal` |
+| `decimal::decimal_from_i64` | `(i64)->Decimal` |
 | `decimal::decimal_gt` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_gte` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_lt` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_lte` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_mul` | `(Decimal,Decimal)->Decimal` |
+| `decimal::decimal_round` | `(Decimal,i64,Rounding)->Decimal` |
+| `decimal::decimal_scale` | `(Decimal)->i64` |
 | `decimal::decimal_sub` | `(Decimal,Decimal)->Decimal` |
-| `decimal::decimal_to_float` | `(Decimal)->f64` |
+| `decimal::decimal_to_f32` | `(Decimal)->f32` |
+| `decimal::decimal_to_f64` | `(Decimal)->f64` |
+| `decimal::decimal_to_fixed_string` | `(Decimal,i64)->string` |
+| `decimal::decimal_to_i64` | `(Decimal,Rounding)->i64` |
 | `decimal::decimal_to_string` | `(Decimal)->string` |
 | `decimal::try_decimal` | `(string)->Option[Decimal]` |
+| `decimal::try_decimal_div` | `(Decimal,Decimal,i64,Rounding)->Option[Decimal]` |
+| `decimal::try_decimal_from_f64` | `(f64,i64,Rounding)->Option[Decimal]` |
+| `decimal::try_decimal_to_i64` | `(Decimal,Rounding)->Option[i64]` |
 | `index::list_index` | `(List[T],i64)->T` |
 | `index::skip_list` | `(List[T],i64)->List[T]` |
 | `index::take_list` | `(List[T],i64)->List[T]` |
@@ -902,10 +910,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 220 or len(set(identities)) != 220:
+    if len(identities) != 228 or len(set(identities)) != 228:
         violations.append(
             "[05-OP-35] stdlib numeric manifest must have exactly two hundred "
-            "twenty unique identities"
+            "twenty-eight unique identities"
         )
 
 
@@ -2465,7 +2473,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the two hundred twenty final exported stdlib numeric definitions",
+            "exactly the two hundred twenty-eight final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "
@@ -2487,10 +2495,9 @@ def validate_normative_contract(
             "`tensor/construct::stack` | "
             "`(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "Every primitive-width intermediate in a graph whose contract names a dtype",
-            "Decimal rational computations explicitly named as mathematical below "
-            "use an exact internal domain",
             "The `datetime::*`, `datetime/business::*`, and `datetime/clock::*` "
             "identities follow [05-OP-73]",
+            "The `decimal::*` identities follow [05-OP-76]",
             "integer primitive arithmetic is checked",
             "JSON access follows [05-OP-2..5]",
             "Numeric tokens follow [05-OP-2]",
@@ -2549,10 +2556,6 @@ def validate_normative_contract(
             "and stop receives exact zero",
             "enumerated by increasing output index",
             "separate canonical adjacent-pair balanced trees",
-            "rejects a zero divisor or negative result scale",
-            "interpreted in exact arithmetic and normalized before either "
-            "representation check",
-            "removable trailing zeros do not cause `Overflow`",
             "NaN is unequal to every value, including itself",
             "Test tolerances have the same active float dtype as the values",
             "`assert_close_tensor` admits exactly one common active float dtype `p`",
@@ -2748,6 +2751,31 @@ def validate_normative_contract(
             "`RoundTiesToEven` the nearest multiple, an exact tie taking the even `k`",
             "`RejectInexact` selects `v` when it is a multiple and otherwise rejects",
             "No mode is a default",
+        ),
+        "05-OP-76": (
+            "governs exactly the `decimal::*` identities of the [05-OP-34] and "
+            "[05-OP-35] registries",
+            "`|c| <= 10^38 - 1` and an integer scale `s` with `0 <= s <= 38`",
+            "There is no NaN, infinity, or negative zero",
+            "each rational in the value set has exactly one representation",
+            "`Decimal` is opaque (spec/04 §2.5)",
+            "with each limb in `[0, 10^9)` and `limb4 < 100`",
+            "[05-OP-36] structural equality of two decimals is equality of the "
+            "rationals they denote",
+            "differentiating through `decimal_from_f64`, the one callable with a "
+            "float argument, is a structural rejection, never a zero cotangent",
+            "the message `<function>: <kind>: <detail>`",
+            "Every range and validity check precedes the arithmetic it protects",
+            "each argument's own validity from left to right, then `RejectInexact`, "
+            "then the result's range",
+            "returns `None` exactly where the twin fails `domain`",
+            "each applies it under [05-OP-74] once to the exact rational",
+            "of at most 1000 Unicode scalar values",
+            "so `decimal(decimal_to_string(x))` is `x`",
+            "it never rounds",
+            "correctly rounded once to the target format with ties to even",
+            "They are the named lossy boundary from decimal to binary float",
+            "its result is always in the value set",
         ),
         "05-OP-40": (
             "active\n> signed-integer or float dtype",

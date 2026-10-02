@@ -560,6 +560,7 @@ def attack(x: f32) -> f32 = prob_value(raw_make(x))
         .current_dir(&pkg)
         .args([
             "build",
+            "--emit-c",
             pkg.join("src/attack.ch").to_str().unwrap(),
             "-o",
             out_dir.to_str().unwrap(),
@@ -645,6 +646,7 @@ fn build_dp_rejects_module_reopen() {
     let assert = chelis()
         .args([
             "build",
+            "--emit-c",
             dp.to_str().unwrap(),
             "-o",
             out_dir.to_str().unwrap(),
@@ -745,6 +747,7 @@ fn build_dp_rejects_stem_mangled_forges() {
         let assert = chelis()
             .args([
                 "build",
+                "--emit-c",
                 path.to_str().unwrap(),
                 "-o",
                 out_dir.to_str().unwrap(),
@@ -861,6 +864,7 @@ def use(x: f32) -> f32 = prob_value(probability(x))
         .current_dir(&pkg)
         .args([
             "build",
+            "--emit-c",
             pkg.join("src/main.ch").to_str().unwrap(),
             "-o",
             out_dir.to_str().unwrap(),
@@ -907,6 +911,7 @@ fn build_dp_rejects_out_of_module_construction() {
     let assert = chelis()
         .args([
             "build",
+            "--emit-c",
             dp.to_str().unwrap(),
             "-o",
             out_dir.to_str().unwrap(),
@@ -1147,7 +1152,7 @@ fn rt3_f4_declaration_error_is_visible_on_check_and_gates_build() {
     // build gates on the declaration error (exit non-zero, does not emit
     // artifacts for a type-broken/declaration-error module).
     chelis()
-        .args(["build", ch.to_str().unwrap()])
+        .args(["build", "--emit-c", ch.to_str().unwrap()])
         .assert()
         .failure();
 

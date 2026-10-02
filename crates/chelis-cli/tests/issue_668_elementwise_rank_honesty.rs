@@ -579,6 +579,7 @@ fn build_link_run(dir: &tempfile::TempDir, stem: &str, source: &str) -> (bool, S
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().expect("UTF-8 path"),
             "--target",

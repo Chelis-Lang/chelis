@@ -71,6 +71,7 @@ fn build_and_run(source: &str, stem: &str) -> (String, String) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().expect("UTF-8 source path"),
             "--target",
             "c",

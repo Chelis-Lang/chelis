@@ -56,7 +56,14 @@ fn build_output(source: &str, name: &str) -> Output {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+        ])
         .arg(dir.path().join(format!("{name}-out")))
         .output()
         .expect("build should run")
@@ -73,7 +80,14 @@ fn emitted_body_lines(source: &str, name: &str, def: &str) -> usize {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+        ])
         .arg(&out_dir)
         .assert()
         .success();
@@ -93,7 +107,14 @@ fn run_compiled(source: &str, name: &str) -> Output {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+        ])
         .arg(&out_dir)
         .assert()
         .success();

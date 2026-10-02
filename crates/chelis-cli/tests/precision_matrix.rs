@@ -164,6 +164,7 @@ fn c_lane_str(expr: &str, ret_ty: &str, name: &str) -> Result<String, String> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1206,6 +1207,7 @@ fn int64_scalar_abs_min_traps_in_the_compiled_host_lane() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1232,103 +1234,96 @@ fn int64_scalar_abs_min_traps_in_the_compiled_host_lane() {
 }
 
 // ===========================================================================
-// Std.Decimal currently rejects calls until #2778's exact arithmetic contract
-// is implemented. Retain these ordinary and rounding-boundary programs as
-// canaries so neither path silently starts returning unchecked answers.
+// Std.Decimal is exact ([05-OP-76]): the classic binary-float traps and the
+// rounding-mode boundary come out as their exact decimal answers, so neither
+// path can silently start returning float-rounded values.
 //
 // These need the staged chelis-std reef fixture, so they carry the same
 // manual-gate ignore as the rest of the std-dependent corpus.
 // ===========================================================================
 
-/// The classic fixed-point cases must report the Decimal fence.
+fn eval_app_stdout(app_pkg: &std::path::Path, reef_home: &std::path::Path) -> String {
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
+        .current_dir(app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .output()
+        .expect("chelis eval should run");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The classic fixed-point cases are exact.
 #[test]
 #[ignore = "needs the staged chelis-std reef fixture; exceeds the inner-loop \
             budget. Run with `cargo test -p chelis-cli --test precision_matrix \
             -- --ignored`."]
-fn decimal_classic_float_traps_report_fence() {
+fn decimal_classic_float_traps_are_exact() {
     let (_dir, reef_home, app_pkg) = common::make_app("precision-decimal-traps");
     write_file(
         &app_pkg.join("src/main.ch"),
         "module Demo.Main\n\
          import Std.Decimal (decimal, decimal_add, decimal_sub, decimal_mul, \
-         decimal_to_string, decimal_from_int)\n\
-         a = print(decimal_to_string(decimal_add(decimal(\"0.1\"), decimal(\"0.2\"))))\n\
-         b = print(decimal_to_string(decimal_sub(decimal(\"1.00\"), decimal(\"0.90\"))))\n\
-         c = print(decimal_to_string(decimal_mul(decimal(\"1.1\"), decimal(\"1.1\"))))\n\
-         d = print(decimal_to_string(decimal_mul(decimal(\"19.99\"), \
-         decimal_from_int(cast(3, i64)))))\n",
+         decimal_to_string, decimal_from_i64)\n\
+         a = decimal_to_string(decimal_add(decimal(\"0.1\"), decimal(\"0.2\")))\n\
+         b = decimal_to_string(decimal_sub(decimal(\"1.00\"), decimal(\"0.90\")))\n\
+         c = decimal_to_string(decimal_mul(decimal(\"1.1\"), decimal(\"1.1\")))\n\
+         d = decimal_to_string(decimal_mul(decimal(\"19.99\"), decimal_from_i64(3i64)))\n",
     );
-    let out = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .current_dir(&app_pkg)
-        .args([
-            "eval",
-            "--file",
-            app_pkg.join("src/main.ch").to_str().unwrap(),
-        ])
-        .output()
-        .expect("chelis eval should run");
-    let rendered = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        !out.status.success()
-            && rendered.contains("Std.Decimal is unavailable")
-            && rendered.contains("#2778"),
-        "{rendered}"
-    );
+    let stdout = eval_app_stdout(&app_pkg, &reef_home);
+    for line in ["a = 0.3\n", "b = 0.1\n", "c = 1.21\n", "d = 59.97\n"] {
+        assert!(stdout.contains(line), "missing `{line}` in:\n{stdout}");
+    }
 }
 
-/// The rounding-mode path must report the Decimal fence.
+/// Every rounding mode resolves the 5/2 and -5/2 ties as its name says.
 #[test]
 #[ignore = "needs the staged chelis-std reef fixture; exceeds the inner-loop \
             budget. Run with `cargo test -p chelis-cli --test precision_matrix \
             -- --ignored`."]
-fn decimal_rounding_modes_report_fence() {
+fn decimal_rounding_modes_resolve_ties() {
     let (_dir, reef_home, app_pkg) = common::make_app("precision-decimal-rounding");
-    write_file(
-        &app_pkg.join("src/main.ch"),
+    let modes = [
+        ("toward_negative", "RoundTowardNegative", "2", "-3"),
+        ("toward_positive", "RoundTowardPositive", "3", "-2"),
+        ("toward_zero", "RoundTowardZero", "2", "-2"),
+        ("away_from_zero", "RoundAwayFromZero", "3", "-3"),
+        ("ties_to_even", "RoundTiesToEven", "2", "-2"),
+        ("ties_to_away", "RoundTiesToAway", "3", "-3"),
+    ];
+    let mut source = String::from(
         "module Demo.Main\n\
-         import Std.Decimal (decimal, decimal_div, decimal_to_string, \
-         round_half_up, round_half_even, round_down, round_up)\n\
-         a = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
-         cast(0, i64), round_half_up())))\n\
-         b = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
-         cast(0, i64), round_half_even())))\n\
-         c = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
-         cast(0, i64), round_down())))\n\
-         d = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
-         cast(0, i64), round_up())))\n\
-         e = print(decimal_to_string(decimal_div(decimal(\"-5\"), decimal(\"2\"), \
-         cast(0, i64), round_half_up())))\n",
+         import Std.Decimal (decimal, decimal_div, decimal_to_string)\n\
+         import Std.Rounding (RoundTowardNegative, RoundTowardPositive, RoundTowardZero, \
+         RoundAwayFromZero, RoundTiesToEven, RoundTiesToAway)\n",
     );
-    let out = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .current_dir(&app_pkg)
-        .args([
-            "eval",
-            "--file",
-            app_pkg.join("src/main.ch").to_str().unwrap(),
-        ])
-        .output()
-        .expect("chelis eval should run");
-    let rendered = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        !out.status.success()
-            && rendered.contains("Std.Decimal is unavailable")
-            && rendered.contains("#2778"),
-        "{rendered}"
-    );
+    for (name, mode, _, _) in modes {
+        source.push_str(&format!(
+            "{name}_up = decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), 0i64, {mode}))\n\
+             {name}_down = decimal_to_string(decimal_div(decimal(\"-5\"), decimal(\"2\"), 0i64, {mode}))\n"
+        ));
+    }
+    write_file(&app_pkg.join("src/main.ch"), &source);
+    let stdout = eval_app_stdout(&app_pkg, &reef_home);
+    for (name, _, up, down) in modes {
+        for line in [
+            format!("{name}_up = {up}\n"),
+            format!("{name}_down = {down}\n"),
+        ] {
+            assert!(stdout.contains(&line), "missing `{line}` in:\n{stdout}");
+        }
+    }
 }
 
 // ===========================================================================
@@ -1409,6 +1404,7 @@ fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             cpath.to_str().unwrap(),
             "--target",
             "c",
@@ -1505,6 +1501,7 @@ fn zeroed_abs_does_not_silently_poison_downstream_arithmetic() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1554,6 +1551,7 @@ fn f32_tensor_abs_is_correct_and_unaffected_by_the_placeholder() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1629,6 +1627,7 @@ fn static_int_condition_does_not_delete_the_correct_branch() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -1690,6 +1689,7 @@ fn pad_sequences_preserves_int64_ids_above_i32_max() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

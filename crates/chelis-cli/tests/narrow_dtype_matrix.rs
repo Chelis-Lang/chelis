@@ -67,6 +67,7 @@ fn build_and_run_c(program: &str, name: &str) -> Result<(String, String), String
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -136,6 +137,7 @@ fn build_target(program: &str, name: &str, target: &str) -> (bool, String, Strin
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             target,

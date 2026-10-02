@@ -185,6 +185,7 @@ mod tests {
     fn link(head: RuntimeValue, tail: RuntimeValue) -> RuntimeValue {
         RuntimeValue::Adt {
             ctor: "Link".to_string(),
+            source_name: "Link".to_string(),
             fields: vec![head, tail].into(),
             field_names: None,
         }
@@ -193,6 +194,7 @@ mod tests {
     fn end() -> RuntimeValue {
         RuntimeValue::Adt {
             ctor: "End".to_string(),
+            source_name: "End".to_string(),
             fields: Values::default(),
             field_names: None,
         }

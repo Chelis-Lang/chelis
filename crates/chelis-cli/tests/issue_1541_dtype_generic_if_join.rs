@@ -226,6 +226,7 @@ fn the_polymorphic_definition_is_not_emitted_standalone() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

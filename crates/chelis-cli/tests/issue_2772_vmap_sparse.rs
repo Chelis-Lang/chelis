@@ -154,6 +154,7 @@ fn vmapped_gather_rejects_an_index_outside_the_row_even_when_inside_the_batch() 
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             source.to_str().unwrap(),
             "--target",
             "c",

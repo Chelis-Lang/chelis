@@ -121,3 +121,14 @@ uv build --wheel --out-dir target/python-wheel/wheels bindings/python
 This builds a wheel from the checkout. The Chelis GitHub toolchain release does
 not include a Python wheel. For editable Python bindings during development,
 see [Contributor setup](https://github.com/Chelis-Lang/chelis/blob/main/docs/contributor_setup.md#python-311).
+
+## Native build prerequisites
+
+`chelis build` invokes a native compiler; `--emit-c` only generates sources.
+On macOS install Apple's Command Line Tools with `xcode-select --install`.
+On Debian/Ubuntu install `build-essential`, and on Fedora install `gcc gcc-c++`.
+BLAS-backed CPU operations additionally need OpenBLAS on Linux; macOS uses
+Accelerate. Definitions-only builds also require `ar` from the native toolchain.
+HIP requires ROCm's `hipcc` and its libraries; Metal requires the macOS SDK and
+`clang++`. A compatible GPU is required when executing GPU work. See
+[Backends](backends.md) for compiler overrides and prerelease target limitations.

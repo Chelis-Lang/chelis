@@ -242,6 +242,7 @@ fn build_link_run(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             path.to_str().expect("UTF-8 path"),
             "--target",
             "c",
@@ -1566,6 +1567,7 @@ fn build_c(path: &str, out_subdir: &std::path::Path) -> std::process::Output {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             path,
             "--target",
             "c",

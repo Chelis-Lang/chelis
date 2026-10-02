@@ -74,6 +74,7 @@ fn c_lane_run(program: &str, name: &str) -> Result<(String, String, bool), Strin
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -419,6 +420,7 @@ fn host_lane_tensor_cast_trunc_rejects_loudly_rather_than_passing_through() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

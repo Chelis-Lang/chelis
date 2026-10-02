@@ -668,6 +668,7 @@ fn check_representation_finite(
             ctor: inner_ctor,
             fields,
             field_names,
+            ..
         } => {
             // The type/ctor naming the violation is the OUTERMOST opaque
             // type when we recursed from one; a nested record field that
@@ -820,6 +821,9 @@ pub(crate) fn revalidate_adt_value(
         declared_signatures: UnordMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
         adt_fields: adt_fields.clone(),
+        // A predicate returns a verdict; a value it builds is never rendered
+        // at an exit, so its constructors keep their checked names.
+        constructor_names: UnordMap::new(),
         tensor_bindings: &empty_tensors,
         session: None,
         active_declaration_names: Vec::new(),
@@ -879,6 +883,7 @@ mod tests {
     fn bounded(value: f64) -> RuntimeValue {
         RuntimeValue::Adt {
             ctor: "Bounded".into(),
+            source_name: "Bounded".into(),
             fields: vec![RuntimeValue::float_lit(value)].into(),
             field_names: None,
         }

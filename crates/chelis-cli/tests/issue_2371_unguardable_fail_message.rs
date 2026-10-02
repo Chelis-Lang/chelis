@@ -107,6 +107,7 @@ fn c_build_stderr(program: &str, name: &str) -> Result<(), String> {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

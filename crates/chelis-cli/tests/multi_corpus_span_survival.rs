@@ -34,6 +34,7 @@ fn build_emit_c(example_rel_path: &str, out_subdir: &str) -> String {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             example_rel_path,
             "--target",
             "c",

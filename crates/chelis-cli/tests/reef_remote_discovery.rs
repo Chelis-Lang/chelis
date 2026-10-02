@@ -659,7 +659,13 @@ fn explicit_bundled_runtime_resolves_without_registry_or_network_access() {
         .env("CHELIS_REEF_HOME", &registry)
         .env("CHELIS_REEF_GITHUB_BASE_API", "http://127.0.0.1:9")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", "src/main.ch", "-o", output.to_str().unwrap()])
+        .args([
+            "build",
+            "--emit-c",
+            "src/main.ch",
+            "-o",
+            output.to_str().unwrap(),
+        ])
         .assert()
         .success();
     assert!(output.join("main.c").exists());
@@ -670,7 +676,13 @@ fn explicit_bundled_runtime_resolves_without_registry_or_network_access() {
         .env("CHELIS_REEF_HOME", &registry)
         .env("CHELIS_REEF_GITHUB_BASE_API", "http://127.0.0.1:9")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", "src/main.ch", "-o", warm_output.to_str().unwrap()])
+        .args([
+            "build",
+            "--emit-c",
+            "src/main.ch",
+            "-o",
+            warm_output.to_str().unwrap(),
+        ])
         .assert()
         .success();
     assert!(warm_output.join("main.c").exists());

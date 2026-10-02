@@ -150,6 +150,38 @@ cadence = "pull_request and push"
 reason = "script-unit executes the reference's positive and negative rows and its NumPy differential"
 tracking_issue = "chelis#2860"
 
+# chelis#2778: the Std.Decimal reference and differential harness. The
+# chelis-cli `std_decimal_oracle` target runs both against eval and native C;
+# script-unit runs the reference's tests and the harness's generator and
+# comparator tests on every pull request.
+[[path_rule]]
+prefix = "scripts/decimal_reference.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/decimal_differential.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/test_decimal_reference.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the reference's accepting and rejecting rows against independent derivations"
+tracking_issue = "chelis#2778"
+
+[[path_rule]]
+prefix = "scripts/test_decimal_differential.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the harness's generator and comparator rows"
+tracking_issue = "chelis#2778"
+
 [[path_rule]]
 prefix = "tests/corpus/core_fragment_parity/"
 disposition = "owner"
@@ -1079,6 +1111,18 @@ cadence = "pull_request and exact-candidate workflow_dispatch when directly modi
 reason = "the runtime-dependent HIP CPU-fixture suite is entirely ignored and must execute explicitly against the exact-head runtime archive when its target changes"
 tracking_issue = "chelis#1863"
 
+# Source-only migration changes this all-ignored CPU behavior-parity
+# harness. Run all five tests when directly modified; the separate performance
+# runner remains the authoritative performance oracle.
+[[manual_only_target]]
+package = "chelis-cli"
+name = "issue_1205_front_end_performance"
+workflow = "ci.yml"
+job = "change-owned-shard"
+cadence = "pull_request and exact-candidate workflow_dispatch when directly modified"
+reason = "the all-ignored front-end behavior parity suite must execute when its source-emission harness changes; this does not replace its authoritative performance runner"
+tracking_issue = "chelis#2828"
+
 # These all-ignored targets either need prerequisites no Linux PR worker has or
 # exceed the default inner-loop budget. A direct modification is listed with
 # its ignored tests, rejected if an active test appears, and reported as a
@@ -1086,6 +1130,13 @@ tracking_issue = "chelis#1863"
 # docs/manual_gates.md row whose command runs exactly this target's ignored
 # tests, and one of them runs all of them with no name filter; an uncited row
 # that runs it makes this row stale.
+[[manual_gate_target]]
+package = "chelis-cli"
+name = "coral_prerequisites"
+manual_gates = ["coral_prerequisites", "coral_prerequisites regression suite"]
+reason = "the documented Coral prerequisite acceptance bundle remains a manual gate outside the default inner-loop budget"
+tracking_issue = "chelis#2828"
+
 [[manual_gate_target]]
 package = "chelis-cli"
 name = "shoals_oracle"
@@ -2562,6 +2613,15 @@ job = "macos-workspace-shard"
 cadence = "daily 04:17 UTC and workflow_dispatch"
 reason = "the macOS workspace shard's Metal smoke builds a Metal host with chelis build and links the archive it staged"
 tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = ".github/scripts/smoke_macos_manifested_callable.py"
+disposition = "owner"
+workflow = "macos-nightly.yml"
+job = "macos-workspace-shard"
+cadence = "daily 04:17 UTC and workflow_dispatch"
+reason = "the macOS workspace shard runs the manifested callable smoke against the generated C ABI with positive execution and negative admission probes"
+tracking_issue = "chelis#2828"
 
 [[path_rule]]
 prefix = "scripts/test_glibc231_workflows.py"
@@ -4053,6 +4113,18 @@ packages = ["chelis-cli"]
 prefix = "examples/grad_host_selectors.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
+
+# Exact sources exercised by the native program/library parity cases and the
+# chelis-e2e executable example corpus.
+[[path_rule]]
+prefix = "examples/native_program.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/native_library.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
 
 [[path_rule]]
 prefix = ".github/workflows/secret-scan.yml"

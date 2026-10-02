@@ -1667,7 +1667,7 @@ pub(super) fn report_orphan_defsigs(
 ///   rewrites package decls to internal `pkg__...` names (and rewrites
 ///   their call sites with them) before the checker runs, so a package
 ///   `def sum` is allowed and genuinely dispatches to the user def (the
-///   stdlib's `Std.Decimal.normalize` / `Std.Test.fail` rely on this).
+///   stdlib's `Std.Test.fail` relies on this).
 /// - Function parameters and block-locals may reuse builtin names: they
 ///   shadow the builtin under ordinary lexical scoping in every lane.
 ///

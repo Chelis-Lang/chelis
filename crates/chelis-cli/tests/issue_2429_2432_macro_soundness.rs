@@ -200,6 +200,7 @@ fn typed_macro_binding_executes_identically_in_eval_and_c() {
         .expect("chelis")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .arg("build")
+        .arg("--emit-c")
         .arg(&path)
         .args(["--target", "c", "--output"])
         .arg(dir.path())

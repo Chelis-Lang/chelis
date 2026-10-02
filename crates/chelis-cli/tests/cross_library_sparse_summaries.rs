@@ -82,6 +82,7 @@ fn build_to_c(source: &str, name: &str) -> String {
         .expect("chelis binary")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",

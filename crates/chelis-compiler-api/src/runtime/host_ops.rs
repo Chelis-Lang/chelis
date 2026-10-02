@@ -143,6 +143,7 @@ pub(super) fn pattern_matches_with_result_producer(
                 ctor: got,
                 fields,
                 field_names,
+                ..
             } = value
             else {
                 return Ok(false);
@@ -270,6 +271,35 @@ pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> UnordMap<String, Vec<St
             }
             if !fields.is_empty() {
                 out.insert(ctor.to_string(), fields);
+            }
+        }
+    }
+    out
+}
+
+/// Each linker-named constructor that `exprs` declare, mapped to its
+/// declared source spelling: the spelling left after its data type's module
+/// qualification, by the rule the compiled lane stores
+/// ([`chelis_types::linked_constructor_source_name`], chelis#2889). A
+/// constructor outside linker format has no entry and keeps its name.
+pub(crate) fn collect_constructor_source_names(exprs: &[Expr]) -> UnordMap<String, String> {
+    let mut out = UnordMap::new();
+    for expr in top_level_items(exprs) {
+        let Some((DeepTag::Deftype, kids)) = tagged_expr_children(expr) else {
+            continue;
+        };
+        let Some(type_name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        for variant in kids.iter().skip(2) {
+            let Some((DeepTag::Variant, variant_kids)) = tagged_expr_children(variant) else {
+                continue;
+            };
+            let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            if let Some(source) = chelis_types::linked_constructor_source_name(type_name, ctor) {
+                out.insert(ctor.to_string(), source.to_string());
             }
         }
     }
@@ -3128,12 +3158,14 @@ pub(crate) fn render_value(value: &RuntimeValue) -> String {
                     ")",
                 );
             }
-            // Show the user-facing (de-mangled) constructor name; a reef-linked
-            // ADT carries the internal `Pkg__..__Ctor` form, which must not leak
-            // to eval output (chelis#399). `demangle_ident` is a no-op on bare /
-            // builtin constructors.
-            RuntimeValue::Adt { ctor, fields, .. } => {
-                out.push_str(&chelis_types::demangle_ident(ctor));
+            // The stored source spelling: a linker name never reaches eval
+            // output (chelis#399), and an authored `__` survives (chelis#2889).
+            RuntimeValue::Adt {
+                source_name,
+                fields,
+                ..
+            } => {
+                out.push_str(source_name);
                 if !fields.is_empty() {
                     out.push('(');
                     schedule_render(

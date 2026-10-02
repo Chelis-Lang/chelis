@@ -68,6 +68,7 @@ fn c_result(dir: &TempDir, stem: &str, source: &str) -> LaneResult {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--allow-style-violations",
             path.to_str().expect("UTF-8 path"),
             "--target",
@@ -320,6 +321,7 @@ fn deep_c_result(dir: &TempDir, stem: &str, source: &str) -> LaneResult {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--deep",
             "--allow-style-violations",
             path.to_str().expect("UTF-8 path"),
@@ -463,6 +465,7 @@ fn hand_authored_deep_static_mismatch_rejects_check_eval_and_c_build() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             "--deep",
             "--allow-style-violations",
             path.to_str().expect("UTF-8 path"),

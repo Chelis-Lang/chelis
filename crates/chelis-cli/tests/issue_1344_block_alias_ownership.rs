@@ -66,6 +66,7 @@ fn build_run_and_emit(source: &str, stem: &str) -> (String, String) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",

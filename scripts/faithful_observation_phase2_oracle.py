@@ -2019,7 +2019,7 @@ def run_exclusion_ground_truth_into(violations: list[str], env: dict[str, str]) 
             source.write_text(program, encoding="utf-8")
             print(f"+ oracle-driven C emission re-execution of {label}", flush=True)
             completed = run_chelis(
-                ("build", str(source), "--target", "c", "--output", str(out_dir)), env
+                ("build", "--emit-c", str(source), "--target", "c", "--output", str(out_dir)), env
             )
             c_file = out_dir / f"{name}.c"
             c_source = (

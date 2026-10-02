@@ -162,6 +162,7 @@ fn non_axis_mismatch_reaches_concat_in_both_lanes() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -201,6 +202,7 @@ fn zero_element_concat_output_metadata_overflow_matches_eval_and_c() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -251,6 +253,7 @@ fn zero_element_concat_output_metadata_within_i64_succeeds_on_both_lanes() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -304,6 +307,7 @@ fn copied_extent_keeps_result_claim_on_eval_and_linked_c() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -409,6 +413,7 @@ fn empty_list_fails_in_linked_c() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

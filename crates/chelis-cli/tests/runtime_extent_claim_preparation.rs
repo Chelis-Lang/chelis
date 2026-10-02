@@ -722,6 +722,7 @@ fn observe_host_lane(
         binary,
         &[
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             if api { "c" } else { target },

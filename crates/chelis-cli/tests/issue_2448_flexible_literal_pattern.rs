@@ -21,6 +21,7 @@ fn run(command: &str, source: &str) -> std::process::Output {
             let output = dir.path().join("built");
             cmd.args([
                 "build",
+                "--emit-c",
                 path.to_str().expect("UTF-8 path"),
                 "--target",
                 "c",

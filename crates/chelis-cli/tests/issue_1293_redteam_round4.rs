@@ -64,6 +64,7 @@ fn assert_eval_and_c_diagnostic(
         .current_dir(app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",

@@ -919,7 +919,7 @@ def execute_case(
         commands.append(" ".join(eval_argv))
         eval_result = runner.run(eval_argv, workdir)
 
-        build_argv = [chelis, "build", "--target", "c", "-o", "out", program.name]
+        build_argv = [chelis, "build", "--emit-c", "--target", "c", "-o", "out", program.name]
         commands.append(" ".join(build_argv))
         build_result = runner.run(build_argv, workdir)
 
@@ -1024,7 +1024,7 @@ def probe_staging_receipt(chelis: Path, runner: Runner) -> dict | None:
         work = Path(tmp)
         (work / "k.ch").write_text("probe = 1\n", encoding="utf-8")
         result = runner.run(
-            [str(chelis), "build", "--target", "c", "-o", "out", "k.ch"], work
+            [str(chelis), "build", "--emit-c", "--target", "c", "-o", "out", "k.ch"], work
         )
         if result.trapped:
             return None

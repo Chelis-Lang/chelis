@@ -729,7 +729,7 @@ def build_cli_output(
     output.mkdir(parents=True, exist_ok=True)
     result = runner.run(
         f"{label}-build-{target}",
-        [str(cli), "build", str(source_path), "--target", target, "--output", str(output)],
+        [str(cli), "build", "--emit-c", str(source_path), "--target", target, "--output", str(output)],
         cwd=context["work_dir"],
         env=command_env(path=path),
     )

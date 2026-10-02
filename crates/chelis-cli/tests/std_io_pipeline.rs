@@ -146,6 +146,7 @@ size_view = print(size)
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",
@@ -251,6 +252,7 @@ fn io_pipeline_acceptance_oracle() {
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",
@@ -629,6 +631,7 @@ v4 = print(ok_quote)
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",
@@ -723,6 +726,7 @@ v1 = print(ok_longline)
         .current_dir(&app_pkg)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",
@@ -803,6 +807,7 @@ def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_pa
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "build",
+            "--emit-c",
             app_pkg.join("src/main.ch").to_str().unwrap(),
             "--target",
             "c",

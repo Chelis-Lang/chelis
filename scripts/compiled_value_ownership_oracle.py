@@ -2340,6 +2340,7 @@ class PhaseContext:
             (
                 str(self.chelis),
                 "build",
+                "--emit-c",
                 str(source),
                 "--target",
                 fixture.backend.value,

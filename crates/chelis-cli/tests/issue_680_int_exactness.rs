@@ -32,8 +32,8 @@
 //! `assert_close(9007199254740992.0, 9007199254740993.0, tol)` passes
 //! trivially. An exact integer lane did not exist. This file supplies one.
 //!
-//! The original `Std.Decimal` corpus covered only small values. Its callables
-//! are now fenced under #2778 until the exact-arithmetic contract is met.
+//! The original `Std.Decimal` corpus covered only small values. Its exact
+//! limb arithmetic now has a product past `i64` checked below.
 //!
 //! ## This is the third local fix of one systemic bug
 //!
@@ -167,6 +167,7 @@ fn build_run_int(dir: &TempDir, program: &str, name: &str) -> i64 {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",
@@ -253,7 +254,7 @@ fn static_int_condition_selects_same_branch_across_lanes() {
     assert_lane_parity(&expr, 111, "static_cond_branch");
 }
 
-/// Multiplication is where Std.Decimal's coefficient scaling lives.
+/// Exact i64 multiplication is what Std.Decimal's limb products rely on.
 #[test]
 fn mul_above_two_pow_53_agrees_across_lanes() {
     // 94906266^2 = 9007199326062756, exactly representable and above 2^53.
@@ -481,10 +482,10 @@ fn int64_tensor_survives_to_tensor_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// Group 6: Std.Decimal now rejects calls until #2778 is resolved.
+// Group 6: Std.Decimal products are exact past i64 ([05-OP-76]).
 // ---------------------------------------------------------------------------
 
-/// A product with an unrepresentable coefficient must never silently saturate.
+/// A product whose coefficient does not fit in i64 is exact, never saturated.
 #[test]
 #[ignore = "chelis#680: needs the staged chelis-std reef fixture; exceeds the \
             inner-loop budget. Run with `cargo test -p chelis-cli --test \
@@ -495,8 +496,10 @@ fn decimal_mul_does_not_silently_saturate() {
         &app_pkg.join("src/main.ch"),
         "module Demo.Main\n\
          import Std.Decimal (decimal, decimal_mul, decimal_to_string)\n\
-         out = print(decimal_to_string(decimal_mul(decimal(\"12345678.99\"), \
-         decimal(\"98765432.11\"))))\n",
+         money = decimal_to_string(decimal_mul(decimal(\"12345678.99\"), \
+         decimal(\"98765432.11\")))\n\
+         past_i64 = decimal_to_string(decimal_mul(decimal(\"9223372036854775807\"), \
+         decimal(\"9223372036854775807\")))\n",
     );
     let out = Command::cargo_bin("chelis")
         .expect("binary")
@@ -512,12 +515,11 @@ fn decimal_mul_does_not_silently_saturate() {
         .expect("chelis eval should run");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let rendered = format!("{stdout}{stderr}");
     assert!(
-        !out.status.success()
-            && rendered.contains("Std.Decimal is unavailable")
-            && rendered.contains("#2778"),
-        "Decimal must reject this product: {rendered}"
+        out.status.success()
+            && stdout.contains("money = 1219326320138698.3689\n")
+            && stdout.contains("past_i64 = 85070591730234615847396907784232501249\n"),
+        "Decimal products must be exact: {stdout}{stderr}"
     );
 }
 
@@ -582,6 +584,7 @@ fn unsupported_builtin_never_silently_emits_a_zero_stub() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
+            "--emit-c",
             path.to_str().unwrap(),
             "--target",
             "c",

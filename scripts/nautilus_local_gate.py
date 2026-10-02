@@ -219,7 +219,7 @@ def build_and_compile_canary(chelis_bin: Path, stem: str, source: str) -> RunRes
         out_dir = tmp_dir / "out"
         write_text(program, source)
         build = run(
-            [str(chelis_bin), "build", str(program), "--target", "c", "--output", str(out_dir)],
+            [str(chelis_bin), "build", "--emit-c", str(program), "--target", "c", "--output", str(out_dir)],
             cwd=REPO,
         )
         if build.returncode != 0:

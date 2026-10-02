@@ -117,6 +117,7 @@ fn native_scalar_lambda_admission_matches_the_annotated_control() {
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
+                "--emit-c",
                 path.to_str().unwrap(),
                 "--target",
                 "c",

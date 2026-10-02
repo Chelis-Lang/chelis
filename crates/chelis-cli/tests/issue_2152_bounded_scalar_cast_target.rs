@@ -176,7 +176,14 @@ fn an_unbounded_binder_cast_target_still_rejects_in_the_build_lane() {
     let output = Command::cargo_bin("chelis")
         .expect("chelis")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+        ])
         .arg(dir.path().join("out"))
         .output()
         .expect("build");

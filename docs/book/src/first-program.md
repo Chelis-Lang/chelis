@@ -24,13 +24,14 @@ chelis eval --file app.ch
 The evaluator prints `result` as a tensor with shape `[3]`. Its values are
 approximately `0.212`, `0.212`, and `0.576`.
 
-To inspect the compiler's Deep representation or emit C source and runtime
-artifacts, run:
+To inspect the compiler's Deep representation and build a native executable, run:
 
 ```sh
 chelis deep app.ch
-chelis build app.ch --target c --output out/
+chelis build app.ch --output out/
+./out/app
 ```
 
-`chelis build` writes source artifacts; it does not invoke a C compiler.
+`chelis build` invokes the system C compiler and links its carried runtime.
+Use `--emit-c` when you only want generated sources and runtime artifacts.
 See [CLI Workflow](cli.md) for the other commands and their output.

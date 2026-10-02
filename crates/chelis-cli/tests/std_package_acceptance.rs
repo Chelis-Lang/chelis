@@ -6,69 +6,100 @@ mod common;
 
 use common::{build_and_run_app, gcc_available, make_app, write_file};
 
+/// A program over every `Std.Decimal` callable whose every root is a
+/// canonical value ([05-OP-76]).
+const DECIMAL_ACCEPTANCE_PROGRAM: &str = r#"module Demo.Main
+import Std.Decimal (Decimal, decimal, try_decimal, decimal_to_string, decimal_to_fixed_string, decimal_from_i64, decimal_to_i64, try_decimal_to_i64, decimal_from_f64, try_decimal_from_f64, decimal_to_f64, decimal_to_f32, decimal_scale, decimal_add, decimal_sub, decimal_mul, decimal_round, decimal_div, try_decimal_div, decimal_lt, decimal_lte, decimal_gt, decimal_gte)
+import Std.Rounding (Rounding, RoundTowardZero, RoundTiesToEven, RejectInexact)
+def shown(value: Option[Decimal]) -> string =
+  match value with {
+    | Some(d) => decimal_to_string(d)
+    | None => "none"
+  }
+def shown_int(value: Option[i64]) -> string =
+  match value with {
+    | Some(v) => to_string(v)
+    | None => "none"
+  }
+parsed = decimal_to_string(decimal("9223372036854775807.0"))
+tried = shown(try_decimal("0.10"))
+rejected = shown(try_decimal("+1"))
+fixed = decimal_to_fixed_string(decimal("1.5"), 2i64)
+from_int = decimal_to_string(decimal_from_i64(sub(-9223372036854775807i64, 1i64)))
+narrowed = decimal_to_i64(decimal("2.5"), RoundTiesToEven)
+try_narrowed = shown_int(try_decimal_to_i64(decimal("1e30"), RoundTowardZero))
+ingested = decimal_to_string(decimal_from_f64(0.1f64, 2i64, RoundTiesToEven))
+try_ingested = shown(try_decimal_from_f64(0.1f64, 2i64, RejectInexact))
+double = decimal_to_f64(decimal("0.1"))
+single = decimal_to_f32(decimal("0.1"))
+scale = decimal_scale(decimal("1.50"))
+total = decimal_to_string(decimal_add(decimal("0.1"), decimal("0.2")))
+difference = decimal_to_string(decimal_sub(decimal("1.00"), decimal("0.90")))
+product = decimal_to_string(decimal_mul(decimal("1.1"), decimal("1.1")))
+rounded = decimal_to_string(decimal_round(decimal("2.675"), 2i64, RoundTiesToEven))
+quotient = decimal_to_string(decimal_div(decimal("5"), decimal("2"), 0i64, RoundTiesToEven))
+try_quotient = shown(try_decimal_div(decimal("1"), decimal("0"), 2i64, RoundTiesToEven))
+below = decimal_lt(decimal("-0.5"), decimal("0"))
+at_most = decimal_lte(decimal("1.50"), decimal("1.5"))
+above = decimal_gt(decimal("1e-38"), decimal("0"))
+at_least = decimal_gte(decimal("1"), decimal("1.01"))
+"#;
+
+/// chelis#2778: every `Std.Decimal` callable type-checks and evaluates
+/// through the bundled standard library to its exact value.
 #[test]
-fn reef_std_decimal_calls_raise_issue_2778_error() {
-    let (_dir, reef_home, app_pkg) = make_app("decimal-fence-2778");
-    let value = "Decimal { coefficient: cast(1, i64), scale: cast(0, i64) }";
-    let invalid = "Decimal { coefficient: cast(1, i64), scale: cast(-1, i64) }";
-    let cases = [
-        "round_half_up()".to_owned(),
-        "round_half_even()".to_owned(),
-        "round_down()".to_owned(),
-        "round_up()".to_owned(),
-        "decimal(\"9223372036854775807.0\")".to_owned(),
-        "try_decimal(\"0.1\")".to_owned(),
-        "decimal_from_int(cast(1, i64))".to_owned(),
-        format!("decimal_add({value}, {value})"),
-        format!("decimal_sub({value}, {value})"),
-        format!("decimal_mul({value}, {value})"),
-        format!("decimal_div({value}, {value}, cast(0, i64), round_half_even())"),
-        format!("decimal_eq({value}, {value})"),
-        format!("decimal_lt({value}, {value})"),
-        format!("decimal_lte({value}, {value})"),
-        format!("decimal_gt({value}, {value})"),
-        format!("decimal_gte({value}, {value})"),
-        format!("decimal_to_float({value})"),
-        format!("decimal_to_string({invalid})"),
-    ];
+fn reef_std_decimal_callables_evaluate_exactly() {
+    let (_dir, reef_home, app_pkg) = make_app("decimal-acceptance-2778");
     let path = app_pkg.join("src/main.ch");
-    for (index, expression) in cases.iter().enumerate() {
-        let source = format!(
-            "module Demo.Main\nimport Std.Decimal (Decimal, RoundingMode, round_half_up, round_half_even, round_down, round_up, decimal, try_decimal, decimal_from_int, decimal_add, decimal_sub, decimal_mul, decimal_div, decimal_eq, decimal_lt, decimal_lte, decimal_gt, decimal_gte, decimal_to_float, decimal_to_string)\nresult = {expression}\n"
-        );
-        write_file(&path, &source);
-        let output = Command::cargo_bin("chelis")
-            .expect("binary")
-            .env("CHELIS_STYLE_GATE_DISABLE", "1")
-            .env("CHELIS_REEF_HOME", &reef_home)
-            .current_dir(&app_pkg)
-            .args(["eval", "--file", path.to_str().unwrap()])
-            .output()
-            .expect("eval output");
-        let rendered = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            !output.status.success()
-                && rendered.contains("Std.Decimal is unavailable")
-                && rendered.contains("#2778"),
-            "case {index} ({expression}) escaped the Decimal fence: {rendered}"
-        );
+    write_file(&path, DECIMAL_ACCEPTANCE_PROGRAM);
+    let mut eval = Command::cargo_bin("chelis").expect("binary");
+    let mut assertion = eval
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success();
+    for line in [
+        "parsed = 9223372036854775807",
+        "tried = 0.1",
+        "rejected = none",
+        "fixed = 1.50",
+        "from_int = -9223372036854775808",
+        "narrowed = 2",
+        "try_narrowed = none",
+        "ingested = 0.1",
+        "try_ingested = none",
+        "double = 0.1",
+        "single = 0.1",
+        "scale = 1",
+        "total = 0.3",
+        "difference = 0.1",
+        "product = 1.21",
+        "rounded = 2.68",
+        "quotient = 2",
+        "try_quotient = none",
+        "below = true",
+        "at_most = true",
+        "above = true",
+        "at_least = false",
+    ] {
+        assertion = assertion.stdout(predicate::str::contains(format!("{line}\n")));
     }
+    let _ = assertion;
 }
 
 #[test]
 #[ignore = "manual gate: Phase 3i std package acceptance suite exceeds the default inner-loop budget"]
-fn reef_std_decimal_module_checks_then_rejects_eval() {
+fn reef_std_decimal_module_checks_then_evaluates() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-decimal");
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
-import Std.Decimal (decimal, decimal_add, decimal_div, decimal_eq, decimal_from_int, decimal_to_string, round_half_even, try_decimal)
-exact = decimal_eq(decimal_add(decimal("0.1"), decimal("0.2")), decimal("0.3"))
-banker = decimal_to_string(decimal_div(decimal_from_int(cast(5, i64)), decimal_from_int(cast(2, i64)), cast(0, i64), round_half_even()))
+import Std.Decimal (decimal, decimal_add, decimal_div, decimal_from_i64, decimal_to_string, try_decimal)
+import Std.Rounding (RoundTiesToEven)
+exact = eq(decimal_to_string(decimal_add(decimal("0.1"), decimal("0.2"))), "0.3")
+banker = decimal_to_string(decimal_div(decimal_from_i64(5i64), decimal_from_i64(2i64), 0i64, RoundTiesToEven))
 bad_decimal = match try_decimal("x.y") with {
   | Some(_) => "bad"
   | None => "invalid-decimal"
@@ -95,9 +126,10 @@ bad_decimal = match try_decimal("x.y") with {
             app_pkg.join("src/main.ch").to_str().unwrap(),
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("Std.Decimal is unavailable"))
-        .stderr(predicate::str::contains("#2778"));
+        .success()
+        .stdout(predicate::str::contains("exact = true"))
+        .stdout(predicate::str::contains("banker = 2"))
+        .stdout(predicate::str::contains("bad_decimal = invalid-decimal"));
 }
 
 /// A program over `Std.Datetime` whose every root is a canonical value.

@@ -179,7 +179,7 @@ fn build_fails_on_non_canonical_surf_source() {
     fs::write(&path, "def foo() -> i32 = 1   \n").unwrap();
     Command::cargo_bin("chelis")
         .expect("binary")
-        .args(["build", path.to_str().unwrap()])
+        .args(["build", "--emit-c", path.to_str().unwrap()])
         .assert()
         .failure()
         .stderr(predicates::str::contains("not canonically formatted"));
@@ -196,7 +196,12 @@ fn build_bypass_emits_warning_on_stderr() {
         // Build without `--output` writes artifacts into the cwd; keep
         // them in the tempdir instead of the test binary's crate dir.
         .current_dir(dir.path())
-        .args(["build", "noncanonical.ch", "--allow-style-violations"])
+        .args([
+            "build",
+            "--emit-c",
+            "noncanonical.ch",
+            "--allow-style-violations",
+        ])
         .assert()
         .stderr(predicates::str::contains("style gate bypassed"));
 }
