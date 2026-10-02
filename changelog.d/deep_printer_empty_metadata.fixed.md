@@ -1,0 +1,1 @@
+`chelis deep` and the canonical Deep printer keep both braces of an empty metadata map at any nesting depth. A node nested deeply enough for its `{}` to start past the line width previously printed only the closing brace, which the Deep parser rejects. See [#2859](https://github.com/Chelis-Lang/chelis/issues/2859).
