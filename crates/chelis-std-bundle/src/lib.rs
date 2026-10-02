@@ -1,192 +1,43 @@
-//! Compile-time-embedded chelis-std runtime artifacts.
+//! The chelis-std runtime each Chelis binary embeds.
 //!
-//! The chelis-std runtime ships with the chelis compiler — every chelis
-//! program implicitly depends on it the same way a Rust program implicitly
-//! depends on `core`/`std`. Distribution-wise, the runtime's `.tar.zst`
-//! archive and `.chb` shell are baked into the chelis binary at compile
-//! time via `include_bytes!()`. The reef loader checks for chelis-std
-//! specifically and serves bytes from this crate; everything else
-//! continues to flow through the local-registry path.
+//! chelis-std is the language runtime: every Chelis program depends on it the
+//! way a Rust program depends on `core`. The build script packs
+//! `packages/chelis-std` into this crate's `OUT_DIR` through the packing
+//! step `chelis reef build` runs, and this crate embeds the resulting archive
+//! and shell with `include_bytes!`. Nothing generated is committed: editing a
+//! `.ch` file under `packages/chelis-std/src` and rebuilding is the whole
+//! workflow.
 //!
-//! ## Why a separate crate
-//!
-//! Keeping the embedded bytes in their own crate:
-//! - leaves `chelis-runtime` (the C-runtime FFI crate) untouched;
-//! - lets `chelis-reef` declare a clean dependency edge to the bundle
-//!   without inheriting the bytes' crate-internal layout;
-//! - confines the build.rs / `include_bytes!` surface to one place;
-//! - makes regeneration explicit (run `scripts/regenerate_chelis_std_bundle.py`,
-//!   then commit every output listed below).
-//!
-//! ## Artifact regeneration
-//!
-//! 1. Edit `packages/chelis-std/src/**.ch` as needed.
-//! 2. Run `python3 scripts/regenerate_chelis_std_bundle.py`. The script:
-//!    - builds the chelis CLI in release mode;
-//!    - runs `chelis reef build` against `packages/chelis-std/`;
-//!    - writes the resulting `chelis-std-<version>.tar.zst` and `.chb`
-//!      under `packages/chelis-std/dist/`;
-//!    - copies that pair into `crates/chelis-std-bundle/dist/`; and
-//!    - regenerates `packages/chelis-std/reef.lock` from those final bytes.
-//! 3. Commit both dist pairs and `packages/chelis-std/reef.lock`.
-//! 4. Run `python3 scripts/regenerate_chelis_std_bundle.py --check`. The
-//!    check regenerates twice, requires the committed five-output set to
-//!    equal the first pass and both passes to be byte-identical, and restores
-//!    the committed inputs without changing the worktree.
-//! 5. Rebuilding any crate that depends on this one (`chelis-reef`,
-//!    `chelis-cli`) picks up the new bytes.
-//!
-//! ## Loader integration
-//!
-//! The reef loader reads the runtime through [`archive_files`], which
-//! decompresses the embedded archive in memory into package-relative paths
-//! (`reef.toml`, `src/...`), so the bundled package has no filesystem
-//! location (chelis#2616). [`extract_into`] writes the same tree to a
-//! caller-supplied directory for callers that need the files on disk.
+//! Only binaries and test harnesses depend on this crate. Libraries such as
+//! `chelis-reef` and `chelis-compiler-api` take the runtime as an explicit
+//! `&'static EmbeddedRuntime` parameter, and a binary passes
+//! [`EMBEDDED_RUNTIME`].
 
-use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use chelis_reef::EmbeddedRuntime;
 
-/// The version of chelis-std these embedded bytes provide. Hand-
-/// maintained in lockstep with `crates/chelis-reef/src/lib.rs`'s
-/// `BUNDLED_CHELIS_STD_VERSION` constant and with
-/// `packages/chelis-std/reef.toml`'s `[package].version`. The
-/// `bundled_chelis_std_version_matches_packages_manifest` test in
-/// chelis-reef and `archive_self_consistency` here assert agreement.
-pub const BUNDLED_CHELIS_STD_VERSION: &str = "0.4.0";
+/// The chelis-std version `packages/chelis-std/reef.toml` names.
+pub const BUNDLED_CHELIS_STD_VERSION: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/chelis-std.version"));
 
-/// The compile-time-embedded zstd-compressed tar archive of the
-/// chelis-std source tree. Layout inside the archive mirrors the
-/// `packages/chelis-std/` source dir: `reef.toml`, `src/*.ch`, etc.
-/// Same shape as the on-disk artifact `chelis reef build` produces
-/// for any reef package.
-pub const CHELIS_STD_ARCHIVE: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/dist/chelis-std-0.4.0.tar.zst"
-));
+/// The zstd-compressed tar archive of the chelis-std sources, as
+/// `chelis reef build` writes `dist/chelis-std-<version>.tar.zst`.
+pub const CHELIS_STD_ARCHIVE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/chelis-std.tar.zst"));
 
-/// The compile-time-embedded `ShellPackage` (bincode) for chelis-std,
-/// covering its public surface (modules, exports, types). Same shape
-/// as `<name>-<version>.chb` produced by `chelis reef build`.
-pub const CHELIS_STD_SHELL: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/dist/chelis-std-0.4.0.chb"
-));
+/// The chelis-std shell, as `chelis reef build` writes
+/// `dist/chelis-std-<version>.chb`.
+pub const CHELIS_STD_SHELL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/chelis-std.chb"));
 
-/// SHA256 of [`CHELIS_STD_ARCHIVE`], computed at runtime on first
-/// access. Used by the reef loader to fill `LockedDependency.archive_sha256`
-/// for synthesized `Bundled` lockfile entries.
-pub fn archive_sha256() -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(CHELIS_STD_ARCHIVE);
-    hex_encode(&hasher.finalize())
-}
+/// The runtime a binary passes to every graph entry point.
+pub static EMBEDDED_RUNTIME: EmbeddedRuntime = EmbeddedRuntime::new(
+    BUNDLED_CHELIS_STD_VERSION,
+    CHELIS_STD_ARCHIVE,
+    CHELIS_STD_SHELL,
+);
 
-/// SHA256 of [`CHELIS_STD_SHELL`], computed at runtime on first
-/// access. Used by the reef loader to fill `LockedDependency.shell_sha256`
-/// for synthesized `Bundled` lockfile entries.
-pub fn shell_sha256() -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(CHELIS_STD_SHELL);
-    hex_encode(&hasher.finalize())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write;
-        let _ = write!(&mut out, "{b:02x}");
-    }
-    out
-}
-
-/// Decompress and untar [`CHELIS_STD_ARCHIVE`] into `dest`. The
-/// directory is created if it does not already exist. After this
-/// returns successfully, `dest` will contain a chelis-std package
-/// tree (`reef.toml`, `src/`, etc.) suitable for
-/// `load_package_modules` and `read_manifest`.
-///
-/// Errors propagate as plain strings to match the chelis-reef error
-/// idiom — the caller wraps in its richer error type.
-pub fn extract_into(dest: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dest).map_err(|e| {
-        format!(
-            "failed to create chelis-std bundle dest {}: {e}",
-            dest.display()
-        )
-    })?;
-    let decoder = zstd::stream::read::Decoder::new(CHELIS_STD_ARCHIVE)
-        .map_err(|e| format!("failed to start zstd decoder for chelis-std bundle: {e}"))?;
-    let mut archive = tar::Archive::new(decoder);
-    archive.unpack(dest).map_err(|e| {
-        format!(
-            "failed to unpack chelis-std bundle into {}: {e}",
-            dest.display()
-        )
-    })?;
-    Ok(())
-}
-
-/// Decompress [`CHELIS_STD_ARCHIVE`] into memory: every regular file keyed
-/// by its package-relative path (`reef.toml`, `src/io/json.ch`, ...).
-///
-/// This is the loader's view of the runtime (chelis#2616). Reading the
-/// archive in memory gives the bundled package no filesystem location, so
-/// nothing is written to disk, nothing can leak, and no path can enter a
-/// cache. An entry that is not a regular file, or whose path is absolute or
-/// climbs out of the package, is an error rather than a skip.
-pub fn archive_files() -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
-    let decoder = zstd::stream::read::Decoder::new(CHELIS_STD_ARCHIVE)
-        .map_err(|e| format!("failed to start zstd decoder for chelis-std bundle: {e}"))?;
-    let mut archive = tar::Archive::new(decoder);
-    let mut files = BTreeMap::new();
-    for entry in archive
-        .entries()
-        .map_err(|e| format!("failed to read chelis-std bundle entries: {e}"))?
-    {
-        let mut entry =
-            entry.map_err(|e| format!("failed to read chelis-std bundle entry: {e}"))?;
-        let path = entry
-            .path()
-            .map_err(|e| format!("chelis-std bundle entry has an unreadable path: {e}"))?
-            .into_owned();
-        if !entry.header().entry_type().is_file() {
-            return Err(format!(
-                "chelis-std bundle entry `{}` is not a regular file",
-                path.display()
-            ));
-        }
-        let mut relative = PathBuf::new();
-        for component in path.components() {
-            match component {
-                Component::Normal(part) => relative.push(part),
-                Component::CurDir => {}
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                    return Err(format!(
-                        "chelis-std bundle entry `{}` leaves the package root",
-                        path.display()
-                    ));
-                }
-            }
-        }
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).map_err(|e| {
-            format!(
-                "failed to read chelis-std bundle entry `{}`: {e}",
-                path.display()
-            )
-        })?;
-        if files.insert(relative, bytes).is_some() {
-            return Err(format!(
-                "chelis-std bundle entry `{}` appears twice",
-                path.display()
-            ));
-        }
-    }
-    Ok(files)
-}
+#[cfg(test)]
+#[path = "../build/stage.rs"]
+mod stage;
 
 #[cfg(test)]
 mod tests {
@@ -194,37 +45,74 @@ mod tests {
     use chelis_shell::{
         SHELL_FORMAT_VERSION, TypeVariableDomain, TypeVariableRestriction, decode_shell,
     };
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
-    /// The embedded shell bincode must agree with the embedded
-    /// archive: same `(name, version)` pair, same `archive_sha256`.
-    /// This is the same invariant `install_validated_artifact_pair`
-    /// asserts at install time; we lock it here at compile-time-bundle
-    /// granularity so a stale dist/ in a commit cannot land green.
+    fn std_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std")
+    }
+
+    /// A copy of the runtime inputs in `dir`, the tree a test edits.
+    fn std_copy(dir: &Path) -> PathBuf {
+        let copy = dir.join("chelis-std");
+        stage::stage(&std_root(), &copy).expect("copy the chelis-std inputs");
+        copy
+    }
+
+    /// Pack `root` exactly as the build script packs `packages/chelis-std`.
+    fn pack_as_build_script(root: &Path, dir: &Path) -> chelis_reef::PackedPackage {
+        let staged = dir.join("staged");
+        stage::stage(root, &staged).expect("stage the runtime inputs");
+        stage::pack(&staged).expect("pack the staged runtime")
+    }
+
+    fn assert_embedded(packed: &chelis_reef::PackedPackage) {
+        assert!(
+            packed.archive == CHELIS_STD_ARCHIVE,
+            "packed archive differs from the embedded archive"
+        );
+        assert!(
+            packed.shell == CHELIS_STD_SHELL,
+            "packed shell differs from the embedded shell"
+        );
+    }
+
+    /// The embedded shell names the embedded archive and the manifest
+    /// version, the invariant the installer checks for any artifact pair.
     #[test]
     fn archive_self_consistency() {
         let shell = decode_shell(CHELIS_STD_SHELL).expect("decode embedded shell");
         assert_eq!(shell.package.name, "chelis-std");
         assert_eq!(shell.package.version, BUNDLED_CHELIS_STD_VERSION);
-        assert_eq!(
-            shell.archive_sha256,
-            archive_sha256(),
-            "embedded shell's archive_sha256 must match the embedded archive bytes: \
-             rerun scripts/regenerate_chelis_std_bundle.py and commit the result"
-        );
+        assert_eq!(shell.archive_sha256, EMBEDDED_RUNTIME.archive_sha256());
     }
 
     #[test]
-    fn package_and_embedded_shells_preserve_std_test_active_float_scheme() {
-        let package_shell = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packages/chelis-std/dist")
-            .join(format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}.chb"));
-        let package_bytes = std::fs::read(&package_shell).expect("read package CHB");
-        assert_eq!(
-            package_bytes, CHELIS_STD_SHELL,
-            "package and compile-time embedded CHB bytes must agree"
-        );
+    fn version_is_the_std_manifest_version() {
+        let manifest = chelis_reef::read_manifest_for_src(&std_root()).expect("read manifest");
+        assert_eq!(BUNDLED_CHELIS_STD_VERSION, manifest.package.version);
+        assert_eq!(EMBEDDED_RUNTIME.version(), manifest.package.version);
+    }
 
+    /// The build-time pair is byte-identical to the pair committed before the
+    /// runtime was packed at build time.
+    #[test]
+    fn build_time_pair_matches_the_committed_pair() {
+        for dist in [
+            std_root().join("dist"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("dist"),
+        ] {
+            let stem = format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}");
+            let archive = std::fs::read(dist.join(format!("{stem}.tar.zst"))).expect("archive");
+            let shell = std::fs::read(dist.join(format!("{stem}.chb"))).expect("shell");
+            assert!(archive == CHELIS_STD_ARCHIVE, "{} archive", dist.display());
+            assert!(shell == CHELIS_STD_SHELL, "{} shell", dist.display());
+        }
+    }
+
+    #[test]
+    fn embedded_shell_preserves_std_test_active_float_scheme() {
         let shell = decode_shell(CHELIS_STD_SHELL).expect("decode embedded shell");
         assert_eq!(shell.format_version, SHELL_FORMAT_VERSION);
         let symbol = shell
@@ -250,46 +138,22 @@ mod tests {
         assert!(type_repr.matches("(t-var {} t0)").count() >= 3);
     }
 
-    /// The extract path must produce a tree that `chelis-reef` can
-    /// read as a normal reef package: a `reef.toml` at the root, a
-    /// `src/` subdirectory with at least one `.ch` file.
+    /// An extraction is a reef package tree whose `compiler =` pin is this
+    /// build's version, the pin `validate_manifest` requires when the runtime
+    /// loads.
     #[test]
     fn extract_yields_reef_package_layout() {
         let dir = tempdir().expect("tempdir");
-        extract_into(dir.path()).expect("extract bundle");
+        EMBEDDED_RUNTIME
+            .extract_into(dir.path())
+            .expect("extract bundle");
 
-        let reef_toml = dir.path().join("reef.toml");
-        assert!(reef_toml.is_file(), "reef.toml missing after extract");
-        let manifest = std::fs::read_to_string(&reef_toml).expect("read reef.toml");
-        assert!(
-            manifest.contains("name = \"chelis-std\""),
-            "reef.toml must declare name = chelis-std; got: {manifest}"
-        );
-
-        // The embedded archive carries chelis-std's own `reef.toml`, and
-        // its `compiler =` pin is read through `validate_manifest` when the
-        // bundled runtime is loaded. `validate_manifest` rejects any pin
-        // other than `=<current compiler version>`, so a stale embedded
-        // pin makes every chelis-std-importing program fail at load with
-        // "package.compiler must be `=X.Y.Z`". That is exactly the failure
-        // mode that broke the 0.9.0 release: the workspace version and
-        // `packages/chelis-std/reef.toml` were bumped, but these embedded
-        // bytes were never regenerated, so they still pinned the prior
-        // version. The bundle crate's `CARGO_PKG_VERSION` marches with the
-        // workspace, so assert the embedded pin equals it; a mismatch means
-        // `scripts/regenerate_chelis_std_bundle.py` was not rerun after the
-        // bump.
+        let manifest = std::fs::read_to_string(dir.path().join("reef.toml")).expect("reef.toml");
+        assert!(manifest.contains("name = \"chelis-std\""), "{manifest}");
         let expected_compiler_line = format!("compiler = \"={}\"", env!("CARGO_PKG_VERSION"));
-        assert!(
-            manifest.contains(&expected_compiler_line),
-            "embedded chelis-std reef.toml must pin {expected_compiler_line:?}; \
-             rerun scripts/regenerate_chelis_std_bundle.py and commit \
-             crates/chelis-std-bundle/dist/. got:\n{manifest}"
-        );
+        assert!(manifest.contains(&expected_compiler_line), "{manifest}");
 
-        let src = dir.path().join("src");
-        assert!(src.is_dir(), "src/ missing after extract");
-        let any_ch = std::fs::read_dir(&src)
+        let any_ch = std::fs::read_dir(dir.path().join("src"))
             .expect("read src/")
             .filter_map(|e| e.ok())
             .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("ch"));
@@ -301,7 +165,9 @@ mod tests {
     #[test]
     fn archive_files_match_an_extracted_tree() {
         let dir = tempdir().expect("tempdir");
-        extract_into(dir.path()).expect("extract bundle");
+        EMBEDDED_RUNTIME
+            .extract_into(dir.path())
+            .expect("extract bundle");
         let mut on_disk = BTreeMap::new();
         let mut pending = vec![dir.path().to_path_buf()];
         while let Some(current) = pending.pop() {
@@ -310,25 +176,219 @@ mod tests {
                 if path.is_dir() {
                     pending.push(path);
                 } else {
-                    let relative = path
-                        .strip_prefix(dir.path())
-                        .expect("relative")
-                        .to_path_buf();
-                    on_disk.insert(relative, std::fs::read(&path).expect("read extracted file"));
+                    let relative = path.strip_prefix(dir.path()).expect("relative");
+                    on_disk.insert(relative.to_path_buf(), std::fs::read(&path).expect("read"));
                 }
             }
         }
-        let in_memory = archive_files().expect("read archive in memory");
+        let in_memory = EMBEDDED_RUNTIME
+            .archive_files()
+            .expect("read archive in memory");
         assert!(in_memory.contains_key(Path::new("reef.toml")));
-        assert_eq!(in_memory, on_disk);
+        assert_eq!(in_memory, &on_disk);
     }
 
+    /// The archive holds exactly the staged inputs: the manifest and the
+    /// `.ch` sources, nothing else from the source tree.
     #[test]
-    fn version_constant_matches_archive_path() {
-        // The path-template hardcoded in include_bytes!() encodes the
-        // version. Keep this assertion as a reminder that bumping
-        // the constant requires updating both lib.rs (here) and the
-        // build.rs file-existence check.
-        assert_eq!(BUNDLED_CHELIS_STD_VERSION, "0.4.0");
+    fn archive_members_are_the_runtime_inputs() {
+        let inputs = stage::runtime_inputs(&std_root()).expect("runtime inputs");
+        let members = EMBEDDED_RUNTIME
+            .archive_files()
+            .expect("archive files")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(members, inputs);
+    }
+
+    /// The build script asks cargo to rerun when a watched path changes, so
+    /// every input must lie under one.
+    #[test]
+    fn every_runtime_input_is_watched() {
+        let watched = stage::watched_paths(&std_root()).expect("watched paths");
+        for input in stage::runtime_inputs(&std_root()).expect("runtime inputs") {
+            assert!(
+                watched.iter().any(|path| input.starts_with(path)),
+                "{} is not under a watched path",
+                input.display()
+            );
+        }
+    }
+
+    /// Selection keeps the manifest, `.ch` files under every declared source
+    /// root, and declared metadata files, and drops everything else.
+    #[test]
+    fn staging_selects_sources_manifest_and_declared_metadata() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let write = |relative: &str, text: &str| {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "reef.toml",
+            &format!(
+                "schema = \"3\"\n[package]\nname = \"chelis-std\"\nversion = \"0.0.1\"\n\
+                 compiler = \"={}\"\nmodule_prefix = \"Std\"\nresolver = \"2\"\n\
+                 additional_sources = [\"extra\"]\nreadme = \"README.md\"\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
+        write("src/a.ch", "module Std.A\n");
+        write("src/nested/b.ch", "module Std.Nested.B\n");
+        write("src/.DS_Store", "litter");
+        write("src/notes.txt", "litter");
+        write("extra/c.ch", "module Std.C\n");
+        write("extra/c.ch.swp", "litter");
+        write("README.md", "readme");
+        write("tests/t.ch", "module Std.T\n");
+        let inputs = stage::runtime_inputs(root).expect("runtime inputs");
+        let expected = [
+            "README.md",
+            "extra/c.ch",
+            "reef.toml",
+            "src/a.ch",
+            "src/nested/b.ch",
+        ]
+        .map(PathBuf::from);
+        assert_eq!(inputs, expected);
+    }
+
+    /// A file that is not a runtime input, such as the `.DS_Store` Finder
+    /// writes, does not change the bundle.
+    #[test]
+    fn a_stray_file_in_std_src_does_not_change_the_bundle() {
+        let dir = tempdir().expect("tempdir");
+        let copy = std_copy(dir.path());
+        std::fs::write(copy.join("src/.DS_Store"), b"\0\0\0\x01Bud1").unwrap();
+        std::fs::write(copy.join("src/io/notes.txt"), b"scratch").unwrap();
+        assert_embedded(&pack_as_build_script(&copy, dir.path()));
+    }
+
+    /// The archive mtime is pinned, so the `SOURCE_DATE_EPOCH` nixpkgs and
+    /// other reproducible-build drivers export does not change the bundle,
+    /// although `chelis reef build` honors it.
+    #[test]
+    fn source_date_epoch_does_not_change_the_bundle() {
+        // SAFETY: this test owns its process under the workspace test runner,
+        // and no other thread reads the environment while it is set.
+        unsafe { std::env::set_var("SOURCE_DATE_EPOCH", "1700000000") };
+        let dir = tempdir().expect("tempdir");
+        let packed = pack_as_build_script(&std_root(), dir.path());
+        unsafe { std::env::remove_var("SOURCE_DATE_EPOCH") };
+        assert_embedded(&packed);
+    }
+
+    /// Workspace packages and their declared normal and build dependencies on
+    /// other workspace packages, from `cargo metadata`. Dev-dependencies are
+    /// left out: they reach only test harnesses.
+    fn workspace_library_edges() -> BTreeMap<String, Vec<String>> {
+        let output = std::process::Command::new(env!("CARGO"))
+            .args([
+                "metadata",
+                "--no-deps",
+                "--offline",
+                "--format-version",
+                "1",
+            ])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("run cargo metadata");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("cargo metadata JSON");
+        let packages = metadata["packages"].as_array().expect("packages");
+        let names = packages
+            .iter()
+            .map(|package| package["name"].as_str().expect("name").to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        packages
+            .iter()
+            .map(|package| {
+                let edges = package["dependencies"]
+                    .as_array()
+                    .expect("dependencies")
+                    .iter()
+                    .filter(|dependency| dependency["kind"].as_str() != Some("dev"))
+                    .map(|dependency| dependency["name"].as_str().expect("name").to_string())
+                    .filter(|name| names.contains(name))
+                    .collect();
+                (package["name"].as_str().unwrap().to_string(), edges)
+            })
+            .collect()
+    }
+
+    fn library_closure(edges: &BTreeMap<String, Vec<String>>, root: &str) -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut pending = vec![root.to_string()];
+        while let Some(package) = pending.pop() {
+            if seen.insert(package.clone()) {
+                pending.extend(edges.get(&package).into_iter().flatten().cloned());
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    /// Libraries take the runtime as a parameter, so checking or building one
+    /// never packs the std: the bundle is outside their dependency graphs.
+    #[test]
+    fn libraries_build_without_the_bundle() {
+        let edges = workspace_library_edges();
+        for library in ["chelis-types", "chelis-reef", "chelis-compiler-api"] {
+            let closure = library_closure(&edges, library);
+            assert!(
+                !closure.iter().any(|package| package == "chelis-std-bundle"),
+                "{library} reaches chelis-std-bundle through {closure:?}"
+            );
+        }
+    }
+
+    /// Only a final artifact (a binary or an extension module) depends on the
+    /// bundle; no workspace package depends on such a package in turn.
+    #[test]
+    fn only_final_artifacts_depend_on_the_bundle() {
+        let edges = workspace_library_edges();
+        let dependents = edges
+            .iter()
+            .filter(|(_, deps)| deps.iter().any(|dep| dep == "chelis-std-bundle"))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        assert!(!dependents.is_empty(), "no binary embeds the runtime");
+        for dependent in dependents {
+            let users = edges
+                .iter()
+                .filter(|(_, deps)| deps.contains(&dependent))
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                users.is_empty(),
+                "{dependent} embeds the runtime but {users:?} depend on it"
+            );
+        }
+    }
+
+    /// Editing a std source changes both packed artifacts, and reverting the
+    /// edit restores the embedded bytes exactly.
+    #[test]
+    fn a_std_source_edit_changes_the_bundle_and_reverting_restores_it() {
+        let dir = tempdir().expect("tempdir");
+        let copy = std_copy(dir.path());
+        let edited = copy.join("src/text.ch");
+        let original = std::fs::read(&edited).expect("read std source");
+        let mut changed = original.clone();
+        changed.extend_from_slice(b"\n-- an edit\n");
+        std::fs::write(&edited, &changed).unwrap();
+        let packed = pack_as_build_script(&copy, &dir.path().join("edited"));
+        assert!(packed.archive != CHELIS_STD_ARCHIVE, "archive unchanged");
+        assert!(packed.shell != CHELIS_STD_SHELL, "shell unchanged");
+
+        std::fs::write(&edited, &original).unwrap();
+        assert_embedded(&pack_as_build_script(&copy, &dir.path().join("reverted")));
     }
 }

@@ -31,6 +31,7 @@ use walkdir::WalkDir;
 pub mod chelis_src;
 pub mod declared_surface;
 mod document_schema;
+mod embedded_runtime;
 /// Typed package identities and deterministic bounded local resolution.
 mod package_metadata;
 #[doc(hidden)]
@@ -48,6 +49,8 @@ pub use remote_discovery::{
     inspect_candidate_manifest_archive, outdated_project, update_project,
 };
 
+pub use embedded_runtime::EmbeddedRuntime;
+
 pub use document_schema::{
     DocumentUpgradeError, LockSchemaVersion, ManifestSchemaVersion, UpgradeMode, UpgradeReport,
     lock_schema_v1_json, manifest_schema_v1_json, manifest_schema_v2_json, manifest_schema_v3_json,
@@ -55,28 +58,6 @@ pub use document_schema::{
 };
 
 const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
-
-/// Version of `chelis-std` that ships bundled with this compiler.
-/// Re-exported from [`chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION`],
-/// which is the single source of truth: that crate is also where the
-/// `include_bytes!()` for the runtime archive + shell live, and the
-/// version string is keyed off the dist filenames.
-///
-/// chelis-std is the language runtime, not a shell — it version-marches
-/// with the compiler and cannot be substituted. Programs implicitly
-/// depend on it the same way Rust programs depend on `core`/`std`.
-/// Lockfile entries for chelis-std use [`LockSource::Bundled`] (not
-/// [`LockSource::LocalRegistry`]) to make this distinction explicit and
-/// auditable.
-const BUNDLED_CHELIS_STD_VERSION: &str = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
-
-/// Public accessor for the version of chelis-std bundled with this
-/// compiler. Use this when you need to emit a `LockSource::Bundled`
-/// entry, surface a soft-verify mismatch error, or otherwise reason
-/// about the runtime version.
-pub fn compiler_bundled_chelis_std_version() -> &'static str {
-    BUNDLED_CHELIS_STD_VERSION
-}
 
 /// The package name of the language runtime. Centralized so the soft-
 /// verify path, the bootstrap rejection path, and the lockfile-migration
@@ -746,11 +727,14 @@ impl PreparedProgram {
 /// containing `file`. `None` means that `file` is not a Reef package module;
 /// consumers must report that state as unavailable, not as a complete empty
 /// graph.
-pub fn dependency_graph_for_file(file: &Path) -> Result<Option<CompilerDependencyGraph>, String> {
+pub fn dependency_graph_for_file(
+    file: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<Option<CompilerDependencyGraph>, String> {
     let Some(root) = find_package_root_for_input(file)? else {
         return Ok(None);
     };
-    let graph = prepare_reef_graph_cached(&root)?;
+    let graph = prepare_reef_graph_cached(&root, runtime)?;
     Ok(Some(graph.compiler_dependency_graph()?))
 }
 
@@ -1824,7 +1808,11 @@ impl PreparedReefGraph {
     /// This graph, relinked when `entries` import a chelis-std module it
     /// does not link yet (chelis#2558). The graph is returned unchanged when
     /// it already links every module the entries reach.
-    pub fn covering(&self, entries: &EntryImports) -> Result<Cow<'_, Self>, String> {
+    pub fn covering(
+        &self,
+        entries: &EntryImports,
+        runtime: &'static EmbeddedRuntime,
+    ) -> Result<Cow<'_, Self>, String> {
         let linked = self.linked_stdlib_modules();
         let mut roots = linked.clone();
         roots.extend(stdlib_imports_of(
@@ -1835,8 +1823,13 @@ impl PreparedReefGraph {
         if linked_stdlib_closure(&self.graph, &roots) == linked {
             return Ok(Cow::Borrowed(self));
         }
-        prepare_graph_from_loaded(self.package_root.clone(), self.graph.clone(), &roots)
-            .map(Cow::Owned)
+        prepare_graph_from_loaded(
+            self.package_root.clone(),
+            self.graph.clone(),
+            &roots,
+            runtime,
+        )
+        .map(Cow::Owned)
     }
 
     /// Returns a content digest for the complete live `.ch` inventory under
@@ -1850,15 +1843,23 @@ impl PreparedReefGraph {
     /// deterministic ordering is guaranteed by sorting on
     /// (package_name, package_version, inventory_path) before returning.
     ///
-    pub fn source_digests(&self) -> Result<Vec<SourceDigest>, String> {
-        self.source_digests_inner(false)
+    /// The bundled runtime's rows come from `runtime`, which must be the
+    /// runtime the graph was loaded from.
+    pub fn source_digests(
+        &self,
+        runtime: &'static EmbeddedRuntime,
+    ) -> Result<Vec<SourceDigest>, String> {
+        self.source_digests_inner(false, runtime)
     }
 
-    fn compute_stdlib_source_digest(&self) -> Result<[u8; 32], String> {
+    fn compute_stdlib_source_digest(
+        &self,
+        runtime: &'static EmbeddedRuntime,
+    ) -> Result<[u8; 32], String> {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis-std-exact-source-v1");
         for digest in self
-            .source_digests()?
+            .source_digests(runtime)?
             .into_iter()
             .filter(|digest| digest.package_name == CHELIS_STD_PACKAGE_NAME)
         {
@@ -1873,13 +1874,17 @@ impl PreparedReefGraph {
         Ok(hasher.finalize().into())
     }
 
-    fn validated_source_digests(&self) -> Result<Vec<SourceDigest>, String> {
-        self.source_digests_inner(true)
+    fn validated_source_digests(
+        &self,
+        runtime: &'static EmbeddedRuntime,
+    ) -> Result<Vec<SourceDigest>, String> {
+        self.source_digests_inner(true, runtime)
     }
 
     fn source_digests_inner(
         &self,
         validate_graph_against_snapshot: bool,
+        runtime: &'static EmbeddedRuntime,
     ) -> Result<Vec<SourceDigest>, String> {
         let mut digests = Vec::new();
         for package in self.graph.packages.values() {
@@ -1892,9 +1897,7 @@ impl PreparedReefGraph {
                     validate_graph_against_snapshot,
                     &mut digests,
                 )?,
-                LoadedSourceKind::Bundled => {
-                    push_bundled_runtime_source_digests(package, &mut digests)?
-                }
+                LoadedSourceKind::Bundled => runtime.push_source_digests(package, &mut digests)?,
                 // A single-file program's implicit root has no sources of its
                 // own: its file is the entry, which no graph digest covers.
                 LoadedSourceKind::SingleFile => {}
@@ -2404,7 +2407,10 @@ fn find_package_root_from_dir(mut dir: PathBuf) -> Result<Option<PathBuf>, Strin
 /// ([`prepare_single_file_program`]). `Ok(None)` means there is nothing to
 /// link: `file` is outside every package and imports nothing, or it cannot
 /// be read or parsed as Surf, which the caller reports in its own shape.
-pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, String> {
+pub fn prepare_program_for_file(
+    file: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<Option<PreparedProgram>, String> {
     let Some(root) = find_package_root_for_input(file)? else {
         let Ok(source) = fs::read_to_string(file) else {
             return Ok(None);
@@ -2412,10 +2418,10 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
         let Ok(decls) = chelis_surf::parser::parse_str(&source) else {
             return Ok(None);
         };
-        return prepare_single_file_program(&file.display().to_string(), &decls);
+        return prepare_single_file_program(&file.display().to_string(), &decls, runtime);
     };
     let lock_path = root.join("reef.lock");
-    let graph = match prepare_reef_graph_cached(&root) {
+    let graph = match prepare_reef_graph_cached(&root, runtime) {
         Ok(graph) => graph,
         // `prepare_program_for_file` historically repairs an absent or
         // obsolete lockfile by resolving the manifest and rewriting the lock.
@@ -2424,13 +2430,13 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
         Err(_) if !lock_path.exists() => {
             let (loaded, _) = load_package_graph_with_lock_preference(
                 &root,
-                LoadOptions::default_for_load(),
+                LoadOptions::default_for_load(runtime),
                 remote_discovery::LockPublication::Project {
                     project_lock_held: false,
                 },
             )?;
-            write_lockfile(&lock_path, &build_lockfile(&loaded))?;
-            prepare_graph_from_loaded(root.clone(), loaded, &BTreeSet::new())?
+            write_lockfile(&lock_path, &build_lockfile(&loaded, runtime))?;
+            prepare_graph_from_loaded(root.clone(), loaded, &BTreeSet::new(), runtime)?
         }
         Err(error) => return Err(error),
     };
@@ -2440,7 +2446,7 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
     // resolved graph even when the cache supplied it. Otherwise a warm cache
     // makes a successful package build silently omit `reef.lock`.
     if !lock_path.exists() {
-        write_lockfile(&lock_path, &build_lockfile(&graph.graph))?;
+        write_lockfile(&lock_path, &build_lockfile(&graph.graph, runtime))?;
     } else {
         read_lockfile(&lock_path)?;
     }
@@ -2474,18 +2480,19 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
 pub fn prepare_program_for_eval_file(
     file: &Path,
     context_dir: &Path,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<Option<PreparedProgram>, String> {
     let source =
         fs::read_to_string(file).map_err(|e| format!("failed to read {}: {e}", file.display()))?;
     let decls =
         chelis_surf::parser::parse_str(&source).map_err(|e| format!("{}: {e}", file.display()))?;
     if matches!(decls.as_slice(), [Decl::Module { .. }]) {
-        return prepare_program_for_file(file);
+        return prepare_program_for_file(file, runtime);
     }
     if find_package_root_for_dir(context_dir)?.is_none() {
-        return prepare_single_file_program(&file.display().to_string(), &decls);
+        return prepare_single_file_program(&file.display().to_string(), &decls, runtime);
     }
-    prepare_program_for_eval_source(context_dir, &decls)
+    prepare_program_for_eval_source(context_dir, &decls, runtime)
 }
 
 /// The graph name of a single-file program's implicit root package
@@ -2509,6 +2516,7 @@ const SINGLE_FILE_PACKAGE_NAME: &str = "<single-file>";
 pub fn prepare_single_file_program(
     source_label: &str,
     decls: &[Decl],
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<Option<PreparedProgram>, String> {
     let (module_name, decls) = match decls {
         [Decl::Module { name, decls, .. }] => (name.as_str(), decls.as_slice()),
@@ -2521,7 +2529,7 @@ pub fn prepare_single_file_program(
         SINGLE_FILE_PACKAGE_NAME.to_string(),
         single_file_root_package(),
     )]);
-    insert_implicit_runtime(&mut packages)?;
+    insert_implicit_runtime(&mut packages, runtime)?;
     let graph = PackageGraph {
         root_package: SINGLE_FILE_PACKAGE_NAME.to_string(),
         packages,
@@ -2537,7 +2545,7 @@ pub fn prepare_single_file_program(
     // function except inside the returned program, whose `package_root` is
     // `None`, and `is_single_file` keeps the lockfile digest off the empty
     // path.
-    let graph = prepare_graph_from_loaded(PathBuf::new(), graph, &roots)?;
+    let graph = prepare_graph_from_loaded(PathBuf::new(), graph, &roots, runtime)?;
     let entry_decls = rewrite_single_file_decls(&graph, module_name, decls)?;
     Ok(Some(assemble_rewritten_entry_program(&graph, &entry_decls)))
 }
@@ -2669,7 +2677,10 @@ fn rewrite_single_file_decls(
 /// actionable error with the attempted directory, not a silent `None` that
 /// loses information; the old-path `Ok(None)` semantics live on in
 /// [`prepare_program_for_eval_source`] where that return is load-bearing.
-pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, String> {
+pub fn prepare_reef_graph(
+    context_dir: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<PreparedReefGraph, String> {
     let Some(root) = find_package_root_for_dir(context_dir)? else {
         return Err(format!(
             "no reef.toml found in `{}` or any parent up to $HOME: \
@@ -2678,8 +2689,8 @@ pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, Strin
             context_dir.display()
         ));
     };
-    let graph = load_package_graph_for_eval(&root)?;
-    prepare_graph_from_loaded(root, graph, &BTreeSet::new())
+    let graph = load_package_graph_for_eval(&root, runtime)?;
+    prepare_graph_from_loaded(root, graph, &BTreeSet::new(), runtime)
 }
 
 /// [`prepare_reef_graph_cached`], extended to link every chelis-std module
@@ -2689,9 +2700,10 @@ pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, Strin
 pub fn prepare_reef_graph_for_entries(
     context_dir: &Path,
     entries: &EntryImports,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<PreparedReefGraph, String> {
-    let graph = prepare_reef_graph_cached(context_dir)?;
-    Ok(graph.covering(entries)?.into_owned())
+    let graph = prepare_reef_graph_cached(context_dir, runtime)?;
+    Ok(graph.covering(entries, runtime)?.into_owned())
 }
 
 /// Resolve, link, and name the prepared graph. Only the chelis-std modules
@@ -2702,6 +2714,7 @@ fn prepare_graph_from_loaded(
     root: PathBuf,
     graph: PackageGraph,
     stdlib_roots: &BTreeSet<String>,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<PreparedReefGraph, String> {
     let stdlib_closure = linked_stdlib_closure(&graph, stdlib_roots);
     let linked = link_graph_with_package_tags(&graph, &[], &stdlib_closure)?;
@@ -2790,7 +2803,7 @@ fn prepare_graph_from_loaded(
         dep_shells,
         eval_module_prefix,
     };
-    prepared.stdlib_source_digest = prepared.compute_stdlib_source_digest()?;
+    prepared.stdlib_source_digest = prepared.compute_stdlib_source_digest(runtime)?;
     Ok(prepared)
 }
 
@@ -2834,7 +2847,10 @@ struct PreparedGraphCacheEnvelope {
 /// Cache corruption and version skew are observable on stderr, then fail
 /// safely to a normal graph rebuild. The cache never changes stdout, which
 /// preserves NDJSON consumers.
-pub fn prepare_reef_graph_cached(context_dir: &Path) -> Result<PreparedReefGraph, String> {
+pub fn prepare_reef_graph_cached(
+    context_dir: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<PreparedReefGraph, String> {
     let Some(root) = find_package_root_for_dir(context_dir)? else {
         return Err(format!(
             "no reef.toml found in `{}` or any parent up to $HOME: \
@@ -2844,10 +2860,10 @@ pub fn prepare_reef_graph_cached(context_dir: &Path) -> Result<PreparedReefGraph
         ));
     };
     let Some(cache_path) = prepared_graph_cache_path(&root) else {
-        return prepare_reef_graph(&root);
+        return prepare_reef_graph(&root, runtime);
     };
 
-    match load_prepared_graph_cache(&cache_path, &root) {
+    match load_prepared_graph_cache(&cache_path, &root, runtime) {
         Ok(Some(graph)) => return Ok(graph),
         Ok(None) => {}
         Err(message) => eprintln!(
@@ -2856,7 +2872,7 @@ pub fn prepare_reef_graph_cached(context_dir: &Path) -> Result<PreparedReefGraph
         ),
     }
 
-    let (graph, source_hash) = prepare_reef_graph_consistently(&root, || {})?;
+    let (graph, source_hash) = prepare_reef_graph_consistently(&root, runtime, || {})?;
     if let Err(message) = save_prepared_graph_cache_with_hash(&cache_path, &graph, source_hash) {
         eprintln!(
             "chelis reef: warning: failed to save prepared graph cache to {}: {message}",
@@ -2873,17 +2889,18 @@ pub fn prepare_reef_graph_cached(context_dir: &Path) -> Result<PreparedReefGraph
 /// parsed from one version under another version's hash.
 fn prepare_reef_graph_consistently(
     root: &Path,
+    runtime: &'static EmbeddedRuntime,
     mut after_candidate_build: impl FnMut(),
 ) -> Result<(PreparedReefGraph, [u8; 32]), String> {
     const MAX_ATTEMPTS: usize = 3;
 
-    let mut topology = prepare_reef_graph(root)?;
+    let mut topology = prepare_reef_graph(root, runtime)?;
     let mut last_validation_error = None;
     for _ in 0..MAX_ATTEMPTS {
-        let before = prepared_graph_source_hash(&topology)?;
-        let candidate = prepare_reef_graph(root)?;
+        let before = prepared_graph_source_hash(&topology, runtime)?;
+        let candidate = prepare_reef_graph(root, runtime)?;
         after_candidate_build();
-        match prepared_graph_validated_source_hash(&candidate) {
+        match prepared_graph_validated_source_hash(&candidate, runtime) {
             Ok(after) if before == after => return Ok((candidate, before)),
             Ok(_) => {
                 topology = candidate;
@@ -2956,12 +2973,18 @@ fn prepared_graph_cache_key_input_bytes_for_identity(
     Ok(inputs)
 }
 
-fn prepared_graph_source_hash(graph: &PreparedReefGraph) -> Result<[u8; 32], String> {
-    prepared_graph_source_hash_from_digests(graph.source_digests()?)
+fn prepared_graph_source_hash(
+    graph: &PreparedReefGraph,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<[u8; 32], String> {
+    prepared_graph_source_hash_from_digests(graph.source_digests(runtime)?)
 }
 
-fn prepared_graph_validated_source_hash(graph: &PreparedReefGraph) -> Result<[u8; 32], String> {
-    prepared_graph_source_hash_from_digests(graph.validated_source_digests()?)
+fn prepared_graph_validated_source_hash(
+    graph: &PreparedReefGraph,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<[u8; 32], String> {
+    prepared_graph_source_hash_from_digests(graph.validated_source_digests(runtime)?)
 }
 
 fn prepared_graph_source_hash_from_digests(digests: Vec<SourceDigest>) -> Result<[u8; 32], String> {
@@ -2982,6 +3005,7 @@ fn prepared_graph_source_hash_from_digests(digests: Vec<SourceDigest>) -> Result
 fn load_prepared_graph_cache(
     path: &Path,
     expected_root: &Path,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<Option<PreparedReefGraph>, String> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -3018,15 +3042,19 @@ fn load_prepared_graph_cache(
     if live_root != cached_root {
         return Ok(None);
     }
-    if prepared_graph_source_hash(&graph)? != envelope.source_hash {
+    if prepared_graph_source_hash(&graph, runtime)? != envelope.source_hash {
         return Ok(None);
     }
     Ok(Some(graph))
 }
 
 #[cfg(test)]
-fn save_prepared_graph_cache(path: &Path, graph: &PreparedReefGraph) -> Result<(), String> {
-    let source_hash = prepared_graph_source_hash(graph)?;
+fn save_prepared_graph_cache(
+    path: &Path,
+    graph: &PreparedReefGraph,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<(), String> {
+    let source_hash = prepared_graph_source_hash(graph, runtime)?;
     save_prepared_graph_cache_with_hash(path, graph, source_hash)
 }
 
@@ -3372,8 +3400,9 @@ pub fn compile_rewritten_entry_batch_with_reef_graph(
 pub fn compile_with_reef_graph(
     graph: &PreparedReefGraph,
     entry_decls: &[Decl],
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<PreparedProgram, String> {
-    let graph = graph.covering(&EntryImports::from_decls(entry_decls))?;
+    let graph = graph.covering(&EntryImports::from_decls(entry_decls), runtime)?;
     let rewritten_entry_decls = rewrite_entry_decls_with_reef_graph(&graph, entry_decls)?;
     Ok(assemble_rewritten_entry_program(
         &graph,
@@ -3437,14 +3466,19 @@ fn load_locked_manifest_for_assessment(
         }
         LockSource::Bundled { .. } => {
             // The runtime comes from this compiler, never from a registry.
-            if !is_bundled_runtime(&dependency.name, &dependency.version) {
+            if !options
+                .runtime
+                .provides(&dependency.name, &dependency.version)
+            {
                 return Err(format!(
-                    "bundled package `{}` `{}` is unavailable: this compiler bundles `{CHELIS_STD_PACKAGE_NAME}` `{BUNDLED_CHELIS_STD_VERSION}`",
-                    dependency.name, dependency.version
+                    "bundled package `{}` `{}` is unavailable: this compiler bundles `{CHELIS_STD_PACKAGE_NAME}` `{}`",
+                    dependency.name,
+                    dependency.version,
+                    options.runtime.version()
                 ));
             }
-            let runtime = bundled_runtime_package()?;
-            let manifest = bundled_runtime_manifest(bundled_runtime_files()?)?;
+            let runtime = options.runtime.package()?;
+            let manifest = options.runtime.manifest()?;
             (manifest, None, runtime.archive_sha256, runtime.shell_sha256)
         }
         LockSource::LocalRegistry { remote_origin } => {
@@ -3522,19 +3556,21 @@ fn assess_transitive_lock(
     let mut reasons = Vec::new();
     let mut pending = vec![root_manifest.typed.package.name.to_string()];
     let mut reachable = BTreeSet::new();
-    if let Some(runtime) = lock_by_name.get(CHELIS_STD_PACKAGE_NAME) {
-        let source_matches = match &runtime.source {
+    if let Some(locked_runtime) = lock_by_name.get(CHELIS_STD_PACKAGE_NAME) {
+        let source_matches = match &locked_runtime.source {
             LockSource::Bundled { compiler_version } => {
                 compiler_version.trim_start_matches('=') == env!("CARGO_PKG_VERSION")
             }
             _ => false,
         };
-        if runtime.version == BUNDLED_CHELIS_STD_VERSION && source_matches {
+        if locked_runtime.version == options.runtime.version() && source_matches {
             pending.push(CHELIS_STD_PACKAGE_NAME.to_string());
         } else {
             reasons.push(format!(
                 "locked runtime `{}` from {:?} differs from compiler-bundled `{}`",
-                runtime.version, runtime.source, BUNDLED_CHELIS_STD_VERSION
+                locked_runtime.version,
+                locked_runtime.source,
+                options.runtime.version()
             ));
         }
     }
@@ -3661,8 +3697,13 @@ fn load_package_graph_with_lock_preference(
     }
     let manifest = read_manifest(&root.join("reef.toml"))?;
     if manifest.typed.resolver == package_versioning::ResolverVersion::Two {
-        let lock = remote_discovery::resolve_project(root, options.auto_fetch, publication)
-            .map_err(|error| error.to_string())?;
+        let lock = remote_discovery::resolve_project(
+            root,
+            options.auto_fetch,
+            publication,
+            options.runtime,
+        )
+        .map_err(|error| error.to_string())?;
         return reconstruct_graph_from_lockfile(root, &lock, options).map(|graph| (graph, true));
     }
     let root_clone = root.to_path_buf();
@@ -3676,10 +3717,13 @@ fn load_package_graph_with_lock_preference(
 
 /// Resolve a graph for eval. A valid lock is the preferred exact solution.
 /// Eval never writes `reef.lock` (chelis#1520); a resolution stays in memory.
-fn load_package_graph_for_eval(root: &Path) -> Result<PackageGraph, String> {
+fn load_package_graph_for_eval(
+    root: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<PackageGraph, String> {
     load_package_graph_with_lock_preference(
         root,
-        LoadOptions::default_for_load(),
+        LoadOptions::default_for_load(runtime),
         remote_discovery::LockPublication::InMemory,
     )
     .map(|(graph, _)| graph)
@@ -3688,6 +3732,7 @@ fn load_package_graph_for_eval(root: &Path) -> Result<PackageGraph, String> {
 pub fn prepare_program_for_eval_source(
     context_dir: &Path,
     entry_decls: &[Decl],
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<Option<PreparedProgram>, String> {
     // Convenience wrapper: preserved for existing callers (chelis eval, the
     // CLI --file path, Deep/IR integration tests) that want the single-shot
@@ -3700,8 +3745,8 @@ pub fn prepare_program_for_eval_source(
     let Some(_) = find_package_root_for_dir(context_dir)? else {
         return Ok(None);
     };
-    let graph = prepare_reef_graph_cached(context_dir)?;
-    compile_with_reef_graph(&graph, entry_decls).map(Some)
+    let graph = prepare_reef_graph_cached(context_dir, runtime)?;
+    compile_with_reef_graph(&graph, entry_decls, runtime).map(Some)
 }
 
 /// Build a package with the default options ([`BuildOptions::default`]),
@@ -3714,8 +3759,11 @@ pub fn prepare_program_for_eval_source(
 /// `BuildOptions { auto_fetch: false }`. Auto-fetch's user-visible
 /// effect is surfaced via stderr ("chelis reef: auto-fetching ...")
 /// so it remains observable, per the locked Item 8 contract invariant.
-pub fn build_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
-    build_package_with_options(root, &BuildOptions::default())
+pub fn build_package(
+    root: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<PackageBuildArtifacts, String> {
+    build_package_with_options(root, &BuildOptions::default(), runtime)
 }
 
 /// Build a package with caller-supplied [`BuildOptions`]. Phase A
@@ -3741,20 +3789,21 @@ pub fn build_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
 pub fn build_package_with_options(
     root: &Path,
     options: &BuildOptions,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<PackageBuildArtifacts, String> {
     let root = canonical_root(root)?;
     let _project_lock =
         document_schema::acquire_project_write_lock(&root).map_err(|error| error.to_string())?;
     let (graph, reused_lock) = load_package_graph_with_lock_preference(
         &root,
-        options.into(),
+        LoadOptions::for_build(options, runtime),
         remote_discovery::LockPublication::Project {
             project_lock_held: true,
         },
     )?;
     document_schema::ensure_project_lock_ignore(&root)?;
     if !reused_lock {
-        let lock = build_lockfile(&graph);
+        let lock = build_lockfile(&graph, runtime);
         write_lockfile_unlocked(&root.join("reef.lock"), &lock)?;
     }
 
@@ -3857,7 +3906,10 @@ fn pack_graph(
     })
 }
 
-pub fn publish_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
+pub fn publish_package(
+    root: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<PackageBuildArtifacts, String> {
     let root = canonical_root(root)?;
     let manifest = read_manifest(&root.join("reef.toml"))?;
     if manifest
@@ -3867,7 +3919,7 @@ pub fn publish_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
     {
         return Err("`chelis reef publish` rejects path dependencies in 3a".to_string());
     }
-    let artifacts = build_package(&root)?;
+    let artifacts = build_package(&root, runtime)?;
     let registry_root = registry_root()?;
     let target_dir = registry_root
         .join("packages")
@@ -6323,6 +6375,7 @@ fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapE
 pub fn install_bootstrap(
     specs: &[GitHubReleaseSpec],
     registry_root: &Path,
+    runtime: &'static EmbeddedRuntime,
 ) -> Result<Vec<InstalledArtifact>, BootstrapError> {
     if specs.is_empty() {
         return Err(BootstrapError::NothingToInstall);
@@ -6347,7 +6400,7 @@ pub fn install_bootstrap(
     if let Some(runtime_spec) = specs.iter().find(|s| s.repo == CHELIS_STD_PACKAGE_NAME) {
         return Err(BootstrapError::RuntimeNotABootstrapTarget {
             requested_version: runtime_spec.version.clone(),
-            bundled_version: compiler_bundled_chelis_std_version().to_string(),
+            bundled_version: runtime.version().to_string(),
         });
     }
 
@@ -6395,7 +6448,7 @@ pub fn install_bootstrap(
             // so a stale shell declaration surfaces clearly.
             if dep_name == CHELIS_STD_PACKAGE_NAME {
                 if let Some(declared) = dep_spec.version.as_deref() {
-                    let bundled = compiler_bundled_chelis_std_version();
+                    let bundled = runtime.version();
                     if declared != bundled {
                         return Err(BootstrapError::Validation {
                             message: format!(
@@ -6526,7 +6579,11 @@ pub struct BundledDependency {
 /// - `root/` — the root package source
 ///
 /// Reads `reef.toml` + `reef.lock` from `package_root`.
-pub fn export_bundle(package_root: &Path, output_dir: &Path) -> Result<BundleManifest, String> {
+pub fn export_bundle(
+    package_root: &Path,
+    output_dir: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<BundleManifest, String> {
     let root = canonical_root(package_root)?;
     let lock_path = root.join("reef.lock");
     if !lock_path.exists() {
@@ -6558,12 +6615,12 @@ pub fn export_bundle(package_root: &Path, output_dir: &Path) -> Result<BundleMan
             LockSource::Bundled { .. } => {
                 // chelis-std is compiler-bundled; write the embedded bytes.
                 let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
-                chelis_std_bundle::extract_into(&dep_dir)?;
+                runtime.extract_into(&dep_dir)?;
             }
-            LockSource::LocalRegistry { .. } if is_bundled_runtime(&dep.name, &dep.version) => {
+            LockSource::LocalRegistry { .. } if runtime.provides(&dep.name, &dep.version) => {
                 // A pre-`Bundled` lockfile spelling of the runtime.
                 let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
-                chelis_std_bundle::extract_into(&dep_dir)?;
+                runtime.extract_into(&dep_dir)?;
             }
             LockSource::LocalRegistry { .. } => {
                 // Load from registry cache and copy extracted source
@@ -6768,18 +6825,21 @@ pub struct ConstructorSchema {
 
 /// Generate a machine-readable ABI/package schema for the package at `root`.
 /// Builds the package (type-checks it) and extracts schema from the shell.
-pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
+pub fn package_schema(
+    root: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<PackageSchema, String> {
     let root = canonical_root(root)?;
     let manifest = read_manifest(&root.join("reef.toml"))?;
     let (graph, reused_lock) = load_package_graph_with_lock_preference(
         &root,
-        LoadOptions::default_for_load(),
+        LoadOptions::default_for_load(runtime),
         remote_discovery::LockPublication::Project {
             project_lock_held: false,
         },
     )?;
     if !reused_lock {
-        let lock = build_lockfile(&graph);
+        let lock = build_lockfile(&graph, runtime);
         write_lockfile(&root.join("reef.lock"), &lock)?;
     }
 
@@ -7284,13 +7344,13 @@ fn reconstruct_graph_from_lockfile(
         }
         match &dep.source {
             // chelis-std is the language runtime and ships bundled inside
-            // the chelis binary (`crates/chelis-std-bundle`). No
+            // the chelis binary (`EmbeddedRuntime`). No
             // `$CHELIS_REEF_HOME` access, no installer prerequisite, and no
             // filesystem location (chelis#2616).
             LockSource::Bundled { .. } | LockSource::LocalRegistry { .. }
-                if is_bundled_runtime(&dep.name, &dep.version) =>
+                if options.runtime.provides(&dep.name, &dep.version) =>
             {
-                packages.insert(dep.name.clone(), bundled_runtime_package()?);
+                packages.insert(dep.name.clone(), options.runtime.package()?);
             }
             LockSource::Bundled { .. } => {
                 // A `Bundled` entry whose version this compiler does not
@@ -7301,7 +7361,7 @@ fn reconstruct_graph_from_lockfile(
                 let dep_version = dep.version.clone();
                 let dep_name_t = dep_name.clone();
                 let dep_version_t = dep_version.clone();
-                let bundled = compiler_bundled_chelis_std_version().to_string();
+                let bundled = options.runtime.version();
                 let timeout_result = run_with_timeout(
                     move || {
                         load_registry_package(&dep_name_t, &dep_version_t).map_err(|e| match e {
@@ -7489,7 +7549,7 @@ fn reconstruct_graph_from_lockfile(
         }
     }
 
-    insert_implicit_runtime(&mut packages)?;
+    insert_implicit_runtime(&mut packages, options.runtime)?;
     Ok(PackageGraph {
         root_package: root_name,
         packages,
@@ -7503,14 +7563,14 @@ fn reconstruct_graph_from_lockfile(
 /// same package set whether or not a `reef.lock` exists. A graph that
 /// already carries the runtime (an explicit dependency, a lockfile entry,
 /// or `chelis-std` itself as the root) is left unchanged.
-fn insert_implicit_runtime(packages: &mut BTreeMap<String, LoadedPackage>) -> Result<(), String> {
+fn insert_implicit_runtime(
+    packages: &mut BTreeMap<String, LoadedPackage>,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<(), String> {
     if packages.contains_key(CHELIS_STD_PACKAGE_NAME) {
         return Ok(());
     }
-    packages.insert(
-        CHELIS_STD_PACKAGE_NAME.to_string(),
-        bundled_runtime_package()?,
-    );
+    packages.insert(CHELIS_STD_PACKAGE_NAME.to_string(), runtime.package()?);
     Ok(())
 }
 
@@ -7897,7 +7957,10 @@ fn typed_manifest_for_loaded(
     parsed.map_err(|error| error.to_string())
 }
 
-fn validate_resolved_graph_with_local_resolver(graph: &PackageGraph) -> Result<(), String> {
+fn validate_resolved_graph_with_local_resolver(
+    graph: &PackageGraph,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<(), String> {
     let root = graph
         .packages
         .get(&graph.root_package)
@@ -7925,8 +7988,8 @@ fn validate_resolved_graph_with_local_resolver(graph: &PackageGraph) -> Result<(
             package_versioning::PackageName::from_str(CHELIS_STD_PACKAGE_NAME)
                 .expect("canonical runtime package name"),
             package_versioning::PackageRequirement::exact(
-                &package_versioning::PackageVersion::from_str(BUNDLED_CHELIS_STD_VERSION)
-                    .expect("bundled runtime package version"),
+                &package_versioning::PackageVersion::from_str(runtime.version())
+                    .map_err(|error| error.to_string())?,
             ),
         ));
     }
@@ -7984,7 +8047,7 @@ fn validate_resolved_graph_with_local_resolver(graph: &PackageGraph) -> Result<(
                 content_identity: format!(
                     "{}#{}#{}",
                     package.source.filesystem_root().map_or_else(
-                        || BUNDLED_RUNTIME_LABEL.to_string(),
+                        || embedded_runtime::BUNDLED_RUNTIME_LABEL.to_string(),
                         |root| { root.display().to_string() }
                     ),
                     package.archive_sha256.as_deref().unwrap_or("editable"),
@@ -8069,13 +8132,13 @@ fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGra
         &mut resolver_states,
         options,
     )?;
-    insert_implicit_runtime(&mut packages)?;
+    insert_implicit_runtime(&mut packages, options.runtime)?;
     let mut graph = PackageGraph {
         root_package: root_id.name,
         packages,
     };
     prune_unreachable_packages(&mut graph);
-    validate_resolved_graph_with_local_resolver(&graph)?;
+    validate_resolved_graph_with_local_resolver(&graph, options.runtime)?;
     Ok(graph)
 }
 
@@ -8267,7 +8330,7 @@ fn resolve_package_recursive(
             package_versioning::TypedDependency::Registry { requirement } => {
                 let version = requirement.as_text();
                 if dep_name.as_str() == CHELIS_STD_PACKAGE_NAME {
-                    let bundled = compiler_bundled_chelis_std_version();
+                    let bundled = options.runtime.version();
                     let bundled_version = package_versioning::PackageVersion::from_str(bundled)
                         .map_err(|error| error.to_string())?;
                     if !requirement.matches(&bundled_version) {
@@ -8283,7 +8346,7 @@ fn resolve_package_recursive(
                     }
                     // The declared version is the bundled one: the runtime
                     // comes from the compiler, never from the registry.
-                    insert_implicit_runtime(packages)?;
+                    insert_implicit_runtime(packages, options.runtime)?;
                     continue;
                 }
                 let installed =
@@ -8340,164 +8403,6 @@ struct InstalledPackage {
     remote_origin: Option<String>,
 }
 
-/// Package-relative label the bundled runtime's diagnostics name in place
-/// of a filesystem path.
-const BUNDLED_RUNTIME_LABEL: &str = "<bundled chelis-std>";
-
-/// The embedded chelis-std archive, decompressed in memory once per process
-/// (chelis#2616). The bundled runtime has no filesystem location: its
-/// modules are parsed from these bytes and its source digests are computed
-/// from them, so a prepared graph carries no per-process path and nothing is
-/// written to disk.
-static BUNDLED_RUNTIME_FILES: std::sync::OnceLock<Result<BTreeMap<PathBuf, Vec<u8>>, String>> =
-    std::sync::OnceLock::new();
-
-fn bundled_runtime_files() -> Result<&'static BTreeMap<PathBuf, Vec<u8>>, String> {
-    BUNDLED_RUNTIME_FILES
-        .get_or_init(chelis_std_bundle::archive_files)
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
-/// The bundled runtime's package sources, parsed once per process.
-struct BundledRuntime {
-    manifest: ReefManifest,
-    resolver: package_versioning::ResolverVersion,
-    modules: BTreeMap<String, ModuleSource>,
-    shell: ShellPackage,
-    shell_sha256: String,
-}
-
-static BUNDLED_RUNTIME: std::sync::OnceLock<Result<BundledRuntime, String>> =
-    std::sync::OnceLock::new();
-
-fn load_bundled_runtime() -> Result<BundledRuntime, String> {
-    let files = bundled_runtime_files()?;
-    let parsed = bundled_runtime_manifest(files)?;
-    let resolver = parsed.typed.resolver;
-    let manifest = parsed.into_raw();
-    if manifest.package.name != CHELIS_STD_PACKAGE_NAME
-        || manifest.package.version != BUNDLED_CHELIS_STD_VERSION
-    {
-        return Err(format!(
-            "the bundled runtime manifest names `{}` `{}`, expected `{CHELIS_STD_PACKAGE_NAME}` `{BUNDLED_CHELIS_STD_VERSION}`",
-            manifest.package.name, manifest.package.version
-        ));
-    }
-    let mut sources = Vec::new();
-    for declared_root in declared_source_roots(&manifest) {
-        for (path, bytes) in files {
-            let Some(rel) = bundled_runtime_source_rel(path, declared_root) else {
-                continue;
-            };
-            let display = format!("{BUNDLED_RUNTIME_LABEL}/{}", path.display());
-            let text = String::from_utf8(bytes.clone())
-                .map_err(|error| format!("{display} is not UTF-8: {error}"))?;
-            sources.push(PackageSourceFile {
-                source_root: declared_root.to_string(),
-                rel: rel.to_path_buf(),
-                display,
-                text,
-            });
-        }
-    }
-    let modules = modules_from_source_files(BUNDLED_RUNTIME_LABEL, &manifest, sources)?;
-    let shell = chelis_shell::decode_shell(chelis_std_bundle::CHELIS_STD_SHELL)
-        .map_err(|e| format!("failed to decode embedded chelis-std shell: {e}"))?;
-    let shell_sha256 = shell_package_sha256(&shell)?;
-    Ok(BundledRuntime {
-        manifest,
-        resolver,
-        modules,
-        shell,
-        shell_sha256,
-    })
-}
-
-fn bundled_runtime_manifest(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<ParsedManifest, String> {
-    let bytes = files
-        .get(Path::new("reef.toml"))
-        .ok_or_else(|| format!("{BUNDLED_RUNTIME_LABEL} has no reef.toml"))?;
-    let text = std::str::from_utf8(bytes)
-        .map_err(|error| format!("{BUNDLED_RUNTIME_LABEL}/reef.toml is not UTF-8: {error}"))?;
-    parse_manifest_contents(
-        Path::new(&format!("{BUNDLED_RUNTIME_LABEL}/reef.toml")),
-        text,
-    )
-}
-
-/// The path of a bundled `.ch` file relative to `declared_root`, or `None`
-/// when the archive entry is not a source file under that root.
-fn bundled_runtime_source_rel<'a>(path: &'a Path, declared_root: &str) -> Option<&'a Path> {
-    if path.extension().and_then(|ext| ext.to_str()) != Some("ch") {
-        return None;
-    }
-    path.strip_prefix(declared_root).ok()
-}
-
-/// Whether `(name, version)` names the runtime this compiler bundles.
-fn is_bundled_runtime(name: &str, version: &str) -> bool {
-    name == CHELIS_STD_PACKAGE_NAME && version == BUNDLED_CHELIS_STD_VERSION
-}
-
-/// The bundled runtime as a graph package. Its source is
-/// [`LoadedSourceKind::Bundled`], which carries no filesystem location.
-fn bundled_runtime_package() -> Result<LoadedPackage, String> {
-    let runtime = BUNDLED_RUNTIME
-        .get_or_init(load_bundled_runtime)
-        .as_ref()
-        .map_err(Clone::clone)?;
-    Ok(LoadedPackage {
-        id: PackageId {
-            name: runtime.manifest.package.name.clone(),
-            version: runtime.manifest.package.version.clone(),
-        },
-        manifest: runtime.manifest.clone(),
-        resolver: runtime.resolver,
-        modules: runtime.modules.clone(),
-        source: LoadedSourceKind::Bundled,
-        archive_sha256: Some(runtime.shell.archive_sha256.clone()),
-        shell_sha256: Some(runtime.shell_sha256.clone()),
-        shell: Some(runtime.shell.clone()),
-        remote_origin: None,
-    })
-}
-
-/// Digest rows for the bundled runtime, identical in shape to the rows
-/// [`PreparedReefGraph::push_filesystem_source_digests`] produces for an
-/// extracted copy of the same archive: the manifest, then every `.ch` file
-/// under a declared source root keyed by its package-relative path. The
-/// bytes come from the embedded archive, never from disk.
-fn push_bundled_runtime_source_digests(
-    package: &LoadedPackage,
-    digests: &mut Vec<SourceDigest>,
-) -> Result<(), String> {
-    let files = bundled_runtime_files()?;
-    let manifest = files
-        .get(Path::new("reef.toml"))
-        .ok_or_else(|| format!("{BUNDLED_RUNTIME_LABEL} has no reef.toml"))?;
-    digests.push(SourceDigest {
-        package_name: package.id.name.clone(),
-        package_version: package.id.version.clone(),
-        module_name: "<manifest::reef.toml>".to_string(),
-        sha256: Sha256::digest(manifest).into(),
-    });
-    for declared_root in declared_source_roots(&package.manifest) {
-        for (path, bytes) in files {
-            if bundled_runtime_source_rel(path, declared_root).is_none() {
-                continue;
-            }
-            digests.push(SourceDigest {
-                package_name: package.id.name.clone(),
-                package_version: package.id.version.clone(),
-                module_name: format!("<source::{}>", inventory_path_hex(path)),
-                sha256: Sha256::digest(bytes).into(),
-            });
-        }
-    }
-    Ok(())
-}
-
 /// Hex of a package-relative inventory path's bytes, the stable spelling a
 /// source digest row uses for the file it covers.
 fn inventory_path_hex(rel: &Path) -> String {
@@ -8546,7 +8451,7 @@ impl LoadRegistryError {
 
 fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, LoadRegistryError> {
     // The bundled chelis-std runtime never reaches this function: graph
-    // construction loads it from the compiler (`bundled_runtime_package`)
+    // construction loads it from the embedded runtime (`EmbeddedRuntime`)
     // before consulting any registry, so a registry lookup for chelis-std
     // happens only for a version this compiler does not bundle.
     let registry_root = registry_root().map_err(LoadRegistryError::Other)?;
@@ -8666,7 +8571,7 @@ fn load_registry_package_or_autofetch(
     // never run on this machine), not a transient network condition
     // an auto-fetch could repair.
     if name == CHELIS_STD_PACKAGE_NAME {
-        let bundled = compiler_bundled_chelis_std_version();
+        let bundled = options.runtime.version();
         return Err(format!(
             "missing dependency `{name}` `{version}`: this is the language runtime, \
              which ships bundled with the compiler (this compiler bundles \
@@ -8868,14 +8773,14 @@ fn github_fetch_error_category(e: &GitHubFetchError) -> &'static str {
     }
 }
 
-/// Phase A Item 8 internal load knobs threaded through the package
-/// graph resolver. The public surface is [`BuildOptions`]; this
-/// internal `Copy` carrier exists because the resolver passes options
-/// into many recursive callsites and a leaf-only `bool` is more
-/// ergonomic than threading the public struct everywhere.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Internal load knobs threaded through the package graph resolver: the
+/// auto-fetch choice from [`BuildOptions`] and the embedded runtime every
+/// graph links. This `Copy` carrier exists because the resolver passes
+/// options into many recursive callsites.
+#[derive(Debug, Clone, Copy)]
 struct LoadOptions {
     auto_fetch: bool,
+    runtime: &'static EmbeddedRuntime,
 }
 
 impl LoadOptions {
@@ -8883,15 +8788,17 @@ impl LoadOptions {
     /// etc.). Keeps the user-experience promise that `chelis check`
     /// against an empty registry will auto-fetch the same way
     /// `chelis reef build` does.
-    fn default_for_load() -> Self {
-        Self { auto_fetch: true }
+    fn default_for_load(runtime: &'static EmbeddedRuntime) -> Self {
+        Self {
+            auto_fetch: true,
+            runtime,
+        }
     }
-}
 
-impl From<&BuildOptions> for LoadOptions {
-    fn from(opts: &BuildOptions) -> Self {
+    fn for_build(opts: &BuildOptions, runtime: &'static EmbeddedRuntime) -> Self {
         Self {
             auto_fetch: opts.auto_fetch,
+            runtime,
         }
     }
 }
@@ -8959,7 +8866,7 @@ fn read_registry_index(registry_root: &Path) -> Result<LocalRegistryIndex, Strin
     Ok(index)
 }
 
-fn build_lockfile(graph: &PackageGraph) -> ReefLock {
+fn build_lockfile(graph: &PackageGraph, runtime: &'static EmbeddedRuntime) -> ReefLock {
     let root = graph
         .packages
         .get(&graph.root_package)
@@ -8984,8 +8891,8 @@ fn build_lockfile(graph: &PackageGraph) -> ReefLock {
                     version: package.id.version.clone(),
                     source: LockSource::bundled_for_current_compiler(),
                     compiler: package.manifest.package.compiler.clone(),
-                    archive_sha256: chelis_std_bundle::archive_sha256(),
-                    shell_sha256: chelis_std_bundle::shell_sha256(),
+                    archive_sha256: runtime.archive_sha256().to_string(),
+                    shell_sha256: runtime.shell_sha256().to_string(),
                 };
             }
             let source = match &package.source {
@@ -9054,11 +8961,11 @@ fn build_lockfile(graph: &PackageGraph) -> ReefLock {
     {
         dependencies.push(LockedDependency {
             name: CHELIS_STD_PACKAGE_NAME.to_string(),
-            version: BUNDLED_CHELIS_STD_VERSION.to_string(),
+            version: runtime.version().to_string(),
             source: LockSource::bundled_for_current_compiler(),
             compiler: root.manifest.package.compiler.clone(),
-            archive_sha256: chelis_std_bundle::archive_sha256(),
-            shell_sha256: chelis_std_bundle::shell_sha256(),
+            archive_sha256: runtime.archive_sha256().to_string(),
+            shell_sha256: runtime.shell_sha256().to_string(),
         });
     }
 
@@ -11993,6 +11900,17 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// The runtime these tests link: the bundle crate's embedded pair, as
+    /// this test build's own [`EmbeddedRuntime`].
+    pub(crate) fn test_runtime() -> &'static EmbeddedRuntime {
+        static RUNTIME: EmbeddedRuntime = EmbeddedRuntime::new(
+            chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,
+            chelis_std_bundle::CHELIS_STD_ARCHIVE,
+            chelis_std_bundle::CHELIS_STD_SHELL,
+        );
+        &RUNTIME
+    }
+
     #[test]
     fn archive_serialization_uses_captured_metadata_and_manifest() {
         use std::io::Read;
@@ -12181,7 +12099,7 @@ mod tests {
         ] {
             let (_dir, root) = two_pkg_fixture(root_name, root_prefix, dep_name, dep_prefix);
             let entry = root.join("src/main.ch");
-            let prepared = prepare_program_for_file(&entry)
+            let prepared = prepare_program_for_file(&entry, test_runtime())
                 .expect("prepare ok")
                 .expect("inside reef package");
 
@@ -12210,12 +12128,8 @@ mod tests {
         }
     }
 
-    /// Lock the runtime version invariant: the `BUNDLED_CHELIS_STD_VERSION`
-    /// constant in this crate must equal the `[package].version` field of
-    /// `packages/chelis-std/reef.toml`. The constant is hand-maintained
-    /// (no `include_str!` because the relative path between the chelis-reef
-    /// crate and the chelis-std reef package is fragile across worktrees);
-    /// this test catches any drift before it ships.
+    /// Lock the runtime version invariant: the embedded runtime's version
+    /// equals the `[package].version` field of `packages/chelis-std/reef.toml`.
     #[test]
     fn bundled_chelis_std_version_matches_packages_manifest() {
         // Resolve the workspace root from CARGO_MANIFEST_DIR (chelis-reef)
@@ -12225,7 +12139,7 @@ mod tests {
         let text = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
             panic!(
                 "could not read {}: {e}: \
-                 BUNDLED_CHELIS_STD_VERSION sync test cannot run without \
+                 runtime version sync test cannot run without \
                  the chelis-std reef.toml; if the file moved, update the \
                  path in this test",
                 manifest_path.display()
@@ -12238,11 +12152,10 @@ mod tests {
             "packages/chelis-std/reef.toml package name must be `chelis-std`"
         );
         assert_eq!(
-            manifest.package.version, BUNDLED_CHELIS_STD_VERSION,
-            "BUNDLED_CHELIS_STD_VERSION (`{}`) must equal \
-             packages/chelis-std/reef.toml's package.version (`{}`); \
-             bump both together",
-            BUNDLED_CHELIS_STD_VERSION, manifest.package.version,
+            manifest.package.version,
+            test_runtime().version(),
+            "the embedded runtime version must equal \
+             packages/chelis-std/reef.toml's package.version",
         );
     }
 
@@ -12251,7 +12164,10 @@ mod tests {
         let package_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std");
         let (graph, _) = load_package_graph_with_lock_preference(
             &package_root,
-            LoadOptions { auto_fetch: false },
+            LoadOptions {
+                auto_fetch: false,
+                runtime: test_runtime(),
+            },
             remote_discovery::LockPublication::InMemory,
         )
         .expect("resolve chelis-std root");
@@ -12270,8 +12186,9 @@ mod tests {
     /// `(archive_sha256, shell_sha256)`.
     fn disk_bundle_hashes(reef_manifest_dir: &Path) -> (String, String) {
         let dist = reef_manifest_dir.join("../chelis-std-bundle/dist");
-        let archive_path = dist.join(format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}.tar.zst"));
-        let shell_path = dist.join(format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}.chb"));
+        let version = test_runtime().version();
+        let archive_path = dist.join(format!("chelis-std-{version}.tar.zst"));
+        let shell_path = dist.join(format!("chelis-std-{version}.chb"));
         let archive = sha256_file(&archive_path).unwrap_or_else(|e| {
             panic!(
                 "could not hash embedded bundle archive {}: {e}",
@@ -12578,14 +12495,14 @@ mod tests {
         let here = Path::new(env!("CARGO_MANIFEST_DIR"));
         let (disk_archive_sha, disk_shell_sha) = disk_bundle_hashes(here);
         assert_eq!(
-            chelis_std_bundle::archive_sha256(),
+            test_runtime().archive_sha256(),
             disk_archive_sha,
             "compiled chelis-std-bundle rlib embeds a STALE archive: its \
              include_bytes! hash disagrees with the on-disk dist bytes. Force \
              a clean rebuild: `cargo clean -p chelis-std-bundle`. chelis#585"
         );
         assert_eq!(
-            chelis_std_bundle::shell_sha256(),
+            test_runtime().shell_sha256(),
             disk_shell_sha,
             "compiled chelis-std-bundle rlib embeds a STALE shell (.chb): its \
              include_bytes! hash disagrees with the on-disk dist bytes. Force \
@@ -12618,6 +12535,7 @@ mod tests {
         archive_sha256: &str,
         shell_sha256: &str,
     ) -> ReefLock {
+        let runtime_version = test_runtime().version();
         let text = format!(
             r#"[package]
 name = "downstream"
@@ -12625,7 +12543,7 @@ version = "0.1.0"
 
 [[dependencies]]
 name = "chelis-std"
-version = "{BUNDLED_CHELIS_STD_VERSION}"
+version = "{runtime_version}"
 compiler = "={ver}"
 archive_sha256 = "{archive_sha256}"
 shell_sha256 = "{shell_sha256}"
@@ -13552,7 +13470,7 @@ path = "./mylib"
         );
 
         let start = std::time::Instant::now();
-        let result = prepare_program_for_eval_file(&eval_file, &root);
+        let result = prepare_program_for_eval_file(&eval_file, &root, test_runtime());
         let elapsed = start.elapsed();
 
         assert!(
@@ -13651,7 +13569,7 @@ some-registry-lib = {{ version = "0.1.0" }}
         }
         let entry_decls =
             chelis_surf::parser::parse_str("def result() -> i32 = 42").expect("parse");
-        let result = prepare_program_for_eval_source(&root, &entry_decls);
+        let result = prepare_program_for_eval_source(&root, &entry_decls, test_runtime());
         unsafe {
             std::env::remove_var("CHELIS_REEF_HOME");
             match prior_token {
@@ -13697,7 +13615,7 @@ some-registry-lib = {{ version = "0.1.0" }}
         );
 
         let start = std::time::Instant::now();
-        let result = prepare_program_for_eval_file(&eval_file, dir.path());
+        let result = prepare_program_for_eval_file(&eval_file, dir.path(), test_runtime());
         let elapsed = start.elapsed();
 
         // Must return immediately (< 500ms), not hang.
@@ -13780,7 +13698,10 @@ kind = "local_registry"
                 reconstruct_graph_from_lockfile(
                     &root_clone,
                     &lock,
-                    LoadOptions { auto_fetch: false },
+                    LoadOptions {
+                        auto_fetch: false,
+                        runtime: test_runtime(),
+                    },
                 )
             },
             Duration::from_millis(200),
@@ -13868,7 +13789,7 @@ path = "./nonexistent_dep"
         let start = std::time::Instant::now();
         let entry_decls =
             chelis_surf::parser::parse_str("def result() -> i32 = 42").expect("parse");
-        let result = prepare_program_for_eval_source(&root, &entry_decls);
+        let result = prepare_program_for_eval_source(&root, &entry_decls, test_runtime());
         let elapsed = start.elapsed();
 
         // Must fail fast with a clean error — not hang.
@@ -13977,7 +13898,7 @@ module_prefix = "OrphanSig"
             "module OrphanSig.Main\nsig missing: i32\n",
         );
 
-        let error = prepare_reef_graph(&root)
+        let error = prepare_reef_graph(&root, test_runtime())
             .expect_err("an authored package signature needs a same-module definition");
         assert!(
             error.contains("missing") && error.contains("same source module"),
@@ -13988,9 +13909,9 @@ module_prefix = "OrphanSig"
     #[test]
     fn synthetic_entry_signatures_require_same_entry_definitions() {
         let (_dir, root) = shared_graph_fixture();
-        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
         let orphan = chelis_surf::parser::parse_str("sig missing: i32").expect("parse orphan");
-        let error = compile_with_reef_graph(&graph, &orphan)
+        let error = compile_with_reef_graph(&graph, &orphan, test_runtime())
             .expect_err("an eval entry signature cannot borrow a library definition");
         assert!(
             error.contains("missing") && error.contains("same source module"),
@@ -13999,7 +13920,8 @@ module_prefix = "OrphanSig"
 
         let paired = chelis_surf::parser::parse_str("sig present: i32\ndef present() -> i32 = 1")
             .expect("parse pair");
-        compile_with_reef_graph(&graph, &paired).expect("paired entry signature must link");
+        compile_with_reef_graph(&graph, &paired, test_runtime())
+            .expect("paired entry signature must link");
     }
 
     fn selected_entry_root(declarations: &[Decl], name: &str) -> SelectedEntryRoot {
@@ -14023,7 +13945,7 @@ module_prefix = "OrphanSig"
     #[test]
     fn isolated_entries_do_not_publish_symbols_and_roots_avoid_source_collisions() {
         let (_dir, root) = shared_graph_fixture();
-        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
         let first = chelis_surf::parser::parse_str("def test_first() -> bool = sibling_value()\n")
             .expect("parse first entry");
         let second = chelis_surf::parser::parse_str(
@@ -14088,7 +14010,7 @@ module_prefix = "OrphanSig"
              def add(x: i32, y: i32) -> i32 = x + y\n\
              def __chelis_batch_root_0() -> bool = true\n",
         );
-        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
         let declarations = chelis_surf::parser::parse_str(
             "import Mylib.Math (__chelis_batch_root_0)\n\
              def test_imported() -> bool = __chelis_batch_root_0()\n",
@@ -14124,7 +14046,7 @@ module_prefix = "OrphanSig"
     #[test]
     fn isolated_entry_manifest_and_root_identity_fail_closed() {
         let (_dir, root) = shared_graph_fixture();
-        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
         let declarations =
             chelis_surf::parser::parse_str("def test_one() -> bool = true\n").expect("parse entry");
         let entry = IsolatedEntryModule {
@@ -14168,7 +14090,7 @@ module_prefix = "OrphanSig"
     #[test]
     fn isolated_entry_local_map_covers_every_declaration_namespace() {
         let (_dir, root) = shared_graph_fixture();
-        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
         let declarations = chelis_surf::parser::parse_str(
             "dim n\n\
              sig helper: i32 -> i32\n\
@@ -14299,7 +14221,7 @@ path = "./coral"
         let (_dir, root) = ctor_collision_two_package_fixture();
         let entry = root.join("src/main.ch");
 
-        let prepared = prepare_program_for_file(&entry)
+        let prepared = prepare_program_for_file(&entry, test_runtime())
             .expect("prepare_program_for_file ok")
             .expect("entry is inside a reef package");
 
@@ -14381,7 +14303,7 @@ version = "0.1.0"
         );
 
         let entry = root.join("src/main.ch");
-        let prepared = prepare_program_for_file(&entry)
+        let prepared = prepare_program_for_file(&entry, test_runtime())
             .expect("prepare ok")
             .expect("entry inside reef package");
 
@@ -14453,7 +14375,7 @@ version = "0.1.0"
         );
 
         let entry = root.join("src/main.ch");
-        let prepared = prepare_program_for_file(&entry)
+        let prepared = prepare_program_for_file(&entry, test_runtime())
             .expect("prepare ok")
             .expect("entry inside reef package");
 
@@ -14558,7 +14480,7 @@ path = "./coral"
         );
 
         let entry = root.join("src/main.ch");
-        let err = prepare_program_for_file(&entry).expect_err(
+        let err = prepare_program_for_file(&entry, test_runtime()).expect_err(
             "ambiguous unqualified IntCol import must be rejected, not silently dispatched",
         );
         assert!(
@@ -14643,7 +14565,7 @@ path = "./coral"
         );
 
         let entry = root.join("src/main.ch");
-        let prepared = prepare_program_for_file(&entry)
+        let prepared = prepare_program_for_file(&entry, test_runtime())
             .expect("prepare ok")
             .expect("entry inside reef package");
         let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
@@ -14735,7 +14657,7 @@ path = "./coral"
         );
 
         let entry = root.join("src/main.ch");
-        let prepared = prepare_program_for_file(&entry)
+        let prepared = prepare_program_for_file(&entry, test_runtime())
             .expect("prepare ok")
             .expect("entry inside reef package");
 
@@ -14850,7 +14772,7 @@ version = "0.1.0"
         );
 
         let entry = root.join("src/combo.ch");
-        let prepared = prepare_program_for_file(&entry)
+        let prepared = prepare_program_for_file(&entry, test_runtime())
             .expect("prepare ok")
             .expect("entry inside reef package");
 
@@ -14953,7 +14875,7 @@ version = "0.1.0"
         );
 
         let entry = root.join("src/combo.ch");
-        let err = prepare_program_for_file(&entry)
+        let err = prepare_program_for_file(&entry, test_runtime())
             .expect_err("qualified reference to an unexported name must be rejected");
         assert!(
             err.contains("does not export") && err.contains("Missing"),
@@ -14996,7 +14918,8 @@ version = "0.1.0"
                 &entry,
                 &format!("module Demo.Client\nimport Demo.Library\n{body}\n"),
             );
-            let error = prepare_program_for_file(&entry).expect_err("private import must reject");
+            let error = prepare_program_for_file(&entry, test_runtime())
+                .expect_err("private import must reject");
             assert!(
                 error.contains(&format!("does not export `{private_name}`")),
                 "{error}"
@@ -15006,13 +14929,15 @@ version = "0.1.0"
             &entry,
             "module Demo.Client\nimport Demo.Library (Mode, Visible, public_value)\ndef go(x: Mode) -> i32 = match x with { | Visible => public_value() }\n",
         );
-        let prepared = prepare_program_for_file(&entry).unwrap().unwrap();
+        let prepared = prepare_program_for_file(&entry, test_runtime())
+            .unwrap()
+            .unwrap();
         let deep = expanded_desugared_program(&prepared.decls).unwrap();
         checked_program_with_effects(&deep)
             .expect("local private helper and public constructors remain valid");
         // Bundled stdlib modules also import siblings, without a dependency
         // shell for their own package. They still use the same export boundary.
-        let mut graph = load_package_graph_for_eval(root).unwrap();
+        let mut graph = load_package_graph_for_eval(root, test_runtime()).unwrap();
         graph.packages.get_mut("demo").unwrap().source = LoadedSourceKind::Bundled;
         let maps = build_internal_maps(&graph);
         let module = &graph.packages["demo"].modules["Demo.Client"];
@@ -15079,7 +15004,7 @@ version = "0.1.0"
         );
 
         let entry = root.join("src/combo.ch");
-        let prepared = prepare_program_for_file(&entry)
+        let prepared = prepare_program_for_file(&entry, test_runtime())
             .expect("prepare ok")
             .expect("entry inside reef package");
 
@@ -15188,7 +15113,7 @@ version = "0.1.0"
         );
 
         let entry = root.join("src/combo.ch");
-        let prepared = prepare_program_for_file(&entry)
+        let prepared = prepare_program_for_file(&entry, test_runtime())
             .expect("prepare ok")
             .expect("entry inside reef package");
 
@@ -15228,15 +15153,18 @@ version = "0.1.0"
         let decls_b = chelis_surf::parser::parse_str(probe_source_b).expect("parse b");
 
         // Split-path: one graph preparation, two per-file compiles.
-        let graph = prepare_reef_graph(&root).expect("prepare_reef_graph should succeed");
-        let split_a = compile_with_reef_graph(&graph, &decls_a).expect("compile a via graph");
-        let split_b = compile_with_reef_graph(&graph, &decls_b).expect("compile b via graph");
+        let graph =
+            prepare_reef_graph(&root, test_runtime()).expect("prepare_reef_graph should succeed");
+        let split_a =
+            compile_with_reef_graph(&graph, &decls_a, test_runtime()).expect("compile a via graph");
+        let split_b =
+            compile_with_reef_graph(&graph, &decls_b, test_runtime()).expect("compile b via graph");
 
         // Baseline: two independent full preparations via the convenience wrapper.
-        let single_a = prepare_program_for_eval_source(&root, &decls_a)
+        let single_a = prepare_program_for_eval_source(&root, &decls_a, test_runtime())
             .expect("single-shot a ok")
             .expect("single-shot a some");
-        let single_b = prepare_program_for_eval_source(&root, &decls_b)
+        let single_b = prepare_program_for_eval_source(&root, &decls_b, test_runtime())
             .expect("single-shot b ok")
             .expect("single-shot b some");
 
@@ -15300,20 +15228,22 @@ version = "0.1.0"
         let decls_b = chelis_surf::parser::parse_str(probe_source_b).expect("parse b");
 
         // Warm the OS caches — first run of either path tends to be skewed.
-        let _ = prepare_program_for_eval_source(&root, &decls_a);
-        let _ = prepare_reef_graph(&root);
+        let _ = prepare_program_for_eval_source(&root, &decls_a, test_runtime());
+        let _ = prepare_reef_graph(&root, test_runtime());
 
         // Single-shot: two independent full preparations.
         let start_single = std::time::Instant::now();
-        let _ = prepare_program_for_eval_source(&root, &decls_a).expect("single a ok");
-        let _ = prepare_program_for_eval_source(&root, &decls_b).expect("single b ok");
+        let _ =
+            prepare_program_for_eval_source(&root, &decls_a, test_runtime()).expect("single a ok");
+        let _ =
+            prepare_program_for_eval_source(&root, &decls_b, test_runtime()).expect("single b ok");
         let single_elapsed = start_single.elapsed();
 
         // Split-shared: one graph prep, two per-file compiles.
         let start_split = std::time::Instant::now();
-        let graph = prepare_reef_graph(&root).expect("prepare_reef_graph ok");
-        let _ = compile_with_reef_graph(&graph, &decls_a).expect("compile a ok");
-        let _ = compile_with_reef_graph(&graph, &decls_b).expect("compile b ok");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare_reef_graph ok");
+        let _ = compile_with_reef_graph(&graph, &decls_a, test_runtime()).expect("compile a ok");
+        let _ = compile_with_reef_graph(&graph, &decls_b, test_runtime()).expect("compile b ok");
         let split_elapsed = start_split.elapsed();
 
         // Diagnostic: the split path must not regress the single-shot path.
@@ -15332,8 +15262,8 @@ version = "0.1.0"
     fn prepare_reef_graph_outside_package_returns_error() {
         let dir = tempdir().expect("tempdir");
         // The tempdir contains no reef.toml in its ancestor chain.
-        let err =
-            prepare_reef_graph(dir.path()).expect_err("outside a reef package must be an error");
+        let err = prepare_reef_graph(dir.path(), test_runtime())
+            .expect_err("outside a reef package must be an error");
         assert!(
             err.contains("reef.toml"),
             "error should mention reef.toml; got: {err}"
@@ -15404,8 +15334,10 @@ module_prefix = "Stray"
     #[test]
     fn source_digests_returns_one_row_per_source_file_for_path_dep_fixture() {
         let (_dir, root) = shared_graph_fixture();
-        let graph = prepare_reef_graph(&root).expect("prepare graph");
-        let digests = graph.source_digests().expect("source_digests");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
+        let digests = graph
+            .source_digests(test_runtime())
+            .expect("source_digests");
         // Sort key invariant: digests are returned in (pkg, ver, mod)
         // order. Validate the count and the ordering for the fixture's two
         // known modules. The implicit chelis-std runtime (chelis#2414) is
@@ -15511,14 +15443,14 @@ module_prefix = "RegistryLib"
         };
 
         let before = prepared
-            .source_digests()
+            .source_digests(test_runtime())
             .expect("LocalRegistry graph is hashable");
         write(
             &source,
             "module RegistryLib.Lib\nexport (one)\ndef one() -> i32 = 2\n",
         );
         let after = prepared
-            .source_digests()
+            .source_digests(test_runtime())
             .expect("changed LocalRegistry graph remains hashable");
         assert_ne!(before, after, "changed registry source invalidates hash");
         assert!(
@@ -15547,8 +15479,8 @@ module_prefix = "RegistryLib"
              @property identity forall(x: i32): selected(x) == add(x, x)\n",
         )
         .expect("entry parses");
-        let graph = prepare_reef_graph(&root).expect("prepare graph");
-        let prepared = compile_with_reef_graph(&graph, &entry).expect("link entry");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
+        let prepared = compile_with_reef_graph(&graph, &entry, test_runtime()).expect("link entry");
         let reachable = prepared
             .reachable_decls()
             .expect("reachable linked declarations");
@@ -15584,8 +15516,8 @@ module_prefix = "RegistryLib"
                match value with { | Wrapped(xs) => 1 }\n",
         )
         .expect("entry parses");
-        let graph = prepare_reef_graph(&root).expect("prepare graph");
-        let prepared = compile_with_reef_graph(&graph, &entry).expect("link entry");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
+        let prepared = compile_with_reef_graph(&graph, &entry, test_runtime()).expect("link entry");
         let rendered = chelis_surf::format::format_program(
             &prepared
                 .reachable_decls()
@@ -15724,7 +15656,7 @@ module_prefix = "RegistryLib"
     #[test]
     fn prepared_reef_graph_round_trips_through_bincode() {
         let (_dir, root) = shared_graph_fixture();
-        let mut original = prepare_reef_graph(&root).expect("prepare graph");
+        let mut original = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
         original
             .graph
             .packages
@@ -15784,12 +15716,24 @@ module_prefix = "RegistryLib"
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
         }
 
-        let from_manifest =
-            resolve_package_graph(&root, LoadOptions { auto_fetch: false }).expect("manifest");
-        let lock = build_lockfile(&from_manifest);
-        let from_lock =
-            reconstruct_graph_from_lockfile(&root, &lock, LoadOptions { auto_fetch: false })
-                .expect("lockfile");
+        let from_manifest = resolve_package_graph(
+            &root,
+            LoadOptions {
+                auto_fetch: false,
+                runtime: test_runtime(),
+            },
+        )
+        .expect("manifest");
+        let lock = build_lockfile(&from_manifest, test_runtime());
+        let from_lock = reconstruct_graph_from_lockfile(
+            &root,
+            &lock,
+            LoadOptions {
+                auto_fetch: false,
+                runtime: test_runtime(),
+            },
+        )
+        .expect("lockfile");
         let mut runtime_free_lock = lock.clone();
         runtime_free_lock
             .dependencies
@@ -15797,7 +15741,10 @@ module_prefix = "RegistryLib"
         let from_runtime_free_lock = reconstruct_graph_from_lockfile(
             &root,
             &runtime_free_lock,
-            LoadOptions { auto_fetch: false },
+            LoadOptions {
+                auto_fetch: false,
+                runtime: test_runtime(),
+            },
         )
         .expect("lockfile without runtime entry");
 
@@ -15851,8 +15798,14 @@ module_prefix = "RegistryLib"
                 ),
             );
             write(&root.join("src/main.ch"), main);
-            let graph = resolve_package_graph(&root, LoadOptions { auto_fetch: false })
-                .expect("resolve package graph");
+            let graph = resolve_package_graph(
+                &root,
+                LoadOptions {
+                    auto_fetch: false,
+                    runtime: test_runtime(),
+                },
+            )
+            .expect("resolve package graph");
             let (_, decls) = link_package_for_build(&graph).expect("link for build");
             let stdlib = &graph.packages[CHELIS_STD_PACKAGE_NAME];
             let mut owner = BTreeMap::new();
@@ -15918,7 +15871,7 @@ module_prefix = "RegistryLib"
             &root.join("src/main.ch"),
             "module Probe.Main\nexport (main)\ndef main() -> i64 = cast(1, i64)\n",
         );
-        let graph = prepare_reef_graph(&root);
+        let graph = prepare_reef_graph(&root, test_runtime());
         unsafe {
             std::env::remove_var("CHELIS_REEF_HOME");
         }
@@ -15944,13 +15897,14 @@ module_prefix = "RegistryLib"
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
         }
 
-        let first = prepare_reef_graph_cached(&root).expect("cold graph");
+        let first = prepare_reef_graph_cached(&root, test_runtime()).expect("cold graph");
         let cache_path = prepared_graph_cache_path(&root).expect("cache path");
         assert!(cache_path.exists(), "cold preparation persists graph");
         assert!(chelis_surf::format::format_program(&first.linked_library_decls).contains("x + y"));
 
         fs::write(&cache_path, b"corrupt").expect("corrupt cache");
-        let rebuilt = prepare_reef_graph_cached(&root).expect("corruption rebuilds");
+        let rebuilt =
+            prepare_reef_graph_cached(&root, test_runtime()).expect("corruption rebuilds");
         assert!(
             chelis_surf::format::format_program(&rebuilt.linked_library_decls).contains("x + y")
         );
@@ -15959,7 +15913,8 @@ module_prefix = "RegistryLib"
             &root.join("mylib/src/math.ch"),
             "module Mylib.Math\n\nexport (add)\ndef add(x: i32, y: i32) -> i32 = x - y\n",
         );
-        let changed = prepare_reef_graph_cached(&root).expect("source change rebuilds");
+        let changed =
+            prepare_reef_graph_cached(&root, test_runtime()).expect("source change rebuilds");
         assert!(
             chelis_surf::format::format_program(&changed.linked_library_decls).contains("x - y"),
             "changed dependency source cannot reuse stale graph"
@@ -15974,13 +15929,15 @@ module_prefix = "RegistryLib"
     #[test]
     fn bundled_runtime_matches_an_extracted_copy_without_a_location() {
         let extracted = tempdir().expect("tempdir");
-        chelis_std_bundle::extract_into(extracted.path()).expect("extract bundle");
+        test_runtime()
+            .extract_into(extracted.path())
+            .expect("extract bundle");
         let manifest = read_manifest(&extracted.path().join("reef.toml"))
             .expect("manifest")
             .into_raw();
         let on_disk_modules = load_package_modules(extracted.path(), &manifest).expect("modules");
 
-        let bundled = bundled_runtime_package().expect("bundled runtime");
+        let bundled = test_runtime().package().expect("bundled runtime");
         assert!(matches!(bundled.source, LoadedSourceKind::Bundled));
         assert!(bundled.source.filesystem_root().is_none());
         assert_eq!(bundled.manifest, manifest);
@@ -16000,7 +15957,9 @@ module_prefix = "RegistryLib"
         }
 
         let mut bundled_rows = Vec::new();
-        push_bundled_runtime_source_digests(&bundled, &mut bundled_rows).expect("bundled rows");
+        test_runtime()
+            .push_source_digests(&bundled, &mut bundled_rows)
+            .expect("bundled rows");
         let mut on_disk_rows = Vec::new();
         PreparedReefGraph::push_filesystem_source_digests(
             &bundled,
@@ -16035,7 +15994,7 @@ module_prefix = "RegistryLib"
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
         }
 
-        let graph = prepare_reef_graph_cached(&root).expect("cold graph");
+        let graph = prepare_reef_graph_cached(&root, test_runtime()).expect("cold graph");
         assert_ne!(
             graph.stdlib_source_digest(),
             [0; 32],
@@ -16052,7 +16011,7 @@ module_prefix = "RegistryLib"
         preceding.extend(encoded);
         fs::write(&cache_path, preceding).expect("write preceding-format cache");
 
-        let error = load_prepared_graph_cache(&cache_path, &root)
+        let error = load_prepared_graph_cache(&cache_path, &root, test_runtime())
             .expect_err("preceding positional payload must be rejected before decode");
         assert!(
             error.contains("format version 9 unsupported (expected 10)"),
@@ -16087,7 +16046,7 @@ module_prefix = "RegistryLib"
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
         }
 
-        prepare_reef_graph_cached(&root).expect("cold graph");
+        prepare_reef_graph_cached(&root, test_runtime()).expect("cold graph");
         let cache_path = prepared_graph_cache_path(&root).expect("cache path");
         let bytes = fs::read(&cache_path).expect("read prepared graph cache");
         let mut envelope: PreparedGraphCacheEnvelope =
@@ -16105,7 +16064,7 @@ module_prefix = "RegistryLib"
         fs::write(&cache_path, changed).expect("write changed-build cache");
 
         assert!(
-            load_prepared_graph_cache(&cache_path, &root)
+            load_prepared_graph_cache(&cache_path, &root, test_runtime())
                 .expect("build mismatch is a clean miss")
                 .is_none(),
             "another build's prepared graph cannot be accepted"
@@ -16120,7 +16079,7 @@ module_prefix = "RegistryLib"
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
         }
 
-        let initial = prepare_reef_graph_cached(&root).expect("initial graph");
+        let initial = prepare_reef_graph_cached(&root, test_runtime()).expect("initial graph");
         assert_eq!(
             initial.graph.packages["myapp"].modules.len(),
             1,
@@ -16132,7 +16091,7 @@ module_prefix = "RegistryLib"
             &second,
             "module Myapp.Second\nexport (second)\ndef second() -> i32 = 2\n",
         );
-        let added = prepare_reef_graph_cached(&root).expect("addition rebuilds");
+        let added = prepare_reef_graph_cached(&root, test_runtime()).expect("addition rebuilds");
         assert!(
             added.graph.packages["myapp"]
                 .modules
@@ -16141,7 +16100,7 @@ module_prefix = "RegistryLib"
         );
 
         fs::remove_file(&second).expect("delete second source");
-        let deleted = prepare_reef_graph_cached(&root).expect("deletion rebuilds");
+        let deleted = prepare_reef_graph_cached(&root, test_runtime()).expect("deletion rebuilds");
         assert!(
             !deleted.graph.packages["myapp"]
                 .modules
@@ -16153,14 +16112,15 @@ module_prefix = "RegistryLib"
             &second,
             "module Myapp.Second\nexport (second)\ndef second() -> i32 = 2\n",
         );
-        prepare_reef_graph_cached(&root).expect("cache second source");
+        prepare_reef_graph_cached(&root, test_runtime()).expect("cache second source");
         let renamed = root.join("src/renamed.ch");
         fs::rename(&second, &renamed).expect("rename source");
         write(
             &renamed,
             "module Myapp.Renamed\nexport (renamed)\ndef renamed() -> i32 = 3\n",
         );
-        let after_rename = prepare_reef_graph_cached(&root).expect("rename rebuilds");
+        let after_rename =
+            prepare_reef_graph_cached(&root, test_runtime()).expect("rename rebuilds");
         let modules = &after_rename.graph.packages["myapp"].modules;
         assert!(modules.contains_key("Myapp.Renamed"));
         assert!(!modules.contains_key("Myapp.Second"));
@@ -16171,7 +16131,7 @@ module_prefix = "RegistryLib"
         let (dir, root) = shared_graph_fixture();
         let dependency = root.join("mylib/src/math.ch");
         let mut mutated = false;
-        let (graph, source_hash) = prepare_reef_graph_consistently(&root, || {
+        let (graph, source_hash) = prepare_reef_graph_consistently(&root, test_runtime(), || {
             if !mutated {
                 write(
                     &dependency,
@@ -16188,14 +16148,14 @@ module_prefix = "RegistryLib"
         );
         assert_eq!(
             source_hash,
-            prepared_graph_source_hash(&graph).expect("live post-build hash"),
+            prepared_graph_source_hash(&graph, test_runtime()).expect("live post-build hash"),
             "saved determinant describes the exact stable build inventory"
         );
 
         let cache_path = dir.path().join("prepared.graph");
         save_prepared_graph_cache_with_hash(&cache_path, &graph, source_hash)
             .expect("save consistent graph");
-        let loaded = load_prepared_graph_cache(&cache_path, &root)
+        let loaded = load_prepared_graph_cache(&cache_path, &root, test_runtime())
             .expect("valid envelope")
             .expect("live inventory matches");
         assert!(
@@ -16216,7 +16176,7 @@ module_prefix = "RegistryLib"
                 root.parent().expect("parent").join("reef-home"),
             );
         }
-        prepare_reef_graph_cached(&root).expect("initial safe graph");
+        prepare_reef_graph_cached(&root, test_runtime()).expect("initial safe graph");
         let outside = root.parent().expect("parent").join("outside");
         write(
             &outside.join("escape.ch"),
@@ -16234,7 +16194,7 @@ module_prefix = "RegistryLib"
         )
         .expect("declare symlink root");
 
-        let error = prepare_reef_graph_cached(&root)
+        let error = prepare_reef_graph_cached(&root, test_runtime())
             .expect_err("cache inventory fails closed on escaping source root");
         assert!(
             error.contains("escapes package root"),
@@ -16249,18 +16209,19 @@ module_prefix = "RegistryLib"
         unsafe {
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
         }
-        let graph = prepare_reef_graph(&root).expect("graph");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("graph");
         let cache_path = prepared_graph_cache_path(&root).expect("cache path");
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 let graph = &graph;
                 let cache_path = &cache_path;
                 scope.spawn(move || {
-                    save_prepared_graph_cache(cache_path, graph).expect("concurrent save")
+                    save_prepared_graph_cache(cache_path, graph, test_runtime())
+                        .expect("concurrent save")
                 });
             }
         });
-        let loaded = load_prepared_graph_cache(&cache_path, &root)
+        let loaded = load_prepared_graph_cache(&cache_path, &root, test_runtime())
             .expect("valid envelope")
             .expect("cache hit");
         assert_eq!(loaded.package_root, graph.package_root);
@@ -16359,7 +16320,7 @@ additional_sources = ["properties"]
         // confirm the linked library decls include the rewritten
         // call_price function so Pkg.Properties.Bar's import of
         // Pkg.Foo (call_price) is resolvable.
-        let graph = prepare_reef_graph(&root).expect("prepare_reef_graph");
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare_reef_graph");
         let has_call_price = graph
             .linked_library_decls
             .iter()
@@ -16774,9 +16735,9 @@ module_prefix = "Invalidation"
             "module Invalidation.Main\n\nexport (id)\ndef id(x: i32) -> i32 = x\n",
         );
 
-        let pre_digests = prepare_reef_graph(&root)
+        let pre_digests = prepare_reef_graph(&root, test_runtime())
             .expect("prepare pre")
-            .source_digests()
+            .source_digests(test_runtime())
             .expect("source_digests pre");
 
         // Mutate the manifest to add additional_sources, but leave
@@ -16795,9 +16756,9 @@ additional_sources = ["properties"]
         // Sanity: the file set is genuinely unchanged.
         assert!(!root.join("properties").exists());
 
-        let post_digests = prepare_reef_graph(&root)
+        let post_digests = prepare_reef_graph(&root, test_runtime())
             .expect("prepare post")
-            .source_digests()
+            .source_digests(test_runtime())
             .expect("source_digests post");
 
         assert_ne!(
@@ -16950,7 +16911,7 @@ chelis-std = {{ version = "0.3.0" }}
         );
         write(&app_root.join("src/main.ch"), main);
 
-        let _published = publish_package(&app_root).expect("publish_package");
+        let _published = publish_package(&app_root, test_runtime()).expect("publish_package");
 
         // Step 3: post-conditions.
         assert!(
@@ -17071,7 +17032,7 @@ module_prefix = "My"
         write_lockfile(&root.join("reef.lock"), &lock).expect("write lock");
 
         let bundle_dir = dir.path().join("bundle");
-        let manifest = export_bundle(&root, &bundle_dir).expect("export_bundle");
+        let manifest = export_bundle(&root, &bundle_dir, test_runtime()).expect("export_bundle");
         assert_eq!(manifest.root_package.name, "mypkg");
         assert!(bundle_dir.join("bundle.json").exists());
         assert!(bundle_dir.join("root/reef.toml").exists());
@@ -17106,7 +17067,7 @@ module_prefix = "Nl"
             "module Nl.Main\ndef f(x: f32) -> f32 = x\n",
         );
         let bundle_dir = dir.path().join("bundle");
-        let err = export_bundle(&root, &bundle_dir).expect_err("should fail");
+        let err = export_bundle(&root, &bundle_dir, test_runtime()).expect_err("should fail");
         assert!(
             err.contains("reef.lock"),
             "error should mention reef.lock: {err}"

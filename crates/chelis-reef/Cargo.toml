@@ -16,7 +16,6 @@ chelis-surf.workspace = true
 chelis-types.workspace = true
 chelis-effects.workspace = true
 chelis-shell.workspace = true
-chelis-std-bundle.workspace = true
 serde.workspace = true
 semver.workspace = true
 spdx.workspace = true
@@ -49,6 +48,9 @@ zstd = "0.13"
 flate2 = "1"
 
 [dev-dependencies]
+# Tests link the embedded runtime. This edge is test-only: the bundle crate
+# build-depends on chelis-reef, and the library never depends on the bundle.
+chelis-std-bundle.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 

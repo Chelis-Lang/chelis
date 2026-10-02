@@ -28,7 +28,6 @@ chelis-ir.workspace = true
 chelis-macros.workspace = true
 chelis-pipeline-core.workspace = true
 chelis-reef.workspace = true
-chelis-std-bundle.workspace = true
 chelis-surf.workspace = true
 chelis-types.workspace = true
 chelis-validate.workspace = true
@@ -49,6 +48,9 @@ tempfile = "3"
 chelis-runtime.workspace = true
 chelis-runtime-bundle.workspace = true
 chelis-reef.workspace = true
+# Tests link the embedded chelis-std runtime; the library takes it as a
+# parameter and never depends on the bundle.
+chelis-std-bundle.workspace = true
 bincode = "1"
 serde_json = "1"
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }

@@ -60,7 +60,7 @@ fn library_fixture(body: &str, std_layer: StdLayer) -> (TempDir, PathBuf) {
         root.join("reef.toml"),
         format!(
             "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\nchelis-std = {{ version = \"{}\" }}\n",
-            chelis_reef::compiler_bundled_chelis_std_version()
+            chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
         ),
     )
     .expect("write app reef.toml");
@@ -81,9 +81,12 @@ fn library_fixture(body: &str, std_layer: StdLayer) -> (TempDir, PathBuf) {
     .expect("write mylib reef.toml");
     fs::write(root.join("mylib/src/math.ch"), body).expect("write math.ch");
     let root = fs::canonicalize(root).expect("canonicalize the package root");
-    chelis_reef::prepare_program_for_file(&root.join("src/main.ch"))
-        .expect("the fixture package must resolve and write its lock")
-        .expect("the entry file is inside the fixture package");
+    chelis_reef::prepare_program_for_file(
+        &root.join("src/main.ch"),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("the fixture package must resolve and write its lock")
+    .expect("the entry file is inside the fixture package");
     (dir, root)
 }
 
@@ -202,8 +205,12 @@ const FOREIGN_LIBRARY: &str = "module Mylib.Math\nexport (triple, offset)\n\n\
 
 fn encoded_fixture_from(body: &str, std_layer: StdLayer) -> (TempDir, Vec<u8>, HandoffDigest) {
     let (dir, root) = library_fixture(body, std_layer);
-    let context = compile_reef_context(Path::new("/tmp/chelis-2211-unused-reef-home"), &root)
-        .expect("the fixture package must compile");
+    let context = compile_reef_context(
+        Path::new("/tmp/chelis-2211-unused-reef-home"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("the fixture package must compile");
     let (bytes, digest) = context
         .encode_for_handoff()
         .expect("a compiled context must encode");
@@ -320,8 +327,12 @@ fn both_decode_routes_reconstruct_identical_contexts() {
 #[test]
 fn cached_program_is_a_checker_fixed_point() {
     let (_dir, root) = library_fixture(&primary_library(FIXTURE_BULK_DEFINITIONS), StdLayer::Whole);
-    let context = compile_reef_context(Path::new("/tmp/chelis-2211-unused-reef-home"), &root)
-        .expect("the fixture package must compile");
+    let context = compile_reef_context(
+        Path::new("/tmp/chelis-2211-unused-reef-home"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("the fixture package must compile");
     let bytes = context.encode().expect("a compiled context must encode");
 
     // Take the program the disk route adopts: decode through it, then read the
@@ -337,9 +348,12 @@ fn cached_program_is_a_checker_fixed_point() {
     assert_checker_fixed_point("the compiled context (.ctx)", &adopted.library_checked);
     assert_carries_reusable_inputs("the compiled context (.ctx)", &adopted.library_checked);
 
-    let prepared = chelis_reef::prepare_program_for_file(&root.join("src/main.ch"))
-        .expect("the fixture package must resolve")
-        .expect("the entry file is inside the fixture package");
+    let prepared = chelis_reef::prepare_program_for_file(
+        &root.join("src/main.ch"),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("the fixture package must resolve")
+    .expect("the entry file is inside the fixture package");
     assert!(
         !prepared.stdlib_decls.is_empty(),
         "the prepared program links no chelis-std declarations, so the stdlib layer checked \

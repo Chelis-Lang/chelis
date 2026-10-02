@@ -114,15 +114,16 @@ fn evaluate_std_entry(
         format!(
             "[package]\nname = \"clockapp\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nchelis-std = {{ version = \"{}\" }}\n",
             crate::COMPILER_VERSION,
-            chelis_reef::compiler_bundled_chelis_std_version()
+            chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
         ),
     )
     .expect("write reef.toml");
     let main = root.join("src/main.ch");
     std::fs::write(&main, format!("module App.Main\n{IMPORTS}{body}")).expect("write main.ch");
-    let prepared = chelis_reef::prepare_program_for_file(&main)
-        .expect("the fixture package resolves")
-        .expect("the entry file is inside the fixture package");
+    let prepared =
+        chelis_reef::prepare_program_for_file(&main, &chelis_std_bundle::EMBEDDED_RUNTIME)
+            .expect("the fixture package resolves")
+            .expect("the entry file is inside the fixture package");
     let _linked = chelis_types::install_linked_program_guard();
     let program = crate::pipeline::prepare_surf_decls(&prepared.decls, None)
         .expect("the linked program prepares");

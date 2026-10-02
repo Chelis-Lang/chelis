@@ -81,7 +81,9 @@ fn bundled_chelis_std_sources_match_the_checked_in_runtime_package() {
         .expect("chelis-cli is a workspace crate");
     let package_root = repo_root.join("packages/chelis-std");
     let extracted = tempdir().expect("bundle extraction tempdir");
-    chelis_std_bundle::extract_into(extracted.path()).expect("extract embedded chelis-std");
+    chelis_std_bundle::EMBEDDED_RUNTIME
+        .extract_into(extracted.path())
+        .expect("extract embedded chelis-std");
 
     let embedded_files = runtime_package_files(extracted.path());
     let checked_in_files = runtime_package_files(&package_root);
@@ -121,12 +123,16 @@ fn bundled_chelis_std_sources_match_the_checked_in_runtime_package() {
         .expect("the runtime package lock carries its bundled self-dependency");
     assert_eq!(
         bundled.archive_sha256,
-        chelis_std_bundle::archive_sha256(),
+        chelis_std_bundle::EMBEDDED_RUNTIME
+            .archive_sha256()
+            .to_string(),
         "the runtime package lock must pin the shipped archive bytes"
     );
     assert_eq!(
         bundled.shell_sha256,
-        chelis_std_bundle::shell_sha256(),
+        chelis_std_bundle::EMBEDDED_RUNTIME
+            .shell_sha256()
+            .to_string(),
         "the runtime package lock must pin the shipped shell bytes"
     );
 }
@@ -284,12 +290,16 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
         // both paths so they MUST agree.
         assert_eq!(
             entry.archive_sha256,
-            chelis_std_bundle::archive_sha256(),
+            chelis_std_bundle::EMBEDDED_RUNTIME
+                .archive_sha256()
+                .to_string(),
             "explicit-listing path must use bundled archive_sha256"
         );
         assert_eq!(
             entry.shell_sha256,
-            chelis_std_bundle::shell_sha256(),
+            chelis_std_bundle::EMBEDDED_RUNTIME
+                .shell_sha256()
+                .to_string(),
             "explicit-listing path must use bundled shell_sha256"
         );
     }

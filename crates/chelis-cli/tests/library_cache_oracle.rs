@@ -772,9 +772,10 @@ fn chelis_std_declares_no_macros() {
     let (scratch, _cache_home) = fresh_cache_home();
     let (dep, entry_body) = plain_bodies();
     let entry = stage_dep_fixture(scratch.path(), dep, entry_body);
-    let prepared = chelis_reef::prepare_program_for_file(&entry)
-        .expect("prepare_program_for_file")
-        .expect("entry resolves inside a reef package");
+    let prepared =
+        chelis_reef::prepare_program_for_file(&entry, &chelis_std_bundle::EMBEDDED_RUNTIME)
+            .expect("prepare_program_for_file")
+            .expect("entry resolves inside a reef package");
     let macro_count = prepared
         .stdlib_decls
         .iter()

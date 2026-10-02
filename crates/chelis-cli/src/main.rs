@@ -16,6 +16,7 @@ use chelis_compiler_api::schema::{
 };
 use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, ExprCarrier as DeepExprCarrier};
+use chelis_std_bundle::EMBEDDED_RUNTIME;
 use chelis_surf::ast::{Decl, ImportKind};
 use chelis_types::types::{Dim, Effect, EffectSet, NominalArg, TensorPrec, Type};
 use chelis_unord::{UnordMap, UnordSet};
@@ -2139,6 +2140,7 @@ fn prepare_eval_in_context(
         package_root,
         &entries,
         true,
+        &EMBEDDED_RUNTIME,
     ) {
         Ok(ctx) => ctx,
         Err(err) => {
@@ -2242,7 +2244,8 @@ fn copy_cost_for_file(
         return copy_cost_for_checked(&checked, &deep_exprs, &deep_exprs);
     }
 
-    let prepared = chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?;
+    let prepared = chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME)
+        .map_err(boxed_string_error)?;
     let (decls, entry_decls, linked_program) = match prepared {
         Some(prepared) => (prepared.decls, prepared.entry_decls, true),
         None => {
@@ -2977,7 +2980,7 @@ fn cmd_check_one_on_grown_stack(
     // emitting no JSON and exiting 1. Catch the parse error here,
     // route it through `synthetic_check_report_with_error`, and let
     // the caller map "errors non-empty" to exit 2 as documented.
-    let prepared = match chelis_reef::prepare_program_for_file(file) {
+    let prepared = match chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME) {
         Ok(prepared) => prepared,
         Err(message) => {
             return synthetic_check_report_with_error(&message);
@@ -3966,7 +3969,8 @@ fn cmd_build(
     if let Ok(source) = fs::read_to_string(file) {
         style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     }
-    let prepared = chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?;
+    let prepared = chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME)
+        .map_err(boxed_string_error)?;
     // RFC v5 (RT-1 F2 bypass): a reef-prepared build checks reef-linker
     // output; accept the linker's reserved internal-name format. Raw
     // `.ch`/`.dp` builds keep the flag FALSE and reject mangled names.
@@ -4900,7 +4904,12 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         ReefCommand::Update { package, offline } => {
-            let report = chelis_reef::update_project(Path::new("."), package.as_deref(), !offline)?;
+            let report = chelis_reef::update_project(
+                Path::new("."),
+                package.as_deref(),
+                !offline,
+                &EMBEDDED_RUNTIME,
+            )?;
             if report.changes.is_empty() {
                 println!("All Reef packages are current.");
             } else {
@@ -4919,8 +4928,12 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             json,
             offline,
         } => {
-            let report =
-                chelis_reef::outdated_project(Path::new("."), package.as_deref(), !offline)?;
+            let report = chelis_reef::outdated_project(
+                Path::new("."),
+                package.as_deref(),
+                !offline,
+                &EMBEDDED_RUNTIME,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else if report.packages.is_empty() {
@@ -4946,7 +4959,8 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             let options = chelis_reef::BuildOptions {
                 auto_fetch: !no_auto_fetch,
             };
-            let artifacts = chelis_reef::build_package_with_options(&root, &options)?;
+            let artifacts =
+                chelis_reef::build_package_with_options(&root, &options, &EMBEDDED_RUNTIME)?;
             println!(
                 "Built {} {}",
                 artifacts.package.name, artifacts.package.version
@@ -4995,7 +5009,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         },
         ReefCommand::Publish { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
-            let artifacts = chelis_reef::publish_package(&root)?;
+            let artifacts = chelis_reef::publish_package(&root, &EMBEDDED_RUNTIME)?;
             println!(
                 "Published {} {}",
                 artifacts.package.name, artifacts.package.version
@@ -5089,7 +5103,8 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                         parsed.push(chelis_reef::GitHubReleaseSpec::parse(s)?);
                     }
                     let registry_root = chelis_reef::registry_home()?;
-                    let installed = chelis_reef::install_bootstrap(&parsed, &registry_root)?;
+                    let installed =
+                        chelis_reef::install_bootstrap(&parsed, &registry_root, &EMBEDDED_RUNTIME)?;
                     for artifact in &installed {
                         println!(
                             "Installed {} {}",
@@ -5124,7 +5139,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         }
         ReefCommand::ExportBundle { path, output } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
-            let manifest = chelis_reef::export_bundle(&root, &output)?;
+            let manifest = chelis_reef::export_bundle(&root, &output, &EMBEDDED_RUNTIME)?;
             println!(
                 "Exported bundle for {} {} to {}",
                 manifest.root_package.name,
@@ -5135,7 +5150,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         }
         ReefCommand::Schema { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
-            let schema = chelis_reef::package_schema(&root)?;
+            let schema = chelis_reef::package_schema(&root, &EMBEDDED_RUNTIME)?;
             let json = serde_json::to_string_pretty(&schema)
                 .map_err(|e| format!("serialize schema: {e}"))?;
             println!("{json}");
@@ -7413,7 +7428,7 @@ fn cmd_test(
     // The result is intentionally dropped — `compile_reef_context`
     // below builds its own graph; we only invoke this for the
     // up-front "is this a reef package?" gate.
-    let _ = chelis_reef::prepare_reef_graph(&cwd)?;
+    let _ = chelis_reef::prepare_reef_graph(&cwd, &EMBEDDED_RUNTIME)?;
 
     // Phase G' (final) — with the linearity divergence root-caused
     // (annotate_ir_program now registers prelude ADTs, matching
@@ -7443,6 +7458,7 @@ fn cmd_test(
         &cwd,
         &test_entries,
         true,
+        &EMBEDDED_RUNTIME,
     ) {
         Ok(context) => context,
         Err(err) if is_local_registry_hash_unsupported(&err) => {
@@ -7450,6 +7466,7 @@ fn cmd_test(
                 &reef_home_path,
                 &cwd,
                 &test_entries,
+                &EMBEDDED_RUNTIME,
             )
             .map_err(|err| format!("compile test context: {}", compiler_error_messages(&err)))?
         }
@@ -9708,8 +9725,8 @@ fn load_test_execution_context(files: &[&Path]) -> Result<TestExecutionContext, 
         }
         _ => {
             let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
-            let graph = chelis_reef::prepare_reef_graph(&cwd)?
-                .covering(&test_entry_imports(files))?
+            let graph = chelis_reef::prepare_reef_graph(&cwd, &EMBEDDED_RUNTIME)?
+                .covering(&test_entry_imports(files), &EMBEDDED_RUNTIME)?
                 .into_owned();
             Ok(TestExecutionContext::ReefGraph(Box::new(graph)))
         }
@@ -10222,7 +10239,7 @@ fn compile_check_in_exec_context(
     exec_context: &TestExecutionContext,
     flat_decls: &[Decl],
 ) -> Result<(), String> {
-    chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), flat_decls)
+    chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), flat_decls, &EMBEDDED_RUNTIME)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -10284,9 +10301,12 @@ fn prepare_eval_in_exec_context(
                 })
         }
         TestExecutionContext::ReefGraph(_) => {
-            let prepared =
-                chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), synth_decls)
-                    .map_err(|e| e.to_string())?;
+            let prepared = chelis_reef::compile_with_reef_graph(
+                exec_context.reef_graph(),
+                synth_decls,
+                &EMBEDDED_RUNTIME,
+            )
+            .map_err(|e| e.to_string())?;
             let source_text = chelis_surf::format::format_program(&prepared.decls);
             // `prepare_eval` is deprecated externally but retained for a
             // directly-invoked worker that was not handed a compiled context.
@@ -10502,8 +10522,11 @@ fn eval_module_init(
     // `compile_with_reef_graph` + `eval_selected`. The in-context
     // path is unblocked for `chelis eval`/`check` consumers but not
     // for `chelis test` until the linearity divergence is fixed.
-    let prepared = match chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), flat_decls)
-    {
+    let prepared = match chelis_reef::compile_with_reef_graph(
+        exec_context.reef_graph(),
+        flat_decls,
+        &EMBEDDED_RUNTIME,
+    ) {
         Ok(p) => p,
         Err(err) => return Some(format!("compile: {err}")),
     };
@@ -10566,8 +10589,9 @@ struct EvalDecls {
 
 fn load_eval_decls(file: &Path) -> Result<EvalDecls, Box<dyn std::error::Error>> {
     let current_dir = env::current_dir()?;
-    if let Some(prepared) = chelis_reef::prepare_program_for_eval_file(file, &current_dir)
-        .map_err(boxed_string_error)?
+    if let Some(prepared) =
+        chelis_reef::prepare_program_for_eval_file(file, &current_dir, &EMBEDDED_RUNTIME)
+            .map_err(boxed_string_error)?
     {
         return Ok(EvalDecls {
             decls: prepared.decls,

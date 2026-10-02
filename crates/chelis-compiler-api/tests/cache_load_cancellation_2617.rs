@@ -138,8 +138,14 @@ fn load_site(site: Site, package_root: &Path, reef_home: &Path, cancelled: bool)
             if cancelled {
                 token.cancel();
             }
-            load_or_compile_for_package(reef_home, package_root, &EntryImports::none(), true)
-                .map(|_| ())
+            load_or_compile_for_package(
+                reef_home,
+                package_root,
+                &EntryImports::none(),
+                true,
+                &chelis_std_bundle::EMBEDDED_RUNTIME,
+            )
+            .map(|_| ())
         }
     };
     match result {

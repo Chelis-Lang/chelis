@@ -155,7 +155,12 @@ fn cmd_eval_reef_failure_preserves_transcript_channels() {
 ///    `<name> = <value>` lines, joined by newline, followed by the
 ///    `println!` trailing newline).
 fn expected_stdout(package_root: &Path, snippet: &str) -> String {
-    let ctx = compile_reef_context(Path::new(""), package_root).expect("compile_reef_context");
+    let ctx = compile_reef_context(
+        Path::new(""),
+        package_root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("compile_reef_context");
     let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
     let mut lines = result.transcript.clone();
     // Issue #912 [05-OBS-6]: always label, matching format_eval_result.

@@ -916,9 +916,15 @@ fn load_reef_context(
     // (`chelis test` worker, NOT the CLI eval site, which drops to legacy
     // `prepare_eval` instead — a divergence to watch if the CLI paths are
     // later unified).
-    load_or_compile_with_local_registry_fallback(&reef_home, root, entries, false)
-        .map(|(context, _path)| context)
-        .map_err(CompileAndLoadError::Compiler)
+    load_or_compile_with_local_registry_fallback(
+        &reef_home,
+        root,
+        entries,
+        false,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .map(|(context, _path)| context)
+    .map_err(CompileAndLoadError::Compiler)
 }
 
 /// Resolve the reef package root for a `compile_and_load` job (issue #816).

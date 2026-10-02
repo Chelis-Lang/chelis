@@ -9165,8 +9165,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         );
 
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/copy-drop"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/copy-drop"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let compiled = compile_new_source_in_context(
             &context,
             "module App.Eval\nimport Mylib.Copy (consume)\n\n\
@@ -9211,8 +9215,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn compile_for_execution_in_context_selects_main_and_scopes_metadata() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-main"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-main"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Entry\nimport Mylib.Copy (consume)\n\n\
              def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n\
              def second(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[2, f32] = add(a, b)\n";
@@ -9249,8 +9257,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn in_context_compiled_metadata_agrees_with_eval() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-eval"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-eval"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Eval\nimport Mylib.Copy (consume)\n\n\
              def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
 
@@ -9493,8 +9505,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn compile_for_execution_in_context_rejects_scalar_entry() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-scalar"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-scalar"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "def main(a: f32, b: f32) -> f32 = add(a, b)\n";
         let err =
             compile_for_execution_in_context(&context, source, CompileTarget::C, Some("main"))
@@ -9518,8 +9534,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn compile_for_execution_in_context_rejects_hip_target() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-hip"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-hip"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Hip\nimport Mylib.Copy (consume)\n\n\
              def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
         // Sanity: the same source compiles in-context to C.
@@ -9547,8 +9567,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn resolve_in_context_entry_ambiguous_without_main() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-ambig"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-ambig"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Ambig\nimport Mylib.Copy (consume)\n\n\
              def first(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n\
              def other(y: tensor[2, f32]) -> tensor[2, f32] = realize(y)\n";
@@ -9571,8 +9595,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn resolve_in_context_entry_rejects_suffix_near_miss() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-suffix"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-suffix"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Sfx\nimport Mylib.Copy (consume)\n\n\
              def compute__solve(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
         let err =
@@ -9590,8 +9618,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn resolve_in_context_entry_selects_double_underscore_def_by_exact_name() {
         let (_dir, root) = copy_drop_context_fixture();
-        let context = crate::compile_reef_context(Path::new("/tmp/inctx-suffix-pos"), &root)
-            .expect("compile context");
+        let context = crate::compile_reef_context(
+            Path::new("/tmp/inctx-suffix-pos"),
+            &root,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        )
+        .expect("compile context");
         let source = "module App.Sfx\nimport Mylib.Copy (consume)\n\n\
              def compute__solve(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
         let artifact = compile_for_execution_in_context(

@@ -257,7 +257,12 @@ fn resource_requirements_survive_imports_and_context_serialization() {
          def cpu_helper(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, x)\n\
          def gpu_helper(x: tensor[2, f32]) -> tensor[2, f32] = with device(\"gpu:0\") { mul(x, x) }\n",
     ).unwrap();
-    let context = compile_reef_context(&root.join("reef-home"), root).unwrap();
+    let context = compile_reef_context(
+        &root.join("reef-home"),
+        root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
     let restored = CompiledContext::decode(&context.encode().unwrap()).unwrap();
     for context in [&context, &restored] {
         for (helper, allowed) in [("cpu_helper", true), ("gpu_helper", false)] {

@@ -179,7 +179,6 @@ dependencies = [
  "chelis-macros",
  "chelis-pipeline-core",
  "chelis-reef",
- "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",
  "chelis-unord",
@@ -277,7 +276,6 @@ dependencies = [
  "chelis-macros",
  "chelis-pipeline-core",
  "chelis-shell",
- "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",
  "chelis-unord",
@@ -309,16 +307,6 @@ dependencies = [
  "chelis-deep",
  "semver",
  "serde",
-]
-
-[[package]]
-name = "chelis-std-bundle"
-version = "0.18.12"
-dependencies = [
- "chelis-shell",
- "sha2",
- "tar",
- "zstd",
 ]
 
 [[package]]

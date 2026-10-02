@@ -109,12 +109,17 @@ fn accepted_package_outputs_match_the_pre_migration_baseline() {
     }
 
     let (_directory, root) = accepted_package_fixture();
-    let artifacts = build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-        .expect("the accepted package must build");
+    let artifacts = build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("the accepted package must build");
     let verified = verify_artifact_pair(&artifacts.archive_path, &artifacts.shell_path)
         .expect("the accepted artifact pair must verify");
     let shell = read_shell(&artifacts.shell_path).expect("the accepted shell must decode");
-    let schema = package_schema(&root).expect("the accepted package schema must build");
+    let schema = package_schema(&root, &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("the accepted package schema must build");
 
     let shell_json = pretty_json(&shell);
     let schema_json = pretty_json(&schema);
@@ -150,8 +155,12 @@ fn rejected_package_errors_match_the_pre_migration_baseline() {
         .iter()
         .map(|(_name, source, _)| {
             let (_directory, root) = rejected_package_fixture(source);
-            let error = build_package_with_options(&root, &BuildOptions { auto_fetch: false })
-                .expect_err("the rejected package must fail");
+            let error = build_package_with_options(
+                &root,
+                &BuildOptions { auto_fetch: false },
+                &chelis_std_bundle::EMBEDDED_RUNTIME,
+            )
+            .expect_err("the rejected package must fail");
             format!("{error}\n")
         })
         .collect::<Vec<_>>();

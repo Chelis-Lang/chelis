@@ -26,7 +26,12 @@ fn context_with_library(library: &str) -> CompiledContext {
     std::fs::create_dir(directory.path().join("src")).unwrap();
     std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"context-draw\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
     std::fs::write(directory.path().join("src/draw.ch"), library).unwrap();
-    compile_reef_context(directory.path(), directory.path()).unwrap()
+    compile_reef_context(
+        directory.path(),
+        directory.path(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap()
 }
 
 /// A client whose `main` runs `body`: a block when it binds names, the bare

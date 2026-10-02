@@ -100,7 +100,12 @@ const TRIVIAL_MAIN: &str = "module Rt.Main\n\ndef rt_value() -> i32 = cast(0, i3
 /// the saved bytes. The scratch dir guard is kept alive by the caller.
 fn save_ctx(name: &str, main_ch: &str) -> (TempDir, PathBuf, CompiledContext, Vec<u8>) {
     let (dir, root) = make_pkg(name, "0.1.0", main_ch);
-    let ctx = compile_reef_context(Path::new("/tmp/unused"), &root).expect("compile context");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/unused"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("compile context");
     let cache_path = root.join(".cache/compiled/entry.ctx");
     ctx.save(&cache_path).expect("save context");
     let bytes = fs::read(&cache_path).expect("read saved cache bytes");
@@ -129,8 +134,18 @@ fn rt1_identical_packages_in_different_roots_do_not_share_a_cache_file_name() {
         "test setup: the two packages must live in different directories"
     );
 
-    let ctx_a = compile_reef_context(Path::new("/tmp/unused"), &root_a).expect("ctx a");
-    let ctx_b = compile_reef_context(Path::new("/tmp/unused"), &root_b).expect("ctx b");
+    let ctx_a = compile_reef_context(
+        Path::new("/tmp/unused"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx a");
+    let ctx_b = compile_reef_context(
+        Path::new("/tmp/unused"),
+        &root_b,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx b");
 
     // The collision precondition still holds: byte-identical sources hash
     // identically. #130 does not change the source hash; it adds the
@@ -182,15 +197,25 @@ fn rt1_load_if_fresh_rejects_a_foreign_root_identity_as_a_clean_miss() {
     let (_dir_a, root_a) = make_pkg("rt-identity", "2.0.0", TRIVIAL_MAIN);
     let (_dir_b, root_b) = make_pkg("rt-identity", "2.0.0", TRIVIAL_MAIN);
 
-    let ctx_a = compile_reef_context(Path::new("/tmp/unused"), &root_a).expect("ctx a");
+    let ctx_a = compile_reef_context(
+        Path::new("/tmp/unused"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx a");
     let cache_dir = TempDir::new().expect("cache dir");
     let path = cache_dir.path().join("entry.ctx");
     ctx_a.save(&path).expect("save A");
 
     // Load A's saved cache against B's package_dir: identity mismatch =>
     // clean miss, NOT a stale hit.
-    let outcome = CompiledContext::load_if_fresh(&path, Path::new("/tmp/unused"), &root_b)
-        .expect("load_if_fresh must not error on an identity-mismatched entry");
+    let outcome = CompiledContext::load_if_fresh(
+        &path,
+        Path::new("/tmp/unused"),
+        &root_b,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load_if_fresh must not error on an identity-mismatched entry");
     assert!(
         outcome.is_none(),
         "post-#130 (RT-1 fix): load_if_fresh must reject a content-matching cache \
@@ -204,9 +229,14 @@ fn rt1_load_if_fresh_rejects_a_foreign_root_identity_as_a_clean_miss() {
     // `prepare_reef_graph` resolves and stores, so this equality holds on
     // every platform (notably macOS, where the un-canonicalized tempfile
     // path `/var/...` differs from the stored `/private/var/...`).
-    let hit = CompiledContext::load_if_fresh(&path, Path::new("/tmp/unused"), &root_a)
-        .expect("load_if_fresh must not error against the original package_dir")
-        .expect("loading against the original package_dir must still be a hit");
+    let hit = CompiledContext::load_if_fresh(
+        &path,
+        Path::new("/tmp/unused"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("load_if_fresh must not error against the original package_dir")
+    .expect("loading against the original package_dir must still be a hit");
     assert_eq!(
         hit.reef_state().package_root,
         root_a,
@@ -228,8 +258,18 @@ fn rt1_distinct_source_packages_still_do_not_collide() {
         "module Rt.Main\n\ndef rt_value() -> i32 = cast(1, i32)\n",
     );
 
-    let ctx_a = compile_reef_context(Path::new("/tmp/unused"), &root_a).expect("ctx a");
-    let ctx_b = compile_reef_context(Path::new("/tmp/unused"), &root_b).expect("ctx b");
+    let ctx_a = compile_reef_context(
+        Path::new("/tmp/unused"),
+        &root_a,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx a");
+    let ctx_b = compile_reef_context(
+        Path::new("/tmp/unused"),
+        &root_b,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx b");
 
     assert_ne!(
         ctx_a.source_hash, ctx_b.source_hash,
@@ -282,9 +322,13 @@ fn cache_identity_collapses_equivalent_paths_to_one_identity() {
         "a `src/..` round trip must canonicalize to the same identity"
     );
     // And therefore the cache file names agree: one package, one file.
-    let src_hash = compile_reef_context(Path::new("/tmp/unused"), &root)
-        .expect("ctx")
-        .source_hash;
+    let src_hash = compile_reef_context(
+        Path::new("/tmp/unused"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx")
+    .source_hash;
     let name_plain = CompiledContext::cache_file_name(("rt-canon", "0.1.0"), src_hash, &plain);
     let name_round = CompiledContext::cache_file_name(("rt-canon", "0.1.0"), src_hash, &round_trip);
     assert_eq!(
@@ -392,8 +436,12 @@ fn load_if_fresh_rejects_a_torn_write_in_the_identity_region() {
     }
     fs::write(&cache_path, &corrupted).expect("write corrupted cache");
 
-    let outcome =
-        CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/unused"), &cache_path);
+    let outcome = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/unused"),
+        &cache_path,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    );
     match outcome {
         Ok(Some(_)) => {
             panic!("a torn write in the identity/header region must NEVER load as Ok(Some(_))")
@@ -451,8 +499,12 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
 
     for (i, pattern) in patterns.iter().enumerate() {
         fs::write(&cache_path, pattern).expect("write hostile pattern");
-        let outcome =
-            CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/unused"), &pkg_dir);
+        let outcome = CompiledContext::load_if_fresh(
+            &cache_path,
+            Path::new("/tmp/unused"),
+            &pkg_dir,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        );
         match outcome {
             Ok(Some(_)) => panic!("hostile pattern #{i} must NEVER load as Ok(Some(_))"),
             Ok(None) | Err(_) => { /* both acceptable: never a silent hit, never a panic */ }
@@ -474,8 +526,12 @@ fn truncation_at_every_prefix_length_never_silently_loads() {
     let mut len = 0usize;
     while len < full {
         fs::write(&cache_path, &bytes[..len]).expect("write truncated prefix");
-        let outcome =
-            CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/unused"), &cache_path);
+        let outcome = CompiledContext::load_if_fresh(
+            &cache_path,
+            Path::new("/tmp/unused"),
+            &cache_path,
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        );
         assert!(
             !matches!(outcome, Ok(Some(_))),
             "truncating to {len}/{full} bytes must NOT silently load as Ok(Some(_))"
@@ -509,8 +565,12 @@ fn a_forged_stale_magic_file_is_rejected_not_decoded() {
     forged.extend_from_slice(&bytes[b"CHELIS_CTX_V23\n".len()..]);
     fs::write(&cache_path, &forged).expect("write forged stale-magic file");
 
-    let outcome =
-        CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/unused"), &cache_path);
+    let outcome = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/unused"),
+        &cache_path,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    );
     match outcome {
         Ok(Some(_)) => panic!("a stale-magic file must NEVER load as an Ok(Some(_))"),
         Ok(None) => panic!(
@@ -542,8 +602,12 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
     forged[magic_len] = forged[magic_len].wrapping_add(99);
     fs::write(&cache_path, &forged).expect("write bumped-version file");
 
-    let outcome =
-        CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/unused"), &cache_path);
+    let outcome = CompiledContext::load_if_fresh(
+        &cache_path,
+        Path::new("/tmp/unused"),
+        &cache_path,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    );
     match outcome {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
@@ -649,15 +713,6 @@ fn stdlib_cache_key_folds_the_compiler_version() {
         hasher.update(b"compiler_version");
         hasher.update((compiler_version.len() as u64).to_le_bytes());
         hasher.update(compiler_version.as_bytes());
-        let version = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
-        hasher.update((version.len() as u64).to_le_bytes());
-        hasher.update(version.as_bytes());
-        let archive = chelis_std_bundle::archive_sha256();
-        hasher.update((archive.len() as u64).to_le_bytes());
-        hasher.update(archive.as_bytes());
-        let shell = chelis_std_bundle::shell_sha256();
-        hasher.update((shell.len() as u64).to_le_bytes());
-        hasher.update(shell.as_bytes());
         hasher.update(b"exact-source-digest");
         hasher.update(REDTEAM_STDLIB_SOURCE_DIGEST);
         match bincode::serialize(&decls) {
@@ -715,7 +770,12 @@ fn cache_identity_survives_a_bincode_round_trip() {
     // guard would fire on a perfectly good cache file. Pin that
     // `encode`/`decode` preserve the identity exactly.
     let (_dir, root) = make_pkg("rt-roundtrip", "0.1.0", TRIVIAL_MAIN);
-    let ctx = compile_reef_context(Path::new("/tmp/unused"), &root).expect("ctx");
+    let ctx = compile_reef_context(
+        Path::new("/tmp/unused"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
     let restored = CompiledContext::decode(&ctx.encode().expect("encode")).expect("decode");
     assert_eq!(
         ctx.identity, restored.identity,
