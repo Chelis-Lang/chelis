@@ -6,11 +6,12 @@
 #
 # Tracked template for the pre-push hook, installed by copy into the COMMON
 # git hooks directory exactly as commit-msg is, and for the same reasons: it
-# names no worktree, resolves its repository at run time, and uses the
-# committing worktree's managed Python with the commit-msg precedence
+# names no worktree, resolves its repository at run time, and uses only the
+# pushing worktree's uv-managed Python, with the commit-msg precedence
 # (chelis#1409). It runs scripts/regen_hooks.py, which checks, without
-# writing, the derived artifacts whose inputs the push changes.
-# Neither hook writes anything; git's --no-verify is the only bypass.
+# writing, the derived artifacts whose inputs the push changes. git's
+# --no-verify is the only bypass. .cargo-husky/hooks/pre-push is a
+# byte-identical copy.
 
 set -eu
 
@@ -47,7 +48,9 @@ elif command -v uv >/dev/null 2>&1; then
     exec uv run --managed-python --python 3.11 --no-project python "$script" "$hook" "$@"
 fi
 
-printf '%s\n' "$hook hook: no managed Python interpreter is available." >&2
+# Deciding which legs a push touches needs Python. The push is not blocked
+# for want of one: CI checks every leg, so say so and let it through.
+printf '%s\n' "$hook hook: no managed Python interpreter is available, so derived artifacts were not checked; CI checks them." >&2
 printf '%s\n' 'Enter Devenv, run: uv venv --python 3.11, or install uv.' >&2
-exit 2
+exit 0
 }

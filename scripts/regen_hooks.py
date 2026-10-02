@@ -5,37 +5,36 @@ The tracked `.githooks/pre-commit` and `.githooks/pre-push` templates (and
 their `.cargo-husky/hooks/` twins) run this script with the committing
 worktree's managed Python:
 
-    .venv/bin/python scripts/regen_hooks.py pre-commit
+    .venv/bin/python scripts/regen_hooks.py pre-commit '<leg rows>'
     .venv/bin/python scripts/regen_hooks.py pre-push <remote> <url> < refs
 
-Both hooks select legs from the `scripts/regen_all.py` manifest by each leg's
-declared `inputs`, so that manifest stays the one place that says what
-regenerates what.
-
 pre-commit
-    Check only; it writes nothing in the worktree or the index. When the
-    staged change touches the inputs of a tier-0 leg that needs only Python,
-    it extracts the staged version of that leg's inputs and outputs into a
-    private temporary directory, runs the generator there, and fails, exit 1,
-    when that changes any output: the commit would carry a derived file that
-    disagrees with its source. The message names the paths, the write command
-    and the `git add` that follows it. It judges the index git hands it, so
+    Check only; it writes nothing in the worktree or the index. Its legs are
+    the `name|inputs|outputs|check|fix` table in `.githooks/pre-commit`; the
+    template picks the rows whose inputs are staged, using git alone, and
+    passes them here. For each, this copies the staged version of only that
+    leg's inputs and outputs into a private temporary directory, which is
+    removed on every exit path (SIGINT, SIGTERM and SIGHUP included), and runs
+    the leg's check there. A check of `-` runs the fix command on the copy
+    and reports each output it changes. Disagreement fails the commit, exit 1,
+    naming the staged sources and the outputs, the fix command, and the
+    `git add` that follows it. Because it reads the index git hands it,
     partial staging, `git commit <paths>` and `git commit -a` are judged by
-    what they commit. With no relevant input staged it prints nothing. It
-    never runs cargo.
+    what they commit. It never runs cargo.
 
 pre-push
-    Check only; it writes nothing that survives it. For each pushed ref it
-    collects the paths the push changes (against the remote's old value when
-    this clone has it, otherwise against the merge base with the remote's
-    default branch, otherwise every path), then runs the `--check` form of
-    every tier-0 or tier-1 leg whose inputs or outputs those paths touch. The
-    checks read the working tree, so a leg is checked only when the pushed
-    commit is this worktree's HEAD and the leg's paths are clean; otherwise
-    the hook prints one line saying the check was skipped and why. A leg that
-    needs cargo is skipped the same way when the cargo target is cold, which
-    is when the binary that leg builds is absent. A stale leg fails the push
-    and the hook prints the exact write command. CI stays the authority.
+    Check only; it writes nothing that survives it. It selects tier-0 legs of
+    the `scripts/regen_all.py` manifest by their declared `inputs` and
+    `writes`. For each pushed ref it collects the paths the push changes
+    (against the remote's old value when this clone has it, otherwise against
+    the merge base with the remote's default branch, otherwise every path)
+    and runs the `--check` form of every leg those paths touch. The checks
+    read the working tree, so a leg is checked only when the pushed commit is
+    this worktree's HEAD and the leg's paths are clean; otherwise the hook
+    prints one line saying the check was skipped and why. A leg that needs
+    cargo is skipped the same way when the cargo target is cold, which is
+    when the binary that leg builds is absent. A stale leg fails the push and
+    the hook prints the exact write command. CI stays the authority.
 
 The only bypass is git's own `--no-verify`. Exit codes: 0 pass or nothing to
 do, 1 inconsistent or stale, 2 a git or generator command could not run.
@@ -45,6 +44,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -63,7 +63,6 @@ EXIT_ERROR = 2
 # cargo target directory; otherwise its first check is a full build.
 WARM_BINARIES: dict[str, str] = {
     "rejection-registry": "debug/rejection_source_inventory",
-    "std-bundle": "debug/chelis",
 }
 
 
@@ -139,6 +138,39 @@ def quiet_runner(argv, *, cwd, env, check):
 # --- pre-commit --------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class CommitLeg:
+    """One row of the leg table in `.githooks/pre-commit`."""
+
+    name: str
+    inputs: tuple[str, ...]
+    outputs: tuple[str, ...]
+    check: tuple[str, ...] | None  # None: run `fix` on the copy and compare
+    fix: tuple[str, ...]
+
+
+def parse_commit_legs(table: str) -> list[CommitLeg]:
+    """Rows `name|inputs|outputs|check|fix`, as the template passes them."""
+    legs = []
+    for row in table.splitlines():
+        if not row:
+            continue
+        fields = row.split("|")
+        if len(fields) != 5 or not all(fields):
+            raise GitError(f"malformed pre-commit leg row: {row!r}")
+        name, inputs, outputs, check, fix = fields
+        legs.append(
+            CommitLeg(
+                name=name,
+                inputs=tuple(inputs.split()),
+                outputs=tuple(outputs.split()),
+                check=None if check == "-" else tuple(check.split()),
+                fix=tuple(fix.split()),
+            )
+        )
+    return legs
+
+
 def snapshot_index(
     repo: Path, specs: list[str], destination: Path, environ: dict[str, str]
 ) -> None:
@@ -178,37 +210,37 @@ def tree_state(root: Path) -> dict[str, bytes]:
     return state
 
 
-def pre_commit(repo: Path, python: str, environ: dict[str, str], out) -> int:
+def pre_commit(
+    repo: Path, python: str, table: str, environ: dict[str, str], out
+) -> int:
     """Fail when a staged source and its staged derived output disagree.
 
-    Writes nothing in the worktree or the index. Each selected generator runs
-    in write mode inside a private snapshot of the staged inputs and outputs;
-    any output it changes there is one the commit carries stale.
+    `table` holds the rows the template found relevant. Writes nothing in the
+    worktree or the index: each leg runs inside a private copy of only its
+    staged inputs and outputs, which is removed on every exit path.
     """
-    legs = [
-        leg
-        for leg in regen_all.regen_legs(python)
-        if leg.tier == 0 and leg.needs == "python"
-    ]
     staged = git_paths(
         repo, "diff", "--cached", "--name-only", "--no-renames", environ=environ
     )
-    selected = touched(legs, staged, outputs=False)
-    if not selected:
-        return EXIT_PASS
-
+    child_environ = dict(environ, PYTHONDONTWRITEBYTECODE="1")
     inconsistent = []
     with tempfile.TemporaryDirectory(prefix="chelis-pre-commit-") as scratch:
-        for leg in selected:
-            assert leg.write_argv is not None
+        for leg in parse_commit_legs(table):
+            sources = [path for path in staged if matches(path, leg.inputs)]
+            if not sources:
+                continue
             snapshot = Path(scratch) / leg.name
             snapshot.mkdir()
-            snapshot_index(repo, [*leg.inputs, *leg.writes], snapshot, environ)
+            snapshot_index(repo, [*leg.inputs, *leg.outputs], snapshot, environ)
             before = tree_state(snapshot)
+            command = [python, *(leg.fix if leg.check is None else leg.check)]
             completed = regen_all.launch(
-                quiet_runner, list(leg.write_argv), cwd=snapshot,
-                env=dict(environ, PYTHONDONTWRITEBYTECODE="1"),
+                quiet_runner, command, cwd=snapshot, env=child_environ
             )
+            if leg.check is not None:
+                if completed.returncode != 0:
+                    inconsistent.append((leg, sources, list(leg.outputs)))
+                continue
             if completed.returncode != 0:
                 reason = getattr(completed, "launch_error", None) or (
                     f"exit {completed.returncode}"
@@ -222,7 +254,6 @@ def pre_commit(repo: Path, python: str, environ: dict[str, str], out) -> int:
                 if before.get(path) != after.get(path)
             )
             if differing:
-                sources = [path for path in staged if matches(path, leg.inputs)]
                 inconsistent.append((leg, sources, differing))
 
     if not inconsistent:
@@ -233,7 +264,7 @@ def pre_commit(repo: Path, python: str, environ: dict[str, str], out) -> int:
             "inconsistent in the staged content.",
             file=out,
         )
-        print(f"  fix: {shlex.join(leg.write_argv)}", file=out)
+        print(f"  fix: {shlex.join((python, *leg.fix))}", file=out)
         print(f"  then: git add -- {shlex.join(differing)}", file=out)
     print(
         "The derived files are generated from their sources; an edit made by hand "
@@ -341,7 +372,9 @@ def pre_push(
     environ: dict[str, str],
     out,
 ) -> int:
-    legs = [leg for leg in regen_all.regen_legs(python) if leg.tier in (0, 1)]
+    # Tier 0 only. The chelis-std bundle (tier 1) is moving to a build-time
+    # artifact (chelis#2930), so no hook checks dist/ or reef.lock files.
+    legs = [leg for leg in regen_all.regen_legs(python) if leg.tier == 0]
     head = git(repo, "rev-parse", "HEAD", environ=environ).strip()
     to_check: list[regen_all.RegenLeg] = []
     for update in parse_ref_updates(ref_text):
@@ -421,15 +454,25 @@ def pre_push(
     return EXIT_REFUSED
 
 
+def terminate(signum, _frame) -> None:
+    """Turn SIGTERM or SIGHUP into an exit that runs every cleanup."""
+    raise SystemExit(128 + signum)
+
+
 def main(argv: list[str]) -> int:
     if not argv or argv[0] not in ("pre-commit", "pre-push"):
-        print("usage: regen_hooks.py pre-commit | pre-push <remote> <url>",
+        print("usage: regen_hooks.py pre-commit <legs> | pre-push <remote> <url>",
               file=sys.stderr)
         return EXIT_ERROR
+    # SIGINT already raises KeyboardInterrupt; these would otherwise kill the
+    # process before the temporary copy is removed.
+    signal.signal(signal.SIGTERM, terminate)
+    signal.signal(signal.SIGHUP, terminate)
     environ = dict(os.environ)
     try:
         if argv[0] == "pre-commit":
-            return pre_commit(REPO_ROOT, sys.executable, environ, sys.stderr)
+            table = argv[1] if len(argv) > 1 else ""
+            return pre_commit(REPO_ROOT, sys.executable, table, environ, sys.stderr)
         remote = argv[1] if len(argv) > 1 else "origin"
         return pre_push(
             REPO_ROOT, sys.executable, remote, sys.stdin.read(), environ, sys.stderr
@@ -437,6 +480,9 @@ def main(argv: list[str]) -> int:
     except GitError as error:
         print(f"{argv[0]}: {error}", file=sys.stderr)
         return EXIT_ERROR
+    except KeyboardInterrupt:
+        print(f"{argv[0]}: interrupted", file=sys.stderr)
+        return 128 + signal.SIGINT
 
 
 if __name__ == "__main__":

@@ -156,7 +156,7 @@ class RegenLeg:
     an entry ending in `/` names a directory, any other entry one exact path.
     `scripts/regen_hooks.py` selects the legs a commit or push touched by
     them, so they cover what the leg's generator reads, its own script
-    included. Tier-2 legs leave them empty because no hook runs tier 2.
+    included. Legs no hook runs leave them empty.
     """
 
     name: str
@@ -273,14 +273,6 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
                 "crates/chelis-std-bundle/dist/",
             ),
             needs="cargo",
-            # The bundle is also compiled by the CLI, so a compiler change can
-            # restale it; the hooks leave that case to CI rather than run the
-            # four-build check on every compiler push.
-            inputs=(
-                "scripts/regenerate_chelis_std_bundle.py",
-                "packages/chelis-std/",
-                "crates/chelis-std-bundle/",
-            ),
         ),
         RegenLeg(
             name="capacity-census",

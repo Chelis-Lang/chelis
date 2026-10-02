@@ -14,9 +14,11 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -24,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import regen_all  # noqa: E402
+import regen_hooks  # noqa: E402
 
 HOOKS = ("pre-commit", "pre-push")
 ASSET = "crates/chelis-conformance/assets/canonical/agents-inheritance.md"
@@ -89,11 +92,34 @@ class HookTemplateContract(unittest.TestCase):
                     self.assertFalse(silent, f"{hook}: prefix of {cut} bytes accepted silently")
 
 
+def commit_leg_table() -> str:
+    """The `legs='...'` table of the pre-commit template."""
+    text = (REPO_ROOT / ".githooks/pre-commit").read_text(encoding="utf-8")
+    start = text.index("\nlegs='") + len("\nlegs='")
+    return text[start:text.index("'\n", start)]
+
+
 class LegInputDeclarations(unittest.TestCase):
+    def test_commit_leg_rows_match_the_regen_all_manifest(self) -> None:
+        """The pre-commit table and regen_all.py must not drift apart."""
+        manifest = {leg.name: leg for leg in regen_all.regen_legs("PY")}
+        rows = regen_hooks.parse_commit_legs(commit_leg_table())
+        self.assertEqual(
+            [row.name for row in rows],
+            ["conformance-assets", "reviewed-unsupported-wording", "opaque-corpus"],
+        )
+        for row in rows:
+            with self.subTest(leg=row.name):
+                leg = manifest[row.name]
+                self.assertEqual(row.inputs, leg.inputs)
+                self.assertEqual(row.outputs, leg.writes)
+                self.assertEqual(("PY", *row.fix), leg.write_argv)
+                self.assertTrue((REPO_ROOT / row.fix[0]).is_file())
+
     def test_every_hook_leg_declares_existing_inputs(self) -> None:
         """A misspelled input would make a hook skip its leg without a word."""
         for leg in regen_all.regen_legs("python"):
-            if leg.tier not in (0, 1):
+            if leg.tier != 0:
                 continue
             with self.subTest(leg=leg.name):
                 self.assertTrue(leg.inputs, "a leg the hooks run must declare inputs")
@@ -119,6 +145,20 @@ class RegenHookRepository(unittest.TestCase):
         git = shutil.which("git")
         self.assertIsNotNone(git, "hook regression tests require git")
         (self.bin / "git").symlink_to(git)
+        # A system interpreter on PATH must never run: hooks use only the
+        # worktree's uv-managed Python or uv itself.
+        self.decoy_log = self.directory / "decoy-ran"
+        for name in ("python3", "python"):
+            decoy = self.bin / name
+            decoy.write_text(
+                f"#!/bin/sh\necho DECOY {name} >> {shlex.quote(str(self.decoy_log))}\n"
+                "echo 'decoy interpreter ran' >&2\nexit 99\n",
+                encoding="utf-8",
+            )
+            decoy.chmod(0o755)
+        self.addCleanup(self.assert_no_decoy_or_leftover)
+        self.tmp = self.directory / "tmp"
+        self.tmp.mkdir()
         self.env = {
             key: value for key, value in os.environ.items()
             if not key.startswith(("GIT_", "CARGO", "CHELIS_"))
@@ -133,6 +173,7 @@ class RegenHookRepository(unittest.TestCase):
             GIT_COMMITTER_EMAIL="hook@example.invalid",
             GIT_CONFIG_NOSYSTEM="1",
             GIT_CONFIG_GLOBAL=os.devnull,
+            TMPDIR=str(self.tmp),
         )
         self.git("init", "--quiet", "--template=", "--initial-branch=main", str(self.repo), cwd=self.directory)
         for relative in FIXTURE_PATHS:
@@ -159,6 +200,11 @@ class RegenHookRepository(unittest.TestCase):
         self.assertEqual(self.first_push.returncode, 0, self.first_push.stderr)
 
     # --- helpers ---------------------------------------------------------
+
+    def assert_no_decoy_or_leftover(self) -> None:
+        self.assertFalse(self.decoy_log.exists(), "a PATH python ran")
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), [],
+                         "a temporary copy was left behind")
 
     def run_git(self, *args: str, cwd: Path | None = None, env=None):
         return subprocess.run(
@@ -370,6 +416,42 @@ class RegenHookRepository(unittest.TestCase):
         pushed = self.push()
         self.assertEqual(pushed.returncode, 0, pushed.stderr)
 
+    def test_no_managed_python_passes_an_irrelevant_commit(self) -> None:
+        shutil.rmtree(self.repo / ".venv")
+        (self.repo / "README.md").write_text("unrelated\n", encoding="utf-8")
+        self.git("add", "README.md")
+        result = self.run_git("commit", "-m", "docs: readme")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        pushed = self.push()
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        self.assertIn("pre-push hook: no managed Python interpreter", pushed.stderr)
+        self.assertIn("CI checks them", pushed.stderr)
+
+    def test_uv_runs_the_hook_when_no_venv_exists(self) -> None:
+        shutil.rmtree(self.repo / ".venv")
+        uv_log = self.directory / "uv-ran"
+        uv = self.bin / "uv"
+        uv.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" != run ] || [ "$2" != --managed-python ] ||\n'
+            '   [ "$3" != --python ] || [ "$4" != 3.11 ] ||\n'
+            '   [ "$5" != --no-project ] || [ "$6" != python ]; then\n'
+            "    exit 2\n"
+            "fi\n"
+            "shift 6\n"
+            f"echo ran >> {shlex.quote(str(uv_log))}\n"
+            f'exec {shlex.quote(sys.executable)} "$@"\n',
+            encoding="utf-8",
+        )
+        uv.chmod(0o755)
+        self.edit_agents()
+        self.git("add", "AGENTS.md")
+        stale = self.run_git("commit", "-m", "docs: edit")
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertIn("are inconsistent", stale.stderr)
+        self.assertTrue(uv_log.exists(), "uv must supply the interpreter")
+
     def test_no_managed_python_fails_closed_with_the_fix(self) -> None:
         shutil.rmtree(self.repo / ".venv")
         self.edit_agents()
@@ -406,6 +488,55 @@ class RegenHookRepository(unittest.TestCase):
             self.edit_agents(text="main again\n")
             self.regenerate()
             self.git("add", "AGENTS.md", ASSET)
+
+    def replace_generator(self, body: str) -> None:
+        generator = self.repo / "scripts/regenerate_conformance_assets.py"
+        generator.write_text(body, encoding="utf-8")
+        self.git("add", "scripts/regenerate_conformance_assets.py")
+
+    def test_temporary_copy_is_removed_on_pass_fail_and_error(self) -> None:
+        self.edit_agents()
+        self.git("add", "AGENTS.md")
+        self.assertEqual(self.run_git("commit", "-m", "docs: stale").returncode, 1)
+        self.assertEqual(list(self.tmp.iterdir()), [], "fail path")
+        self.regenerate()
+        self.git("add", ASSET)
+        self.assertEqual(self.run_git("commit", "-m", "docs: fresh").returncode, 0)
+        self.assertEqual(list(self.tmp.iterdir()), [], "pass path")
+        self.replace_generator("raise SystemExit('generator broke')\n")
+        error = self.run_git("commit", "-m", "chore: broken generator")
+        self.assertNotEqual(error.returncode, 0)
+        self.assertIn("could not run on the staged content", error.stderr)
+        self.assertEqual(list(self.tmp.iterdir()), [], "error path")
+
+    def test_temporary_copy_is_removed_when_interrupted(self) -> None:
+        marker = self.directory / "generator-started"
+        self.replace_generator(
+            "import os, pathlib, time\n"
+            "pathlib.Path(os.environ['GENERATOR_STARTED']).touch()\n"
+            "time.sleep(60)\n"
+        )
+        hook = Path(self.git("rev-parse", "--path-format=absolute",
+                             "--git-common-dir").strip()) / "hooks/pre-commit"
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signum.name):
+                marker.unlink(missing_ok=True)
+                process = subprocess.Popen(
+                    [str(hook)], cwd=self.repo,
+                    env=dict(self.env, GENERATOR_STARTED=str(marker)),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                deadline = time.monotonic() + 30
+                while not marker.exists():
+                    self.assertLess(time.monotonic(), deadline, "generator never started")
+                    if process.poll() is not None:
+                        self.fail(f"hook exited early: {process.communicate()}")
+                    time.sleep(0.05)
+                self.assertTrue(list(self.tmp.iterdir()), "the copy exists mid-run")
+                process.send_signal(signum)
+                _, stderr = process.communicate(timeout=30)
+                self.assertEqual(process.returncode, 128 + signum, stderr)
+                self.assertEqual(list(self.tmp.iterdir()), [], f"{signum.name} left a copy")
 
     # --- pre-push --------------------------------------------------------
 
@@ -451,13 +582,13 @@ class RegenHookRepository(unittest.TestCase):
 
     def test_pre_push_skips_cargo_legs_on_a_cold_target(self) -> None:
         # The first push has no remote-tracking base, so every path counts,
-        # crates/ and packages/chelis-std/ included; this clone has no target.
-        for leg in ("rejection-registry", "std-bundle"):
-            with self.subTest(leg=leg):
-                self.assertIn(
-                    f"pre-push: skipping {leg}: the cargo target is cold",
-                    self.first_push.stderr,
-                )
+        # crates/ included; this clone has no target.
+        self.assertIn(
+            "pre-push: skipping rejection-registry: the cargo target is cold",
+            self.first_push.stderr,
+        )
+        # The chelis-std bundle is never a hook leg (chelis#2930).
+        self.assertNotIn("std-bundle", self.first_push.stderr)
 
     def test_pre_push_selects_the_registry_only_for_citation_edits(self) -> None:
         source = self.repo / "crates/demo/src/lib.rs"
