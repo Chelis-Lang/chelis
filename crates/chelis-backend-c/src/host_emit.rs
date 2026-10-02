@@ -1178,7 +1178,7 @@ fn append_activation_helpers(
     let lowerings: [(&str, ActivationLowering); 3] = [
         ("sigmoid", chelis_ir::tier2::lower_sigmoid),
         ("silu", chelis_ir::tier2::lower_silu),
-        ("gelu", lower_gelu_through_sigmoid),
+        ("gelu", chelis_ir::tier2::lower_gelu),
     ];
     for (name, lower) in lowerings {
         if !used(&format!("chelis_host_{name}_{suffix}")) {
@@ -1190,46 +1190,6 @@ fn append_activation_helpers(
         out.extend(activation_body(prim, lower, &finalize));
         out.push("}".to_string());
     }
-}
-
-/// spec/05 §3.3's `gelu`: `mul(x, sigmoid(mul(const(2.0), u)))` with
-/// `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and
-/// `c = sqrt(2/pi)`, the sigmoid being `tier2`'s. The `0.5*x*(1+tanh(u))`
-/// spelling `tier2::lower_gelu` still builds cancels for negative `x` and
-/// overflows to `inf` for large finite `x` (chelis#2997); this graph gives `x`
-/// and `-0` there. When `tier2::lower_gelu` adopts the same graph, this
-/// function is replaced by it so both lanes again share one definition.
-fn lower_gelu_through_sigmoid(
-    owner: chelis_ir::dag::Owner,
-    dag: &mut chelis_ir::dag::Dag,
-    x: chelis_ir::dag::NodeId,
-    ty: &TensorType,
-    parent_span: Option<&str>,
-) -> chelis_ir::dag::NodeId {
-    let node = |dag: &mut chelis_ir::dag::Dag, op: RiscOp, inputs: Vec<chelis_ir::dag::NodeId>| {
-        dag.add_node(
-            owner,
-            op,
-            inputs,
-            ty.clone(),
-            parent_span.map(str::to_owned),
-        )
-    };
-    let c = node(
-        dag,
-        RiscOp::synth_const(ty.precision, 0.7978845608028654),
-        vec![],
-    );
-    let k = node(dag, RiscOp::synth_const(ty.precision, 0.044715), vec![]);
-    let x_squared = node(dag, RiscOp::Mul, vec![x, x]);
-    let x_cubed = node(dag, RiscOp::Mul, vec![x_squared, x]);
-    let scaled_cube = node(dag, RiscOp::Mul, vec![k, x_cubed]);
-    let sum = node(dag, RiscOp::Add, vec![x, scaled_cube]);
-    let u = node(dag, RiscOp::Mul, vec![c, sum]);
-    let two = node(dag, RiscOp::synth_const(ty.precision, 2.0), vec![]);
-    let two_u = node(dag, RiscOp::Mul, vec![two, u]);
-    let sigmoid = chelis_ir::tier2::lower_sigmoid(owner, dag, two_u, ty, parent_span);
-    node(dag, RiscOp::Mul, vec![x, sigmoid])
 }
 
 type ActivationLowering = fn(
@@ -12686,7 +12646,8 @@ mod expression_dispatch_tests {
         x * (1.0 / (1.0 + chelis_crmath::exp_f64(-(2.0 * u))))
     }
 
-    /// chelis#2997: the host gelu helpers follow spec/05 §3.3's
+    /// chelis#2997: the host gelu helpers, derived from `tier2::lower_gelu`,
+    /// follow spec/05 §3.3's
     /// `x*sigmoid(2u)` graph bit for bit, so gelu of a large finite input is
     /// that input (the old `0.5*x*(1+tanh(u))` helper overflowed to `inf`).
     /// Checked over every finite f16, at bf16/f32/f64 max finite, and at the

@@ -493,7 +493,10 @@ fn parse_c_hex_literal(s: &str) -> f32 {
 
 /// `2^e`, exactly, for a normal-range exponent (no libm `powi`, chelis#2957).
 fn pow2(e: i32) -> f64 {
-    assert!((-1022..=1023).contains(&e), "pow2 exponent {e} out of the normal range");
+    assert!(
+        (-1022..=1023).contains(&e),
+        "pow2 exponent {e} out of the normal range"
+    );
     f64::from_bits(((1023 + e) as u64) << 52)
 }
 
