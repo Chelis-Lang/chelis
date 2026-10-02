@@ -175,9 +175,33 @@ profile (`2026-10-01T09:30:00-04:00`, `PT3661S`, `P14M3D`). A failure reports
 `<function>: overflow: <detail>` when arithmetic or a count conversion leaves
 its type's range. Each `try_` form other than the masked column forms returns
 `None` where its twin fails `domain`. `eq` and
-`neq` compare values, and the `*_lt`, `*_lte`, `*_gt`, and `*_gte` functions
-order them. The module is pure and runs under `chelis eval`, `chelis test`, and
-generated C.
+`neq` compare values. Dates, times, datetimes, instants, and durations also
+have `*_lt`, `*_lte`, `*_gt`, and `*_gte` functions that order them; offsets,
+offset datetimes, and periods have no order. The module is pure and runs under
+`chelis eval`, `chelis test`, and generated C. In generated C, projecting `.0`
+from a masked column producer such as `try_dates_from_epoch_days` emits C that
+does not compile ([#2883](https://github.com/Chelis-Lang/chelis/issues/2883));
+destructure the pair instead. A printed datetime value names its constructor
+by an internal package name rather than its source name
+([#2880](https://github.com/Chelis-Lang/chelis/issues/2880)).
+
+### Business days
+
+`Std.Datetime.Business` builds a `BusinessCalendar` from a `Weekmask` record
+naming the business weekdays, a holiday list, and a horizon:
+`business_calendar(w, holidays, valid_from, valid_until)`. There is no built-in
+weekend. A calendar answers only from the days of its horizon. A date outside
+it, or a query whose answer the days beyond the horizon could change, fails
+`domain` instead of degrading to a weekends-only answer. `is_business_day`
+tests a date. `business_day_roll` takes `Unadjusted`, `Following`,
+`Preceding`, `ModifiedFollowing`, or `ModifiedPreceding`. `business_day_offset`
+rolls a non-business start as its `NonBusinessStart` policy says
+(`RejectNonBusinessStart`, `RollStartForward`, or `RollStartBackward`) and
+then moves whole business days. `business_day_count` counts `[begin, end)` and
+is negative for a reversed range. `business_in_all` and `business_in_any`
+combine two calendars over their common horizon. The constructor, the
+queries, and the combinations each have a `try_` form, and the `dates_*` forms
+apply the queries to `Dates[n]` columns.
 
 ### Exported but unavailable
 
