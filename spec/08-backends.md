@@ -368,16 +368,21 @@ dispatch is checked by the device gate of §4.6. Shard 2 of the `macos-workspace
 `tests/gpu_correctness.rs` marks every test `#[ignore]`. Each test invokes
 `codegen_metal`, writes the emitted `.mm` to a temporary directory, drives `clang++`
 against `-framework Metal -framework Foundation`, runs the resulting binary, and
-asserts agreement with the `chelis-ir` evaluator within Metal-specific f32 tolerances.
+compares the result with the `chelis-ir` evaluator.
 
 The C backend is the numeric oracle for every GPU backend (§2). The Metal
-numeric-agreement contract is: for each kernel under test, the Metal GPU
-result must equal the `chelis-ir` evaluator (which the C backend is verified
-against) within the Metal f32 tolerance (`ABS_TOL`/`REL_TOL` in
-`tests/gpu_correctness.rs`, `1e-4` each). `assert_close` in that file is the
-agreement check. MSL fast-math semantics may require a wider tolerance than HIP
-for `exp`/`log`/`sqrt`-heavy kernels; a kernel needing higher precision uses
-`precise::*` qualifiers per call. The `m6_pad_*` / `m6_shrink_*` cases (1-D and 2-D
+numeric-agreement contract is [05-OBS-3]'s: for each kernel under test, every
+Metal result has the same bits as the `chelis-ir` evaluator (which the C backend
+is verified against). There is no Metal-specific absolute or relative tolerance.
+Metal kernels compile without fast math and without contraction, preserve
+subnormals, and compute every transcendental with a Chelis-owned correctly
+rounded kernel; an MSL built-in, `precise::` included, is not one, because MSL
+bounds its error rather than rounding correctly. An operation the Metal backend
+cannot compute to these bits is rejected under [05-UNS-1], never approximated.
+(The Metal and HIP lanes do not yet meet this contract; see
+[chelis#2968](https://github.com/Chelis-Lang/chelis/issues/2968) and
+[chelis#2969](https://github.com/Chelis-Lang/chelis/issues/2969).)
+The `m6_pad_*` / `m6_shrink_*` cases (1-D and 2-D
 pad/shrink, non-zero fill, and a pad→shrink roundtrip) mirror the HIP `g16_*`
 cases one-for-one.
 
@@ -443,9 +448,32 @@ Native build command surface:
 `chelis build` SHALL invoke the selected target's native compiler and produce an
 executable when the checked root manifest requires an observation entry point, or
 a static library without a process entry when it does not. Compilation SHALL use
-the target's required support sources and compiler/linker flags; host arithmetic
-SHALL disable implicit floating-point contraction (`-ffp-contract=off`). Executable
+the target's required support sources and compiler/linker flags. Every lane's
+arithmetic, host and device alike, SHALL be compiled without implicit
+floating-point contraction (`-ffp-contract=off` or the device compiler's
+equivalent) and without any value-changing optimization: no fast math,
+reassociation, flush-to-zero, or approximate reciprocal, square root, or
+transcendental. The compile and link invocations are a function of the declared
+target: the compiler SHALL NOT add flags derived from the build host's CPU (such
+as `-march=native`), and SHALL run each native tool with an environment cleared
+to a fixed allowlist, so that an ambient variable (for example `CFLAGS`,
+`CCC_OVERRIDE_OPTIONS`, or `NIX_CFLAGS_COMPILE`) cannot change generated code. A
+selected native compiler that does not honor this profile, including a wrapper
+that injects flags, SHALL fail the build rather than produce an artifact.
+Emitted code computes every transcendental with the compiler-owned correctly
+rounded kernels of [05-OP-46], never with the host math library, a vendor vector
+library, or a compiler built-in. Executable
 linking SHALL name the carried staged runtime archive by path (§2.1).
+
+Every entry point through which other code runs compiled Chelis code, namely an
+executable's process entry, an exported static-library function, and a binding
+call, SHALL establish round-to-nearest-even with flush-to-zero and
+denormals-are-zero disabled before any Chelis arithmetic, and SHALL restore the
+caller's floating-point control state when it returns, a trap return included.
+The evaluator establishes the same state on every thread on which it computes.
+Every lane finalizes a NaN produced by floating arithmetic or conversion to
+[04-NUM-2]'s canonical NaN, whatever default NaN or payload propagation its
+hardware has.
 Static libraries contain the compiled module and support objects; their consumers
 link the carried runtime archive and the target's reported native dependencies.
 
@@ -469,9 +497,10 @@ All backends must preserve:
 - the numeric semantics of `spec/04-type-system.md` §9: finalize at the declared dtype,
   compute at the arithmetic width [04-NUM-8] declares, trap per [04-NUM-9]/[04-NUM-10],
   and carry values without collapse per [04-NUM-11]
-- numerical correctness within documented tolerances, which under [04-NUM-8] cover
-  implementation variance at a single width (libm against SLEEF against vForce) and never
-  a structural width mismatch between lanes
+- bit-identical values across lanes and hosts: [05-OBS-3] grants no operation a
+  nonzero bound, the transcendentals are correctly rounded under [05-OP-46], and no
+  host math library, vendor vector library, compiler, flag, or floating-point
+  environment is a source of variance (§7)
 - named-dimension and precision semantics established before lowering
 - agreement with the reference C backend on the shared test suite - a practical oracle
   for the invariants above, not a substitute for them

@@ -116,9 +116,10 @@ with derivation-authored closure flags, preserving the pinned sysroot and librar
 paths. Record executed argv, effective profile, and resolved library identities
 in `proof_scope`.
 
-This choice leaves `chelis build`, `parity.rs`, and the e2e crates unchanged.
-Changing the product build's default profile is a separate change, not a
-precondition for [#763]. A constructor-only unit test is insufficient for N1:
+This choice leaves `parity.rs` and the e2e crates unchanged. The product
+`chelis build` profile adopts the same strictness under `spec/08-backends.md`
+§7; `spec/design/correctly_rounded_math.md` owns that change, which is not a precondition
+for [#763]. A constructor-only unit test is insufficient for N1:
 the runner and Nix check must exercise the spawned compiler under hostile
 `CHELIS_CC`, `CC`, `CFLAGS`, `LDFLAGS`, `NIX_CFLAGS_COMPILE`, `NIX_LDFLAGS`,
 and OpenMP settings. A wrapper can inject fast-math and linker flags after the

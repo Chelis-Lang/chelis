@@ -182,7 +182,7 @@ Each row names its governing atom.
 | `Numeric:sub:TableA` | [05-OP-41] |
 | `Numeric:sum:TableA` | [05-OP-30] |
 | `Numeric:tan:TableA` | [05-OP-46] |
-| `Numeric:tanh:TableA` | [05-OP-48] |
+| `Numeric:tanh:TableA` | [05-OP-46] |
 | `Numeric:tensor_to_scalar:TableA` | [05-OP-50] |
 | `Numeric:trace:TableA` | [05-OP-53] |
 | `Numeric:trunc_div:TableA` | [05-OP-64] |

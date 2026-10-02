@@ -191,8 +191,8 @@ syntax-grammar lane.
 
 Every lane owes the same observable results to the numbered specs: where
 a lane and a spec atom disagree, the lane has the bug. Lanes may differ
-only where an atom permits it, as the tolerance table of [05-OBS-3]
-does. `chelis lane-check` compares the evaluator lane against the
+only where an atom permits it; for values, [05-OBS-3]'s tolerance table
+is the only such permission, and it grants no operation a nonzero bound. `chelis lane-check` compares the evaluator lane against the
 compiled C lane.
 
 ---

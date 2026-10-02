@@ -106,17 +106,12 @@ Guarantees (compiler-verified):
   ✓ Dimension safety verified (all tensor operations have consistent shapes)
 
 This program is reproducible: same source, same inputs, same seeds will
-produce identical outputs on the same platform with the same compiler version.
+produce identical outputs with the same compiler build and target.
 ```
 
 ## Cross-Platform Reproducibility
 
-The compile-time guarantee covers seeded randomness. Bit-exact reproducibility across platforms (different CPU architectures, different SIMD widths, GPU vs CPU) requires additional discipline:
-
-- **Within a platform** (same CPU/GPU, same compiler version, same SIMD level): bit-exact reproducibility holds for code that doesn't use non-deterministic reductions.
-- **Across platforms**: bit-exact reproducibility requires explicit cross-platform-deterministic reduction modes (currently a future feature).
-
-The manifest documents this distinction. The `guarantees` section currently asserts within-platform reproducibility. A future `cross_platform_deterministic` flag will be added when the cross-platform mode ships.
+The controlling contract is `spec/00-context.md`'s: for fixed program text, compiler build, target (the declared triple and backend), and declared inputs, every value is a function of those inputs, so bit-exact reproducibility does not depend on the CPU, the SIMD level, the host C compiler, or the host math library. Reductions follow their atoms' pinned orders and transcendentals are correctly rounded ([05-OP-46]; `spec/design/correctly_rounded_math.md`). The manifest's `guarantees` section states that contract and does not narrow it.
 
 ## CI Integration
 

@@ -173,6 +173,12 @@ float chelis_sum_f32_neon(const float* restrict data, int n) {
 
 ## Level 3: Vectorized Math Library Integration
 
+> Superseded by `spec/design/correctly_rounded_math.md`. [05-OP-46] makes every transcendental
+> correctly rounded, which Sleef's `_u10` variants and Accelerate vForce are
+> not, so neither library may compute a Chelis transcendental. A vectorized
+> form of the compiler-owned kernels is admissible once it passes that
+> document's exhaustive oracle. The text below is the historical plan.
+
 **Effort:** Medium (build dependency + emitter mapping)
 **Impact:** Large (10-20x on math-heavy fused kernels like erf, normal_cdf)
 **When:** When benchmarks show math-heavy kernels dominate. This is the highest-impact SIMD investment.

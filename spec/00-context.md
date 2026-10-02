@@ -72,7 +72,13 @@ These principles determine the following rules:
 - the core IR stays small even when the user-facing language grows
 - for fixed program text, compiler build, target, and declared inputs, every
   check, evaluation, and build result is a function of those inputs; feedback
-  that varies between identical runs is a defect, not an implementation freedom
+  that varies between identical runs is a defect, not an implementation freedom.
+  The target is the declared target triple together with the selected backend.
+  The host's math library, the host C compiler and its version, compiler flags,
+  environment variables, and the process floating-point state are not part of
+  the target. They may change the bytes of a native artifact, but a value that a
+  check, an evaluation, or a built program computes or observes never depends on
+  them
 
 ## 6. Dual Syntax
 

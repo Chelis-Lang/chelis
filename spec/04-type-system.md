@@ -2071,7 +2071,7 @@ Operations accept same-precision operands only. The table of valid combinations:
 | Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any active numeric dtype (both operands same dtype) → bool |
 | Equality (`eq`, `neq`) | any active numeric dtype or bool (both operands same dtype), plus the recursively comparable host-value domain in [05-OP-36] → bool |
 | Logical (and, or, not) | bool only |
-| Transcendental (exp, log, sin, cos, tan, atan, sqrt) | f32, f64, bf16, f16 only (not integer) |
+| Transcendental (exp, log, sin, cos, tan, atan, tanh, sqrt) | f32, f64, bf16, f16 only (not integer) |
 
 Every reserved name of §1.1.1 - `f8e4m3`, `f8e5m2`, the `uint*` family,
 `int4`/`uint4`, `complex64`/`complex128`, and `decimal128`/`decimal256` - is
@@ -3404,7 +3404,11 @@ Scope:
 > class, not an input payload or sign. A pure bit-moving or selection
 > operation preserves NaN payload bits only when its governing operation atom
 > explicitly says it is bit-preserving. The width at which the op is COMPUTED
-> before finalization is fixed by [04-NUM-8], not by this atom.
+> before finalization is fixed by [04-NUM-8], not by this atom. These rules
+> are the only floating-point environment: no rounding mode, flush-to-zero,
+> denormals-are-zero, or other dynamic state of the process, host, or caller
+> in which a lane runs changes a result, and subnormal operands and results
+> are never flushed.
 
 > **[04-NUM-3]** Integer op results that are not exactly representable
 > in the declared width SHALL trap with the branded overflow diagnostic;
