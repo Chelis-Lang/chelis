@@ -325,6 +325,13 @@ are symlinks to `agent-skills/`.
   `Claude-Session` trailers, Codex or Claude attribution, AI co-authorship markers, or
   AI-session links in commit messages or PR bodies. The tracked commit-msg hook rejects
   them; `README.md` explains how it is installed.
+- **Documents describe the current state.** A new or substantially revised document reads
+  as a description of how things are, for a reader who never saw the history: no dated
+  status ("as of", "currently", "no longer"), delivery narrative, or decision attribution;
+  history lives in the changelog and its fragments, pull requests, and issues. A design
+  doc may state the problem it addresses and the alternatives it rejected; investigation
+  records and the archive keep their dates. No absolute machine paths or personal email addresses in
+  tracked files.
 - **Issues are closed manually.** Automatic closure is disabled: `Closes #N` in a PR body
   or commit has no effect, and merging never closes an issue. Close one deliberately
   with `gh issue close N --comment "resolved by #<PR>"` once the behavior is confirmed
@@ -487,6 +494,10 @@ holds the measurements behind these rules.
   immediately with the exact missing items. Prefer a labelled partial report over
   silence or an overstated completion claim, and deduplicate repeated reports that
   race with a resume nudge.
+- Every follow-up message to a running subagent, and every message to a peer session,
+  ends by asking the recipient to acknowledge it and confirm what it will do. No
+  acknowledgement by the recipient's next reply means the message was not received:
+  resend it, consolidated.
 - More than five subagents live at once under one orchestrator needs the user's
   explicit approval and a stated reason. Five is the widest fan-out measured working
   here, not a certified safe width, and it is a separate budget from the CPU one above.
