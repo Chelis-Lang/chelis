@@ -7,6 +7,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 thread_local! {
@@ -7681,6 +7682,10 @@ struct LowerCtx<'program> {
     /// Scoped like `dim_substitutions`: one activation's bindings never
     /// reach a sibling call.
     checked_dim_substitutions: UnordMap<String, DimInfo>,
+    /// The serial of the next activation that instantiates a binder without
+    /// evidence. Shared with every sub-context whose nodes are spliced into
+    /// this graph, so no two activations of one graph draw the same identity.
+    activation_serial: Arc<AtomicU64>,
     /// WS-A8: precision-tvar substitutions, keyed by the precision-var
     /// name (e.g. `p`) as it appears in `(t-var {} p)` precision slots
     /// of the polymorphic def's signature. Populated at call sites of
@@ -7802,6 +7807,7 @@ impl<'program> LowerCtx<'program> {
             decl: None,
             dim_substitutions: UnordMap::new(),
             checked_dim_substitutions: UnordMap::new(),
+            activation_serial: Arc::new(AtomicU64::new(0)),
             prec_substitutions: UnordMap::new(),
             rank_substitutions: UnordMap::new(),
             dim_axis_positions: UnordMap::new(),
@@ -11930,6 +11936,7 @@ impl<'program> LowerCtx<'program> {
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
         subctx.dag.inherit_declarations(&self.dag);
+        subctx.activation_serial = Arc::clone(&self.activation_serial);
         subctx.decl = self.decl;
         // This ordinary-grad subcontext lowers called declarations as private
         // pure helpers. Their literal result tokens must survive into zero or
@@ -13073,6 +13080,22 @@ impl<'program> LowerCtx<'program> {
                 }
             }
         }
+        // A binder with no evidence, such as one whose actual axis has only a
+        // run-time extent, still names this activation's axis and no other:
+        // it gets a fresh identity, never the callee-private name, which a
+        // sibling activation of the same body would share.
+        let unbound = binders
+            .into_sorted()
+            .into_iter()
+            .filter(|binder| !self.checked_dim_substitutions.contains_key(binder))
+            .collect::<Vec<_>>();
+        if !unbound.is_empty() {
+            let serial = self.activation_serial.fetch_add(1, Ordering::Relaxed);
+            for binder in unbound {
+                let fresh = DimInfo::Named(format!("_act_dim_{serial}_{binder}"), None);
+                self.checked_dim_substitutions.insert(binder, fresh);
+            }
+        }
     }
 
     /// Execute a resolved signature activation over bindings already placed
@@ -13534,6 +13557,7 @@ impl<'program> LowerCtx<'program> {
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
         subctx.dag.inherit_declarations(&self.dag);
+        subctx.activation_serial = Arc::clone(&self.activation_serial);
         subctx.decl = self.decl;
         #[cfg(feature = "lowering-trace")]
         {
@@ -13859,6 +13883,7 @@ impl<'program> LowerCtx<'program> {
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
         subctx.dag.inherit_declarations(&self.dag);
+        subctx.activation_serial = Arc::clone(&self.activation_serial);
         subctx.decl = self.decl;
         #[cfg(feature = "lowering-trace")]
         {

@@ -80,6 +80,21 @@ def within[n](t: &tensor[n, i64], low: i64, high: i64) -> tensor[n, bool] = and(
 def month_lengths[n](year: &tensor[n, i64], month: &tensor[n, i64]) -> tensor[n, i64] = {\n  leap = and(divisible(year, 4i64), or(not(divisible(year, 100i64)), divisible(year, 400i64)))\n  where(eq(month, filled(month, 2i64)), where(leap, filled(month, 29i64), filled(month, 28i64)), filled(month, 31i64))\n}\n\
 def field_mask[n](year: &tensor[n, i64], month: &tensor[n, i64], day: &tensor[n, i64]) -> tensor[n, bool] = {\n  fields = and(within(year, -9999i64, 9999i64), within(month, 1i64, 12i64))\n  and(fields, and(gte(day, filled(day, 1i64)), lte(day, month_lengths(year, month))))\n}\n";
 
+/// One generic body activated at sibling calls whose extents are known only
+/// at run time and legitimately differ. Each activation's binder is its own,
+/// so neither call's claim reaches the other.
+const BUMP: &str = "def bump[n](t: &tensor[n, i64]) -> tensor[n, i64] = add(t, filled(t, 1i64))\n";
+
+const BUMP_OWNED: &str =
+    "def bump[n](t: tensor[n, i64]) -> tensor[n, i64] = add(t, filled(t, 1i64))\n";
+
+/// Sibling activations of a body whose two parameters share one binder.
+const PAIR_BUMP: &str = "def pair_bump[n](t: &tensor[n, i64], u: &tensor[n, i64]) -> tensor[n, i64] = add(add(t, u), filled(t, 1i64))\n";
+
+const SIBLING_PAIRS: &str = "def run(xs: List[i64], ys: List[i64], zs: List[i64]) -> tensor[i64] = {\n  a = to_tensor(xs)\n  b = to_tensor(ys)\n  c = to_tensor(zs)\n  add(sum(pair_bump(a, a), 0i32), sum(pair_bump(b, c), 0i32))\n}\n";
+
+const SIBLINGS: &str = "def run(xs: List[i64], ys: List[i64]) -> tensor[i64] = {\n  a = to_tensor(xs)\n  b = to_tensor(ys)\n  add(sum(bump(a), 0i32), sum(bump(b), 0i32))\n}\nresult = run([1i64, 2i64], [3i64, 4i64, 5i64])\n";
+
 struct Case {
     name: &'static str,
     definitions: &'static [&'static str],
@@ -148,6 +163,26 @@ const POSITIVE: &[Case] = &[
         definitions: &[FILLED, FIELDS],
         run: "def run(years: List[i64], months: List[i64], days: List[i64]) -> List[bool] = to_list(field_mask(to_tensor(years), to_tensor(months), to_tensor(days)))\nresult = run([2024i64, 2023i64, 1900i64, 2000i64], [2i64, 2i64, 2i64, 13i64], [29i64, 29i64, 28i64, 1i64])\n",
     },
+    Case {
+        name: "sibling_activations_with_different_run_time_lengths",
+        definitions: &[FILLED, BUMP],
+        run: SIBLINGS,
+    },
+    Case {
+        name: "sibling_activations_of_an_owned_parameter",
+        definitions: &[FILLED, BUMP_OWNED],
+        run: SIBLINGS,
+    },
+    Case {
+        name: "three_sibling_activations",
+        definitions: &[FILLED, BUMP],
+        run: "def run(xs: List[i64], ys: List[i64], zs: List[i64]) -> tensor[i64] = {\n  a = to_tensor(xs)\n  b = to_tensor(ys)\n  c = to_tensor(zs)\n  add(add(sum(bump(a), 0i32), sum(bump(b), 0i32)), sum(bump(c), 0i32))\n}\nresult = run([1i64, 2i64], [3i64, 4i64, 5i64], [6i64])\n",
+    },
+    Case {
+        name: "sibling_activations_of_a_shared_binder",
+        definitions: &[FILLED, PAIR_BUMP, SIBLING_PAIRS],
+        run: "result = run([1i64, 2i64], [3i64, 4i64, 5i64], [6i64, 7i64, 8i64])\n",
+    },
 ];
 
 /// Each run-time twin with one argument a different length, and the line
@@ -184,6 +219,14 @@ const NEGATIVE: &[(Case, &str)] = &[
             run: "def run(years: List[i64], months: List[i64], days: List[i64]) -> List[bool] = to_list(field_mask(to_tensor(years), to_tensor(months), to_tensor(days)))\nresult = run([2024i64, 2023i64, 1900i64, 2000i64], [2i64, 2i64, 2i64, 13i64], [29i64, 29i64, 28i64])\n",
         },
         "extent `n`: year axis 0 = 4, day axis 0 = 3",
+    ),
+    (
+        Case {
+            name: "sibling_activation_lengths_differ",
+            definitions: &[FILLED, PAIR_BUMP, SIBLING_PAIRS],
+            run: "result = run([1i64, 2i64], [3i64, 4i64, 5i64], [6i64, 7i64])\n",
+        },
+        "extent `n`: t axis 0 = 3, u axis 0 = 2",
     ),
 ];
 
@@ -270,7 +313,9 @@ fn check_negative(case: &Case, evaluator: &str, compiled: &str) -> Result<(), St
 
 // REGRESSION TEST. On `4a53cc7bd` the C build refused the chelis#2917 and
 // chelis#2893 programs at ownership lowering, panicked on the chelis#2906
-// program, and refused or panicked on the three neighbouring shapes.
+// program, and refused or panicked on the three neighbouring shapes. On
+// `637c680cc` the compiled sibling activations trapped on one shared binder
+// (`extent \`d44\`: claimed = 2, insert axis 0 = 3`).
 #[test]
 fn generic_bodies_compile_as_eval_runs_them() {
     let failures: Vec<String> = POSITIVE
