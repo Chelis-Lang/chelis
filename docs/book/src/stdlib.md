@@ -213,10 +213,12 @@ fails instead of rounding. `decimal_to_f64` and `decimal_to_f32` are the one
 other conversion that drops precision, rounding once to nearest with ties to
 even. `decimal_to_string` writes the canonical text without an exponent, and
 `decimal_to_fixed_string(x, n)` writes exactly `n` fractional digits and never
-rounds. A failure reports `<function>: domain: <detail>`
-for an invalid input or `<function>: overflow: <detail>` for a result outside
-the value set; each `try_` form returns `None` where its twin fails `domain`,
-and `try_decimal_to_i64` also where its twin fails `overflow`. The module is
+rounds. A failure reports `<function>: domain: <detail>` for an argument that
+denotes no value of its domain, including text or a float whose value lies
+outside the decimal range, or `<function>: overflow: <detail>` when the exact
+result of arithmetic lies outside that range or `decimal_to_i64`'s integer lies
+outside i64; each `try_` form returns `None` where its twin fails `domain`, and
+`try_decimal_to_i64` also where its twin fails `overflow`. The module is
 pure and runs under `chelis eval`, `chelis test`, and generated C.
 
 ### Exported but unavailable
