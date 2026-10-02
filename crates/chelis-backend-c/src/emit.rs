@@ -808,14 +808,25 @@ impl CEmitter {
         // not compile, which is the class the occurrence walk's `panic!` was
         // guarding and the reason a receipt has to take its place rather than
         // nothing taking it.
-        if let Some(missing) = dag
-            .rendered_dim_names()
-            .into_iter()
-            .find(|name| !e.declared_dim_names.contains(name))
-        {
+        //
+        // Covering the set is not enough: a declaration the operation order
+        // places after a reference is the same C that does not compile
+        // (chelis#2883, where the only site that produces the extent runs
+        // after an earlier operation's guard reads it). So the receipt also
+        // covers a name the finished function reads before declaring.
+        let rendered = dag.rendered_dim_names();
+        let violation = rendered
+            .iter()
+            .find(|name| !e.declared_dim_names.contains(*name))
+            .map(|name| (name.clone(), "is rendered but never declared"))
+            .or_else(|| {
+                extent_read_before_declaration(&e.lines, &rendered)
+                    .map(|name| (name, "is rendered before it is declared"))
+            });
+        if let Some((missing, how)) = violation {
             return Err(chelis_types::unsupported::Unsupported::new(
                 chelis_types::unsupported::UnsupportedKind::Construct(format!(
-                    "extent `{missing}` is rendered but never declared"
+                    "extent `{missing}` {how}"
                 )),
                 format!("emitted function `{func_name}`"),
                 chelis_types::unsupported::Stage::Codegen("c"),
@@ -8931,9 +8942,130 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     }
 }
 
+/// The first of `names` that a line of `lines` reads as a C identifier
+/// before the line declaring it, `int64_t <name> = <extent>;`, in function
+/// order (chelis#2883). Both declaration loops emit exactly that spelling,
+/// and a declaration's own right-hand side is a read. String and character
+/// literals, comments and preprocessor lines are not code, so a guard
+/// message that quotes a name is not a read of it.
+fn extent_read_before_declaration(lines: &[String], names: &[String]) -> Option<String> {
+    let names: BTreeSet<&str> = names.iter().map(String::as_str).collect();
+    let mut declared: BTreeSet<&str> = BTreeSet::new();
+    for line in lines {
+        let code = line.trim_start();
+        if code.starts_with('#') {
+            continue;
+        }
+        let declaration = code
+            .strip_prefix("int64_t ")
+            .and_then(|rest| rest.split_once(" = "))
+            .filter(|(name, _)| names.contains(name));
+        let read = declaration.map_or(code, |(_, extent)| extent);
+        if let Some(name) =
+            c_identifiers(read).find(|token| names.contains(token) && !declared.contains(token))
+        {
+            return Some(name.to_string());
+        }
+        if let Some((name, _)) = declaration {
+            declared.insert(name);
+        }
+    }
+    None
+}
+
+/// The identifiers of one line of C, outside string and character
+/// literals and comments. A token that starts with a digit is a number and
+/// is skipped whole, so `1LL` yields no identifier.
+fn c_identifiers(code: &str) -> impl Iterator<Item = &str> {
+    let bytes = code.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'"' || byte == b'\'' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != byte {
+                i += if bytes[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+        } else if code[i..].starts_with("//") {
+            break;
+        } else if code[i..].starts_with("/*") {
+            i = code[i + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |end| i + 2 + end + 2);
+        } else if byte.is_ascii_alphanumeric() || byte == b'_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            if !byte.is_ascii_digit() {
+                tokens.push(&code[start..i]);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    tokens.into_iter()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_extent_read_before_its_declaration_is_found() {
+        let lines = |text: &[&str]| text.iter().map(|line| line.to_string()).collect::<Vec<_>>();
+        let names = vec!["d5".to_string(), "n".to_string()];
+        // chelis#2883's shape: a guard reads `d5`, its declaration follows.
+        assert_eq!(
+            extent_read_before_declaration(
+                &lines(&[
+                    "    if ((chelis_tensor_shape(t5, 0)) != d5) {",
+                    "    int64_t d5 = ((int64_t*)t12_data)[0];",
+                ]),
+                &names,
+            ),
+            Some("d5".to_string())
+        );
+        // Declared first, then read, including by a later declaration's
+        // right-hand side: nothing is reported.
+        assert_eq!(
+            extent_read_before_declaration(
+                &lines(&[
+                    "    int64_t d5 = chelis_tensor_shape(inputs[0], 0);",
+                    "    int64_t n = d5;",
+                    "    chelis_tensor *t1 = chelis_alloc(1, (int64_t[]){ n }, CHELIS_DTYPE_I64);",
+                ]),
+                &names,
+            ),
+            None
+        );
+        // A declaration reading a name declared only after it is a read.
+        assert_eq!(
+            extent_read_before_declaration(
+                &lines(&["    int64_t n = d5;", "    int64_t d5 = 3;"]),
+                &names,
+            ),
+            Some("d5".to_string())
+        );
+        // Quoted names, comments, pragmas and other identifiers that merely
+        // contain a name are not reads.
+        assert_eq!(
+            extent_read_before_declaration(
+                &lines(&[
+                    "    fprintf(stderr, \"extent `d5`: claimed = %lld\\n\", (long long)(t5_size));",
+                    "    // span: d5 n",
+                    "    /* d5 */ int64_t n_d5 = 'n';",
+                    "    #pragma omp parallel for simd n",
+                    "    int64_t d51 = 1LL;",
+                    "    int64_t d5 = n_d5;",
+                ]),
+                &names,
+            ),
+            None
+        );
+    }
     use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
     use chelis_types::types::Prim;
 
