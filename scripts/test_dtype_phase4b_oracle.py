@@ -2067,8 +2067,8 @@ class ContractValidationTests(unittest.TestCase):
             REPO_ROOT / "spec/registry/stdlib_numeric_manifest.md"
         ).read_text(encoding="utf-8")
         rows = re.findall(r"^\| `([^`]+)` \|", registry, re.MULTILINE)
-        self.assertEqual(len(rows), 228)
-        self.assertEqual(len(set(rows)), 228)
+        self.assertEqual(len(rows), 250)
+        self.assertEqual(len(set(rows)), 250)
         identities = set(rows)
         for identity in (
             "decimal::decimal_add",
@@ -2077,6 +2077,7 @@ class ContractValidationTests(unittest.TestCase):
             "datetime::date_lt",
             "datetime/business::business_day_offset",
             "datetime/clock::clock_now",
+            "datetime/zone::zoned_from_local",
         ):
             with self.subTest(identity=identity):
                 self.assertIn(identity, identities)
@@ -2972,6 +2973,17 @@ class ContractValidationTests(unittest.TestCase):
             with self.subTest(clause=clause):
                 self.assertIn(clause, block)
 
+    def test_stdlib_datetime_zone_contract_is_total(self) -> None:
+        block = self.repository_atom("05-OP-73")
+        for clause in (
+            "`time_zone_offset_at(tz,i)` is the offset in force at `i`",
+            "`RejectNonUniqueLocal` fails `domain` in a fold and in a gap",
+            "`UseWrittenOffset` gives the instant `local - offset`",
+            "`u-ca` tag whose value is `iso8601` or `gregory` is accepted",
+        ):
+            with self.subTest(clause=clause):
+                self.assertIn(clause, block)
+
     def test_stdlib_assertion_and_process_contracts_are_total(self) -> None:
         normalized = self.repository_atom("05-OP-35")
         self.assertIn(
@@ -3120,6 +3132,22 @@ class ContractValidationTests(unittest.TestCase):
             "`date_days_until(a,b)` is\n> `epoch_day(a) - epoch_day(b)`",
         )
         self.assert_contract_fails("OP-73.*date_days_until")
+
+    def test_zone_gap_orientation_is_frozen(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "`EarlierInstant` gives `dt - o_a`",
+            "`EarlierInstant` gives `dt - o_b`",
+        )
+        self.assert_contract_fails("OP-73.*EarlierInstant")
+
+    def test_zone_daylight_start_prevails_at_a_tie(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "a start prevailing over an end",
+            "an end prevailing over a start",
+        )
+        self.assert_contract_fails("OP-73.*a start prevailing")
 
     def test_duration_range_failure_is_on_the_normalized_second(self) -> None:
         self.replace(

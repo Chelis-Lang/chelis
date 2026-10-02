@@ -355,7 +355,10 @@ EXPECTED_OP_MANIFESTS = {
 | `datetime::Period` | `Period { months: i64, days: i64 }` |
 | `datetime::Dates` | `Dates { epoch_days: tensor[n,i64] }` |
 | `datetime::Instants` | `Instants { unix_seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |
-| `datetime/clock::MonotonicInstant` | `MonotonicInstant { second: i64, nanosecond: i64 }` |""".splitlines()
+| `datetime/clock::MonotonicInstant` | `MonotonicInstant { second: i64, nanosecond: i64 }` |
+| `datetime/zone::TimeZone` | `TimeZone { name: string, initial_offset: i64, transitions: List[(i64,i64)], footer: Option[(i64,Option[(i64,(i64,i64,i64,i64,i64),(i64,i64,i64,i64,i64))])] }` |
+| `datetime/zone::Zoned` | `Zoned { instant: Instant, zone: TimeZone }` |
+| `datetime/zone::ZonedText` | `ZonedText { local: DateTime, offset: Offset, zone_name: string, critical: bool }` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
@@ -526,6 +529,28 @@ EXPECTED_OP_MANIFESTS = {
 | `datetime::weekday_iso_number` | `(Weekday)->i64` |
 | `datetime::weekday_on_or_after` | `(Date,Weekday)->Date` |
 | `datetime::weekday_on_or_before` | `(Date,Weekday)->Date` |
+| `datetime/zone::parse_zoned_text` | `(string)->ZonedText` |
+| `datetime/zone::time_zone_fixed` | `(Offset)->TimeZone` |
+| `datetime/zone::time_zone_from_tzif` | `(string,List[i64])->TimeZone` |
+| `datetime/zone::time_zone_name` | `(TimeZone)->string` |
+| `datetime/zone::time_zone_offset_at` | `(TimeZone,Instant)->Offset` |
+| `datetime/zone::time_zone_utc` | `()->TimeZone` |
+| `datetime/zone::try_parse_zoned_text` | `(string)->Option[ZonedText]` |
+| `datetime/zone::try_time_zone_from_tzif` | `(string,List[i64])->Option[TimeZone]` |
+| `datetime/zone::try_time_zone_offset_at` | `(TimeZone,Instant)->Option[Offset]` |
+| `datetime/zone::try_zoned` | `(Instant,TimeZone)->Option[Zoned]` |
+| `datetime/zone::try_zoned_from_local` | `(DateTime,TimeZone,Disambiguation)->Option[Zoned]` |
+| `datetime/zone::try_zoned_from_text` | `(ZonedText,TimeZone,OffsetConflict)->Option[Zoned]` |
+| `datetime/zone::zoned` | `(Instant,TimeZone)->Zoned` |
+| `datetime/zone::zoned_add_duration` | `(Zoned,Duration)->Zoned` |
+| `datetime/zone::zoned_add_period` | `(Zoned,Period,DayOverflow,Disambiguation)->Zoned` |
+| `datetime/zone::zoned_from_local` | `(DateTime,TimeZone,Disambiguation)->Zoned` |
+| `datetime/zone::zoned_from_text` | `(ZonedText,TimeZone,OffsetConflict)->Zoned` |
+| `datetime/zone::zoned_instant` | `(Zoned)->Instant` |
+| `datetime/zone::zoned_local` | `(Zoned)->DateTime` |
+| `datetime/zone::zoned_offset` | `(Zoned)->Offset` |
+| `datetime/zone::zoned_to_string` | `(Zoned)->string` |
+| `datetime/zone::zoned_zone` | `(Zoned)->TimeZone` |
 | `decimal::decimal` | `(string)->Decimal` |
 | `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
 | `decimal::decimal_div` | `(Decimal,Decimal,i64,Rounding)->Decimal` |
@@ -910,10 +935,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 228 or len(set(identities)) != 228:
+    if len(identities) != 250 or len(set(identities)) != 250:
         violations.append(
             "[05-OP-35] stdlib numeric manifest must have exactly two hundred "
-            "twenty-eight unique identities"
+            "fifty unique identities"
         )
 
 
@@ -2473,7 +2498,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the two hundred twenty-eight final exported stdlib numeric definitions",
+            "exactly the two hundred fifty final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "
@@ -2495,8 +2520,8 @@ def validate_normative_contract(
             "`tensor/construct::stack` | "
             "`(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "Every primitive-width intermediate in a graph whose contract names a dtype",
-            "The `datetime::*`, `datetime/business::*`, and `datetime/clock::*` "
-            "identities follow [05-OP-73]",
+            "The `datetime::*`, `datetime/business::*`, `datetime/clock::*`, and "
+            "`datetime/zone::*` identities follow [05-OP-73]",
             "The `decimal::*` identities follow [05-OP-76]",
             "integer primitive arithmetic is checked",
             "JSON access follows [05-OP-2..5]",
@@ -2693,9 +2718,9 @@ def validate_normative_contract(
             "alias, or compatibility identity belongs to this atom",
         ),
         "05-OP-73": (
-            "governs exactly the `datetime::*`, `datetime/business::*`, and "
-            "`datetime/clock::*` identities of the [05-OP-34] and [05-OP-35] "
-            "registries",
+            "governs exactly the `datetime::*`, `datetime/business::*`, "
+            "`datetime/clock::*`, and `datetime/zone::*` identities of the [05-OP-34] "
+            "and [05-OP-35] registries",
             "A day of the horizon is a business day when the weekmask includes its "
             "weekday and it is not a holiday",
             "so two calendars with the same business days, weekmask, and horizon are "
@@ -2740,6 +2765,18 @@ def validate_normative_contract(
             "`monotonic_until(a,b)` is the only datetime callable",
             "No callable converts a `MonotonicInstant` to or from an `Instant`",
             "naming the builtin rather than `clock_now` or `monotonic_now`",
+            "reads an RFC 9636 TZif file of version `2`, `3`, or `4`",
+            "when the file has a leap-second record, which is not on the POSIX timescale",
+            "a start prevailing over an end at the same instant",
+            "covers only the instants before its last transition",
+            "within 86 399 seconds of `dt` read at offset zero",
+            "A trial `dt - o` outside the instant range fails `overflow`",
+            "`EarlierInstant` gives `dt - o_a`, and `LaterInstant` and "
+            "`CompatibleInstant` give `dt - o_b`",
+            "when more than one change satisfies this, every policy fails `domain`",
+            "with offset zero written `+00:00`",
+            "any other critical tag fail `domain`, and any other elective tag is ignored",
+            "resolves the record against `tz` whatever its name",
         ),
         "05-OP-74": (
             "governs exactly the seven constructors of the standard-library plain enum "
