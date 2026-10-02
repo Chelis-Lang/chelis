@@ -12,6 +12,7 @@ out via the chelis-python test binaries successfully loading libpython).
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -336,144 +337,131 @@ class EnsureLinkSymlinkTest(unittest.TestCase):
             self.assertEqual(list(libdir.iterdir()), [])
 
 
-class DiscoverPythonLibdirsTest(unittest.TestCase):
-    """Discovery walks UV_PYTHON_INSTALL_DIR + ~/.local/share/uv/python/
-    to find every libpython install. Needed because pyo3-build-config
-    can query a different uv install copy than `.venv/bin/python`."""
+class InterpreterBuildSignatureTest(unittest.TestCase):
+    """Stable venv spelling must not preserve old interpreter build metadata."""
+    def packet(self):
+        return {
+            "executable": "/checkout/.venv/bin/python",
+            "resolved_executable": "/uv/cpython-3.11.16/bin/python3.11",
+            "prefix": "/checkout/.venv", "base_prefix": "/uv/cpython-3.11.16",
+            "implementation": "cpython", "version": "3.11.16 (owned build)",
+            "version_info": [3, 11, 16], "pointer_width": 64,
+            "libdir": "/uv/cpython-3.11.16/lib", "ldlibrary": "libpython3.11.so.1.0",
+            "soabi": "cpython-311-x86_64-linux-gnu",
+            "build_flags": {"Py_DEBUG": 0, "Py_REF_DEBUG": 0, "Py_TRACE_REFS": 0, "COUNT_ALLOCS": None, "Py_ENABLE_SHARED": 1, "Py_GIL_DISABLED": None},
+        }
 
-    def test_primary_libdir_included_first(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            libdir = Path(td)
-            (libdir / "libpython3.11.so.1.0").touch()
-            with mock.patch("platform.system", return_value="Linux"):
-                with mock.patch.dict(os.environ, {}, clear=True):
-                    result = ci_setup_uv_python.discover_python_libdirs(str(libdir), "3.11")
-            self.assertGreaterEqual(len(result), 1)
-            self.assertEqual(result[0].resolve(), libdir.resolve())
+    def signature(self, packet, environment=None):
+        result = subprocess.CompletedProcess([], 0, json.dumps(packet), "")
+        with mock.patch("subprocess.run", return_value=result) as run:
+            value = ci_setup_uv_python.pyo3_environment_signature(
+                Path("/checkout/.venv/bin/python"), environ=environment or {},
+            )
+        self.assertEqual(run.call_args.args[0][:2], ["/checkout/.venv/bin/python", "-I"])
+        return value
 
-    def test_primary_libdir_skipped_when_no_libpython(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            empty = Path(td) / "empty"
-            empty.mkdir()
-            with mock.patch("platform.system", return_value="Linux"):
-                with mock.patch.dict(os.environ, {}, clear=True):
-                    with mock.patch.object(Path, "home", return_value=Path("/nonexistent")):
-                        result = ci_setup_uv_python.discover_python_libdirs(str(empty), "3.11")
-            self.assertEqual(result, [])
+    def test_signature_is_deterministic_and_patch_update_invalidates_stable_venv(self):
+        first = self.packet()
+        self.assertEqual(self.signature(first), self.signature(dict(reversed(list(first.items())))))
+        second = dict(first, version="3.11.17 (owned build)", version_info=[3, 11, 17])
+        self.assertNotEqual(self.signature(first), self.signature(second))
 
-    def test_finds_uv_python_install_dir_root(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            install = root / "cpython-3.11.15-linux-x86_64-gnu"
-            (install / "lib").mkdir(parents=True)
-            (install / "lib" / "libpython3.11.so.1.0").touch()
-            with mock.patch("platform.system", return_value="Linux"):
-                with mock.patch.dict(
-                    os.environ,
-                    {"UV_PYTHON_INSTALL_DIR": str(root)},
-                    clear=True,
-                ):
-                    with mock.patch.object(Path, "home", return_value=Path("/nonexistent")):
-                        result = ci_setup_uv_python.discover_python_libdirs(
-                            "/some/primary/that/does/not/exist", "3.11"
-                        )
-            self.assertEqual(len(result), 1)
-            self.assertEqual(result[0].name, "lib")
+    def test_build_and_location_inputs_independently_invalidate(self):
+        first = self.packet()
+        changes = {
+            "resolved_executable": "/other/bin/python3.11", "prefix": "/other/venv",
+            "base_prefix": "/other/python", "implementation": "pypy",
+            "version": "3.11.16 (another build)", "pointer_width": 32,
+            "libdir": "/other/lib", "ldlibrary": "libpython3.11.dylib",
+            "soabi": "cpython-311-darwin", "build_flags": {"Py_DEBUG": 1, "Py_REF_DEBUG": 0, "Py_TRACE_REFS": 0, "COUNT_ALLOCS": None, "Py_ENABLE_SHARED": 1, "Py_GIL_DISABLED": None},
+        }
+        for key, value in changes.items():
+            with self.subTest(input=key):
+                self.assertNotEqual(self.signature(first), self.signature(dict(first, **{key: value})))
 
-    def test_dedupes_roots_that_resolve_to_same_path(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            install = root / "cpython-3.11.15-linux-x86_64-gnu"
-            (install / "lib").mkdir(parents=True)
-            (install / "lib" / "libpython3.11.so.1.0").touch()
-            libdir = install / "lib"
-            with mock.patch("platform.system", return_value="Linux"):
-                with mock.patch.dict(
-                    os.environ,
-                    {"UV_PYTHON_INSTALL_DIR": str(root)},
-                    clear=True,
-                ):
-                    with mock.patch.object(Path, "home", return_value=Path("/nonexistent")):
-                        result = ci_setup_uv_python.discover_python_libdirs(str(libdir), "3.11")
-            self.assertEqual(len(result), 1)
+    def test_missing_or_malformed_identity_fails_closed(self):
+        for key, invalid in [("version_info", [3, 10, 16]), ("pointer_width", True),
+                             ("libdir", ""), ("libdir", "relative"),
+                             ("version", ""), ("build_flags", [])]:
+            with self.subTest(key=key, invalid=invalid):
+                with self.assertRaisesRegex(RuntimeError, "interpreter build identity"):
+                    self.signature(dict(self.packet(), **{key: invalid}))
+        packet = self.packet()
+        del packet["libdir"]
+        with self.assertRaisesRegex(RuntimeError, "interpreter build identity"):
+            self.signature(packet)
+
+    def test_discovery_overrides_are_rejected_before_probe(self):
+        for name in ["PYO3_CONFIG_FILE", "PYO3_NO_PYTHON", "PYO3_CROSS", "PYO3_CROSS_LIB_DIR"]:
+            for value in ["set", ""]:
+                with self.subTest(name=name, value=value):
+                    with mock.patch("subprocess.run") as run:
+                        with self.assertRaisesRegex(RuntimeError, name):
+                            ci_setup_uv_python.pyo3_environment_signature(
+                                Path("/checkout/.venv/bin/python"), environ={name: value},
+                            )
+                        run.assert_not_called()
+
+    def test_failed_or_non_json_probe_cannot_publish_a_signature(self):
+        with mock.patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, [])):
+            with self.assertRaisesRegex(RuntimeError, "interpreter build identity"):
+                ci_setup_uv_python.pyo3_environment_signature(Path("/checkout/.venv/bin/python"), environ={})
+        with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "not JSON", "")):
+            with self.assertRaisesRegex(RuntimeError, "interpreter build identity"):
+                ci_setup_uv_python.pyo3_environment_signature(Path("/checkout/.venv/bin/python"), environ={})
 
 
-class EnsureDefaultUvRootMirrorTest(unittest.TestCase):
-    """The mirror exists to defeat pyo3-build-config caching that may
-    persist a -L flag pointing at `~/.local/share/uv/python/<install>/lib`
-    even when uv staged Python elsewhere."""
+class CurrentLibrarySetupTest(unittest.TestCase):
+    def test_override_is_rejected_before_venv_creation(self):
+        with mock.patch.object(sys, "argv", ["ci_setup_uv_python"]), \
+             mock.patch.dict(os.environ, {"PYO3_CONFIG_FILE": ""}, clear=True), \
+             mock.patch.object(ci_setup_uv_python, "create_venv") as create:
+            with self.assertRaisesRegex(RuntimeError, "PYO3_CONFIG_FILE"):
+                ci_setup_uv_python.main()
+            create.assert_not_called()
 
-    def test_mirrors_libpython_to_default_root(self) -> None:
-        with tempfile.TemporaryDirectory() as actual_root_str:
-            with tempfile.TemporaryDirectory() as fake_home_str:
-                actual_root = Path(actual_root_str)
-                install = actual_root / "cpython-3.11.15-linux-x86_64-gnu"
-                libdir = install / "lib"
-                libdir.mkdir(parents=True)
-                lib_file = libdir / "libpython3.11.so.1.0"
-                lib_file.touch()
-                fake_home = Path(fake_home_str)
-                with mock.patch("platform.system", return_value="Linux"):
-                    with mock.patch.object(Path, "home", return_value=fake_home):
-                        ci_setup_uv_python.ensure_default_uv_root_mirror(
-                            str(libdir), "3.11"
-                        )
-                mirror = (
-                    fake_home
-                    / ".local"
-                    / "share"
-                    / "uv"
-                    / "python"
-                    / "cpython-3.11.15-linux-x86_64-gnu"
-                    / "lib"
-                    / "libpython3.11.so"
-                )
-                self.assertTrue(mirror.is_symlink())
-                self.assertEqual(
-                    Path(os.readlink(mirror)),
-                    lib_file.resolve(),
-                )
+    def test_current_library_and_signature_are_published_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = root / "current/lib"
+            current.mkdir(parents=True)
+            (current / "libpython3.11.so.1.0").touch()
+            output = root / "github-env"
+            interpreter = root / ".venv/bin/python"
+            with mock.patch.object(sys, "argv", ["ci_setup_uv_python"]), \
+                 mock.patch.object(ci_setup_uv_python, "create_venv", return_value=interpreter), \
+                 mock.patch.object(ci_setup_uv_python, "libdir_for", return_value=str(current)), \
+                 mock.patch.object(ci_setup_uv_python, "python_abi_version", return_value="3.11"), \
+                 mock.patch.object(ci_setup_uv_python, "pyo3_environment_signature", return_value="current-signature") as signature, \
+                 mock.patch.dict(os.environ, {"GITHUB_ENV": str(output)}, clear=True), \
+                 mock.patch("platform.system", return_value="Linux"):
+                self.assertEqual(ci_setup_uv_python.main(), 0)
+            signature.assert_called_once_with(interpreter)
+            exports = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            self.assertEqual(exports["LD_LIBRARY_PATH"], str(current))
+            self.assertEqual(exports["PYO3_PYTHON"], str(interpreter))
+            self.assertEqual(exports["PYO3_ENVIRONMENT_SIGNATURE"], "current-signature")
+            self.assertTrue((current / "libpython3.11.so").is_file())
 
-    def test_noop_when_libdir_is_not_uv_style(self) -> None:
-        # System Python lives at /usr/lib/python3.11; libdir is /usr/lib
-        # whose parent is /usr, not a cpython-X install. Helper should
-        # noop rather than create a mirror.
-        with tempfile.TemporaryDirectory() as actual_root_str:
-            with tempfile.TemporaryDirectory() as fake_home_str:
-                libdir = Path(actual_root_str) / "lib"
-                libdir.mkdir()
-                (libdir / "libpython3.11.so.1.0").touch()
-                fake_home = Path(fake_home_str)
-                with mock.patch("platform.system", return_value="Linux"):
-                    with mock.patch.object(Path, "home", return_value=fake_home):
-                        ci_setup_uv_python.ensure_default_uv_root_mirror(
-                            str(libdir), "3.11"
-                        )
-                # No mirror should have been created.
-                default_root = fake_home / ".local" / "share" / "uv" / "python"
-                self.assertFalse(default_root.exists())
-
-    def test_noop_when_libdir_has_no_libpython(self) -> None:
-        with tempfile.TemporaryDirectory() as actual_root_str:
-            with tempfile.TemporaryDirectory() as fake_home_str:
-                install = Path(actual_root_str) / "cpython-3.11.15-linux-x86_64-gnu"
-                libdir = install / "lib"
-                libdir.mkdir(parents=True)
-                # No libpython file in this dir.
-                fake_home = Path(fake_home_str)
-                with mock.patch("platform.system", return_value="Linux"):
-                    with mock.patch.object(Path, "home", return_value=fake_home):
-                        ci_setup_uv_python.ensure_default_uv_root_mirror(
-                            str(libdir), "3.11"
-                        )
-                default_root = fake_home / ".local" / "share" / "uv" / "python"
-                # The dir might exist as we mkdir'd it, but no symlink
-                # should have been created.
-                if default_root.exists():
-                    mirror_libdir = (
-                        default_root / "cpython-3.11.15-linux-x86_64-gnu" / "lib"
-                    )
-                    self.assertFalse((mirror_libdir / "libpython3.11.so").exists())
+    def test_missing_current_library_rejects_even_if_a_sibling_is_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = root / "cpython-3.11.17/lib"
+            sibling = root / "cpython-3.11.16/lib"
+            current.mkdir(parents=True)
+            sibling.mkdir(parents=True)
+            (sibling / "libpython3.11.so.1.0").touch()
+            with mock.patch.object(sys, "argv", ["ci_setup_uv_python"]), \
+                 mock.patch.object(ci_setup_uv_python, "create_venv", return_value=root / ".venv/bin/python"), \
+                 mock.patch.object(ci_setup_uv_python, "libdir_for", return_value=str(current)), \
+                 mock.patch.object(ci_setup_uv_python, "python_abi_version", return_value="3.11"), \
+                 mock.patch.dict(os.environ, {"UV_PYTHON_INSTALL_DIR": str(root)}, clear=True), \
+                 mock.patch("platform.system", return_value="Linux"), \
+                 mock.patch.object(ci_setup_uv_python, "append_to_github_env") as publish:
+                with self.assertRaisesRegex(RuntimeError, "no libpython3.11"):
+                    ci_setup_uv_python.main()
+                publish.assert_not_called()
+                self.assertEqual(list(current.iterdir()), [])
 
 
 if __name__ == "__main__":

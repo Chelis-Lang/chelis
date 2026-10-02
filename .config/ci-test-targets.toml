@@ -2393,6 +2393,24 @@ reason = "script-unit enters the project CI profile before executing runtime and
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "scripts/ci_setup_uv_python.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the script suite verifies current-interpreter library setup and PyO3 cache identity shared by hosted, Devenv and gate consumers"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_setup_uv_python.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered script suite runs interpreter signature and authoritative library setup regressions"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
 prefix = "scripts/ci_devenv.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2436,6 +2454,15 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit activates the project through the shared setup sequence before its environment handoff regressions"
 tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".github/actions/vendor/ci/"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "byte-for-byte Chelis-Lang/ci@6afc09f copy; the native Nix job runs the vendored disk reclaim, portable Devenv and build-cache actions, and openspec-store.yml runs the vendored Devenv and store actions on pull requests"
+tracking_issue = "chelis#2867"
 
 [[path_rule]]
 prefix = "scripts/ci_nix_cache_roots.py"
@@ -3409,6 +3436,15 @@ job = "lint-rust"
 cadence = "pull_request and push"
 reason = "Clippy policy is executed directly by the standing Rust policy job"
 tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "chelis-lint.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust policy job's lint-and-unit gate stage runs chelis lint --check ., which loads this repository traversal policy before any rule"
+tracking_issue = "chelis#2867"
 
 [[path_rule]]
 prefix = "scripts/pipeline_core_dependency_guard.py"

@@ -232,6 +232,7 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 from unrepresentable_domain_oracle import ORACLE_BINARY_ENV  # noqa: E402
+from ci_setup_uv_python import pyo3_environment_signature  # noqa: E402
 
 # NB: `tomllib` is intentionally NOT imported at module top. It is stdlib
 # only from Python 3.11. The gate bootstrap now re-executes an unmanaged
@@ -1063,6 +1064,13 @@ def gate_environment(
                 "`uv python install 3.11` and retry."
             )
         environment["PYO3_PYTHON"] = str(executable)
+
+    try:
+        environment["PYO3_ENVIRONMENT_SIGNATURE"] = pyo3_environment_signature(
+            Path(environment["PYO3_PYTHON"]), environ=environment,
+        )
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
 
     root = repo_root.resolve()
     configured_target = environment.get("CARGO_TARGET_DIR", "target")

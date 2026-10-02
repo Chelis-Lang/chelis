@@ -82,14 +82,13 @@ class _Stub:
 
 
 def _popen_stub(returncodes: dict[int, int] | None = None, *, raise_on: int | None = None):
-    """Intercept only the gate's own children (they carry `env`); the
-    interpreter probe in `gate_environment` goes to the real Popen."""
+    """Intercept gate children; isolated interpreter identity probes run for real."""
     real_popen = gate.subprocess.Popen
     launched: list[list[str]] = []
     codes = returncodes or {}
 
     def fake_popen(command, *args, **kwargs):
-        if "env" not in kwargs:
+        if "env" not in kwargs or command[1:3] == ["-I", "-c"]:
             return real_popen(command, *args, **kwargs)
         launched.append(list(command))
         if raise_on is not None and len(launched) == raise_on:

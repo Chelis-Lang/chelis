@@ -1,0 +1,35 @@
+{
+  "schema": "cproof-cache-inventory/v1",
+  "system": "x86_64-linux",
+  "profiles": [
+    "actionlint",
+    "cargo-deny",
+    "cargo-machete",
+    "cargo-mutants",
+    "check-cargo-nix",
+    "check-python-types",
+    "container-image",
+    "openspec-governance",
+    "ruff",
+    "rust-lint",
+    "rust-release-binary",
+    "setup-cargo-criterion",
+    "setup-flamegraph",
+    "setup-hyperfine",
+    "typos",
+    "zizmor"
+  ],
+  "limits": {
+    "maxRoots": 32,
+    "maxClosurePaths": 10000,
+    "maxNarBytes": 2147483648,
+    "maxTotalBytes": 8589934592,
+    "minFreeBytesBeforePreparation": 25769803776,
+    "minFreeBytesAfterRealization": 12884901888
+  },
+  "niks3": {
+    "version": "1.10.1",
+    "url": "https://github.com/Mic92/niks3/releases/download/v1.10.1/niks3_Linux_x86_64.tar.gz",
+    "sha256": "4857272d97db083eb090eca30b6ad9c4c541b8c2ffa33e9bcc315945ec47284c"
+  }
+}

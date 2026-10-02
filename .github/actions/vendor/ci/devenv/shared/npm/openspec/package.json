@@ -1,0 +1,8 @@
+{
+  "name": "chelis-openspec-governance-action",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@fission-ai/openspec": "1.6.0"
+  }
+}

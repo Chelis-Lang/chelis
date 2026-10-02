@@ -1,0 +1,25 @@
+name: Reclaim GitHub-hosted Ubuntu runner disk
+description: >-
+  Remove a fixed set of unused SDKs and Docker images from a verified
+  GitHub-hosted Ubuntu runner.
+outputs:
+  applied:
+    description: Whether the runner matched the protected cleanup boundary.
+    value: ${{ steps.reclaim.outputs.applied }}
+  failed-command-count:
+    description: Number of fixed cleanup commands that failed.
+    value: ${{ steps.reclaim.outputs.failed-command-count }}
+  reclaimed-bytes:
+    description: Nonnegative increase in free root-disk bytes.
+    value: ${{ steps.reclaim.outputs.reclaimed-bytes }}
+runs:
+  using: composite
+  steps:
+    - name: Reclaim fixed runner disk space
+      id: reclaim
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CI_RUNNER_OS: ${{ runner.os }}
+        CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+      run: python3 "$ACTION_PATH/reclaim.py"

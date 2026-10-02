@@ -73,10 +73,7 @@ PR_PACKAGE_EXPANSION_YML = (
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
-DEVENV_SETUP_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@"
-    "0b5faba5025fade929194b46a9e52e43fec63462"
-)
+DEVENV_SETUP_ACTION = "./.github/actions/vendor/ci/actions/setup-devenv"
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CARCARA_FULL_SUITE_COMMAND = (
@@ -501,7 +498,7 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "22bb60c2b83fcbfb653b74d3366418937adb23e43d34e7ba1d767204d854f217"
+    "894b49911f105fb5941e460a1ff25555882af56221eca3f3932a41bdcff10763"
 )
 
 
@@ -1322,11 +1319,11 @@ class ListOutputTests(unittest.TestCase):
 
         # `gate_environment` probes the interpreter through subprocess.run,
         # which also reaches Popen; only the gate's own child commands
-        # carry an explicit `env`, so let everything else through.
+        # stream output; interpreter identity queries must reach real Python.
         real_popen = gate.subprocess.Popen
 
         def fake_popen(command, *args, **kwargs):
-            if "env" not in kwargs:
+            if "env" not in kwargs or command[1:3] == ["-I", "-c"]:
                 return real_popen(command, *args, **kwargs)
             seen.append(dict(kwargs["env"]))
             return _Stub()
@@ -1361,6 +1358,7 @@ class ListOutputTests(unittest.TestCase):
         self.assertEqual(len(seen), 2)
         for environment in seen:
             self.assertEqual(environment[gate.ORACLE_BINARY_ENV], expected)
+            self.assertTrue(environment["PYO3_ENVIRONMENT_SIGNATURE"].startswith("chelis-pyo3-v1-"))
 
     def test_run_commands_exports_no_handoff_without_a_preceding_build(self):
         seen, _ = self._recorded_child_environments(
@@ -1376,12 +1374,12 @@ class ListOutputTests(unittest.TestCase):
         # oracle reaches it costs a whole workspace clippy, fmt, the lint
         # pass, three rustdoc stages and two guards first.
         launched: list[list[str]] = []
-        # Only the gate's own child commands carry an explicit `env`;
-        # `gate_environment`'s interpreter probe must still run.
+        # Interpreter identity queries must still run with their explicit env;
+        # the gate's child commands must not launch.
         real_popen = gate.subprocess.Popen
 
         def record(command, *args, **kwargs):
-            if "env" not in kwargs:
+            if "env" not in kwargs or command[1:3] == ["-I", "-c"]:
                 return real_popen(command, *args, **kwargs)
             launched.append(list(command))
             raise AssertionError("no command may launch")

@@ -1,0 +1,16 @@
+name: Publish build cache
+description: Publish declared real-workload outputs, verify isolated readbacks, and finally clean job-owned cache state. Invoke with always().
+inputs:
+  state-path:
+    description: Job-owned state-path output from restore-build-cache.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Publish and clean real-workload caches
+      if: ${{ always() }}
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        BUILD_CACHE_STATE_PATH: ${{ inputs.state-path }}
+      run: exec python3 "$ACTION_PATH/../../tools/build_cache.py" publish

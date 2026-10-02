@@ -1,0 +1,48 @@
+name: Restore build cache
+description: Expose job-isolated signed Nix substitutions and optional repository-owned Kache reads over existing Tunnet membership.
+inputs:
+  workspace:
+    description: Workspace-relative real-workload directory; must remain inside GITHUB_WORKSPACE.
+    required: false
+    default: "."
+  mode:
+    description: Exactly read or read-write; publication intent, never authorization.
+    required: false
+    default: read
+  kache-binary:
+    description: Repository-owned Kache executable path (0.12.0 or 0.16.0); empty disables Kache integration.
+    required: false
+    default: ""
+  state-path:
+    description: Existing Nix-only state to attach the realized project Kache binary; workspace and publication mode remain unchanged.
+    required: false
+    default: ""
+outputs:
+  state-path:
+    description: Job-owned state file to pass to publish-build-cache with always().
+    value: ${{ steps.restore.outputs.state-path || steps.attach.outputs.state-path }}
+  roots-path:
+    description: Initially empty manifest; append one canonical realized Nix output path per line.
+    value: ${{ steps.restore.outputs.roots-path || steps.attach.outputs.roots-path }}
+runs:
+  using: composite
+  steps:
+    - name: Restore real-workload caches
+      id: restore
+      if: inputs.state-path == ''
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        BUILD_CACHE_WORKSPACE: ${{ inputs.workspace }}
+        BUILD_CACHE_MODE: ${{ inputs.mode }}
+        BUILD_CACHE_KACHE_BINARY: ${{ inputs.kache-binary }}
+      run: exec python3 "$ACTION_PATH/../../tools/build_cache.py" restore
+    - name: Attach the realized project compiler cache
+      id: attach
+      if: inputs.state-path != ''
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        BUILD_CACHE_STATE_PATH: ${{ inputs.state-path }}
+        BUILD_CACHE_KACHE_BINARY: ${{ inputs.kache-binary }}
+      run: exec python3 "$ACTION_PATH/../../tools/build_cache.py" attach

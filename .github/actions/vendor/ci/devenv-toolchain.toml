@@ -1,0 +1,185 @@
+[inputs]
+# Devenv main 2026-09-04 (2.2.3). The release line 2.2.1 embeds a Nix build with
+# a use-after-free on the evaluator read-only flag (cachix/devenv#3064, fixed
+# upstream by NixOS/nix d5f162d1166f71a8eb1e343727a51fcfb8a88235). Return to the
+# first release that contains that fix.
+devenv = "360b5eb1397291383d10845a63a0247981bd5598"
+nixpkgs = "6004ea8c229fe9d41b21c6f4c76bf6c2e10771dd"
+ci-nixpkgs = "241313f4e8e508cb9b13278c2b0fa25b9ca27163"
+nixpkgs-multiverse = "c2b0a50710c6615c237e8d7e193b6a91f73fc7e5"
+git-hooks = "43b3c1ab9d40fb1dbb008f451988a91e375825e9"
+treefmt-nix = "df3c0640565d04a0261253cdd89fce78ec50168a"
+nix-apple-container = "b70aebb4762867d61326f2c36f5a69e935f767f5"
+nix2container = "76be9608a7f4d6c985d28b0e7be903ae2547df3e"
+pyproject-build-systems = "90fde00db3687922d39d95fc591475fd0bbbcd72"
+pyproject-nix = "e3b599ca2e7fcf93d4edf65d7f19bbf6491724f3"
+uv2nix = "5a836d395cbf5fc22670eb98dd4aa4fc4d406977"
+
+[versions]
+python = "3.11.15"
+uv = "0.11.26"
+ty = "0.0.63"
+ruff = "0.15.22"
+actionlint = "1.7.12"
+zizmor = "1.26.1"
+shellcheck = "0.11.0"
+pyright = "1.1.411"
+nixfmt = "1.4.0"
+apple-container = "1.1.0"
+
+[runtime]
+systems = ["aarch64-darwin", "x86_64-linux"]
+
+[apple-container]
+nix-image = "docker.io/nixos/nix@sha256:377d4887aca98f0dfa12971c1ea6d6a625a435d8b610d4c95a436843da6fbfd1"
+architecture = "amd64"
+target-system = "x86_64-linux"
+known-hosts-sha256 = "c73ac5d045cd2a359d2202b79b551fb22a638463d5ddbe5ed59b1b3998869c88"
+
+[portable]
+nix-version = "2.34.4"
+devenv-version = "2.2.3"
+setup-action-revision = "1b1c0e69ddb5c61119ef1188edd7c27fbb8f1e89"
+
+[portable.devenv-outputs]
+x86_64-linux = "/nix/store/xwhcf2bx93i76i59bgzvqr19kv6w6yab-devenv-wrapped-2.2.3"
+aarch64-darwin = "/nix/store/x06aza11qrhx7gvrqjhxprqbx7pi72kd-devenv-wrapped-2.2.3"
+
+[devenv-profiles]
+schema = "chelis-devenv-profiles/v1"
+
+[devenv-profiles.profiles.actionlint]
+action = "actions/actionlint"
+systems = ["x86_64-linux"]
+constructor = "nixpkgs-actionlint"
+version = "1.7.12"
+digest = "sha256:8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+runtime = {}
+
+[devenv-profiles.profiles.cargo-deny]
+action = "actions/cargo-deny"
+systems = ["x86_64-linux"]
+constructor = "nixpkgs-cargo-deny"
+version = "0.20.2"
+digest = "sha256:9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+runtime = {}
+
+[devenv-profiles.profiles.cargo-llvm-cov]
+action = "actions/cargo-llvm-cov"
+systems = ["x86_64-linux"]
+constructor = "nixpkgs-cargo-llvm-cov"
+version = "0.8.7"
+digest = "sha256:9a75fe29538d3800b3da57f6f6efb64cba5c720a257bf0cb8b51f39d495a9168"
+runtime = {}
+
+[devenv-profiles.profiles.cargo-machete]
+action = "actions/cargo-machete"
+systems = ["x86_64-linux"]
+constructor = "nixpkgs-cargo-machete"
+version = "0.9.2"
+digest = "sha256:48200087f54c55aabcd4db4af1e25742b49846c02a1b1bfa134711945b35b2e9"
+runtime = {}
+
+[devenv-profiles.profiles.cargo-mutants]
+action = "actions/cargo-mutants"
+systems = ["x86_64-linux"]
+constructor = "nixpkgs-cargo-mutants"
+version = "27.1.0"
+digest = "sha256:dfe6dc37d0342c891d2829b5a695aa57c2d0edecef7e7d0399a30cc6e206411e"
+runtime = {}
+
+[devenv-profiles.profiles.check-cargo-nix]
+action = "actions/check-cargo-nix"
+systems = ["aarch64-darwin", "x86_64-linux"]
+constructor = "crate2nix-source"
+version = "0.15.0"
+digest = ""
+runtime = {}
+
+[devenv-profiles.profiles.check-python-types]
+action = "actions/check-python-types"
+systems = ["x86_64-linux"]
+constructor = "ty-wheel"
+version = "0.0.63"
+digest = ""
+runtime = {}
+
+[devenv-profiles.profiles.container-image]
+action = "actions/container-image"
+systems = ["x86_64-linux"]
+constructor = "container-tools"
+version = "2.34.8"
+digest = ""
+runtime = {}
+
+[devenv-profiles.profiles.openspec-governance]
+action = "actions/openspec-governance"
+systems = ["aarch64-darwin", "x86_64-linux"]
+constructor = "openspec-npm"
+version = "1.6.0"
+digest = ""
+runtime = { node = "24.18.0" }
+
+[devenv-profiles.profiles.ruff]
+action = "actions/ruff"
+systems = ["aarch64-darwin", "x86_64-linux"]
+constructor = "ruff-wheel"
+version = "0.12.5"
+digest = ""
+runtime = {}
+
+[devenv-profiles.profiles.rust-lint]
+action = "actions/rust-lint"
+systems = ["x86_64-linux"]
+constructor = "rust-quality-helpers"
+version = "3.11.15"
+digest = ""
+runtime = {}
+
+[devenv-profiles.profiles.rust-release-binary]
+action = "actions/rust-release-binary"
+systems = ["x86_64-linux"]
+constructor = "rust-release-helpers"
+version = "3.11.15"
+digest = ""
+runtime = {}
+
+[devenv-profiles.profiles.setup-cargo-criterion]
+action = "actions/setup-cargo-criterion"
+systems = ["x86_64-linux"]
+constructor = "nixpkgs-cargo-criterion"
+version = "1.1.0"
+digest = ""
+runtime = {}
+
+[devenv-profiles.profiles.setup-flamegraph]
+action = "actions/setup-flamegraph"
+systems = ["x86_64-linux"]
+constructor = "nixpkgs-cargo-flamegraph"
+version = "0.6.13"
+digest = ""
+runtime = {}
+
+[devenv-profiles.profiles.setup-hyperfine]
+action = "actions/setup-hyperfine"
+systems = ["x86_64-linux"]
+constructor = "nixpkgs-hyperfine"
+version = "1.20.0"
+digest = ""
+runtime = {}
+
+[devenv-profiles.profiles.typos]
+action = "actions/typos"
+systems = ["x86_64-linux"]
+constructor = "nixpkgs-typos"
+version = "1.48.0"
+digest = ""
+runtime = {}
+
+[devenv-profiles.profiles.zizmor]
+action = "actions/zizmor"
+systems = ["x86_64-linux"]
+constructor = "zizmor-wheel"
+version = "1.28.0"
+digest = ""
+runtime = {}

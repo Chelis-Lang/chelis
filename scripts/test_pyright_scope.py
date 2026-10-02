@@ -15,6 +15,7 @@ import check_pyright_scope as scope
 
 
 EXPECTED_INCLUDES = {
+    ".github/actions/vendor/ci",
     ".github/scripts",
     "docs/archive/mascot",
     "bindings/python",
