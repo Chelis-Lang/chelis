@@ -29,8 +29,8 @@ Observations:
 
 Every printed line must belong to a binding of the program.
 
-Profiles: the default corpus is the edge corpus CI runs (envelope boundaries,
-limb boundaries and carry chains, removable zeros, i64 boundaries, ties in
+Profiles: the default corpus is the edge corpus nightly CI runs (envelope
+boundaries, limb boundaries and carry chains, removable zeros, i64 boundaries, ties in
 every mode and sign, subnormal and double-rounding f32 witnesses, long divisions
 that need the quotient digit's second correction or its clamp, the parser's
 accepted and rejected spellings, and seeded random values, which take one
@@ -791,7 +791,7 @@ def random_float(rng: random.Random) -> float:
 
 
 def build_corpus(large: bool = False) -> Corpus:
-    """The default (CI) corpus, or with `large` the manual gate's.
+    """The default (nightly CI) corpus, or with `large` the manual gate's.
 
     The large corpus crosses every input with every scale and rounding mode and
     observes every twin. To keep the default run short, the default corpus

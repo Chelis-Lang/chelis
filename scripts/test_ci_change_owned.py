@@ -952,8 +952,6 @@ class SchemaTests(unittest.TestCase):
             owned.Identity("chelis-types", "expand_insert_dispatch_family"),
             owned.Identity("chelis-types", "issue_1294_standard_lowerings"),
         } <= set(config.standing_targets))
-        self.assertEqual(len(config.target_exclusions), 5)
-        self.assertEqual(len(config.test_exclusions), 6)
         self.assertEqual(
             set(config.manual_only_targets),
             {

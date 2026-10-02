@@ -590,6 +590,8 @@ fn extreme_cases() -> Vec<(&'static str, String)> {
     cases
 }
 
+/// Runs in the nightly workflow, not in pull-request CI
+/// (`.config/ci-test-targets.toml`).
 #[test]
 fn std_decimal_extreme_arguments_raise_no_primitive_trap() {
     let cases = extreme_cases();

@@ -13,9 +13,10 @@
 //! chains, removable zeros, i64 edges, ties in every rounding mode and sign,
 //! subnormal and double-rounding f32 witnesses, the parser's accepted and
 //! rejected spellings, seeded random values, and a sampled program for every
-//! failure path, on both lanes. The ignored test is the manual gate in
-//! `docs/manual_gates.md`: the same corpus with many more seeded random cases
-//! and failure samples.
+//! failure path, on both lanes. It runs in the nightly workflow, not in
+//! pull-request CI (`.config/ci-test-targets.toml`). The ignored test is the
+//! manual gate in `docs/manual_gates.md`: the same corpus with many more seeded
+//! random cases and failure samples.
 
 use std::path::PathBuf;
 use std::process::Command;
