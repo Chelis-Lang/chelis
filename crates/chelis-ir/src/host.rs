@@ -305,9 +305,18 @@ fn bind_top_level_callable(
 /// before substituting a callee body into a different lexical scope. The
 /// linearity walk honors function parameters, block locals and patterns; a
 /// same-spelled binder anywhere inside the body remains an ordinary local.
+///
+/// An `expand`/`insert` size the checker stamped as the body's own dimension
+/// is not a value read, so its name is never renamed to a top-level value of
+/// the same spelling (chelis#469). Within one checked definition a stamped
+/// dimension name reads no value at all: a value visible there under the
+/// same name makes the size ambiguous, a type error, and a later top-level
+/// value is not visible ([04-INF-4]).
 fn qualify_top_level_value_reads(program: &HostLoweringSession<'_>, expr: &Expr) -> Expr {
+    let dimensions = stamped_dimension_size_names(expr);
     let renames = chelis_types::linearity::free_runtime_variables(expr)
         .into_iter()
+        .filter(|name| !dimensions.contains(name))
         .filter(|name| {
             program.def_named(name).is_some_and(|(_, body)| {
                 !matches!(stamped_parts(body), Some((DeepTag::Fn, _, _)))
@@ -323,6 +332,19 @@ fn qualify_top_level_value_reads(program: &HostLoweringSession<'_>, expr: &Expr)
         })
         .collect::<BTreeMap<_, _>>();
     chelis_types::linearity::rename_free_runtime_variables(expr, &renames)
+}
+
+/// Every name an `expand`/`insert` size in `expr` reads as a stamped dimension.
+fn stamped_dimension_size_names(expr: &Expr) -> BTreeSet<String> {
+    fn walk(expr: &Expr, names: &mut BTreeSet<String>) {
+        if let Some(name) = crate::lower::app_stamped_dimension_size(expr) {
+            names.insert(name);
+        }
+        visit_semantic_expr_children(expr, |child| walk(child, names));
+    }
+    let mut names = BTreeSet::new();
+    walk(expr, &mut names);
+    names
 }
 
 /// Each top-level fn's directly called top-level fns.
@@ -22321,10 +22343,27 @@ def bad[b](box: Box[b]) -> bool =
         assert_issue_1922_summary_probe("causal_sdpa_with_sink", true);
     }
 
+    /// The shared fixture with a direct fatal in `causal_sdpa_with_sink`'s own
+    /// body: a runtime `reduce_window_sum` window list, a deliberate unimplemented
+    /// rejection owned by chelis#1058. The fixture's original direct fatal was
+    /// its `insert` sized by `seq`, which chelis#469 made an ordinary runtime
+    /// extent; the probe mechanics under test need a fatal raised in the probed
+    /// body, not that particular one.
+    const ISSUE_1922_WINDOW: &str =
+        "  pooled = reduce_window_sum(&masked, [seq, 1i64], [1i64, 1i64])\n";
+
+    fn issue_1922_probe_fixture() -> String {
+        let fixture = include_str!("../../../tests/support/helper_summary_fatal.ch");
+        let anchor = "  sink_scalar = scalar_to_tensor(sink)\n";
+        assert_eq!(fixture.matches(anchor).count(), 1, "fixture anchor");
+        fixture
+            .replace(anchor, &format!("{anchor}{ISSUE_1922_WINDOW}"))
+            .replace("  _ = masked\n", "  _ = masked\n  _ = pooled\n")
+    }
+
     fn assert_issue_1922_summary_probe(name: &str, raises_here: bool) {
-        let checked = surf_check(include_str!(
-            "../../../tests/support/helper_summary_fatal.ch"
-        ));
+        let fixture = issue_1922_probe_fixture();
+        let checked = surf_check(&fixture);
         let session = HostLoweringSession::new(&checked);
         let _restore = MonoProbeGuard::begin();
         MONO_SPECIALIZATIONS.with(|state| {
@@ -22347,11 +22386,18 @@ def bad[b](box: Box[b]) -> bool =
             if raises_here {
                 let error = result.expect_err("direct fatal diagnostic must not be deferred");
                 assert!(error.fatal, "{error:?}");
-                assert_eq!(
-                    error.message,
-                    "`insert` size resolves to `seq`, but no in-scope tensor axis supplies that extent. Use an i64 literal or a shape(tensor, i32-axis) read. Tracked by Chelis-Lang/chelis#469"
+                assert!(
+                    error.message.starts_with(
+                        "unsupported: a non-literal window list for `reduce_window_sum`"
+                    ) && error.message.contains("unimplemented chelis#1058"),
+                    "{error:?}"
                 );
-                assert_eq!(error.span_id.as_deref(), Some("surf:471..509"));
+                let list = "[seq, 1i64]";
+                let start = fixture.find(list).expect("window list");
+                assert_eq!(
+                    error.span_id.as_deref(),
+                    Some(format!("surf:{start}..{}", start + list.len()).as_str())
+                );
             } else {
                 assert_eq!(
                     result,

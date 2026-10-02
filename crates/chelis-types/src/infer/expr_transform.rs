@@ -877,27 +877,9 @@ pub(super) fn infer_def(
     subst.leave_level(body_level, vg);
     let scheme = env.generalize(&body_ty, subst);
     subst.name_generic_parameters(&scheme, &name, &UnordMap::new());
-    // chelis#397/#469: record the size provenance (see `infer_top_level` /
-    // `infer_let`) so a later `expand` size built from this binding can be
-    // checked for materializability. Classified against the pre-binding scope.
-    match classify_expand_size(&kids[1], env, adt_reg, subst) {
-        SizeClass::Static => {
-            if let Some(value) =
-                fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))
-            {
-                env.mark_static_size_value(&name, value);
-            } else {
-                env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);
-            }
-        }
-        SizeClass::ShapeSourced => {
-            env.mark_size_provenance(&name, crate::env::SizeProvenance::ShapeSourced);
-        }
-        SizeClass::Sourceless | SizeClass::Unknown => env.clear_size_provenance(&name),
-    }
-    // chelis#631: same discipline for list-literal lengths.
-    note_list_literal_binding(env, &name, &kids[1]);
-    env.bind(name, scheme);
+    // The binding's value facts, read against the pre-binding scope.
+    let facts = rhs_binding_facts(env, &kids[1]);
+    env.bind_with_facts(name, scheme, facts);
     body_ty
 }
 

@@ -67,14 +67,6 @@ pub(super) fn infer_fn(
         let ty = ty_ann.clone().unwrap_or_else(|| vg.fresh_type());
         product.record_inferred_contract(&format!("function parameter `{pname}`"), &ty, env, subst);
         fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
-        // chelis#397/#469: a parameter is a fresh runtime binding with no
-        // size provenance. Clear any entry inherited (through the derived
-        // `Clone` of `env`) from an outer name it shadows, so a sourceless
-        // value parameter `d` shadowing an outer shape-sourced `d` (BLOCKER C)
-        // is not wrongly treated as a materializable extent.
-        fn_env.clear_size_provenance(pname);
-        // chelis#631: same for a shadowed list-literal length.
-        fn_env.clear_list_literal_len(pname);
         param_types.push(ty);
     }
 
@@ -297,11 +289,6 @@ pub(super) fn infer_def_body_with_sig(
             .unwrap_or_else(|| vg.fresh_type());
         product.record_inferred_contract(&format!("function parameter `{pname}`"), &ty, env, subst);
         fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
-        // chelis#397/#469: a fresh parameter has no size provenance; clear any
-        // entry inherited from an outer name it shadows (BLOCKER C).
-        fn_env.clear_size_provenance(pname);
-        // chelis#631: same for a shadowed list-literal length.
-        fn_env.clear_list_literal_len(pname);
         param_types.push(ty);
     }
 
@@ -631,38 +618,13 @@ pub(super) fn infer_let(
                     subst.name_generic_parameters(&scheme, name, &UnordMap::new());
                     scheme
                 };
-                // chelis#397/#469: record the size provenance of this binding
-                // BEFORE binding it (so `classify_expand_size` resolves it
-                // against the binding's RHS, not its own name) so a later
-                // `expand(b, 0, name)` can recover whether `name` is a
-                // materializable extent (static / shape-sourced) or a
-                // sourceless runtime scalar. Bound BEFORE `let_env.bind` so
-                // the RHS is classified against the pre-binding scope, and
-                // transitively through earlier bindings in the same block.
-                // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so
-                // a re-bind to a sourceless RHS — `len = shape(x, 0); len = k`
-                // (BLOCKER B) — does not inherit the earlier shape-sourced entry.
-                match classify_expand_size(rhs_expr, &let_env, adt_reg, subst) {
-                    SizeClass::Static => {
-                        if let Some(value) =
-                            fold_static_int_expr(rhs_expr, |bound| let_env.static_size_value(bound))
-                        {
-                            let_env.mark_static_size_value(name, value);
-                        } else {
-                            let_env.mark_size_provenance(name, crate::env::SizeProvenance::Static);
-                        }
-                    }
-                    SizeClass::ShapeSourced => {
-                        let_env
-                            .mark_size_provenance(name, crate::env::SizeProvenance::ShapeSourced);
-                    }
-                    SizeClass::Sourceless | SizeClass::Unknown => {
-                        let_env.clear_size_provenance(name)
-                    }
-                }
-                // chelis#631: same discipline for list-literal lengths.
-                note_list_literal_binding(&mut let_env, name, rhs_expr);
-                let_env.bind_lexical(name.to_string(), scheme);
+                // The binding's value facts are read BEFORE binding it, so the
+                // RHS folds against the pre-binding scope and a later
+                // `expand(b, 0, name)` types a literal extent. They replace
+                // the name's previous entry with it, so a re-bind
+                // (`len = 3i64; len = k`) does not inherit an earlier value.
+                let facts = rhs_binding_facts(&let_env, rhs_expr);
+                let_env.bind_lexical_with_facts(name.to_string(), scheme, facts);
             }
             i += 2;
         }

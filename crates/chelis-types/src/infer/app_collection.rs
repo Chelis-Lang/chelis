@@ -554,18 +554,6 @@ pub(super) fn static_list_len(expr: Option<&deep::Expr>, env: &Env) -> Option<us
     None
 }
 
-/// Record (or clear) the statically-known list-literal length of a
-/// binding so a later `concat(name, axis)` can count elements
-/// (chelis#631). Add-symmetric like the size-provenance marking beside
-/// it: a re-bind to a non-literal RHS must clear any stale entry. A
-/// `(var other)` RHS propagates an existing entry transitively.
-pub(super) fn note_list_literal_binding(env: &mut Env, name: &str, rhs: &deep::Expr) {
-    match static_list_len(Some(rhs), env) {
-        Some(len) => env.mark_list_literal_len(name, len),
-        None => env.clear_list_literal_len(name),
-    }
-}
-
 /// Resolve an ADT constructor application and enforce its call shape.
 pub(super) fn prepare_constructor_application(
     func_name: &Option<String>,

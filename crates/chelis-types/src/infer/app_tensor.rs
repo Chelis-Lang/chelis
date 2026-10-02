@@ -849,7 +849,6 @@ pub(super) fn check_expand_signature(
     arg_tys: &[Type],
     result_ty: &Type,
     axis_is_dim_name: bool,
-    size_class: SizeClass,
     env: &Env,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
@@ -860,6 +859,12 @@ pub(super) fn check_expand_signature(
     let inserts_only = builtin == "insert";
     if arg_tys.len() != 3 && arg_tys.len() != 4 {
         return report_builtin_arity_bare(errors, builtin, "3 or 4 arguments", arg_tys.len());
+    }
+    if let Some(error) = arg_exprs
+        .get(2)
+        .and_then(|size| ambiguous_size_name_error(builtin, size, env, subst))
+    {
+        return report(errors, error);
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -1087,38 +1092,26 @@ pub(super) fn check_expand_signature(
                 ),
             );
         }
-        // A non-literal runtime size. chelis#397/#469: discriminate by
-        // PROVENANCE (computed by the caller as `size_class`), not by the
-        // surface spelling. A size whose value provably folds to a constant
-        // (`Static`) or derives from an in-scope tensor's `shape(t, axis)`
-        // read / dimension name (`ShapeSourced`) is materializable; a truly
-        // sourceless runtime scalar (`Sourceless` — a bare `i32`/`i64`
-        // parameter, a `cast`/arithmetic over one, or a `let` bound to such)
-        // has no backend representation and is rejected here so check, build,
-        // and eval all agree (a check-clean program must build). The walk
-        // unifies the four spellings the #397 red team found drifting:
-        // bare-`var`, `cast(var, _)`, `let`-bound, and arithmetic.
+        // A non-literal runtime size. spec/04-type-system.md section 4.7.2
+        // admits any `i64` size and forbids rejecting an extent because of
+        // its provenance (chelis#469), so no spelling is refused here: a
+        // parameter, binding, cast, call result or arithmetic size is a
+        // fresh runtime extent, and a literal or named claim over it is
+        // checked at run time.
         None => {
-            if size_class == SizeClass::Sourceless {
-                return report(
-                    errors,
-                    sourceless_expand_size_error(builtin, arg_exprs.get(2)),
-                );
-            }
-            // A bare `var` naming a genuine §4.7.2 Form-2 symbolic dim — a
-            // declared dim parameter (not a value binding) or a dim carried
-            // by an in-scope tensor — stamps the named dim into the output so
-            // declared results refer to it by name. Every other materializable
-            // spelling (`shape(...)` reads, static arithmetic, `cast`-wrapped,
-            // and `let`-bound sizes) defers the output dim slot to
-            // the declared return-type / call-context via unification.
+            // A bare `var` naming a dimension of this definition, a binder of
+            // the enclosing definition or a dim carried by a tensor type in
+            // scope, stamps the named dim into the output so declared results
+            // refer to it by name. Every other spelling, a value included,
+            // gives a fresh extent that the declared return type or call
+            // context may claim through unification. The stamp is the one
+            // record of the reading: lowering reads a size as a dimension only
+            // where this axis carries the size's own name, so no later stage
+            // re-decides it in another scope (chelis#469). A name that is
+            // neither a dimension here nor a value has nothing to read, and
+            // lowering rejects it.
             match arg_exprs.get(2).and_then(symbolic_dim_ref_name) {
-                Some(name)
-                    if env.lookup(name).is_none()
-                        || env.tensor_carries_dim_with_subst(name, subst) =>
-                {
-                    Dim::Name(name.to_string())
-                }
+                Some(name) if definition_dimension(env, name, subst) => Dim::Name(name.to_string()),
                 _ => Dim::Wildcard,
             }
         }

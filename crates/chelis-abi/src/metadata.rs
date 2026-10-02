@@ -2,6 +2,13 @@
 
 use chelis_vocab::RuntimeDType;
 
+/// The `Domain` detail every lane prints when an `expand`/`insert` axis or
+/// extent is outside its domain, a runtime negative size among them
+/// (spec/04-type-system.md section 4.7.2). The C runtime reaches it through
+/// [`MovementMetadata::expanded`]; the host interpreter, which builds no
+/// metadata plan, names it directly so both lanes render one line.
+pub const EXPANSION_DOMAIN: &str = "expansion axis or extent outside domain";
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum MetadataError {
     Domain(std::borrow::Cow<'static, str>),
@@ -290,9 +297,7 @@ impl MovementMetadata {
             axis
         };
         if axis < 0 || axis >= i64::from(rank_i32) || size < 0 {
-            return Err(MetadataError::Domain(
-                "expansion axis or extent outside domain".into(),
-            ));
+            return Err(MetadataError::Domain(EXPANSION_DOMAIN.into()));
         }
         let axis = usize::try_from(axis)
             .map_err(|_| MetadataError::Overflow("expansion axis exceeds usize"))?;

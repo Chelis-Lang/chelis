@@ -3220,9 +3220,13 @@ y = insert(b, cast(0, i32), negative_count)
     );
     let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("insert with negative count must fail");
+    // chelis#469: the trap renders as the C runtime renders it, the metadata
+    // `Domain` line and then [04-NUM-9]'s trap line.
     assert!(
-        err.contains("insert") && err.contains("extent") && err.contains("-1"),
-        "expected exact negative-extent diagnostic, got: {err}"
+        err.contains(
+            "Domain: expansion axis or extent outside domain\nnumeric trap: domain in insert at i64"
+        ),
+        "expected the Domain trap for a negative extent, got: {err}"
     );
 }
 

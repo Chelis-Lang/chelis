@@ -4842,7 +4842,18 @@ impl<'a> EvalContext<'a> {
                     return Err(format!("{name} requires non-negative axis, got {axis}"));
                 }
                 if count < 0 {
-                    return Err(format!("{name} requires non-negative extent, got {count}"));
+                    // A runtime negative size traps `Domain` before allocation
+                    // (spec/04-type-system.md section 4.7.2), rendered as the C
+                    // runtime renders it: the metadata line, then [04-NUM-9]'s
+                    // trap line with the extent dtype.
+                    let trap = chelis_types::NumericTrap::Domain {
+                        op: if name == "insert" { "insert" } else { "expand" },
+                        prim: Prim::Int64,
+                    };
+                    let error = chelis_abi::metadata::MetadataError::Domain(
+                        chelis_abi::metadata::EXPANSION_DOMAIN.into(),
+                    );
+                    return Err(format!("{error}\n{trap}"));
                 }
                 // One shape per operation (spec/04-type-system.md section
                 // 4.7.2), so the name selects the evaluator rather than a

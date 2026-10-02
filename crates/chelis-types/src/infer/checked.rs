@@ -188,7 +188,6 @@ pub(super) enum DeferredShapeRule {
         /// original call did, and the two differ in their result forms.
         builtin: &'static str,
         axis_is_dim_name: bool,
-        size_class: SizeClass,
         env: Box<Env>,
     },
     LayerNorm,
@@ -1203,7 +1202,6 @@ impl InferenceProduct {
                 DeferredShapeRule::Expand {
                     builtin,
                     axis_is_dim_name,
-                    size_class,
                     env,
                 } => check_expand_signature(
                     builtin,
@@ -1211,7 +1209,6 @@ impl InferenceProduct {
                     &check.arg_tys,
                     &check.result_ty,
                     *axis_is_dim_name,
-                    *size_class,
                     env,
                     subst,
                     errors,

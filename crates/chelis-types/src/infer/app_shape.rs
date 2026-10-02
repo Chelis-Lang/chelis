@@ -173,19 +173,6 @@ pub(super) fn infer_expand_app(
     let axis_is_dim_name = kids.get(2).is_some_and(|arg| {
         symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
     });
-    // chelis#397/#469: classify the size slot by PROVENANCE, following
-    // `let`/`cast`/arithmetic to a tensor shape source. The positive-rank
-    // path would otherwise stamp a sourceless runtime scalar as a `Dim::Name`,
-    // type-check clean, and then die at build/eval with the §4.7.2
-    // sourceless-size rejection (chelis#469: "no tensor in scope carries it").
-    // Rejecting it at CHECK keeps check↔build↔eval in sync (a check-clean
-    // program must build); a literal/static/shape-sourced size is materializable
-    // and accepted, uniformly across the bare-`var`, `cast`-wrapped, `let`-bound,
-    // and arithmetic spellings.
-    let size_class = kids
-        .get(3)
-        .map(|arg| classify_expand_size(arg, env, adt_reg, subst))
-        .unwrap_or(SizeClass::Unknown);
     let result_ty = Type::Var(vg.fresh_tvar());
     check_expand_signature(
         callee,
@@ -193,7 +180,6 @@ pub(super) fn infer_expand_app(
         &arg_tys,
         &result_ty,
         axis_is_dim_name,
-        size_class,
         env,
         subst,
         errors,

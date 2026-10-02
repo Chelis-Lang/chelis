@@ -2694,30 +2694,11 @@ pub(super) fn infer_top_level(
 
         product.record_bypass(expr, scheme_body.clone(), "top-level declaration inference");
 
-        // chelis#397/#469: record the size provenance of a top-level value
-        // binding (e.g. `zero_count = sub(cast(0, i32), cast(0, i32))`)
-        // BEFORE binding it, so a later `expand(b, 0, zero_count)` recovers
-        // whether it is a materializable extent (static / shape-sourced) or a
-        // sourceless runtime scalar. Classified against the pre-binding scope.
-        // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so a
-        // re-bind to a sourceless RHS does not inherit an earlier entry.
-        match classify_expand_size(&kids[1], env, adt_reg, subst) {
-            SizeClass::Static => {
-                if let Some(value) =
-                    fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))
-                {
-                    env.mark_static_size_value(&name, value);
-                } else {
-                    env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);
-                }
-            }
-            SizeClass::ShapeSourced => {
-                env.mark_size_provenance(&name, crate::env::SizeProvenance::ShapeSourced);
-            }
-            SizeClass::Sourceless | SizeClass::Unknown => env.clear_size_provenance(&name),
-        }
-        // chelis#631: same discipline for list-literal lengths.
-        note_list_literal_binding(env, &name, &kids[1]);
+        // The binding's value facts (a static extent such as
+        // `zero_count = sub(0i64, 0i64)`, or a list literal's length), read
+        // against the pre-binding scope. A deferred recursive member is a
+        // function, which carries none.
+        let facts = rhs_binding_facts(env, &kids[1]);
         if defer_recursive_binding {
             product
                 .group_result_origins
@@ -2738,7 +2719,7 @@ pub(super) fn infer_top_level(
                 errors,
             );
             subst.name_generic_parameters(&scheme, &name, &declared_type_names);
-            env.bind(name, scheme);
+            env.bind_with_facts(name, scheme, facts);
             None
         }
     } else {

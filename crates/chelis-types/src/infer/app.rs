@@ -377,13 +377,18 @@ fn infer_app_inner(
             // value environment is a *runtime value* (the issue #259 class,
             // `expand(&x, ax, 4)` with `ax: i32`), not a dim name, and must
             // keep flowing through ordinary inference into the
-            // compile-time-constant rejection. The 4-arg anchored form routes
-            // through `infer_expand_app` instead and never reaches this loop.
+            // compile-time-constant rejection. The size slot is discriminated
+            // the same way: a name bound in the value environment is a runtime
+            // size whose own type must be `i64`, so `insert(x, 0, j)` with
+            // `j: i32` keeps its `i32` and reaches the size-dtype rejection
+            // below rather than being retyped as an extent (chelis#469). The
+            // 4-arg anchored form routes through `infer_expand_app` instead
+            // and never reaches this loop.
             let is_expand = matches!(func_name.as_deref(), Some("expand") | Some("insert"));
-            let is_expand_size = is_expand && index == 2;
-            let is_expand_inserted_name = is_expand
-                && index == 1
-                && symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none());
+            let names_a_dim =
+                symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none());
+            let is_expand_size = is_expand && index == 2 && names_a_dim;
+            let is_expand_inserted_name = is_expand && index == 1 && names_a_dim;
             let is_reduction_axis = is_named_reduction && index >= 1;
             if (is_expand_size || is_expand_inserted_name || is_reduction_axis)
                 && symbolic_dim_ref_name(arg).is_some()

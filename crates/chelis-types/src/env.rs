@@ -47,33 +47,6 @@ pub(crate) fn generalize_sweep_env_visits() -> usize {
     GENERALIZE_SWEEP_ENV_VISITS.with(std::cell::Cell::get)
 }
 
-/// Provenance of a let-bound `int`-valued name, tracked so a runtime
-/// `expand` size can be checked for materializability (chelis#397/#469).
-///
-/// A runtime `expand` size has a backend representation only when its
-/// extent is recoverable: either it folds to a compile-time constant, or
-/// it provably derives from an in-scope tensor's `shape(t, axis)` read.
-/// A *truly sourceless* runtime scalar (a bare `i32`/`i64` parameter)
-/// has neither, so it must be rejected at check time to keep
-/// check↔build↔eval in sync. The discriminator is PROVENANCE, not the
-/// surface spelling: `let-bound`, `cast`-wrapped, and arithmetic spellings
-/// all reduce to one of these classes. The inline `shape(...)` and
-/// in-scope-tensor-dim spellings are recognized syntactically at the
-/// expand site; this map only records what a `let` binding carries forward
-/// so a later `expand(b, 0, a_dim)` can recover `a_dim`'s class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SizeProvenance {
-    /// The value folds to a compile-time constant (a literal, `cast(N,_)`,
-    /// or integer arithmetic over such values). The host runtime and the
-    /// evaluator can compute it; it is a materializable extent.
-    Static,
-    /// The value provably derives from an in-scope tensor's
-    /// `shape(t, axis)` read — directly, through `cast`, through integer
-    /// arithmetic, or transitively through another shape-provenance
-    /// binding. The backend reads the extent from that tensor's shape.
-    ShapeSourced,
-}
-
 /// The checker identities owned by one declaration binder list.
 ///
 /// A `defsig` binder list is intentionally unkinded: the same source spelling
@@ -86,9 +59,20 @@ pub(crate) struct DeclarationBinderIdentities {
     pub(crate) type_vars: UnordMap<String, TypeVar>,
     pub(crate) dim_vars: UnordMap<String, DimVar>,
     pub(crate) rank_vars: UnordMap<String, RankVar>,
+    /// Listed names the signature uses only as a type or rank binder. Body
+    /// completion still gives each one a dimension identity, but the name is
+    /// not a dimension of the definition (spec/04-type-system.md section
+    /// 4.7.2 reads a size name as a dimension, never as a precision or rank).
+    pub(crate) non_dimension_binders: UnordSet<String>,
 }
 
 impl DeclarationBinderIdentities {
+    /// Whether `name` is a dimension binder of the declaration: a listed name
+    /// the signature uses as a dimension, or uses in no role at all.
+    pub(crate) fn binds_dimension(&self, name: &str) -> bool {
+        self.dim_vars.contains_key(name) && !self.non_dimension_binders.contains(name)
+    }
+
     pub(crate) fn contains_name(&self, name: &str) -> bool {
         self.type_vars.contains_key(name)
             || self.dim_vars.contains_key(name)
@@ -121,6 +105,11 @@ impl DeclarationBinderIdentities {
 
     fn complete(&mut self, binder_names: &UnordSet<String>, var_gen: &mut VarGen) {
         for name in binder_names.to_sorted() {
+            if !self.dim_vars.contains_key(name)
+                && (self.type_vars.contains_key(name) || self.rank_vars.contains_key(name))
+            {
+                self.non_dimension_binders.insert(name.clone());
+            }
             self.type_vars
                 .entry(name.clone())
                 .or_insert_with(|| var_gen.fresh_tvar());
@@ -167,12 +156,39 @@ pub(crate) struct RejectedSignature {
     pub(crate) witness: crate::errors::ErrorWitness,
 }
 
+/// What the checker established about the value one binding was bound to,
+/// beyond its type. It lives on the binding entry, so every new binding of
+/// the name replaces it, and no binder can leave a stale fact visible under
+/// a name it shadows (chelis#469).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct BindingFacts {
+    /// The exact value of a binding whose right-hand side folds to a checked
+    /// integer constant, so an `expand`/`insert` size naming it types a
+    /// literal extent.
+    pub(crate) static_size: Option<i64>,
+    /// chelis#631: the element count of a binding to a list literal, so
+    /// `concat(rows, axis)` can size its concat axis through the binding (a
+    /// list's length is not part of its type).
+    pub(crate) list_literal_len: Option<usize>,
+}
+
+/// One value binding: its scheme and the check-time facts about its value.
+/// Serialized as the scheme alone; the facts are an analysis artifact of
+/// one check and never enter a cached environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+struct ValueBinding {
+    scheme: Arc<Scheme>,
+    #[serde(skip)]
+    facts: BindingFacts,
+}
+
 /// Type environment (Γ): maps names to polymorphic type schemes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Env {
     // Schemes are immutable once bound. Lexical snapshots copy the name map,
     // while sharing signature bodies until a scope replaces its own binding.
-    bindings: UnordMap<String, Arc<Scheme>>,
+    bindings: UnordMap<String, ValueBinding>,
     /// Active constructor bindings, separate from ordinary value lookup.
     ///
     /// Every exact owner remains available so constructor syntax can select by
@@ -251,23 +267,6 @@ pub struct Env {
     /// current restriction, which a body constraint may already have narrowed.
     #[serde(skip)]
     active_declared_type_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>>,
-    /// chelis#397/#469: provenance of `let`-bound `int`-valued names, so a
-    /// runtime `expand` size built from a `let` binding can be checked for
-    /// materializability. Cloned at every lexical scope boundary along with
-    /// `bindings` (so it has correct lexical scoping for free) and dropped
-    /// from serialization (it is a check-time-only analysis artifact).
-    #[serde(skip)]
-    size_provenance: UnordMap<String, SizeProvenance>,
-    /// Exact values for the `Static` subset of `size_provenance`.
-    #[serde(skip)]
-    static_size_values: UnordMap<String, i64>,
-    /// chelis#631: literal element counts of `let`-bound list expressions,
-    /// so `concat(rows, axis)` can size its concat axis through the
-    /// binding (a list's length is not part of its type). Same
-    /// lexical-scoping-by-`Clone` and add-symmetric mark/clear discipline
-    /// as `size_provenance`; check-time-only, dropped from serialization.
-    #[serde(skip)]
-    list_literal_lens: UnordMap<String, usize>,
     /// chelis#1134 / [04-INF-4]: flattened declaration index of every
     /// top-level eager (non-function) value in the unit being checked.
     ///
@@ -334,7 +333,9 @@ impl Env {
 
     /// Look up a name. Returns None if unbound.
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
-        self.bindings.get(name).map(Arc::as_ref)
+        self.bindings
+            .get(name)
+            .map(|binding| binding.scheme.as_ref())
     }
 
     /// Look up the active constructor owner and scheme for an exact name.
@@ -390,64 +391,29 @@ impl Env {
         self.exact_stdlib_expected_result.as_ref()
     }
 
-    /// Record the size provenance of a `let`-bound name (chelis#397/#469).
-    pub fn mark_size_provenance(&mut self, name: &str, prov: SizeProvenance) {
-        self.size_provenance.insert(name.to_string(), prov);
-        self.static_size_values.remove(name);
+    /// The facts recorded on the binding `name` resolves to here. A name
+    /// that is unbound, or that resolves to a top-level value declared after
+    /// the current declaration ([04-INF-4]), carries none.
+    fn binding_facts(&self, name: &str) -> BindingFacts {
+        match self.top_level_value_visibility(name) {
+            TopLevelValueVisibility::Visible => self
+                .bindings
+                .get(name)
+                .map(|binding| binding.facts)
+                .unwrap_or_default(),
+            TopLevelValueVisibility::NotYetDeclared { .. } => BindingFacts::default(),
+        }
     }
 
-    /// Record one checked, fully folded integer extent binding.
-    pub fn mark_static_size_value(&mut self, name: &str, value: i64) {
-        self.size_provenance
-            .insert(name.to_string(), SizeProvenance::Static);
-        self.static_size_values.insert(name.to_string(), value);
-    }
-
-    /// Clear any recorded size provenance for `name` (chelis#397/#469).
-    ///
-    /// The provenance map is add-symmetric: it must be CLEARED at every
-    /// binding site whose RHS is sourceless, and at every value-parameter
-    /// bind, so a name that re-binds (or shadows an outer name) to a
-    /// sourceless runtime scalar does not inherit a stale `ShapeSourced`/
-    /// `Static` entry. Without this, `len = shape(x, 0); len = k;
-    /// expand(b, 0, len)` (BLOCKER B — a re-bind) and a sourceless value
-    /// parameter `d` that shadows an outer shape-sourced `d` (BLOCKER C — a
-    /// shadow inherited through the derived `Clone`) would both be wrongly
-    /// accepted at check, materializing a runtime extent that contradicts
-    /// the checked type (a check↔eval divergence / check-clean-fails-build).
-    pub fn clear_size_provenance(&mut self, name: &str) {
-        self.size_provenance.remove(name);
-        self.static_size_values.remove(name);
-    }
-
-    /// The recorded size provenance of a name, if any (chelis#397/#469).
-    pub fn size_provenance(&self, name: &str) -> Option<SizeProvenance> {
-        self.size_provenance.get(name).copied()
-    }
-
-    /// Exact checked value of a previously folded lexical extent.
+    /// Exact checked value of the folded extent binding `name` resolves to.
     pub fn static_size_value(&self, name: &str) -> Option<i64> {
-        self.static_size_values.get(name).copied()
+        self.binding_facts(name).static_size
     }
 
-    /// Record the literal element count of a `let`-bound list (chelis#631).
-    pub fn mark_list_literal_len(&mut self, name: &str, len: usize) {
-        self.list_literal_lens.insert(name.to_string(), len);
-    }
-
-    /// Clear any recorded list-literal length for `name` (chelis#631).
-    ///
-    /// Add-symmetric like [`Self::clear_size_provenance`]: cleared at
-    /// every binding site whose RHS is not a list literal and at every
-    /// value-parameter bind, so a re-bind or shadow does not inherit a
-    /// stale length and mis-size a later `concat`.
-    pub fn clear_list_literal_len(&mut self, name: &str) {
-        self.list_literal_lens.remove(name);
-    }
-
-    /// The recorded list-literal length of a name, if any (chelis#631).
+    /// The list-literal length of the binding `name` resolves to, if any
+    /// (chelis#631).
     pub fn list_literal_len(&self, name: &str) -> Option<usize> {
-        self.list_literal_lens.get(name).copied()
+        self.binding_facts(name).list_literal_len
     }
 
     /// True when some in-scope tensor binding carries the named dimension
@@ -459,14 +425,13 @@ impl Env {
         self.bindings
             .to_sorted()
             .into_iter()
-            .any(|(_, scheme)| type_carries_dim_name(&scheme.body, name))
+            .any(|(_, binding)| type_carries_dim_name(&binding.scheme.body, name))
     }
 
     pub(crate) fn tensor_carries_dim_with_subst(&self, name: &str, subst: &Subst) -> bool {
-        self.bindings
-            .to_sorted()
-            .into_iter()
-            .any(|(_, scheme)| type_carries_dim_name(&subst.semantic_type(&scheme.body), name))
+        self.bindings.to_sorted().into_iter().any(|(_, binding)| {
+            type_carries_dim_name(&subst.semantic_type(&binding.scheme.body), name)
+        })
     }
 
     /// Look up an imported or qualified name by its unique terminal segment.
@@ -477,7 +442,7 @@ impl Env {
             .into_iter()
             .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
         let first = matches.next()?;
-        matches.next().is_none().then_some(first.as_ref())
+        matches.next().is_none().then_some(first.scheme.as_ref())
     }
 
     /// Extend the environment with a new binding.
@@ -485,9 +450,20 @@ impl Env {
         self.bind_shared(name, Arc::new(scheme));
     }
 
+    /// Extend the environment with a binding whose value carries `facts`.
+    pub(crate) fn bind_with_facts(&mut self, name: String, scheme: Scheme, facts: BindingFacts) {
+        self.insert_binding(name, Arc::new(scheme), facts);
+    }
+
     fn bind_shared(&mut self, name: String, scheme: Arc<Scheme>) {
+        self.insert_binding(name, scheme, BindingFacts::default());
+    }
+
+    /// The one way a value binding enters the environment. The new entry
+    /// replaces the name's previous entry together with its facts.
+    fn insert_binding(&mut self, name: String, scheme: Arc<Scheme>, facts: BindingFacts) {
         self.rejected_signatures.remove(&name);
-        self.bindings.insert(name, scheme);
+        self.bindings.insert(name, ValueBinding { scheme, facts });
     }
 
     pub(crate) fn bind_rejected_signature(
@@ -517,8 +493,11 @@ impl Env {
     /// Bind a constructor in both structural constructor position and the
     /// ordinary value environment used by bare/nullary references.
     pub(crate) fn bind_constructor(&mut self, name: String, owner: String, scheme: Scheme) {
-        self.rejected_signatures.remove(&name);
-        self.bindings.insert(name.clone(), Arc::new(scheme.clone()));
+        self.insert_binding(
+            name.clone(),
+            Arc::new(scheme.clone()),
+            BindingFacts::default(),
+        );
         let candidates = self.constructor_bindings.entry(name).or_default();
         candidates.retain(|candidate| candidate.owner != owner);
         candidates.push(ConstructorBinding { owner, scheme });
@@ -528,8 +507,18 @@ impl Env {
     /// scope. Unlike [`Self::bind`], this also records that builtin callable
     /// dispatch must not claim the name while this environment lives.
     pub(crate) fn bind_lexical(&mut self, name: String, scheme: Scheme) {
+        self.bind_lexical_with_facts(name, scheme, BindingFacts::default());
+    }
+
+    /// [`Self::bind_lexical`] for a binding whose value carries `facts`.
+    pub(crate) fn bind_lexical_with_facts(
+        &mut self,
+        name: String,
+        scheme: Scheme,
+        facts: BindingFacts,
+    ) {
         self.lexical_bindings.insert(name.clone());
-        self.bind(name, scheme);
+        self.bind_with_facts(name, scheme, facts);
     }
 
     /// Whether an ordinary lexical binding owns `name` in this environment.
@@ -1211,7 +1200,8 @@ impl Env {
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
     pub fn free_tvars(&self, subst: &Subst) -> UnordSet<TypeVar> {
         let mut result = UnordSet::new();
-        for (_, scheme) in self.bindings.to_sorted() {
+        for (_, binding) in self.bindings.to_sorted() {
+            let scheme = &binding.scheme;
             #[cfg(feature = "generalize-sweep-oracle")]
             note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
@@ -1229,7 +1219,8 @@ impl Env {
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
     pub fn free_dvars(&self, subst: &Subst) -> UnordSet<DimVar> {
         let mut result = UnordSet::new();
-        for (_, scheme) in self.bindings.to_sorted() {
+        for (_, binding) in self.bindings.to_sorted() {
+            let scheme = &binding.scheme;
             #[cfg(feature = "generalize-sweep-oracle")]
             note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
@@ -1247,7 +1238,8 @@ impl Env {
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
     pub fn free_rvars(&self, subst: &Subst) -> UnordSet<RankVar> {
         let mut result = UnordSet::new();
-        for (_, scheme) in self.bindings.to_sorted() {
+        for (_, binding) in self.bindings.to_sorted() {
+            let scheme = &binding.scheme;
             #[cfg(feature = "generalize-sweep-oracle")]
             note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
@@ -2350,6 +2342,7 @@ mod tests {
                     ("m".to_string(), DimVar(4)),
                 ]),
                 rank_vars: UnordMap::new(),
+                non_dimension_binders: UnordSet::new(),
             },
         );
         let instantiation = InstantiatedScheme {

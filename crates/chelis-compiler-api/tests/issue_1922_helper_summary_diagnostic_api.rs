@@ -1,12 +1,16 @@
 //! [05-UNS-1..3]: source-reachable fatal lowering uses the diagnostic channel,
 //! not an unwind or a fallback value. This is not insert/concat support.
+//!
+//! The fixture's fatal was its `insert` sized by `seq` until chelis#469 made
+//! that an ordinary runtime extent; public eval now reaches the static-DAG
+//! `concat` rejection in `join_columns` instead.
 
 use chelis_compiler_api::compiler::eval;
 use chelis_compiler_api::schema::{EvalRequest, SourceKind};
 use std::collections::BTreeMap;
 
 const SOURCE: &str = include_str!("../../../tests/support/helper_summary_fatal.ch");
-const MESSAGE: &str = "`insert` size resolves to `seq`, but no in-scope tensor axis supplies that extent. Use an i64 literal or a shape(tensor, i32-axis) read. Tracked by Chelis-Lang/chelis#469";
+const MESSAGE: &str = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906)";
 
 fn request(source: &str) -> EvalRequest {
     EvalRequest {
@@ -20,6 +24,8 @@ fn request(source: &str) -> EvalRequest {
 fn fatal_summary_diagnostic_returns_and_later_eval_recovers() {
     // Repeat on this same thread: an escaped probe must not leave an inlining
     // marker or cached false summary which changes the second disposition.
+    let operand = "[x, y]";
+    let start = SOURCE.find(operand).expect("join_columns' concat operand");
     for _ in 0..2 {
         let caught = std::panic::catch_unwind(|| eval(request(SOURCE)));
         if let Err(payload) = &caught {
@@ -38,7 +44,10 @@ fn fatal_summary_diagnostic_returns_and_later_eval_recovers() {
         // the diagnostic text; this repair does not change the wire schema.
         assert_eq!(
             error.errors[0].message,
-            format!("{MESSAGE} at source span `surf:471..509`")
+            format!(
+                "{MESSAGE} at source span `surf:{start}..{}`",
+                start + operand.len()
+            )
         );
         let valid = eval(request(
             "def sink_output(x: f32) -> f32 = add(x, 2.0)\noutput = sink_output(3.0)\n",

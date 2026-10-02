@@ -171,390 +171,83 @@ pub(super) fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
     kids.first().and_then(symbol_name)
 }
 
-/// chelis#397/#469: the materializability class of a runtime `expand` size
-/// argument, by PROVENANCE rather than surface spelling.
+/// True when `name` is a dimension binder of the enclosing definition. A
+/// listed name its signature uses only as a precision or rank binder is not
+/// one.
+fn definition_binds_dimension(env: &Env, name: &str) -> bool {
+    env.type_resolution_binders()
+        .is_some_and(|binders| binders.binds_dimension(name))
+}
+
+/// True when `name` is a dimension of the definition being checked: a binder
+/// of the enclosing definition, or a dimension a tensor type in scope carries
+/// (spec/04-type-system.md section 4.7.2, "an in-scope symbolic dimension may
+/// preserve its name").
+pub(super) fn definition_dimension(env: &Env, name: &str, subst: &Subst) -> bool {
+    definition_binds_dimension(env, name) || env.tensor_carries_dim_with_subst(name, subst)
+}
+
+/// The type error for an `expand`/`insert` size that names something both a
+/// value and a dimension (spec/04-type-system.md section 4.7.2).
 ///
-/// A runtime `expand` size has a backend representation only when its
-/// extent is recoverable. The discriminator must be uniform across the
-/// bare-`var`, `cast`-wrapped, `let`-bound, and arithmetic spellings (the
-/// four that #397's red team found drifting): all reduce to one of these
-/// classes via the same recursive walk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SizeClass {
-    /// Folds to a compile-time constant (literal/`cast(N,_)`/arithmetic
-    /// over such values, or a `let` name marked `Static`). The host runtime
-    /// and the evaluator can compute it; a materializable extent.
-    Static,
-    /// Provably derives from an in-scope tensor's `shape(t, axis)` read, or
-    /// names an in-scope tensor dimension (§4.7.2 Form-2) — directly,
-    /// through `cast`, through integer arithmetic, or transitively through a
-    /// `let` name marked `ShapeSourced`. The backend reads the extent from
-    /// the tensor's shape.
-    ShapeSourced,
-    /// A runtime value with no static value and no tensor source — a bare
-    /// `i32`/`i64` parameter, a `cast`/arithmetic over one, or a `let`
-    /// name bound to such. No backend representation; rejected at check
-    /// (#469) so check↔build↔eval agree.
-    Sourceless,
-    /// Not a recognized int-valued size shape (e.g. the input tensor is
-    /// still a type var, or the expr is something the walk does not model).
-    /// The caller leaves the existing non-rejecting behavior in place.
-    Unknown,
-}
-
-/// The §4.7.2 sourceless-size diagnostic (chelis#469), emitted by
-/// `check_expand_signature` when an `expand` size resolves to `Sourceless`.
-/// Factored out so the diagnostic text has a single source of truth.
-/// `size_expr` is the size sub-expression (used only to name a symbolic
-/// dimension when the size is a bare `var`).
-pub(super) fn sourceless_expand_size_error(
-    builtin: &'static str,
-    size_expr: Option<&deep::Expr>,
-) -> CheckError {
-    let described = size_expr
-        .and_then(symbolic_dim_ref_name)
-        .map(|name| format!("the symbolic dimension `{name}`"))
-        .unwrap_or_else(|| "a runtime scalar".to_string());
-    CheckError::new(
-        CheckErrorKind::DimensionMismatch,
-        format!(
-            "`{builtin}` size resolves to {described}, but no tensor in scope carries \
-             it. Runtime extents use exact `i64`; source the value from an in-scope \
-             tensor dimension or a `shape(tensor, i32-axis)` read. A bare runtime \
-             scalar has no shape identity to attach to the result yet. Tracked by \
-             Chelis-Lang/chelis#469 (spec/04-type-system.md \u{00a7}4.7.2)"
-        ),
-        vec![
-            "Source the extent from a tensor in scope with \
-             `shape(x, cast(axis, i32))`, bind that read to a `let`, or use an \
-             exact `i64` literal extent."
-                .to_string(),
-        ],
-    )
-}
-
-/// chelis#397/#469: classify a runtime `expand` size argument by
-/// provenance. Walks `cast`, integer arithmetic (`add`/`sub`/`mul`/`div`),
-/// bare `var` references (resolved against `env` — an in-scope tensor dim
-/// is Form-2 `ShapeSourced`, a recorded `let` provenance is followed, a
-/// bare value binding with neither is `Sourceless`), and `shape(t, axis)`
-/// reads. The recursion mirrors the IR layer's
-/// `extract_dim_expr_value`/`symbol_has_tensor_source`/`shape_dep` triad so
-/// the check-time accept set matches what the backends can materialize.
-pub(super) fn classify_expand_size(
-    expr: &deep::Expr,
+/// A size expression reads values, and a bare name in it may also preserve a
+/// dimension's identity. When one name occurrence denotes both a value binding
+/// (a parameter, a local or a top-level binding) and an in-scope dimension (a
+/// binder of the enclosing definition, or a dimension a tensor type in scope
+/// carries), the two readings can give different extents, and nothing in the
+/// program says which is meant. Every free name of the size counts, under
+/// `cast` and arithmetic as well as bare, so no spelling of the size can pick
+/// a reading silently (chelis#469).
+pub(super) fn ambiguous_size_name_error(
+    builtin: &str,
+    size: &deep::Expr,
     env: &Env,
-    adt_reg: &AdtRegistry,
     subst: &Subst,
-) -> SizeClass {
-    classify_size_in(
-        expr,
-        &SizeCtx {
-            env,
-            adt_reg,
-            subst,
-            piped: &[],
-        },
-    )
+) -> Option<CheckError> {
+    crate::linearity::free_runtime_variables(size)
+        .into_iter()
+        .find_map(|name| {
+            let value = match env.top_level_value_visibility(&name) {
+                TopLevelValueVisibility::Visible => env.lookup(&name),
+                TopLevelValueVisibility::NotYetDeclared { shadowed } => shadowed,
+            }?;
+            let dimension = if definition_binds_dimension(env, &name) {
+                "a dimension binder of the enclosing definition"
+            } else if env.tensor_carries_dim_with_subst(&name, subst) {
+                "a dimension carried by a tensor type in scope"
+            } else {
+                return None;
+            };
+            let value_ty = subst.apply(&value.body);
+            Some(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "{builtin} size names `{name}`, which is both a value of type {value_ty} \
+                     and {dimension}, so the extent it denotes is ambiguous \
+                     (spec/04-type-system.md \u{00a7}4.7.2)"
+                ),
+                vec![format!(
+                    "Rename the value or the dimension so `{name}` has one meaning; \
+                     `shape(t, axis)` reads a tensor's extent explicitly."
+                )],
+            ))
+        })
 }
 
-/// What `classify_expand_size` reads while it walks: the type environment,
-/// the ADT registry a record projection resolves its field type against
-/// (chelis#1266), and the pipe-stage parameters currently standing for an
-/// upstream value (chelis#569).
-struct SizeCtx<'a> {
-    env: &'a Env,
-    adt_reg: &'a AdtRegistry,
-    subst: &'a Subst,
-    piped: &'a [PipedParam],
-}
-
-/// One pipe stage's parameter while the walk is inside that stage's body
-/// (chelis#569). `(pipe {} v s1 s2)` means `s2(s1(v))`, and each `s` is the
-/// `(fn {} (params {} p) body)` node the Surf parser synthesizes for a
-/// call-stage, so the walk classifies `body` with `p` standing for what the
-/// stage receives instead of materializing the rewritten application.
-struct PipedParam {
-    name: String,
-    class: SizeClass,
-    /// The piped value's type, when the check layer can read it without
-    /// inference. Only the pipe's own input expression has one: a stage
-    /// RESULT is a computed value whose type this layer does not model, and
-    /// `None` there keeps the shape-operand question fail-closed.
-    ty: Option<Type>,
-}
-
-impl SizeCtx<'_> {
-    fn piped(&self, name: &str) -> Option<&PipedParam> {
-        // Innermost binding wins: a nested pipe reuses the synthesized
-        // parameter name, so the search runs from the end.
-        self.piped.iter().rev().find(|param| param.name == name)
-    }
-}
-
-fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
-    stack_guard!("classify_expand_size", expr, SizeClass::Unknown);
-    let env = ctx.env;
-    // The checker and lowerer share one checked static folder.
-    if fold_static_int_expr(expr, |name| env.static_size_value(name)).is_some() {
-        return SizeClass::Static;
-    }
-    // An inline `shape(t, axis)` read (possibly `cast`-wrapped) of an
-    // in-scope tensor is the canonical shape source (`bias_broadcast`).
-    if let Some(operand) = shape_read_operand(expr) {
-        return if shape_operand_is_in_scope_tensor(operand, ctx) {
-            SizeClass::ShapeSourced
-        } else {
-            // `shape(<non-tensor>, ...)` cannot supply an extent.
-            SizeClass::Sourceless
-        };
-    }
-    // chelis#1107 round 3: this outer match was `Expr::List`-only with a
-    // non-erroring `_ => SizeClass::Unknown` default, and `Unknown` is the
-    // ACCEPTING class in `check_expand_signature` (`Sourceless` is the
-    // rejecting one). So a stamped `Expr::Node` size argument fell to the
-    // fail-OPEN default: `expand(x, 0, k)` with a runtime scalar `k` was
-    // accepted by `check_typed_program` and rejected by `check_ir_program`
-    // as a §4.7.2 sourceless size -- the exact silent-miscompile class
-    // chelis#469 exists to prevent. Reading both carriers here also restores
-    // the deliberately fail-CLOSED `_ => Sourceless` default below.
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return SizeClass::Unknown;
-    };
-    match tag {
-        // `cast(<inner>, ty)` — provenance is the inner expr's.
-        DeepTag::Cast => kids
-            .first()
-            .map_or(SizeClass::Unknown, |inner| classify_size_in(inner, ctx)),
-        DeepTag::Var => match symbolic_dim_ref_name(expr) {
-            // Inside a pipe stage, the stage parameter stands for what the
-            // stage receives, so it carries that value's class (chelis#569).
-            Some(name) if ctx.piped(name).is_some() => ctx
-                .piped(name)
-                .map_or(SizeClass::Unknown, |param| param.class),
-            // A name carried by an in-scope tensor's shape is a
-            // Form-2 symbolic dim with a real source.
-            Some(name) if env.tensor_carries_dim_with_subst(name, ctx.subst) => {
-                SizeClass::ShapeSourced
-            }
-            // A recorded `let` provenance (shape-sourced or static).
-            Some(name) => match env.size_provenance(name) {
-                Some(crate::env::SizeProvenance::ShapeSourced) => SizeClass::ShapeSourced,
-                Some(crate::env::SizeProvenance::Static) => SizeClass::Static,
-                // A bare value binding (a runtime scalar parameter)
-                // with no tensor source and no static provenance.
-                None if env.lookup(name).is_some() => SizeClass::Sourceless,
-                None => SizeClass::Unknown,
-            },
-            None => SizeClass::Unknown,
-        },
-        // Integer arithmetic: combine the operands' classes.
-        DeepTag::App => classify_arith_app(kids, ctx),
-        // chelis#569's `pipe` arm is gone: `chelis_deep::pipe::fold_pipe`
-        // rewrites `v |> s1 |> s2` into `s2(s1(v))` over the checker's input,
-        // so the canonical spelling of a shape read reaches this slot as the
-        // `app` node above and takes the same route the direct spelling does.
-        // The arm that used to sit here read only the pipe's input for a
-        // type, so a `shape(...)` read in a LATER stage classified
-        // `Sourceless` where the direct spelling classified `ShapeSourced`:
-        // an under-approximation the fold makes unnecessary rather than
-        // safer.
-        // chelis#530: any other List-shaped size — a tuple
-        // projection (`t.0`), an inline `match`/`if`, a record
-        // `access`, etc. — has NO backend-materializable shape
-        // source. It is `Sourceless`, NOT `Unknown`: returning
-        // `Unknown` here let the inline `expand(b, 0, t.0)` form
-        // (and its `cast`/arithmetic wrappers) reach the
-        // non-rejecting `_ => subst.apply(result_ty)` accept arm of
-        // `check_expand_signature` and silently miscompile in C to a
-        // hardcoded extent-1 axis (eval `[3, 2]` vs C `[1, 2]`),
-        // exactly the silent-miscompile class #469 exists to
-        // prevent. The `shape(t, ..)`, `cast(..)`, literal,
-        // bare-`var`, and arithmetic forms are all recognized BEFORE
-        // this arm, so reaching here means the size is genuinely
-        // sourceless at the check layer. Mirrors the `classify_arith_app`
-        // non-arith-`app` fail-closed default below.
-        _ => SizeClass::Sourceless,
-    }
-}
-
-/// Combine the size classes of an integer-arithmetic application's
-/// operands (chelis#397/#469/#1379). `combine_arith_classes` below states the
-/// fold and owns the rule; this arm decides only whether the callee is one of
-/// the arithmetic builtins.
+/// The facts a binding to `rhs` carries, read against the pre-binding scope.
 ///
-/// A non-arithmetic `app` — any other function call, e.g. `ident(a_dim)` or
-/// a user `def` — produces a runtime value with NO shape source the backend
-/// can read the extent from, exactly like a bare runtime scalar. It is
-/// `Sourceless`, NOT `Unknown`: returning `Unknown` here let the inline
-/// `expand(b, 0, ident(a_dim))` form (and its `cast`/arith wrappers) reach
-/// the non-rejecting `_` arm of `check_expand_signature` and silently
-/// miscompile in C to a hardcoded extent-1 axis (chelis#397 BLOCKER A — the
-/// same silent-miscompile class #469 exists to prevent). The `shape(t, ..)`,
-/// `cast(..)`, literal, and bare-`var` forms are all recognized BEFORE this
-/// arm, so reaching here means the call is genuinely sourceless at the check
-/// layer (a user `def` wrapping `shape` is opaque here and would be rejected
-/// at lowering too — no `shape_dep`).
-/// chelis#1107 round 3: takes the children slice rather than a `&deep::List`,
-/// so the classifier works on either carrier (a stamped `Expr::Node` has no
-/// `&deep::List` to hand over).
-fn classify_arith_app(kids: &[deep::Expr], ctx: &SizeCtx<'_>) -> SizeClass {
-    let Some(callee) = kids.first() else {
-        return SizeClass::Sourceless;
-    };
-    let is_int_arith = INT_ARITH.iter().any(|name| is_builtin_var(callee, name));
-    if !is_int_arith {
-        return SizeClass::Sourceless;
-    }
-    combine_arith_classes(kids[1..].iter().map(|arg| classify_size_in(arg, ctx)))
-}
-
-/// The integer-arithmetic builtins the provenance walk follows.
-///
-/// The same operator set the shared static folder walks
-/// (`fold_static_int_expr`), because the two decide one question about one
-/// category: whether an expression is checked integer arithmetic. They
-/// disagreed on the two integer division primitives, and `spec/05` section 2.1
-/// makes those the ONLY way to divide an i64 extent, `div` being float-only.
-/// A static `floor_div(4i64, 2i64)` therefore folded and was admitted while a
-/// runtime `floor_div(shape(x, 0), 2i64)` was rejected as sourceless: the same
-/// operator on the same category, decided opposite ways by two enumerations
-/// (chelis#1379).
-const INT_ARITH: &[&str] = &[
-    "add",
-    "sub",
-    "mul",
-    "div",
-    "floor_div",
-    "trunc_div",
-    "mod",
-    "neg",
-];
-
-/// Fold operand classes, shared by the application and bare-pipe-stage
-/// spellings of the same arithmetic.
-///
-/// A `ShapeSourced` operand makes the whole expression `ShapeSourced`, because
-/// the extent is computable from that tensor and whatever it is combined with.
-/// `Sourceless` decides only an expression with no admissible operand at all,
-/// and all-`Static` operands stay `Static`. `Sourceless` used to be absorbing,
-/// which rejected `add(shape(x, 0), k)` at check even though both lanes execute
-/// it (chelis#1379). The pipe spelling reaches this through the same fold, so
-/// the two spellings cannot answer differently.
-fn combine_arith_classes(classes: impl Iterator<Item = SizeClass>) -> SizeClass {
-    let operand_classes: Vec<SizeClass> = classes.collect();
-    if operand_classes.contains(&SizeClass::ShapeSourced) {
-        return SizeClass::ShapeSourced;
-    }
-    if operand_classes.contains(&SizeClass::Sourceless) {
-        return SizeClass::Sourceless;
-    }
-    if operand_classes.contains(&SizeClass::Unknown) {
-        return SizeClass::Unknown;
-    }
-    SizeClass::Static
-}
-
-/// Recognize a `shape(operand, axis)` application — possibly wrapped in one
-/// or more `cast(..., i32)` layers — and return its `operand` expr
-/// (chelis#397/#469). The check-layer analog of the IR layer's
-/// `shape_app_operand_axis`. The axis is not validated here (the operand's
-/// presence is what proves a tensor source); a runtime axis is fine.
-pub(super) fn shape_read_operand(expr: &deep::Expr) -> Option<&deep::Expr> {
-    stack_guard!("shape_read_operand", expr, None);
-    // chelis#1107: carrier-preserving read; a `List`-only destructure never
-    // recognized a stamped `shape(...)` read.
-    let (tag, _, kids) = stamped_parts(expr)?;
-    // Strip outer `cast(..., ty)` wrappers (tag form and app form).
-    if tag == DeepTag::Cast {
-        return kids.first().and_then(shape_read_operand);
-    }
-    let callee = kids.first()?;
-    if tag == DeepTag::App && is_builtin_var(callee, "cast") {
-        return kids.get(1).and_then(shape_read_operand);
-    }
-    if tag == DeepTag::App && is_builtin_var(callee, "shape") {
-        // `(app {} (var shape) <operand> <axis>)`.
-        return kids.get(1);
-    }
-    None
-}
-
-/// True when a `shape(...)` operand expression resolves to an in-scope
-/// tensor (chelis#397/#469). The operand is a bare `var` (`shape(x, 0)`) or
-/// a borrow of one (`shape(&x, 0)`); either way the named binding must have
-/// a tensor type in `env`. A non-tensor operand cannot supply an extent.
-fn shape_operand_is_in_scope_tensor(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> bool {
-    shape_operand_type(operand, ctx)
-        .as_ref()
-        .is_some_and(type_is_tensor)
-}
-
-/// The type a `shape(...)` operand denotes, when the check layer can read it
-/// without inference (chelis#397/#469, chelis#1266).
-///
-/// The question this answers is "does this operand have a tensor type", not
-/// "is this operand a named tensor binding". The two diverged at a record
-/// field: `shape(inp.q, 0)` names no tensor binding, yet `inp.q` is an
-/// in-scope tensor with exactly the extent the size reads (chelis#1266).
-/// Asking the ADT base whether IT is tensor-carrying is the wrong question --
-/// `Inputs` is a record, not a tensor -- so the projection resolves the
-/// FIELD's declared type instead.
-///
-/// Recognized spellings: a bare `var`, a `borrow`/`&` wrapper in either the
-/// tag or the builtin-application form, and a field projection (`access`) of
-/// any of these, nested to any depth. A projection resolves only on a
-/// single-record-variant ADT with named fields, which is the only shape
-/// `infer_access` itself projects.
-fn shape_operand_type(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> Option<Type> {
-    stack_guard!("shape_operand_type", operand, None);
-    if let Some(name) = symbolic_dim_ref_name(operand) {
-        // A pipe stage's parameter denotes the upstream value (chelis#569).
-        if let Some(param) = ctx.piped(name) {
-            return param.ty.clone();
-        }
-        return ctx.env.lookup(name).map(|scheme| scheme.body.clone());
-    }
-    let (tag, _, kids) = stamped_parts(operand)?;
-    // `&x` desugars to the `(borrow {} (var x))` TAG form; `borrow(x)`
-    // may also appear as the `(app {} (var borrow) (var x))` builtin form.
-    if tag == DeepTag::Borrow {
-        return kids
-            .first()
-            .and_then(|inner| shape_operand_type(inner, ctx));
-    }
-    if tag == DeepTag::Access {
-        // `(access {} target field)`: the field's declared type, read off the
-        // single record variant of the target's ADT.
-        let target = kids.first()?;
-        let field = kids.get(1).and_then(symbol_name)?;
-        let mut resolved = shape_operand_type(target, ctx)?;
-        while let Type::Ref(inner) = resolved {
-            resolved = *inner;
-        }
-        let (Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _)) = resolved else {
-            return None;
-        };
-        let variant = single_record_variant(ctx.adt_reg, &adt_name)?;
-        return variant
-            .fields
-            .iter()
-            .find(|(name, _)| name.as_deref() == Some(field))
-            .map(|(_, ty)| ty.clone());
-    }
-    let callee = kids.first()?;
-    if tag == DeepTag::App && is_builtin_var(callee, "borrow") {
-        return kids.get(1).and_then(|inner| shape_operand_type(inner, ctx));
-    }
-    None
-}
-
-/// True when a type is (or contains, through `Ref`) a tensor type.
-fn type_is_tensor(ty: &Type) -> bool {
-    match ty {
-        Type::Tensor(..) => true,
-        Type::Ref(inner) => type_is_tensor(inner),
-        _ => false,
+/// A right-hand side that folds to a checked integer constant lets a later
+/// `expand`/`insert` size naming the binding type a literal extent, and a
+/// list literal records its element count for `concat` (chelis#631). The
+/// facts travel on the binding entry ([`Env::bind_with_facts`]), so any later
+/// binding of the name, by any binder, replaces them. This records VALUES
+/// only: a size of any provenance is admissible (spec/04-type-system.md
+/// section 4.7.2, chelis#469), so nothing here classifies where a
+/// non-constant value came from.
+pub(super) fn rhs_binding_facts(env: &Env, rhs: &deep::Expr) -> BindingFacts {
+    BindingFacts {
+        static_size: fold_static_int_expr(rhs, |bound| env.static_size_value(bound)),
+        list_literal_len: static_list_len(Some(rhs), env),
     }
 }
 

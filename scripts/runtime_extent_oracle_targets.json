@@ -360,7 +360,7 @@
         "a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs",
         "a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs",
         "a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source",
-        "a_bare_runtime_scalar_expand_size_is_still_sourceless",
+        "a_bare_runtime_scalar_is_an_admissible_expand_size_on_eval",
         "a_binder_that_shadows_the_record_base_suppresses_the_hoist",
         "a_caller_transported_result_label_survives_the_op_computed_stamp",
         "a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_c",
@@ -413,7 +413,7 @@
         "a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
         "a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer",
         "a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer",
-        "a_piped_shape_read_of_a_non_tensor_is_still_sourceless",
+        "a_piped_runtime_scalar_size_executes_on_both_lanes",
         "a_polymorphic_argument_claim_sizes_a_root_on_c",
         "a_polymorphic_argument_claim_sizes_a_root_on_eval",
         "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
@@ -432,13 +432,13 @@
         "a_result_only_binder_claim_sizes_a_root_on_eval",
         "a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
         "a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
+        "a_runtime_expand_size_in_pipe_position_executes_on_both_lanes",
         "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
         "a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes",
         "a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval",
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_c",
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
         "a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval",
-        "a_sourceless_expand_size_is_rejected_in_pipe_position_by_the_cli",
         "a_split_kernel_tuple_root_executes_when_its_repeated_binder_agrees",
         "a_split_kernel_tuple_root_guards_its_repeated_binder_on_c",
         "a_split_kernel_tuple_root_guards_its_repeated_binder_on_eval",
@@ -475,7 +475,7 @@
         "an_overshooting_shrink_span_reports_the_domain_error_on_c",
         "an_overshooting_shrink_span_reports_the_domain_error_on_eval",
         "an_unread_declaring_parameter_still_guards_its_named_result_claim",
-        "arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless",
+        "arithmetic_over_a_scalar_with_no_tensor_source_is_an_admissible_size_on_eval",
         "arithmetic_over_two_tensors_is_guarded_against_the_value_it_computes_on_eval",
         "c_independent_trap_after_a_mismatch_loses",
         "c_independent_trap_before_a_mismatch_wins",
@@ -959,12 +959,12 @@
         "mode": "exact"
       },
       "expected": [
+        "issue1791_a_non_i64_size_rejects_identically_in_both_positions",
+        "issue1791_a_runtime_size_checks_clean_in_pipe_position_too",
         "issue1791_a_shape_sourced_size_in_pipe_position_still_checks_clean",
-        "issue1791_a_sourceless_size_rejects_in_pipe_position_too",
-        "issue1791_the_direct_spelling_keeps_its_exact_rendering",
         "issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic"
       ],
-      "note": "chelis#1791 half B and chelis#1923, at the checker. The verdict is the checker's, so these receipts are unit-level and no lane splits them; the CLI twin in cli_slice_b records what a user sees. Named with --exact rather than running the whole file because issue_530_expand_inline_size_gate.rs also holds chelis#530's eleven inline-size cells, which this phase does not own."
+      "note": "chelis#1791 half B and chelis#1923, at the checker. The verdict is the checker's, so these receipts are unit-level and no lane splits them; the CLI twin in cli_slice_b records what a user sees. Named with --exact rather than running the whole file because issue_530_expand_inline_size_gate.rs also holds chelis#530's inline-size cells, which this phase does not own."
     },
     {
       "phase": "b",

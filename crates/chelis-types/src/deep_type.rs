@@ -496,6 +496,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             type_vars: self.type_vars.clone(),
             dim_vars: self.dim_vars.clone(),
             rank_vars: self.rank_vars.clone(),
+            non_dimension_binders: UnordSet::new(),
         }
     }
 
