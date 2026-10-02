@@ -246,7 +246,7 @@ outside i64; each `try_` form returns `None` where its twin fails `domain`, and
 pure and runs under `chelis eval`, `chelis test`, and generated C.
 
 `Std.Datetime.Zone` makes time zone rules values. `time_zone_from_tzif(name,
-bytes)` reads a TZif file (RFC 9636, version 2 or later) whose bytes the program
+bytes)` reads a TZif file (RFC 9636, versions 2 to 4) whose bytes the program
 supplies: the standard library holds no time zone database and never reads the
 host's. `time_zone_fixed(o)` and `time_zone_utc()` build fixed zones. A `Zoned` is
 an instant in a zone: `zoned(i, tz)` pairs them, and `zoned_from_local(dt, tz,

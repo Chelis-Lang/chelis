@@ -14,7 +14,9 @@ with `time_zone_from_tzif`, and prints four bindings:
   as a presence flag and a unix second;
 - `texts`: `zoned_to_string` at sampled instants, joined with `|`;
 - `round_trips`: whether `zoned_from_text(parse_zoned_text(zoned_to_string(z)),
-  tz, RejectOffsetMismatch)` returns `z`;
+  tz, policy)` returns `z` under both `UseWrittenOffset` and
+  `RejectOffsetMismatch` (the first holds for every `z` by [05-OP-73]; the
+  second need not, and is compared at these sampled instants only);
 - for `UTC` only, a separate eval-only program checks that the file's zone
   equals `time_zone_utc()`. Compiled C prints a reachable nullary definition as
   extra roots (chelis#2624) and then aborts on the footer's `None` component
@@ -79,12 +81,12 @@ def resolution_row(tz: TimeZone, civil: i64, policy: Disambiguation) -> List[i64
 }
 def resolution_rows(tz: TimeZone, civils: List[i64]) -> List[i64] = fold(fn (acc: List[i64], civil: i64) -> acc |> concat(resolution_row(tz, civil, EarlierInstant)) |> concat(resolution_row(tz, civil, LaterInstant)) |> concat(resolution_row(tz, civil, CompatibleInstant)) |> concat(resolution_row(tz, civil, RejectNonUniqueLocal)), [], civils)
 def text_rows(tz: TimeZone, seconds: List[i64]) -> string = fold(fn (acc: string, s: i64) -> if eq(acc, "") then zoned_to_string(zoned(instant_from_unix(s, 0i64), tz)) else acc |> string_concat("|") |> string_concat(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz))), "", seconds)
-def round_trip_rows(tz: TimeZone, seconds: List[i64]) -> List[i64] = map(fn (s: i64) -> if eq(zoned_from_text(parse_zoned_text(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz))), tz, RejectOffsetMismatch), zoned(instant_from_unix(s, 0i64), tz)) then 1i64 else 0i64, seconds)
+def round_trip_rows(tz: TimeZone, seconds: List[i64]) -> List[i64] = map(fn (s: i64) -> if and(eq(zoned_from_text(parse_zoned_text(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz))), tz, UseWrittenOffset), zoned(instant_from_unix(s, 0i64), tz)), eq(zoned_from_text(parse_zoned_text(zoned_to_string(zoned(instant_from_unix(s, 0i64), tz))), tz, RejectOffsetMismatch), zoned(instant_from_unix(s, 0i64), tz))) then 1i64 else 0i64, seconds)
 """
 
 IMPORTS = """\
 import Std.Datetime (datetime, date_from_epoch_day, time_from_nanosecond_of_day, instant_from_unix, instant_unix_second, offset_seconds)
-import Std.Datetime.Zone (TimeZone, Disambiguation, EarlierInstant, LaterInstant, CompatibleInstant, RejectNonUniqueLocal, RejectOffsetMismatch, time_zone_from_tzif, time_zone_utc, time_zone_offset_at, try_zoned_from_local, zoned, zoned_instant, zoned_to_string, parse_zoned_text, zoned_from_text)
+import Std.Datetime.Zone (TimeZone, Disambiguation, EarlierInstant, LaterInstant, CompatibleInstant, RejectNonUniqueLocal, UseWrittenOffset, RejectOffsetMismatch, time_zone_from_tzif, time_zone_utc, time_zone_offset_at, try_zoned_from_local, zoned, zoned_instant, zoned_to_string, parse_zoned_text, zoned_from_text)
 """
 
 

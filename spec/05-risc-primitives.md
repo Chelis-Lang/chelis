@@ -3360,7 +3360,7 @@ exact ADT identity by [05-OP-34].
 > `local - offset` is outside the instant range, gives `local - offset` when it is one of
 > `zoned_from_local`'s candidates, and fails `domain` otherwise. Resolving
 > `parse_zoned_text(zoned_to_string(z))` against `z`'s zone with
-> `RejectOffsetMismatch` returns `z`.
+> `UseWrittenOffset` returns `z`.
 >
 > Every datetime callable is outside AD and has no accumulator.
 

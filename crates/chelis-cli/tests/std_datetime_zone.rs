@@ -355,53 +355,71 @@ fn run_chelis(app_pkg: &Path, reef_home: &Path, args: &[&str]) -> (bool, String)
     )
 }
 
-/// Runs one `chelis test` over a fixture with one test per expression and
-/// returns each test's outcome: `None` for PASS, `Some(message)` for FAIL.
+/// Expressions per `chelis test` run. Every run has its own suite timeout,
+/// and each case reads its zone's TZif bytes again, so one run over a whole
+/// sweep can outgrow that timeout on a slow runner.
+const CASES_PER_SUITE: usize = 40;
+
+/// Runs `chelis test` over fixtures with one test per expression, at most
+/// [`CASES_PER_SUITE`] to a run, and returns each test's outcome: `None` for
+/// PASS, `Some(message)` for FAIL.
 fn run_expression_suite(
     dir_name: &str,
     expressions: &[(String, String)],
 ) -> BTreeMap<String, Option<String>> {
     let (_dir, reef_home, app_pkg) = make_app(dir_name);
     let prelude = PRELUDE.replace("@TZIF@", &fixture_dir().to_string_lossy());
-    let mut source = format!("module Demo.Tests.Zone\n{IMPORTS}\n{prelude}");
-    for (name, expression) in expressions {
-        source.push_str(&format!(
-            "def test_{name}() -> unit ! {{ Test, IO }} = {{\n  _value = {expression}\n  ()\n}}\n"
-        ));
-    }
     write_file(
         &app_pkg.join("src/main.ch"),
         "module Demo.Main\nanchor = 0i64\n",
     );
-    let path = app_pkg.join("tests/zone_cases.ch");
-    write_file(&path, &source);
-    let (_, rendered) = run_chelis(
-        &app_pkg,
-        &reef_home,
-        &["test", "--batch-mode", "file", path.to_str().unwrap()],
-    );
     let mut outcomes = BTreeMap::new();
-    for line in rendered.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("test_") else {
-            continue;
-        };
-        let Some((name, verdict)) = rest.split_once(' ') else {
-            continue;
-        };
-        let verdict = verdict.trim_start_matches(['.', ' ']);
-        if verdict == "PASS" {
-            outcomes.insert(name.to_string(), None);
-        } else if let Some(message) = verdict
-            .strip_prefix("FAIL (")
-            .and_then(|tail| tail.strip_suffix(')'))
-        {
-            outcomes.insert(name.to_string(), Some(message.to_string()));
+    for (index, chunk) in expressions.chunks(CASES_PER_SUITE).enumerate() {
+        let mut source = format!("module Demo.Tests.Zone\n{IMPORTS}\n{prelude}");
+        for (name, expression) in chunk {
+            source.push_str(&format!(
+                "def test_{name}() -> unit ! {{ Test, IO }} = {{\n  _value = {expression}\n  ()\n}}\n"
+            ));
         }
+        // One fixture file at a time, so no run sees another's module.
+        let path = app_pkg.join(format!("tests/zone_cases_{index:03}.ch"));
+        write_file(&path, &source);
+        let (_, rendered) = run_chelis(
+            &app_pkg,
+            &reef_home,
+            &["test", "--batch-mode", "file", path.to_str().unwrap()],
+        );
+        std::fs::remove_file(&path).expect("remove the finished fixture");
+        let mut reported = 0usize;
+        for line in rendered.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("test_") else {
+                continue;
+            };
+            let Some((name, verdict)) = rest.split_once(' ') else {
+                continue;
+            };
+            let verdict = verdict.trim_start_matches(['.', ' ']);
+            if verdict == "PASS" {
+                outcomes.insert(name.to_string(), None);
+                reported += 1;
+            } else if let Some(message) = verdict
+                .strip_prefix("FAIL (")
+                .and_then(|tail| tail.strip_suffix(')'))
+            {
+                outcomes.insert(name.to_string(), Some(message.to_string()));
+                reported += 1;
+            }
+        }
+        assert_eq!(
+            reported,
+            chunk.len(),
+            "every generated test must report exactly one verdict:\n{rendered}"
+        );
     }
     assert_eq!(
         outcomes.len(),
         expressions.len(),
-        "every generated test must report exactly one verdict:\n{rendered}"
+        "expression names must be distinct"
     );
     outcomes
 }

@@ -892,9 +892,12 @@ compares `zoned_instant` and `time_zone_name`.
   the zone read from tzdata's `UTC` file. `time_zone_fixed(o)` is named `±HH:MM`, with
   `:SS` only when nonzero and `+00:00` for zero; `parse_zoned_text` reads such a numeric
   annotation, `:SS` included, as the zone name.
-- **`RejectOffsetMismatch`** computes `zoned_from_local`'s candidates first, so it fails
-  wherever that computation fails, then fails `overflow` when `local − offset` is outside
-  the instant range, then `domain` unless `local − offset` is a candidate.
+- **`RejectOffsetMismatch`** fails `overflow` when `local − offset` is outside the instant
+  range, then wherever `zoned_from_local`'s computation of the candidates fails, then
+  `domain` unless `local − offset` is a candidate (§5's order). So a written zone text
+  round-trips under `UseWrittenOffset`, but not always under `RejectOffsetMismatch`: near
+  the end of a zone with an empty footer, or near the range edge, computing the candidates
+  fails.
 - **No `try_` forms** for `zoned_add_duration` and `zoned_add_period`; this section lists
   none.
 - **Fixtures.** The tests read TZif files generated from the Python `tzdata` package
