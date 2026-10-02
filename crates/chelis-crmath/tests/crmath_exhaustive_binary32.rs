@@ -49,6 +49,9 @@ fn check_range(function: &str, start: u64, end: u64) -> Outcome {
     let (k32, k64) = (f32_kernel(function), f64_kernel(function));
     let mut outcome = Outcome::default();
     for wide in start..end {
+        if wide > start && (wide - start).is_multiple_of(1 << 27) {
+            println!("{function}: worker {start:#x} at {:#x} of {end:#x}", wide);
+        }
         let bits = u32::try_from(wide).unwrap();
         let x = f32::from_bits(bits);
         let got = k32(x).to_bits();
