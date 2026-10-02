@@ -34,8 +34,8 @@ Shoals carries its own date layer on top of `Std.Time`, with its own defect list
 - The weekend is hardcoded to Saturday and Sunday.
 - Holiday tables answer "not a holiday" for years they do not cover.
 
-Coral's time-series index (coral#41) and Nautilus's econometrics (nautilus#92) are
-waiting on a date type that does not exist.
+Coral's time-series index (coral#41) and Nautilus's econometrics (nautilus#92) need a
+date type.
 
 Dates and times are a solved problem in the sense that mature libraries agree on most
 of the model (prior art §2 to §6). This design adopts that consensus. Where the libraries
@@ -194,10 +194,15 @@ exceptions to it:
     step's range, so `try_date_add_period(date(2024, 1, 31), period(1, 4000000),
     RejectInvalidDay)` returns `None` before the day step could overflow;
   - `duration_to_count`: the rounding policy, then representability in i64;
-  - `instant_round_to`: the increment, then the rounding policy, then the result's range.
-  No other S1 callable can fail both ways for one input; `instant_to_unix_count` follows
-  the same order as `duration_to_count`, but only its nanosecond counts can leave i64,
-  and those are always exact.
+  - `instant_round_to`: the increment, then the rounding policy, then the result's range;
+  - `zoned_add_duration` (§11): the instant range, then coverage;
+  - `zoned_from_local` and `zoned_from_text` (§11): every `overflow` check before any
+    `domain` check;
+  - `zoned_add_period` (§11) with a nonzero period: as `datetime_add_period`, then as
+    `zoned_from_local`. A zero period makes no check.
+  No other S1 or S4a callable can fail both ways for one input; `instant_to_unix_count`
+  follows the same order as `duration_to_count`, but only its nanosecond counts can leave
+  i64, and those are always exact.
 
 **No primitive trap escapes.** Every range and validity check runs before the arithmetic
 it protects, so no primitive numeric trap ever escapes a `Std.Datetime` call. A test
@@ -685,12 +690,10 @@ reads O(log h) list elements.
 **Vectorized forms (decided in S2).** Each vectorized form applies the scalar algorithm to
 every element, at O(n log h) per call with nothing the horizon's length. That also keeps
 each element's failure identical to its scalar twin's by construction. The prefix-count
-gather planned above was built and measured, and four problems ruled it out:
-- A tensor cannot be sized from a scalar (#469). Every call would therefore build a
-  horizon-length `List` first, 7 304 485 elements for a full-range calendar.
-- `chelis eval` rejects `scatter_replace` (#2892).
-- Compiled C rejected the table program at internal shape invariants (#2893, #2907).
-- Compiled C panicked on one variant of it (#2906).
+gather planned above was built and measured, and ruled out, while `chelis eval` lacked
+`scatter_replace` (#2892), tensors could not be sized from a scalar (#469), so that every
+call built a horizon-length `List` first (7 304 485 elements for a full-range calendar),
+and compiled C refused or panicked on the table program (#2893, #2906, #2907).
 
 A tensor kernel can replace the per-element loop, without changing the contract, once both
 lanes lower such programs.
@@ -758,8 +761,8 @@ A failure of any element fails the whole call, except in the masked `try_` forms
 
 **`TimeZone`** is opaque. It holds the IANA identifier, the offset in force before the
 first transition, a strictly increasing list of transitions (unix second and new offset),
-and an optional structured POSIX rule for instants after the last transition (TZif's
-footer, RFC 8536 §3.3).
+and an optional structured POSIX rule for instants from the last transition on (TZif's
+footer, RFC 9636 §3.3, which obsoletes RFC 8536).
 
 **Constructors:**
 - `time_zone_from_tzif(name: string, bytes: List[i64]) -> TimeZone` and its `try_` form
@@ -775,11 +778,13 @@ footer, RFC 8536 §3.3).
 - `time_zone_utc()`.
 - Accessors `time_zone_name` and `time_zone_offset_at(tz, i: Instant) -> Offset`, with a
   `try_` form for the latter.
-  - Instants before the first transition use the initial offset (RFC 8536's time type 0).
-  - Instants after the last transition use the footer rule.
-  - A zone whose footer is empty has no information past its last transition (RFC 8536
-    §3.3). There `time_zone_offset_at` fails `domain` rather than carrying the last
-    offset forward, which would be the silent extrapolation §3 forbids.
+  - Instants before the first transition use the initial offset (RFC 9636's time type 0).
+  - Instants at or after the last transition use the footer rule. With no transitions
+    the footer rule applies everywhere, or time type 0 when the footer is empty.
+  - A zone whose footer is empty has no information from its last transition on (RFC
+    9636 §3.2: local time there is unspecified). There `time_zone_offset_at` fails
+    `domain` rather than carrying the last offset forward, which would be the silent
+    extrapolation §3 forbids.
   - Every other instant has exactly one offset.
   - By §5's coverage rule, every Zone operation that needs the offset at an uncovered
     instant fails `domain`. This includes `zoned`, `zoned_from_local`,
@@ -798,22 +803,32 @@ compares `zoned_instant` and `time_zone_name`.
   `time_zone_offset_at` does.
 - `zoned_from_local(dt, tz, disambiguation: Disambiguation) -> Zoned` and its `try_`
   form.
-  - **Candidates.** The candidates are every instant whose local reading in `tz` is
-    `dt`: the set of `dt − o` over the zone's offsets `o` for which
-    `time_zone_offset_at(tz, dt − o) = o`. One candidate means `dt` is unique and is the
-    result under every policy.
+  - **Candidates.** The trials are the offsets in force within one day of `dt`: every
+    offset that `time_zone_offset_at` gives for an instant from `dt − 86 399 s` through
+    `dt + 86 399 s`, reading `dt` at offset zero, among the instants inside the instant
+    range. The candidates are the trials `dt − o` with `time_zone_offset_at(tz, dt − o)
+    = o`, every instant whose local reading in `tz` is `dt`. Every candidate lies in that
+    window, so the restriction loses none; it keeps an offset in force far from `dt`
+    from producing a trial. Without it, `Pacific/Kiritimati` (-10:40 until 1979) would
+    fail `9999-12-30T14:00`, whose answer at +14:00 is in range. One candidate means
+    `dt` is unique and is the result under every policy.
   - **Range edges.** A trial `dt − o` outside the instant range fails the whole call with
     `overflow`, as `datetime_to_instant_at` does, before any coverage check. This can
-    happen only within one offset width of the civil range's ends, for example the
+    happen only within one day of the civil range's ends, for example the
     `9999-12-31T23:59:59` sentinel in any zone. The same holds for
     `zoned_add_period`'s re-resolution and for `zoned_from_text` under `UseZoneRules`.
+  - **Coverage.** When an instant of the window lies outside the zone's coverage, the
+    call fails `domain`: an offset in force there is unknown, so the trials are unknown.
   - **Fold** (two or more candidates): `EarlierInstant` takes the earliest and
     `LaterInstant` the latest.
-  - **Gap** (no candidate): there is exactly one transition at instant `T` whose
-    pre-transition offset `o_b` and post-transition offset `o_a` satisfy
-    `T + o_b ≤ dt < T + o_a` (local times). `EarlierInstant` gives `dt − o_a` and
-    `LaterInstant` gives `dt − o_b`, the instants just before and after the gap as
-    Temporal defines them.
+  - **Gap** (no candidate): a transition at instant `T` whose pre-transition offset
+    `o_b` and post-transition offset `o_a` satisfy `T + o_b ≤ dt < T + o_a` (local
+    times) decides. `EarlierInstant` gives `dt − o_a` and `LaterInstant` gives
+    `dt − o_b`, the instants just before and after the gap as Temporal defines them.
+    A strictly increasing transition list can have more than one: offsets 0, then
+    +3:00 at `T`, -1:00 at `T` + 10 min and +3:00 at `T` + 20 min put local `T` + 1:00
+    in the gap of the first and the third. When more than one transition satisfies the
+    condition, every policy fails `domain`.
   - `CompatibleInstant` is earlier in a fold and later in a gap: Temporal's
     `'compatible'`, offered by name only.
   - `RejectNonUniqueLocal` fails `domain` in either case.
@@ -821,25 +836,103 @@ compares `zoned_instant` and `time_zone_name`.
 - `zoned_add_duration(z, d) -> Zoned` moves along the instant timeline.
 - `zoned_add_period(z, p, overflow: DayOverflow, disambiguation) -> Zoned` adds `p` to the
   local date and keeps the local time, then re-resolves with `disambiguation`. Date units
-  move on the wall clock and time units on the instant line (prior art §6).
-- **Text.** `zoned_to_string` emits RFC 9557: `2026-10-01T09:30:00-04:00[America/New_York]`.
+  move on the wall clock and time units on the instant line (prior art §6). A zero period
+  (`P0D`) returns `z` itself, whatever `overflow` and `disambiguation` are, as Temporal
+  returns the same instant when the date part is zero. Re-resolving would move the later
+  occurrence of a fold under `EarlierInstant`, and fail it under `RejectNonUniqueLocal`
+  or near the end of a zone's coverage, for an addition that changes nothing.
+- **Text.** `zoned_to_string` emits RFC 9557 text,
+  `2026-10-01T09:30:00-04:00[America/New_York]`, extended as §8.8 extends RFC 3339: an
+  offset whose seconds are nonzero, such as a local mean time offset, is written
+  `±HH:MM:SS`, which RFC 3339's `time-numoffset` lacks. Offset zero is written `+00:00`,
+  not `Z`: RFC 9557 §2 gives `Z` the meaning "local offset unknown", which a resolved
+  `Zoned` is not (Temporal and jiff write `+00:00`).
+  - Parsing keeps that meaning. A written `Z`, `z` or negative zero offset (`-00:00`,
+    RFC 9557 §3.4) leaves the record's offset absent, and its date and time are then
+    UTC. `+00:00` is a known offset of zero.
   - Parsing is split so it needs no lookup function and no effect.
     `parse_zoned_text` / `try_parse_zoned_text` return a plain `ZonedText` record:
-    `{ local: DateTime, offset: Offset, zone_name: string, critical: bool }`.
+    `{ written: DateTime, offset: Option[Offset], zone_name: string, critical: bool }`.
+    The date and time field is `written`, not `local`, because under an absent offset
+    it is a UTC reading, not a local one.
   - `zoned_from_text(zt, tz, conflict: OffsetConflict) -> Zoned` and its `try_` form
-    resolve it against a `TimeZone` the caller obtained.
+    resolve it against a `TimeZone` the caller obtained. They do not compare
+    `zone_name` with `time_zone_name(tz)`: a link name such as `America/Buenos_Aires`
+    resolves to a zone that carries its target's name (§13).
+    - With the offset absent, every policy gives the instant the written UTC date and
+      time name. No critical-annotation check or mismatch test applies, since the text
+      asserts no local offset: RFC 9557's Figure 2,
+      `2022-07-08T00:14:07Z[!Europe/London]`, is consistent and resolves to 00:14:07Z,
+      written `2022-07-08T01:14:07+01:00[Europe/London]`.
     - `UseWrittenOffset` keeps the instant the text names.
     - `UseZoneRules` re-reads the local time in the zone. Its gap/fold cases fail
       `domain`; a caller wanting a policy goes through `zoned_from_local`.
-    - `RejectOffsetMismatch` accepts the written offset when `local − offset` is one of
+    - `RejectOffsetMismatch` accepts the written offset when `written − offset` is one of
       `zoned_from_local`'s candidates for that local time, and fails `domain` otherwise.
       So in a fold, a written offset that is one of the two valid offsets selects that
       occurrence, as Temporal's `'reject'` does.
   - A critical (`!`) zone annotation fails `domain` under `UseWrittenOffset` when the
     written offset fails `RejectOffsetMismatch`'s test (`time_zone_offset_at(tz,
-    local − offset) ≠ offset`), as RFC 9557 requires.
+    written − offset) ≠ offset`), as RFC 9557 requires. Its Figure 1,
+    `2022-07-08T00:14:07+00:00[!Europe/London]`, fails so.
   - The suffix tags `u-ca=iso8601` and `u-ca=gregory` are accepted. Other calendars are
     rejected, unknown elective tags are ignored, and unknown critical tags are rejected.
+    A key that two tags give different values is rejected when either tag is critical
+    (RFC 9557 §3.3), and every critical tag must be one the module recognizes, whatever
+    its position. Otherwise the first tag with a key decides and later elective ones
+    are ignored. The parser collects every tag and then judges them together, grouped by
+    key, so no verdict depends on which tags it compares.
+
+**Decisions recorded by S4a.**
+- **Representation.** `TimeZone { name: string, initial_offset: i64, transitions:
+  List[(i64, i64)], footer: Option[...] }`. Offsets are seconds east of UTC. The footer
+  is the standard offset and, with daylight saving time, the daylight offset and the
+  start and end rules, each `(form, a, b, c, time of day)`: form 0 is `Jn`, form 1 the
+  zero-based `n`, form 2 `Mm.w.d`. Tuples, not private record types, per §6.
+- **Footer evaluation.** Each year has a daylight start (its date and time read at the
+  standard offset) and an end (read at the daylight offset); the offset is the daylight
+  one when the latest start or end at or before the instant is a start. A start
+  prevails over an end at the same instant, which keeps RFC 9636 §3.3.1's all-year
+  daylight time (`EST5EDT,0/0,J365/25`) in daylight time across each new year. A rule
+  repeats every 400 Gregorian years (146 097 days, a whole number of weeks), so an
+  evaluation reduces its instant modulo 12 622 780 800 s and works in years 1968 to
+  2371, where `Std.Datetime`'s producers never fail and no product leaves i64.
+- **Parser strictness.** Versions `2`, `3` and `4` are read and every other version byte
+  is rejected (RFC 9636: "MUST be one of"). A version `2` footer that uses the
+  transition-time extension is rejected (§3.3.2: "MUST be designated as version 3").
+  Leap-second records are rejected: their transition times count leap seconds, which
+  the POSIX timescale (§4) does not. The version 1 block is skipped, not validated.
+  RFC 9636's constraints on counts, type indices, DST flags, designation indices and the
+  standard/UT indicators are checked; the file ends at the footer's closing newline.
+- **Footer consistency** compares the UTC offset the footer gives at the last transition
+  with that transition's; the time type's DST flag and abbreviation are not stored, so
+  they are not compared. A footer that names daylight saving time without a rule is
+  rejected; no POSIX default rule is supplied.
+- **Names.** `time_zone_from_tzif`'s name must be an RFC 9557 `time-zone-name`, so
+  `zoned_to_string`'s output always parses. `time_zone_utc()` is named `UTC` and equals
+  the zone read from tzdata's `UTC` file. `time_zone_fixed(o)` is named `±HH:MM`, with
+  `:SS` only when nonzero and `+00:00` for zero; `parse_zoned_text` reads such a numeric
+  annotation, `:SS` included, as the zone name.
+- **`RejectOffsetMismatch`** checks, in order: the `overflow` of `zoned_from_local`'s
+  computation of the candidates, then whether `written − offset` is inside the instant
+  range (`overflow`), then that computation's `domain` failures, then whether
+  `written − offset` is a candidate (`domain`). Every `overflow` comes before any `domain`, as §5 requires. So a written zone text
+  round-trips under `UseWrittenOffset`, but not always under `RejectOffsetMismatch`: near
+  the end of a zone with an empty footer, or near the range edge, computing the candidates
+  fails.
+- **Unknown local offset.** `ZonedText`'s offset is an `Option[Offset]`, absent for `Z`,
+  `z` and a negative zero offset, and an absent offset resolves to its UTC instant under
+  every policy. Reading `Z` as offset zero would make `UseZoneRules` read a UTC time as
+  London's local time, an hour away in summer, and would fail RFC 9557's consistent
+  Figure 2 under a critical annotation. Rejecting `Z` would refuse common producers'
+  output, such as `…Z[UTC]`. §8.8's `parse_offset_datetime` still reads `Z` as offset
+  zero, since an `OffsetDateTime` names its instant exactly either way. Under §8.8's
+  seconds extension `-00:00:00` is a negative zero offset too, so it is also unknown.
+- **No `try_` forms** for `zoned_add_duration` and `zoned_add_period`; this section lists
+  none.
+- **Fixtures.** The tests read TZif files generated from the Python `tzdata` package
+  2026.4 (IANA 2026d) by `scripts/generate_tzif_fixtures.py`, which also writes the
+  synthetic files for each parser rule.
 
 ## 12. `Std.Datetime.Clock` (stage S5)
 
@@ -890,8 +983,7 @@ and every caller carries `IO`.
 
 ## 13. The `bed` repository: external data (stages S4b and S7)
 
-`bed` (as in seabed) is one new Chelis-Lang repository, private until chelis itself is
-public. It is framed broadly: it holds external data that Chelis programs consume as
+`bed` (as in seabed) is a Chelis-Lang repository. It is framed broadly: it holds external data that Chelis programs consume as
 declared inputs, meaning data whose truth is set outside any program by a legislature, a
 standards body or an exchange, and synced from that upstream on the upstream's schedule.
 Date and time data is its first content, not its definition.
@@ -983,7 +1075,8 @@ holiday tables.
 
 [05-OP-35] gains one sentence routing their semantics to a new atom, "`datetime::*`
 identities follow [05-OP-73]", as JSON access already follows [05-OP-2..5]. S2 extends the
-sentence and the atom's scope to the `datetime/business::*` identities. The capacity
+sentence and the atom's scope to the `datetime/business::*` identities, and S4a to the
+`datetime/zone::*` identities. The capacity
 census, the frozen-contract oracle (`scripts/dtype_phase4b_oracle.py`) and the registry
 bijection test then need no new structure.
 
@@ -1014,7 +1107,7 @@ and extends [05-HOST-2]'s list of host operations with them.
 
 **Release.** Removing `Std.Time` removes census rows, which the remediation roadmap's
 invariant 7 makes 0.19 payload by default. S1 ships in a 0.18.x patch rather than
-waiting for 0.19, by release decision, as 0.18.4 did for its ABI change. Every `Std.Time`
+waiting for 0.19, as 0.18.4 did for its ABI change. Every `Std.Time`
 callable already fails, so the removal stops no running computation. A program that only
 builds `Std.Time` records or names its types still type-checks against the fenced module
 and breaks when the module is removed. The known importers are Shoals and hello-chelis,
@@ -1083,8 +1176,8 @@ S6, Shoals keeps its own date layer.
   removed-module test does for `Std.Init` and `Std.Tokenizer`. The changelog fragment
   and docs name the replacement.
 - **Downstream.** Coral and nautilus pass `chelis check` against each new
-  standard-library bundle. Shoals and hello-chelis import `Std.Time`, so they fail
-  `chelis check` against bundles without it until their cut-overs (S6, S8, §15).
+  standard-library bundle. Shoals and hello-chelis, which import `Std.Time`, move in
+  their cut-overs (S6, S8).
 
   The first opaque type in the standard library can turn an unannotated accessor lambda
   into an `OpaqueTypeViolation` in any program that reaches the module (spec/04 §2.5), so

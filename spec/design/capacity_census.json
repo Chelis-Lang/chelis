@@ -1461,6 +1461,27 @@
     },
     {
       "kind": "std-adt-numeric",
+      "id": "datetime/zone::TimeZone: () (variant {} TimeZone (field {} name (t-prim {} string)) (field {} initial_offset (t-prim {} i64)) (field {} transitions (t-adt {} List (t-tuple {} (t-prim {} i64) (t-prim {} i64)))) (field {} footer (t-adt {} Option (t-tuple {} (t-prim {} i64) (t-adt {} Option (t-tuple {} (t-prim {} i64) (t-tuple {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64)) (t-tuple {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64))))))))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime/zone::Zoned: () (variant {} Zoned (field {} instant (t-adt {} Instant)) (field {} zone (t-adt {} TimeZone)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "datetime/zone::ZonedText: () (variant {} ZonedText (field {} written (t-adt {} DateTime)) (field {} offset (t-adt {} Option (t-adt {} Offset))) (field {} zone_name (t-prim {} string)) (field {} critical (t-prim {} bool)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
       "id": "datetime::Date: () (variant {} Date (field {} epoch_day (t-prim {} i64)))",
       "flags": [
         "numeric-op"
@@ -1703,6 +1724,116 @@
     {
       "kind": "std-def-numeric",
       "id": "datetime/clock::monotonic_until: (t-fn {} (t-adt {} MonotonicInstant) (t-adt {} MonotonicInstant) (t-adt {} Duration))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::parse_zoned_text: (t-fn {} (t-prim {} string) (t-adt {} ZonedText))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::time_zone_fixed: (t-fn {} (t-adt {} Offset) (t-adt {} TimeZone))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::time_zone_from_tzif: (t-fn {} (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-adt {} TimeZone))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::time_zone_name: (t-fn {} (t-adt {} TimeZone) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::time_zone_offset_at: (t-fn {} (t-adt {} TimeZone) (t-adt {} Instant) (t-adt {} Offset))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::time_zone_utc: (t-fn {} (t-adt {} TimeZone))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::try_parse_zoned_text: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} ZonedText)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::try_time_zone_from_tzif: (t-fn {} (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-adt {} Option (t-adt {} TimeZone)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::try_time_zone_offset_at: (t-fn {} (t-adt {} TimeZone) (t-adt {} Instant) (t-adt {} Option (t-adt {} Offset)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::try_zoned: (t-fn {} (t-adt {} Instant) (t-adt {} TimeZone) (t-adt {} Option (t-adt {} Zoned)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::try_zoned_from_local: (t-fn {} (t-adt {} DateTime) (t-adt {} TimeZone) (t-adt {} Disambiguation) (t-adt {} Option (t-adt {} Zoned)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::try_zoned_from_text: (t-fn {} (t-adt {} ZonedText) (t-adt {} TimeZone) (t-adt {} OffsetConflict) (t-adt {} Option (t-adt {} Zoned)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::zoned: (t-fn {} (t-adt {} Instant) (t-adt {} TimeZone) (t-adt {} Zoned))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::zoned_add_duration: (t-fn {} (t-adt {} Zoned) (t-adt {} Duration) (t-adt {} Zoned))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::zoned_add_period: (t-fn {} (t-adt {} Zoned) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} Disambiguation) (t-adt {} Zoned))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::zoned_from_local: (t-fn {} (t-adt {} DateTime) (t-adt {} TimeZone) (t-adt {} Disambiguation) (t-adt {} Zoned))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::zoned_from_text: (t-fn {} (t-adt {} ZonedText) (t-adt {} TimeZone) (t-adt {} OffsetConflict) (t-adt {} Zoned))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::zoned_instant: (t-fn {} (t-adt {} Zoned) (t-adt {} Instant))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::zoned_local: (t-fn {} (t-adt {} Zoned) (t-adt {} DateTime))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::zoned_offset: (t-fn {} (t-adt {} Zoned) (t-adt {} Offset))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::zoned_to_string: (t-fn {} (t-adt {} Zoned) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/zone::zoned_zone: (t-fn {} (t-adt {} Zoned) (t-adt {} TimeZone))",
       "flags": []
     },
     {

@@ -2766,7 +2766,7 @@ exact ADT identity by [05-OP-34].
 > access, owner flag, or free-style path; it has no accumulator and is outside
 > AD.
 >
-> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the fourteen
+> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the seventeen
 > exported stdlib ADT identities enumerated in the normative registry
 > `spec/registry/stdlib_adt_identities.md`, which this atom incorporates by
 > reference, and no structurally similar successor.
@@ -2792,9 +2792,9 @@ exact ADT identity by [05-OP-34].
 > spelling of an integer-form source token outside i64 range ([05-OP-2]);
 > it is source-faithful text, never a float funnel, and its string field
 > compares and renders byte-exactly. The opaque `datetime::*`,
-> `datetime/business::*`, and `datetime/clock::*` identities hold
-> [05-OP-73]'s invariants, and the opaque `decimal::Decimal` identity holds
-> [05-OP-76]'s, by construction. There is no second prelude JSON
+> `datetime/business::*`, `datetime/clock::*`, and `datetime/zone::*`
+> identities hold [05-OP-73]'s invariants, and the opaque `decimal::Decimal`
+> identity holds [05-OP-76]'s, by construction. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
 > ordinary constructor and the executed matching arm preserve the recursive
 > cotangent shape: differentiable float fields receive their corresponding
@@ -2804,7 +2804,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the two hundred twenty-eight final exported stdlib numeric definitions enumerated in the
+> the two hundred fifty final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
@@ -2820,8 +2820,8 @@ exact ADT identity by [05-OP-34].
 > refuses `JsonFloat` and `JsonBigInt`, `json_bigint` is [05-OP-3]'s exact
 > big-integer projection, while `json_float` performs [05-OP-3]'s named
 > i64-to-f64 widening, refuses `JsonBigInt`, and returns a stored f64
-> unchanged. The `datetime::*`, `datetime/business::*`, and
-> `datetime/clock::*` identities follow [05-OP-73]. The `decimal::*`
+> unchanged. The `datetime::*`, `datetime/business::*`, `datetime/clock::*`,
+> and `datetime/zone::*` identities follow [05-OP-73]. The `decimal::*`
 > identities follow [05-OP-76]. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
@@ -2998,22 +2998,25 @@ exact ADT identity by [05-OP-34].
 > from its implementation body or age.
 
 > **[05-OP-73]** `datetime(arguments...) -> result` governs exactly the
-> `datetime::*`, `datetime/business::*`, and `datetime/clock::*` identities
-> of the [05-OP-34] and [05-OP-35] registries: the opaque value types `Date`,
-> `Time`, `DateTime`, `Instant`, `Offset`, `OffsetDateTime`, `Duration`,
-> `Period`, `Dates[n]`, `Instants[n]`, `BusinessCalendar`, and
-> `MonotonicInstant`, and the callables over them, together with the one
-> callable of the three modules that reaches no numeric value and so has no
-> registry row, `weekday_name`. Its plain enums are
-> `Weekday` (`Monday` through
-> `Sunday`), `DayOverflow` (`ClampToMonthEnd`, `RejectInvalidDay`), and
-> `TimeUnit` (`Hours`, `Minutes`, `Seconds`, `Milliseconds`, `Microseconds`,
-> `Nanoseconds`), with `BusinessDayRoll` and `NonBusinessStart` defined
-> below; every enum constructor is a valid value. `instant_to_unix_count`,
-> `duration_to_count`, and `instant_round_to`, with the `try_` forms of the
-> first two, take a [05-OP-74] `Rounding`. `duration_to_seconds_f64` is the one
-> other callable that drops precision; it is a named lossy boundary with fixed
-> nearest-even rounding.
+> `datetime::*`, `datetime/business::*`, `datetime/clock::*`, and
+> `datetime/zone::*` identities of the [05-OP-34] and [05-OP-35] registries:
+> the opaque value types `Date`, `Time`, `DateTime`, `Instant`, `Offset`,
+> `OffsetDateTime`, `Duration`, `Period`, `Dates[n]`, `Instants[n]`,
+> `BusinessCalendar`, `MonotonicInstant`, `TimeZone`, and `Zoned`, the record
+> `ZonedText`, and the callables over them, together with
+> `datetime::weekday_name`, the one callable of the four modules that reaches no
+> numeric value and so has no registry row. Its plain enums are `Weekday`
+> (`Monday` through `Sunday`), `DayOverflow` (`ClampToMonthEnd`,
+> `RejectInvalidDay`), `TimeUnit` (`Hours`, `Minutes`, `Seconds`,
+> `Milliseconds`, `Microseconds`, `Nanoseconds`), `Disambiguation`
+> (`EarlierInstant`, `LaterInstant`, `CompatibleInstant`,
+> `RejectNonUniqueLocal`), and `OffsetConflict` (`UseWrittenOffset`,
+> `UseZoneRules`, `RejectOffsetMismatch`), with `BusinessDayRoll` and
+> `NonBusinessStart` defined below; every enum constructor is a valid value.
+> `instant_to_unix_count`, `duration_to_count`, and `instant_round_to`, with
+> the `try_` forms of the first two, take a [05-OP-74] `Rounding`.
+> `duration_to_seconds_f64` is the one other callable that drops precision; it
+> is a named lossy boundary with fixed nearest-even rounding.
 >
 > The calendar is proleptic Gregorian with astronomical year numbering, so
 > year 0 exists. The timescale is POSIX: every day has exactly 86 400 seconds
@@ -3046,25 +3049,33 @@ exact ADT identity by [05-OP-34].
 > name and `<detail>` names the offending value. `<kind>` is `overflow` exactly
 > when a result computed from these values leaves its type: adding,
 > subtracting, negating, or multiplying dates, datetimes, instants, durations,
-> or periods, including `datetime_to_instant_at`'s reading of a civil value at
-> an offset; rounding an instant in `instant_round_to`; and a count leaving
-> i64 in `instant_to_unix_count` or `duration_to_count`. Every other failure is
-> `domain`: an argument, count, or text that denotes no value of its type (an
-> invalid field; a year, epoch day, offset, instant, duration, or period
-> outside its range; text outside the profile below), an argument outside the
+> or periods, including the reading of a civil value at an offset in
+> `datetime_to_instant_at`, `zoned_from_local`, `zoned_add_period`, and
+> `zoned_from_text`; rounding an instant in `instant_round_to`; and a count
+> leaving i64 in `instant_to_unix_count` or `duration_to_count`. Every other
+> failure is `domain`: an argument, count, or text that denotes no value of its
+> type (an invalid field; a year, epoch day, offset, instant, duration, or
+> period outside its range; text outside the profile below; a name or bytes
+> that `time_zone_from_tzif` does not admit), an argument outside the
 > operation's admitted values (an occurrence below 1 in
 > `nth_weekday_in_month`; an increment of `instant_round_to` that is not
 > positive or does not divide one day; the weekmasks, horizons, holidays, and
-> dates the business-calendar paragraphs below reject), a business-calendar
-> result that its horizon does not determine, and a `Reject` policy that
-> fires. For
-> a call that could fail both ways, checks run in the order the defining
+> dates the business-calendar paragraphs below reject; an instant its zone does
+> not cover; a local reading in more than one gap; a written offset that a
+> critical annotation asserts and the zone contradicts), a business-calendar
+> result that its horizon does not determine, and a `Reject` policy that fires.
+> For a call that could fail both ways, checks run in the order the defining
 > computation produces the quantity each one checks: `date_add_months` checks
 > the target year-month's range and then the day under its policy;
 > `date_add_period` and `datetime_add_period` do so for the month step and then
 > check the day step's range; `duration_to_count` applies its rounding policy
-> and then checks representability; and `instant_round_to` checks the
-> increment, then its rounding policy, then the result's range. Every range and
+> and then checks representability; `instant_round_to` checks the increment,
+> then its rounding policy, then the result's range; `zoned_add_duration`
+> checks the instant range and then coverage; `zoned_from_local` and
+> `zoned_from_text` make every `overflow` check before any `domain` check; and
+> `zoned_add_period` with a nonzero period checks as `datetime_add_period` does
+> and then as `zoned_from_local` does, while a zero period makes no check.
+> Every range and
 > validity check precedes the arithmetic it protects, so no [04-NUM-9] trap of
 > a primitive escapes a call for any arguments. Except for the masked column
 > forms below, a `try_` callable takes its twin's arguments, returns `Some` of
@@ -3193,7 +3204,7 @@ exact ADT identity by [05-OP-34].
 > duration or period whose value lies outside its type.
 > `parse_instant` converts any offset exactly, and `parse_offset_datetime`
 > keeps the written offset, `Z` and `-00:00` being offset zero. Each
-> `*_to_string` emits its value's one canonical text: years 0..9999 as four
+> `*_to_string` other than `zoned_to_string` emits its value's one canonical text: years 0..9999 as four
 > digits and negative years as `-` and six digits; `T` as the separator; a
 > fraction with trailing zeros removed and omitted when zero; offset zero as
 > `Z` and any other offset as `±HH:MM`, with `:SS` only when nonzero;
@@ -3271,6 +3282,99 @@ exact ADT identity by [05-OP-34].
 > [05-OP-75]'s message `clock_wall_read: io: <detail>` or
 > `clock_monotonic_read: io: <detail>`, naming the builtin rather than
 > `clock_now` or `monotonic_now`; `io` is the kind of exactly these failures.
+>
+> A `TimeZone` is a name, an initial offset, a strictly increasing list of
+> transitions, each a unix second and the offset in force from it on, and a
+> footer rule that may be absent; two zones are equal exactly when all four are,
+> and `time_zone_name` reads the name. `time_zone_from_tzif(name, bytes)` reads
+> an RFC 9636 TZif file of version `2`, `3`, or `4`, skipping its version 1
+> block and using its version 2+ header, data block, and footer; the initial
+> offset is time type 0's. It fails `domain` when `name` is not an RFC 9557
+> `time-zone-name`; when an element of `bytes` lies outside 0..255; when the
+> file departs from RFC 9636's layout or from its constraints on counts, type
+> indices, DST flags, designation indices, and indicators; when the file has a
+> leap-second record, which is not on the POSIX timescale; when an offset of a
+> time type or of the footer lies outside -86 399..86 399; when the transitions
+> are not strictly increasing; when the footer is neither empty nor a POSIX TZ
+> string, or names daylight saving time without a rule; when a version `2`
+> footer uses RFC 9636 §3.3.2's transition-time extension; and when the footer
+> rule evaluated at the last transition gives an offset other than that
+> transition's. `time_zone_fixed(o)` has the single offset `o` and is named
+> `±HH:MM`, with `:SS` only when nonzero and `+00:00` for offset zero;
+> `time_zone_utc()` has offset zero and is named `UTC`. Each has no transitions
+> and a footer rule of its offset without daylight saving time.
+>
+> `time_zone_offset_at(tz,i)` is the offset in force at `i`: the initial offset
+> before the first transition, a transition's offset from it until the next
+> transition, and the footer rule's offset from the last transition on. With no
+> transitions the footer rule's offset applies everywhere, or the initial offset
+> when the footer is absent. A footer rule without daylight saving time gives
+> its standard offset. With daylight saving time, every year has a start at the
+> rule's start date and time read at the standard offset and an end at its end
+> date and time read at the daylight offset, the dates being `Jn` (day `n` of
+> 1..365, never counting 29 February), `n` (the zero-based day 0..365), and
+> `Mm.w.d` (weekday `d`, Sunday being 0, of week `w` of month `m`, week 5 being
+> the last); the offset is the daylight offset when the latest start or end at
+> or before the instant is a start, a start prevailing over an end at the same
+> instant, and the standard offset otherwise. A zone covers every instant,
+> except that a zone with transitions and no footer rule covers only the
+> instants before its last transition. A callable that needs the offset at an
+> instant its zone does not cover fails `domain`.
+>
+> A `Zoned` is an instant and a zone that covers it; two are equal exactly when
+> both parts are. `zoned(i,tz)` pairs them, `zoned_instant`, `zoned_zone`, and
+> `zoned_offset` read a `Zoned`, and `zoned_local` is `instant_to_datetime_at`
+> of its instant and offset. `zoned_from_local(dt,tz,policy)` resolves a local
+> reading. Its trials are the offsets that `time_zone_offset_at` gives at the
+> instants of the instant range within 86 399 seconds of `dt` read at offset
+> zero, and its candidates are the instants `dt - o` over the trials `o` at
+> which the offset is `o`. A trial `dt - o` outside the instant range fails
+> `overflow`; otherwise an instant of that window outside the zone's coverage
+> fails `domain`. One candidate is the result under every policy. With two or
+> more, a fold, `EarlierInstant` and `CompatibleInstant` give the earliest and
+> `LaterInstant` the latest. With none, a gap, the change at an instant `T` from
+> an offset `o_b` to an offset `o_a` with `T + o_b <= dt < T + o_a` decides:
+> `EarlierInstant` gives `dt - o_a`, and `LaterInstant` and `CompatibleInstant`
+> give `dt - o_b`; when more than one change satisfies this, every policy fails
+> `domain`. `RejectNonUniqueLocal` fails `domain` in a fold and in a gap.
+> `zoned_add_duration(z,d)` adds `d` to the instant and fails `overflow` outside
+> the instant range. `zoned_add_period(z,p,overflow,policy)` returns `z` when
+> `p` is zero, whatever `overflow` and `policy` are. Otherwise it applies
+> `datetime_add_period` with `overflow` to the local reading, failing as it
+> fails, and resolves the result as `zoned_from_local` does with `policy`.
+>
+> `zoned_to_string(z)` is the canonical text of the local reading, then the
+> offset with offset zero written `+00:00`, then the zone's name in brackets, as
+> in `2026-10-01T09:30:00-04:00[America/New_York]`. `parse_zoned_text` accepts
+> an `instant` text followed by one zone annotation, which is `[`, an optional
+> critical flag `!`, an RFC 9557 `time-zone-name` or an `offset` other than `Z`
+> or `z`, and `]`, and then by zero or more RFC 9557 suffix tags. It returns the
+> `ZonedText` record of the date and time as written, the written offset, the
+> annotation's name as written, and whether the annotation is critical. The
+> offset is absent when it is written `Z`, `z`, or with a `-` sign and value
+> zero: RFC 9557 §2 and §3.4 read these as a known UTC time whose local offset
+> is unknown, so the written date and time are then UTC. Every other offset,
+> `+00:00` included, is present. A key that two suffix tags give different
+> values fails `domain` when either tag is critical, whatever their positions,
+> as RFC 9557 §3.3 requires. Otherwise an elective tag whose key an earlier
+> tag gives is ignored, and a `u-ca` tag whose value is `iso8601` or `gregory`
+> is accepted; another `u-ca` value and any other critical tag fail `domain`,
+> and any other elective tag is ignored.
+> `zoned_from_text(zt,tz,policy)` resolves the record against `tz` whatever its
+> name. When the offset is absent, every policy gives the instant that the
+> written date and time denote at offset zero, failing `overflow` outside the
+> instant range and `domain` where `tz` does not cover that instant; no policy
+> compares an offset. Otherwise, with `written` the written date and time,
+> `UseWrittenOffset` gives the instant `written - offset`, failing `overflow`
+> outside the instant range and `domain` when the annotation is critical and
+> `time_zone_offset_at` there is not the written offset. `UseZoneRules`
+> resolves `written` as `zoned_from_local` does with `RejectNonUniqueLocal`.
+> `RejectOffsetMismatch` fails as `zoned_from_local` with `EarlierInstant`
+> fails for `written` and `overflow` when `written - offset` is outside the
+> instant range, gives `written - offset` when it is one of
+> `zoned_from_local`'s candidates, and fails `domain` otherwise. Resolving
+> `parse_zoned_text(zoned_to_string(z))` against `z`'s zone with
+> `UseWrittenOffset` returns `z`.
 >
 > Every datetime callable is outside AD and has no accumulator.
 

@@ -1168,6 +1168,27 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "numeric_adt"
     ),
     final_numeric_row!(
+        "std-adt-numeric",
+        "datetime/zone::TimeZone: () (variant {} TimeZone (field {} name (t-prim {} string)) (field {} initial_offset (t-prim {} i64)) (field {} transitions (t-adt {} List (t-tuple {} (t-prim {} i64) (t-prim {} i64)))) (field {} footer (t-adt {} Option (t-tuple {} (t-prim {} i64) (t-adt {} Option (t-tuple {} (t-prim {} i64) (t-tuple {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64)) (t-tuple {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64))))))))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime/zone::Zoned: () (variant {} Zoned (field {} instant (t-adt {} Instant)) (field {} zone (t-adt {} TimeZone)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "datetime/zone::ZonedText: () (variant {} ZonedText (field {} written (t-adt {} DateTime)) (field {} offset (t-adt {} Option (t-adt {} Offset))) (field {} zone_name (t-prim {} string)) (field {} critical (t-prim {} bool)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
         "std-def-numeric",
         "contracts::normal_cdf: [p: Float] (t-fn {} (t-var {} p) (t-var {} p))",
         &[],
@@ -2759,6 +2780,160 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "std-def-numeric",
         "datetime::weekday_on_or_before: (t-fn {} (t-adt {} Date) (t-adt {} Weekday) (t-adt {} Date))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::parse_zoned_text: (t-fn {} (t-prim {} string) (t-adt {} ZonedText))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::time_zone_fixed: (t-fn {} (t-adt {} Offset) (t-adt {} TimeZone))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::time_zone_from_tzif: (t-fn {} (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-adt {} TimeZone))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::time_zone_name: (t-fn {} (t-adt {} TimeZone) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::time_zone_offset_at: (t-fn {} (t-adt {} TimeZone) (t-adt {} Instant) (t-adt {} Offset))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::time_zone_utc: (t-fn {} (t-adt {} TimeZone))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_parse_zoned_text: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} ZonedText)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_time_zone_from_tzif: (t-fn {} (t-prim {} string) (t-adt {} List (t-prim {} i64)) (t-adt {} Option (t-adt {} TimeZone)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_time_zone_offset_at: (t-fn {} (t-adt {} TimeZone) (t-adt {} Instant) (t-adt {} Option (t-adt {} Offset)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_zoned: (t-fn {} (t-adt {} Instant) (t-adt {} TimeZone) (t-adt {} Option (t-adt {} Zoned)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_zoned_from_local: (t-fn {} (t-adt {} DateTime) (t-adt {} TimeZone) (t-adt {} Disambiguation) (t-adt {} Option (t-adt {} Zoned)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::try_zoned_from_text: (t-fn {} (t-adt {} ZonedText) (t-adt {} TimeZone) (t-adt {} OffsetConflict) (t-adt {} Option (t-adt {} Zoned)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned: (t-fn {} (t-adt {} Instant) (t-adt {} TimeZone) (t-adt {} Zoned))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_add_duration: (t-fn {} (t-adt {} Zoned) (t-adt {} Duration) (t-adt {} Zoned))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_add_period: (t-fn {} (t-adt {} Zoned) (t-adt {} Period) (t-adt {} DayOverflow) (t-adt {} Disambiguation) (t-adt {} Zoned))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_from_local: (t-fn {} (t-adt {} DateTime) (t-adt {} TimeZone) (t-adt {} Disambiguation) (t-adt {} Zoned))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_from_text: (t-fn {} (t-adt {} ZonedText) (t-adt {} TimeZone) (t-adt {} OffsetConflict) (t-adt {} Zoned))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_instant: (t-fn {} (t-adt {} Zoned) (t-adt {} Instant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_local: (t-fn {} (t-adt {} Zoned) (t-adt {} DateTime))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_offset: (t-fn {} (t-adt {} Zoned) (t-adt {} Offset))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_to_string: (t-fn {} (t-adt {} Zoned) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/zone::zoned_zone: (t-fn {} (t-adt {} Zoned) (t-adt {} TimeZone))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"

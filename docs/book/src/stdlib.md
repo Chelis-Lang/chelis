@@ -150,7 +150,8 @@ the `Test` effect. Generated builds reject these assertion calls.
 and returns `(exit_code, stdout, stderr)`. `run_chelis(args)` invokes the
 `chelis` command. Both carry `IO` and run during evaluation and
 testing. The language specifies compiled host process execution too, but
-`chelis build` rejects these calls.
+`chelis build` does not yet compile these calls
+([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)).
 
 ### Dates and times
 
@@ -194,7 +195,8 @@ no other datetime function takes one and it does not convert to an `Instant`. Bo
 `IO`, so every caller carries it, declared or inferred. A failed read reports
 `clock_wall_read: io: <detail>` or `clock_monotonic_read: io: <detail>`, naming
 the underlying read. The clocks run under `chelis eval` and `chelis test`;
-`chelis build` rejects them.
+`chelis build` does not yet compile them
+([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)).
 
 ### Business days
 
@@ -244,6 +246,26 @@ result of arithmetic lies outside that range or `decimal_to_i64`'s integer lies
 outside i64; each `try_` form returns `None` where its twin fails `domain`, and
 `try_decimal_to_i64` also where its twin fails `overflow`. The module is
 pure and runs under `chelis eval`, `chelis test`, and generated C.
+
+`Std.Datetime.Zone` makes time zone rules values. `time_zone_from_tzif(name,
+bytes)` reads a TZif file (RFC 9636, versions 2 to 4) whose bytes the program
+supplies: the standard library holds no time zone database and never reads the
+host's. `time_zone_fixed(o)` and `time_zone_utc()` build fixed zones. A `Zoned` is
+an instant in a zone: `zoned(i, tz)` pairs them, and `zoned_from_local(dt, tz,
+policy)` resolves a local reading, where the `Disambiguation` (`EarlierInstant`,
+`LaterInstant`, `CompatibleInstant`, or `RejectNonUniqueLocal`) decides a reading
+that a daylight saving change skips or repeats. `zoned_add_duration` moves along
+the instant line and `zoned_add_period` moves the wall clock, keeping the value
+unchanged for a zero period. `zoned_to_string` writes RFC 9557 text such as
+`2026-10-01T09:30:00-04:00[America/New_York]`, with an offset whose seconds are
+nonzero written `±HH:MM:SS` as the text profile allows;
+`parse_zoned_text` reads it into a plain `ZonedText` record, and
+`zoned_from_text(zt, tz, policy)` resolves that against a zone the caller
+obtained, with an `OffsetConflict` policy for a written offset the zone does not
+use there. A written `Z`, `z` or `-00:00` means a UTC time whose local offset is
+unknown (RFC 9557): its record has no offset, and every policy resolves it to that
+UTC instant. A zone whose TZif footer is empty has no offsets from its last
+transition on, and a call that needs one there fails `domain`.
 
 ### Exported but unavailable
 

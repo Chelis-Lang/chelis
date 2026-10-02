@@ -1,0 +1,37 @@
+{
+  "tzdata_package": "2026.4",
+  "iana_release": "2026d",
+  "zones": [
+    "America/New_York",
+    "Europe/London",
+    "Australia/Lord_Howe",
+    "Pacific/Kiritimati",
+    "Asia/Kolkata",
+    "America/Sao_Paulo",
+    "UTC"
+  ],
+  "sha256": {
+    "synthetic/all_year_dst.tzif": "429d621902d45ecff2ca3a31327bc3794787e21829a0084113265a7e59e0bc51",
+    "synthetic/bad_magic.tzif": "f7109d73e662d83436d9a5b9e22e9172e12bb0186b33a0dc71bd648f2a76a7c1",
+    "synthetic/decreasing.tzif": "109d4412be88e3c94c555458170cc74b9a7e5a08013d65825a47463ff0a1ec55",
+    "synthetic/dst_without_rule.tzif": "a97b86754dfa3ffc0088582b01ca1a86a7ed3c215482beed90b06fe16b73b553",
+    "synthetic/empty_footer.tzif": "3b85e5ba25cb577700abfa399160d50afa12be6f46c1aebd7af52cd719da5d72",
+    "synthetic/inconsistent_footer.tzif": "7a045d31277b2d0934126b40504ab951cef50ea4a3df18d684cc0317679cf38d",
+    "synthetic/jerusalem_in_v2.tzif": "3f3fd620d516da2fba1109f01ef1ed786f79a9f0a516c8832a0478e4219cfe1b",
+    "synthetic/jerusalem_v3.tzif": "b465c2684b9587b4358bb9ed0ec8ed9c7fd237d649617049ad62fd4ff364013c",
+    "synthetic/leap_seconds.tzif": "3101188df3388d58d3bc92c53ed65ef2c0e2dee54fb7c3872eaf54f6059882f9",
+    "synthetic/non_increasing.tzif": "0ec0a892aa1b87b7470e790b4ba77ef95a6eaa7446359e87ffd7620ac677a732",
+    "synthetic/offset_out_of_bounds.tzif": "3630ab566de645d7f91bddf4ef7db5717ef0359f833f982c058a24ff7e37daec",
+    "synthetic/truncated.tzif": "6e387d2bc937dffc00d712d0b1870d38e7317094b4350dbdef08c88f7f6dcfd7",
+    "synthetic/version_1.tzif": "72e268e9d7344c3b4324389277f3e5177db09a65fe4e3f7608716ba73d039951",
+    "synthetic/version_5.tzif": "db4184ad6aedd523118d860bfc66ed7d45398759c47cc67522c3fc9e397345db",
+    "synthetic/zero_typecnt.tzif": "b130f3d297140b306e4354a7db8b20a8e2cc4889a4e833f10865708a5642bdd4",
+    "zones/America/New_York.tzif": "d7f2206b3a45989fc9ad63d558922532fa7352280d5f87176bf1db79cb1d1fa9",
+    "zones/America/Sao_Paulo.tzif": "fa2ceb222f065c0289f3997ff0c54ba05a74a599b4522870fa86a96e24e18891",
+    "zones/Asia/Kolkata.tzif": "3a00bdbe1bc4959e727567c730ba51b03455ecd455f7c190c5ad14386eb79b0d",
+    "zones/Australia/Lord_Howe.tzif": "f368bd25659c0293d02bb79ec7dac7d5b73a92dffafce14b4dd2ffb8ba11aada",
+    "zones/Europe/London.tzif": "676541f0b8ad457c744c093f807589adcad909e3fd03f901787d08786eedbd33",
+    "zones/Pacific/Kiritimati.tzif": "71454698c44182595fb982775f4074ce0d017fe2cfa3d97b2dee63bbcf36771e",
+    "zones/UTC.tzif": "fddce1e648a1732ac29afd9a16151b2973cdf082e7ec0c690f7e42be6b598b93"
+  }
+}

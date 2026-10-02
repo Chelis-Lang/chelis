@@ -22,3 +22,6 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `datetime::Dates` | `Dates { epoch_days: tensor[n,i64] }` |
 | `datetime::Instants` | `Instants { unix_seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |
 | `datetime/clock::MonotonicInstant` | `MonotonicInstant { second: i64, nanosecond: i64 }` |
+| `datetime/zone::TimeZone` | `TimeZone { name: string, initial_offset: i64, transitions: List[(i64,i64)], footer: Option[(i64,Option[(i64,(i64,i64,i64,i64,i64),(i64,i64,i64,i64,i64))])] }` |
+| `datetime/zone::Zoned` | `Zoned { instant: Instant, zone: TimeZone }` |
+| `datetime/zone::ZonedText` | `ZonedText { written: DateTime, offset: Option[Offset], zone_name: string, critical: bool }` |
