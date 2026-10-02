@@ -44,6 +44,9 @@ class WorkflowContract:
     contexts: tuple[str, ...]
     identity_artifact: str | None = None
     events: tuple[str, ...] = ("pull_request",)
+    # Events whose runs of this workflow are not evidence and are passed over
+    # when selecting the context's check run. Any other event stays an error.
+    ignored_events: tuple[str, ...] = ()
 
 
 WORKFLOWS = {
@@ -72,7 +75,9 @@ WORKFLOWS = {
     ),
     # Secret scan also runs on every push, so a head carries a push-event
     # check run of the same name; only its pull_request run is evidence.
-    "secret-scan.yml": WorkflowContract(contexts=("Secret scan",)),
+    "secret-scan.yml": WorkflowContract(
+        contexts=("Secret scan",), ignored_events=("push",)
+    ),
 }
 CONTEXT_WORKFLOW = {
     context: workflow_file
@@ -266,16 +271,20 @@ def _evidence_check_run(
     context: str,
     candidates: Sequence[Mapping[str, Any]],
 ) -> Mapping[str, Any] | None:
-    """The latest check run that its own workflow reported for an allowed event.
+    """The context's evidence candidate: its latest check run, except that
+    runs of the context's own workflow from an ignored event are passed over.
 
-    A workflow that also runs on other events (Secret scan runs on every push)
-    reports a same-named check run for the head from each event; those runs are
-    not pull-request evidence and are skipped rather than compared by start
-    time against the pull_request run. A same-named run from any other workflow
-    file stays a hard error, exactly as provenance checking reports it.
+    Secret scan also runs on every push, so a pushed head carries a push-event
+    check run of the same name beside the pull_request one; the push run is not
+    evidence and is skipped rather than compared by start time. Every other
+    workflow has no ignored event and keeps the latest-run rule unchanged, and a
+    run from any other workflow file or a non-ignored event still reaches
+    provenance checking, which rejects it.
     """
     workflow_file = CONTEXT_WORKFLOW[context]
     contract = WORKFLOWS[workflow_file]
+    if not contract.ignored_events:
+        return candidates[0]
     expected_path = f".github/workflows/{workflow_file}"
     for candidate in candidates:
         check_run_id = _positive_integer(
@@ -290,13 +299,12 @@ def _evidence_check_run(
             api(f"repos/{repository}/actions/runs/{run_id}"),
             f"{context} workflow run",
         )
-        if run.get("path") != expected_path:
-            raise ReceiptError(
-                f"{context}: run path was {run.get('path')!r}, "
-                f"expected {expected_path!r}"
-            )
-        if run.get("event") in contract.events:
-            return candidate
+        if (
+            run.get("path") == expected_path
+            and run.get("event") in contract.ignored_events
+        ):
+            continue
+        return candidate
     return None
 
 

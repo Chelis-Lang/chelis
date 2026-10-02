@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr-candidate-receipt-${{ github.event.workflow_run.head_sha }}
+  group: pr-candidate-receipt-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.event }}
   cancel-in-progress: true
 
 jobs:

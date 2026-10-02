@@ -557,6 +557,98 @@ class CandidateReceiptTests(unittest.TestCase):
         ):
             self.collect(responses=responses)
 
+    def later_run(
+        self,
+        responses: dict[str, object],
+        *,
+        context: str,
+        workflow_file: str,
+        event: str,
+        check_id: int,
+        run_id: int,
+    ) -> None:
+        """Add a later failing run of `context` from `workflow_file` and `event`."""
+        endpoint = (
+            f"repos/{self.fixture.repo_name}/commits/"
+            f"{self.fixture.repository.head_sha}/check-runs?per_page=100&page=1"
+        )
+        responses[endpoint]["check_runs"].append(
+            {
+                "id": check_id,
+                "name": context,
+                "status": "completed",
+                "conclusion": "failure",
+                "started_at": "2026-09-15T12:09:00Z",
+                "app": {"id": self.fixture.app_id},
+            }
+        )
+        responses[f"repos/{self.fixture.repo_name}/actions/jobs/{check_id}"] = {
+            "id": check_id,
+            "run_id": run_id,
+            "run_attempt": 1,
+            "head_sha": self.fixture.repository.head_sha,
+            "name": context,
+            "status": "completed",
+            "conclusion": "failure",
+        }
+        responses[f"repos/{self.fixture.repo_name}/actions/runs/{run_id}"] = {
+            "id": run_id,
+            "run_attempt": 1,
+            "event": event,
+            "path": f".github/workflows/{workflow_file}",
+            "head_sha": self.fixture.repository.head_sha,
+            "head_repository": {"full_name": self.fixture.repo_name},
+            "status": "completed",
+            "conclusion": "failure",
+            "pull_requests": [{"number": self.fixture.pr_number}],
+        }
+
+    def test_later_dispatch_run_of_a_mapped_workflow_still_withholds_the_receipt(
+        self,
+    ) -> None:
+        responses = copy.deepcopy(self.fixture.responses)
+        self.later_run(
+            responses,
+            context="Docs",
+            workflow_file="ci.yml",
+            event="workflow_dispatch",
+            check_id=3101,
+            run_id=111,
+        )
+
+        with self.assertRaises((receipt.ReceiptNotReady, receipt.ReceiptError)):
+            self.collect(responses=responses)
+
+    def test_only_secret_scan_push_runs_are_passed_over(self) -> None:
+        responses = copy.deepcopy(self.fixture.responses)
+        self.later_run(
+            responses,
+            context="Secret scan",
+            workflow_file="secret-scan.yml",
+            event="workflow_dispatch",
+            check_id=3102,
+            run_id=112,
+        )
+
+        with self.assertRaises((receipt.ReceiptNotReady, receipt.ReceiptError)):
+            self.collect(responses=responses)
+
+    def test_pending_checks_api_retarget_check_waits_without_a_job_lookup(
+        self,
+    ) -> None:
+        responses = copy.deepcopy(self.fixture.responses)
+        pending = self.check_run(responses, "PR Base Retarget Validation")
+        pending["id"] = 3103
+        pending["status"] = "in_progress"
+        pending["conclusion"] = None
+        pending["started_at"] = "2026-09-15T12:09:00Z"
+
+        with self.assertRaisesRegex(
+            receipt.ReceiptNotReady,
+            "PR Base Retarget Validation: latest check is in_progress",
+        ):
+            self.collect(responses=responses)
+
     def test_rejects_unmapped_new_required_context(self) -> None:
         responses = copy.deepcopy(self.fixture.responses)
         branch = responses[
