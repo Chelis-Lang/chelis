@@ -10949,9 +10949,11 @@ fn lower_tuple_get_host_expr(
 // only the existing host scalar builtins (`add`/`mul`/`sub`/`div`/`neg`/
 // `exp`/`log`/`sin`/`cos`/`tanh`/`sqrt`/`pow`/`abs`/`cast`). No new runtime
 // struct and no new C builtin are required: the dual "struct" is split into
-// two `double`-typed expression trees at lowering time, which is the
-// forward-mode dual-number scheme the spec prescribes (one directional
-// derivative per pass).
+// two expression trees at lowering time, which is the forward-mode
+// dual-number scheme the spec prescribes (one directional derivative per
+// pass). Both trees carry the operand dtype: every constant, intermediate
+// and result is at the dtype of the values it combines ([04-NUM-8],
+// [05-OP-64]), and a node whose dtype is not determined fails closed.
 //
 // Multi-parameter `wrt=(p1, p2, ...)` emits one derivative tree per
 // parameter (each with that parameter's seed = 1.0 and the rest = 0.0) and
@@ -10965,30 +10967,60 @@ fn lower_tuple_get_host_expr(
 // and never reaches this host-lane pass.
 
 /// A dual value: the primal value expression and its derivative expression,
-/// both ordinary scalar (`Float64`) host expressions.
+/// both scalar host expressions of the dual's dtype `ty`.
 #[derive(Clone)]
 struct Dual {
     value: HostExpr,
     deriv: HostExpr,
+    ty: HostTypeTerm,
 }
 
-fn dual_float(value: f64, deriv: f64) -> Dual {
-    Dual {
-        value: HostExpr::new(HostExprKind::Float(value)),
-        deriv: HostExpr::new(HostExprKind::Float(deriv)),
-    }
-}
-
-fn scalar_builtin(name: &str, args: Vec<HostExpr>) -> HostExpr {
+fn scalar_builtin(name: &str, args: Vec<HostExpr>, ty: &HostTypeTerm) -> HostExpr {
     HostExpr::new(HostExprKind::Builtin {
         name: name.to_string(),
         args,
-        ty: HostTypeTerm::Float64,
+        ty: ty.clone(),
     })
 }
 
-fn host_float(value: f64) -> HostExpr {
-    HostExpr::new(HostExprKind::Float(value))
+/// A float constant at the float dtype `ty`. The lexical carrier is `f64`,
+/// so a constant of any other width is finalized by `cast`, exactly as a
+/// checked `lit` is ([04-LIT-1]). `None` for a non-float or unresolved `ty`.
+fn typed_float_const(value: f64, ty: &HostTypeTerm) -> Option<HostExpr> {
+    let HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim)) = ty else {
+        return None;
+    };
+    if !prim.is_float() {
+        return None;
+    }
+    let literal = HostExpr::new(HostExprKind::Float(value));
+    Some(if *prim == Prim::F64 {
+        literal
+    } else {
+        HostExpr::new(HostExprKind::Builtin {
+            name: "cast".to_string(),
+            args: vec![literal],
+            ty: ty.clone(),
+        })
+    })
+}
+
+/// A seed or constant-derivative value (`0` or `1`) at the scalar dtype `ty`.
+fn typed_seed(seed: i64, ty: &HostTypeTerm) -> Option<HostExpr> {
+    if *ty == HostTypeTerm::Int64 {
+        return Some(HostExpr::new(HostExprKind::Int(seed)));
+    }
+    typed_float_const(seed as f64, ty)
+}
+
+/// The common dtype of the duals an op combines. Operands of one op share a
+/// dtype in checked code (no implicit promotion); a disagreement fails closed
+/// rather than picking a width.
+fn common_dual_type(args: &[Dual]) -> Option<HostTypeTerm> {
+    let (first, rest) = args.split_first()?;
+    rest.iter()
+        .all(|arg| arg.ty == first.ty)
+        .then(|| first.ty.clone())
 }
 
 /// `true` if a host type is a scalar this pass can differentiate. Integer
@@ -11038,13 +11070,13 @@ fn resolve_scalar_def<'a>(
     }
     let mut param_names = Vec::new();
     let mut param_tys = Vec::new();
-    for param in params_list.children_slice() {
+    for (index, param) in params_list.children_slice().iter().enumerate() {
         let pname = param_name(param)?;
-        let pty = param_host_type(param)
-            .or_else(|| {
-                lookup_declared_fn_type(program, name).and_then(|(tys, _)| tys.first().cloned())
-            })
-            .unwrap_or(HostTypeTerm::Float64);
+        // An undetermined parameter dtype fails closed: the dual trees are
+        // built at the parameter's dtype, never at an assumed width.
+        let pty = param_host_type(param).or_else(|| {
+            lookup_declared_fn_type(program, name).and_then(|(tys, _)| tys.get(index).cloned())
+        })?;
         param_names.push(pname);
         param_tys.push(pty);
     }
@@ -11121,34 +11153,60 @@ fn try_lower_scalar_grad_app(
         .iter()
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
         .collect::<Result<Vec<_>, _>>()?;
+    // Each argument enters its parameter's dual at that parameter's dtype.
+    if arg_values
+        .iter()
+        .zip(&param_tys)
+        .any(|(value, ty)| host_expr_type(value) != *ty)
+    {
+        return Ok(None);
+    }
 
     // One forward pass per `wrt` parameter.
     let mut derivs = Vec::new();
+    let mut deriv_tys = Vec::new();
     for wrt_name in &wrt_names {
         let mut env: UnordMap<String, Dual> = UnordMap::new();
         for (idx, pname) in param_names.iter().enumerate() {
-            let seed = if pname == wrt_name { 1.0 } else { 0.0 };
+            let seed = i64::from(pname == wrt_name);
+            let Some(deriv) = typed_seed(seed, &param_tys[idx]) else {
+                return Ok(None);
+            };
             env.insert(
                 pname.clone(),
                 Dual {
                     value: arg_values[idx].clone(),
-                    deriv: host_float(seed),
+                    deriv,
+                    ty: param_tys[idx].clone(),
                 },
             );
         }
         let Some(dual) = dual_eval(body, &env, program, 0) else {
             return Ok(None);
         };
-        derivs.push(dual.deriv);
+        // The gradient with respect to a parameter has that parameter's
+        // dtype. A body that casts to another width carries its tangent at
+        // that width; the result is converted back once, as the adjoint of
+        // that cast would be.
+        let Some(wrt_idx) = param_names.iter().position(|name| name == wrt_name) else {
+            return Ok(None);
+        };
+        let wrt_ty = &param_tys[wrt_idx];
+        let deriv = if dual.ty == *wrt_ty {
+            dual.deriv
+        } else {
+            scalar_builtin("cast", vec![dual.deriv], wrt_ty)
+        };
+        derivs.push(deriv);
+        deriv_tys.push(wrt_ty.clone());
     }
 
     if derivs.len() == 1 {
         Ok(derivs.pop())
     } else {
-        let tys = derivs.iter().map(|_| HostTypeTerm::Float64).collect();
         Ok(Some(HostExpr::new(HostExprKind::Tuple(
             derivs,
-            HostTypeTerm::Tuple(tys),
+            HostTypeTerm::Tuple(deriv_tys),
         ))))
     }
 }
@@ -11938,22 +11996,51 @@ fn dual_eval(
         return None;
     }
     match expr {
-        Expr::Atom(Atom::Float(v), _) => Some(dual_float(*v, 0.0)),
-        Expr::Atom(Atom::Int(v), _) => Some(dual_float(*v as f64, 0.0)),
         Expr::Node(list, _) => match list.tag() {
+            // A literal is a constant at its checked dtype ([04-LIT-1]); a
+            // literal without one has no width this pass may assume.
             DeepTag::Lit => {
-                let inner = list.children_slice().first()?;
-                dual_eval(inner, env, program, depth)
+                let prim = expr_scalar_primitive(expr)?;
+                let ty = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim));
+                let value = match list.children_slice().first()? {
+                    Expr::Atom(Atom::Float(v), _) => typed_float_const(*v, &ty)?,
+                    Expr::Atom(Atom::Int(v), _) if ty == HostTypeTerm::Int64 => {
+                        HostExpr::new(HostExprKind::Int(*v))
+                    }
+                    // An integer-source float literal casts from the exact
+                    // integer, never through `f64`.
+                    Expr::Atom(Atom::Int(v), _) if prim.is_float() => {
+                        HostExpr::new(HostExprKind::Builtin {
+                            name: "cast".to_string(),
+                            args: vec![HostExpr::new(HostExprKind::Int(*v))],
+                            ty: ty.clone(),
+                        })
+                    }
+                    _ => return None,
+                };
+                Some(Dual {
+                    value,
+                    deriv: typed_seed(0, &ty)?,
+                    ty,
+                })
             }
             DeepTag::Var => {
                 let name = list.children_slice().first().and_then(symbol_name)?;
-                let dual = env.get(name)?;
-                Some(Dual {
-                    value: dual.value.clone(),
-                    deriv: dual.deriv.clone(),
-                })
+                env.get(name).cloned()
             }
-            DeepTag::App => dual_eval_app(list, env, program, depth),
+            DeepTag::App => {
+                let dual = dual_eval_app(expr, list, env, program, depth)?;
+                // The application's checked dtype, when stamped, must be the
+                // dtype the dual trees were built at.
+                match expr_scalar_primitive(expr) {
+                    Some(prim)
+                        if dual.ty != HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim)) =>
+                    {
+                        None
+                    }
+                    _ => Some(dual),
+                }
+            }
             // `(let (bind n0 v0 n1 v1 ...) body)`: forward-mode through a
             // block body. Each binding's value is dual-evaluated in the
             // environment built so far (sequential scoping — a later binding
@@ -11961,7 +12048,7 @@ fn dual_eval(
             // environment under which the body is evaluated. The value and
             // derivative trees are substituted at each use site rather than
             // bound to host-let variables; this is correct because the dual
-            // trees are pure `Float64` arithmetic with no side effects. The
+            // trees are pure scalar arithmetic with no side effects. The
             // canonical scalar-AD shapes (single-variable derivatives,
             // Black-Scholes Greeks) reuse each intermediate a small number of
             // times, so the substituted trees stay small.
@@ -12014,6 +12101,7 @@ fn dual_eval_let(
 }
 
 fn dual_eval_app(
+    app_expr: &Expr,
     list: &Node,
     env: &UnordMap<String, Dual>,
     program: &HostLoweringSession<'_>,
@@ -12034,118 +12122,160 @@ fn dual_eval_app(
     // Helper closures over scalar builtins.
     let v = |d: &Dual| d.value.clone();
     let dv = |d: &Dual| d.deriv.clone();
+    // Every builtin arm computes, and builds its constants, at its operands'
+    // common dtype; a user-defined callee binds its own parameter dtypes.
+    let ty = || common_dual_type(&args);
+    let dual = |value: HostExpr, deriv: HostExpr, ty: HostTypeTerm| Dual { value, deriv, ty };
 
     match (op, args.len()) {
-        ("add", 2) => Some(Dual {
-            value: scalar_builtin("add", vec![v(&args[0]), v(&args[1])]),
-            deriv: scalar_builtin("add", vec![dv(&args[0]), dv(&args[1])]),
-        }),
-        ("sub", 2) => Some(Dual {
-            value: scalar_builtin("sub", vec![v(&args[0]), v(&args[1])]),
-            deriv: scalar_builtin("sub", vec![dv(&args[0]), dv(&args[1])]),
-        }),
+        ("add", 2) => {
+            let ty = ty()?;
+            Some(dual(
+                scalar_builtin("add", vec![v(&args[0]), v(&args[1])], &ty),
+                scalar_builtin("add", vec![dv(&args[0]), dv(&args[1])], &ty),
+                ty,
+            ))
+        }
+        ("sub", 2) => {
+            let ty = ty()?;
+            Some(dual(
+                scalar_builtin("sub", vec![v(&args[0]), v(&args[1])], &ty),
+                scalar_builtin("sub", vec![dv(&args[0]), dv(&args[1])], &ty),
+                ty,
+            ))
+        }
         ("mul", 2) => {
             // (uv)' = u'v + uv'
-            let lhs = scalar_builtin("mul", vec![dv(&args[0]), v(&args[1])]);
-            let rhs = scalar_builtin("mul", vec![v(&args[0]), dv(&args[1])]);
-            Some(Dual {
-                value: scalar_builtin("mul", vec![v(&args[0]), v(&args[1])]),
-                deriv: scalar_builtin("add", vec![lhs, rhs]),
-            })
+            let ty = ty()?;
+            let lhs = scalar_builtin("mul", vec![dv(&args[0]), v(&args[1])], &ty);
+            let rhs = scalar_builtin("mul", vec![v(&args[0]), dv(&args[1])], &ty);
+            Some(dual(
+                scalar_builtin("mul", vec![v(&args[0]), v(&args[1])], &ty),
+                scalar_builtin("add", vec![lhs, rhs], &ty),
+                ty,
+            ))
         }
         ("div", 2) => {
             // (u/v)' = (u'v - uv') / v^2
-            let num_l = scalar_builtin("mul", vec![dv(&args[0]), v(&args[1])]);
-            let num_r = scalar_builtin("mul", vec![v(&args[0]), dv(&args[1])]);
-            let num = scalar_builtin("sub", vec![num_l, num_r]);
-            let den = scalar_builtin("mul", vec![v(&args[1]), v(&args[1])]);
-            Some(Dual {
-                value: scalar_builtin("div", vec![v(&args[0]), v(&args[1])]),
-                deriv: scalar_builtin("div", vec![num, den]),
-            })
+            let ty = ty()?;
+            let num_l = scalar_builtin("mul", vec![dv(&args[0]), v(&args[1])], &ty);
+            let num_r = scalar_builtin("mul", vec![v(&args[0]), dv(&args[1])], &ty);
+            let num = scalar_builtin("sub", vec![num_l, num_r], &ty);
+            let den = scalar_builtin("mul", vec![v(&args[1]), v(&args[1])], &ty);
+            Some(dual(
+                scalar_builtin("div", vec![v(&args[0]), v(&args[1])], &ty),
+                scalar_builtin("div", vec![num, den], &ty),
+                ty,
+            ))
         }
-        ("neg", 1) => Some(Dual {
-            value: scalar_builtin("neg", vec![v(&args[0])]),
-            deriv: scalar_builtin("neg", vec![dv(&args[0])]),
-        }),
+        ("neg", 1) => {
+            let ty = ty()?;
+            Some(dual(
+                scalar_builtin("neg", vec![v(&args[0])], &ty),
+                scalar_builtin("neg", vec![dv(&args[0])], &ty),
+                ty,
+            ))
+        }
         ("exp", 1) => {
             // (e^u)' = e^u * u'
-            let value = scalar_builtin("exp", vec![v(&args[0])]);
-            Some(Dual {
-                deriv: scalar_builtin("mul", vec![value.clone(), dv(&args[0])]),
-                value,
-            })
+            let ty = ty()?;
+            let value = scalar_builtin("exp", vec![v(&args[0])], &ty);
+            let deriv = scalar_builtin("mul", vec![value.clone(), dv(&args[0])], &ty);
+            Some(dual(value, deriv, ty))
         }
         ("log", 1) => {
             // (ln u)' = u' / u
-            Some(Dual {
-                value: scalar_builtin("log", vec![v(&args[0])]),
-                deriv: scalar_builtin("div", vec![dv(&args[0]), v(&args[0])]),
-            })
+            let ty = ty()?;
+            Some(dual(
+                scalar_builtin("log", vec![v(&args[0])], &ty),
+                scalar_builtin("div", vec![dv(&args[0]), v(&args[0])], &ty),
+                ty,
+            ))
         }
         ("sin", 1) => {
             // (sin u)' = cos(u) * u'
-            let cos = scalar_builtin("cos", vec![v(&args[0])]);
-            Some(Dual {
-                value: scalar_builtin("sin", vec![v(&args[0])]),
-                deriv: scalar_builtin("mul", vec![cos, dv(&args[0])]),
-            })
+            let ty = ty()?;
+            let cos = scalar_builtin("cos", vec![v(&args[0])], &ty);
+            Some(dual(
+                scalar_builtin("sin", vec![v(&args[0])], &ty),
+                scalar_builtin("mul", vec![cos, dv(&args[0])], &ty),
+                ty,
+            ))
         }
         ("cos", 1) => {
             // (cos u)' = -sin(u) * u'
-            let sin = scalar_builtin("sin", vec![v(&args[0])]);
-            let neg_sin = scalar_builtin("neg", vec![sin]);
-            Some(Dual {
-                value: scalar_builtin("cos", vec![v(&args[0])]),
-                deriv: scalar_builtin("mul", vec![neg_sin, dv(&args[0])]),
-            })
+            let ty = ty()?;
+            let sin = scalar_builtin("sin", vec![v(&args[0])], &ty);
+            let neg_sin = scalar_builtin("neg", vec![sin], &ty);
+            Some(dual(
+                scalar_builtin("cos", vec![v(&args[0])], &ty),
+                scalar_builtin("mul", vec![neg_sin, dv(&args[0])], &ty),
+                ty,
+            ))
         }
         ("tanh", 1) => {
             // (tanh u)' = (1 - tanh(u)^2) * u'
-            let t = scalar_builtin("tanh", vec![v(&args[0])]);
-            let t2 = scalar_builtin("mul", vec![t.clone(), t.clone()]);
-            let one_minus = scalar_builtin("sub", vec![host_float(1.0), t2]);
-            Some(Dual {
-                value: t,
-                deriv: scalar_builtin("mul", vec![one_minus, dv(&args[0])]),
-            })
+            let ty = ty()?;
+            let t = scalar_builtin("tanh", vec![v(&args[0])], &ty);
+            let t2 = scalar_builtin("mul", vec![t.clone(), t.clone()], &ty);
+            let one_minus = scalar_builtin("sub", vec![typed_float_const(1.0, &ty)?, t2], &ty);
+            let deriv = scalar_builtin("mul", vec![one_minus, dv(&args[0])], &ty);
+            Some(dual(t, deriv, ty))
         }
         ("sqrt", 1) => {
             // (sqrt u)' = u' / (2 sqrt(u))
-            let s = scalar_builtin("sqrt", vec![v(&args[0])]);
-            let den = scalar_builtin("mul", vec![host_float(2.0), s.clone()]);
-            Some(Dual {
-                value: s,
-                deriv: scalar_builtin("div", vec![dv(&args[0]), den]),
-            })
+            let ty = ty()?;
+            let s = scalar_builtin("sqrt", vec![v(&args[0])], &ty);
+            let den = scalar_builtin("mul", vec![typed_float_const(2.0, &ty)?, s.clone()], &ty);
+            let deriv = scalar_builtin("div", vec![dv(&args[0]), den], &ty);
+            Some(dual(s, deriv, ty))
         }
         ("pow", 2) => {
             // Only constant exponents are supported in forward mode here:
             // (u^c)' = c * u^(c-1) * u'. A non-constant exponent (`deriv`
             // not identically zero) needs the general
-            // u^v * (v' ln u + v u'/u) form; reject to stay correct.
-            let exponent = float_const(&args[1].value)?;
+            // u^v * (v' ln u + v u'/u) form; reject to stay correct. `c - 1`
+            // is computed at the operand dtype, not folded at `f64`.
+            let ty = ty()?;
+            float_const(&args[1].value)?;
             if !is_zero_float(&args[1].deriv) {
                 return None;
             }
-            let pow_inner = scalar_builtin("pow", vec![v(&args[0]), host_float(exponent - 1.0)]);
-            let coeff = scalar_builtin("mul", vec![host_float(exponent), pow_inner]);
-            Some(Dual {
-                value: scalar_builtin("pow", vec![v(&args[0]), v(&args[1])]),
-                deriv: scalar_builtin("mul", vec![coeff, dv(&args[0])]),
-            })
+            let exponent = v(&args[1]);
+            let exponent_less_one =
+                scalar_builtin("sub", vec![exponent.clone(), typed_float_const(1.0, &ty)?], &ty);
+            let pow_inner = scalar_builtin("pow", vec![v(&args[0]), exponent_less_one], &ty);
+            let coeff = scalar_builtin("mul", vec![exponent, pow_inner], &ty);
+            Some(dual(
+                scalar_builtin("pow", vec![v(&args[0]), v(&args[1])], &ty),
+                scalar_builtin("mul", vec![coeff, dv(&args[0])], &ty),
+                ty,
+            ))
         }
-        // `cast` between scalar precisions is value-preserving for the dual
-        // tree (host scalars are all `double`); the derivative passes
-        // through unchanged.
+        // `cast` between scalar precisions is linear: the value and the
+        // derivative are both converted to the checked target dtype, which
+        // the application carries. A cast without a stamped target has no
+        // width this pass may assume.
         // `cast_trunc` deliberately has NO arm here: falling through to
         // the user-call path yields `None`, which is the [05-OP-6]
         // `no_grad` rejection. A passthrough dual would be the silent
         // zero-derivative the atom forbids.
-        ("cast", _) if !args.is_empty() => Some(Dual {
-            value: v(&args[0]),
-            deriv: dv(&args[0]),
-        }),
+        ("cast", 1) => {
+            let target = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                expr_scalar_primitive(app_expr)?,
+            ));
+            if !is_dual_scalar_type(&target) {
+                return None;
+            }
+            if target == args[0].ty {
+                return Some(args[0].clone());
+            }
+            Some(dual(
+                scalar_builtin("cast", vec![v(&args[0])], &target),
+                scalar_builtin("cast", vec![dv(&args[0])], &target),
+                target,
+            ))
+        }
         // A call to a user-defined scalar def (`d1(...)`, `normal_cdf(...)`):
         // inline the callee's body into the dual tree. The callee must be a
         // top-level scalar def with scalar parameters; its body is
@@ -12161,7 +12291,8 @@ fn dual_eval_app(
 
 /// Inline a call to a user-defined scalar def into the dual tree. Returns
 /// `None` when the callee is not a resolvable scalar def, its arity does not
-/// match, or its body uses an unsupported construct.
+/// match, an argument's dtype is not its parameter's, or its body uses an
+/// unsupported construct.
 fn dual_eval_user_call(
     op: &str,
     args: &[Dual],
@@ -12175,6 +12306,9 @@ fn dual_eval_user_call(
     if param_tys.iter().any(|ty| !is_dual_scalar_type(ty)) {
         return None;
     }
+    if args.iter().zip(&param_tys).any(|(arg, ty)| arg.ty != *ty) {
+        return None;
+    }
     let mut call_env: UnordMap<String, Dual> = UnordMap::new();
     for (name, arg) in param_names.iter().zip(args.iter()) {
         call_env.insert(name.clone(), arg.clone());
@@ -12182,9 +12316,18 @@ fn dual_eval_user_call(
     dual_eval(body, &call_env, program, depth + 1)
 }
 
+/// A scalar literal under its dtype finalization: `Float`/`Int`, or a `cast`
+/// of one (a non-`f64` float constant, see `typed_float_const`).
+fn scalar_literal(expr: &HostExpr) -> &HostExpr {
+    match &expr.kind {
+        HostExprKind::Builtin { name, args, .. } if name == "cast" && args.len() == 1 => &args[0],
+        _ => expr,
+    }
+}
+
 /// Extract a compile-time float constant from a HostExpr if it is a literal.
 fn float_const(expr: &HostExpr) -> Option<f64> {
-    match &expr.kind {
+    match &scalar_literal(expr).kind {
         HostExprKind::Float(v) => Some(*v),
         HostExprKind::Int(v) => Some(*v as f64),
         _ => None,
@@ -12192,6 +12335,7 @@ fn float_const(expr: &HostExpr) -> Option<f64> {
 }
 
 fn is_zero_float(expr: &HostExpr) -> bool {
+    let expr = scalar_literal(expr);
     matches!(&expr.kind, HostExprKind::Float(v) if *v == 0.0)
         || matches!(&expr.kind, HostExprKind::Int(0))
 }
