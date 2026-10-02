@@ -164,7 +164,7 @@ message grammar so that every failure is deterministic and machine-readable:
 |---|---|---|
 | `domain` | An input is outside the operation's value set: an invalid field, a year outside the range, malformed text, a query outside a calendar's horizon, a `Reject…` policy firing. | returns `None` |
 | `overflow` | An arithmetic result leaves the type's range. | still fails |
-| `io` | The host could not supply a clock reading (`Std.Datetime.Clock` only, §12). | no `try_` form |
+| `io` | The host could not supply a clock reading (`Std.Datetime.Clock` only). The message names the clock builtin, not the exported callable (§12). | no `try_` form |
 
 Two `try_` forms have a second `None` case: `try_instant_to_unix_count` and
 `try_duration_to_count` return `None` where their twin fails `overflow` because the count
@@ -774,7 +774,10 @@ compares `zoned_instant` and `time_zone_name`.
     art §9).
 
 **Failures.** A host reading outside the instant range, or a host clock error, fails
-with kind `io` (§5), naming the reading.
+with kind `io` (§5), naming the reading. The failure names the builtin, as in
+`clock_wall_read: io: <detail>` or `clock_monotonic_read: io: <detail>`, rather than
+`clock_now` or `monotonic_now`, because a library definition cannot relabel a builtin's
+failure.
 
 **Builtins.**
 - Each clock is one host-lane builtin under [05-HOST-2], in the same family as
@@ -784,6 +787,23 @@ with kind `io` (§5), naming the reading.
   `generate_rejection_registries.py --write`. It changes no published C header.
 - Compiled host execution of IO builtins follows chelis#1297. S5 delivers the eval lane
   and names #1297 for the compiled lane.
+
+**Builtins (decided in S5).** The builtins are `clock_wall_read()` and
+`clock_monotonic_read()`, under the atom [05-OP-75].
+- Each returns `(seconds, nanoseconds)` in Euclidean form, so a reading before the
+  clock's origin has negative seconds and a nonnegative remainder.
+- Both clocks admit exactly the instant range's unix seconds, so `clock_now` builds its
+  `Instant` with `instant_from_unix` and never fails after a successful read.
+- The evaluator reaches the host through its system port, which gains a clock
+  capability. An embedding that refuses the capability makes each read fail with kind
+  `io`.
+- In the evaluator, the monotonic origin is the process's first monotonic read.
+
+**Representation (decided in S5).** `MonotonicInstant` is
+`{ second: i64, nanosecond: i64 }`, with the nanosecond in `[0, 10^9)`, the same form as
+`Duration`. Both readings lie in [05-OP-75]'s range, so `monotonic_until`'s difference
+stays under 2^40 seconds, and `duration` normalizes it without failing. The module uses
+`Std.Datetime` only through its exported producers.
 
 **Why a separate module.** The clock lives in its own module so that a program, or a
 shell's policy, can import all of pure `Std.Datetime` and provably never read the clock.

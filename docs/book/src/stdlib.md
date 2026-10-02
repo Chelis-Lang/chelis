@@ -179,6 +179,17 @@ its type's range. Each `try_` form other than the masked column forms returns
 order them. The module is pure and runs under `chelis eval`, `chelis test`, and
 generated C.
 
+`Std.Datetime.Clock` reads the host clocks. It is a separate module, so a
+program that imports only `Std.Datetime` never reads a clock. `clock_now()`
+returns the wall-clock `Instant`. `monotonic_now()` returns a `MonotonicInstant`
+from a clock that never runs backwards, and `monotonic_until(a, b)` is the exact
+`Duration` from `a` to `b`. A `MonotonicInstant` has an unspecified origin, so
+it has no other operation and does not convert to an `Instant`. Both reads carry
+`IO`, so every caller declares it. A failed read reports
+`clock_wall_read: io: <detail>` or `clock_monotonic_read: io: <detail>`, naming
+the underlying read. The clocks run under `chelis eval` and `chelis test`;
+`chelis build` rejects them.
+
 ### Exported but unavailable
 
 `Std.Decimal` exports types and callable names, but calling its arithmetic
