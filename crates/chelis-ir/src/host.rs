@@ -12241,8 +12241,11 @@ fn dual_eval_app(
                 return None;
             }
             let exponent = v(&args[1]);
-            let exponent_less_one =
-                scalar_builtin("sub", vec![exponent.clone(), typed_float_const(1.0, &ty)?], &ty);
+            let exponent_less_one = scalar_builtin(
+                "sub",
+                vec![exponent.clone(), typed_float_const(1.0, &ty)?],
+                &ty,
+            );
             let pow_inner = scalar_builtin("pow", vec![v(&args[0]), exponent_less_one], &ty);
             let coeff = scalar_builtin("mul", vec![exponent, pow_inner], &ty);
             Some(dual(
@@ -12260,9 +12263,9 @@ fn dual_eval_app(
         // `no_grad` rejection. A passthrough dual would be the silent
         // zero-derivative the atom forbids.
         ("cast", 1) => {
-            let target = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
-                expr_scalar_primitive(app_expr)?,
-            ));
+            let target = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(expr_scalar_primitive(
+                app_expr,
+            )?));
             if !is_dual_scalar_type(&target) {
                 return None;
             }

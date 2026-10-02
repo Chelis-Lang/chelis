@@ -34,7 +34,9 @@ fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
 /// The lowered `out` global: its declared host type and value.
 fn lowered_out(src: &str) -> (HostType, HostExpr) {
     let compiled = try_lower_compiled_program(&checked_surf(src)).expect("host lowering");
-    let host = compiled.host.expect("a scalar grad program lowers to the host lane");
+    let host = compiled
+        .host
+        .expect("a scalar grad program lowers to the host lane");
     let out = host
         .globals
         .into_iter()
@@ -83,12 +85,7 @@ fn widths(expr: &HostExpr) -> Widths {
 }
 
 /// The issue's oracle bodies, each `f: T -> T`. `{t}` is the dtype.
-const BODIES: [&str; 4] = [
-    "mul(exp(x), x)",
-    "div(1.0{t}, x)",
-    "log(x)",
-    "sqrt(x)",
-];
+const BODIES: [&str; 4] = ["mul(exp(x), x)", "div(1.0{t}, x)", "log(x)", "sqrt(x)"];
 
 fn program(dtype: &str, body: &str) -> String {
     let body = body.replace("{t}", dtype);
@@ -142,7 +139,10 @@ fn f32_constants_inside_the_derivative_rule_are_f32() {
         let widths = widths(&value);
         assert!(widths.bare_float_literals.is_empty(), "{src}");
         assert!(
-            widths.computed.iter().all(|(_, ty)| *ty == HostType::Float32),
+            widths
+                .computed
+                .iter()
+                .all(|(_, ty)| *ty == HostType::Float32),
             "{src}: {:?}",
             widths.computed
         );
@@ -151,15 +151,24 @@ fn f32_constants_inside_the_derivative_rule_are_f32() {
 
 #[test]
 fn f32_multi_parameter_gradient_tuple_is_f32() {
-    let src = "def f(x: f32, y: f32) -> f32 = mul(x, y)\nout = grad(f, wrt=(x, y))(0.5f32, 2.0f32)\n";
+    let src =
+        "def f(x: f32, y: f32) -> f32 = mul(x, y)\nout = grad(f, wrt=(x, y))(0.5f32, 2.0f32)\n";
     let (ty, value) = lowered_out(src);
-    assert_eq!(ty, HostType::Tuple(vec![HostType::Float32, HostType::Float32]));
+    assert_eq!(
+        ty,
+        HostType::Tuple(vec![HostType::Float32, HostType::Float32])
+    );
     let HostExprKind::Tuple(_, tuple_ty) = &value.kind else {
         panic!("a two-parameter gradient is a tuple: {value:?}");
     };
     assert_eq!(*tuple_ty, ty);
     let widths = widths(&value);
-    assert!(widths.computed.iter().all(|(_, ty)| *ty == HostType::Float32));
+    assert!(
+        widths
+            .computed
+            .iter()
+            .all(|(_, ty)| *ty == HostType::Float32)
+    );
     assert!(
         widths.bare_float_literals.is_empty(),
         "seeds stay at f64: {:?}",
