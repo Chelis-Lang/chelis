@@ -265,8 +265,7 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_option_print_helper(&mut body);
     body.push(String::new());
-    append_tensor_math_helpers(&mut body);
-    body.push(String::new());
+    let math_helpers_index = body.len();
     // Authored functions are published in the generated header with external
     // linkage. [05-OBS-11] can make the same translation unit executable by
     // adding `main`, but that observation driver must not contradict the
@@ -533,6 +532,12 @@ pub(crate) fn emit_host_abi_program(
             external_helpers,
         )?;
     }
+
+    // The scalar activation helpers precede every authored body and are
+    // emitted only when one calls them, so the unit carries only the
+    // correctly rounded kernels it uses. This splice lies after the key
+    // callback index, so it runs first and leaves that index valid.
+    splice_tensor_math_helpers(&mut body, math_helpers_index);
 
     // Insert private key callback support only when a selected body needs
     // its closed carrier or function symbol, before any such declaration.
@@ -1140,6 +1145,7 @@ fn append_activation_helpers(
     prim: Prim,
     suffix: &str,
     finalizer: Option<&str>,
+    used: &dyn Fn(&str) -> bool,
 ) {
     let c_type = if prim == Prim::F64 { "double" } else { "float" };
     let zero = if prim == Prim::F64 { "0.0" } else { "0.0f" };
@@ -1153,17 +1159,21 @@ fn append_activation_helpers(
         None => expr,
     };
 
-    out.push(format!(
-        "static inline {c_type} chelis_host_relu_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!("    return x < {zero} ? {zero} : x;"));
-    out.push("}".to_string());
+    if used(&format!("chelis_host_relu_{suffix}")) {
+        out.push(format!(
+            "static inline {c_type} chelis_host_relu_{suffix}({c_type} x) {{"
+        ));
+        out.push(format!("    return x < {zero} ? {zero} : x;"));
+        out.push("}".to_string());
+    }
 
-    out.push(format!(
-        "static inline {c_type} chelis_host_tanh_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!("    return {};", finalize(format!("{tanh}(x)"))));
-    out.push("}".to_string());
+    if used(&format!("chelis_host_tanh_{suffix}")) {
+        out.push(format!(
+            "static inline {c_type} chelis_host_tanh_{suffix}({c_type} x) {{"
+        ));
+        out.push(format!("    return {};", finalize(format!("{tanh}(x)"))));
+        out.push("}".to_string());
+    }
 
     let lowerings: [(&str, ActivationLowering); 3] = [
         ("sigmoid", chelis_ir::tier2::lower_sigmoid),
@@ -1171,6 +1181,9 @@ fn append_activation_helpers(
         ("gelu", chelis_ir::tier2::lower_gelu),
     ];
     for (name, lower) in lowerings {
+        if !used(&format!("chelis_host_{name}_{suffix}")) {
+            continue;
+        }
         out.push(format!(
             "static inline {c_type} chelis_host_{name}_{suffix}({c_type} x) {{"
         ));
@@ -1273,17 +1286,30 @@ fn exact_f64_to_f32(wide: f64) -> f32 {
     narrow
 }
 
-fn append_tensor_math_helpers(out: &mut Vec<String>) {
+/// Insert at `index` the finalizers and every activation helper `body` calls.
+fn splice_tensor_math_helpers(body: &mut Vec<String>, index: usize) {
+    let mut helpers = Vec::new();
+    append_tensor_math_helpers(&mut helpers, &|name| {
+        let call = format!("{name}(");
+        body.iter().any(|line| line.contains(&call))
+    });
+    helpers.push(String::new());
+    body.splice(index..index, helpers);
+}
+
+/// Append the reduced-float finalizers and each activation helper `used`
+/// selects by name.
+fn append_tensor_math_helpers(out: &mut Vec<String>, used: &dyn Fn(&str) -> bool) {
     out.push("static inline float chelis_host_finalize_f16(float x) {".to_string());
     out.push("    return chelis_f16_to_f32(chelis_f32_to_f16(x));".to_string());
     out.push("}".to_string());
     out.push("static inline float chelis_host_finalize_bf16(float x) {".to_string());
     out.push("    return chelis_bf16_to_f32(chelis_f32_to_bf16(x));".to_string());
     out.push("}".to_string());
-    append_activation_helpers(out, Prim::F16, "f16", Some("chelis_host_finalize_f16"));
-    append_activation_helpers(out, Prim::Bf16, "bf16", Some("chelis_host_finalize_bf16"));
-    append_activation_helpers(out, Prim::F32, "f32", None);
-    append_activation_helpers(out, Prim::F64, "f64", None);
+    append_activation_helpers(out, Prim::F16, "f16", Some("chelis_host_finalize_f16"), used);
+    append_activation_helpers(out, Prim::Bf16, "bf16", Some("chelis_host_finalize_bf16"), used);
+    append_activation_helpers(out, Prim::F32, "f32", None, used);
+    append_activation_helpers(out, Prim::F64, "f64", None, used);
 }
 
 /// Private scalar-cast helpers for the generated translation unit.
@@ -12460,7 +12486,7 @@ mod expression_dispatch_tests {
         }
 
         let mut helpers = Vec::new();
-        append_tensor_math_helpers(&mut helpers);
+        append_tensor_math_helpers(&mut helpers, &|_| true);
         let emitted = helpers.join("\n");
         for op in ["relu", "sigmoid", "tanh", "silu", "gelu"] {
             for width in ["f16", "bf16", "f32", "f64"] {
@@ -12491,11 +12517,18 @@ mod expression_dispatch_tests {
     #[test]
     fn activation_helpers_call_the_correctly_rounded_kernels() {
         let mut helpers = Vec::new();
-        append_tensor_math_helpers(&mut helpers);
+        append_tensor_math_helpers(&mut helpers, &|_| true);
         let emitted = helpers.join("\n");
-        for libm in ["expf(", "tanhf(", " exp(", " tanh("] {
-            assert!(!emitted.contains(libm), "helpers must not call `{libm}`:\n{emitted}");
+        let identifiers: Vec<&str> = emitted
+            .split(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+            .collect();
+        for libm in ["expf", "tanhf", "exp", "tanh"] {
+            assert!(
+                !identifiers.contains(&libm),
+                "helpers must not call `{libm}`:\n{emitted}"
+            );
         }
+        assert!(emitted.contains("chelis_cr_expf(") && emitted.contains("chelis_cr_tanh("));
         let witnesses: [f32; 4] = [-0.055_804_74, 1e-3, 1e-5, -3.0];
         let mut main = String::from(
             "#include \"chelis_runtime.h\"\n#include <stdio.h>\n#include <string.h>\n",
