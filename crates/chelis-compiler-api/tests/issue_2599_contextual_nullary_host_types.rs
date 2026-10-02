@@ -70,6 +70,49 @@ const POSITIVE: &[Case] = &[
         name: "partition_list_sibling_none",
         source: "def case(flag: bool) -> (List[Option[i64]], List[Option[i64]]) =\n  partition(fn (o: Option[i64]) -> flag, [Some(1i64), None])\na = case(true)\nb = case(false)\n",
     },
+    Case {
+        name: "scan_callback_returns_none",
+        source: "def case(flag: bool) -> List[Option[i64]] =\n  scan(fn (acc: Option[i64], x: i64) -> if gt(x, 1i64) then None else Some(x), Some(0i64), [1i64, 2i64])\na = case(true)\n",
+    },
+    // A predicate's result is `bool`, so only the predicate body's own
+    // subexpressions can type the `None`.
+    Case {
+        name: "filter_predicate_sibling_none",
+        source: "def case(flag: bool) -> List[i64] =\n  filter(fn (x: i64) -> gt(len([Some(x), None]), x), [0i64, 1i64, 5i64])\na = case(true)\n",
+    },
+    Case {
+        name: "partition_predicate_sibling_none",
+        source: "def case(flag: bool) -> (List[i64], List[i64]) =\n  partition(fn (x: i64) -> gt(len([Some(x), None]), x), [0i64, 1i64, 5i64])\na = case(true)\n",
+    },
+    // The parent's type is known and the child's own type is resolved and
+    // shaped differently: `len` returns `i64` over a list of options, and
+    // each higher-order operation below returns something other than its
+    // list operand. The child keeps its own type, which is what reaches the
+    // `None` inside it.
+    Case {
+        name: "len_of_sibling_typed_list",
+        source: "def case(flag: bool) -> i64 = len([Some(1i64), None])\na = case(true)\n",
+    },
+    Case {
+        name: "fold_scalar_accumulator_over_option_list",
+        source: "def case(flag: bool) -> i64 =\n  fold(fn (acc: i64, o: Option[i64]) -> add(acc, 1i64), 0i64, [Some(1i64), None])\na = case(true)\n",
+    },
+    Case {
+        name: "scan_scalar_accumulator_over_option_list",
+        source: "def case(flag: bool) -> List[i64] =\n  scan(fn (acc: i64, o: Option[i64]) -> add(acc, 1i64), 0i64, [Some(1i64), None])\na = case(true)\n",
+    },
+    Case {
+        name: "map_over_option_list",
+        source: "def case(flag: bool) -> List[i64] =\n  map(fn (o: Option[i64]) -> 1i64, [Some(1i64), None])\na = case(true)\n",
+    },
+    Case {
+        name: "flat_map_over_option_list",
+        source: "def case(flag: bool) -> List[Option[i64]] =\n  flat_map(fn (o: Option[i64]) -> [o, o], [Some(1i64), None])\na = case(true)\n",
+    },
+    Case {
+        name: "filter_over_option_list",
+        source: "def case(flag: bool) -> List[Option[i64]] =\n  filter(fn (o: Option[i64]) -> flag, [Some(1i64), None])\na = case(true)\nb = case(false)\n",
+    },
     // chelis#2470: the parameter type fixes `None` inside `len(...)`.
     Case {
         name: "call_argument_none_under_len",
