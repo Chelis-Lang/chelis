@@ -124,6 +124,8 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "iota",
         "list_map_capture",
         "ordered_adjoint_sum",
+        // Version 24 (chelis#2957): the [05-OP-46] Tier 1 hyperbolic tangent.
+        "tanh",
     ];
     actual.sort();
     expected.sort();
@@ -131,7 +133,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         WIRE_DAG_SCHEMA_VERSION, 24,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 77);
+    assert_eq!(actual.len(), 78);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"
