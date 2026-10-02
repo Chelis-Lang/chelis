@@ -8,7 +8,10 @@
 //! its copy, the later call consumed and released the only reference, and
 //! constructing the literal then read freed memory. The compiled program
 //! aborted with `chelis_value_clone: heap kind mismatch` when the runtime's
-//! handle check, itself a read of the freed header, caught it.
+//! handle check, itself a read of the freed header, caught it. When a later
+//! item allocated a value into the freed slot, the check could pass and the
+//! program printed that value in place of the stored one, exiting 0; the
+//! outcome varied between runs of the same binary.
 //!
 //! Oracle: every program compiles, runs against the `ownership-ledger`
 //! runtime with every allocation finalized and no live owner left, and
@@ -68,6 +71,12 @@ fn shared() -> Vec<Case> {
         case(
             "tuple_stores_then_calls",
             "def both(m: Mask) -> (Mask, i64) = (m, count_true(m))\nr = both({mask})\n",
+        ),
+        // A later item allocates a value of the same kind, which can reuse
+        // the freed slot, so the stored item reads that value instead.
+        case(
+            "tuple_stores_then_calls_then_allocates",
+            "def go(m: Mask) -> (Mask, i64, Mask) = (m, count_true(m), Mask { a: false, b: false })\nr = go({mask})\n",
         ),
         case(
             "nested_tuple_in_a_list",
@@ -166,8 +175,11 @@ fn failures(cases: &[Case]) -> Vec<String> {
     cases.iter().filter_map(|case| check(case).err()).collect()
 }
 
-// REGRESSION TEST. On `1a772bea6` every case here aborted at the runtime's
-// heap-handle check (heap kind mismatch, or no live strong owner).
+// REGRESSION TEST. On `1a772bea6` every case here failed under this ledger
+// harness, most at the runtime's heap-handle check (heap kind mismatch, or no
+// live strong owner). Built against the ordinary runtime,
+// `tuple_stores_then_calls_then_allocates` also exited 0 in some runs and
+// printed `r.0 = Mask(false, false)` where eval prints `Mask(true, false)`.
 #[test]
 fn a_literal_keeps_a_value_a_later_item_consumes() {
     let cases = shared();
