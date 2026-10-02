@@ -659,7 +659,8 @@ art §14). Shoals' tables degraded silently, and this rule closes that class.
 - **`try_` forms.** `business_calendar`, `is_business_day`, `business_day_roll`,
   `business_day_offset`, `business_day_count`, `business_in_all`, and `business_in_any`
   each have a `try_` twin. The four calendar readers cannot fail, and the vectorized forms
-  have no `try_` twin.
+  have no `try_` twin: §6's masked `try_` rule governs column producers, and these are
+  queries over a column.
 
 **Complexity.** No operation recurses or loops per day. A scalar query is O(log h) in the
 number of holidays.
@@ -715,8 +716,9 @@ Calendar B's offsets cost no more than A's, because no cost scales with the hori
 
 Two costs outside this module show up in the measurements:
 - In a debug build of the runtime, compiled C rescans a `bool` tensor's whole storage on
-  every element read (#2903), so there `dates_from_epoch_days` and every vectorized form
-  grow quadratically in the column's length beyond about 10 000 elements. A release build
+  every element read (#2903), so there building a column with `dates_from_epoch_days` and
+  reading a `bool` result grow quadratically in the column's length beyond about 10 000
+  elements; the vectorized forms' own work stays linear. A release build
   of the runtime does not rescan.
 - In `chelis eval`, each `index` into a `List` copies the list (#2335), so the binary
   searches cost O(h) per probe there.

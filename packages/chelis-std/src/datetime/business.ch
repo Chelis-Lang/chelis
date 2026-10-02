@@ -295,8 +295,9 @@ def business_in_any(a: BusinessCalendar, b: BusinessCalendar) -> BusinessCalenda
 }
 def try_business_in_any(a: BusinessCalendar, b: BusinessCalendar) -> Option[BusinessCalendar] = if a |> horizons_problem(b) |> eq("") then Some(any_calendar(a, b)) else None
 -- Vectorized forms. Each applies its scalar twin's algorithm to every
--- element, so a call costs O(n log h) and allocates nothing the length of the
--- horizon. An element whose scalar twin fails makes the call fail with that
+-- element, so a call reads O(n log h) holiday-list elements and allocates
+-- nothing the length of the horizon. Under chelis eval each list index copies
+-- the list (#2335), which multiplies that by h. An element whose scalar twin fails makes the call fail with that
 -- element's detail, naming the lowest such element.
 -- The index of the first result carrying a problem, or -1.
 def first_problem(results: List[(string, i64)]) -> i64 = fold(fn (acc: (i64, i64), result: (string, i64)) -> if gte(acc.1, 0i64) then acc else if eq(result.0, "") then (add(acc.0, 1i64), -1i64) else (add(acc.0, 1i64), acc.0), (0i64, -1i64), results).1

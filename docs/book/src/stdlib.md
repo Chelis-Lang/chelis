@@ -181,8 +181,8 @@ offset datetimes, and periods have no order. The module is pure and runs under
 `chelis eval`, `chelis test`, and generated C. In generated C, projecting `.0`
 from a masked column producer such as `try_dates_from_epoch_days` emits C that
 does not compile ([#2883](https://github.com/Chelis-Lang/chelis/issues/2883));
-destructure the pair instead. A printed datetime value names its constructor
-by an internal package name rather than its source name
+destructure the pair instead. In generated C, a printed datetime value names its
+constructor by an internal package name rather than its source name
 ([#2880](https://github.com/Chelis-Lang/chelis/issues/2880)).
 
 ### Business days
