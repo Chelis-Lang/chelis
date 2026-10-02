@@ -198,7 +198,7 @@ bandwidth-bound, and the known exception is attention, where `exp` throughput li
 kernels (FlashAttention-4 is reported to emulate `exp2` with a polynomial on the FMA
 units; not re-verified).
 
-So the language carries two tiers, chosen in the program text rather than by the lane,
+So the language can carry two tiers, chosen in the program text rather than by the lane,
 following Java's `StrictMath`/`Math` split but made explicit at each call:
 
 - `exp`, `log`, `sin`, ... are correctly rounded and identical on every target.
@@ -230,14 +230,24 @@ no lane choice. Composition: compounds remain graphs and become exact. Small lan
 transcendentals stay primitives with exact semantics, implemented in the runtime.
 Future-proof: the rule is decided fully now even if binary64 lands after binary32.
 
-**Open decisions.**
+**Decisions (2026-10-02).**
 
-- `tanh`: the spec's `2*sigmoid(2x)-1` form loses 620 ULP at 1e-3 and 14,932 ULP at 1e-5
-  in both lanes. Either make `tanh` a correctly rounded primitive, or add `expm1` and
-  define `tanh(x) = expm1(2x) / (expm1(2x) + 2)`.
-- The approximate tier's spelling, which ops it covers, and each op's bound.
-- GPU lanes (experimental): the exact tier needs Chelis-owned device kernels; until they
-  exist HIP and Metal are fenced on the known-issues page (#1170).
+- `tanh` becomes a correctly rounded primitive. The spec's `2*sigmoid(2x)-1` form loses
+  620 ULP at 1e-3 and 14,932 ULP at 1e-5 in both lanes; an accurate graph would itself
+  need a new `expm1` primitive, and correctly rounded `tanh` implementations exist
+  (CORE-MATH, glibc 2.41 `tanhf`). `sigmoid`, `silu` and `gelu` stay graphs: with exact
+  leaves they have no cancellation of the `tanh` kind.
+- The approximate tier is the planned GPU route, not part of the first spec amendment.
+  Adding a new, separately named op later breaks no existing program, and no released
+  lane needs it yet (HIP and Metal are experimental). Its bound is an accuracy promise
+  for code that opted out of cross-target reproducibility, not a cross-lane agreement
+  tolerance: the exact tier has none.
+- The rule covers every float width from the start. Binary32 and binary64 are
+  implemented together where a vendored correctly rounded kernel exists; any binary64
+  function without one gets the single permitted non-normative parenthetical and an
+  owning issue, never a narrowed rule.
+- GPU lanes (experimental) need Chelis-owned device kernels for the exact tier; until
+  then HIP and Metal are fenced on the known-issues page (#1170).
 - Option D reverses the #1311 decision and the non-goals in `dtype_semantics.md` and
   `faithful_observation.md`. That decision rested on correct rounding being work no
   vendor library does; section 4 shows that premise no longer holds for CPUs.
