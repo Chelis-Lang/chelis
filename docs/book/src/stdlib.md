@@ -150,7 +150,7 @@ the `Test` effect. Generated builds reject these assertion calls.
 and returns `(exit_code, stdout, stderr)`. `run_chelis(args)` invokes the
 `chelis` command. Both carry `IO` and run during evaluation and
 testing. The language specifies compiled host process execution too, but
-`chelis build` does not yet compile these calls
+`chelis build` does not compile these calls
 ([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)).
 
 ### Dates and times
@@ -192,7 +192,7 @@ no other datetime function takes one and it does not convert to an `Instant`. Bo
 `IO`, so every caller carries it, declared or inferred. A failed read reports
 `clock_wall_read: io: <detail>` or `clock_monotonic_read: io: <detail>`, naming
 the underlying read. The clocks run under `chelis eval` and `chelis test`;
-`chelis build` does not yet compile them
+`chelis build` does not compile them
 ([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)).
 
 ### Business days
