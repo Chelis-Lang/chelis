@@ -3254,7 +3254,7 @@ exact ADT identity by [05-OP-34].
 > Every callable is pure, total on its stated domain, outside AD, and has no accumulator;
 > differentiating through `decimal_from_f64`, the one callable with a float argument, is
 > a structural rejection, never a zero cotangent.
-> A failure is [05-OP-60]'s `fail` with the message `<function>: <kind>: <detail>`, where
+> A failing call reports through [05-OP-60]'s failure channel with the message `<function>: <kind>: <detail>`, where
 > `<function>` is the exported callable's name, `<detail>` names the offending value, and
 > `<kind>` is `domain` when an argument or text denotes no value of the operation's domain
 > or of `Decimal` (malformed or over-long text, text or a float whose value is outside the
@@ -3269,8 +3269,10 @@ exact ADT identity by [05-OP-34].
 > `None` exactly where the twin fails `domain`; `try_decimal_to_i64` also returns `None`
 > where its twin fails `overflow`.
 >
-> Rounding to a quantum follows [05-OP-74]: every callable that takes a `Rounding` rounds
-> the exact rational result to an integer multiple of its quantum once, by that mode.
+> The callables that take a `Rounding` are `decimal_to_i64`, `try_decimal_to_i64`,
+> `decimal_from_f64`, `try_decimal_from_f64`, `decimal_round`, `decimal_div`, and
+> `try_decimal_div`; each applies it under [05-OP-74] once to the exact rational
+> result, with the quantum `1` for the i64 conversions and `10^-n` for the others.
 >
 > `decimal(text)` accepts exactly one RFC 8259 number token,
 > `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`, of at most 1000 Unicode scalar

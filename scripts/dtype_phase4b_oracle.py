@@ -2724,7 +2724,7 @@ def validate_normative_contract(
             "each argument's own validity from left to right, then `RejectInexact`, "
             "then the result's range",
             "returns `None` exactly where the twin fails `domain`",
-            "Rounding to a quantum follows [05-OP-74]",
+            "each applies it under [05-OP-74] once to the exact rational",
             "of at most 1000 Unicode scalar values",
             "so `decimal(decimal_to_string(x))` is `x`",
             "it never rounds",
