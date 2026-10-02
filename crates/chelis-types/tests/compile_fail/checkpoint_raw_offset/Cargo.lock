@@ -89,6 +89,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-crmath"
+version = "0.18.12"
+dependencies = [
+ "cc",
+ "half",
+]
+
+[[package]]
 name = "chelis-deep"
 version = "0.18.12"
 dependencies = [
@@ -111,6 +119,7 @@ dependencies = [
 name = "chelis-types"
 version = "0.18.12"
 dependencies = [
+ "chelis-crmath",
  "chelis-deep",
  "chelis-pred",
  "chelis-unord",
