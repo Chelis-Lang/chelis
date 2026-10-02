@@ -4380,6 +4380,25 @@ fn verify_scatter_like(
     }
 }
 
+/// Whether an element-wise scatter's update shape contradicts its index
+/// shape.
+///
+/// The runtime plan compares the observed update shape with the index shape
+/// before any element is read or written ([05-OP-66]), so that comparison is
+/// the guard for an extent the graph cannot prove (runtime_extents.md C2.3).
+/// Only a different rank or two different static sizes on one axis is a
+/// contradiction. Two dimension names prove nothing: independently loaded
+/// runtime tensors carry distinct anonymous names whatever their sizes.
+fn extents_contradict(observed: &[DimInfo], required: &[DimInfo]) -> bool {
+    observed.len() != required.len()
+        || observed.iter().zip(required).any(|(observed, required)| {
+            matches!(
+                (dim_known_size(observed), dim_known_size(required)),
+                (Some(observed), Some(required)) if observed != required
+            )
+        })
+}
+
 /// Verify the ONNX `ScatterElements` structural contract
 /// (`spec/05-risc-primitives.md` §3.5.1). Distinct from
 /// [`verify_scatter_like`]: `data`, `indices`, and `updates` share a
@@ -4423,7 +4442,7 @@ fn verify_scatter_elements(
                 node.id.0
             ));
         }
-        if indices.output_type.dims != updates.output_type.dims {
+        if extents_contradict(&indices.output_type.dims, &updates.output_type.dims) {
             errors.push(format!(
                 "{label} at node {} requires indices.dims == updates.dims, got {:?} vs {:?}",
                 node.id.0, indices.output_type.dims, updates.output_type.dims
@@ -4654,6 +4673,30 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    /// chelis#2907: a scatter's runtime plan compares the observed update
+    /// shape, so only a static contradiction is a structural error. Two
+    /// independently loaded runtime extents prove nothing either way.
+    #[test]
+    fn scatter_update_extents_contradict_only_statically() {
+        let named = |name: &str| DimInfo::Named(name.into(), None);
+        assert!(!extents_contradict(
+            &[named("_anon_dim_2_0")],
+            &[named("_anon_dim_1_0")]
+        ));
+        assert!(!extents_contradict(&[named("n")], &[DimInfo::Lit(3)]));
+        assert!(!extents_contradict(&[DimInfo::Lit(3)], &[DimInfo::Lit(3)]));
+        assert!(!extents_contradict(
+            &[DimInfo::Named("n".into(), Some(3))],
+            &[DimInfo::Lit(3)]
+        ));
+        assert!(extents_contradict(&[DimInfo::Lit(2)], &[DimInfo::Lit(3)]));
+        assert!(extents_contradict(
+            &[DimInfo::Named("n".into(), Some(2))],
+            &[DimInfo::Lit(3)]
+        ));
+        assert!(extents_contradict(&[named("n")], &[named("n"), named("m")]));
     }
 
     /// A graph with one group of nodes per entry, each group built by
