@@ -2129,6 +2129,8 @@ pub fn float_relu_adjoint(
     }
 }
 
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 fn float_vec_unop_f32<T: Copy>(
     op: FloatUnOp,
     values: &[T],
@@ -2165,6 +2167,8 @@ fn float_vec_unop_f32<T: Copy>(
     }
 }
 
+// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+#[allow(clippy::disallowed_methods)]
 fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
     macro_rules! map {
         ($body:expr) => {

@@ -54,9 +54,9 @@ fn check_range(function: &str, start: u64, end: u64) -> Outcome {
         let got = k32(x).to_bits();
         match decided(k64(f64::from(x))) {
             Some(expected) if expected == got => {}
-            Some(expected) => outcome
-                .mismatches
-                .push(format!("{function} f32 input {bits:08x}: kernel {got:08x}, expected {expected:08x}")),
+            Some(expected) => outcome.mismatches.push(format!(
+                "{function} f32 input {bits:08x}: kernel {got:08x}, expected {expected:08x}"
+            )),
             None => outcome.ambiguous.push((bits, got)),
         }
     }
@@ -64,10 +64,13 @@ fn check_range(function: &str, start: u64, end: u64) -> Outcome {
 }
 
 fn threads() -> u64 {
-    std::env::var("CHELIS_CRMATH_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
-        let available = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
-        u64::try_from(available / 2).unwrap().max(1)
-    })
+    std::env::var("CHELIS_CRMATH_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| {
+            let available = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
+            u64::try_from(available / 2).unwrap().max(1)
+        })
 }
 
 #[test]
@@ -80,7 +83,11 @@ fn every_binary32_input_is_correctly_rounded() {
     for function in FUNCTIONS {
         let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..workers)
-                .map(|w| scope.spawn(move || check_range(function, span * w / workers, span * (w + 1) / workers)))
+                .map(|w| {
+                    scope.spawn(move || {
+                        check_range(function, span * w / workers, span * (w + 1) / workers)
+                    })
+                })
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
@@ -94,10 +101,18 @@ fn every_binary32_input_is_correctly_rounded() {
             }
         }
     }
-    assert!(mismatches.is_empty(), "{} mismatches:\n{}", mismatches.len(), mismatches.join("\n"));
+    assert!(
+        mismatches.is_empty(),
+        "{} mismatches:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let list = std::env::temp_dir().join(format!("chelis-crmath-ambiguous-{}.txt", std::process::id()));
+    let list = std::env::temp_dir().join(format!(
+        "chelis-crmath-ambiguous-{}.txt",
+        std::process::id()
+    ));
     std::fs::write(&list, ambiguous_list).unwrap();
     let python = root.join(".venv/bin/python");
     let status = Command::new(&python)
@@ -106,7 +121,11 @@ fn every_binary32_input_is_correctly_rounded() {
         .arg(&list)
         .status()
         .unwrap_or_else(|e| panic!("cannot run {}: {e}", python.display()));
-    assert!(status.success(), "MPFR resolution of {} failed ({status})", list.display());
+    assert!(
+        status.success(),
+        "MPFR resolution of {} failed ({status})",
+        list.display()
+    );
     std::fs::remove_file(&list).unwrap();
 }
 
