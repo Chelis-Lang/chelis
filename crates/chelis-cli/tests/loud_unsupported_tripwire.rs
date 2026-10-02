@@ -552,12 +552,12 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustFormatNarrowing,
         "crates/chelis-backend-c/src/lib.rs",
-        6,
+        4,
         "cfg(test): the fill negative-lock needle ({value:.8}f must NOT \
-         appear), its escaped {{:.8}} message quote, two rel_err \
-         tolerance-assert messages, and two {value:e} renders inside the \
-         same lock messages (counted since the round-4 F5 exp-selector \
-         widening) - not product exits",
+         appear), its escaped {{:.8}} message quote, and two {value:e} \
+         renders inside the same lock messages - not product exits (the two \
+         rel_err tolerance-assert messages left with chelis#2957's \
+         correctly rounded kernels)",
     ),
     (
         Pat::RustFormatNarrowing,

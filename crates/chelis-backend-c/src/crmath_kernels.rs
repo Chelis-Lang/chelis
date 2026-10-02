@@ -35,7 +35,8 @@ pub(crate) fn link_called_kernels(source: String) -> String {
     const RUNTIME_INCLUDE: &str = "#include \"chelis_runtime.h\"\n";
     let at = source
         .find(RUNTIME_INCLUDE)
-        .map_or(0, |at| at + RUNTIME_INCLUDE.len());
+        .expect("every generated C unit opens with the runtime include")
+        + RUNTIME_INCLUDE.len();
     let mut linked = String::with_capacity(source.len() + text.len() + 1);
     linked.push_str(&source[..at]);
     linked.push_str(&text);
