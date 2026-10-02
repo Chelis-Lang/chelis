@@ -2138,7 +2138,6 @@ fn append_helper(
     let options = crate::CodegenOptions {
         use_blas: uses_blas,
         static_entry: true,
-        ..crate::CodegenOptions::default()
     };
     let helper_src =
         CEmitter::emit_verified_dag_with_options(dag, &helper_name, options, entry_coverage)?;

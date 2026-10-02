@@ -13,10 +13,10 @@ use chelis_crmath::c_source::{Kernel, kernel_text};
 fn called_kernels(source: &str) -> Vec<Kernel> {
     let mut called = Vec::new();
     for word in source.split(|c: char| !(c == '_' || c.is_ascii_alphanumeric())) {
-        if let Some(kernel) = Kernel::from_entry(word) {
-            if !called.contains(&kernel) {
-                called.push(kernel);
-            }
+        if let Some(kernel) = Kernel::from_entry(word)
+            && !called.contains(&kernel)
+        {
+            called.push(kernel);
         }
     }
     called.sort();

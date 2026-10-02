@@ -486,9 +486,15 @@ fn parse_c_hex_literal(s: &str) -> f32 {
     let mut mantissa = u64::from_str_radix(int_part, 16).expect("int digit") as f64;
     for (i, c) in frac_part.chars().enumerate() {
         let digit = c.to_digit(16).expect("hex frac digit") as f64;
-        mantissa += digit * 16f64.powi(-(i as i32 + 1));
+        mantissa += digit * pow2(-4 * (i as i32 + 1));
     }
-    (sign * mantissa * 2f64.powi(exp)) as f32
+    (sign * mantissa * pow2(exp)) as f32
+}
+
+/// `2^e`, exactly, for a normal-range exponent (no libm `powi`, chelis#2957).
+fn pow2(e: i32) -> f64 {
+    assert!((-1022..=1023).contains(&e), "pow2 exponent {e} out of the normal range");
+    f64::from_bits(((1023 + e) as u64) << 52)
 }
 
 /// Sibling of the #189 / #248 lossy-float-emission fix: every finite f32
