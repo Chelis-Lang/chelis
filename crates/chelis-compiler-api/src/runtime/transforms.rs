@@ -31,6 +31,7 @@ enum GradListShape {
     Tuple(Vec<GradListShape>),
     Adt {
         ctor: String,
+        source_name: String,
         field_names: Option<Vec<String>>,
         fields: Vec<GradListShape>,
     },
@@ -71,10 +72,12 @@ impl GradListShape {
             ),
             Self::Adt {
                 ctor,
+                source_name,
                 field_names,
                 fields,
             } => RuntimeValue::Adt {
                 ctor: ctor.clone(),
+                source_name: source_name.clone(),
                 fields: fields
                     .iter()
                     .map(|field| field.repack(leaves))
@@ -1089,6 +1092,7 @@ fn stage_grad_list_value(
         }
         RuntimeValue::Adt {
             ctor,
+            source_name,
             fields,
             field_names,
         } => {
@@ -1113,6 +1117,7 @@ fn stage_grad_list_value(
                 make_adt_construction_exprs(ctor, field_names.as_deref(), field_exprs, span),
                 GradListShape::Adt {
                     ctor: ctor.clone(),
+                    source_name: source_name.clone(),
                     field_names: field_names.clone(),
                     fields: field_shapes,
                 },

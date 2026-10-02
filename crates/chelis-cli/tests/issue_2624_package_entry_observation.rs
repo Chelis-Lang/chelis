@@ -239,9 +239,10 @@ fn package_entry_owes_no_library_root_and_leaks_no_linker_name() {
 #[test]
 fn constructors_spelled_with_double_underscores_keep_their_identity() {
     // The stored constructor name is the whole source spelling, so `Foo__Bar`
-    // and `Bar` remain two constructors: each match selects its own arm, and
-    // structural equality tells them apart. A terminal-segment de-mangle
-    // would store both as `Bar`.
+    // and `Bar` remain two constructors: each match selects its own arm,
+    // structural equality tells them apart, and both lanes print a library's
+    // `Old__New` as written (chelis#2889). A terminal-segment de-mangle would
+    // store or print both as their last segment.
     let library = "module Drawlib.Draw
 export (Box, Tag, unbox, tag_value)
 type Box[a] =
@@ -273,6 +274,7 @@ own = [Foo__Bar(1i64), Bar(2i64)]
 own_picks = [pick(Foo__Bar(3i64)), pick(Bar(4i64))]
 distinct = eq(Bar(2i64), Foo__Bar(2i64))
 lib_picks = [tag_value(Old__New(7i64)), tag_value(New(8i64))]
+lib_tags = [Old__New(7i64), New(8i64)]
 boxes = [Box(1.5f64), Box(2.5f64)]
 opened = unbox(Box(9i64))
 ";
@@ -281,7 +283,7 @@ opened = unbox(Box(9i64))
     assert_eq!(
         evaluated,
         "own = [Foo__Bar(1), Bar(2)]\nown_picks = [3, 104]\ndistinct = false\n\
-         lib_picks = [7, 108]\nboxes = [Box(1.5), Box(2.5)]\nopened = 9\n"
+         lib_picks = [7, 108]\nlib_tags = [Old__New(7), New(8)]\nboxes = [Box(1.5), Box(2.5)]\nopened = 9\n"
     );
     let Some(compiled) = compiled_stdout(dir.path(), &app, "src/main.ch", "main") else {
         return;

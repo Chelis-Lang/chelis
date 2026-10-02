@@ -241,8 +241,10 @@ fn decode_adt(
         field_names.push(spec.name.clone());
     }
 
+    // A wire constructor is already the source spelling ([05-OBS-7]).
     Ok(RuntimeValue::Adt {
         ctor: ctor.to_string(),
+        source_name: ctor.to_string(),
         fields: fields.into(),
         field_names: Some(field_names),
     })

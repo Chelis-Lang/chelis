@@ -413,11 +413,11 @@ pub fn linked_constructor_source_name<'a>(type_name: &str, ctor: &'a str) -> Opt
 /// (non-reef) identifiers carry no marker prefix and pass through
 /// unchanged.
 ///
-/// Public so the eval value renderer (chelis-compiler-api) shows the
-/// user-facing source name rather than the internal mangled form, matching the
-/// de-mangling already applied to diagnostics (chelis#399). Lowercase binding
-/// names may themselves contain `__`; the package/module casing boundary
-/// identifies where that authored terminal begins.
+/// Lowercase binding names may themselves contain `__`; the package/module
+/// casing boundary identifies where that authored terminal begins. A
+/// constructor's spelling is not recovered here: it needs its data type's
+/// qualification ([`linked_constructor_source_name`]), which both execution
+/// lanes apply (chelis#2889).
 pub fn demangle_ident(name: &str) -> String {
     if let Some(stem) = name.strip_prefix("pkg__")
         && let Some(binding) = demangle_lowercase_binding(stem)

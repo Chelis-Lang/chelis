@@ -3,35 +3,45 @@ use super::transforms::*;
 use super::*;
 use chelis_deep::DeepTag;
 
-/// chelis#399: a reef-linked ADT value carries the internal
-/// `Pkg__..__Ctor` constructor name; eval rendering (the human renderer
-/// AND the `--json` `ExecutionValue` ABI surface) must show the bare,
-/// user-facing name, matching the de-mangling already applied to
-/// diagnostics. Bare / builtin constructors pass through unchanged.
+/// chelis#399, chelis#2889: a reef-linked ADT value keeps its linker name as
+/// its identity and stores its declared source spelling, which both eval
+/// exits (the human renderer and the `--json` `ExecutionValue` ABI surface)
+/// print. The spelling keeps an authored `__`, so a type's two constructors
+/// `Foo__Bar` and `Bar` stay distinct; a constructor without a linker name
+/// stores its own name.
 #[test]
-fn eval_renderer_demangles_reef_linked_ctor() {
-    let mangled = RuntimeValue::Adt {
-        ctor: "Pkg__kb__chelis__agent__KellyBenchAgent__Strategy__StrategyState".to_string(),
-        fields: vec![RuntimeValue::Unit, RuntimeValue::Unit].into(),
+fn eval_renders_the_stored_constructor_source_spelling() {
+    let deftype = chelis_deep::parser::parse_str(
+        "(deftype {} Pkg__app__Demo__Shapes__Shape () \
+         (variant {} Pkg__app__Demo__Shapes__Foo__Bar (field {} value (t-prim {} i64))) \
+         (variant {} Pkg__app__Demo__Shapes__Bar (field {} value (t-prim {} i64))))",
+    )
+    .expect("parse deftype fixture");
+    let names = collect_constructor_source_names(&deftype);
+    assert_eq!(
+        names
+            .get("Pkg__app__Demo__Shapes__Foo__Bar")
+            .map(String::as_str),
+        Some("Foo__Bar")
+    );
+    assert_eq!(
+        names.get("Pkg__app__Demo__Shapes__Bar").map(String::as_str),
+        Some("Bar")
+    );
+    let linked = RuntimeValue::Adt {
+        ctor: "Pkg__app__Demo__Shapes__Foo__Bar".to_string(),
+        source_name: "Foo__Bar".to_string(),
+        fields: vec![RuntimeValue::Unit].into(),
         field_names: None,
     };
-    // human renderer: bare ctor with fields
-    assert_eq!(render_value(&mangled), "StrategyState((), ())");
-    // `--json` / ExecutionValue ABI surface: bare ctor
-    match runtime_value_to_schema(&mangled).expect("schema") {
-        crate::schema::ExecutionValue::Adt { ctor, .. } => assert_eq!(ctor, "StrategyState"),
+    assert_eq!(render_value(&linked), "Foo__Bar(())");
+    match runtime_value_to_schema(&linked).expect("schema") {
+        crate::schema::ExecutionValue::Adt { ctor, .. } => assert_eq!(ctor, "Foo__Bar"),
         _ => panic!("expected ExecutionValue::Adt"),
     }
-    // nullary reef-linked ctor de-mangles too
-    let nullary = RuntimeValue::Adt {
-        ctor: "Pkg__pkg__Mod__NoBet".to_string(),
-        fields: vec![].into(),
-        field_names: None,
-    };
-    assert_eq!(render_value(&nullary), "NoBet");
-    // bare / builtin constructor is unchanged (demangle_ident no-op)
     let bare = RuntimeValue::Adt {
         ctor: "None".to_string(),
+        source_name: "None".to_string(),
         fields: vec![].into(),
         field_names: None,
     };
@@ -149,6 +159,7 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         program: ProgramScope::new(UnordMap::new(), UnordMap::new()),
         declared_signatures: UnordMap::new(),
         adt_fields: UnordMap::new(),
+        constructor_names: UnordMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
         tensor_bindings: &empty_tensors,
         session: None,
@@ -199,6 +210,7 @@ fn issue_1125_eval_checked_root(
         ),
         declared_signatures: signatures,
         adt_fields: UnordMap::new(),
+        constructor_names: UnordMap::new(),
         adt_registry: checked.adt_registry().clone(),
         tensor_bindings: &empty_tensors,
         session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
@@ -461,6 +473,7 @@ fn runtime_pattern_reader_matches_every_decoded_pattern() {
         (
             RuntimeValue::Adt {
                 ctor: "Some".to_string(),
+                source_name: "Some".to_string(),
                 fields: vec![RuntimeValue::Bool(true)].into(),
                 field_names: None,
             },
@@ -482,6 +495,7 @@ fn runtime_pattern_reader_matches_every_decoded_pattern() {
         (
             RuntimeValue::Adt {
                 ctor: "Point".to_string(),
+                source_name: "Point".to_string(),
                 fields: vec![RuntimeValue::Bool(true)].into(),
                 field_names: Some(vec!["x".to_string()]),
             },
@@ -635,6 +649,7 @@ fn runtime_nested_owner_readers_reject_malformed_children() {
         pattern_matches(
             &RuntimeValue::Adt {
                 ctor: "Point".to_string(),
+                source_name: "Point".to_string(),
                 fields: vec![RuntimeValue::Bool(true)].into(),
                 field_names: Some(vec!["x".to_string()]),
             },
@@ -1827,6 +1842,7 @@ fn eval_deep_with_bindings(
         program: ProgramScope::new(UnordMap::new(), UnordMap::new()),
         declared_signatures: UnordMap::new(),
         adt_fields: UnordMap::new(),
+        constructor_names: UnordMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
         tensor_bindings: &empty_tensors,
         session: None,
@@ -3661,6 +3677,7 @@ fn execution_wire_nested_numeric_scalars_keep_their_dtype_tags() {
             ),
             RuntimeValue::Adt {
                 ctor: "Boxed".to_string(),
+                source_name: "Boxed".to_string(),
                 fields: vec![scalar].into(),
                 field_names: Some(vec!["value".to_string()]),
             },
@@ -4164,6 +4181,7 @@ fn int_scalar_of(dtype: Prim, value: i64) -> RuntimeValue {
 fn adt(ctor: &str, fields: Vec<RuntimeValue>) -> RuntimeValue {
     RuntimeValue::Adt {
         ctor: ctor.to_string(),
+        source_name: ctor.to_string(),
         fields: fields.into(),
         field_names: None,
     }
@@ -4591,6 +4609,7 @@ mod issue_2439_transform_lowering_context {
 fn runtime_value_clone_copies_every_container_in_order() {
     let original = RuntimeValue::Adt {
         ctor: "Record".to_string(),
+        source_name: "Record".to_string(),
         fields: vec![
             RuntimeValue::List(vec![RuntimeValue::int64(1), RuntimeValue::int64(2)].into()),
             RuntimeValue::Tuple(vec![RuntimeValue::Bool(true), RuntimeValue::Unit].into()),
