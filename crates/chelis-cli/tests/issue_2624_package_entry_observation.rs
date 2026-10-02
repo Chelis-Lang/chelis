@@ -293,6 +293,32 @@ opened = unbox(Box(9i64))
 }
 
 #[test]
+fn a_dependency_nullary_definition_returning_an_opaque_record_is_not_an_entry_root() {
+    // The entry's only root calls an exported nullary definition of the
+    // library. That definition is the library's, so neither lane prints it
+    // or any of its record fields, including the option holding a tuple.
+    let library = "module Drawlib.Draw
+export (TimeZone, time_zone_utc, time_zone_name)
+@opaque
+type TimeZone =
+  | TimeZone { name: string, initial_offset: i64, transitions: List[(i64, i64)], next: Option[(i64, Option[i64])] }
+def time_zone_utc() -> TimeZone = TimeZone { name: \"UTC\", initial_offset: 0i64, transitions: [], next: Some((0i64, None)) }
+def time_zone_name(zone: TimeZone) -> string = zone.name
+";
+    let entry = "module App.Main
+import Drawlib.Draw (TimeZone, time_zone_utc, time_zone_name)
+a = time_zone_name(time_zone_utc())
+";
+    let (dir, app) = package_with(library, &[("src/main.ch", entry)]);
+    let evaluated = chelis(dir.path(), &app, &["eval", "--file", "src/main.ch"]);
+    assert_eq!(evaluated, "a = UTC\n");
+    let Some(compiled) = compiled_stdout(dir.path(), &app, "src/main.ch", "main") else {
+        return;
+    };
+    assert_eq!(compiled, evaluated);
+}
+
+#[test]
 fn a_file_outside_a_package_still_owes_every_root_it_declares() {
     // Control: the same library-shaped declarations in one loose file are
     // that program's own roots, so both lanes print every one of them.
