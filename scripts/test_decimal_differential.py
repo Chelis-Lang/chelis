@@ -272,11 +272,20 @@ class Generator(unittest.TestCase):
         counts = CORPUS.composition()["cases by category"]
         for category in ("envelope", "limbs", "removable_zeros", "i64_edges", "ties", "float_edges", "random",
                          "parse_accepted", "parse_malformed", "parse_outside", "parse_too_long", "parse_spelled",
-                         "fixed", "from_i64", "to_i64", "from_f64", "arith", "round", "div", "div_random", "order",
-                         "failure_order"):
+                         "fixed", "from_i64", "to_i64", "from_f64", "arith", "round", "div", "div_random",
+                         "div_quotient_correction", "div_quotient_clamp", "order", "failure_order"):
             self.assertGreater(counts[category], 0, category)
         rows = CORPUS.composition()["cases by row"]
         self.assertEqual(set(rows), set(harness.ROWS))
+
+    def test_every_long_division_witness_divides_in_the_default_corpus(self) -> None:
+        for category, witnesses in (("div_quotient_correction", harness.QUOTIENT_CORRECTION_WITNESSES),
+                                    ("div_quotient_clamp", harness.QUOTIENT_CLAMP_WITNESSES)):
+            divided = {(args[0].lstrip("-"), args[1], args[2])
+                       for args in [c.args for c in CORPUS.cases if c.category == category and c.row == "row_div"]
+                       + [f.args for f in CORPUS.failures if f.category == category and f.function == "decimal_div"]}
+            self.assertEqual(divided, set(witnesses), category)
+        self.assertEqual((len(harness.QUOTIENT_CORRECTION_WITNESSES), len(harness.QUOTIENT_CLAMP_WITNESSES)), (60, 30))
 
     def test_every_exported_callable_is_called(self) -> None:
         text = "\n".join(p.source for p in programs())
