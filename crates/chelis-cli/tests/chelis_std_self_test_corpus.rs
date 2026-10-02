@@ -24,10 +24,10 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 /// Floor on the retained chelis-std self-test corpus, set below the measured
-/// 237 passing tests, of which 56 are the Std.Datetime suite, 18 the
-/// Std.Datetime.Business suite, 4 the Std.Datetime.Clock suite, and 42 the
-/// Std.Decimal suite.
-const MIN_PASSED: u32 = 231;
+/// 277 passing tests, of which 56 are the Std.Datetime suite, 18 the
+/// Std.Datetime.Business suite, 4 the Std.Datetime.Clock suite, 40 the
+/// Std.Datetime.Zone suite, and 42 the Std.Decimal suite.
+const MIN_PASSED: u32 = 271;
 
 fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
