@@ -109,13 +109,23 @@ impl fmt::Display for GeneratedProgram {
     }
 }
 
+/// Keeps otherwise DAG-only constant functions in an authored host module.
+/// These functions are emitted, never invoked by the C driver.
+pub const HOST_ANCHOR: &str = "\ndef host_loss(t: tensor[1, f32]) -> f32 = tensor_to_scalar(sum(t, 0))\ndef host_grad(t: tensor[1, f32]) -> tensor[1, f32] = grad(host_loss)(t)\n";
+
 pub fn emit(source: &str, entry: &str) -> GeneratedProgram {
-    // Keep otherwise DAG-only constant functions in an authored host module.
-    // This additional function is emitted, never invoked by the C driver.
-    let host_anchor = "\ndef host_loss(t: tensor[1, f32]) -> f32 = tensor_to_scalar(sum(t, 0))\ndef host_grad(t: tensor[1, f32]) -> tensor[1, f32] = grad(host_loss)(t)\n";
+    emit_source(SourceKind::Surf, format!("{source}{HOST_ANCHOR}"), entry)
+}
+
+/// [`emit`] for Deep text, which carries [`HOST_ANCHOR`]'s functions itself.
+pub fn emit_deep(source: &str, entry: &str) -> GeneratedProgram {
+    emit_source(SourceKind::Deep, source.to_string(), entry)
+}
+
+fn emit_source(source_kind: SourceKind, source: String, entry: &str) -> GeneratedProgram {
     let artifact = compile(CompileRequest {
-        source_kind: SourceKind::Surf,
-        source: format!("{source}{host_anchor}"),
+        source_kind,
+        source,
         target: CompileTarget::C,
         entry_name: Some("fixture".into()),
     })

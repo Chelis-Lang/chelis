@@ -566,6 +566,7 @@ OWNERSHIP_LEDGER_API_TESTS: list[str] = [
     "--test", "issue_2577_filter_named_predicate",
     "--test", "issue_2599_contextual_nullary_host_types",
     "--test", "issue_2781_loop_result_captured_by_a_loop",
+    "--test", "issue_2883_extent_declaration_order",
     "--test", "issue_2891_aggregate_shared_operand",
     "--test", "key_admission_lanes",
     "--test", "key_affinity_lanes",
