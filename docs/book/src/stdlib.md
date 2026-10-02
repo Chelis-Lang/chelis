@@ -192,7 +192,8 @@ naming the business weekdays, a holiday list, and a horizon:
 `business_calendar(w, holidays, valid_from, valid_until)`. There is no built-in
 weekend. A calendar answers only from the days of its horizon. A date outside
 it, or a query whose answer the days beyond the horizon could change, fails
-`domain` instead of degrading to a weekends-only answer. `is_business_day`
+`domain` instead of degrading to a weekends-only answer; the one exception is
+a count's end, which may be the day after the horizon. `is_business_day`
 tests a date. `business_day_roll` takes `Unadjusted`, `Following`,
 `Preceding`, `ModifiedFollowing`, or `ModifiedPreceding`. `business_day_offset`
 rolls a non-business start as its `NonBusinessStart` policy says
