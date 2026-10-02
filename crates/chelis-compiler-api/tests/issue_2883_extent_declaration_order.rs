@@ -14,7 +14,9 @@
 //! or declares it, not from identifier spellings in the C text, so a
 //! dimension spelled like a helper's parameter (`index`, `value`, `low`), a
 //! local (`word`, `element`), a member (`dtype`) or a checked-cast helper's
-//! variable (`sign`, `shift`) is never taken for an early read.
+//! variable (`sign`, `shift`) is never taken for an early read. Nor is a
+//! span ID the C carries in a comment, whatever it spells, and a span ID
+//! carrying one of the mark characters is refused where Deep is parsed.
 //!
 //! The rejected programs must fail at code generation with that rejection.
 //! The neighbouring programs that already compiled must still compile, run
@@ -23,8 +25,10 @@
 
 mod ownership_support;
 
-use chelis_compiler_api::compiler::{CompilerError, compile, eval};
-use chelis_compiler_api::schema::{CompileRequest, CompileTarget, EvalRequest, SourceKind};
+use chelis_compiler_api::compiler::{CompilerError, compile, desugar, eval};
+use chelis_compiler_api::schema::{
+    CompileRequest, CompileTarget, DesugarRequest, EvalRequest, SourceKind,
+};
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -221,4 +225,116 @@ fn neighbouring_programs_still_compile_as_eval_runs_them() {
         .filter_map(|case| check_compiled(case).err())
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// The program's Deep text, as `desugar` writes it with the ledger harness's
+/// host functions, with every span ID replaced by `span`.
+fn deep_with_spans(surf: &str, span: &str) -> String {
+    let deep = desugar(DesugarRequest {
+        source: format!("{surf}{}", ownership_support::HOST_ANCHOR),
+    })
+    .unwrap_or_else(|error| panic!("desugar: {error:?}"))
+    .deep_text;
+    let key = "span: \"";
+    let mut out = String::new();
+    let mut rest = deep.as_str();
+    while let Some(start) = rest.find(key) {
+        let value = start + key.len();
+        let end = value + rest[value..].find('"').expect("a closed span ID");
+        out.push_str(&rest[..value]);
+        out.push_str(span);
+        rest = &rest[end..];
+    }
+    assert!(out.contains(span), "no span ID to replace in:\n{deep}");
+    out.push_str(rest);
+    out
+}
+
+fn compile_c(source_kind: SourceKind, source: &str) -> Result<(), CompilerError> {
+    compile(CompileRequest {
+        source_kind,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: None,
+    })
+    .map(|_| ())
+}
+
+fn messages(error: &CompilerError) -> String {
+    error
+        .errors
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const DOUBLED: &str = "def double_it[n](t: tensor[n, f32]) -> tensor[n, f32] = add(t, t)\nr_a = double_it(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+
+/// Span IDs are opaque producer strings, kept verbatim in the C's
+/// `// span:` comments (spec/03 §1.1.1), and private-use characters are
+/// legal in one. Bracketing with them spells an unclosed bracket, a
+/// bracketed name that is no extent, and a bracketed extent name; none is an
+/// extent read.
+const PRIVATE_USE_SPANS: &[&str] = &["n_\u{E000}001", "\u{E000}zz\u{E002}", "\u{E000}n\u{E002}"];
+
+#[test]
+fn a_span_id_never_reads_or_declares_an_extent() {
+    let surf = format!("{PRELUDE}{DOUBLED}");
+    let expected = evaluated(&surf);
+    let failures: Vec<String> = PRIVATE_USE_SPANS
+        .iter()
+        .filter_map(|span| {
+            catch_unwind(AssertUnwindSafe(|| {
+                let generated =
+                    ownership_support::emit_deep(&deep_with_spans(&surf, span), "private_use_span");
+                assert!(
+                    generated.contains(&format!("// span: {span}\n")),
+                    "{generated}"
+                );
+                let (summary, stdout) = ownership_support::run_program(&generated);
+                ownership_support::balanced(&summary);
+                assert_eq!(stdout, expected, "compiled output differs from eval");
+            }))
+            .err()
+            .map(|payload| format!("{span:?}: {}", panic_message(payload)))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// The issue's program, with every span ID spelling a declaration of the
+/// extent it reads early, is still refused.
+#[test]
+fn a_span_id_does_not_hide_a_read_before_its_declaration() {
+    let issue = format!("{PRELUDE}{MASKED}r_a = col_xs(masked({VALUES}).0)\n");
+    let refused = compile_c(SourceKind::Deep, &deep_with_spans(&issue, "s"))
+        .expect_err("the issue's program");
+    let message = messages(&refused);
+    let name = message
+        .split("extent `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .unwrap_or_else(|| panic!("no extent named in {message}"));
+    let deep = deep_with_spans(&issue, &format!("\u{E001}{name}\u{E002}"));
+    let error = compile_c(SourceKind::Deep, &deep).expect_err("a span ID declares nothing");
+    declaration_rejection(&error, "is rendered before it is declared").unwrap();
+}
+
+// The negative twin: the emitter marks extents with C0 control characters,
+// which a span ID may not contain, so a span ID carrying one is refused where
+// the Deep source is parsed and never reaches the emitter.
+#[test]
+fn a_span_id_with_a_mark_character_is_refused_at_parse() {
+    let surf = format!("{PRELUDE}{DOUBLED}");
+    for span in ["n_\u{1}001", "\u{1}zz\u{3}", "\u{1}n\u{3}", "\u{2}n\u{3}"] {
+        let error = compile_c(SourceKind::Deep, &deep_with_spans(&surf, span))
+            .expect_err("a control character in a span ID");
+        let message = messages(&error);
+        assert!(
+            message.contains("metadata `span` requires a string without ASCII control characters (spec/03 §1.1.1)")
+                && message.contains("forbidden character"),
+            "{span:?}: {message}"
+        );
+    }
 }

@@ -816,10 +816,28 @@ impl CEmitter {
         // covers a name the finished function reads before declaring. The
         // order comes from the marks the emitter put on each name where it
         // rendered or declared it, read in the finished function's order;
-        // a spelling the emitter did not mark is never an extent read.
-        let read_first = settle_extent_marks(&mut e.lines);
-        let violation = dag
-            .rendered_dim_names()
+        // a spelling the emitter did not mark is never an extent read, and a
+        // mark character the emitter did not write is refused.
+        let rendered = dag.rendered_dim_names();
+        let declared = &e.declared_dim_names;
+        let settled = settle_extent_marks(&mut e.lines, |name| {
+            declared.contains(name) || rendered.iter().any(|known| known == name)
+        });
+        let unwritten_mark = |defect: String| {
+            chelis_types::unsupported::Unsupported::new(
+                chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                    "extent mark the emitter did not write ({defect})"
+                )),
+                format!("emitted function `{func_name}`"),
+                chelis_types::unsupported::Stage::Codegen("c"),
+                chelis_types::unimplemented_rejection!(
+                    1277,
+                    "the emitter marks each extent read and declaration once; see runtime_extents.md C4.4"
+                ),
+            )
+        };
+        let read_first = settled.map_err(&unwritten_mark)?;
+        let violation = rendered
             .into_iter()
             .find(|name| !e.declared_dim_names.contains(name))
             .map(|name| (name, "is rendered but never declared"))
@@ -837,7 +855,13 @@ impl CEmitter {
                 ),
             ));
         }
-        Ok(e.lines.join("\n"))
+        let source = e.lines.join("\n");
+        if source.contains(EXTENT_MARKS) {
+            return Err(unwritten_mark(
+                "a mark character remains after settling".into(),
+            ));
+        }
+        Ok(source)
     }
 
     fn emit_tensor_snapshot(&mut self, id: usize, writable: bool) {
@@ -8110,22 +8134,37 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let Some(names) = self.runtime_dim_sites.get(&(id, axis)).cloned() else {
             return;
         };
-        // Every name reads `extent_expr`, and after the first that variable
-        // holds the name declared before it, so two spellings of one extent
-        // land as `int64_t b = a;` rather than as a second read of the same
-        // expression.
+        for line in
+            Self::runtime_dim_declarations(&names, extent_expr, &mut self.declared_dim_names)
+        {
+            self.line(&line);
+        }
+    }
+
+    /// The declaration lines of the `names` not yet in `declared`, which
+    /// records them. Every name reads `extent_expr`, and after the first that
+    /// variable holds the name declared before it, so two spellings of one
+    /// extent land as `int64_t b = a;` rather than as a second read of the
+    /// same expression.
+    fn runtime_dim_declarations(
+        names: &[String],
+        extent_expr: &str,
+        declared: &mut chelis_unord::UnordSet<String>,
+    ) -> Vec<String> {
         let mut extent_expr = extent_expr.to_string();
+        let mut lines = Vec::new();
         for name in names {
-            if self.declared_dim_names.contains(&name) {
+            if declared.contains(name) {
                 continue;
             }
-            self.declared_dim_names.insert(name.clone());
-            self.line(&format!(
+            declared.insert(name.clone());
+            lines.push(format!(
                 "int64_t {} = {extent_expr};",
-                extent_declaration(&name)
+                extent_declaration(name)
             ));
-            extent_expr = extent_read(&name);
+            extent_expr = extent_read(name);
         }
+        lines
     }
 
     /// Declare supported runtime extents, then consume this operation's
@@ -8244,13 +8283,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             self.emitted_local_dim_guards.push(guard_key);
             // Read the exact captured scalar, the canonical input binding,
             // or the checker-resolved literal, according to the guard plan.
-            let operand = match &site.canonical {
-                chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => {
-                    Self::bound_c_expr(&RtDim::Node(0), &[*witness], witness.0, axis)
-                }
-                chelis_ir::axis_sources::CanonicalExtent::Binder(name) => extent_read(name),
-                other => other.to_string(),
-            };
+            let operand = Self::canonical_extent_operand(&site.canonical, axis);
             let mismatch = format!("({extent_expr}) != {operand}");
             // The claim's activation is its carrier's owner activation
             // (spec/10 section 3.2): rank 0 at an arm, one Bool per row under
@@ -8524,19 +8557,31 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 .iter()
                 .find(|(claimed_axis, _)| *claimed_axis == axis)
                 .and_then(|(_, canonical)| match canonical {
-                    chelis_ir::axis_sources::CanonicalExtent::Resolved(extent) => {
-                        Some(extent.to_string())
+                    chelis_ir::axis_sources::CanonicalExtent::Binder(name)
+                        if !self.declared_dim_names.contains(name) =>
+                    {
+                        None
                     }
-                    chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => Some(
-                        Self::bound_c_expr(&RtDim::Node(0), &[*witness], witness.0, axis),
-                    ),
-                    chelis_ir::axis_sources::CanonicalExtent::Binder(name) => self
-                        .declared_dim_names
-                        .contains(name)
-                        .then(|| extent_read(name)),
+                    canonical => Some(Self::canonical_extent_operand(canonical, axis)),
                 })
         });
         claimed.unwrap_or_else(|| carried.to_string())
+    }
+
+    /// A claim's canonical extent as the C operand that reads it for `axis`:
+    /// the declared binder, the declaring witness's scalar, or the resolved
+    /// size.
+    fn canonical_extent_operand(
+        canonical: &chelis_ir::axis_sources::CanonicalExtent,
+        axis: usize,
+    ) -> String {
+        match canonical {
+            chelis_ir::axis_sources::CanonicalExtent::Binder(name) => extent_read(name),
+            chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => {
+                Self::bound_c_expr(&RtDim::Node(0), &[*witness], witness.0, axis)
+            }
+            chelis_ir::axis_sources::CanonicalExtent::Resolved(extent) => extent.to_string(),
+        }
     }
 
     /// Emit an affine movement operation's copy (`copy`, which reads
@@ -8950,12 +8995,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
 
 // Marks the emitter puts around an extent name it renders as a C
 // identifier (`EXTENT_READ`) and around the name a declaration introduces
-// (`EXTENT_DECLARATION`), each closed by `EXTENT_END`. They are private-use
-// characters no generated C contains, and `settle_extent_marks` removes them
-// before the function is returned.
-const EXTENT_READ: char = '\u{E000}';
-const EXTENT_DECLARATION: char = '\u{E001}';
-const EXTENT_END: char = '\u{E002}';
+// (`EXTENT_DECLARATION`), each closed by `EXTENT_END`, and which
+// `settle_extent_marks` removes before the function is returned. They are C0
+// control characters, which no text from a parsed program carries: span IDs
+// may not contain them (spec/03 §1.1.1) and the Deep parser rejects one that
+// does, the comment and format-string sanitizers escape them, string
+// literals are written as octal escapes, and source identifiers are ASCII
+// words. A graph built without the parser can still carry one in a name the
+// emitter writes unescaped; settling refuses it unless it encloses one of the
+// function's own extent names.
+const EXTENT_READ: char = '\u{1}';
+const EXTENT_DECLARATION: char = '\u{2}';
+const EXTENT_END: char = '\u{3}';
+const EXTENT_MARKS: [char; 3] = [EXTENT_READ, EXTENT_DECLARATION, EXTENT_END];
 
 /// `name` as the emitter renders it where C reads the extent.
 fn extent_read(name: &str) -> String {
@@ -8974,37 +9026,56 @@ fn extent_declaration(name: &str) -> String {
 /// it. Only the emitter writes the marks, so an identifier that merely has
 /// a name's spelling, such as a helper's parameter or a member access, is
 /// never taken for a read.
-fn settle_extent_marks(lines: &mut [String]) -> Option<String> {
+///
+/// Every mark must open, enclose a name `is_extent` accepts, and close before
+/// the next mark. Anything else is a mark character the emitter did not
+/// write, and the error says where it is.
+fn settle_extent_marks(
+    lines: &mut [String],
+    is_extent: impl Fn(&str) -> bool,
+) -> Result<Option<String>, String> {
     let mut declared = BTreeSet::new();
     let mut read_first = None;
-    for line in lines.iter_mut() {
-        if !line.contains([EXTENT_READ, EXTENT_DECLARATION]) {
+    for (index, line) in lines.iter_mut().enumerate() {
+        if !line.contains(EXTENT_MARKS) {
             continue;
         }
+        let malformed = |what: String| format!("line {}: {what}", index + 1);
         let mut plain = String::with_capacity(line.len());
         let mut declaring = Vec::new();
         let mut rest = line.as_str();
-        while let Some(start) = rest.find([EXTENT_READ, EXTENT_DECLARATION]) {
+        while let Some(start) = rest.find(EXTENT_MARKS) {
             plain.push_str(&rest[..start]);
-            let mark = rest[start..].chars().next().expect("found a mark");
-            let after = &rest[start + mark.len_utf8()..];
+            // Each mark is one byte, so the slices below stay on boundaries.
+            let mark = char::from(rest.as_bytes()[start]);
+            if mark == EXTENT_END {
+                return Err(malformed("an end mark closes no extent mark".into()));
+            }
+            let after = &rest[start + 1..];
             let end = after
-                .find(EXTENT_END)
-                .expect("every extent mark is closed where it is written");
+                .find(EXTENT_MARKS)
+                .filter(|end| after.as_bytes()[*end] == EXTENT_END as u8)
+                .ok_or_else(|| malformed("an extent mark is not closed".into()))?;
             let name = &after[..end];
+            if !is_extent(name) {
+                return Err(malformed(format!(
+                    "the marked name `{}` is no extent of this function",
+                    name.escape_debug()
+                )));
+            }
             plain.push_str(name);
             if mark == EXTENT_DECLARATION {
                 declaring.push(name.to_string());
             } else if !declared.contains(name) && read_first.is_none() {
                 read_first = Some(name.to_string());
             }
-            rest = &after[end + EXTENT_END.len_utf8()..];
+            rest = &after[end + 1..];
         }
         plain.push_str(rest);
         declared.extend(declaring);
         *line = plain;
     }
-    read_first
+    Ok(read_first)
 }
 
 #[cfg(test)]
@@ -9013,6 +9084,11 @@ mod tests {
 
     use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
     use chelis_types::types::Prim;
+
+    /// Every name is an extent, for the order tests below.
+    fn any_name(_: &str) -> bool {
+        true
+    }
 
     // chelis#2883: the order check reads the emitter's own marks, so a read
     // before the declaration is found and the marks are removed, while an
@@ -9029,7 +9105,10 @@ mod tests {
                 extent_declaration("d5")
             ),
         ];
-        assert_eq!(settle_extent_marks(&mut lines), Some("d5".to_string()));
+        assert_eq!(
+            settle_extent_marks(&mut lines, any_name),
+            Ok(Some("d5".to_string()))
+        );
         assert_eq!(
             lines,
             [
@@ -9039,8 +9118,9 @@ mod tests {
         );
 
         // Declared, then read, including by a later declaration's right-hand
-        // side. The unmarked `index`, `value` and `.dtype` are a helper's
-        // parameters and a member access that share the names' spellings.
+        // side. The unmarked `index` and `value` are a helper's parameters,
+        // `dtype` is a local and `.dtype` a member access, each sharing a
+        // name's spelling.
         let mut lines = vec![
             "static uint64_t mix(uint64_t value, int64_t index) { return value + index; }"
                 .to_string(),
@@ -9059,12 +9139,8 @@ mod tests {
                 extent_read("value")
             ),
         ];
-        assert_eq!(settle_extent_marks(&mut lines), None);
-        assert!(lines.iter().all(|line| !line.contains([
-            EXTENT_READ,
-            EXTENT_DECLARATION,
-            EXTENT_END
-        ])));
+        assert_eq!(settle_extent_marks(&mut lines, any_name), Ok(None));
+        assert!(lines.iter().all(|line| !line.contains(EXTENT_MARKS)));
         assert_eq!(lines[3], "    int64_t value = index;");
 
         // A declaration whose right-hand side reads a name declared only on
@@ -9077,13 +9153,165 @@ mod tests {
             ),
             format!("    int64_t {} = 3;", extent_declaration("d5")),
         ];
-        assert_eq!(settle_extent_marks(&mut lines), Some("d5".to_string()));
+        assert_eq!(
+            settle_extent_marks(&mut lines, any_name),
+            Ok(Some("d5".to_string()))
+        );
+    }
+
+    // A mark character the emitter did not write is an error naming its
+    // line, never a panic and never a silent rewrite: an unclosed mark, an
+    // end mark that closes nothing, a mark opened inside another, and a
+    // well-formed pair around a name that is no extent of the function.
+    #[test]
+    fn extent_marks_the_emitter_did_not_write_are_errors() {
+        let is_d5 = |name: &str| name == "d5";
+        let declared = format!("    int64_t {} = 3;", extent_declaration("d5"));
+        for (stray, expected) in [
+            (
+                format!("// span: n_{EXTENT_READ}001"),
+                "line 2: an extent mark is not closed",
+            ),
+            (
+                format!("// span: zz{EXTENT_END}"),
+                "line 2: an end mark closes no extent mark",
+            ),
+            (
+                format!("// span: {EXTENT_READ}a{EXTENT_DECLARATION}d5{EXTENT_END}"),
+                "line 2: an extent mark is not closed",
+            ),
+            (
+                format!("// span: {EXTENT_READ}n{EXTENT_END}"),
+                "line 2: the marked name `n` is no extent of this function",
+            ),
+        ] {
+            let mut lines = vec![declared.clone(), stray.clone()];
+            assert_eq!(
+                settle_extent_marks(&mut lines, is_d5),
+                Err(expected.to_string()),
+                "{stray:?}"
+            );
+        }
+        // The same marks the emitter writes, around its own name, settle.
+        let mut lines = vec![declared, format!("    return {};", extent_read("d5"))];
+        assert_eq!(settle_extent_marks(&mut lines, is_d5), Ok(None));
+        assert_eq!(lines[1], "    return d5;");
+    }
+
+    // Every place the emitter renders an extent name for C to read marks it,
+    // so the order check sees that read. Each assertion fails when its site
+    // writes the bare name instead.
+    #[test]
+    fn every_extent_read_site_marks_the_name() {
+        // A runtime-bound named dimension, as allocations and loops read it.
+        assert_eq!(
+            CEmitter::emit_dim_info(&DimInfo::Named("n".into(), None)),
+            extent_read("n")
+        );
+        assert_eq!(
+            CEmitter::emit_dim_info(&DimInfo::Named("n".into(), Some(3))),
+            "3"
+        );
+        // A symbolic reshape bound.
+        assert_eq!(
+            CEmitter::bound_c_expr(&RtDim::Sym("n".into()), &[], 0, 0),
+            extent_read("n")
+        );
+        // A claim's binder, as a local guard's operand and as the extent an
+        // inactive claim-sized axis declares.
+        assert_eq!(
+            CEmitter::canonical_extent_operand(
+                &chelis_ir::axis_sources::CanonicalExtent::Binder("n".into()),
+                0
+            ),
+            extent_read("n")
+        );
+        assert_eq!(
+            CEmitter::canonical_extent_operand(
+                &chelis_ir::axis_sources::CanonicalExtent::Resolved(3),
+                0
+            ),
+            "3"
+        );
+        // A second spelling of one extent reads the first, and a name
+        // already declared is not declared again.
+        let mut declared = chelis_unord::UnordSet::new();
+        declared.insert("c".to_string());
+        assert_eq!(
+            CEmitter::runtime_dim_declarations(
+                &["a".into(), "c".into(), "b".into()],
+                "chelis_tensor_shape(t4, 0)",
+                &mut declared
+            ),
+            [
+                format!(
+                    "int64_t {} = chelis_tensor_shape(t4, 0);",
+                    extent_declaration("a")
+                ),
+                format!(
+                    "int64_t {} = {};",
+                    extent_declaration("b"),
+                    extent_read("a")
+                ),
+            ]
+        );
     }
 
     fn emit_test_dag(dag: &Dag, name: &str) -> Result<String, Unsupported> {
         let verified = crate::testing::verified_dag(dag, crate::CodegenOptions::default())
             .expect("C emitter unit-test DAG must verify ownership");
         CEmitter::emit_dag(verified, name)
+    }
+
+    /// `x: [name]` doubled, with `span` on the addition.
+    fn doubled_named(name: &str, span: &str) -> Dag {
+        let ty = TensorType {
+            dims: vec![DimInfo::Named(name.to_string(), None)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        dag.add_node(decl, RiscOp::Add, vec![x, x], ty, Some(span.to_string()));
+        dag
+    }
+
+    // A graph built without the Deep parser can carry a mark character in a
+    // span ID. The comment sanitizer escapes it, so it is no mark and the
+    // span comment keeps its escaped form. A dimension name carrying one is
+    // refused rather than read as a mark or written into the C.
+    #[test]
+    fn a_mark_character_from_a_constructed_graph_is_never_a_mark() {
+        for span in [
+            format!("n_{EXTENT_READ}001"),
+            format!("{EXTENT_READ}zz{EXTENT_END}"),
+            format!("{EXTENT_READ}n{EXTENT_END}"),
+            format!("{EXTENT_DECLARATION}n{EXTENT_END}"),
+        ] {
+            let c = emit_test_dag(&doubled_named("n", &span), "f")
+                .unwrap_or_else(|error| panic!("{span:?}: {error}"));
+            let escaped = chelis_ir::span_sanitize::sanitize_for_comment(&span);
+            assert!(
+                c.contains(&format!("// span: {escaped}\n")),
+                "{span:?}:\n{c}"
+            );
+            assert!(!c.contains(EXTENT_MARKS), "{span:?}:\n{c}");
+        }
+
+        let error = emit_test_dag(&doubled_named(&format!("n{EXTENT_END}"), "s"), "f")
+            .expect_err("a mark character in a dimension name");
+        assert!(
+            error
+                .to_string()
+                .contains("extent mark the emitter did not write"),
+            "{error}"
+        );
     }
 
     fn scalar_f32() -> TensorType {
