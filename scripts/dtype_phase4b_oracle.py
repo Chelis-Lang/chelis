@@ -353,7 +353,8 @@ EXPECTED_OP_MANIFESTS = {
 | `datetime::Duration` | `Duration { second: i64, nanosecond: i64 }` |
 | `datetime::Period` | `Period { months: i64, days: i64 }` |
 | `datetime::Dates` | `Dates { epoch_days: tensor[n,i64] }` |
-| `datetime::Instants` | `Instants { unix_seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |""".splitlines()
+| `datetime::Instants` | `Instants { unix_seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |
+| `datetime/clock::MonotonicInstant` | `MonotonicInstant { second: i64, nanosecond: i64 }` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
@@ -361,6 +362,9 @@ EXPECTED_OP_MANIFESTS = {
 | `contracts::normal_cdf_contract_samples` | `()->i64` |
 | `contracts::normal_cdf_contract_seed` | `()->i64` |
 | `contracts::standard_contract_tolerance` | `()->f32` |
+| `datetime/clock::clock_now` | `()->Instant!{IO}` |
+| `datetime/clock::monotonic_now` | `()->MonotonicInstant!{IO}` |
+| `datetime/clock::monotonic_until` | `(MonotonicInstant,MonotonicInstant)->Duration` |
 | `datetime::date` | `(i64,i64,i64)->Date` |
 | `datetime::date_add_days` | `(Date,i64)->Date` |
 | `datetime::date_add_months` | `(Date,i64,DayOverflow)->Date` |
@@ -875,10 +879,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 195 or len(set(identities)) != 195:
+    if len(identities) != 198 or len(set(identities)) != 198:
         violations.append(
             "[05-OP-35] stdlib numeric manifest must have exactly one hundred "
-            "ninety-five unique identities"
+            "ninety-eight unique identities"
         )
 
 
@@ -2437,7 +2441,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the one hundred ninety-five final exported stdlib numeric definitions",
+            "exactly the one hundred ninety-eight final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "
@@ -2461,7 +2465,7 @@ def validate_normative_contract(
             "Every primitive-width intermediate in a graph whose contract names a dtype",
             "Decimal rational computations explicitly named as mathematical below "
             "use an exact internal domain",
-            "The `datetime::*` identities follow [05-OP-73]",
+            "The `datetime::*` and `datetime/clock::*` identities follow [05-OP-73]",
             "integer primitive arithmetic is checked",
             "JSON access follows [05-OP-2..5]",
             "Numeric tokens follow [05-OP-2]",
@@ -2661,8 +2665,8 @@ def validate_normative_contract(
             "alias, or compatibility identity belongs to this atom",
         ),
         "05-OP-73": (
-            "governs exactly the `datetime::*` identities of the [05-OP-34] and "
-            "[05-OP-35] registries",
+            "governs exactly the `datetime::*` and `datetime/clock::*` identities of "
+            "the [05-OP-34] and [05-OP-35] registries",
             "The calendar is proleptic Gregorian with astronomical year numbering",
             "The timescale is POSIX: every day has exactly 86 400 seconds",
             "-4 371 587..2 932 896",
@@ -2683,6 +2687,11 @@ def validate_normative_contract(
             "negative years as `-` and six digits",
             "`-000000` is not a year",
             "Parsing a value's canonical text returns that value",
+            "`clock_now` and `monotonic_now` are the only callables of this atom that "
+            "read the host or carry an effect",
+            "`monotonic_until(a,b)` is its only operation",
+            "No callable converts a `MonotonicInstant` to or from an `Instant`",
+            "naming the builtin rather than `clock_now` or `monotonic_now`",
         ),
         "05-OP-74": (
             "governs exactly the seven constructors of the standard-library plain enum "
