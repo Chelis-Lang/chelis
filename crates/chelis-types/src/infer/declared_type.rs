@@ -235,7 +235,7 @@ pub(super) fn declaration_dtype_bounds(
 ) -> UnordMap<String, TypeVarRestriction> {
     chelis_deep::decode_dtype_bounds(meta)
         .into_iter()
-        .map(|(binder, family)| (binder, restriction_for_family(family)))
+        .map(|(binder, bound)| (binder, restriction_for_bound(&bound)))
         .collect()
 }
 
@@ -272,5 +272,26 @@ pub(super) fn restriction_for_family(family: chelis_deep::DtypeFamily) -> TypeVa
         chelis_deep::DtypeFamily::Float => TypeVarRestriction::ActiveFloat,
         chelis_deep::DtypeFamily::Int => TypeVarRestriction::ActiveInt,
         chelis_deep::DtypeFamily::Numeric => TypeVarRestriction::ActiveNumeric,
+    }
+}
+
+/// The checker restriction for either `spec/04-type-system.md` §5.9 bound
+/// form. A family keeps its §1.1-tracking predicate; a set becomes the
+/// corresponding [`PrimSet`], so the checker never turns one into the other.
+pub(super) fn restriction_for_bound(bound: &chelis_deep::DtypeBound) -> TypeVarRestriction {
+    match bound {
+        chelis_deep::DtypeBound::Family(family) => restriction_for_family(*family),
+        chelis_deep::DtypeBound::Set(members) => TypeVarRestriction::ActiveSet(
+            crate::types::PrimSet::from_members(members.iter().map(|dtype| match dtype {
+                chelis_deep::BoundDtype::F32 => crate::types::Prim::F32,
+                chelis_deep::BoundDtype::F64 => crate::types::Prim::F64,
+                chelis_deep::BoundDtype::Bf16 => crate::types::Prim::Bf16,
+                chelis_deep::BoundDtype::F16 => crate::types::Prim::F16,
+                chelis_deep::BoundDtype::I8 => crate::types::Prim::Int8,
+                chelis_deep::BoundDtype::I16 => crate::types::Prim::Int16,
+                chelis_deep::BoundDtype::I32 => crate::types::Prim::Int32,
+                chelis_deep::BoundDtype::I64 => crate::types::Prim::Int64,
+            })),
+        ),
     }
 }

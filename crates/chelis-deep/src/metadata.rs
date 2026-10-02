@@ -95,7 +95,7 @@ rules! {
     "type" => S::Type, P::Any, "a type-expression node";
     "loc" => S::Loc, P::Any, "(loc string integer integer)";
     "eff" => S::Effects, P::Tag(T::TFn), "an effects node of names or (resource {} string) entries on t-fn";
-    "dtype_bounds" => S::Bounds, P::Tag(T::Defsig), "a map from distinct binder names to float, int, or numeric on defsig";
+    "dtype_bounds" => S::Bounds, P::Tag(T::Defsig), "a map from distinct binder names to float, int, numeric, or a list of active dtypes on defsig";
     "effects" => S::Effects, P::Tag(T::Fn), "an effects node of names or (resource {} string) entries on fn";
     "source" => S::Source, P::Any, "a preserved structural (macro-name original-arg...) list";
     "wrt" => S::Wrt, P::Tag(T::Grad), "a variable or nonempty tuple of variables on grad";
@@ -169,6 +169,8 @@ enum View<'a> {
     Ast(&'a Expr),
     Value(&'a V),
     Name(&'a str, Span),
+    /// §5.9's explicit dtype set, viewed as its ordered member names.
+    BoundSet(&'a std::collections::BTreeSet<crate::BoundDtype>, Span),
     String(&'a str, Span),
     True(Span),
     Annotations(&'a Metadata, Span),
@@ -218,7 +220,8 @@ impl<'a> View<'a> {
             Self::Raw(v) => v.span(),
             Self::Ast(v) => v.span(),
             Self::Value(v) => v.span(),
-            Self::Name(_, span)
+            Self::BoundSet(_, span)
+            | Self::Name(_, span)
             | Self::String(_, span)
             | Self::True(span)
             | Self::Annotations(_, span) => span,
@@ -279,6 +282,12 @@ impl<'a> View<'a> {
     fn list(self) -> Option<Vec<Self>> {
         match self.scalar() {
             Self::Raw(RawExpr::List(v, _)) => Some(v.iter().map(Self::Raw).collect()),
+            Self::BoundSet(members, span) => Some(
+                members
+                    .iter()
+                    .map(|dtype| Self::Name(dtype.name(), span))
+                    .collect(),
+            ),
             Self::Ast(Expr::BareList(v, _)) => Some(v.iter().map(Self::Ast).collect()),
             Self::Value(V::Source(v)) => Some(
                 std::iter::once(Self::Name(v.name.value(), v.name.span()))
@@ -306,7 +315,15 @@ impl<'a> View<'a> {
             Self::Ast(Expr::Map(v, _)) | Self::Annotations(v, _) => Some(entries(v)),
             Self::Value(V::DtypeBounds(v)) => Some(
                 v.bounds()
-                    .map(|(k, v)| (k, Self::Name(v.value().deep_name(), v.span())))
+                    .map(|(k, v)| {
+                        let view = match v.value() {
+                            crate::DtypeBound::Family(family) => {
+                                Self::Name(family.deep_name(), v.span())
+                            }
+                            crate::DtypeBound::Set(members) => Self::BoundSet(members, v.span()),
+                        };
+                        (k, view)
+                    })
                     .collect(),
             ),
             _ => None,
@@ -914,10 +931,25 @@ fn shape_valid(shape: Shape, v: View<'_>) -> bool {
         }),
         S::Bounds => v.map().is_some_and(|m| {
             m.iter().enumerate().all(|(i, (k, v))| {
-                !m[..i].iter().any(|(prior, _)| prior == k)
-                    && v.name()
-                        .and_then(crate::DtypeFamily::from_deep_name)
-                        .is_some()
+                // spec/03 §2.2: a family atom, or §5.9's explicit set as a
+                // non-empty list of distinct active §1.1 dtype spellings.
+                let family = v
+                    .name()
+                    .and_then(crate::DtypeFamily::from_deep_name)
+                    .is_some();
+                let set = v.list().is_some_and(|members| {
+                    !members.is_empty()
+                        && members.iter().enumerate().all(|(j, member)| {
+                            member
+                                .name()
+                                .and_then(crate::BoundDtype::from_name)
+                                .is_some()
+                                && !members[..j]
+                                    .iter()
+                                    .any(|prior| prior.name() == member.name())
+                        })
+                });
+                !m[..i].iter().any(|(prior, _)| prior == k) && (family || set)
             })
         }),
         S::Source => v

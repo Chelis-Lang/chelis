@@ -231,22 +231,29 @@ pub(super) fn check_declared_dtype_bounds(
             continue;
         };
         let declared_bound = declared_bounds.get(&binder).copied().flatten();
+        // [04-INF-9]: the declaration satisfies its body when its bound is at
+        // least as narrow as the body's requirement, not only when the two are
+        // equal. §5.9's set form makes the difference observable: `{f32, f64}`
+        // satisfies a `Float` requirement without equalling it.
         if let Some(required) = subst.tvar_restriction(resolved_var)
-            && declared_bound != Some(required)
+            && !declared_bound.is_some_and(|bound| bound.is_at_least_as_narrow_as(required))
         {
             let authored = declared_bound
-                .map(|bound| format!("the declared `{}` family", bound.family_name()))
+                .map(|bound| {
+                    let kind = if bound.is_family() { "family" } else { "set" };
+                    format!("the declared `{}` {kind}", bound.bound_spelling())
+                })
                 .unwrap_or_else(|| "an unbounded authored variable".to_string());
             errors.push(CheckError::new(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
-                    "declared type parameter {} of `{declaration}` requires dtype family `{}` in its body, but its signature admits {authored}; an authored generic contract must satisfy its operation requirements at the definition (spec/04-type-system.md §3.1, [04-DTYPE-2])",
-                    render_declared_binder(type_names, binder), required.family_name(),
+                    "declared type parameter {} of `{declaration}` requires {} in its body, but its signature admits {authored}; an authored generic contract must satisfy its operation requirements at the definition (spec/04-type-system.md §3.1, [04-DTYPE-2])",
+                    render_declared_binder(type_names, binder), required.bound_description(),
                 ),
                 vec![format!(
                     "Declare this binder with `{}: {}` in the signature's binder list.",
                     type_names.get(&binder).expect("an authored binder has a source name"),
-                    required.family_name(),
+                    required.bound_spelling(),
                 )],
             ));
         }
@@ -599,7 +606,7 @@ fn at_boundary_instantiation(
                 bound: Some(bound),
             } => Some(format!(
                 "`{name}`, declared `{name}: {}`",
-                bound.family_name()
+                bound.bound_spelling()
             )),
             BoundaryOperandKind::Authored { name, bound: None } => {
                 Some(format!("`{name}`, declared with no dtype-family bound"))
@@ -666,7 +673,7 @@ fn at_boundary_instantiation(
              tensor, collection, or string. Declare the operand with the type this operation \
              requires, such as `tensor[n, {name}]`, or narrow `{name}`'s bound to the dtypes the \
              operation admits.",
-            family = bound.family_name(),
+            family = bound.bound_spelling(),
         ),
         BoundaryOperandKind::Authored { name, bound: None } => format!(
             "`{name}` declares no dtype-family bound, so it denotes every type. Declare the \

@@ -1977,11 +1977,13 @@ impl Subst {
             let Type::Var(operand) = self.apply(&Type::Var(*tv)) else {
                 return true;
             };
-            let Some(
-                bound @ (TypeVarRestriction::ActiveFloat
-                | TypeVarRestriction::ActiveInt
-                | TypeVarRestriction::ActiveNumeric),
-            ) = self.tvar_restriction(operand)
+            // Any §5.9 declaration bound discharges this gate, including the
+            // explicit set form. Listing the three families rejected a
+            // set-bounded scalar `cast` that every equivalent family accepted
+            // (chelis#2443 round 2).
+            let Some(bound) = self
+                .tvar_restriction(operand)
+                .filter(|restriction| restriction.is_declaration_bound())
             else {
                 return true;
             };
@@ -3117,6 +3119,29 @@ impl Subst {
 /// one, and the result admits only floats. Only `Float` against `Int` is
 /// empty, and an empty intersection is a `PrecisionMismatch` naming both
 /// families.
+/// How a clash between two bounds is named.
+///
+/// The all-families form is byte-identical to the wording that predates
+/// §5.9's set form, which a per-operand `bound_description()` would not be:
+/// the original sentence hoists "dtype families" as a shared plural, so
+/// describing each side separately doubles the phrase. Nothing pinned that
+/// text, so it churned silently until red-team round 3 measured it
+/// differentially against the base.
+fn describe_bound_clash(left: TypeVarRestriction, right: TypeVarRestriction) -> String {
+    if left.is_family() && right.is_family() {
+        return format!(
+            "dtype families `{}` and `{}`",
+            left.bound_spelling(),
+            right.bound_spelling()
+        );
+    }
+    format!(
+        "{} and {}",
+        left.bound_description(),
+        right.bound_description()
+    )
+}
+
 fn merge_tvar_restrictions(
     existing: TypeVarRestriction,
     incoming: TypeVarRestriction,
@@ -3124,9 +3149,8 @@ fn merge_tvar_restrictions(
     existing.intersect(incoming).ok_or_else(|| TypeError {
         kind: TypeErrorKind::DtypeFamilyMismatch,
         message: format!(
-            "dtype families `{}` and `{}` share no active dtype, so the type variables they bound cannot be the same type",
-            existing.family_name(),
-            incoming.family_name()
+            "{} share no active dtype, so the type variables they bound cannot be the same type",
+            describe_bound_clash(existing, incoming)
         ),
     })
 }
@@ -3691,7 +3715,7 @@ fn ensure_tvar_restriction(
     ty: &Type,
     subst: &Subst,
 ) -> Result<(), TypeError> {
-    let family = restriction.family_name();
+    let family = restriction.bound_description();
     let gloss = restriction.membership_gloss();
     match ty {
         Type::Ref(inner) if restriction.is_value_constraint() => {
@@ -3718,14 +3742,14 @@ fn ensure_tvar_restriction(
         Type::Prim(prim) => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,
             message: format!(
-                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{}`",
+                "type variable bounded by {family} ({gloss}) cannot be instantiated at `{}`",
                 prim.name()
             ),
         }),
         other => Err(TypeError {
             kind: TypeErrorKind::DtypeFamilyMismatch,
             message: format!(
-                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{other}`"
+                "type variable bounded by {family} ({gloss}) cannot be instantiated at `{other}`"
             ),
         }),
     }

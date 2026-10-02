@@ -336,7 +336,7 @@ fn trusted_quantile_symbols(decls: &[Decl]) -> Vec<String> {
             } if name == LINKED_NAUTILUS_QUANTILE
                 && type_binders
                     .iter()
-                    .map(|binder| (binder.name.as_str(), binder.bound))
+                    .map(|binder| (binder.name.as_str(), binder.bound.as_ref()))
                     .eq([("n", None)])
                 && params.len() == 2
                 && matches!(

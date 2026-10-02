@@ -1096,7 +1096,7 @@ fn check_literal_pattern_at_binder(
              (spec/04-type-system.md [04-PAT-1], [04-LIT-2])",
             atom.family(),
             atom.rendered(),
-            family.family_name(),
+            family.bound_spelling(),
             member.name(),
         ),
         vec![binder_pattern_repair(atom, site, binder, family)],
@@ -1123,7 +1123,9 @@ fn unbounded_binder_pattern_repair(
     };
     let declare = format!(
         "Declare `{binder}: {}`, the family {} literal patterns denote",
-        family.family_name(),
+        family
+            .family_name()
+            .expect("a literal-pattern repair names a family bound"),
         atom.family(),
     );
     if family_members(family).any(|member| literal_pattern_failure_at(member, atom).is_some()) {
@@ -1240,7 +1242,7 @@ fn binder_pattern_repair(
     binder: &str,
     family: TypeVarRestriction,
 ) -> String {
-    let family_name = family.family_name();
+    let family_name = family.bound_spelling();
     let Some(value) = PatternValue::of(atom) else {
         return format!(
             "No member of `{family_name}` is {}, so this arm matches no value at any \
@@ -1257,57 +1259,61 @@ fn binder_pattern_repair(
         );
     }
     let held_everywhere = members.iter().all(|member| value.held_exactly_at(*member));
+    let every_member_is_integer = members.iter().all(|member| member.is_integer());
+    let every_member_is_float = members.iter().all(|member| member.is_float());
+    let mixes_integer_and_float = !every_member_is_integer && !every_member_is_float;
     let no_suffix = "a literal pattern itself carries no suffix and no cast \
                      (spec/02-surf-syntax.md section P10a)";
-    match (family, value.as_integer()) {
-        (TypeVarRestriction::ActiveInt, Some(integer)) if held_everywhere => {
+    if held_everywhere {
+        if every_member_is_integer && let Some(integer) = value.as_integer() {
             return format!(
                 "Write the literal as an integer, `{integer}`, which denotes the same value \
-                 exactly at every member of `Int`; {no_suffix}"
+                 exactly at every member of `{family_name}`; {no_suffix}"
             );
         }
-        (TypeVarRestriction::ActiveFloat, _) if held_everywhere => {
+        if every_member_is_float {
             return format!(
                 "Write the literal as a float, `{}`, which denotes the same value exactly at \
-                 every member of `Float`; {no_suffix}",
+                 every member of `{family_name}`; {no_suffix}",
                 value.float_body(),
             );
         }
-        (TypeVarRestriction::ActiveNumeric, Some(integer)) if held_everywhere => {
+        if let Some(integer) = value.as_integer() {
             return format!(
                 "Compare instead of matching: {}. `cast({integer}, {binder})` binds {integer} \
-                 exactly at every member of `Numeric`; {no_suffix}",
+                 exactly at every member of `{family_name}`; {no_suffix}",
                 comparison_repair(site, |subject| {
                     format!("eq({subject}, cast({integer}, {binder}))")
                 }),
             );
         }
-        _ => {}
     }
-    let (widest, spelled) = match family {
-        TypeVarRestriction::ActiveInt => (
+    let (widest, spelled) = if every_member_is_integer {
+        (
             Prim::Int64,
             value
                 .as_integer()
                 .map(|integer| format!("{integer}i64"))
-                .expect("a value some Int member holds is an i64"),
-        ),
-        _ => {
-            let magnitude = value.as_f64().abs();
-            if !value.held_exactly_at(Prim::F64)
-                || (family == TypeVarRestriction::ActiveNumeric
-                    && (F64_EXACT_INTEGER_LIMIT..=I64_MAGNITUDE_LIMIT).contains(&magnitude))
-            {
-                return format!(
-                    "No comparison that cannot trap is exact at every member of \
-                     `{family_name}` for `{}`, because at `f64` an `i64` near it rounds \
-                     onto the same value. Declare `{binder}` with the family this arm is \
-                     meant for, `Int` or `Float`, and compare at that family's widest member",
-                    atom.rendered(),
-                );
-            }
-            (Prim::F64, format!("{}f64", value.float_body()))
+                .expect("a value some integer member holds is an i64"),
+        )
+    } else {
+        let magnitude = value.as_f64().abs();
+        // A bound admitting both an integer and a float member cannot offer an
+        // exact non-trapping comparison in f64's collision range, whether it
+        // is spelled `Numeric` or as a mixed set.
+        if !value.held_exactly_at(Prim::F64)
+            || (mixes_integer_and_float
+                && (F64_EXACT_INTEGER_LIMIT..=I64_MAGNITUDE_LIMIT).contains(&magnitude))
+        {
+            return format!(
+                "No comparison that cannot trap is exact at every member of \
+                 `{family_name}` for `{}`, because at `f64` an `i64` near it rounds \
+                 onto the same value. Declare `{binder}` with the family this arm is \
+                 meant for, `Int` or `Float`, and compare at that family's widest member",
+                atom.rendered(),
+            );
         }
+        (Prim::F64, format!("{}f64", value.float_body()))
     };
     let widest = widest.name();
     format!(

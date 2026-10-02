@@ -473,7 +473,7 @@ alias heuristic and no implicit collection fallback.
 
 An unbounded listed name may be unused; it denotes a vacuous universal
 quantifier and is preserved by canonical Surf/Deep round-tripping. A listed
-name with a dtype-family bound must occur in the declared type as §P4c
+name with a dtype bound must occur in the declared type as §P4c
 requires.
 
 The `spec/04-type-system.md` §1.1.2 unsigned aliases (`u8`, `u16`,
@@ -554,9 +554,9 @@ Writing `def f[a, b](x: &tensor[3, p])` (where `p` is not in
 See `spec/04-type-system.md` §5.8 for the type-system semantics and
 the `TensorPrec` representation that backs this surface rule.
 
-#### P4c: Dtype-Family Bounds
+#### P4c: Dtype Bounds
 
-A binder in a `[..]` clause may declare a **dtype-family bound**,
+A binder in a `[..]` clause may declare a **dtype bound**,
 written after the binder name:
 
 ```text
@@ -564,15 +564,26 @@ sig linspace[n, p: Float]: p -> p -> i64 -> tensor[n, p]
 def linspace(start, stop, count) = ...
 
 def arange_values[p: Int](current: p, stop: p, out: List[p]) -> List[p] = ...
+
+def widen[p: {f32, f64}](x: p) -> p = ...
 ```
 
-The bound is one of `Float`, `Int`, or `Numeric`, and it restricts the
-binder to the active dtypes of that family per
-`spec/04-type-system.md` §5.9 [04-DTYPE-2]. Any other name in the
+The bound is either a family name -- one of `Float`, `Int`, or
+`Numeric` -- or an **explicit dtype set** written `{d1, d2, ...}`, a
+brace-delimited comma-separated list of active dtype names. Both forms
+restrict the binder per `spec/04-type-system.md` §5.9 [04-DTYPE-2]: a
+family name to the active dtypes of that family, and a set to exactly
+the dtypes it lists. Any other name in the
 bound position is a syntax error, so an ADT name never becomes a
 silent bound and a user type named `Float` is unaffected outside this
 position. A binder with no bound keeps its existing meaning: an
 unconstrained type variable, not a dtype.
+
+A one-member set is written `{f64}`; there is no bare-dtype bound
+spelling, so a bound is always a family name or a braced set. The
+braces are required and carry the meaning: `p: f64` is a syntax error
+rather than a bound, because a binder restricted to exactly one dtype
+is a set of one and not a type ascription.
 
 A `sig`'s `[..]` clause is complete: every `t-var`, `d-var`, and
 `d-rank` name in the signature appears exactly once. Listing a
@@ -583,11 +594,18 @@ declaration: a standalone `sig` carries it, and a matching `def` must
 not carry a second list.
 
 A bounded binder is a type binder only. Using one in a dimension slot
-or as a rank spread is an error, since a dtype family cannot name an
+or as a rank spread is an error, since a dtype bound cannot name an
 extent.
 
-The formatter prints a bound as `name: Family` with one space after the
-colon and preserves the authored binder order.
+The formatter prints a family bound as `name: Family` with one space
+after the colon, and a set bound as `name: {d1, d2}` with one space
+after the colon, no space inside the braces, one space after each
+comma, and its members in `spec/04-type-system.md` §1.1 declaration
+order rather than the authored order. It preserves the authored binder
+order. The two differ because a binder list is ordered -- its sequence
+is the declaration's, and an explicit type application reads it -- while
+§5.9 makes a set bound unordered, so its members have no authored
+sequence worth keeping.
 
 ### P4a: Canonical Surf Style
 
@@ -1025,7 +1043,7 @@ positions is exactly:
 3. the body expression of a function with a declared return type that is a
    tensor type, when the body is itself a tensor literal
 4. the first argument of an explicit `cast(literal, p)` expression — the
-   literals bind at `p`, which may also be a dtype-family-bounded type binder;
+   literals bind at `p`, which may also be a dtype-bounded type binder;
    the literal then binds at each admissible instantiation
    (`spec/04-type-system.md` §5.6)
 
@@ -1268,7 +1286,7 @@ A property's optional `TypeBinders` is the declaration's complete explicit
 binder list under §P4b/§P4c. It scopes every quantifier type, `where`
 precondition, predicate body, and expression-valued property option. Duplicate
 or forbidden binder names and undeclared type, dimension, or rank variables
-reject exactly as they do for `def`; dtype-family bounds use the same
+reject exactly as they do for `def`; dtype bounds use the same
 representation and validity rules. Omitting the list preserves the existing
 monomorphic property spelling.
 

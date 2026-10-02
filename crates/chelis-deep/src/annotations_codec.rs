@@ -206,11 +206,40 @@ fn decode_value(key: MetadataKey, raw: RawExpr) -> Result<MetadataValue, Metadat
                 return Err(invalid(spelling, span, "a dtype binder map"));
             };
             let mut bounds = Vec::with_capacity(entries.len());
-            for (binder, family) in entries {
-                let family = name(family, spelling)?;
-                let kind = crate::DtypeFamily::from_deep_name(family.value())
-                    .ok_or_else(|| invalid(spelling, family.span(), "float, int, or numeric"))?;
-                bounds.push((binder, Spanned::new(kind, family.span())));
+            for (binder, bound) in entries {
+                // spec/03 §2.2: a family atom, or a list of member spellings
+                // for §5.9's explicit set form.
+                let decoded = match &bound {
+                    RawExpr::List(members, list_span) => {
+                        let mut set = std::collections::BTreeSet::new();
+                        if members.is_empty() {
+                            return Err(invalid(spelling, *list_span, "a non-empty dtype set"));
+                        }
+                        for member in members {
+                            let member = name(member.clone(), spelling)?;
+                            let dtype =
+                                crate::BoundDtype::from_name(member.value()).ok_or_else(|| {
+                                    invalid(spelling, member.span(), "an active §1.1 dtype")
+                                })?;
+                            if !set.insert(dtype) {
+                                return Err(invalid(
+                                    spelling,
+                                    member.span(),
+                                    "a dtype set without repeated members",
+                                ));
+                            }
+                        }
+                        Spanned::new(crate::DtypeBound::Set(set), *list_span)
+                    }
+                    _ => {
+                        let family = name(bound, spelling)?;
+                        let kind = crate::DtypeFamily::from_deep_name(family.value()).ok_or_else(
+                            || invalid(spelling, family.span(), "float, int, or numeric"),
+                        )?;
+                        Spanned::new(crate::DtypeBound::Family(kind), family.span())
+                    }
+                };
+                bounds.push((binder, decoded));
             }
             V::DtypeBounds(DtypeBounds::try_new(bounds, span)?)
         }
@@ -754,10 +783,21 @@ impl WireExpr {
                     entries: v
                         .bounds()
                         .map(|(k, v)| {
-                            (
-                                k.to_string(),
-                                atom(Atom::Name(v.value().deep_name().into()), v.span()),
-                            )
+                            let encoded = match v.value() {
+                                crate::DtypeBound::Family(family) => {
+                                    atom(Atom::Name(family.deep_name().into()), v.span())
+                                }
+                                crate::DtypeBound::Set(members) => WireExpr::BareList(
+                                    members
+                                        .iter()
+                                        .map(|dtype| {
+                                            atom(Atom::Name(dtype.name().into()), v.span())
+                                        })
+                                        .collect(),
+                                    v.span(),
+                                ),
+                            };
+                            (k.to_string(), encoded)
                         })
                         .collect(),
                 },

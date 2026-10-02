@@ -2458,16 +2458,17 @@ pub(super) fn finish_unified_app(
                         // the scheme's opaque result here left every consumer of
                         // a generic `to_tensor` (a `reshape`, say) suspended past
                         // its declaration boundary.
+                        // Any dtype bound of spec/04 §5.9 resolves the element,
+                        // including the explicit set form: a set restricts WHICH
+                        // dtypes are admissible, never which programs type-check
+                        // (chelis#2443). Listing only the three families left a
+                        // set-bounded `to_tensor` suspended, so `[p: {f32, f64}]`
+                        // was rejected where the equivalent `Float` was accepted.
                         ToTensorPeel::Pending { rank, element }
                             if rank > 0
-                                && matches!(
-                                    subst.tvar_restriction(element),
-                                    Some(
-                                        TypeVarRestriction::ActiveFloat
-                                            | TypeVarRestriction::ActiveInt
-                                            | TypeVarRestriction::ActiveNumeric
-                                    )
-                                ) =>
+                                && subst.tvar_restriction(element).is_some_and(|restriction| {
+                                    !restriction.is_value_constraint()
+                                }) =>
                         {
                             let dims = kids
                                 .get(1)

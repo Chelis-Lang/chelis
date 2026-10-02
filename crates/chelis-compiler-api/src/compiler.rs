@@ -6187,7 +6187,7 @@ fn wire_decl(decl: &Decl) -> SourceWireResult<WireSurfDecl> {
                 .iter()
                 .map(|binder| crate::schema::WireTypeBinder {
                     name: binder.name.clone(),
-                    bound: binder.bound.map(|family| family.surf_name().to_string()),
+                    bound: binder.bound.as_ref().map(|bound| bound.surf_spelling()),
                 })
                 .collect(),
             params: params.iter().map(wire_param).collect(),
@@ -6209,7 +6209,7 @@ fn wire_decl(decl: &Decl) -> SourceWireResult<WireSurfDecl> {
                 .iter()
                 .map(|binder| crate::schema::WireTypeBinder {
                     name: binder.name.clone(),
-                    bound: binder.bound.map(|family| family.surf_name().to_string()),
+                    bound: binder.bound.as_ref().map(|bound| bound.surf_spelling()),
                 })
                 .collect(),
             params: params.iter().map(wire_param).collect(),

@@ -389,13 +389,19 @@ names between its declaration name and type expression. A monomorphic
 whether a listed name is a `t-var`, `d-var`, or `d-rank`; a name absent
 from the list is undeclared. A `defsig` may carry `dtype_bounds`
 metadata restricting its explicitly bound type variables to a dtype
-family (`spec/04-type-system.md` §5.9
-[04-DTYPE-2]):
+bound (`spec/04-type-system.md` §5.9
+[04-DTYPE-2]). A bound is encoded either as the lowercase family
+atom -- `float`, `int`, `numeric` -- or, for §5.9's explicit dtype
+set, as a list of the lowercase active dtype spellings the set
+admits (§6.2 gives the canonical order):
 
 ```lisp
 (defsig {dtype_bounds: {p: int}} arange (n p)
   (t-fn {} (t-var {} p) (t-var {} p)
     (t-tensor {} (d-var {} n) (t-var {} p))))
+
+(defsig {dtype_bounds: {p: (f32 f64)}} widen (p)
+  (t-fn {} (t-var {} p) (t-var {} p)))
 ```
 
 The value is a metadata map whose keys are binder names and whose values
@@ -548,9 +554,14 @@ environment or a cached compiler context. Resolution is fail-closed:
   the signature.
   Active, reserved, retired, and deferred primitive spellings cannot be
   rebound as `t-var` names. Its
-  `dtype_bounds` metadata attaches a dtype family to a named `t-var` binder;
+  `dtype_bounds` metadata attaches a dtype bound to a named `t-var` binder;
   the bound restricts every occurrence of that name, and a bounded name used
-  in a dimension or rank position is an error. A
+  in a dimension or rank position is an error. A family atom and a
+  one-member set list are distinct encodings and do not compare equal,
+  because §5.9 makes a family track §1.1's active set while a set does
+  not. An empty list, a repeated member, and a member that is not an
+  active §1.1 dtype spelling are each ingress errors. §6.2 gives the
+  canonical member order. A
   `deftype` or `typealias` binds only names in its explicit parameter list and
   assigns each one exactly one header kind, `Type` or single `Dimension`, under
   [04-ADT-3]; a declaration parameter cannot bind a `d-rank` spread. An
@@ -807,6 +818,9 @@ Deep has exactly one textual representation per program.
   Producer-specific and `span_*` extension keys take their places in that one
   sequence beside the defined keys rather than forming a separate group.
   [03-META-1] makes every key unique, so the order is total.
+- `dtype_bounds` set members: `spec/04-type-system.md` §1.1 declaration
+  order. §5.9 makes a set bound unordered, so its members carry no authored
+  sequence to preserve.
 - Module declarations: declaration order (not sorted).
 - Import names within an import: alphabetized.
 - Record and record-update `kv` pairs: written order, which is left-to-right

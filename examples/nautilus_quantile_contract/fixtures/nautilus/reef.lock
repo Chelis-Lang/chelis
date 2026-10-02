@@ -9,8 +9,9 @@ name = "chelis-std"
 version = "0.4.0"
 compiler = "=0.18.12"
 archive_sha256 = "502e40c7a9a631728f6de4669a0c3e04fe8f60e7d59c30c82b28bdaaccb79e46"
-shell_sha256 = "4c78363102235a1e672c61d7a3f43c16729b59a03520b8a7ac812f3ef358f3b7"
+shell_sha256 = "be7b8a730c01678c49d2af130971fd590d2c8c4fa85dd3be86f1af9535e9d217"
 
 [dependencies.source]
 kind = "bundled"
 compiler_version = "0.18.12"
+
