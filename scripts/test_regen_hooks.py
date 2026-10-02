@@ -175,6 +175,32 @@ class PrePushReadOnly(unittest.TestCase):
                 )
 
 
+class StdlibOnlyLegs(unittest.TestCase):
+    def test_every_hook_script_imports_without_site_packages(self) -> None:
+        """`uv run --no-project` supplies no packages, so each script the
+        hooks run, and everything it imports, must be stdlib or in-tree."""
+        scripts = {Path("scripts/regen_hooks.py")}
+        for row in regen_hooks.parse_commit_legs(commit_leg_table()):
+            scripts.add(Path(row.fix[0]))
+            if row.check is not None:
+                scripts.add(Path(row.check[0]))
+        for leg in regen_hooks.pre_push_legs("PY"):
+            for argv in (leg.check_argv, leg.write_argv):
+                if argv is not None:
+                    scripts.add(Path(argv[1]))
+        for script in sorted(scripts):
+            with self.subTest(script=str(script)):
+                result = subprocess.run(
+                    [sys.executable, "-I", "-S", "-c",
+                     "import sys; sys.path[:0] = sys.argv[1:3]; "
+                     "__import__(sys.argv[3])",
+                     str(REPO_ROOT / script.parent), str(REPO_ROOT / "scripts"),
+                     script.stem],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class RegenHookRepository(unittest.TestCase):
     """Real commits and pushes through the installed templates."""
 
@@ -489,10 +515,11 @@ class RegenHookRepository(unittest.TestCase):
             "#!/bin/sh\n"
             'if [ "$1" != run ] || [ "$2" != --managed-python ] ||\n'
             '   [ "$3" != --python ] || [ "$4" != 3.11 ] ||\n'
-            '   [ "$5" != --no-project ] || [ "$6" != python ]; then\n'
+            '   [ "$5" != --no-project ] || [ "$6" != --isolated ] ||\n'
+            '   [ "$7" != python ]; then\n'
             "    exit 2\n"
             "fi\n"
-            "shift 6\n"
+            "shift 7\n"
             f"echo ran >> {shlex.quote(str(uv_log))}\n"
             f'exec {shlex.quote(sys.executable)} "$@"\n',
             encoding="utf-8",
@@ -504,6 +531,42 @@ class RegenHookRepository(unittest.TestCase):
         self.assertNotEqual(stale.returncode, 0)
         self.assertIn("are inconsistent", stale.stderr)
         self.assertTrue(uv_log.exists(), "uv must supply the interpreter")
+
+    def test_uv_runs_the_hook_in_a_fresh_linked_worktree(self) -> None:
+        """A new agent worktree has no .venv; uv must serve it, and the
+        primary checkout's interpreter must not."""
+        linked = self.directory / "fresh agent worktree"
+        self.git("worktree", "add", "--quiet", "-b", "agent", str(linked))
+        self.interpreter(self.repo / ".venv/bin/python", selected=False)
+        uv_log = self.directory / "uv-ran"
+        uv = self.bin / "uv"
+        uv.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" != run ] || [ "$2" != --managed-python ] ||\n'
+            '   [ "$3" != --python ] || [ "$4" != 3.11 ] ||\n'
+            '   [ "$5" != --no-project ] || [ "$6" != --isolated ] ||\n'
+            '   [ "$7" != python ]; then\n'
+            "    exit 2\n"
+            "fi\n"
+            "shift 7\n"
+            f'echo "$PWD" >> {shlex.quote(str(uv_log))}\n'
+            f'exec {shlex.quote(sys.executable)} "$@"\n',
+            encoding="utf-8",
+        )
+        uv.chmod(0o755)
+        self.edit_agents(linked)
+        self.git("add", "AGENTS.md", cwd=linked)
+        stale = self.run_git("commit", "-m", "docs: edit", cwd=linked)
+        self.assertEqual(stale.returncode, 1, stale.stderr)
+        self.assertIn("are inconsistent", stale.stderr)
+        self.assertIn(f"fix: {regen_hooks.UV_FALLBACK} scripts/", stale.stderr)
+        self.regenerate(linked)
+        self.git("add", ASSET, cwd=linked)
+        fresh = self.run_git("commit", "-m", "docs: edit", cwd=linked)
+        self.assertEqual(fresh.returncode, 0, fresh.stderr)
+        self.assertEqual(
+            uv_log.read_text(encoding="utf-8").splitlines(), [str(linked)] * 2
+        )
 
     def test_no_managed_python_fails_closed_with_the_fix(self) -> None:
         shutil.rmtree(self.repo / ".venv")

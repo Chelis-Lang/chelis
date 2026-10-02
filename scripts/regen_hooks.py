@@ -100,6 +100,19 @@ CONTENT_FILTERS: dict[str, tuple[str, str]] = {
 }
 
 
+UV_FALLBACK = "uv run --managed-python --python 3.11 --no-project --isolated python"
+
+
+def runnable(repo: Path, python: str, script_argv) -> str:
+    """A command the author can paste: the hook's interpreter when it lives in
+    this worktree, else the uv form, since uv's isolated one is temporary."""
+    try:
+        interpreter = Path(python).relative_to(repo).as_posix()
+    except ValueError:
+        interpreter = UV_FALLBACK
+    return f"{interpreter} {shlex.join(script_argv)}"
+
+
 class GitError(RuntimeError):
     """A git command the hook depends on failed."""
 
@@ -287,7 +300,7 @@ def pre_commit(
             "inconsistent in the staged content.",
             file=out,
         )
-        print(f"  fix: {shlex.join((python, *leg.fix))}", file=out)
+        print(f"  fix: {runnable(repo, python, leg.fix)}", file=out)
         print(f"  then: git add -- {shlex.join(differing)}", file=out)
     print(
         "The derived files are generated from their sources; an edit made by hand "
@@ -380,11 +393,11 @@ def cargo_target(repo: Path, environ: dict[str, str]) -> Path:
     return target if target.is_absolute() else repo / target
 
 
-def check_command(leg: regen_all.RegenLeg, python: str) -> str:
+def check_command(repo: Path, leg: regen_all.RegenLeg, python: str) -> str:
     if leg.check_argv is not None:
-        return shlex.join(leg.check_argv)
+        return runnable(repo, python, leg.check_argv[1:])
     # The opaque corpus has no --check of its own; regen_all supplies it.
-    return shlex.join((python, "scripts/regen_all.py", "--tier", str(leg.tier), "--check"))
+    return runnable(repo, python, ("scripts/regen_all.py", "--tier", str(leg.tier), "--check"))
 
 
 def pre_push_legs(python: str) -> list[regen_all.RegenLeg]:
@@ -432,7 +445,7 @@ def pre_push(
                 print(
                     f"pre-push: not checking {leg.name}: its paths have uncommitted "
                     "changes, so the working tree is not the pushed commit; on a "
-                    f"clean tree run {check_command(leg, python)}",
+                    f"clean tree run {check_command(repo, leg, python)}",
                     file=out,
                 )
                 continue
@@ -441,7 +454,7 @@ def pre_push(
                 print(
                     f"pre-push: skipping {leg.name}: the cargo target is cold "
                     f"({cargo_target(repo, environ) / warm} is absent); check it with "
-                    f"{check_command(leg, python)}",
+                    f"{check_command(repo, leg, python)}",
                     file=out,
                 )
                 continue
@@ -453,7 +466,7 @@ def pre_push(
                     print(
                         f"pre-push: skipping {leg.name}: cargo cannot confirm "
                         "Cargo.lock is current without rewriting it; run "
-                        f"{check_command(leg, python)}",
+                        f"{check_command(repo, leg, python)}",
                         file=out,
                     )
                     continue
@@ -491,7 +504,7 @@ def pre_push(
     )
     for leg in stale:
         assert leg.write_argv is not None
-        print(f"  {shlex.join(leg.write_argv)}", file=out)
+        print(f"  {runnable(repo, python, leg.write_argv[1:])}", file=out)
     return EXIT_REFUSED
 
 

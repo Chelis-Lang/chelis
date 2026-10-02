@@ -76,8 +76,11 @@ if [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
 elif [ -x "$repo_root/.venv/bin/python" ]; then
     exec "$repo_root/.venv/bin/python" "$script" "$hook" "$@"
 elif command -v uv >/dev/null 2>&1; then
+    # --isolated: without it uv prefers an activated VIRTUAL_ENV or a .venv
+    # in any parent directory, such as the primary checkout's when this
+    # worktree is nested inside it, over the managed interpreter.
     unset UV_PYTHON_PREFERENCE
-    exec uv run --managed-python --python 3.11 --no-project python "$script" "$hook" "$@"
+    exec uv run --managed-python --python 3.11 --no-project --isolated python "$script" "$hook" "$@"
 fi
 
 printf '%s\n' "$hook hook: no managed Python interpreter is available to check the staged derived artifacts." >&2
