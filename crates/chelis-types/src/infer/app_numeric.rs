@@ -138,8 +138,8 @@ impl PrecisionSubject {
         match self {
             PrecisionSubject::Concrete(name) => format!("`{name}`"),
             PrecisionSubject::Bounded(name, bound) => format!(
-                "`{name}` (a precision variable bounded by dtype family `{}`, {})",
-                bound.family_name(),
+                "`{name}` (a precision variable bounded by {}, {})",
+                bound.bound_description(),
                 bound.membership_gloss()
             ),
         }
@@ -165,7 +165,7 @@ impl PrecisionSubject {
             PrecisionSubject::Bounded(_, bound) => Some(format!(
                 "spec/04-type-system.md §5.9 [04-DTYPE-2]: the binder's `{}` bound admits \
                  dtypes this operation does not. Declare it {}, or give the operand {}.",
-                bound.family_name(),
+                bound.bound_spelling(),
                 required.binder_spelling(),
                 required.operand_gloss()
             )),

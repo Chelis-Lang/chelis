@@ -462,7 +462,7 @@ fn rows_for_source(
                 "[{}] ",
                 bounds
                     .iter()
-                    .map(|(binder, family)| format!("{binder}: {}", family.surf_name()))
+                    .map(|(binder, bound)| format!("{binder}: {}", bound.surf_spelling()))
                     .collect::<Vec<_>>()
                     .join(", ")
             )

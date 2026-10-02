@@ -9,7 +9,10 @@ pub const SHELL_MAGIC: &[u8; 8] = b"CHELCHB\0";
 // adds checked collection-operation relations. Positional bincode cannot read
 // either change as an absent field without changing the programs an export
 // admits, so both require exact version rejection.
-pub const SHELL_FORMAT_VERSION: u32 = 5;
+/// Bumped to 6 for chelis#2443: [`TypeVariableDomain`] gained an
+/// `ActiveSet` variant, so a shell published by this compiler can carry a
+/// domain a version-5 reader cannot decode.
+pub const SHELL_FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPackage {
@@ -151,7 +154,10 @@ pub struct TypeVariableRestriction {
 /// The §5.9 primitive dtype bounds and §3.1 inferred operation-value
 /// restrictions from `spec/04-type-system.md`, kept distinct in published
 /// metadata. A new semantic domain requires a spec and shell format change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+// Not `Copy`: §5.9's set form publishes its member spellings, so the domain
+// carries a `Vec`. A published format names its dtypes rather than encoding
+// them as bits, which a shell consumer would have to decode.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TypeVariableDomain {
     /// §5.9 `Float`.
@@ -166,6 +172,10 @@ pub enum TypeVariableDomain {
     IntValue,
     /// An inferred operation operand is a numeric scalar or tensor.
     NumericValue,
+    /// §5.9's explicit dtype set, as the member spellings it admits in §1.1
+    /// declaration order. Unlike a family, this does not widen when §1.1
+    /// activates a dtype, so the members are published rather than a name.
+    ActiveSet(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -639,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_encoding_has_an_explicit_v5_envelope() {
+    fn shell_encoding_has_an_explicit_v6_envelope() {
         let bytes = encode_shell(&fixture_shell()).expect("encode shell");
 
         assert_eq!(&bytes[..8], b"CHELCHB\0");
@@ -647,7 +657,7 @@ mod tests {
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             SHELL_FORMAT_VERSION
         );
-        assert_eq!(SHELL_FORMAT_VERSION, 5);
+        assert_eq!(SHELL_FORMAT_VERSION, 6);
     }
 
     #[test]
@@ -671,7 +681,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("unknown CHB version must be rejected");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 99 is unsupported; expected 5"
+            "invalid shell envelope: shell format version 99 is unsupported; expected 6"
         );
     }
 
@@ -683,7 +693,23 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("CHB v4 must not decode without relations");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 4 is unsupported; expected 5"
+            "invalid shell envelope: shell format version 4 is unsupported; expected 6"
+        );
+    }
+
+    /// chelis#2443 took the envelope to 6, because `TypeVariableDomain` gained
+    /// spec/04 §5.9's explicit dtype set and a v5 reader cannot decode it.
+    /// A v5 shell must therefore be refused rather than read as if the domain
+    /// vocabulary were unchanged.
+    #[test]
+    fn shell_decode_rejects_the_pre_dtype_set_domain_version() {
+        let mut bytes = encode_shell(&fixture_shell()).expect("encode shell");
+        bytes[8..12].copy_from_slice(&5_u32.to_le_bytes());
+
+        let error = decode_shell(&bytes).expect_err("CHB v5 predates the dtype-set domain");
+        assert_eq!(
+            error.to_string(),
+            "invalid shell envelope: shell format version 5 is unsupported; expected 6"
         );
     }
 

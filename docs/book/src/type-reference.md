@@ -76,17 +76,32 @@ unify with another dimension but is never generalized. A declared result
 dimension can restore a named shape claim, with a runtime equality check when
 the size cannot be proved statically.
 
-### Dtype-family bounds
+### Dtype bounds
 
-A binder in the `[...]` clause may name one dtype family, which restricts every dtype it
-can be instantiated at. The families are `Float` (the four active floats), `Int` (the four
-active signed integers), and `Numeric` (their union). `bool` and `string` belong to no
-family.
+A binder in the `[...]` clause may carry a dtype bound, which restricts every dtype it can
+be instantiated at. A bound is written either as a family name or as an explicit dtype set.
+
+The families are `Float` (the four active floats), `Int` (the four active signed integers),
+and `Numeric` (their union). `bool` and `string` belong to no family.
 
 ```chelis-surf
 def add_ints[p: Int](x: p, y: p) -> p = add(x, y)
 def add_floats[p: Float](x: p, y: p) -> p = add(x, y)
+def add_wide[p: {f32, f64}](x: p, y: p) -> p = add(x, y)
 ```
+
+An explicit set admits exactly the dtypes it lists. The difference from a family is not
+cosmetic: a family denotes whatever the active dtype set admits into it, so it widens if a
+dtype is activated later, while a set never does. A set is therefore the way to exclude a
+member a family would admit - which matters because a bound's literals must be valid at
+*every* admissible instantiation. Under `p: Float`, `cast(1000000.0, p)` is rejected,
+because `Float` admits `f16` and the literal rounds to infinity there; under
+`p: {f32, f64}` the same literal is fine.
+
+A one-member bound is written `{f64}`. There is no bare-dtype spelling: `p: f64` is a
+syntax error, because a binder restricted to one dtype is a set of one rather than a type
+ascription. The formatter prints a set's members in the order the active dtype set
+declares them, not the order you wrote them.
 
 Calling `add_ints` at `f32`, or `add_floats` at `i32`, is a `PrecisionMismatch` naming the
 required family. The bound is part of the function's type, not a check on the callee name,

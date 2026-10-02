@@ -6389,7 +6389,12 @@ fn copy_package_source(src: &Path, dst: &Path) -> Result<(), String> {
 /// Version 3 (chelis#1654) adds `collection_obligations`, without which two
 /// exports that accept different programs describe themselves identically;
 /// it is likewise not compatible with version 2.
-pub const PACKAGE_SCHEMA_FORMAT_VERSION: u32 = 3;
+/// Version 4 (chelis#2443) widens `type_variable_restrictions[].domain` from a
+/// string enum to a string-or-object union, because spec/04 §5.9's explicit
+/// dtype set publishes its members rather than a family name. A version-3
+/// consumer parsing `domain` as a string is correct for version 3 and breaks
+/// on a set, so it is likewise not compatible with version 3.
+pub const PACKAGE_SCHEMA_FORMAT_VERSION: u32 = 4;
 
 /// Machine-readable package schema describing exported functions, types,
 /// constructors, and required authoring signatures.
@@ -10031,6 +10036,9 @@ fn canonical_shell_scheme(
             TypeVarRestriction::FloatValue => TypeVariableDomain::FloatValue,
             TypeVarRestriction::IntValue => TypeVariableDomain::IntValue,
             TypeVarRestriction::NumericValue => TypeVariableDomain::NumericValue,
+            TypeVarRestriction::ActiveSet(set) => TypeVariableDomain::ActiveSet(
+                set.members().map(|prim| prim.name().to_string()).collect(),
+            ),
         };
         restrictions.push((
             canonical.0,

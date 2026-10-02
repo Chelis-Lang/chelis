@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 pub use crate::ExtensionData;
 pub use crate::annotations_transform::MetadataName;
-use crate::{Atom, DtypeFamily, Expr, RawExpr, Span, metadata::MetadataError};
+use crate::{Atom, DtypeBound, Expr, RawExpr, Span, metadata::MetadataError};
 
 /// A value and its original syntax span.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -459,12 +459,12 @@ impl InvariantPredicate {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DtypeBounds {
-    pub(crate) bounds: BTreeMap<String, Spanned<DtypeFamily>>,
+    pub(crate) bounds: BTreeMap<String, Spanned<DtypeBound>>,
     pub(crate) span: Span,
 }
 impl DtypeBounds {
     pub fn try_new(
-        bounds: impl IntoIterator<Item = (String, Spanned<DtypeFamily>)>,
+        bounds: impl IntoIterator<Item = (String, Spanned<DtypeBound>)>,
         span: Span,
     ) -> Result<Self, MetadataError> {
         let mut result = Self {
@@ -483,7 +483,7 @@ impl DtypeBounds {
         }
         Ok(result)
     }
-    pub fn bounds(&self) -> impl Iterator<Item = (&str, &Spanned<DtypeFamily>)> {
+    pub fn bounds(&self) -> impl Iterator<Item = (&str, &Spanned<DtypeBound>)> {
         self.bounds.iter().map(|(k, v)| (k.as_str(), v))
     }
     pub fn span(&self) -> Span {

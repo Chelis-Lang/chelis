@@ -66,6 +66,63 @@ impl<'a> LiteralSource<'a> {
             _ => LiteralFamilyFit::IncompatibleKind,
         }
     }
+
+    /// Whether an unsuffixed literal is admitted by either §5.9 bound form.
+    pub fn admitted_by_bound(self, bound: &crate::DtypeBound) -> bool {
+        self.has_exact_unsuffixed_style() && self.bound_fit(bound) == LiteralFamilyFit::Fits
+    }
+
+    /// [04-INF-6] at every member of either §5.9 bound form.
+    ///
+    /// The family arm keeps [`LiteralSource::family_fit`]'s behaviour. The set
+    /// arm is why chelis#2443 exists: an integer literal is range-checked
+    /// against the integer members the set actually lists, so `{i32, i64}`
+    /// admits a value i8 could not hold, while `Int` still does not.
+    pub fn bound_fit(self, bound: &crate::DtypeBound) -> LiteralFamilyFit {
+        let crate::DtypeBound::Set(members) = bound else {
+            let crate::DtypeBound::Family(family) = bound else {
+                unreachable!("DtypeBound has exactly two forms")
+            };
+            return self.family_fit(*family);
+        };
+        // §5.9 makes an empty set a declaration error, rejected before a
+        // bound is installed, so there is always at least one member.
+        let every_member_is_float = members.iter().all(|member| member.is_float());
+        match self.numeric_atom {
+            // A float literal cannot bind at an integer member.
+            Some(Atom::Float(_)) if every_member_is_float => LiteralFamilyFit::Fits,
+            Some(Atom::Float(_)) => LiteralFamilyFit::IncompatibleKind,
+            // An integer literal adopts a float member exactly as it does
+            // under `Float`.
+            Some(Atom::Int(_)) if every_member_is_float => LiteralFamilyFit::Fits,
+            Some(Atom::Int(value)) => {
+                if members
+                    .iter()
+                    .filter(|member| member.is_integer())
+                    .all(|member| {
+                        let (min, max) = signed_integer_range(*member);
+                        *value >= min && *value <= max
+                    })
+                {
+                    LiteralFamilyFit::Fits
+                } else {
+                    LiteralFamilyFit::IntegerOutOfRange
+                }
+            }
+            _ => LiteralFamilyFit::IncompatibleKind,
+        }
+    }
+}
+
+/// The closed range of one active signed integer dtype.
+fn signed_integer_range(member: crate::BoundDtype) -> (i64, i64) {
+    match member {
+        crate::BoundDtype::I8 => (i8::MIN as i64, i8::MAX as i64),
+        crate::BoundDtype::I16 => (i16::MIN as i64, i16::MAX as i64),
+        crate::BoundDtype::I32 => (i32::MIN as i64, i32::MAX as i64),
+        crate::BoundDtype::I64 => (i64::MIN, i64::MAX),
+        float => unreachable!("{} is not a signed integer", float.name()),
+    }
 }
 
 fn active_signed_integer_ranges() -> [(i64, i64); 4] {

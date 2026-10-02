@@ -152,7 +152,7 @@ first-class `len`, `index`, `append`, `concat`, `key_from_seed`, `split_key`,
 its operand and result types in canonical Deep form under those same
 identities. A relation variable absent from the printed callable type is
 rejected rather than published as a hidden predicate. `reef schema` JSON uses
-schema `format_version: 3` and the same two ledgers, so the machine-readable
+schema `format_version: 4` and the same two ledgers, so the machine-readable
 authoring ABI and the installable CHB describe the same published checked
 scheme identity. These publication surfaces are not compiler checker-reuse
 inputs in this slice; serialized TypeEnv owns that path.

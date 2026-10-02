@@ -13,7 +13,7 @@ pub(super) struct DeclaredSigMetadata {
     pub(super) param_types: Vec<deep::Expr>,
     pub(super) binders: UnordSet<String>,
     /// Exact dtype-family capabilities admitted by the typed annotation boundary.
-    pub(super) dtype_bounds: UnordMap<String, chelis_deep::DtypeFamily>,
+    pub(super) dtype_bounds: UnordMap<String, chelis_deep::DtypeBound>,
 }
 
 /// One checker operation's typed inference result. The product is private,
@@ -803,7 +803,7 @@ impl InferenceProduct {
                          contract at the declaration boundary (spec/04-type-system.md §3.1)",
                         contract.subject,
                         contract.owner.as_deref().unwrap_or("<anonymous>"),
-                        required.family_name(),
+                        required.bound_spelling(),
                         subst.apply(&Type::Var(contract.variable)),
                     ),
                     vec![

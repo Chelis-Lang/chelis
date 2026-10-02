@@ -51,13 +51,22 @@ Here `empty_tensor` has shape `[0]` and dtype `f64`. An unconstrained
 
 ## Dtype parameters
 
-A dtype-family bound restricts the dtypes a parameter accepts. `Int` accepts
-integer dtypes; `Float` accepts floating dtypes; `Numeric` accepts both:
+A dtype bound restricts the dtypes a parameter accepts. A bound is either a
+family or an explicit set. `Int` accepts integer dtypes; `Float` accepts
+floating dtypes; `Numeric` accepts both:
 
 ```chelis-surf
 def double_ints[p: Int](x: p) -> p = add(x, x)
 ```
 
-For named dimensions, rank polymorphism, generic casts, ownership, and the
-corresponding Deep forms, see the [Type System Reference](type-reference.md).
+An explicit set admits exactly the dtypes it lists, which is how a declaration
+excludes a member its family would admit:
+
+```chelis-surf
+def widen_only[p: {f32, f64}](x: p) -> p = add(x, x)
+```
+
+For named dimensions, rank polymorphism, generic casts, ownership, the
+difference between the two bound forms, and the corresponding Deep forms, see
+the [Type System Reference](type-reference.md).
 For effects in function types, continue to [Effects](effects.md).
