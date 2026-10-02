@@ -14,7 +14,7 @@
 //!    against an empty `$CHELIS_REEF_HOME`. The lockfile carries a
 //!    `chelis-std` entry with `LockSource::Bundled`.
 //! 2. **Explicit-runtime project builds.** Same shape, but the
-//!    project lists `chelis-std = { version = "0.4.0" }` explicitly.
+//!    project lists `chelis-std = { version = "<bundled version>" }` explicitly.
 //!    The lockfile is structurally identical to the implicit case
 //!    (synthesis is idempotent).
 //! 3. **Wipe-and-rebuild.** After the first build, the test wipes
@@ -39,101 +39,159 @@
 
 use assert_cmd::Command;
 use chelis_reef::{LockSource, ReefLock};
-use std::collections::BTreeMap;
+use chelis_std_bundle::{
+    BUNDLED_CHELIS_STD_VERSION, CHELIS_STD_ARCHIVE, CHELIS_STD_SHELL, EMBEDDED_RUNTIME,
+};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
-use walkdir::WalkDir;
 
-fn runtime_package_files(root: &Path) -> BTreeMap<PathBuf, String> {
-    let mut files = BTreeMap::new();
-    let manifest = PathBuf::from("reef.toml");
-    files.insert(
-        manifest.clone(),
-        fs::read_to_string(root.join(&manifest)).unwrap_or_else(|error| {
-            panic!("read runtime package file {}: {error}", manifest.display())
-        }),
-    );
-    for entry in WalkDir::new(root.join("src")) {
-        let entry = entry.expect("walk runtime package src tree");
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(root)
-            .expect("runtime package entry stays below root")
-            .to_path_buf();
-        files.insert(
-            relative,
-            fs::read_to_string(entry.path()).expect("read runtime package source file"),
-        );
-    }
-    files
+fn std_package_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std")
 }
 
-#[test]
-fn bundled_chelis_std_sources_match_the_checked_in_runtime_package() {
-    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = crate_root
-        .parent()
-        .and_then(Path::parent)
-        .expect("chelis-cli is a workspace crate");
-    let package_root = repo_root.join("packages/chelis-std");
-    let extracted = tempdir().expect("bundle extraction tempdir");
-    chelis_std_bundle::EMBEDDED_RUNTIME
-        .extract_into(extracted.path())
-        .expect("extract embedded chelis-std");
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
-    let embedded_files = runtime_package_files(extracted.path());
-    let checked_in_files = runtime_package_files(&package_root);
-    assert_eq!(
-        embedded_files.keys().collect::<Vec<_>>(),
-        checked_in_files.keys().collect::<Vec<_>>(),
-        "embedded chelis-std file inventory differs from packages/chelis-std"
-    );
-    for (path, checked_in) in &checked_in_files {
-        assert!(
-            embedded_files.get(path) == Some(checked_in),
-            "embedded chelis-std source drift at {}; rerun scripts/regenerate_chelis_std_bundle.py and commit every generated distribution artifact",
-            path.display()
-        );
+/// Copy the runtime inputs of `packages/chelis-std` (the files the embedded
+/// runtime is packed from) to `dest`.
+fn copy_std_sources(dest: &Path) -> PathBuf {
+    let source = std_package_root();
+    for relative in chelis_std_bundle::stage::runtime_inputs(&source).expect("runtime inputs") {
+        let target = dest.join(&relative);
+        fs::create_dir_all(target.parent().expect("input has a parent")).expect("mkdir");
+        fs::copy(source.join(&relative), &target).expect("copy runtime input");
     }
+    dest.to_path_buf()
+}
 
-    let version = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
-    let package_dist = package_root.join("dist");
-    assert!(
-        fs::read(package_dist.join(format!("chelis-std-{version}.tar.zst")))
-            .expect("read package archive artifact")
-            == chelis_std_bundle::CHELIS_STD_ARCHIVE,
-        "packages/chelis-std and the compile-time bundle must carry one archive"
-    );
-    assert!(
-        fs::read(package_dist.join(format!("chelis-std-{version}.chb")))
-            .expect("read package shell artifact")
-            == chelis_std_bundle::CHELIS_STD_SHELL,
-        "packages/chelis-std and the compile-time bundle must carry one shell"
-    );
+/// `chelis reef build` of the package at `root`, offline, with the default
+/// archive mtime.
+fn reef_build(root: &Path, reef_home: &Path) {
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
+        .env_remove("SOURCE_DATE_EPOCH")
+        .args(["reef", "build", "--no-auto-fetch", root.to_str().unwrap()])
+        .assert()
+        .success();
+}
 
-    let lock = read_lockfile(&package_root);
-    let bundled = lock
+fn built_pair(root: &Path) -> (Vec<u8>, Vec<u8>) {
+    let dist = root.join("dist");
+    let stem = format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}");
+    (
+        fs::read(dist.join(format!("{stem}.tar.zst"))).expect("read built archive"),
+        fs::read(dist.join(format!("{stem}.chb"))).expect("read built shell"),
+    )
+}
+
+/// The `(archive_sha256, shell_sha256)` the lock at `root` records for the
+/// bundled runtime.
+fn locked_runtime_hashes(root: &Path) -> (String, String) {
+    let lock = read_lockfile(root);
+    assert_chelis_std_bundled_entry(&lock);
+    let entry = lock
         .dependencies
         .iter()
         .find(|dependency| dependency.name == "chelis-std")
-        .expect("the runtime package lock carries its bundled self-dependency");
+        .expect("the lock records the runtime");
+    (entry.archive_sha256.clone(), entry.shell_sha256.clone())
+}
+
+/// The embedded archive holds exactly the runtime inputs of
+/// `packages/chelis-std`, byte for byte, so a binary never carries a runtime
+/// built from other sources.
+#[test]
+fn bundled_chelis_std_sources_match_the_checked_in_runtime_package() {
+    let package_root = std_package_root();
+    let inputs = chelis_std_bundle::stage::runtime_inputs(&package_root).expect("runtime inputs");
+    let embedded = EMBEDDED_RUNTIME
+        .archive_files()
+        .expect("read the embedded archive");
     assert_eq!(
-        bundled.archive_sha256,
-        chelis_std_bundle::EMBEDDED_RUNTIME
-            .archive_sha256()
-            .to_string(),
-        "the runtime package lock must pin the shipped archive bytes"
+        embedded.keys().cloned().collect::<Vec<_>>(),
+        inputs,
+        "embedded chelis-std file inventory differs from packages/chelis-std"
     );
+    for relative in &inputs {
+        let checked_in = fs::read(package_root.join(relative)).expect("read runtime input");
+        assert!(
+            embedded.get(relative) == Some(&checked_in),
+            "embedded chelis-std source drift at {}; the build of chelis-std-bundle \
+             packs packages/chelis-std, so this binary was built from other sources",
+            relative.display()
+        );
+    }
+}
+
+/// The fixed point between the compiler and the runtime it embeds:
+/// `chelis reef build` of a fresh copy of the std sources writes exactly the
+/// embedded archive and shell, and the lock that build writes, like the lock
+/// of any package built against this runtime, names the hashes of those
+/// freshly built bytes.
+#[test]
+fn building_the_std_sources_reproduces_the_embedded_runtime() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_copy = copy_std_sources(&dir.path().join("chelis-std"));
+    reef_build(&std_copy, &reef_home);
+    let (archive, shell) = built_pair(&std_copy);
+    assert!(
+        archive == CHELIS_STD_ARCHIVE,
+        "chelis reef build of the std sources wrote an archive other than the embedded one"
+    );
+    assert!(
+        shell == CHELIS_STD_SHELL,
+        "chelis reef build of the std sources wrote a shell other than the embedded one"
+    );
+    let built_hashes = (sha256_hex(&archive), sha256_hex(&shell));
     assert_eq!(
-        bundled.shell_sha256,
-        chelis_std_bundle::EMBEDDED_RUNTIME
-            .shell_sha256()
-            .to_string(),
-        "the runtime package lock must pin the shipped shell bytes"
+        locked_runtime_hashes(&std_copy),
+        built_hashes,
+        "the runtime's own lock must name the hashes of the runtime it builds"
+    );
+
+    let downstream = dir.path().join("downstream");
+    write_implicit_runtime_project(&downstream, "Downstream");
+    reef_build(&downstream, &reef_home);
+    assert_eq!(
+        locked_runtime_hashes(&downstream),
+        built_hashes,
+        "a package's lock must name the hashes of the runtime built from the std sources"
+    );
+}
+
+/// Negative parity for the fixed point: an edited std copy builds a different
+/// pair, while every lock this binary writes keeps naming the runtime the
+/// binary embeds, so the comparison above can fail.
+#[test]
+fn an_edited_std_copy_does_not_reproduce_the_embedded_runtime() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_copy = copy_std_sources(&dir.path().join("chelis-std"));
+    let edited = std_copy.join("src/text.ch");
+    let mut source = fs::read(&edited).expect("read std source");
+    source.extend_from_slice(b"\n-- an edit\n");
+    fs::write(&edited, source).expect("edit std source");
+    reef_build(&std_copy, &reef_home);
+    let (archive, shell) = built_pair(&std_copy);
+    assert!(
+        archive != CHELIS_STD_ARCHIVE,
+        "the edit must change the archive"
+    );
+    assert!(shell != CHELIS_STD_SHELL, "the edit must change the shell");
+    let locked = locked_runtime_hashes(&std_copy);
+    assert_ne!(locked, (sha256_hex(&archive), sha256_hex(&shell)));
+    assert_eq!(
+        locked,
+        (
+            EMBEDDED_RUNTIME.archive_sha256().to_string(),
+            EMBEDDED_RUNTIME.shell_sha256().to_string()
+        )
     );
 }
 
@@ -205,7 +263,10 @@ fn assert_chelis_std_bundled_entry(lock: &ReefLock) {
                     .collect::<Vec<_>>()
             )
         });
-    assert_eq!(entry.version, "0.4.0", "bundled chelis-std version");
+    assert_eq!(
+        entry.version, BUNDLED_CHELIS_STD_VERSION,
+        "bundled chelis-std version"
+    );
     match &entry.source {
         LockSource::Bundled { compiler_version } => {
             // The compiler_version field records the version of the
@@ -267,7 +328,7 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
         let dir = tempdir().expect("tempdir");
         let pkg_root = dir.path().join("explicit-pkg");
         let reef_home = dir.path().join("reef-home");
-        write_explicit_runtime_project(&pkg_root, "Explicit", "0.4.0");
+        write_explicit_runtime_project(&pkg_root, "Explicit", BUNDLED_CHELIS_STD_VERSION);
 
         Command::cargo_bin("chelis")
             .expect("chelis binary")
@@ -290,16 +351,12 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
         // both paths so they MUST agree.
         assert_eq!(
             entry.archive_sha256,
-            chelis_std_bundle::EMBEDDED_RUNTIME
-                .archive_sha256()
-                .to_string(),
+            EMBEDDED_RUNTIME.archive_sha256(),
             "explicit-listing path must use bundled archive_sha256"
         );
         assert_eq!(
             entry.shell_sha256,
-            chelis_std_bundle::EMBEDDED_RUNTIME
-                .shell_sha256()
-                .to_string(),
+            EMBEDDED_RUNTIME.shell_sha256(),
             "explicit-listing path must use bundled shell_sha256"
         );
     }
@@ -350,7 +407,7 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
         let dir = tempdir().expect("tempdir");
         let pkg_root = dir.path().join("wipe-std-only");
         let reef_home = dir.path().join("reef-home");
-        write_explicit_runtime_project(&pkg_root, "WipeStdOnly", "0.4.0");
+        write_explicit_runtime_project(&pkg_root, "WipeStdOnly", BUNDLED_CHELIS_STD_VERSION);
 
         Command::cargo_bin("chelis")
             .expect("chelis binary")
@@ -399,7 +456,9 @@ fn phaseA_item1_negative_parity_explicit_version_mismatch() {
 
     let stderr = String::from_utf8_lossy(&assert_out.get_output().stderr).to_string();
     assert!(
-        stderr.contains("chelis-std") && stderr.contains("9.9.9") && stderr.contains("0.4.0"),
+        stderr.contains("chelis-std")
+            && stderr.contains("9.9.9")
+            && stderr.contains(BUNDLED_CHELIS_STD_VERSION),
         "soft-verify error must name both versions; got stderr:\n{stderr}"
     );
 

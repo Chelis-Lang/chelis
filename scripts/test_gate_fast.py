@@ -111,8 +111,7 @@ class FastCommandListTests(unittest.TestCase):
         lint, clippy and the tripwires.
         """
         commands = gate.fast_command_list(
-            [], std_changed=False, changed_paths=[], lock_guard_changed=False
-        )
+            [], std_changed=False, changed_paths=[])
         self.assertEqual(
             commands[:4],
             [
@@ -134,7 +133,6 @@ class FastCommandListTests(unittest.TestCase):
             ["chelis-cli", "chelis-surf"],
             std_changed=False,
             changed_paths=[],
-            lock_guard_changed=False,
         )
         clippy = [
             command for command in commands
@@ -156,143 +154,47 @@ class FastCommandListTests(unittest.TestCase):
         self.assertTrue(gate.std_paths_changed(["crates/chelis-std-bundle/build.rs"]))
         self.assertFalse(gate.std_paths_changed(["crates/chelis-cli/src/main.rs"]))
         self.assertFalse(gate.std_paths_changed([]))
-        without = gate.fast_command_list(
-            [], std_changed=False, changed_paths=[], lock_guard_changed=False
-        )
+        without = gate.fast_command_list([], std_changed=False, changed_paths=[])
         with_std = gate.fast_command_list(
-            ["chelis-std-bundle"],
-            std_changed=True,
-            changed_paths=[],
-            lock_guard_changed=False,
+            ["chelis-std-bundle"], std_changed=True, changed_paths=[]
         )
         self.assertEqual(without[-1], gate.FAST_TRIPWIRE_NEXTEST)
-        self.assertNotIn(gate.REGEN_TIER1_WRITE, without)
         self.assertNotIn(gate.STD_BUNDLE_SELF_CONSISTENCY, without)
-        # Writers first: tier 1 regenerates the bundle right after tier 0, so
-        # lint, clippy, and the bundled-std tripwire see fresh embedded bytes;
-        # the self-consistency test is a check and goes last.
-        self.assertEqual(
-            with_std[:2], [gate.REGEN_TIER0_WRITE, gate.REGEN_TIER1_WRITE]
-        )
+        # The build packs the runtime, so a std change adds no writer: the
+        # prefix is unchanged and the bundle crate's tests are a check that
+        # goes last.
+        self.assertEqual(with_std[:2], [gate.REGEN_TIER0_WRITE, gate.FMT_WRITE])
         self.assertEqual(with_std[-1], gate.STD_BUNDLE_SELF_CONSISTENCY)
         self.assertEqual(with_std.count(gate.FAST_TRIPWIRE_NEXTEST), 1)
-        self.assertLess(
-            with_std.index(gate.REGEN_TIER1_WRITE), with_std.index(gate.FMT_WRITE)
-        )
         self.assertLess(
             with_std.index(gate.FAST_TRIPWIRE_NEXTEST),
             with_std.index(gate.STD_BUNDLE_SELF_CONSISTENCY),
         )
+
+    def test_the_std_bundle_tracking_guard_runs_on_every_fast_pass(self):
+        """The guard reads the index, so it runs whatever changed, after the
+        lint and evaluator guards and before the per-crate stages."""
+        for std_changed in (False, True):
+            commands = gate.fast_command_list(
+                ["chelis-cli"], std_changed=std_changed, changed_paths=[]
+            )
+            self.assertEqual(commands.count(gate.STD_BUNDLE_TRACKING_GUARD), 1)
+            self.assertEqual(
+                commands.index(gate.STD_BUNDLE_TRACKING_GUARD),
+                commands.index(gate.EVAL_SYSTEM_GUARD) + 1,
+            )
         self.assertEqual(
-            gate.render(gate.REGEN_TIER1_WRITE),
-            "<managed-python> scripts/regen_all.py --tier 1",
+            gate.render(gate.STD_BUNDLE_TRACKING_GUARD),
+            "<managed-python> scripts/check_std_bundle_untracked.py",
         )
-
-    def test_bundled_lock_guard_leg_appears_only_when_its_own_trigger_fires(self):
-        """chelis#2309: the `chelis-reef` bundled-lock guard is a lib unit test
-        in a crate the changed-crate stage never selects, so before this leg no
-        local invocation reached it and `--fast` reported PASS on a head that CI
-        then rejected (chelis#2305)."""
-        without = gate.fast_command_list(
-            [], std_changed=False, changed_paths=[], lock_guard_changed=False
-        )
-        self.assertNotIn(gate.REEF_BUNDLED_LOCK_HASHES, without)
-        with_guard = gate.fast_command_list(
-            [], std_changed=False, changed_paths=[], lock_guard_changed=True
-        )
-        # Last, so tier-1 regeneration (when it runs at all) has already written
-        # the `dist/` bytes the committed locks are compared against.
-        self.assertEqual(with_guard[-1], gate.REEF_BUNDLED_LOCK_HASHES)
-        self.assertEqual(with_guard[:-1], without)
-        both = gate.fast_command_list(
-            [], std_changed=True, changed_paths=[], lock_guard_changed=True
-        )
-        self.assertEqual(
-            both[-2:],
-            [gate.STD_BUNDLE_SELF_CONSISTENCY, gate.REEF_BUNDLED_LOCK_HASHES],
-        )
-
-    def test_fast_command_list_requires_the_lock_guard_decision(self):
-        """No default: a call site that forgets the flag must raise, not
-        silently drop the only local stage that reaches the guard."""
-        with self.assertRaises(TypeError):
-            gate.fast_command_list([], std_changed=False, changed_paths=[])
-
-    def test_lock_guard_trigger_covers_every_path_class_that_moves_the_verdict(self):
-        """Each of the four path classes that can invalidate the invariant, and
-        the negative parity for each."""
-        fires = gate.bundled_lock_guard_paths_changed
-        # The bundle side: the same prefixes `std_paths_changed` already keys on.
-        self.assertTrue(fires(["packages/chelis-std/src/decimal.ch"]))
-        self.assertTrue(fires(["crates/chelis-std-bundle/dist/chelis-std-0.4.0.chb"]))
-        # The lock side, matched by basename because the guard discovers its
-        # lock set by walking the tree, not from an enumerated list.
-        self.assertTrue(fires(["crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.lock"]))
-        self.assertTrue(fires(["examples/nautilus_quantile_contract/reef.lock"]))
-        self.assertTrue(fires(["a/brand/new/package/reef.lock"]))
-        self.assertTrue(fires(["reef.lock"]))
-        # The workspace version the locks pin the compiler to: `chelis-reef`
-        # takes `version.workspace = true` and the guard feeds its own
-        # CARGO_PKG_VERSION into the comparison.
-        self.assertTrue(fires(["Cargo.toml"]))
-        # The guard's own crate: --fast runs clippy, not nextest, per changed
-        # crate, so editing the discovery walk never ran the guard locally.
-        # This asserted False before round 1, which pinned the hole open -- and
-        # was only true while chelis-reef reads `version.workspace = true`.
-        self.assertTrue(fires(["crates/chelis-reef/src/lib.rs"]))
-        self.assertTrue(fires(["crates/chelis-reef/Cargo.toml"]))
-
-        # Negative parity: none of these can move either side.
-        self.assertFalse(fires([]))
-        self.assertFalse(fires(["crates/chelis-cli/src/main.rs"]))
-        self.assertFalse(fires(["docs/local_gate.md"]))
-        self.assertFalse(fires(["reef.lock.bak"]))
-        # The trailing slash on GUARD_CRATE_PREFIX is load-bearing: a sibling
-        # crate whose name merely starts with it must stay quiet.
-        self.assertFalse(fires(["crates/chelis-reef-foo/src/lib.rs"]))
-        self.assertFalse(fires(["examples/x/not-a-reef.lock"]))
-
-    def test_lock_guard_trigger_is_a_superset_of_the_std_trigger(self):
-        """`std_changed` alone would fix one of the three path classes
-        chelis#2309 names, so the new leg may never be narrower than it."""
-        for paths in (
-            ["packages/chelis-std/src/x.ch"],
-            ["crates/chelis-std-bundle/build.rs"],
-            ["crates/chelis-cli/src/main.rs"],
-            [],
-        ):
-            if gate.std_paths_changed(paths):
-                self.assertTrue(
-                    gate.bundled_lock_guard_paths_changed(paths), paths
-                )
-
-    def test_bundled_lock_guard_command_names_both_halves_of_the_invariant(self):
-        """The filterset must select exactly the two `chelis-reef` lib tests
-        that own the invariant, and both must exist in the crate's source."""
-        command = gate.REEF_BUNDLED_LOCK_HASHES
-        self.assertEqual(command[:3], ["cargo", "nextest", "run"])
-        self.assertEqual(command[3:6], ["-p", "chelis-reef", "--lib"])
-        self.assertNotIn("--workspace", command)
-        # Without --no-fail-fast an rlib-half failure suppresses the lock
-        # report: one failure per round at stage granularity, which is the
-        # defect this leg removes at lock granularity. Round 1 mutated the flag
-        # away and no test noticed.
-        self.assertIn("--no-fail-fast", command)
-        filterset = command[command.index("-E") + 1]
-        source = (REPO_ROOT / "crates" / "chelis-reef" / "src" / "lib.rs").read_text()
-        for name in (
-            "bundled_chelis_std_lock_hashes_match_embedded_artifacts",
-            "embedded_bundle_rlib_matches_disk",
-        ):
-            self.assertIn(f"test({name})", filterset)
-            self.assertIn(f"fn {name}()", source)
+        self.assertIn(gate.STD_BUNDLE_TRACKING_GUARD, gate.FAST_STATIC_COMMANDS)
+        self.assertIn(gate.STD_BUNDLE_TRACKING_GUARD, gate.STAGES["lint-and-unit"])
 
     def test_fast_excludes_workspace_clippy_fmt_check_doctests_and_both_oracles(self):
         rendered = [
             gate.render(c)
             for c in gate.fast_command_list(
-                ["chelis-cli"], std_changed=True, changed_paths=[], lock_guard_changed=False
-            )
+                ["chelis-cli"], std_changed=True, changed_paths=[])
         ]
         for excluded in (
             gate.CLIPPY_WORKSPACE,
@@ -304,7 +206,7 @@ class FastCommandListTests(unittest.TestCase):
             gate.DOCTEST_PIPELINE_CORE,
             gate.UNREPRESENTABLE_DOMAIN_ORACLE,
             gate.RUNTIME_REPRESENTATION_ORACLE,
-            gate.CHELIS_STD_BUNDLE_CHECK,
+            gate.STD_BUNDLE_REPRODUCIBILITY,
             gate.NEXTEST_WORKSPACE,
             gate.BUILD_WORKSPACE,
         ):
@@ -335,12 +237,11 @@ class FastCommandListTests(unittest.TestCase):
 
     def test_fast_list_hands_over_no_oracle_binary(self):
         commands = gate.fast_command_list(
-                ["chelis-cli"], std_changed=True, changed_paths=[], lock_guard_changed=False
-            )
+                ["chelis-cli"], std_changed=True, changed_paths=[])
         self.assertIsNone(gate.oracle_binary_handoff(commands, "/t"))
 
     def test_fast_uses_the_managed_python_marker(self):
-        for command in (gate.REGEN_TIER0_WRITE, gate.REGEN_TIER1_WRITE):
+        for command in (gate.REGEN_TIER0_WRITE, gate.STD_BUNDLE_TRACKING_GUARD):
             self.assertEqual(command[0], gate.MANAGED_PYTHON)
         materialized = gate.materialize_command(
             gate.REGEN_TIER0_WRITE, Path("/py/bin/python")
@@ -643,8 +544,7 @@ class SummaryTests(unittest.TestCase):
         # The same path the run derives, so this also asserts that `--fast`
         # hands the derived set to the classification rather than an empty one.
         expected = gate.fast_command_list(
-            ["chelis-cli"], std_changed=False, changed_paths=[], lock_guard_changed=False
-        )
+            ["chelis-cli"], std_changed=False, changed_paths=[])
         self.assertEqual(len(launched), len(expected))
         self.assertEqual(len(summary["stages"]), len(expected))
         for index, stage in enumerate(summary["stages"], start=1):
@@ -724,50 +624,25 @@ class SummaryTests(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertTrue(summary["git"]["std_changed"])
-        # A std path moves the embedded bundle, which is one side of the
-        # bundled-lock invariant, so the chelis#2309 leg fires here too.
-        self.assertTrue(summary["git"]["lock_guard_changed"])
         self.assertEqual(summary["git"]["selected_crates"], [])
         rendered = [" ".join(c) for c in launched]
-        self.assertTrue(rendered[1].endswith("scripts/regen_all.py --tier 1"), rendered[1])
-        self.assertTrue(rendered[-2].startswith("cargo nextest run -p chelis-std-bundle --lib"))
-        self.assertTrue(rendered[-1].startswith("cargo nextest run -p chelis-reef --lib"))
+        self.assertTrue(rendered[1].endswith("cargo fmt --all"), rendered[1])
+        self.assertTrue(rendered[-1].startswith("cargo nextest run -p chelis-std-bundle --lib"))
         self.assertIn("chelis-std paths changed", out)
-        self.assertIn("bundled-lock invariant can have moved", out)
         self.assertIn("no crate changes detected", out)
         self.assertIn("per-crate clippy", out)
 
-    def test_lock_only_change_appends_the_lock_guard_but_not_the_std_legs(self):
-        """chelis#2309's uncovered class: `examples/**/reef.lock` belongs to no
-        crate and is under no std prefix, so before this leg nothing local ran
-        the guard it invalidates."""
-        rc, summary, launched, out, _err, _lease = self._run_main(
-            ["--fast"],
-            diff="examples/nautilus_quantile_contract/reef.lock\n",
-        )
-        self.assertEqual(rc, 0)
-        self.assertFalse(summary["git"]["std_changed"])
-        self.assertTrue(summary["git"]["lock_guard_changed"])
-        self.assertEqual(summary["git"]["selected_crates"], [])
-        rendered = [" ".join(c) for c in launched]
-        self.assertTrue(rendered[-1].startswith("cargo nextest run -p chelis-reef --lib"))
-        self.assertNotIn(
-            "scripts/regen_all.py --tier 1", " ".join(rendered)
-        )
-        self.assertNotIn("chelis-std-bundle --lib", " ".join(rendered))
-        self.assertIn("bundled-lock invariant can have moved", out)
-
     def test_unrelated_change_appends_neither_conditional_leg(self):
-        """Negative parity: the leg stays off the cost of every other change."""
+        """Negative parity: the bundle crate's tests stay off the cost of every
+        other change."""
         rc, summary, launched, out, _err, _lease = self._run_main(
             ["--fast"], diff="crates/chelis-surf/src/lib.rs\n"
         )
         self.assertEqual(rc, 0)
         self.assertFalse(summary["git"]["std_changed"])
-        self.assertFalse(summary["git"]["lock_guard_changed"])
         rendered = " ".join(" ".join(c) for c in launched)
-        self.assertNotIn("chelis-reef", rendered)
-        self.assertNotIn("bundled-lock invariant can have moved", out)
+        self.assertNotIn("chelis-std-bundle --lib", rendered)
+        self.assertNotIn("chelis-std paths changed", out)
 
     def test_summary_written_on_stage_failure(self):
         rc, summary, launched, _out, err, _lease = self._run_main(

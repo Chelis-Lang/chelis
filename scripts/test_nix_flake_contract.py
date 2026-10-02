@@ -654,6 +654,7 @@ class NixSourceContractTests(unittest.TestCase):
             "chelis-cli": "chelis-source/crates/chelis-cli",
             "chelis-compiler-api": "chelis-source/crates/chelis-compiler-api",
             "chelis-cove": "chelis-source/crates/chelis-cove",
+            "chelis-std-bundle": "chelis-source/crates/chelis-std-bundle",
             "tree-sitter-chelis": "chelis-source/tree-sitter-chelis",
         }
         for crate, source_root in expected_roots.items():
@@ -661,6 +662,11 @@ class NixSourceContractTests(unittest.TestCase):
                 self.assertIn(f'"{crate}" = attrs:', packages)
                 self.assertIn(f'sourceRoot = "{source_root}";', packages)
         self.assertEqual(packages.count("src = crateSource;"), len(expected_roots))
+        # The bundle's build script packs packages/chelis-std from the crate
+        # source tree.
+        crate_source = packages[packages.index("crateSource = import ./source.nix") :]
+        crate_source = crate_source[: crate_source.index("};")]
+        self.assertIn('"packages"', crate_source)
 
     def test_repository_lint_has_no_generated_graph_exclusion(self) -> None:
         policy = (REPO_ROOT / "chelis-lint.toml").read_text(encoding="utf-8")

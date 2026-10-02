@@ -35,9 +35,10 @@ pub static EMBEDDED_RUNTIME: EmbeddedRuntime = EmbeddedRuntime::new(
     CHELIS_STD_SHELL,
 );
 
-#[cfg(test)]
+/// The input selection and packing step the build script runs, for tests
+/// that reproduce the embedded runtime from the sources.
 #[path = "../build/stage.rs"]
-mod stage;
+pub mod stage;
 
 #[cfg(test)]
 mod tests {
@@ -93,22 +94,6 @@ mod tests {
         let manifest = chelis_reef::read_manifest_for_src(&std_root()).expect("read manifest");
         assert_eq!(BUNDLED_CHELIS_STD_VERSION, manifest.package.version);
         assert_eq!(EMBEDDED_RUNTIME.version(), manifest.package.version);
-    }
-
-    /// The build-time pair is byte-identical to the pair committed before the
-    /// runtime was packed at build time.
-    #[test]
-    fn build_time_pair_matches_the_committed_pair() {
-        for dist in [
-            std_root().join("dist"),
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("dist"),
-        ] {
-            let stem = format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}");
-            let archive = std::fs::read(dist.join(format!("{stem}.tar.zst"))).expect("archive");
-            let shell = std::fs::read(dist.join(format!("{stem}.chb"))).expect("shell");
-            assert!(archive == CHELIS_STD_ARCHIVE, "{} archive", dist.display());
-            assert!(shell == CHELIS_STD_SHELL, "{} shell", dist.display());
-        }
     }
 
     #[test]

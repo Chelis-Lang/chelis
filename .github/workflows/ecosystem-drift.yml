@@ -82,9 +82,9 @@ jobs:
       - name: Build chelis-cli (release)
         run: cargo build --release -p chelis-cli --features sealed-runtime
 
-      # Rebuild chelis-std from HEAD source with the HEAD binary so the
-      # bundled package genuinely reflects HEAD (catches a chelis change
-      # that breaks chelis-std's own lowering — a nautilus-#11-class bug).
+      # Build chelis-std from HEAD source with the HEAD binary: the dist pair
+      # is not committed, and `reef install --from-monorepo` in the drift job
+      # reads it. The binary embeds the same pair, packed at build time.
       # Emits packages/chelis-std/dist/chelis-std-<ver>.{chb,tar.zst}.
       - name: Rebuild HEAD chelis-std bundle
         run: ./target/release/chelis reef build --no-auto-fetch packages/chelis-std

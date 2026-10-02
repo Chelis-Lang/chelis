@@ -3,10 +3,10 @@
 
 Usage (from the repository root, with the worktree's managed Python):
 
-    .venv/bin/python scripts/regen_all.py               # write tiers 0 and 1
+    .venv/bin/python scripts/regen_all.py               # write tier 0
     .venv/bin/python scripts/regen_all.py --check       # report stale legs only
     .venv/bin/python scripts/regen_all.py --tier 0      # lightweight generators
-    .venv/bin/python scripts/regen_all.py --full        # tiers 0, 1, 2 plus the
+    .venv/bin/python scripts/regen_all.py --full        # tiers 0 and 1 plus the
                                                         # check-only legs
     .venv/bin/python scripts/regen_all.py --full --check
 
@@ -23,10 +23,7 @@ Tiers, in dependency order
     The corpus generator has no `--check`; this script regenerates into a
     temporary directory and byte-compares, the same three comparisons
     `crates/chelis-cli/tests/opaque_corpus_gate.rs` makes.
-1   The chelis-std bundle (`regenerate_chelis_std_bundle.py --debug`). It needs
-    cargo and must follow tier 0 because the rejection registry is compiled
-    source.
-2   Behind `--full` only. The capacity census, written by running
+1   Behind `--full` only. The capacity census, written by running
     `capacity_census_tripwire` with `CHELIS_CAPACITY_CENSUS_WRITE=1`; the
     runtime-representation Phase 0 inventory
     (`runtime_representation_oracle.py --phase 0 --regenerate`, which needs
@@ -52,7 +49,7 @@ writer. The final line is exactly one of:
 
 Regeneration never blesses growth
 ---------------------------------
-Two tier-2 writers can land content that a human must still review, and this
+Two tier-1 writers can land content that a human must still review, and this
 script refuses to call that a pass:
 
 * The capacity census writer gives every new row the citation `"TODO"`. After
@@ -102,8 +99,8 @@ EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_MANUAL = 2
 
-DEFAULT_TIERS: tuple[int, ...] = (0, 1)
-FULL_TIERS: tuple[int, ...] = (0, 1, 2)
+DEFAULT_TIERS: tuple[int, ...] = (0,)
+FULL_TIERS: tuple[int, ...] = (0, 1)
 
 CENSUS_JSON = "spec/design/capacity_census.json"
 CENSUS_WRITE_ENV = "CHELIS_CAPACITY_CENSUS_WRITE"
@@ -248,25 +245,8 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
             custom_check="opaque-corpus",
         ),
         RegenLeg(
-            name="std-bundle",
-            tier=1,
-            write_argv=(python, "scripts/regenerate_chelis_std_bundle.py", "--debug"),
-            check_argv=(
-                python,
-                "scripts/regenerate_chelis_std_bundle.py",
-                "--debug",
-                "--check",
-            ),
-            writes=(
-                "packages/chelis-std/dist/",
-                "packages/chelis-std/reef.lock",
-                "crates/chelis-std-bundle/dist/",
-            ),
-            needs="cargo",
-        ),
-        RegenLeg(
             name="capacity-census",
-            tier=2,
+            tier=1,
             write_argv=(
                 "cargo",
                 "nextest",
@@ -292,7 +272,7 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
         ),
         RegenLeg(
             name="runtime-representation",
-            tier=2,
+            tier=1,
             write_argv=(
                 python,
                 RUNTIME_REPRESENTATION_ORACLE,
@@ -307,7 +287,7 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
         ),
         RegenLeg(
             name="dtype-c-header",
-            tier=2,
+            tier=1,
             write_argv=None,
             check_argv=(
                 "cargo",
@@ -324,7 +304,7 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
         ),
         RegenLeg(
             name="capacity-census-wire",
-            tier=2,
+            tier=1,
             write_argv=None,
             check_argv=(
                 "cargo",
@@ -341,7 +321,7 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
         ),
         RegenLeg(
             name="tree-sitter",
-            tier=2,
+            tier=1,
             write_argv=None,
             check_argv=None,
             writes=(
@@ -636,13 +616,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         choices=FULL_TIERS,
         metavar="N",
-        help="select a tier (repeatable); default 0 and 1, or 0, 1, 2 with --full",
+        help="select a tier (repeatable); default 0, or 0 and 1 with --full",
     )
     parser.add_argument(
         "--full",
         action="store_true",
         help=(
-            "also run tier 2 (the censuses, the runtime-representation inventory, "
+            "also run tier 1 (the censuses, the runtime-representation inventory, "
             "the binding graph writer, and the check-only legs)"
         ),
     )
@@ -651,8 +631,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         args.tiers = FULL_TIERS if args.full else DEFAULT_TIERS
     else:
         args.tiers = tuple(sorted(set(args.tier)))
-    if 2 in args.tiers and not args.full:
-        parser.error("--tier 2 requires --full")
+    if 1 in args.tiers and not args.full:
+        parser.error("--tier 1 requires --full")
     return args
 
 

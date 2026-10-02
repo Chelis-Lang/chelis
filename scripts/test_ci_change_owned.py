@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 from unittest import mock
 
@@ -1613,16 +1614,62 @@ class SchemaTests(unittest.TestCase):
                     f"{neighbor} inherited authority from an exact fixture rule",
                 )
 
+    def test_std_source_rule_names_every_package_that_consumes_the_bundle(self) -> None:
+        """The chelis-std sources reach a package through the bundle crate,
+        whose build script packs them: a package that depends on the bundle in
+        any section, or a normal dependent of such a package, consumes them.
+        Dev-dependency edges reach only that package's own tests."""
+        root = Path(__file__).resolve().parents[1]
+        workspace = tomllib.loads((root / "Cargo.toml").read_text())
+        manifests = {}
+        for member in workspace["workspace"]["members"]:
+            manifest = tomllib.loads((root / member / "Cargo.toml").read_text())
+            manifests[manifest["package"]["name"]] = manifest
+
+        def declared(manifest: dict, section: str) -> set[str]:
+            return set(manifest.get(section, {})) & set(manifests)
+
+        consumers = {
+            name
+            for name, manifest in manifests.items()
+            if any(
+                "chelis-std-bundle" in declared(manifest, section)
+                for section in ("dependencies", "dev-dependencies", "build-dependencies")
+            )
+        }
+        frontier = [
+            name for name in consumers
+            if "chelis-std-bundle" in declared(manifests[name], "dependencies")
+        ]
+        while frontier:
+            current = frontier.pop()
+            for name, manifest in manifests.items():
+                normal = declared(manifest, "dependencies") | declared(
+                    manifest, "build-dependencies"
+                )
+                if current in normal and name not in consumers:
+                    consumers.add(name)
+                    frontier.append(name)
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        rules = [
+            rule for rule in config.path_rules
+            if rule.prefix == "packages/chelis-std/"
+        ]
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0].disposition, "packages")
+        self.assertEqual(
+            set(rules[0].packages), consumers | {"chelis-std-bundle"}
+        )
+
     def test_canonical_release_shared_pins_have_required_gate_owners(self) -> None:
         from scripts import bump_compiler_pins as bump
 
         root = Path(__file__).resolve().parents[1]
         config = owned.read_config(root / ".config/ci-test-targets.toml")
-        paths = [*bump.PINNED_REAL_TOML_FILES,
-                 *(path / "reef.lock" for path in bump.PINNED_REAL_LOCK_DIRS)]
+        paths = bump.PINNED_REAL_TOML_FILES
         example_paths = {str(path.relative_to(root)) for path in paths
                          if path.is_relative_to(root / "examples")}
-        self.assertEqual(len(example_paths), 5)
+        self.assertEqual(len(example_paths), 3)
         for path in sorted(example_paths):
             with self.subTest(path=path):
                 rules = [rule for rule in config.path_rules if rule.matches(path)]

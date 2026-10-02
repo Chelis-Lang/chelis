@@ -4,7 +4,7 @@ Run via `.venv/bin/python -m unittest scripts.test_regen_all` from the repo
 root, or through the CI `unittest discover -s scripts` step.
 
 Every test injects a recording runner in place of `subprocess.run`, so nothing
-here needs cargo, a built `chelis`, or a network. The tier-2 hooks read files
+here needs cargo, a built `chelis`, or a network. The tier-1 hooks read files
 from an injected temporary repository root rather than the live checkout.
 """
 
@@ -86,7 +86,7 @@ def _write(path: Path, text: str) -> None:
 
 
 def _fake_repo(tmp: Path, *, todo_rows: int = 0, freeze_sha: str = GOOD_SHA) -> Path:
-    """A minimal repository root carrying every file the tier-2 hooks read."""
+    """A minimal repository root carrying every file the tier-1 hooks read."""
     rows = [
         {"kind": "header-export", "id": f"row {n}", "flags": [], "citation": "TODO"}
         for n in range(todo_rows)
@@ -129,7 +129,7 @@ def _run(
 
 
 class LegManifestTests(unittest.TestCase):
-    def test_default_tiers_are_zero_and_one_in_order(self):
+    def test_default_tier_is_zero_in_order(self):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             recorder = _Recorder()
@@ -142,7 +142,6 @@ class LegManifestTests(unittest.TestCase):
                 f"{PYTHON} scripts/regenerate_conformance_assets.py",
                 f"{PYTHON} scripts/generate_reviewed_unsupported_wording_snapshot.py",
                 f"{PYTHON} tests/corpus/opaque_invariants/generate_corpus.py",
-                f"{PYTHON} scripts/regenerate_chelis_std_bundle.py --debug",
             ],
         )
         self.assertNotIn("capacity_census_tripwire", output)
@@ -160,7 +159,7 @@ class LegManifestTests(unittest.TestCase):
             self.assertEqual(argv[0], PYTHON)
             self.assertNotEqual(argv[0], "cargo")
 
-    def test_full_adds_tier_two_and_check_only_legs(self):
+    def test_full_adds_tier_one_and_check_only_legs(self):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             recorder = _Recorder()
@@ -168,7 +167,7 @@ class LegManifestTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         rendered = recorder.rendered()
         self.assertEqual(
-            rendered[5:],
+            rendered[4:],
             [
                 "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
                 f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0 --regenerate",
@@ -179,13 +178,13 @@ class LegManifestTests(unittest.TestCase):
         self.assertIn("(no writer)", output)
         self.assertIn(regen_all.TREE_SITTER_NOTE, output)
 
-    def test_tier_two_requires_full(self):
+    def test_tier_one_requires_full(self):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as raised:
-                regen_all.parse_args(["--tier", "2"])
+                regen_all.parse_args(["--tier", "1"])
         self.assertEqual(raised.exception.code, 2)
-        args = regen_all.parse_args(["--tier", "2", "--full"])
-        self.assertEqual(args.tiers, (2,))
+        args = regen_all.parse_args(["--tier", "1", "--full"])
+        self.assertEqual(args.tiers, (1,))
 
     def test_legs_are_sorted_by_tier_and_named_uniquely(self):
         legs = regen_all.regen_legs(PYTHON)
@@ -230,13 +229,10 @@ class CheckModeTests(unittest.TestCase):
             rendered[3],
         )
         self.assertEqual(
-            rendered[4], f"{PYTHON} scripts/regenerate_chelis_std_bundle.py --debug --check"
+            rendered[4], "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
         )
         self.assertEqual(
-            rendered[5], "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
-        )
-        self.assertEqual(
-            rendered[6], f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0"
+            rendered[5], f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0"
         )
         for line in rendered:
             self.assertNotIn("--write", line)
@@ -249,16 +245,18 @@ class CheckModeTests(unittest.TestCase):
             recorder = _Recorder(
                 returncodes={
                     "generate_rejection_registries.py --check": 1,
-                    "regenerate_chelis_std_bundle.py --debug --check": 3,
+                    "generate_reviewed_unsupported_wording_snapshot.py --check": 3,
                 },
                 corpus=root / regen_all.OPAQUE_CORPUS_DIR,
             )
             code, output = _run(["--check"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 1)
         # Every leg still ran (no fail-fast in check mode).
-        self.assertEqual(len(recorder.calls), 5)
+        self.assertEqual(len(recorder.calls), 4)
         self.assertTrue(
-            output.rstrip().endswith("REGEN ALL: STALE (rejection-registry, std-bundle)"),
+            output.rstrip().endswith(
+                "REGEN ALL: STALE (rejection-registry, reviewed-unsupported-wording)"
+            ),
             output,
         )
 
@@ -270,7 +268,7 @@ class CheckModeTests(unittest.TestCase):
                 corpus=root / regen_all.OPAQUE_CORPUS_DIR,
             )
             code, output = _run(
-                ["--check", "--full", "--tier", "2"], repo_root=root, recorder=recorder
+                ["--check", "--full", "--tier", "1"], repo_root=root, recorder=recorder
             )
         self.assertEqual(code, 1)
         self.assertIn(regen_all.DTYPE_HEADER_MANUAL, output)
@@ -282,9 +280,9 @@ class CensusEnvTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             writer = _Recorder()
-            _run(["--full", "--tier", "2"], repo_root=root, recorder=writer)
+            _run(["--full", "--tier", "1"], repo_root=root, recorder=writer)
             checker = _Recorder(corpus=root / regen_all.OPAQUE_CORPUS_DIR)
-            _run(["--check", "--full", "--tier", "2"], repo_root=root, recorder=checker)
+            _run(["--check", "--full", "--tier", "1"], repo_root=root, recorder=checker)
         write_env = [
             env for argv, env in writer.calls if "capacity_census_tripwire" in argv
         ]
@@ -354,7 +352,7 @@ class CensusEnvTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             recorder = _Recorder()
-            _code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=recorder)
+            _code, output = _run(["--full", "--tier", "1"], repo_root=root, recorder=recorder)
         self.assertIn(
             "capacity-census (cargo): CHELIS_CAPACITY_CENSUS_WRITE=1 cargo nextest run",
             output,
@@ -367,7 +365,7 @@ class ManualActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td), todo_rows=2)
             recorder = _Recorder()
-            code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=recorder)
+            code, output = _run(["--full", "--tier", "1"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 2)
         self.assertIn('2 capacity census row(s) landed with citation "TODO"', output)
         self.assertIn("header-export: row 0", output)
@@ -391,7 +389,7 @@ class ManualActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td), freeze_sha=OTHER_SHA)
             recorder = _Recorder()
-            code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=recorder)
+            code, output = _run(["--full", "--tier", "1"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 2)
         self.assertIn(f"hashes to {GOOD_SHA}", output)
         self.assertIn(f'FREEZE_SHA256 = "{OTHER_SHA}"', output)
@@ -410,7 +408,7 @@ class ManualActionTests(unittest.TestCase):
             root = _fake_repo(Path(td), freeze_sha=GOOD_SHA)
             self.assertIsNone(regen_all.after_runtime_representation_write(root))
             recorder = _Recorder()
-            code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=recorder)
+            code, output = _run(["--full", "--tier", "1"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 0, output)
         self.assertTrue(output.rstrip().endswith("REGEN ALL: PASS"), output)
 
@@ -426,7 +424,7 @@ class ManualActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             recorder = _Recorder(returncodes={"capacity_census_wire": 101})
-            code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=recorder)
+            code, output = _run(["--full", "--tier", "1"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 2)
         self.assertIn(regen_all.CENSUS_WIRE_MANUAL, output)
         self.assertTrue(
@@ -445,7 +443,7 @@ class LaunchFailureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             recorder = _Recorder(missing_programs=("cargo",))
-            code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=recorder)
+            code, output = _run(["--full", "--tier", "1"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 1)
         self.assertIn("failed: could not launch cargo", output)
         self.assertTrue(
@@ -502,7 +500,7 @@ class LaunchFailureTests(unittest.TestCase):
                 if "runtime_dtype_generated_header" in argv:
                     raise PermissionError(13, "Permission denied", argv[0])
                 return subprocess.CompletedProcess(list(argv), 0)
-            code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=runner)
+            code, output = _run(["--full", "--tier", "1"], repo_root=root, recorder=runner)
         self.assertEqual(code, 1)
         self.assertNotIn("manual:", output)
         self.assertTrue(
@@ -584,11 +582,10 @@ class WriteModeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(len(recorder.calls), 2)
         self.assertNotIn("generate_corpus.py", " ".join(recorder.rendered()))
-        self.assertNotIn("regenerate_chelis_std_bundle.py", " ".join(recorder.rendered()))
         self.assertTrue(
             output.rstrip().endswith("REGEN ALL: FAIL (conformance-assets, exit 1)"), output
         )
-        self.assertIn("3 later leg(s) not run", output)
+        self.assertIn("2 later leg(s) not run", output)
 
     def test_leg_lines_name_tier_position_and_owned_paths(self):
         with tempfile.TemporaryDirectory() as td:
@@ -596,15 +593,15 @@ class WriteModeTests(unittest.TestCase):
             recorder = _Recorder()
             _code, output = _run([], repo_root=root, recorder=recorder)
         self.assertIn(
-            "[tier 0 1/5] rejection-registry (cargo + python):", output
+            "[tier 0 1/4] rejection-registry (cargo + python):", output
         )
-        self.assertIn("[tier 1 5/5] std-bundle (cargo):", output)
+        self.assertIn("[tier 0 4/4] opaque-corpus (python):", output)
         self.assertIn(
             "owns: spec/design/loud_unsupported_issue_manifest.json, "
             "crates/chelis-types/src/rejection_registry_generated.rs",
             output,
         )
-        self.assertIn("regen_all: write mode, tiers 0, 1, 5 leg(s)", output)
+        self.assertIn("regen_all: write mode, tiers 0, 4 leg(s)", output)
 
 
 class NeverWritesFrozenArtifactsTests(unittest.TestCase):
