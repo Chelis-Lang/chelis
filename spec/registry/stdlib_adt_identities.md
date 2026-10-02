@@ -11,6 +11,7 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
 | `decimal::Decimal` | `Decimal { negative: bool, limb0: i64, limb1: i64, limb2: i64, limb3: i64, limb4: i64, scale: i64 }` |
 | `datetime/business::BusinessCalendar` | `BusinessCalendar { weekmask: Weekmask, holidays: List[i64], valid_from: i64, valid_until: i64 }` |
+| `datetime/columns::Durations` | `Durations { seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |
 | `datetime::Date` | `Date { epoch_day: i64 }` |
 | `datetime::Time` | `Time { nanosecond_of_day: i64 }` |
 | `datetime::DateTime` | `DateTime { epoch_day: i64, nanosecond_of_day: i64 }` |

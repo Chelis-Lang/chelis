@@ -2792,7 +2792,8 @@ exact ADT identity by [05-OP-34].
 > spelling of an integer-form source token outside i64 range ([05-OP-2]);
 > it is source-faithful text, never a float funnel, and its string field
 > compares and renders byte-exactly. The opaque `datetime::*`,
-> `datetime/business::*`, `datetime/clock::*`, and `datetime/zone::*`
+> `datetime/business::*`, `datetime/clock::*`, `datetime/columns::*`, and
+> `datetime/zone::*`
 > identities hold [05-OP-73]'s invariants, and the opaque `decimal::Decimal`
 > identity holds [05-OP-76]'s, by construction. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
@@ -2821,7 +2822,8 @@ exact ADT identity by [05-OP-34].
 > big-integer projection, while `json_float` performs [05-OP-3]'s named
 > i64-to-f64 widening, refuses `JsonBigInt`, and returns a stored f64
 > unchanged. The `datetime::*`, `datetime/business::*`, `datetime/clock::*`,
-> and `datetime/zone::*` identities follow [05-OP-73]. The `decimal::*`
+> `datetime/columns::*`, and `datetime/zone::*` identities follow [05-OP-73].
+> The `decimal::*`
 > identities follow [05-OP-76]. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
@@ -2998,25 +3000,27 @@ exact ADT identity by [05-OP-34].
 > from its implementation body or age.
 
 > **[05-OP-73]** `datetime(arguments...) -> result` governs exactly the
-> `datetime::*`, `datetime/business::*`, `datetime/clock::*`, and
-> `datetime/zone::*` identities of the [05-OP-34] and [05-OP-35] registries:
-> the opaque value types `Date`, `Time`, `DateTime`, `Instant`, `Offset`,
-> `OffsetDateTime`, `Duration`, `Period`, `Dates[n]`, `Instants[n]`,
-> `BusinessCalendar`, `MonotonicInstant`, `TimeZone`, and `Zoned`, the record
-> `ZonedText`, and the callables over them, together with
-> `datetime::weekday_name`, the one callable of the four modules that reaches no
-> numeric value and so has no registry row. Its plain enums are `Weekday`
-> (`Monday` through `Sunday`), `DayOverflow` (`ClampToMonthEnd`,
-> `RejectInvalidDay`), `TimeUnit` (`Hours`, `Minutes`, `Seconds`,
-> `Milliseconds`, `Microseconds`, `Nanoseconds`), `Disambiguation`
+> `datetime::*`, `datetime/business::*`, `datetime/clock::*`,
+> `datetime/columns::*`, and `datetime/zone::*` identities of the [05-OP-34]
+> and [05-OP-35] registries: the opaque value types `Date`, `Time`,
+> `DateTime`, `Instant`, `Offset`, `OffsetDateTime`, `Duration`, `Period`,
+> `Dates[n]`, `Instants[n]`, `Durations[n]`, `BusinessCalendar`,
+> `MonotonicInstant`, `TimeZone`, and `Zoned`, the record `ZonedText`, and the
+> callables over them, together with `datetime::weekday_name`, the one callable
+> of the five modules that reaches no numeric value and so has no registry row.
+> Its plain enums are `Weekday` (`Monday` through `Sunday`), `DayOverflow`
+> (`ClampToMonthEnd`, `RejectInvalidDay`), `TimeUnit` (`Hours`, `Minutes`,
+> `Seconds`, `Milliseconds`, `Microseconds`, `Nanoseconds`), `Disambiguation`
 > (`EarlierInstant`, `LaterInstant`, `CompatibleInstant`,
 > `RejectNonUniqueLocal`), and `OffsetConflict` (`UseWrittenOffset`,
 > `UseZoneRules`, `RejectOffsetMismatch`), with `BusinessDayRoll` and
 > `NonBusinessStart` defined below; every enum constructor is a valid value.
 > `instant_to_unix_count`, `duration_to_count`, and `instant_round_to`, with
-> the `try_` forms of the first two, take a [05-OP-74] `Rounding`.
-> `duration_to_seconds_f64` is the one other callable that drops precision; it
-> is a named lossy boundary with fixed nearest-even rounding.
+> the `try_` forms of the first two and the column forms
+> `instants_to_unix_count` and `instants_round_to`, take a [05-OP-74]
+> `Rounding`. `duration_to_seconds_f64` and its column form
+> `instants_seconds_since_f64` are the other callables that drop precision;
+> they are named lossy boundaries with fixed nearest-even rounding.
 >
 > The calendar is proleptic Gregorian with astronomical year numbering, so
 > year 0 exists. The timescale is POSIX: every day has exactly 86 400 seconds
@@ -3082,7 +3086,10 @@ exact ADT identity by [05-OP-34].
 > the twin's result, returns `None` exactly where the twin fails `domain`, and
 > fails exactly where the twin fails `overflow`; `try_instant_to_unix_count`
 > and `try_duration_to_count` also return `None` where the count leaves i64.
-> The masked column forms never fail.
+> A column callable fails `domain` before it reads any element when a column
+> argument's length differs from another argument's; tensor arguments of
+> different lengths fail spec/04 §4.7's entry guards first. The masked column
+> forms fail in no other case.
 >
 > `is_leap_year`, `days_in_year`, and `days_in_month` are total over every i64
 > year; `days_in_month` fails `domain` unless the month is 1..12.
@@ -3177,6 +3184,41 @@ exact ADT identity by [05-OP-34].
 > mask, and an invalid position holds the unix epoch. `dates_epoch_days`,
 > `instants_unix_seconds`, and `instants_nanoseconds` consume the column and
 > return its storage.
+>
+> `Durations[n]` holds `tensor[n,i64]` columns of seconds and nanoseconds, each
+> element pair a Euclidean-normalized `Duration`. Each `datetime/columns::*`
+> callable is the elementwise form of the scalar callable named below, its
+> twin: its column arguments and corresponding tensor arguments share one
+> dimension `n`, and it applies the twin, with the twin's checks in the twin's
+> order, to the elements at each index. A call fails exactly when the twin
+> fails at some index; it then fails with the twin's kind for the lowest such
+> index `k` and the twin's detail prefixed `element k: `, under the column
+> callable's name. `dates_year`, `dates_month`, `dates_day`,
+> `dates_weekday_iso_number`, and `dates_day_of_year` apply `date_year`,
+> `date_month`, `date_day`, `weekday_iso_number` of `date_weekday`, and
+> `date_day_of_year`. `dates_from_ymd(y,m,d)` applies `date`.
+> `dates_add_days(ds,n)` and `dates_add_months(ds,n,policy)` apply
+> `date_add_days` and `date_add_months` to each date and its count.
+> `dates_days_until`, `dates_lt`, `dates_lte`, `dates_gt`, and `dates_gte`
+> apply their scalar twins. `dates_to_strings` returns `date_to_string` of each
+> date in order. `instants_from_unix_count(c,unit)`,
+> `instants_to_unix_count(is,unit,r)`, `instants_add_duration(is,ds)`,
+> `instants_until(a,b)`, `instants_to_dates_at(is,o)`, `instants_lt`,
+> `instants_lte`, `instants_gt`, and `instants_gte` apply
+> `instant_from_unix_count`, `instant_to_unix_count`, `instant_add_duration`,
+> `instant_until`, the date of `instant_to_datetime_at`, and the instant
+> comparisons. `instants_round_to(is,inc,r)` applies `instant_round_to`; it
+> first fails `domain` with the twin's detail and no element prefix when `inc`
+> is not positive or does not divide 86 400 seconds, whatever the column
+> holds. `instants_seconds_since_f64(is,origin)` is
+> `duration_to_seconds_f64(instant_until(origin,i))` for each instant `i`, bit
+> for bit. `durations(s,ns)` applies `duration`, and `durations_seconds` and
+> `durations_nanoseconds` consume the column and return its storage. The masked
+> forms `try_dates_from_ymd`, `try_durations`, and `try_parse_dates(texts)`,
+> which reads a `List[string]` of length `n` with `parse_date`, return the
+> column with a `tensor[n,bool]` mask that is false exactly where the twin
+> fails; an invalid position holds 1970-01-01 or the zero duration. Every
+> callable consumes its column arguments and borrows its tensor arguments.
 >
 > Every text form follows one profile built on RFC 3339 and RFC 9557, with this
 > case-sensitive grammar:
