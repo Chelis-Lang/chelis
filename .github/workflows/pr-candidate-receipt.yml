@@ -15,13 +15,14 @@ on:
       - Changelog
       - PR Contract Acknowledgements
       - PR Base Retarget Validation
+      - Secret scan
     types: [completed]
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr-candidate-receipt-${{ github.event.workflow_run.head_sha }}
+  group: pr-candidate-receipt-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.event }}
   cancel-in-progress: true
 
 jobs:

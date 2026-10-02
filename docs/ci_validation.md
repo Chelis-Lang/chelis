@@ -158,7 +158,9 @@ candidate, reads the current branch-protection set, and binds every required
 context to its expected workflow file and exact job id. An unknown required
 context, a stale head, mismatched workflow provenance, missing artifact,
 non-green latest check, or contradictory candidate identity withholds or fails
-the receipt. The receipt also marks workflow, CI-policy, agent-contract and
+the receipt. The one exception to "latest" is Secret scan, which also runs on
+every push: its push-event run on the same head is passed over, and its latest
+pull_request run is the evidence. The receipt also marks workflow, CI-policy, agent-contract and
 CI-script changes as ineligible for later evidence reuse; their green state is
 recorded, but candidate-controlled validation logic cannot authorize its own
 reuse. A successful `pr-candidate-receipt-<head-sha>` artifact is therefore

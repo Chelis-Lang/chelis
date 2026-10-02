@@ -12,6 +12,8 @@ CI_CONTRACT_EXACT_PATHS: frozenset[str] = frozenset(
     {
         ".config/ci-change-owned-durations.json",
         ".config/ci-test-targets.toml",
+        ".github/scripts/secret_scan.py",
+        ".github/scripts/verify_release_smt.py",
         "AGENTS.md",
         "agent-skills/redteam-exec/SKILL.md",
         "docs/ci_validation.md",
@@ -39,7 +41,6 @@ CI_CONTRACT_EXACT_PATHS: frozenset[str] = frozenset(
         "scripts/test_pr_workflow_routing.py",
         "scripts/test_regenerate_conformance_assets.py",
         "scripts/test_release_workflow_pyo3_isolation.py",
-        "scripts/verify_release_smt.py",
     }
 )
 CI_CONTRACT_PREFIXES: tuple[str, ...] = (

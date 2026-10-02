@@ -11,6 +11,9 @@ import unittest
 
 import yaml
 
+from scripts import ci_candidate_receipt
+from scripts import ci_pr_lifecycle_report
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / ".github/workflows/ci.yml"
@@ -51,6 +54,7 @@ RECEIPT_TRIGGER_WORKFLOWS = {
     "Changelog",
     "PR Contract Acknowledgements",
     "PR Base Retarget Validation",
+    "Secret scan",
 }
 def actions_events(workflow: dict) -> dict:
     return workflow.get("on", workflow.get(True))
@@ -936,6 +940,13 @@ def assert_candidate_receipt_workflow(
         "github.event.workflow_run.head_sha",
         str(workflow["concurrency"]),
     )
+    # A run triggered by another event (Secret scan's push runs, the retarget
+    # coordinator's pull_request_target runs) skips its job; keying the group
+    # by event keeps such a skipped run from cancelling a collection.
+    test.assertIn(
+        "github.event.workflow_run.event",
+        str(workflow["concurrency"]["group"]),
+    )
     job = workflow["jobs"]["collect"]
     test.assertEqual(
         job["permissions"],
@@ -1388,6 +1399,21 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             assert_manual_expansion_workflow(self, manual)
+
+    def test_receipt_triggers_are_the_collectors_mapped_workflows(self) -> None:
+        mapped = {
+            yaml.safe_load((ROOT / ".github/workflows" / name).read_text())["name"]
+            for name in ci_candidate_receipt.WORKFLOWS
+        }
+        self.assertEqual(mapped, RECEIPT_TRIGGER_WORKFLOWS)
+        trigger = actions_events(yaml.safe_load(RECEIPT.read_text()))
+        self.assertEqual(set(trigger["workflow_run"]["workflows"]), mapped)
+        self.assertEqual(
+            ci_pr_lifecycle_report.WORKFLOW_RUN_PARENTS[
+                ".github/workflows/pr-candidate-receipt.yml"
+            ],
+            mapped,
+        )
 
     def test_receipt_collector_cannot_checkout_or_execute_pr_content(self) -> None:
         workflow = copy.deepcopy(yaml.safe_load(RECEIPT.read_text()))
