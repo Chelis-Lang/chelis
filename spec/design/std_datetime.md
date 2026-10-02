@@ -714,9 +714,10 @@ over the whole range (7 304 484 days) with no holidays.
 Calendar B's offsets cost no more than A's, because no cost scales with the horizon.
 
 Two costs outside this module show up in the measurements:
-- In compiled C, reading a `bool` tensor revalidates its whole storage once per element
-  (#2903), so `dates_from_epoch_days` and every vectorized form grow quadratically in the
-  column's length beyond about 10 000 elements.
+- In a debug build of the runtime, compiled C rescans a `bool` tensor's whole storage on
+  every element read (#2903), so there `dates_from_epoch_days` and every vectorized form
+  grow quadratically in the column's length beyond about 10 000 elements. A release build
+  of the runtime does not rescan.
 - In `chelis eval`, each `index` into a `List` copies the list (#2335), so the binary
   searches cost O(h) per probe there.
 
