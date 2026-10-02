@@ -123,6 +123,27 @@ cadence = "pull_request and push"
 reason = "script-unit executes this module's positive and negative parity-receipt rows"
 tracking_issue = "chelis#2102"
 
+# chelis#2957: the CORE-MATH vendoring script regenerates and checks the
+# chelis-crmath amalgamation; script-unit runs its tests, including the
+# repository's own `--check`, on every pull request.
+[[path_rule]]
+prefix = "scripts/vendor_core_math.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the vendoring script's rewrite, manifest, and drift-check tests"
+tracking_issue = "chelis#2957"
+
+[[path_rule]]
+prefix = "scripts/test_vendor_core_math.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the vendoring script's rewrite, manifest, and drift-check tests"
+tracking_issue = "chelis#2957"
+
 # chelis#2859: the Std.Datetime reference and differential harness. The
 # chelis-cli `std_datetime_oracle` target runs both against eval and native C;
 # script-unit runs the reference's own tests on every pull request.
@@ -2187,7 +2208,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -3781,7 +3803,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -3797,7 +3820,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -3911,7 +3935,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -4182,7 +4207,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",

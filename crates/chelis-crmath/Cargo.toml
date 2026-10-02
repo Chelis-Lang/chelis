@@ -1,0 +1,19 @@
+[package]
+name = "chelis-crmath"
+description = "Correctly rounded transcendentals (vendored CORE-MATH) for every Chelis lane"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+links = "chelis_crmath"
+
+[dependencies]
+half.workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true
