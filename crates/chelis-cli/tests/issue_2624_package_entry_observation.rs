@@ -46,7 +46,8 @@ def scaled(x: f64) -> f64 = mul(x, scale)
 const ENTRY: &str = "module App.Main
 import Drawlib.Draw (sampled, Point, Shape, Circle, Square, origin, shift, area)
 import App.Helpers (scaled)
-import Std.Time (Date, Monday)
+import Std.Datetime (Monday)
+import Std.Io.Json (Json, JsonInt)
 import Std.Contracts (normal_cdf_contract_seed)
 type Pair =
   | Pair { left: i64, right: i64 }
@@ -57,8 +58,7 @@ areas = [area(Circle(1.5f64)), area(Square(scaled(2.0f64)))]
 shapes = (Circle(1.0f64), [Square(2.0f64)])
 same = eq(shift(origin()), Point(1.0f64, 0.0f64))
 differ = eq(Circle(1.0f64), Square(1.0f64))
-day = Date { year: 2026i64, month: 10i64, day: 1i64 }
-days = [Some(day), None]
+days = [Some(JsonInt(2026i64)), None]
 weekday = Monday
 own = [Pair { left: 1i64, right: 2i64 }]
 def own_origin() -> Pair = Pair { left: 0i64, right: 0i64 }
@@ -77,10 +77,7 @@ shapes.0.0 = 1.0
 shapes.1 = [Square(2.0)]
 same = true
 differ = false
-day.year = 2026
-day.month = 10
-day.day = 1
-days = [Some(Date(2026, 10, 1)), None]
+days = [Some(JsonInt(2026)), None]
 weekday = Monday
 own = [Pair(1, 2)]
 own_origin.left = 0
