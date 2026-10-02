@@ -354,7 +354,8 @@ EXPECTED_OP_MANIFESTS = {
 | `datetime::Duration` | `Duration { second: i64, nanosecond: i64 }` |
 | `datetime::Period` | `Period { months: i64, days: i64 }` |
 | `datetime::Dates` | `Dates { epoch_days: tensor[n,i64] }` |
-| `datetime::Instants` | `Instants { unix_seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |""".splitlines()
+| `datetime::Instants` | `Instants { unix_seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |
+| `datetime/clock::MonotonicInstant` | `MonotonicInstant { second: i64, nanosecond: i64 }` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
@@ -384,6 +385,9 @@ EXPECTED_OP_MANIFESTS = {
 | `datetime/business::try_business_in_all` | `(BusinessCalendar,BusinessCalendar)->Option[BusinessCalendar]` |
 | `datetime/business::try_business_in_any` | `(BusinessCalendar,BusinessCalendar)->Option[BusinessCalendar]` |
 | `datetime/business::try_is_business_day` | `(BusinessCalendar,Date)->Option[bool]` |
+| `datetime/clock::clock_now` | `()->Instant!{IO}` |
+| `datetime/clock::monotonic_now` | `()->MonotonicInstant!{IO}` |
+| `datetime/clock::monotonic_until` | `(MonotonicInstant,MonotonicInstant)->Duration` |
 | `datetime::date` | `(i64,i64,i64)->Date` |
 | `datetime::date_add_days` | `(Date,i64)->Date` |
 | `datetime::date_add_months` | `(Date,i64,DayOverflow)->Date` |
@@ -898,10 +902,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 217 or len(set(identities)) != 217:
+    if len(identities) != 220 or len(set(identities)) != 220:
         violations.append(
             "[05-OP-35] stdlib numeric manifest must have exactly two hundred "
-            "seventeen unique identities"
+            "twenty unique identities"
         )
 
 
@@ -2461,7 +2465,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the two hundred seventeen final exported stdlib numeric definitions",
+            "exactly the two hundred twenty final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "
@@ -2485,7 +2489,8 @@ def validate_normative_contract(
             "Every primitive-width intermediate in a graph whose contract names a dtype",
             "Decimal rational computations explicitly named as mathematical below "
             "use an exact internal domain",
-            "The `datetime::*` and `datetime/business::*` identities follow [05-OP-73]",
+            "The `datetime::*`, `datetime/business::*`, and `datetime/clock::*` "
+            "identities follow [05-OP-73]",
             "integer primitive arithmetic is checked",
             "JSON access follows [05-OP-2..5]",
             "Numeric tokens follow [05-OP-2]",
@@ -2685,8 +2690,9 @@ def validate_normative_contract(
             "alias, or compatibility identity belongs to this atom",
         ),
         "05-OP-73": (
-            "governs exactly the `datetime::*` and `datetime/business::*` identities "
-            "of the [05-OP-34] and [05-OP-35] registries",
+            "governs exactly the `datetime::*`, `datetime/business::*`, and "
+            "`datetime/clock::*` identities of the [05-OP-34] and [05-OP-35] "
+            "registries",
             "A day of the horizon is a business day when the weekmask includes its "
             "weekday and it is not a holiday",
             "so two calendars with the same business days, weekmask, and horizon are "
@@ -2726,6 +2732,11 @@ def validate_normative_contract(
             "negative years as `-` and six digits",
             "`-000000` is not a year",
             "Parsing a value's canonical text returns that value",
+            "`clock_now` and `monotonic_now` are the only callables of this atom that "
+            "read the host or carry an effect",
+            "`monotonic_until(a,b)` is the only datetime callable",
+            "No callable converts a `MonotonicInstant` to or from an `Instant`",
+            "naming the builtin rather than `clock_now` or `monotonic_now`",
         ),
         "05-OP-74": (
             "governs exactly the seven constructors of the standard-library plain enum "

@@ -21,3 +21,4 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `datetime::Period` | `Period { months: i64, days: i64 }` |
 | `datetime::Dates` | `Dates { epoch_days: tensor[n,i64] }` |
 | `datetime::Instants` | `Instants { unix_seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |
+| `datetime/clock::MonotonicInstant` | `MonotonicInstant { second: i64, nanosecond: i64 }` |

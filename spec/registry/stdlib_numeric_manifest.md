@@ -34,6 +34,9 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `datetime/business::try_business_in_all` | `(BusinessCalendar,BusinessCalendar)->Option[BusinessCalendar]` |
 | `datetime/business::try_business_in_any` | `(BusinessCalendar,BusinessCalendar)->Option[BusinessCalendar]` |
 | `datetime/business::try_is_business_day` | `(BusinessCalendar,Date)->Option[bool]` |
+| `datetime/clock::clock_now` | `()->Instant!{IO}` |
+| `datetime/clock::monotonic_now` | `()->MonotonicInstant!{IO}` |
+| `datetime/clock::monotonic_until` | `(MonotonicInstant,MonotonicInstant)->Duration` |
 | `datetime::date` | `(i64,i64,i64)->Date` |
 | `datetime::date_add_days` | `(Date,i64)->Date` |
 | `datetime::date_add_months` | `(Date,i64,DayOverflow)->Date` |

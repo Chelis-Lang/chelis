@@ -1092,6 +1092,13 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-adt-numeric",
+        "datetime/clock::MonotonicInstant: () (variant {} MonotonicInstant (field {} second (t-prim {} i64)) (field {} nanosecond (t-prim {} i64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
         "datetime::Date: () (variant {} Date (field {} epoch_day (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
@@ -1709,6 +1716,27 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "std-def-numeric",
         "datetime/business::try_is_business_day: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} Option (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/clock::clock_now: (t-fn {eff: (effects {} io)} (t-adt {} Instant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/clock::monotonic_now: (t-fn {eff: (effects {} io)} (t-adt {} MonotonicInstant))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "datetime/clock::monotonic_until: (t-fn {} (t-adt {} MonotonicInstant) (t-adt {} MonotonicInstant) (t-adt {} Duration))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"

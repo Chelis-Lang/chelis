@@ -607,6 +607,54 @@ fn cmd_eval_host_arrow_effectful_root_stays_unsurfaced_and_effect_does_not_run()
     );
 }
 
+/// Host-arrow-root surfacing, case (b'), the effect-free guard across a
+/// package boundary. The nullary entry declaration has no effect of its own:
+/// its `IO` comes from a library callee, so only the library's effect rows
+/// can show it is effectful. The root stays unsurfaced and the effect does not
+/// run, exactly as when the entry calls `debug` itself. The pure twin is case
+/// (a), whose library callee is effect-free and whose root is surfaced.
+#[test]
+fn cmd_eval_host_arrow_root_with_effectful_library_callee_stays_unsurfaced() {
+    let (_dir, root) = path_dep_package();
+    write_file(
+        &root.join("mylib/src/log.ch"),
+        "module Mylib.Log\nexport (shout)\n\n\
+         def shout(message: string) -> string = debug(message)\n",
+    );
+    let entry_path = root.join("src/arrowlibeff.ch");
+    let snippet = "module App.ArrowLibEff\n\
+                   import Mylib.Log (shout)\n\n\
+                   def logged() -> string = shout(\"SENTINEL_2863\")\n";
+    write_file(&entry_path, snippet);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", entry_path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run chelis eval");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "exit status: {:?} stdout={stdout} stderr={stderr}",
+        output.status
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
+    let roots = parsed["roots"].as_array().expect("roots array");
+    assert!(
+        !roots.iter().any(|r| r["name"].as_str() == Some("logged")),
+        "a nullary root whose IO comes from a library callee must NOT be surfaced; \
+         got roots: {roots:?}"
+    );
+    assert!(
+        !stdout.contains("SENTINEL_2863") && !stderr.contains("SENTINEL_2863"),
+        "the library callee's effect ran for an unsurfaced root: stdout={stdout:?} \
+         stderr={stderr}"
+    );
+}
+
 /// Host-arrow-root surfacing, case (c) — CONSUMED pure root, applied once.
 ///
 /// When a pure host-arrow root is also CONSUMED (something calls `name()`),

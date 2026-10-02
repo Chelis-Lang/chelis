@@ -539,6 +539,8 @@ fn infer_app_effects(
                 | "list_dir"
                 | "mmap_file"
                 | "process_run"
+                | "clock_wall_read"
+                | "clock_monotonic_read"
         )
     ) {
         effects.insert(Effect::Io);
@@ -2047,6 +2049,71 @@ pure_value = add(cast(1, i64), cast(2, i64))
             "expected pure arithmetic binding to stay effect-free, got {:?}",
             inferred.get("pure_value")
         );
+    }
+
+    #[test]
+    fn clock_reads_infer_io_but_pure_binding_stays_pure() {
+        // [05-OP-75]: each clock read is an IO source; an adjacent pure
+        // binding stays effect-free.
+        let program = surf_checked(
+            r#"
+wall = clock_wall_read()
+mono = clock_monotonic_read()
+pure_value = add(1i64, 2i64)
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        for root in ["wall", "mono"] {
+            assert!(
+                inferred
+                    .get(root)
+                    .is_some_and(|effects| effects.contains(&Effect::Io)),
+                "expected IO effect on clock root {root}, got {:?}",
+                inferred.get(root)
+            );
+        }
+        assert!(
+            inferred
+                .get("pure_value")
+                .is_none_or(|effects| effects.is_empty()),
+            "expected pure arithmetic binding to stay effect-free, got {:?}",
+            inferred.get("pure_value")
+        );
+    }
+
+    #[test]
+    fn declared_pure_function_cannot_read_a_clock() {
+        // [05-OP-75] and spec/04 section 7: a function whose declared effects
+        // omit IO cannot read either clock, directly or through a caller.
+        // Declaring IO admits the same bodies.
+        for clock in ["clock_wall_read", "clock_monotonic_read"] {
+            for (declared, admitted) in [("{}", false), ("{Test}", false), ("{IO}", true)] {
+                let decls = parse_surf(&format!(
+                    "def read() -> (i64, i64) ! {declared} = {clock}()\n\
+                     def outer() -> (i64, i64) ! {declared} = read()\n"
+                ))
+                .expect("surf parse");
+                let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+                let checked = chelis_types::check_ir_program(&deep).expect("type check");
+                let verdict = check_program(&checked);
+                if admitted {
+                    assert!(verdict.is_ok(), "{clock} under ! {declared}: {verdict:?}");
+                    continue;
+                }
+                let errors = verdict.expect_err("a clock read needs a declared IO effect");
+                for function in ["read", "outer"] {
+                    assert!(
+                        errors.iter().any(|error| {
+                            error.kind == EffectErrorKind::UnhandledEffect
+                                && error.message.contains(&format!("`{function}`"))
+                                && error.message.contains("IO")
+                        }),
+                        "expected UnhandledEffect on {function} mentioning IO for {clock} \
+                         under ! {declared}, got {errors:?}"
+                    );
+                }
+            }
+        }
     }
 
     // ----- Phase 3t.1: Test effect propagation and enforcement -----

@@ -1454,6 +1454,13 @@
     },
     {
       "kind": "std-adt-numeric",
+      "id": "datetime/clock::MonotonicInstant: () (variant {} MonotonicInstant (field {} second (t-prim {} i64)) (field {} nanosecond (t-prim {} i64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
       "id": "datetime::Date: () (variant {} Date (field {} epoch_day (t-prim {} i64)))",
       "flags": [
         "numeric-op"
@@ -1681,6 +1688,21 @@
     {
       "kind": "std-def-numeric",
       "id": "datetime/business::try_is_business_day: (t-fn {} (t-adt {} BusinessCalendar) (t-adt {} Date) (t-adt {} Option (t-prim {} bool)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/clock::clock_now: (t-fn {eff: (effects {} io)} (t-adt {} Instant))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/clock::monotonic_now: (t-fn {eff: (effects {} io)} (t-adt {} MonotonicInstant))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "datetime/clock::monotonic_until: (t-fn {} (t-adt {} MonotonicInstant) (t-adt {} MonotonicInstant) (t-adt {} Duration))",
       "flags": []
     },
     {

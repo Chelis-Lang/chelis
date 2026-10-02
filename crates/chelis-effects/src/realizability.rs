@@ -864,9 +864,21 @@ pub fn compute_root_manifest(
     program: &CheckedProgram,
     realizability: &RealizabilityResult,
 ) -> RootManifest {
+    compute_root_manifest_in_context(None, program, realizability)
+}
+
+/// [`compute_root_manifest`] for new code checked against `library`. A
+/// definition's effect row includes the effects of the library callees it
+/// reaches, so a nullary definition that is effectful only through a library
+/// call stays a callable declaration rather than becoming a value root.
+pub fn compute_root_manifest_in_context(
+    library: Option<&CheckedProgram>,
+    program: &CheckedProgram,
+    realizability: &RealizabilityResult,
+) -> RootManifest {
     let exprs = program.annotated_exprs();
     let type_env = program.type_env();
-    let effects_by_def = crate::def_effect_rows(program);
+    let effects_by_def = crate::def_effect_rows_in_context(library, program);
     let mut entries = Vec::new();
 
     for expr in exprs {

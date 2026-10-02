@@ -24,6 +24,8 @@ mod named_axis;
 mod numeric_text;
 mod program_scope;
 mod shared_values;
+#[cfg(test)]
+mod std_clock_tests;
 mod system;
 mod system_adapter;
 #[cfg(test)]

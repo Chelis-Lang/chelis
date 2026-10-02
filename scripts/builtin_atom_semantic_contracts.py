@@ -76,6 +76,9 @@ CLAUSES = {
          "the new axis last"),
     72: ("consumes the key `k`", "`derive(derive(k, 2), n)`", "negative ones included, is valid",
          "with no broadcasting"),
+    75: ("Both halves come from one host reading", "`nanoseconds` lies in `0..999999999`",
+         "`seconds` lies in `-377705030401..253402214400`", "never runs backwards",
+         "`<operation>: io: <detail>`", "No default, zero, clamped, or wrapped reading"),
 }
 
 # Cross-chapter domain contradictions caught during semantic review. Requiring
@@ -109,6 +112,8 @@ CALLABLE_CLAUSES = {
         (("cast",), "`cast(value,target_dtype)` returns the same scalar or tensor"),
         (("clamp", "cumsum", "diagonal", "sort", "split", "trace", "where"),
          "`where(condition,a,b)` uses a bool condition and same-shaped same-dtype branches"),
+        (("clock_monotonic_read", "clock_wall_read"),
+         "`clock_wall_read()->(i64,i64)!{IO}` and"),
         (("cmplt",), "`comparison(left, right) -> result` governs exactly the seven language identities"),
         (("count",), "`count(x, axes...) -> result` admits exactly a `bool` tensor operand"),
         (("dict_get", "dict_insert", "dict_merge", "dict_remove"),

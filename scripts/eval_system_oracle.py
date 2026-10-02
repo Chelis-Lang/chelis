@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Evaluator-only system boundary acceptance for the eight shipped builtins.
+"""Evaluator-only system boundary acceptance for the shipped host builtins.
 
 From the repository root, run ``python3 scripts/eval_system_oracle.py``.
 Each leg executes against this checkout; compiled C and the runtime C ABI
 retain their own acceptance suites. The source-guard legs check recognized
 syntactic drift, not the absence of arbitrary Rust host access. Runtime
-boundary tests own the policy behavior for the eight evaluator builtins.
+boundary tests own the policy behavior for the evaluator's host builtins.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ LEGS = (
     ("cargo", "nextest", "run", "-p", "chelis-compiler-api", "--test", "eval_system_boundary", "--no-tests", "fail"),
     ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_1479_list_dir_lane_parity", "--no-tests", "fail"),
     ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "process_run_builtin", "--no-tests", "fail"),
+    ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "host_clock_builtins", "--no-tests", "fail"),
 )
 
 

@@ -1,4 +1,4 @@
-//! Policy-checked, evaluator-only filesystem and process access.
+//! Policy-checked, evaluator-only filesystem, process, and clock access.
 //!
 //! Compiled artifacts and the runtime C ABI do not use this port. The policy
 //! lives in the wrapper, not the default adapter or individual builtin arms.
@@ -7,11 +7,13 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvalSystemCapability {
     Filesystem,
     Process,
+    Clock,
 }
 
 impl fmt::Display for EvalSystemCapability {
@@ -19,6 +21,7 @@ impl fmt::Display for EvalSystemCapability {
         f.write_str(match self {
             Self::Filesystem => "Filesystem",
             Self::Process => "Process",
+            Self::Clock => "Clock",
         })
     }
 }
@@ -33,12 +36,15 @@ pub(crate) enum EvalSystemOperation {
     ListDir,
     MmapFile,
     ProcessRun,
+    ClockWallRead,
+    ClockMonotonicRead,
 }
 
 impl EvalSystemOperation {
     pub(crate) fn capability(self) -> EvalSystemCapability {
         match self {
             Self::ProcessRun => EvalSystemCapability::Process,
+            Self::ClockWallRead | Self::ClockMonotonicRead => EvalSystemCapability::Clock,
             Self::ReadFile
             | Self::WriteFile
             | Self::ReadLines
@@ -61,6 +67,8 @@ impl fmt::Display for EvalSystemOperation {
             Self::ListDir => "list_dir",
             Self::MmapFile => "mmap_file",
             Self::ProcessRun => "process_run",
+            Self::ClockWallRead => "clock_wall_read",
+            Self::ClockMonotonicRead => "clock_monotonic_read",
         })
     }
 }
@@ -79,11 +87,32 @@ pub(crate) enum EvalSystemError {
     /// [05-HOST-4] rejects the entire listing, identifying the first invalid
     /// host name after byte ordering; this is not an OS/read error.
     InvalidDirectoryName { directory: PathBuf, entry: OsString },
+    /// [05-OP-75]: the host clock could not supply a reading.
+    ClockHost {
+        operation: EvalSystemOperation,
+        source: std::io::Error,
+    },
+    /// [05-OP-75]: a reading, in Euclidean form, whose seconds lie outside
+    /// [`CLOCK_SECONDS_MIN`]..=[`CLOCK_SECONDS_MAX`].
+    ClockOutOfRange {
+        operation: EvalSystemOperation,
+        seconds: i128,
+        nanoseconds: u32,
+    },
 }
 
 impl fmt::Display for EvalSystemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // [05-OP-75] fixes every clock failure, a refusal included, as
+            // `<operation>: io: <detail>`.
+            Self::Refused {
+                operation,
+                capability: capability @ EvalSystemCapability::Clock,
+            } => write!(
+                f,
+                "{operation}: io: {capability} capability is not permitted"
+            ),
             Self::Refused {
                 operation,
                 capability,
@@ -110,6 +139,18 @@ impl fmt::Display for EvalSystemError {
                 directory.as_os_str().as_encoded_bytes().escape_ascii(),
                 entry.as_encoded_bytes().escape_ascii(),
             ),
+            Self::ClockHost { operation, source } => {
+                write!(f, "{operation}: io: host clock error: {source}")
+            }
+            Self::ClockOutOfRange {
+                operation,
+                seconds,
+                nanoseconds,
+            } => write!(
+                f,
+                "{operation}: io: host reading (seconds {seconds}, nanoseconds {nanoseconds}) \
+                 is outside seconds {CLOCK_SECONDS_MIN}..{CLOCK_SECONDS_MAX}"
+            ),
         }
     }
 }
@@ -128,6 +169,64 @@ pub(crate) struct EvalProcessOutput {
     pub(crate) stderr: Vec<u8>,
 }
 
+/// [05-OP-75]: the least and greatest admitted reading second, the unix
+/// seconds whose civil reading at every UTC offset under one day lies in
+/// years -9999 through 9999.
+pub(crate) const CLOCK_SECONDS_MIN: i64 = -377_705_030_401;
+pub(crate) const CLOCK_SECONDS_MAX: i64 = 253_402_214_400;
+
+/// One host clock reading as the host reports it: a distance on one side of
+/// the clock's origin. The boundary, not the adapter, normalizes and range
+/// checks it, so an injected clock is held to the same contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvalClockReading {
+    AtOrAfterOrigin(Duration),
+    BeforeOrigin(Duration),
+}
+
+/// A checked [05-OP-75] reading in Euclidean form: `nanoseconds` lies in
+/// `0..1_000_000_000` and `seconds` in the admitted range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EvalClockTime {
+    pub(crate) seconds: i64,
+    pub(crate) nanoseconds: i64,
+}
+
+impl EvalClockReading {
+    /// Euclidean normalization, then the range check. A reading outside the
+    /// range is reported with its exact value, never clamped or wrapped.
+    fn checked_time(
+        self,
+        operation: EvalSystemOperation,
+    ) -> Result<EvalClockTime, EvalSystemError> {
+        let (seconds, nanoseconds) = match self {
+            Self::AtOrAfterOrigin(distance) => {
+                (i128::from(distance.as_secs()), distance.subsec_nanos())
+            }
+            Self::BeforeOrigin(distance) if distance.subsec_nanos() == 0 => {
+                (-i128::from(distance.as_secs()), 0)
+            }
+            Self::BeforeOrigin(distance) => (
+                -i128::from(distance.as_secs()) - 1,
+                1_000_000_000 - distance.subsec_nanos(),
+            ),
+        };
+        match i64::try_from(seconds) {
+            Ok(admitted) if (CLOCK_SECONDS_MIN..=CLOCK_SECONDS_MAX).contains(&admitted) => {
+                Ok(EvalClockTime {
+                    seconds: admitted,
+                    nanoseconds: i64::from(nanoseconds),
+                })
+            }
+            _ => Err(EvalSystemError::ClockOutOfRange {
+                operation,
+                seconds,
+                nanoseconds,
+            }),
+        }
+    }
+}
+
 /// Typed adapter results prevent an operation from receiving another
 /// operation's payload. Pure line splitting and process decoding stay in the
 /// evaluator; filename validation is part of the directory system boundary.
@@ -144,28 +243,34 @@ pub(crate) trait EvalSystem {
         program: &str,
         args: &[String],
     ) -> Result<EvalProcessOutput, EvalSystemError>;
+    fn read_wall_clock(&mut self) -> std::io::Result<EvalClockReading>;
+    fn read_monotonic_clock(&mut self) -> std::io::Result<EvalClockReading>;
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EvalSystemPolicy {
     pub(crate) filesystem: bool,
     pub(crate) process: bool,
+    pub(crate) clock: bool,
 }
 
 impl EvalSystemPolicy {
     pub(crate) const ALLOW_ALL: Self = Self {
         filesystem: true,
         process: true,
+        clock: true,
     };
     pub(crate) const DENY_ALL: Self = Self {
         filesystem: false,
         process: false,
+        clock: false,
     };
 
     fn permits(self, capability: EvalSystemCapability) -> bool {
         match capability {
             EvalSystemCapability::Filesystem => self.filesystem,
             EvalSystemCapability::Process => self.process,
+            EvalSystemCapability::Clock => self.clock,
         }
     }
 }
@@ -287,5 +392,28 @@ impl EvalSystemBoundary {
     ) -> Result<EvalProcessOutput, EvalSystemError> {
         self.check(EvalSystemOperation::ProcessRun)?;
         self.adapter_mut().run_process(program, args)
+    }
+
+    pub(crate) fn clock_wall_read(&mut self) -> Result<EvalClockTime, EvalSystemError> {
+        let operation = EvalSystemOperation::ClockWallRead;
+        self.check(operation)?;
+        let reading = self.adapter_mut().read_wall_clock();
+        Self::checked_clock_reading(operation, reading)
+    }
+
+    pub(crate) fn clock_monotonic_read(&mut self) -> Result<EvalClockTime, EvalSystemError> {
+        let operation = EvalSystemOperation::ClockMonotonicRead;
+        self.check(operation)?;
+        let reading = self.adapter_mut().read_monotonic_clock();
+        Self::checked_clock_reading(operation, reading)
+    }
+
+    fn checked_clock_reading(
+        operation: EvalSystemOperation,
+        reading: std::io::Result<EvalClockReading>,
+    ) -> Result<EvalClockTime, EvalSystemError> {
+        reading
+            .map_err(|source| EvalSystemError::ClockHost { operation, source })?
+            .checked_time(operation)
     }
 }

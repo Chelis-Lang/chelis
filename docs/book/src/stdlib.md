@@ -178,12 +178,25 @@ its type's range. Each `try_` form other than the masked column forms returns
 `neq` compare values. Dates, times, datetimes, instants, and durations also
 have `*_lt`, `*_lte`, `*_gt`, and `*_gte` functions that order them; offsets,
 offset datetimes, and periods have no order. The module is pure and runs under
-`chelis eval`, `chelis test`, and generated C. In generated C, projecting `.0`
-from a masked column producer such as `try_dates_from_epoch_days` emits C that
-does not compile ([#2883](https://github.com/Chelis-Lang/chelis/issues/2883));
-destructure the pair instead. In generated C, a printed datetime value names its
+`chelis eval`, `chelis test`, and generated C. `chelis build` refuses a program
+that projects `.0` from a masked column producer such as
+`try_dates_from_epoch_days`
+([#2883](https://github.com/Chelis-Lang/chelis/issues/2883)); destructure the
+pair instead. In generated C, a printed datetime value names its
 constructor by an internal package name rather than its source name
 ([#2880](https://github.com/Chelis-Lang/chelis/issues/2880)).
+
+`Std.Datetime.Clock` reads the host clocks. It is a separate module, so
+nothing in `Std.Datetime` reads a clock; any code that reads one, through this
+module or the underlying builtins, carries `IO`. `clock_now()`
+returns the wall-clock `Instant`. `monotonic_now()` returns a `MonotonicInstant`
+from a clock that never runs backwards, and `monotonic_until(a, b)` is the exact
+`Duration` from `a` to `b`. A `MonotonicInstant` has an unspecified origin, so
+no other datetime function takes one and it does not convert to an `Instant`. Both reads carry
+`IO`, so every caller carries it, declared or inferred. A failed read reports
+`clock_wall_read: io: <detail>` or `clock_monotonic_read: io: <detail>`, naming
+the underlying read. The clocks run under `chelis eval` and `chelis test`;
+`chelis build` rejects them.
 
 ### Business days
 

@@ -321,12 +321,15 @@ Eval handles the form. See [#2740](https://github.com/Chelis-Lang/chelis/issues/
 ### 3.5 I/O and process — introduces `IO`
 
 `read_file`, `write_file`, `read_lines`, `read_bytes`, `file_exists`, `list_dir`,
-`mmap_file`, `mmap_read`, `mmap_len`, `process_run`.
+`mmap_file`, `mmap_read`, `mmap_len`, `process_run`, `clock_wall_read`,
+`clock_monotonic_read`.
 
 | Name | Signature | Notes |
 |---|---|---|
 | `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by host-name bytes; strict UTF-8 conversion under [05-HOST-4]. An invalid name traps `IO` for the complete call. |
 | `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. Eval/test runs it; CLI and compiler API reject compiled builds. |
+| `clock_wall_read` | `() -> (i64, i64)` | Host wall clock on the POSIX timescale as `(seconds, nanoseconds)` since 1970-01-01T00:00:00 UTC, from one reading; nanoseconds in `[0, 10^9)`. Eval/test runs it; compiled builds reject it. [05-OP-75] |
+| `clock_monotonic_read` | `() -> (i64, i64)` | A clock that never runs backwards, as `(seconds, nanoseconds)` from an unspecified origin. Eval/test runs it; compiled builds reject it. [05-OP-75] |
 
 String-valued path APIs cannot directly name non-UTF-8 files. `list_dir`
 preserves valid names exactly, without normalization; on conversion failure its
@@ -440,6 +443,7 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               to_list
               read_file write_file read_lines read_bytes file_exists list_dir
               mmap_file mmap_read mmap_len process_run
+              clock_wall_read clock_monotonic_read
               round_to
               parse_csv to_csv csv_f64s csv_ints csv_strs csv_nrows csv_cols
               csv_f64 csv_int csv_str
@@ -618,7 +622,7 @@ before target selection.
 
 | Effect | Introduced by | Handled by |
 |---|---|---|
-| `IO` | file ops, `mmap_*`, `process_run`, `print` | checked execution boundary / runtime |
+| `IO` | file ops, `mmap_*`, `process_run`, `clock_*_read`, `print` | checked execution boundary / runtime |
 | `Test` | `test_assert*` | test/root boundary |
 | `Accum` | internal gradient accumulation | compiler-internal |
 | `Resource(Device)` | `with device(...)` placement region | checked handler and selected target |
@@ -705,7 +709,7 @@ losses, optimizers, and training loops live in a shell, not in `chelis-std`
 | `Std.Io.Json` | `Json` with `JsonNull`, `JsonBool`, `JsonInt`, `JsonBigInt`, `JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; parsing, serialization, file I/O, accessors, and `try_*` forms. Integer tokens preserve the `JsonInt(i64)`/`JsonBigInt(string)` distinction instead of passing through `f64`; decimal/exponent tokens use `JsonFloat(f64)`. |
 | `Std.Io.Parquet`, `Std.Io.Safetensors` | `read_parquet`/`write_parquet`; `save_tensors`/`load_tensors`. Check concrete dtype, shape, and target support for a selected call. |
 | `Std.Scalar`, `Std.Text`, `Std.Test` | Scalar `max`/`min`/`abs`; `join`; assertions, shape checks, and failure helpers. |
-| `Std.Datetime`, `Std.Datetime.Business`, `Std.Rounding`, `Std.Decimal`, `Std.Process`, `Std.Contracts` | Validated dates, times, instants, offsets, durations, periods, and date/instant columns; business-day calendars over a declared horizon; the shared rounding modes; fixed-point arithmetic; `run`/`run_chelis`; named contract predicates. |
+| `Std.Datetime`, `Std.Datetime.Business`, `Std.Datetime.Clock`, `Std.Rounding`, `Std.Decimal`, `Std.Process`, `Std.Contracts` | Validated dates, times, instants, offsets, durations, periods, and date/instant columns; business-day calendars over a declared horizon; the host wall and monotonic clocks, which carry `IO`; the shared rounding modes; fixed-point arithmetic; `run`/`run_chelis`; named contract predicates. |
 
 Compiled-host support for a source-defined module depends on its
 selected dependencies and execution path.

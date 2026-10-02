@@ -1698,6 +1698,9 @@ exact ADT identity by [05-OP-34].
 > legal host-runtime operations in every language execution mode. Pure parsing,
 > projection, serialization, and rounding retain their stated purity; file and
 > process operations retain their declared `IO` effect and observable order.
+> The clock reads `clock_wall_read` and `clock_monotonic_read` ([05-OP-75])
+> are likewise legal host-runtime operations in every language execution mode
+> and retain their declared `IO` effect and observable order.
 > A compiled host execution SHALL produce the same typed result or language
 > trap as evaluation. A device-only kernel may not perform `IO`, but that
 > effect-boundary fact SHALL NOT be represented as a language-wide rejection,
@@ -2764,7 +2767,7 @@ exact ADT identity by [05-OP-34].
 > access, owner flag, or free-style path; it has no accumulator and is outside
 > AD.
 >
-> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the thirteen
+> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the fourteen
 > exported stdlib ADT identities enumerated in the normative registry
 > `spec/registry/stdlib_adt_identities.md`, which this atom incorporates by
 > reference, and no structurally similar successor.
@@ -2790,9 +2793,9 @@ exact ADT identity by [05-OP-34].
 > spelling of an integer-form source token outside i64 range ([05-OP-2]);
 > it is source-faithful text, never a float funnel, and its string field
 > compares and renders byte-exactly. Decimal invariants are checked by the
-> named [05-OP-35] operations before use; the opaque `datetime::*` and
-> `datetime/business::*` identities hold [05-OP-73]'s invariants by
-> construction. There is no second prelude JSON
+> named [05-OP-35] operations before use; the opaque `datetime::*`,
+> `datetime/business::*`, and `datetime/clock::*` identities hold
+> [05-OP-73]'s invariants by construction. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
 > ordinary constructor and the executed matching arm preserve the recursive
 > cotangent shape: differentiable float fields receive their corresponding
@@ -2802,7 +2805,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the two hundred seventeen final exported stdlib numeric definitions enumerated in the
+> the two hundred twenty final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
@@ -2821,8 +2824,8 @@ exact ADT identity by [05-OP-34].
 > refuses `JsonFloat` and `JsonBigInt`, `json_bigint` is [05-OP-3]'s exact
 > big-integer projection, while `json_float` performs [05-OP-3]'s named
 > i64-to-f64 widening, refuses `JsonBigInt`, and returns a stored f64
-> unchanged. The `datetime::*` and `datetime/business::*` identities follow
-> [05-OP-73]. Index wrappers
+> unchanged. The `datetime::*`, `datetime/business::*`, and
+> `datetime/clock::*` identities follow [05-OP-73]. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
 > For a differentiable element type, `list_index(xs,i)` returns an input
@@ -3037,12 +3040,13 @@ exact ADT identity by [05-OP-34].
 > from its implementation body or age.
 
 > **[05-OP-73]** `datetime(arguments...) -> result` governs exactly the
-> `datetime::*` and `datetime/business::*` identities of the [05-OP-34] and
-> [05-OP-35] registries: the opaque value types `Date`, `Time`, `DateTime`,
-> `Instant`, `Offset`, `OffsetDateTime`, `Duration`, `Period`, `Dates[n]`,
-> `Instants[n]`, and `BusinessCalendar`, and the callables over them,
-> together with the one callable of the two modules that reaches no numeric
-> value and so has no registry row, `weekday_name`. Its plain enums are
+> `datetime::*`, `datetime/business::*`, and `datetime/clock::*` identities
+> of the [05-OP-34] and [05-OP-35] registries: the opaque value types `Date`,
+> `Time`, `DateTime`, `Instant`, `Offset`, `OffsetDateTime`, `Duration`,
+> `Period`, `Dates[n]`, `Instants[n]`, `BusinessCalendar`, and
+> `MonotonicInstant`, and the callables over them, together with the one
+> callable of the three modules that reaches no numeric value and so has no
+> registry row, `weekday_name`. Its plain enums are
 > `Weekday` (`Monday` through
 > `Sunday`), `DayOverflow` (`ClampToMonthEnd`, `RejectInvalidDay`), and
 > `TimeUnit` (`Hours`, `Minutes`, `Seconds`, `Milliseconds`, `Microseconds`,
@@ -3077,7 +3081,8 @@ exact ADT identity by [05-OP-34].
 > `tensor[n,i64]` columns of in-range unix seconds and nanoseconds; columns
 > have no missing-value sentinel.
 >
-> Every callable is pure and total on its stated domain. A failing call
+> Every callable except the clock reads `clock_now` and `monotonic_now` is
+> pure and total on its stated domain. A failing call of such a callable
 > reports through [05-OP-60]'s failure channel with the message
 > `<function>: <kind>: <detail>`, where `<function>` is the exported callable's
 > name and `<detail>` names the offending value. `<kind>` is `overflow` exactly
@@ -3293,6 +3298,21 @@ exact ADT identity by [05-OP-34].
 > their scalar twin to each element; where the twin fails for some element,
 > the call fails `domain` naming the lowest such element index and the twin's
 > detail there.
+>
+> `clock_now` and `monotonic_now` are the only callables of this atom that
+> read the host or carry an effect: each performs exactly one [05-OP-75] read
+> and carries `IO`. `clock_now` is the `Instant` whose unix second and
+> nanosecond are the `(seconds, nanoseconds)` of one `clock_wall_read`, which
+> [05-OP-75]'s range makes a valid instant. `monotonic_now` is the
+> `MonotonicInstant` of one `clock_monotonic_read`: a second in [05-OP-75]'s
+> range and a nanosecond in `[0, 10^9)`, measured from that clock's
+> unspecified origin. `monotonic_now` is the only producer of a
+> `MonotonicInstant`, and `monotonic_until(a,b)` is the only datetime callable
+> that takes one: the exact `Duration` from `a` to `b`, which never fails. No callable converts a
+> `MonotonicInstant` to or from an `Instant`. A read that fails fails with
+> [05-OP-75]'s message `clock_wall_read: io: <detail>` or
+> `clock_monotonic_read: io: <detail>`, naming the builtin rather than
+> `clock_now` or `monotonic_now`; `io` is the kind of exactly these failures.
 >
 > Every datetime callable is outside AD and has no accumulator.
 
@@ -4063,6 +4083,38 @@ path even though bare `round` under `grad` remains a structural
 >
 > Accumulator: None; all returned byte counts and offsets are exact checked
 > i64.
+
+#### Host clocks
+
+> **[05-OP-75]** Signature: `clock_wall_read()->(i64,i64)!{IO}` and
+> `clock_monotonic_read()->(i64,i64)!{IO}` are the host clock reads. Each
+> takes no argument and returns `(seconds, nanoseconds)`.
+>
+> Domain: The result types and the `IO` effect are exact. A result denotes
+> the exact time `seconds + nanoseconds / 10^9` seconds in Euclidean form:
+> `nanoseconds` lies in `0..999999999`, so a reading before the clock's
+> origin has negative `seconds` and a nonnegative remainder. `seconds` lies
+> in `-377705030401..253402214400`, the unix seconds whose civil reading
+> at every UTC offset of magnitude under one day falls in years -9999
+> through 9999.
+>
+> Result: Both halves come from one host reading, so a result never
+> combines parts of two readings. `clock_wall_read` reads the host wall
+> clock on the POSIX timescale: the time since 1970-01-01T00:00:00 UTC, in
+> which every day is exactly 86400 seconds long. `clock_monotonic_read`
+> reads a host clock that never runs backwards: within one execution, no
+> read is less, in `(seconds, nanoseconds)` order, than an earlier read.
+> Its origin is unspecified, and nothing relates it to a wall reading.
+>
+> Failure: A host clock error, or a reading whose `seconds` lies outside
+> the domain above, fails loudly with the message
+> `<operation>: io: <detail>`, where the detail names the host error or the
+> reading. No default, zero, clamped, or wrapped reading substitutes for a
+> failure, and no unused-result optimization may erase a read.
+>
+> Adjoint: Clock reads are outside AD under the effect rules.
+>
+> Accumulator: None; both halves are exact i64 values.
 
 #### CSV text structure
 

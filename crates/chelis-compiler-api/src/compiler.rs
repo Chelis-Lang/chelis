@@ -2670,8 +2670,14 @@ fn compile_rewritten_decls_in_context(
         &new_checked,
         crate::target_capability::tensor_capable_prims(target),
     );
-    let mut manifest =
-        chelis_effects::realizability::compute_root_manifest(&new_checked, &realizability);
+    // The new code's effect rows include its library callees' effects, so a
+    // nullary definition that is effectful only through the library is not
+    // auto-applied as a value root.
+    let mut manifest = chelis_effects::realizability::compute_root_manifest_in_context(
+        Some(context.library_checked()),
+        &new_checked,
+        &realizability,
+    );
     route_tensor_inputs_from_dag(
         &mut manifest,
         &lowered_parts.dag,

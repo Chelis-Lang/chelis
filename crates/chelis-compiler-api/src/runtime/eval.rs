@@ -4304,6 +4304,10 @@ impl<'a> EvalContext<'a> {
                     .into(),
                 ))
             }
+            // [05-OP-75]: `(seconds, nanoseconds)` from one policy-checked
+            // host reading. Compiled host execution is chelis#1297.
+            "clock_wall_read" => Ok(clock_time_value(self.system.clock_wall_read()?)),
+            "clock_monotonic_read" => Ok(clock_time_value(self.system.clock_monotonic_read()?)),
             "write_file" => {
                 let path = expect_string_arg(args, 0)?;
                 let contents = expect_string_arg(args, 1)?;
@@ -5251,6 +5255,17 @@ pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Re
         }
     }
     returned.expect("the root comparison returns a result")
+}
+
+/// [05-OP-75]: a checked clock reading as its `(seconds, nanoseconds)` tuple.
+fn clock_time_value(time: system::EvalClockTime) -> RuntimeValue {
+    RuntimeValue::Tuple(
+        vec![
+            RuntimeValue::int64(time.seconds),
+            RuntimeValue::int64(time.nanoseconds),
+        ]
+        .into(),
+    )
 }
 
 /// [05-OP-33]: admit the complete result before deriving any keys.
