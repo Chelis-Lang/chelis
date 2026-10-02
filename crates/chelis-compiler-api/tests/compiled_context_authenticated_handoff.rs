@@ -49,7 +49,8 @@ use tempfile::TempDir;
 ///
 /// `body` lets a caller ask for a second, genuinely different library. Two
 /// copies of the same one would make a swapped type environment a no-op.
-fn library_fixture(body: &str) -> (TempDir, PathBuf) {
+/// `std_layer` says how much of the standard library the package imports.
+fn library_fixture(body: &str, std_layer: StdLayer) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("tempdir");
     let root = dir.path().join("myapp");
     fs::create_dir_all(root.join("src")).expect("mkdir src");
@@ -67,7 +68,7 @@ fn library_fixture(body: &str) -> (TempDir, PathBuf) {
         root.join("src/main.ch"),
         format!(
             "module App.Main\n{}\ndef placeholder() -> i32 = cast(0, i32)\n",
-            every_stdlib_module_import()
+            std_layer.imports()
         ),
     )
     .expect("write main.ch");
@@ -84,6 +85,35 @@ fn library_fixture(body: &str) -> (TempDir, PathBuf) {
         .expect("the fixture package must resolve and write its lock")
         .expect("the entry file is inside the fixture package");
     (dir, root)
+}
+
+/// How much of chelis-std a fixture package imports (chelis#2949).
+///
+/// A package links, and `compile_reef_context` checks, only the chelis-std
+/// modules it imports, so this choice sets what each test pays as the library
+/// grows. Nextest runs every test in its own process, so nothing compiled for
+/// one test is shared with another.
+#[derive(Clone, Copy)]
+enum StdLayer {
+    /// Every chelis-std module. For a property that depends on what the
+    /// library contains: route equivalence and the checker fixed point must
+    /// hold over every construct the real library uses.
+    Whole,
+    /// One small chelis-std module. The stdlib layer is still non-empty, so
+    /// `compile_reef_context` takes the layered path every real package takes,
+    /// and the payload still clears [`FIXTURE_MINIMUM_BYTES`]. For a property
+    /// of the handoff envelope, its digest, or the type-environment check,
+    /// none of which depends on which declarations the library holds.
+    Minimal,
+}
+
+impl StdLayer {
+    fn imports(self) -> String {
+        match self {
+            StdLayer::Whole => every_stdlib_module_import(),
+            StdLayer::Minimal => "import Std.Scalar\n".to_string(),
+        }
+    }
 }
 
 /// The fixture library: a fixed head that exercises linearity and effects --
@@ -170,8 +200,8 @@ const FOREIGN_LIBRARY: &str = "module Mylib.Math\nexport (triple, offset)\n\n\
      def triple(x: i64) -> i64 = x + x + x\n\
      def offset(x: f32, y: f32) -> f32 = x - y\n";
 
-fn encoded_fixture_from(body: &str) -> (TempDir, Vec<u8>, HandoffDigest) {
-    let (dir, root) = library_fixture(body);
+fn encoded_fixture_from(body: &str, std_layer: StdLayer) -> (TempDir, Vec<u8>, HandoffDigest) {
+    let (dir, root) = library_fixture(body, std_layer);
     let context = compile_reef_context(Path::new("/tmp/chelis-2211-unused-reef-home"), &root)
         .expect("the fixture package must compile");
     let (bytes, digest) = context
@@ -180,13 +210,21 @@ fn encoded_fixture_from(body: &str) -> (TempDir, Vec<u8>, HandoffDigest) {
     (dir, bytes, digest)
 }
 
-fn encoded_fixture() -> (TempDir, Vec<u8>, HandoffDigest) {
-    let fixture = encoded_fixture_from(&primary_library(FIXTURE_BULK_DEFINITIONS));
+fn encoded_fixture(std_layer: StdLayer) -> (TempDir, Vec<u8>, HandoffDigest) {
+    let fixture = encoded_fixture_from(&primary_library(FIXTURE_BULK_DEFINITIONS), std_layer);
     assert!(
         fixture.1.len() >= FIXTURE_MINIMUM_BYTES,
         "the route-equivalence fixture encodes {} bytes, below the {FIXTURE_MINIMUM_BYTES}-byte \
          floor this comparison is supposed to cover",
         fixture.1.len()
+    );
+    assert!(
+        !wire_of(&fixture.1)
+            .reef_state
+            .linked_stdlib_decls
+            .is_empty(),
+        "the fixture links no chelis-std declarations, so compile_reef_context took the \
+         monolithic path rather than the layered one every real package takes"
     );
     fixture
 }
@@ -206,7 +244,7 @@ fn encoded_fixture() -> (TempDir, Vec<u8>, HandoffDigest) {
 /// here is a value difference, not an ordering artifact.
 #[test]
 fn both_decode_routes_reconstruct_identical_contexts() {
-    let (_dir, bytes, digest) = encoded_fixture();
+    let (_dir, bytes, digest) = encoded_fixture(StdLayer::Whole);
 
     let untrusted = CompiledContext::decode(&bytes).expect("the untrusted route must accept");
     let authenticated = CompiledContext::decode_authenticated(&bytes, &digest)
@@ -281,7 +319,7 @@ fn both_decode_routes_reconstruct_identical_contexts() {
 /// a value difference.
 #[test]
 fn cached_program_is_a_checker_fixed_point() {
-    let (_dir, root) = library_fixture(&primary_library(FIXTURE_BULK_DEFINITIONS));
+    let (_dir, root) = library_fixture(&primary_library(FIXTURE_BULK_DEFINITIONS), StdLayer::Whole);
     let context = compile_reef_context(Path::new("/tmp/chelis-2211-unused-reef-home"), &root)
         .expect("the fixture package must compile");
     let bytes = context.encode().expect("a compiled context must encode");
@@ -384,7 +422,7 @@ fn assert_checker_fixed_point(layer: &str, stored: &chelis_types::CheckedProgram
 /// never saw that channel.
 #[test]
 fn authenticated_decode_rejects_a_payload_rewritten_after_encode() {
-    let (_dir, bytes, digest) = encoded_fixture();
+    let (_dir, bytes, digest) = encoded_fixture(StdLayer::Minimal);
 
     let rewritten = rewrite_payload_and_reseal(&bytes);
     assert_ne!(
@@ -416,8 +454,9 @@ fn authenticated_decode_rejects_a_payload_rewritten_after_encode() {
 /// pass one and fail the other.
 #[test]
 fn authenticated_decode_rejects_a_digest_minted_for_other_bytes() {
-    let (_dir, bytes, _digest) = encoded_fixture();
-    let (_other_dir, _other_bytes, other_digest) = encoded_fixture_from(FOREIGN_LIBRARY);
+    let (_dir, bytes, _digest) = encoded_fixture(StdLayer::Minimal);
+    let (_other_dir, _other_bytes, other_digest) =
+        encoded_fixture_from(FOREIGN_LIBRARY, StdLayer::Minimal);
 
     let error = CompiledContext::decode_authenticated(&bytes, &other_digest)
         .expect_err("another payload's digest must not authenticate these bytes");
@@ -433,14 +472,14 @@ fn authenticated_decode_rejects_a_digest_minted_for_other_bytes() {
 /// coverage that justifies keeping the re-derivation for the disk cache.
 #[test]
 fn the_untrusted_route_still_accepts_a_payload_with_no_accompanying_digest() {
-    let (_dir, bytes, _digest) = encoded_fixture();
+    let (_dir, bytes, _digest) = encoded_fixture(StdLayer::Minimal);
     CompiledContext::decode(&bytes)
         .expect("decode must keep working for a caller that has only the bytes");
 }
 
 #[test]
 fn handoff_digest_hex_round_trips() {
-    let (_dir, _bytes, digest) = encoded_fixture();
+    let (_dir, _bytes, digest) = encoded_fixture(StdLayer::Minimal);
     let hex = digest.to_hex();
     assert_eq!(hex.len(), 64, "a SHA-256 is 64 hex characters: {hex}");
     assert_eq!(
@@ -494,8 +533,9 @@ fn handoff_digest_rejects_every_spelling_but_the_canonical_one() {
 /// semantic check can reject it.
 #[test]
 fn authenticated_decode_rejects_a_type_environment_from_another_library() {
-    let (_dir, bytes, _digest) = encoded_fixture();
-    let (_foreign_dir, foreign_bytes, _foreign_digest) = encoded_fixture_from(FOREIGN_LIBRARY);
+    let (_dir, bytes, _digest) = encoded_fixture(StdLayer::Minimal);
+    let (_foreign_dir, foreign_bytes, _foreign_digest) =
+        encoded_fixture_from(FOREIGN_LIBRARY, StdLayer::Minimal);
 
     let honest = wire_of(&bytes);
     let foreign = wire_of(&foreign_bytes);
