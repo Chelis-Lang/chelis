@@ -7,7 +7,7 @@
 mod common;
 
 use assert_cmd::Command;
-use common::{link_generated, make_app, write_file};
+use common::{make_app, write_file};
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use std::path::{Path, PathBuf};
@@ -131,13 +131,12 @@ impl SingleFile {
         (assert, out_dir)
     }
 
-    /// Build to C, link with the host toolchain, run, and return stdout.
+    /// Build natively, run the executable `chelis build` publishes, and
+    /// return stdout.
     fn build_and_run(&self) -> String {
         let (assert, out_dir) = self.build();
         assert.success();
         let stem = self.path.file_stem().and_then(|s| s.to_str()).unwrap();
-        let status = link_generated(&out_dir, &format!("{stem}.c"), stem);
-        assert!(status.success(), "link failed: {status}");
         let run = StdCommand::new(out_dir.join(stem))
             .output()
             .expect("compiled binary should run");

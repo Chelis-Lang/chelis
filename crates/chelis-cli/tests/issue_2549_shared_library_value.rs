@@ -15,7 +15,7 @@
 mod common;
 
 use assert_cmd::Command;
-use common::{gcc_available, link_generated};
+use common::gcc_available;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
@@ -132,6 +132,10 @@ fn three_importers_and_a_second_import_path_evaluate_and_build() {
     assert!(ok, "eval d must succeed; stderr: {stderr}");
     assert_eq!(stdout, "main = tensor(shape=[2], data=[2.0, 2.0])\n");
 
+    if !gcc_available() {
+        eprintln!("skipped the native build of d: no host C compiler");
+        return;
+    }
     let out = dir.path().join("out");
     let out_arg = out.to_str().expect("UTF-8 out dir");
     let (ok, _stdout, stderr) = chelis(&root, &cache, &["build", "src/d.ch", "-o", out_arg]);
@@ -140,12 +144,6 @@ fn three_importers_and_a_second_import_path_evaluate_and_build() {
         out.join("d.c").is_file(),
         "build must emit C; stderr: {stderr}"
     );
-    if !gcc_available() {
-        eprintln!("skipped the native run of d.c: no host C compiler");
-        return;
-    }
-    let status = link_generated(&out, "d.c", "d");
-    assert!(status.success(), "link failed: {status}");
     let run = std::process::Command::new(out.join("d"))
         .output()
         .expect("compiled binary should run");

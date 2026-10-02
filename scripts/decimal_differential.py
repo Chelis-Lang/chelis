@@ -45,8 +45,9 @@ binary under test comes from `--chelis` or the `CHELIS_BIN` environment
 variable. Each program is a package depending on `chelis-std`, the way a shell
 uses it: `--reef-home` names a reef home where it is published, and without it
 the harness publishes this checkout's `packages/chelis-std` into a fresh one
-first. The C lane compiles with `--toolchain-json` when given, and otherwise
-with the command `chelis build` prints.
+first. The C lane emits each program's source with `chelis build --emit-c` and
+compiles it with `--toolchain-json` when given, and otherwise with the command
+`chelis build --emit-c` prints.
 """
 
 from __future__ import annotations
@@ -1115,7 +1116,7 @@ class Runner:
 
     def build_image(self, program: Program) -> tuple[Path | None, LaneResult | None]:
         app, main = self.app(self.work / "c" / program.image, program.source)
-        build = self.run([str(self.chelis), "build", main, "--target", "c", "--output", "out"], app)
+        build = self.run([str(self.chelis), "build", main, "--target", "c", "--emit-c", "--output", "out"], app)
         if build.returncode != 0:
             return None, LaneResult("c", build.returncode, build.stdout, build.stderr, "build")
         stem = Path(main).stem

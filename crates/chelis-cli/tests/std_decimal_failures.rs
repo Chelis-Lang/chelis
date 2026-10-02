@@ -17,7 +17,7 @@
 mod common;
 
 use assert_cmd::Command;
-use common::{gcc_available, link_generated, make_app, write_file};
+use common::{gcc_available, make_app, write_file};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -396,8 +396,6 @@ fn std_decimal_compiled_failures_report_their_exact_message() {
         built,
         "the failure-selection program must build:\n{rendered}"
     );
-    let status = link_generated(&out_dir, "main.c", "main");
-    assert!(status.success(), "link failed: {status}");
     for (index, (name, expression, expected)) in EXACT_FAILURES.iter().enumerate() {
         write_file(&app_pkg.join("case.txt"), &format!("{index}\n"));
         let run = StdCommand::new(out_dir.join("main"))

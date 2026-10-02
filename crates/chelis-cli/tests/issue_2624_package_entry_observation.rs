@@ -12,7 +12,7 @@
 mod common;
 
 use assert_cmd::Command;
-use common::{gcc_available, link_generated};
+use common::gcc_available;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
@@ -148,9 +148,13 @@ fn chelis(dir: &Path, cwd: &Path, args: &[&str]) -> String {
     stdout
 }
 
-/// Build `entry` to C under `cwd`, link it, run it, and return its stdout.
-/// `None` when no host C compiler exists.
+/// Build `entry` natively under `cwd`, run the executable `chelis build`
+/// publishes, and return its stdout. `None` when no host C compiler exists.
 fn compiled_stdout(dir: &Path, cwd: &Path, entry: &str, stem: &str) -> Option<String> {
+    if !gcc_available() {
+        eprintln!("skipped the native build of {stem}: no host C compiler");
+        return None;
+    }
     let out = dir.join(format!("{stem}-out"));
     chelis(
         dir,
@@ -164,12 +168,6 @@ fn compiled_stdout(dir: &Path, cwd: &Path, entry: &str, stem: &str) -> Option<St
             out.to_str().expect("UTF-8 output dir"),
         ],
     );
-    if !gcc_available() {
-        eprintln!("skipped the native run of {stem}.c: no host C compiler");
-        return None;
-    }
-    let status = link_generated(&out, &format!("{stem}.c"), stem);
-    assert!(status.success(), "link failed: {status}");
     let run = std::process::Command::new(out.join(stem))
         .output()
         .expect("compiled binary runs");

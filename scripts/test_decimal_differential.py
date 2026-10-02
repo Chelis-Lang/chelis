@@ -544,7 +544,9 @@ class Invocation(unittest.TestCase):
                 with harness.ThreadPoolExecutor(max_workers=4) as pool:
                     results = list(pool.map(runner.c_lane, runs))
                 self.assertEqual({(r.status, r.stage) for r in results}, {(0, "run")})
-                self.assertEqual(sum(1 for argv, _ in calls if argv[1:2] == ["build"]), 1)
+                builds = [argv for argv, _ in calls if argv[1:2] == ["build"]]
+                self.assertEqual(len(builds), 1)
+                self.assertIn("--emit-c", builds[0])
                 image = Path(scratch) / "c" / "row_round"
                 self.assertEqual(sorted(cwd for argv, cwd in calls if argv[0] == str(image / "out" / "case")),
                                  sorted(Path(scratch) / "c-runs" / p.name for p in runs))
