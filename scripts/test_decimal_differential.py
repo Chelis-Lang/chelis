@@ -651,32 +651,32 @@ def unpadded_text(x: ref.Decimal) -> str:
 
 # Each defect class the canary's docstring names, with its models by name.
 CANARY_DEFECTS: dict[str, dict[str, dict[str, object]]] = {
-    "the text parser's digit or scale limit off by one": {
+    "the reference's single digit limit or scale limit moved by one": {
         "37 digits": {"MAX_DIGITS": 37, "MAX_COEFFICIENT": 10**37 - 1},
         "39 digits": {"MAX_DIGITS": 39, "MAX_COEFFICIENT": 10**39 - 1},
         "scale 37": {"MAX_SCALE": 37},
         "scale 39": {"MAX_SCALE": 39},
     },
-    "an inner limb rendered without its leading zeros": {"unpadded": {"decimal_to_string": unpadded_text}},
-    "a limb carry dropped in addition": {"carry": sums(limbwise(operator.add), operator.sub)},
-    "a limb borrow dropped in subtraction": {"borrow": sums(operator.add, limbwise(operator.sub))},
-    "a limb product's carry dropped in multiplication": {"carry": product(carryless_product)},
-    "a directed rounding mode rounding as another directed mode": {
+    "every inner limb printed without its leading zeros": {"unpadded": {"decimal_to_string": unpadded_text}},
+    "every limb carry dropped in addition": {"carry": sums(limbwise(operator.add), operator.sub)},
+    "every limb borrow dropped in subtraction": {"borrow": sums(operator.add, limbwise(operator.sub))},
+    "every limb product's carry dropped in multiplication": {"carry": product(carryless_product)},
+    "one directed mode of one callable rounding as another directed mode on every input": {
         f"{name} {mode} as {other}": rounding(name, mode, as_mode=other)
         for name in MODE_CALLABLES for mode in DIRECTED for other in DIRECTED if other != mode},
-    "a RoundTiesToEven tie broken toward zero, away from zero, toward positive or toward negative": {
+    "every RoundTiesToEven tie of one callable broken toward zero, away from zero, toward positive or toward negative": {
         f"{name} {tie}": rounding(name, "RoundTiesToEven", tie=tie) for name in MODE_CALLABLES for tie in WRONG_TIES},
-    "a RoundTiesToAway tie broken to even, toward zero, toward positive or toward negative": {
+    "every RoundTiesToAway tie of one callable broken to even, toward zero, toward positive or toward negative": {
         f"{name} {tie}": rounding(name, "RoundTiesToAway", tie=tie)
         for name in MODE_CALLABLES for tie in ("to even", "toward zero", "toward positive", "toward negative")},
-    "a RejectInexact call accepting an inexact value": {
+    "one callable's RejectInexact rounding toward zero instead of failing, on every input": {
         name: rounding(name, "RejectInexact", as_mode="RoundTowardZero") for name in MODE_CALLABLES
         if name != "decimal_round"},
-    "a binary conversion tie broken toward zero, away from zero, toward positive or toward negative": {
+    "every binary conversion tie broken toward zero, away from zero, toward positive or toward negative": {
         f"f{width} {tie}": binary_rounding(fmt, tie)
         for width, fmt in ((64, ref.F64), (32, ref.F32)) for tie in WRONG_TIES},
-    "an f32 conversion rounding through f64": {"through f64": {"decimal_to_f32_bits": f32_through_f64}},
-    "a long division taking one quotient-digit correction or none": {
+    "every f32 conversion rounding through f64": {"through f64": {"decimal_to_f32_bits": f32_through_f64}},
+    "every long division taking at most one quotient-digit correction, or none": {
         f"{n} corrections": quotient(long_division(n)) for n in (1, 0)},
 }
 

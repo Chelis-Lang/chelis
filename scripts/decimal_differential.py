@@ -953,25 +953,28 @@ def build_canary_corpus() -> Corpus:
     """The canary corpus: a fixed hand-picked handful of the default corpus's edge inputs.
 
     It runs every row, so it calls every callable and observes every twin, in
-    one program with no failure programs and no seeded random inputs. It
-    detects a defect only where one of its expected outputs changes; the
-    default corpus is the complete check. Each defect class below changes at
-    least one of them, which `scripts/test_decimal_differential.py` checks
-    against models of the class that perturb the reference as a module with the
-    defect would compute:
+    one program with no failure programs and no seeded random inputs. It is a
+    fixed sample: it detects a module defect only where one of its expected
+    outputs changes, and the default corpus is the complete check. Each
+    perturbation below, applied to the reference uniformly on every input,
+    changes at least one expected output, which
+    `scripts/test_decimal_differential.py` checks. A module defect that departs
+    from these only on some inputs (for example only for a negative divisor, or
+    in one of several checks that share a limit in the reference) can pass the
+    canary:
 
-    - the text parser's digit or scale limit off by one
-    - an inner limb rendered without its leading zeros
-    - a limb carry dropped in addition
-    - a limb borrow dropped in subtraction
-    - a limb product's carry dropped in multiplication
-    - a directed rounding mode rounding as another directed mode
-    - a RoundTiesToEven tie broken toward zero, away from zero, toward positive or toward negative
-    - a RoundTiesToAway tie broken to even, toward zero, toward positive or toward negative
-    - a RejectInexact call accepting an inexact value
-    - a binary conversion tie broken toward zero, away from zero, toward positive or toward negative
-    - an f32 conversion rounding through f64
-    - a long division taking one quotient-digit correction or none
+    - the reference's single digit limit or scale limit moved by one
+    - every inner limb printed without its leading zeros
+    - every limb carry dropped in addition
+    - every limb borrow dropped in subtraction
+    - every limb product's carry dropped in multiplication
+    - one directed mode of one callable rounding as another directed mode on every input
+    - every RoundTiesToEven tie of one callable broken toward zero, away from zero, toward positive or toward negative
+    - every RoundTiesToAway tie of one callable broken to even, toward zero, toward positive or toward negative
+    - one callable's RejectInexact rounding toward zero instead of failing, on every input
+    - every binary conversion tie broken toward zero, away from zero, toward positive or toward negative
+    - every f32 conversion rounding through f64
+    - every long division taking at most one quotient-digit correction, or none
 
     The binary conversions are `decimal_to_f64` and `decimal_to_f32`. The
     rounding classes hold for every callable that takes a mode, except that a
