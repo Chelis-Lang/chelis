@@ -1113,7 +1113,7 @@ def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> ten
 }
 
 /// Ragged extents are NOT recoverable through a binding — only the
-/// literal length survives (`Env::list_literal_lens`), and the
+/// literal length survives (`Env::list_literal_len`), and the
 /// §4.5.2 join has already widened the mismatched extents to `*`. A
 /// let-bound ragged list therefore keeps the honest wildcard: a
 /// claim the direct form would reject is accepted permissively.

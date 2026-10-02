@@ -877,12 +877,9 @@ pub(super) fn infer_def(
     subst.leave_level(body_level, vg);
     let scheme = env.generalize(&body_ty, subst);
     subst.name_generic_parameters(&scheme, &name, &UnordMap::new());
-    // Record a static extent value (see `infer_top_level` / `infer_let`),
-    // folded against the pre-binding scope.
-    note_static_size_binding(env, &name, &kids[1]);
-    // chelis#631: same discipline for list-literal lengths.
-    note_list_literal_binding(env, &name, &kids[1]);
-    env.bind(name, scheme);
+    // The binding's value facts, read against the pre-binding scope.
+    let facts = rhs_binding_facts(env, &kids[1]);
+    env.bind_with_facts(name, scheme, facts);
     body_ty
 }
 

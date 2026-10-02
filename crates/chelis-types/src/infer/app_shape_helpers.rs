@@ -232,19 +232,20 @@ pub(super) fn ambiguous_size_name_error(
         })
 }
 
-/// Record, or clear, the folded value of a value binding used as an extent.
+/// The facts a binding to `rhs` carries, read against the pre-binding scope.
 ///
-/// A binding whose right-hand side folds to a checked integer constant lets a
-/// later `expand`/`insert` size naming it type a literal extent; any other
-/// binding clears a value recorded under the same name, so a re-bind or a
-/// shadowing parameter never inherits one. This records VALUES only: a size
-/// of any provenance is admissible (spec/04-type-system.md section 4.7.2,
-/// chelis#469), so nothing here classifies where a non-constant value came
-/// from.
-pub(super) fn note_static_size_binding(env: &mut Env, name: &str, rhs: &deep::Expr) {
-    match fold_static_int_expr(rhs, |bound| env.static_size_value(bound)) {
-        Some(value) => env.mark_static_size_value(name, value),
-        None => env.clear_static_size_value(name),
+/// A right-hand side that folds to a checked integer constant lets a later
+/// `expand`/`insert` size naming the binding type a literal extent, and a
+/// list literal records its element count for `concat` (chelis#631). The
+/// facts travel on the binding entry ([`Env::bind_with_facts`]), so any later
+/// binding of the name, by any binder, replaces them. This records VALUES
+/// only: a size of any provenance is admissible (spec/04-type-system.md
+/// section 4.7.2, chelis#469), so nothing here classifies where a
+/// non-constant value came from.
+pub(super) fn rhs_binding_facts(env: &Env, rhs: &deep::Expr) -> BindingFacts {
+    BindingFacts {
+        static_size: fold_static_int_expr(rhs, |bound| env.static_size_value(bound)),
+        list_literal_len: static_list_len(Some(rhs), env),
     }
 }
 

@@ -2694,11 +2694,11 @@ pub(super) fn infer_top_level(
 
         product.record_bypass(expr, scheme_body.clone(), "top-level declaration inference");
 
-        // Record the folded value of a static top-level extent binding (e.g.
-        // `zero_count = sub(0i64, 0i64)`) against the pre-binding scope.
-        note_static_size_binding(env, &name, &kids[1]);
-        // chelis#631: same discipline for list-literal lengths.
-        note_list_literal_binding(env, &name, &kids[1]);
+        // The binding's value facts (a static extent such as
+        // `zero_count = sub(0i64, 0i64)`, or a list literal's length), read
+        // against the pre-binding scope. A deferred recursive member is a
+        // function, which carries none.
+        let facts = rhs_binding_facts(env, &kids[1]);
         if defer_recursive_binding {
             product
                 .group_result_origins
@@ -2719,7 +2719,7 @@ pub(super) fn infer_top_level(
                 errors,
             );
             subst.name_generic_parameters(&scheme, &name, &declared_type_names);
-            env.bind(name, scheme);
+            env.bind_with_facts(name, scheme, facts);
             None
         }
     } else {

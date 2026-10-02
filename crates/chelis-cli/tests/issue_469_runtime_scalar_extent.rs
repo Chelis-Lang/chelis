@@ -804,3 +804,116 @@ fn size_names_read_in_their_own_definition_on_both_lanes() {
         assert_lanes_agree(stem, source, expected);
     }
 }
+
+/// A pattern binder shadows an outer static value of the same name. Each row
+/// binds `n` (or folds over it) under an outer `n = 3i64`, and the size reads
+/// the pattern's 5. The checker used to keep the outer binding's folded 3
+/// under the pattern's name: eval printed 5 while C guarded the axis against
+/// 3 and trapped. The controls are a pattern with no outer `n`, a parameter
+/// `n`, and a `fold` lambda parameter `n`; the claim row declares 3 and traps
+/// identically on both lanes.
+#[test]
+fn a_pattern_binder_shadows_an_outer_static_size_on_both_lanes() {
+    let some = "out = f(to_tensor([1i64, 2i64]), Some(5i64))\n";
+    for (stem, source, expected) in [
+        (
+            "match_shadow_static",
+            format!(
+                "n = 3i64\n\
+                 def f(x: tensor[2, i64], o: Option[i64]) -> i64 = match o with {{\n\
+                   | Some(n) => shape(insert(x, 0, n), 0)\n\
+                   | None => 0i64\n\
+                 }}\n{some}"
+            ),
+            "out = 5",
+        ),
+        (
+            "match_shadow_local",
+            format!(
+                "def f(x: tensor[2, i64], o: Option[i64]) -> i64 = {{\n\
+                   n = 3i64\n\
+                   match o with {{\n\
+                     | Some(n) => shape(insert(x, 0, n), 0)\n\
+                     | None => 0i64\n\
+                   }}\n\
+                 }}\n{some}"
+            ),
+            "out = 5",
+        ),
+        (
+            "match_shadow_sum",
+            format!(
+                "n = 3i64\n\
+                 def f(x: tensor[2, i64], o: Option[i64]) -> i64 = match o with {{\n\
+                   | Some(n) => tensor_to_scalar(sum(sum(insert(x, 0, n), 0), 0))\n\
+                   | None => 0i64\n\
+                 }}\n{some}"
+            ),
+            "out = 15",
+        ),
+        (
+            "match_shadow_tuple",
+            "n = 3i64\n\
+             def f(x: tensor[2, i64], p: (i64, i64)) -> i64 = match p with {\n\
+               | (m, n) => add(m, shape(insert(x, 0, n), 0))\n\
+             }\n\
+             out = f(to_tensor([1i64, 2i64]), (1i64, 5i64))\n"
+                .to_string(),
+            "out = 6",
+        ),
+        (
+            "match_shadow_arith",
+            format!(
+                "n = 3i64\n\
+                 def f(x: tensor[2, i64], o: Option[i64]) -> i64 = match o with {{\n\
+                   | Some(n) => shape(insert(x, 0, add(n, 0i64)), 0)\n\
+                   | None => 0i64\n\
+                 }}\n{some}"
+            ),
+            "out = 5",
+        ),
+        (
+            "match_no_outer",
+            format!(
+                "def f(x: tensor[2, i64], o: Option[i64]) -> i64 = match o with {{\n\
+                   | Some(n) => shape(insert(x, 0, n), 0)\n\
+                   | None => 0i64\n\
+                 }}\n{some}"
+            ),
+            "out = 5",
+        ),
+        (
+            "match_shadow_param",
+            "def f(x: tensor[2, i64], n: i64, o: Option[i64]) -> i64 = match o with {\n\
+               | Some(n) => shape(insert(x, 0, n), 0)\n\
+               | None => 0i64\n\
+             }\n\
+             out = f(to_tensor([1i64, 2i64]), 3i64, Some(5i64))\n"
+                .to_string(),
+            "out = 5",
+        ),
+        (
+            "fold_param_shadow",
+            "n = 3i64\n\
+             def f(x: tensor[2, i64]) -> i64 = fold(fn (acc: i64, n: i64) -> add(acc, shape(insert(x, 0, n), 0)), 0i64, [1i64, 5i64])\n\
+             out = f(to_tensor([1i64, 2i64]))\n"
+                .to_string(),
+            "out = 6",
+        ),
+    ] {
+        assert_lanes_agree(stem, &source, expected);
+    }
+    assert_lanes_trap_identically(
+        "match_shadow_claim",
+        "n = 3i64\n\
+         def f(x: tensor[2, i64], o: Option[i64]) -> tensor[3, 2, i64] = match o with {\n\
+           | Some(n) => insert(x, 0, n)\n\
+           | None => insert(x, 0, 3i64)\n\
+         }\n\
+         out = f(to_tensor([1i64, 2i64]), Some(5i64))\n",
+        &[
+            "claimed = 3, insert axis 0 = 5",
+            &domain_trap_line("insert"),
+        ],
+    );
+}

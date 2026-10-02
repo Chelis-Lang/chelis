@@ -337,3 +337,65 @@ fn renaming_either_meaning_checks_clean() {
         assert_checks_clean(source, label);
     }
 }
+
+/// Every binder shadows the value facts of the name it rebinds. A `match` or
+/// tuple pattern variable `n` that shadows a static `n = 3i64` is a runtime
+/// value, so the size it names is a fresh extent and the declared `5` claims
+/// it. The checker used to keep the outer binding's folded 3 under the
+/// pattern's name, typing the axis as 3 while the program executed 5, and so
+/// rejected each of these with `Lit(3) vs Lit(5)`.
+#[test]
+fn a_pattern_binder_never_inherits_an_outer_static_size() {
+    for (label, source) in [
+        (
+            "a match pattern under a top-level static",
+            "n = 3i64\n\
+             def f(x: tensor[2, i64], o: Option[i64], d: tensor[5, 2, i64]) -> tensor[5, 2, i64] = match o with {\n\
+               | Some(n) => insert(x, 0, n)\n\
+               | None => d\n\
+             }\n",
+        ),
+        (
+            "a match pattern under a local static",
+            "def f(x: tensor[2, i64], o: Option[i64], d: tensor[5, 2, i64]) -> tensor[5, 2, i64] = {\n\
+               n = 3i64\n\
+               match o with {\n\
+                 | Some(n) => insert(x, 0, n)\n\
+                 | None => d\n\
+               }\n\
+             }\n",
+        ),
+        (
+            "a tuple pattern",
+            "n = 3i64\n\
+             def f(x: tensor[2, i64], p: (i64, i64)) -> tensor[5, 2, i64] = match p with {\n\
+               | (m, n) => insert(x, 0, n)\n\
+             }\n",
+        ),
+        (
+            "arithmetic over a match pattern",
+            "n = 3i64\n\
+             def f(x: tensor[2, i64], o: Option[i64], d: tensor[5, 2, i64]) -> tensor[5, 2, i64] = match o with {\n\
+               | Some(n) => insert(x, 0, add(n, 0i64))\n\
+               | None => d\n\
+             }\n",
+        ),
+    ] {
+        assert_checks_clean(source, label);
+    }
+}
+
+/// The same rule for a list literal's recorded length (chelis#631): a pattern
+/// variable `rows` that shadows a two-element `rows` literal concatenates to
+/// whatever length it holds, not 2.
+#[test]
+fn a_pattern_binder_never_inherits_an_outer_list_literal_length() {
+    assert_checks_clean(
+        "rows = [to_tensor([1i64]), to_tensor([2i64])]\n\
+         def f(o: Option[List[tensor[1, i64]]], d: tensor[3, i64]) -> tensor[3, i64] = match o with {\n\
+           | Some(rows) => concat(rows, 0)\n\
+           | None => d\n\
+         }\n",
+        "a match pattern over a list literal",
+    );
+}
