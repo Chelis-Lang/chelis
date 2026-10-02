@@ -10,15 +10,18 @@ lane is not enough: each must equal the reference.
 
 Observations:
 
-- A grid is one binding that maps a row function over a literal list of
-  input tuples and prints a flat `List[string]`. Each case contributes a fixed
-  number of elements: a decimal as its canonical text, an `Option` as that
+- Each row function and each failing function is one program that reads its
+  inputs from `cases.txt` at run time, so the C lane builds it once and runs
+  the binary once per case file, and the eval lane evaluates it once per case
+  file.
+- A grid run maps a row function over a chunk of input tuples and prints a
+  flat `List[string]`. Each case contributes a fixed number of elements: a decimal as its canonical text, an `Option` as that
   text or `None`, an i64 or bool through `to_string`, and a float through
   `to_string`, whose shortest round-trip text the comparator reads back to its
   bit pattern at the float's own width. Rows that use a twin and its `try_`
   form observe every input through the `try_` form and the twin on the inputs
-  the reference accepts.
-- A failure is a program whose single binding must fail. Each lane must exit
+  the reference accepts (every fourth of them in the default corpus).
+- A failure run makes one failing call, which must fail. Each lane must exit
   nonzero with a message `<function>: <kind>: <detail>` whose function and
   kind equal the reference's, whose detail matches the pinned message shape,
   and which both lanes spell identically. A primitive trap escaping instead
@@ -30,9 +33,10 @@ Profiles: the default corpus is the edge corpus CI runs (envelope boundaries,
 limb boundaries and carry chains, removable zeros, i64 boundaries, ties in
 every mode and sign, subnormal and double-rounding f32 witnesses, long divisions
 that need the quotient digit's second correction or its clamp, the parser's
-accepted and rejected spellings, and seeded random values); `--large` adds
-many more seeded random cases and failure samples for the manual gate of
-`docs/manual_gates.md`.
+accepted and rejected spellings, and seeded random values, which take one
+rounding mode per scale in rotation); `--large` adds many more seeded random
+cases, crosses each with every mode, observes every twin, and samples more
+failures, for the manual gate of `docs/manual_gates.md`.
 
 The supported entry point is `crates/chelis-cli/tests/std_decimal_oracle.rs`,
 which supplies the freshly built binary, a published standard library and the
@@ -64,6 +68,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 
@@ -74,6 +79,13 @@ SEED = 2778
 PASS_MARKER = "STD DECIMAL ORACLE: PASS"
 FAIL_MARKER = "STD DECIMAL ORACLE: FAIL"
 BOTH = ("eval", "c")
+# A program reads its inputs from this file in its working directory, so one
+# compiled program serves every chunk of its row and every failing call of its
+# function.
+CASES_FILE = "cases.txt"
+# The root a grid program prints, and the root a failure program must fail in.
+GRID_ROOT = "outputs"
+FAILURE_ROOT = "outcome"
 REPO = Path(__file__).resolve().parent.parent
 
 DECIMAL_NAMES = (
@@ -278,8 +290,13 @@ FAILURE_EXPRS = {
 
 
 def failure_expr(function: str, args: tuple) -> str:
+    """The failing call with its arguments as literals, as a report names it."""
+    return failure_call(function, [value_lit(kind, value) for kind, value in zip(FAILURE_EXPRS[function], args)])
+
+
+def failure_call(function: str, lits: Sequence[str]) -> str:
+    """The failing call over argument expressions of the function's declared kinds."""
     kinds = FAILURE_EXPRS[function]
-    lits = [value_lit(kind, value) for kind, value in zip(kinds, args)]
     decimals = [f"decimal({x})" if kind == "string" else x for kind, x in zip(kinds, lits)]
     if function == "decimal":
         return f"decimal_to_string(decimal({lits[0]}))"
@@ -305,7 +322,86 @@ PRELUDE = {
         '  | None => "None"\n'
         "}\n"
     ),
+    # Reading the case file: one line per field (`field_line`).
+    "cases": f'def cases() -> List[string] ! {{ IO }} = read_lines("{CASES_FILE}")\n',
+    "int_field": (
+        "def int_field(line: string) -> i64 = match to_int(line) with {\n"
+        "  | Some(v) => v\n"
+        '  | None => fail(string_concat("not an i64 case field: ", line))\n'
+        "}\n"
+    ),
+    # The non-finite values are quotients, as in `f64_lit`; the compiled lane's
+    # `to_float` does not read their spellings yet (chelis#2870).
+    "float_field": (
+        'def float_field(line: string) -> f64 = if eq(line, "nan") then (0.0f64 / 0.0f64) '
+        'else if eq(line, "inf") then (1.0f64 / 0.0f64) else if eq(line, "-inf") then (-1.0f64 / 0.0f64) '
+        "else finite_field(line)\n"
+    ),
+    "finite_field": (
+        "def finite_field(line: string) -> f64 = match to_float(line) with {\n"
+        "  | Some(v) => v\n"
+        '  | None => fail(string_concat("not an f64 case field: ", line))\n'
+        "}\n"
+    ),
+    "coded_text": (
+        "def coded_text(body: string) -> string = {\n"
+        "  (text, digits) = fold(fn (acc: (string, string), at: i64) -> {\n"
+        "    (done, pending) = acc\n"
+        "    ch = string_slice(body, at, 1i64)\n"
+        '    if eq(ch, ",") then (string_concat(done, char_from_code(int_field(pending))), "") '
+        "else (done, string_concat(pending, ch))\n"
+        '  }, ("", ""), range(0i64, string_len(body)))\n'
+        "  string_concat(text, char_from_code(int_field(digits)))\n"
+        "}\n"
+    ),
+    "text_field": (
+        "def text_field(line: string) -> string = {\n"
+        "  body = string_slice(line, 2i64, sub(string_len(line), 2i64))\n"
+        '  if string_starts_with(line, "c:") then coded_text(body) else body\n'
+        "}\n"
+    ),
+    "rounding_field": (
+        "def rounding_field(line: string) -> Rounding = "
+        + "".join(f'if eq(line, "{mode}") then {mode} else ' for mode in ROUNDINGS)
+        + 'fail(string_concat("not a Rounding case field: ", line))\n'
+    ),
 }
+
+FIELD_DECODERS = {"string": "text_field", "i64": "int_field", "f64": "float_field", "Rounding": "rounding_field"}
+
+
+def field_line(kind: str, value: object) -> str:
+    """One case-file line for a field: text as `s:` and its characters when they
+    are all printable ASCII, otherwise `c:` and its code points; numbers in a
+    form `to_int` and `to_float` read back exactly; a mode by its name."""
+    if kind == "string":
+        if all(0x20 <= ord(ch) <= 0x7E for ch in value):
+            return "s:" + value
+        return "c:" + ",".join(str(ord(ch)) for ch in value)
+    if kind == "i64":
+        if not ref.fits_i64(value):
+            raise ValueError(f"{value} does not fit in i64")
+        return str(value)
+    if kind == "f64":
+        return repr(value)
+    if kind == "Rounding":
+        if value not in ROUNDINGS:
+            raise ValueError(value)
+        return value
+    raise ValueError(kind)
+
+
+def case_lines(kinds: Sequence[str], args: tuple) -> list[str]:
+    return [field_line(kind, value) for kind, value in zip(kinds, args)]
+
+
+def field_reads(kinds: Sequence[str], first: int | str) -> list[str]:
+    """Expressions decoding the fields of one case, which starts at line `first`."""
+    def line(k: int) -> str:
+        if isinstance(first, int):
+            return f"{first + k}i64"
+        return first if k == 0 else f"add({first}, {k}i64)"
+    return [f"{FIELD_DECODERS[kind]}(index(lines, {line(k)}))" for k, kind in enumerate(kinds)]
 
 
 def prelude_for(body: str) -> str:
@@ -331,6 +427,27 @@ def program_source(body: Sequence[str]) -> str:
         f"import Std.Rounding ({', '.join(ROUNDING_NAMES)})\n\n"
         + prelude_for(text) + "\n" + text + "\n"
     )
+
+
+def grid_source(row_name: str) -> str:
+    """The program that maps a row function over every case in the case file."""
+    kind = ROWS[row_name]
+    width = len(kind.params)
+    reads = field_reads(kind.params, "k" if width == 1 else f"mul(k, {width}i64)")
+    argument = reads[0] if width == 1 else "(" + ", ".join(reads) + ")"
+    count = "len(lines)" if width == 1 else f"trunc_div(len(lines), {width}i64)"
+    return program_source([
+        f"{GRID_ROOT} = {{",
+        "  lines = cases()",
+        f"  flat_map(fn (k: i64) -> {row_name}({argument}), range(0i64, {count}))",
+        "}",
+    ])
+
+
+def failure_source(function: str) -> str:
+    """The program that makes the one failing call the case file describes."""
+    reads = field_reads(FAILURE_EXPRS[function], 0)
+    return program_source([f"{FAILURE_ROOT} = {{", "  lines = cases()", f"  [{failure_call(function, reads)}]", "}"])
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +479,10 @@ class Failure:
 class Corpus:
     cases: list[Case] = field(default_factory=list)
     failures: list[Failure] = field(default_factory=list)
+    # A twin that has a `try_` form is observed on every `twin_stride`-th input
+    # the reference accepts; the `try_` form observes every input.
+    twin_stride: int = 1
+    twin_calls: Counter = field(default_factory=Counter)
 
     def add(self, category: str, row_name: str, args: tuple) -> None:
         kind = ROWS[row_name]
@@ -373,14 +494,21 @@ class Corpus:
         name = f"f{len(self.failures):05d}_{function}_{error.kind}"
         self.failures.append(Failure(name, category, function, args, error))
 
-    def outcome(self, category: str, function: str, row_name: str, args: tuple, compute: Callable[[], object]) -> None:
-        """A grid case when the reference accepts the call, a failure program when it fails."""
+    def outcome(self, category: str, function: str, row_name: str, args: tuple, compute: Callable[[], object],
+                keep_case: bool = True) -> None:
+        """A grid case when the reference accepts the call (if `keep_case`), a failure
+        program when it fails."""
         try:
             compute()
         except DecimalError as error:
             self.fail(category, function, args, error)
             return
-        self.add(category, row_name, args)
+        if keep_case:
+            self.add(category, row_name, args)
+
+    def twin_kept(self, function: str) -> bool:
+        self.twin_calls[function] += 1
+        return (self.twin_calls[function] - 1) % self.twin_stride == 0
 
     # One method per callable family; each records the twin and its `try_` form.
 
@@ -407,11 +535,13 @@ class Corpus:
 
     def to_i64(self, category: str, text: str, mode: str) -> None:
         self.add(category, "row_try_to_i64", (text, mode))
-        self.outcome(category, "decimal_to_i64", "row_to_i64", (text, mode), lambda: ref.decimal_to_i64(d(text), mode))
+        self.outcome(category, "decimal_to_i64", "row_to_i64", (text, mode), lambda: ref.decimal_to_i64(d(text), mode),
+                     self.twin_kept("decimal_to_i64"))
 
     def from_f64(self, category: str, x: float, n: int, mode: str) -> None:
         self.add(category, "row_try_from_f64", (x, n, mode))
-        self.outcome(category, "decimal_from_f64", "row_from_f64", (x, n, mode), lambda: ref.decimal_from_f64(x, n, mode))
+        self.outcome(category, "decimal_from_f64", "row_from_f64", (x, n, mode), lambda: ref.decimal_from_f64(x, n, mode),
+                     self.twin_kept("decimal_from_f64"))
 
     def arith(self, category: str, op: str, a: str, c: str) -> None:
         compute = {"add": ref.decimal_add, "sub": ref.decimal_sub, "mul": ref.decimal_mul}[op]
@@ -423,7 +553,8 @@ class Corpus:
     def div(self, category: str, a: str, c: str, n: int, mode: str) -> None:
         args = (a, c, n, mode)
         self.outcome(category, "try_decimal_div", "row_try_div", args, lambda: ref.try_decimal_div(d(a), d(c), n, mode))
-        self.outcome(category, "decimal_div", "row_div", args, lambda: ref.decimal_div(d(a), d(c), n, mode))
+        self.outcome(category, "decimal_div", "row_div", args, lambda: ref.decimal_div(d(a), d(c), n, mode),
+                     self.twin_kept("decimal_div"))
 
     def order(self, category: str, a: str, c: str) -> None:
         self.add(category, "row_order", (a, c))
@@ -659,9 +790,22 @@ def random_float(rng: random.Random) -> float:
 
 
 def build_corpus(large: bool = False) -> Corpus:
+    """The default (CI) corpus, or with `large` the manual gate's.
+
+    The large corpus crosses every input with every scale and rounding mode and
+    observes every twin. To keep the default run short, the default corpus
+    observes a twin on every fourth input the reference accepts (its `try_`
+    form still sees every input), and gives seeded random inputs of rounding
+    and float conversion one mode per scale in rotation instead of all seven;
+    the fixed edge inputs keep the full cross product.
+    """
     rng = random.Random(SEED)
-    corpus = Corpus()
+    corpus = Corpus(twin_stride=1 if large else 4)
     scale = 25 if large else 1
+
+    def modes_for(k: int, j: int, edge: bool) -> Sequence[str]:
+        """Every mode for an edge input or in the large corpus; one in rotation otherwise."""
+        return ROUNDINGS if large or edge else (ROUNDINGS[(k + j) % len(ROUNDINGS)],)
 
     pools = {
         "envelope": ENVELOPE, "limbs": LIMBS, "removable_zeros": REMOVABLE, "i64_edges": I64_EDGES, "ties": TIES,
@@ -707,9 +851,9 @@ def build_corpus(large: bool = False) -> Corpus:
 
     # Float to decimal.
     floats = FLOATS + [random_float(rng) for _ in range(20 * scale)]
-    for x in floats:
-        for n in SCALES:
-            for mode in ROUNDINGS:
+    for k, x in enumerate(floats):
+        for j, n in enumerate(SCALES):
+            for mode in modes_for(k, j, k < len(FLOATS)):
                 corpus.from_f64("from_f64", x, n, mode)
     for x in (0.5, math.nan, -math.inf):
         for n in BAD_SCALES:
@@ -730,10 +874,11 @@ def build_corpus(large: bool = False) -> Corpus:
             corpus.arith("arith", op, a, c)
 
     # Rounding to a scale.
-    round_inputs = TIES + ENVELOPE + I64_EDGES[:4] + pools["random"][: 30 * scale]
-    for text in round_inputs:
-        for n in (0, 1, 2, 5, 18, 37, 38):
-            for mode in ROUNDINGS:
+    round_edges = TIES + ENVELOPE + I64_EDGES[:4]
+    round_inputs = round_edges + pools["random"][: 30 * scale]
+    for k, text in enumerate(round_inputs):
+        for j, n in enumerate((0, 1, 2, 5, 18, 37, 38)):
+            for mode in modes_for(k, j, k < len(round_edges)):
                 corpus.round("round", text, n, mode)
     for n in BAD_SCALES:
         corpus.round("round_bad_scale", "2.5", n, "RoundTiesToEven")
@@ -789,15 +934,11 @@ def build_corpus(large: bool = False) -> Corpus:
 
 @dataclass(frozen=True)
 class Binding:
+    """A printed root and the cases whose expected elements it lists, in order."""
+
     name: str
     row: str
     cases: tuple[Case, ...]
-
-    @property
-    def expr(self) -> str:
-        kind = ROWS[self.row]
-        items = ", ".join(kind.literal(case.args) for case in self.cases)
-        return f"flat_map(fn (t: {kind.tuple_type()}) -> {self.row}(t), [{items}])"
 
     @property
     def expected(self) -> list[Element]:
@@ -806,8 +947,16 @@ class Binding:
 
 @dataclass(frozen=True)
 class Program:
+    """One run: the program `image` names, reading `inputs` as its case file.
+
+    Every run of an image has the same source, so the C lane builds an image
+    once and runs the binary once per run.
+    """
+
     name: str
+    image: str
     source: str
+    inputs: str
     bindings: tuple[Binding, ...] = ()
     failure: Failure | None = None
 
@@ -828,20 +977,25 @@ def representative_failures(failures: list[Failure], per_path: int) -> list[Fail
     return sorted(chosen, key=lambda f: f.name)
 
 
-def make_programs(corpus: Corpus, chunk: int, per_program: int, failures_per_path: int) -> list[Program]:
+def make_programs(corpus: Corpus, chunk: int, failures_per_path: int) -> list[Program]:
+    """A run per `chunk` cases of a row, and per sampled failure."""
     programs = []
     by_row: dict[str, list[Case]] = {}
     for case in corpus.cases:
         by_row.setdefault(case.row, []).append(case)
     for row_name, cases in by_row.items():
-        bindings = [Binding(f"{row_name}_{k // chunk:04d}", row_name, tuple(cases[k:k + chunk]))
-                    for k in range(0, len(cases), chunk)]
-        for start in range(0, len(bindings), per_program):
-            group = tuple(bindings[start:start + per_program])
-            body = [f"{binding.name} = {binding.expr}" for binding in group]
-            programs.append(Program(f"{row_name}_p{start // per_program:03d}", program_source(body), group))
+        source = grid_source(row_name)
+        params = ROWS[row_name].params
+        for k in range(0, len(cases), chunk):
+            group = tuple(cases[k:k + chunk])
+            inputs = "\n".join(line for case in group for line in case_lines(params, case.args))
+            programs.append(Program(f"{row_name}_{k // chunk:04d}", row_name, source, inputs,
+                                    (Binding(GRID_ROOT, row_name, group),)))
+    sources: dict[str, str] = {}
     for failure in representative_failures(corpus.failures, failures_per_path):
-        programs.append(Program(failure.name, program_source([f"{failure.name} = [{failure.expr}]"]), failure=failure))
+        source = sources.setdefault(failure.function, failure_source(failure.function))
+        inputs = "\n".join(case_lines(FAILURE_EXPRS[failure.function], failure.args))
+        programs.append(Program(failure.name, f"fail_{failure.function}", source, inputs, failure=failure))
     return programs
 
 
@@ -914,14 +1068,18 @@ class Runner:
             version = subprocess.run([str(chelis), "--version"], capture_output=True, text=True, check=True)
             compiler_version = version.stdout.split()[1]
         self.compiler_version = compiler_version
+        # Each image's build outcome: its binary, or the lane result that stopped it.
+        self.images: dict[str, tuple[Path | None, LaneResult | None]] = {}
+        self.image_locks: dict[str, threading.Lock] = {}
+        self.locks_guard = threading.Lock()
 
     def env(self) -> dict[str, str]:
         env = dict(os.environ)
         env.update({"CHELIS_STYLE_GATE_DISABLE": "1", "OMP_NUM_THREADS": "1", "CHELIS_REEF_HOME": str(self.reef_home)})
         return env
 
-    def app(self, program: Program, lane: str) -> tuple[Path, str]:
-        app = self.work / lane / program.name
+    def app(self, app: Path, source: str) -> tuple[Path, str]:
+        """A package at `app` depending on `chelis-std`, with `source` as its entry module."""
         if app.exists():
             shutil.rmtree(app)
         (app / "src").mkdir(parents=True)
@@ -929,7 +1087,7 @@ class Runner:
             'schema = "1"\n\n[package]\nname = "decimal-oracle"\nversion = "0.1.0"\n'
             f'compiler = "={self.compiler_version}"\nmodule_prefix = "Demo"\n\n'
             f'[dependencies]\nchelis-std = {{ version = "{self.std_version}" }}\n', encoding="utf-8")
-        (app / "src" / "main.ch").write_text(program.source, encoding="utf-8")
+        (app / "src" / "main.ch").write_text(source, encoding="utf-8")
         return app, "src/main.ch"
 
     def run(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -937,15 +1095,29 @@ class Runner:
                               check=False)
 
     def eval_lane(self, program: Program) -> LaneResult:
-        app, main = self.app(program, "eval")
+        app, main = self.app(self.work / "eval" / program.name, program.source)
+        (app / CASES_FILE).write_text(program.inputs, encoding="utf-8")
         done = self.run([str(self.chelis), "eval", "--file", main], app)
         return LaneResult("eval", done.returncode, done.stdout, done.stderr, "eval")
 
-    def c_lane(self, program: Program) -> LaneResult:
-        app, main = self.app(program, "c")
+    def image(self, program: Program) -> tuple[Path | None, LaneResult | None]:
+        """The program's image built once, however many runs ask for it at once."""
+        with self.locks_guard:
+            lock = self.image_locks.setdefault(program.image, threading.Lock())
+        with lock:
+            if program.image not in self.images:
+                try:
+                    self.images[program.image] = self.build_image(program)
+                except subprocess.TimeoutExpired as error:
+                    stopped = LaneResult("c", None, "", f"timed out after {error.timeout} s", "timeout")
+                    self.images[program.image] = (None, stopped)
+            return self.images[program.image]
+
+    def build_image(self, program: Program) -> tuple[Path | None, LaneResult | None]:
+        app, main = self.app(self.work / "c" / program.image, program.source)
         build = self.run([str(self.chelis), "build", main, "--target", "c", "--output", "out"], app)
         if build.returncode != 0:
-            return LaneResult("c", build.returncode, build.stdout, build.stderr, "build")
+            return None, LaneResult("c", build.returncode, build.stdout, build.stderr, "build")
         stem = Path(main).stem
         if self.toolchain is not None:
             argv = [self.toolchain.compiler, *self.toolchain.compile_flags, "-Iout", f"out/{stem}.c",
@@ -953,15 +1125,26 @@ class Runner:
         else:
             argv = printed_compile_command(build.stdout)
             if argv is None:
-                return LaneResult("c", None, build.stdout, "chelis build printed no Compile: command", "build")
+                return None, LaneResult("c", None, build.stdout, "chelis build printed no Compile: command", "build")
         link = self.run(argv, app)
         if link.returncode != 0:
-            return LaneResult("c", link.returncode, link.stdout, link.stderr, "link")
-        done = self.run([str(app / "out" / "case")], app)
+            return None, LaneResult("c", link.returncode, link.stdout, link.stderr, "link")
         if not self.keep_artifacts:
             # Each build carries its own runtime archive (about 30 MB); the
-            # program source stays beside it for reproduction.
-            shutil.rmtree(app / "out", ignore_errors=True)
+            # binary and the program source stay for the runs and reproduction.
+            for entry in (app / "out").iterdir():
+                if entry.name != "case":
+                    shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+        return app / "out" / "case", None
+
+    def c_lane(self, program: Program) -> LaneResult:
+        binary, stopped = self.image(program)
+        if stopped is not None:
+            return stopped
+        run_dir = self.work / "c-runs" / program.name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / CASES_FILE).write_text(program.inputs, encoding="utf-8")
+        done = self.run([str(binary)], run_dir)
         return LaneResult("c", done.returncode, done.stdout, done.stderr, "run")
 
     def lane(self, name: str, program: Program) -> LaneResult:
@@ -1098,7 +1281,7 @@ def check_program(program: Program, results: list[LaneResult], report: Report) -
             report.problem("stray-output", f"{program.name} [{result.lane}]: unexpected output lines: {stray[:10]}")
         for binding in program.bindings:
             for problem in compare_binding(binding, printed.get(binding.name)):
-                report.problem("value", f"[{result.lane}] {problem}")
+                report.problem("value", f"{program.name} [{result.lane}] {problem}")
     report.cases += sum(len(binding.cases) for binding in program.bindings)
     report.elements += sum(len(binding.expected) for binding in program.bindings)
 
@@ -1121,8 +1304,13 @@ def run_all(runner, programs: list[Program], lanes: Sequence[str], jobs: int, lo
     done = 0
     lane_seconds: Counter = Counter()
     last = time.monotonic()
+    # One run of every image goes first, so the C builds start together rather
+    # than queueing behind the runs that wait for them.
+    seen: set[str] = set()
+    firsts = [p for p in programs if not (p.image in seen or seen.add(p.image))]
+    ordered = firsts + [p for p in programs if p not in firsts]
     with ThreadPoolExecutor(max_workers=max(jobs, 1)) as pool:
-        for program, results in pool.map(run_one, programs):
+        for program, results in pool.map(run_one, ordered):
             check_program(program, results, report)
             for result in results:
                 lane_seconds[result.lane] += result.seconds
@@ -1161,9 +1349,8 @@ def main(argv: list[str] | None = None) -> int:
                         "command chelis build prints")
     parser.add_argument("--reef-home", type=Path, help="a reef home with chelis-std published (default: publish this "
                         "checkout's packages/chelis-std into a fresh one)")
-    parser.add_argument("--jobs", type=int, default=4)
-    parser.add_argument("--chunk", type=int, default=150, help="cases per grid binding")
-    parser.add_argument("--per-program", type=int, default=4, help="grid bindings per program")
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4, help="parallel runs (default: the CPU count)")
+    parser.add_argument("--chunk", type=int, default=100, help="cases per grid run")
     parser.add_argument("--failures-per-path", type=int, help="failure programs per category, function and kind")
     parser.add_argument("--timeout", type=int, default=1800, help="seconds per lane process")
     parser.add_argument("--work", type=Path, help="keep generated programs here instead of a temporary directory")
@@ -1177,7 +1364,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--lanes is a comma-separated subset of eval,c")
     corpus = build_corpus(args.large)
     per_path = args.failures_per_path or (12 if args.large else 3)
-    programs = make_programs(corpus, args.chunk, args.per_program, per_path)
+    programs = make_programs(corpus, args.chunk, per_path)
     if args.only:
         programs = [p for p in programs if re.search(args.only, p.name)]
     if args.list:

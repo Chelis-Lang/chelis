@@ -1424,12 +1424,13 @@ REVIEWED: tuple[Row, ...] = (
             '"Compile: clang -O2 -march=native out/main.c out/libchelis_runtime.a -lm -o out/main\\n")',
             '["clang", "-O2", "-march=native", "out/main.c", "out/libchelis_runtime.a", "-lm", "-o", "out/case"])',
             '(cwd / "out" / "libchelis_runtime.a").write_bytes(b"x")',
+            'self.assertEqual((image / "out" / "libchelis_runtime.a").exists(), keep)',
         ),
         disposition="not-lookup",
         reason=(
             "a fixture `Compile:` line as `chelis build` prints it, naming the archive it staged, to test that the "
             "harness reruns that command with only its output retargeted; and a fixture staged archive the harness "
-            "must delete with the rest of a C build's outputs"
+            "must delete once it has linked the program, unless artifacts are kept"
         ),
     ),
     Row(

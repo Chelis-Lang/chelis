@@ -93,7 +93,7 @@ class FakeRunner:
 
 @functools.cache
 def default_programs() -> tuple[Program, ...]:
-    return tuple(harness.make_programs(CORPUS, 150, 4, 2))
+    return tuple(harness.make_programs(CORPUS, 150, 2))
 
 
 def programs() -> list[Program]:
@@ -282,8 +282,8 @@ class Generator(unittest.TestCase):
         for category, witnesses in (("div_quotient_correction", harness.QUOTIENT_CORRECTION_WITNESSES),
                                     ("div_quotient_clamp", harness.QUOTIENT_CLAMP_WITNESSES)):
             divided = {(args[0].lstrip("-"), args[1], args[2])
-                       for args in [c.args for c in CORPUS.cases if c.category == category and c.row == "row_div"]
-                       + [f.args for f in CORPUS.failures if f.category == category and f.function == "decimal_div"]}
+                       for args in [c.args for c in CORPUS.cases if c.category == category and c.row == "row_try_div"]
+                       + [f.args for f in CORPUS.failures if f.category == category and f.function == "try_decimal_div"]}
             self.assertEqual(divided, set(witnesses), category)
         self.assertEqual((len(harness.QUOTIENT_CORRECTION_WITNESSES), len(harness.QUOTIENT_CLAMP_WITNESSES)), (60, 30))
 
@@ -323,23 +323,58 @@ class Generator(unittest.TestCase):
         self.assertEqual(reasons[("decimal_round", ("2.5", 39))], ("domain", "scale"))
 
     def test_the_equality_row_runs_by_default(self) -> None:
-        default = harness.make_programs(CORPUS, 150, 4, 1)
+        default = harness.make_programs(CORPUS, 150, 1)
         equality = [p for p in default if any(b.row == "row_eq" for b in p.bindings)]
         self.assertTrue(equality)
         self.assertTrue(all(b.row == "row_eq" for p in equality for b in p.bindings))
         placed = sum(len(b.cases) for p in default for b in p.bindings)
         self.assertEqual(placed, len(CORPUS.cases))
 
-    def test_every_case_lands_in_exactly_one_binding(self) -> None:
-        for chunk, per_program in ((150, 4), (7, 3), (1000, 1)):
-            selected = harness.make_programs(CORPUS, chunk, per_program, 1)
+    def test_every_case_lands_in_exactly_one_run(self) -> None:
+        for chunk in (150, 7, 1000):
+            selected = harness.make_programs(CORPUS, chunk, 1)
             placed = [case for p in selected for binding in p.bindings for case in binding.cases]
             self.assertEqual(len(placed), len(CORPUS.cases))
             for p in selected:
-                self.assertTrue(len(p.bindings) <= per_program)
-                self.assertEqual(len({b.row for b in p.bindings}) <= 1, True)
+                self.assertLessEqual(len(p.bindings), 1)
                 for binding in p.bindings:
+                    self.assertEqual(binding.name, harness.GRID_ROOT)
                     self.assertLessEqual(len(binding.cases), chunk)
+
+    def test_each_run_reads_its_cases_through_its_image(self) -> None:
+        by_image: dict[str, set[str]] = {}
+        for p in programs():
+            by_image.setdefault(p.image, set()).add(p.source)
+            if p.failure is None:
+                binding = p.bindings[0]
+                params = harness.ROWS[binding.row].params
+                self.assertEqual(p.image, binding.row)
+                self.assertEqual(p.inputs.split("\n"),
+                                 [line for case in binding.cases for line in harness.case_lines(params, case.args)])
+            else:
+                self.assertEqual(p.image, f"fail_{p.failure.function}")
+                self.assertEqual(p.inputs.split("\n"),
+                                 harness.case_lines(harness.FAILURE_EXPRS[p.failure.function], p.failure.args))
+        self.assertTrue(all(len(sources) == 1 for sources in by_image.values()))
+        self.assertEqual(set(by_image), set(harness.ROWS) | {f"fail_{f}" for f in harness.FAILURE_EXPRS})
+
+    def test_the_default_trims_only_cross_products_and_twins(self) -> None:
+        # The try_ forms see every input; a twin sees every fourth accepted input.
+        for twin, try_row in (("row_from_f64", "row_try_from_f64"), ("row_div", "row_try_div"),
+                              ("row_to_i64", "row_try_to_i64")):
+            twin_args = {c.args for c in CORPUS.cases if c.row == twin}
+            try_args = {c.args for c in CORPUS.cases if c.row == try_row}
+            self.assertTrue(twin_args and twin_args <= try_args, twin)
+            self.assertLess(len(twin_args), len(try_args) // 2, twin)
+        # Every edge input keeps every scale and mode; a seeded random input keeps
+        # every scale and one mode per scale.
+        rounded: dict[str, set[tuple[int, str]]] = {}
+        for args in ([c.args for c in CORPUS.cases if c.row == "row_round" and c.category == "round"]
+                     + [f.args for f in CORPUS.failures if f.function == "decimal_round" and f.category == "round"]):
+            rounded.setdefault(args[0], set()).add(args[1:])
+        for text in harness.TIES + harness.ENVELOPE:
+            self.assertEqual(len(rounded[text]), 49, text)
+        self.assertTrue(any(len(pairs) == 7 for text, pairs in rounded.items()))
 
     def test_the_large_corpus_extends_the_default(self) -> None:
         large = harness.build_corpus(large=True)
@@ -415,9 +450,40 @@ class Literals(unittest.TestCase):
         self.assertNotIn("def row_", source)
         self.assertIn("import Std.Decimal (Decimal, decimal, try_decimal,", source)
         self.assertIn("import Std.Rounding (Rounding, RoundTowardNegative,", source)
-        source = harness.program_source([f"b = {first_program('row_try_div').bindings[0].expr}"])
-        self.assertIn("def row_try_div(", source)
-        self.assertIn("def opt_text(", source)
+        source = harness.grid_source("row_try_div")
+        for name in ("row_try_div", "opt_text", "cases", "text_field", "coded_text", "int_field", "rounding_field"):
+            self.assertIn(f"def {name}(", source)
+        self.assertNotIn("def float_field(", source)
+        self.assertIn(f'read_lines("{harness.CASES_FILE}")', source)
+        self.assertIn(f"{harness.GRID_ROOT} = {{", source)
+        self.assertIn("range(0i64, trunc_div(len(lines), 4i64))", source)
+        self.assertIn("row_parse(text_field(index(lines, k)))", harness.grid_source("row_parse"))
+        floats = harness.grid_source("row_from_f64")
+        self.assertIn('if eq(line, "nan") then (0.0f64 / 0.0f64)', floats)
+        self.assertIn("def finite_field(", floats)
+        failure = harness.failure_source("decimal_from_f64")
+        self.assertIn(f"{harness.FAILURE_ROOT} = {{", failure)
+        self.assertIn("decimal_from_f64(float_field(index(lines, 0i64)), int_field(index(lines, 1i64)), "
+                      "rounding_field(index(lines, 2i64)))", failure)
+
+    def test_case_file_fields_read_back_exactly(self) -> None:
+        self.assertEqual(harness.field_line("string", " 1.5e-3"), "s: 1.5e-3")
+        self.assertEqual(harness.field_line("string", ""), "s:")
+        self.assertEqual(harness.field_line("string", "1\n"), "c:49,10")
+        self.assertEqual(harness.field_line("string", "é"), "c:233")
+        self.assertEqual(harness.field_line("i64", ref.I64_MIN), "-9223372036854775808")
+        with self.assertRaises(ValueError):
+            harness.field_line("i64", ref.I64_MAX + 1)
+        for x in (0.1, -0.0, 5e-324, 1.7976931348623157e308, 1e22, 2.0**53 + 2):
+            line = harness.field_line("f64", x)
+            self.assertEqual(struct.pack("<d", float(line)), struct.pack("<d", x), line)
+        self.assertEqual([harness.field_line("f64", x) for x in (math.nan, math.inf, -math.inf)], ["nan", "inf", "-inf"])
+        self.assertEqual(harness.field_line("Rounding", "RejectInexact"), "RejectInexact")
+        with self.assertRaises(ValueError):
+            harness.field_line("Rounding", "RoundHalfUp")
+        for case in CORPUS.cases:
+            for line in harness.case_lines(harness.ROWS[case.row].params, case.args):
+                self.assertTrue(line.isascii() and line.isprintable(), line)
 
     def test_failure_expressions(self) -> None:
         self.assertEqual(harness.failure_expr("decimal", ("1x",)), 'decimal_to_string(decimal("1x"))')
@@ -455,33 +521,55 @@ class Invocation(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             harness.main(["--list", "--lanes", "eval,hip"])
 
-    def test_c_build_outputs_are_removed_unless_kept(self) -> None:
-        program = programs()[0]
+    def test_an_image_is_built_once_and_run_per_case_file(self) -> None:
+        runs = [p for p in programs() if p.image == "row_round"]
+        self.assertGreater(len(runs), 1)
         for keep in (False, True):
             with harness.tempfile.TemporaryDirectory() as scratch:
                 runner = harness.Runner(Path("/bin/false"), Path(scratch), 5, Path(scratch) / "home", "0.4.0",
                                         keep_artifacts=keep, compiler_version="9.9.9")
+                calls: list[tuple[list[str], Path]] = []
 
                 def fake_run(argv, cwd):
+                    calls.append((argv, cwd))
                     if argv[1:2] == ["build"]:
                         (cwd / "out").mkdir()
                         (cwd / "out" / "libchelis_runtime.a").write_bytes(b"x")
                         return harness.subprocess.CompletedProcess(argv, 0, "Compile: cc out/main.c -o out/main\n", "")
+                    if argv[0] == "cc":
+                        (cwd / "out" / "case").write_bytes(b"binary")
                     return harness.subprocess.CompletedProcess(argv, 0, "", "")
 
                 runner.run = fake_run
-                result = runner.c_lane(program)
-                app = Path(scratch) / "c" / program.name
-                self.assertEqual((result.status, result.stage), (0, "run"))
-                self.assertTrue((app / "src" / "main.ch").exists())
-                self.assertEqual((app / "out").exists(), keep)
+                with harness.ThreadPoolExecutor(max_workers=4) as pool:
+                    results = list(pool.map(runner.c_lane, runs))
+                self.assertEqual({(r.status, r.stage) for r in results}, {(0, "run")})
+                self.assertEqual(sum(1 for argv, _ in calls if argv[1:2] == ["build"]), 1)
+                image = Path(scratch) / "c" / "row_round"
+                self.assertEqual(sorted(cwd for argv, cwd in calls if argv[0] == str(image / "out" / "case")),
+                                 sorted(Path(scratch) / "c-runs" / p.name for p in runs))
+                for p in runs:
+                    self.assertEqual((Path(scratch) / "c-runs" / p.name / harness.CASES_FILE).read_text(encoding="utf-8"),
+                                     p.inputs)
+                self.assertTrue((image / "src" / "main.ch").exists())
+                self.assertTrue((image / "out" / "case").exists())
+                self.assertEqual((image / "out" / "libchelis_runtime.a").exists(), keep)
+
+    def test_a_failed_image_build_stops_every_run_of_it(self) -> None:
+        runs = [p for p in programs() if p.image == "row_round"]
+        with harness.tempfile.TemporaryDirectory() as scratch:
+            runner = harness.Runner(Path("/bin/false"), Path(scratch), 5, Path(scratch) / "home", "0.4.0",
+                                    compiler_version="9.9.9")
+            runner.run = lambda argv, cwd: harness.subprocess.CompletedProcess(argv, 1, "", "error: no")
+            results = [runner.c_lane(p) for p in runs]
+        self.assertEqual({(r.status, r.stage, r.stderr) for r in results}, {(1, "build", "error: no")})
 
     def test_programs_are_packages_depending_on_chelis_std(self) -> None:
         program = programs()[0]
         with harness.tempfile.TemporaryDirectory() as scratch:
             home = Path(scratch) / "home"
             runner = harness.Runner(Path("/bin/false"), Path(scratch), 5, home, "0.4.0", compiler_version="9.9.9")
-            app, main = runner.app(program, "c")
+            app, main = runner.app(Path(scratch) / "app", program.source)
             self.assertEqual(main, "src/main.ch")
             self.assertEqual((app / "src" / "main.ch").read_text(encoding="utf-8"), program.source)
             manifest = (app / "reef.toml").read_text(encoding="utf-8")
