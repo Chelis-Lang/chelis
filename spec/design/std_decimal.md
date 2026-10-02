@@ -4,15 +4,15 @@ Tracker: chelis#2778.
 Prior art: [`decimal_prior_art.md`](../../docs/investigations/decimal_prior_art.md),
 cited below as "prior art §N".
 
-This is the design of record for `Std.Decimal`. It decides the whole surface; the
-normative text lands in spec/05 as one new atom together with the implementation and its
-registry rows (§12). Where this document and a numbered chapter disagree, the chapter
-wins and this document has a bug.
+This is the design of record for `Std.Decimal`. It records the reasoning behind the
+surface; the normative text is the spec/05 atom [05-OP-76] and its registry rows (§12).
+Where this document and a numbered chapter disagree, the chapter wins and this document
+has a bug.
 
 ## 1. Why
 
-Every `Std.Decimal` callable has failed with #2778 since #2806. The code it fenced could
-not meet its own contract, the Decimal paragraphs of [05-OP-35]:
+The previous `Std.Decimal`, fenced by #2806 under #2778, could not meet its own contract,
+the Decimal paragraphs of [05-OP-35]:
 
 - The value was `Decimal { coefficient: i64, scale: i64 }`, and [05-OP-35] asked for exact
   rational arithmetic over every i64 scale, trapping only when the final canonical pair
@@ -251,8 +251,8 @@ f64; an f32 widens to f64 exactly first.
 
 Equality is [05-OP-36]'s structural `eq`/`neq`. Because every value is canonical,
 structural equality of two decimals is equality of the rationals they denote, and there is
-no `decimal_eq`. This requires #2587, which makes the checker and both lanes admit `eq` on
-ADT values as [05-OP-36] already says; it lands before Decimal. Ordered comparison of ADT
+no `decimal_eq`. This relies on structural equality on ADT values (#2587), which
+[05-OP-36] states for the checker and both lanes. Ordered comparison of ADT
 values stays a type error under [05-OP-36], so the four ordering callables exist.
 
 ## 9. Binary floats
@@ -323,8 +323,8 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
   `decimal::*` identities of the [05-OP-34] and [05-OP-35] registries. It states the value
   set, canonical form, opacity, grammar and length bound, each callable, and the failure
   contract, citing [05-OP-74] for rounding, [05-OP-59] for `to_float`, [05-OP-60] for
-  `fail` and [05-OP-36] for equality. The number is confirmed against `main` when it lands
-  ([05-OP-73] is Std.Datetime, [05-OP-74] rounding, [05-OP-75] the clock).
+  `fail` and [05-OP-36] for equality. Its neighbours are [05-OP-73] (Std.Datetime),
+  [05-OP-74] (rounding) and [05-OP-75] (the clock).
 - [05-OP-35] loses its Decimal paragraphs and its "Decimal rational computations … exact
   internal domain" sentence and gains "The `decimal::*` identities follow [05-OP-76]"; its
   count changes.
@@ -335,8 +335,7 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
 - [05-OP-74] defines all seven `Rounding` modes, `RejectInexact` included, and [05-OP-73]
   states what each Std.Datetime callable that takes a `Rounding` does under
   `RejectInexact` (a `domain` failure when the value is not a whole number of units or
-  increments). Std.Datetime's first stage carries both; if it lands without them, the
-  Decimal implementation adds them.
+  increments).
 - `stdlib_numeric_manifest.md` replaces the 14 `decimal::*` rows; `stdlib_adt_identities.md`
   reshapes `decimal::Decimal`.
 - spec/04 §1.1.1 states the interchange rule (§10) and drops "built on `trunc_div` scale
@@ -383,19 +382,11 @@ spec/04: a `decimal128` or `decimal256` value whose exact value lies in the valu
 
 ## 15. Delivery and consumers
 
-Three changes:
-1. this document and the prior art;
-2. #2587, structural equality on ADT values;
-3. the implementation: the atom and registry rows, the module, the reference and
-   differential driver, the tests, the guard artifacts and the documentation.
-
-The third depends on the first two and on Std.Datetime's first stage, which adds
-`Std.Rounding` with its seven modes, their [05-OP-74] definition and Datetime's
-`RejectInexact` behaviour in [05-OP-73], and the [05-OP-34] opaque-identity sentence (§12
-says what the Decimal implementation adds if that stage lands without the seventh mode).
+The design is #2872, structural equality on ADT values is #2876, and the implementation is
+#2913.
 
 The only code consumer is hello-chelis's decimal example, which constructs
 `Decimal { coefficient, scale }` directly and stops compiling under opacity; it is
-rewritten against the new surface after the release. Shoals plans an order book on
-`Std.Decimal`. Removing the old callables, `RoundingMode` and the old field shape is a
-breaking change to a surface that has failed at run time since #2806.
+rewritten against the new surface. Shoals plans an order book on `Std.Decimal`. Removing
+the old callables, `RoundingMode` and the old field shape is a breaking change to a
+surface that #2806 had fenced.
