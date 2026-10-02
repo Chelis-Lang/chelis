@@ -464,6 +464,13 @@ EVAL_SYSTEM_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/eval_system_oracle.py",
 ]
+# Generated chelis-std files stay out of the index: the bundle crate's build
+# script packs the runtime, so a tracked dist pair or a lock recording the
+# bundled runtime would go stale with the first std edit. Pure git and Python.
+STD_BUNDLE_TRACKING_GUARD: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/check_std_bundle_untracked.py",
+]
 
 # The chelis#908 unrepresentable-domain oracle. #908's "Constraint on every
 # fix in this class" requires it to run in a continuous job: before this it
@@ -579,6 +586,7 @@ STAGES: dict[str, list[list[str]]] = {
         PIPELINE_CORE_DOCUMENTATION_GUARD,
         PIPELINE_CORE_COMPILE_FAIL,
         EVAL_SYSTEM_GUARD,
+        STD_BUNDLE_TRACKING_GUARD,
     ],
     "integration": [
         NEXTEST_WORKSPACE_CI,
@@ -646,6 +654,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     PIPELINE_CORE_DEPENDENCY_GUARD,
     PIPELINE_CORE_DOCUMENTATION_GUARD,
     EVAL_SYSTEM_GUARD,
+    STD_BUNDLE_TRACKING_GUARD,
     UNREPRESENTABLE_DOMAIN_ORACLE,
     RUNTIME_REPRESENTATION_ORACLE,
     LOWERING_TRACE_TESTS,
@@ -740,6 +749,7 @@ FAST_STATIC_COMMANDS: list[list[str]] = [
     FMT_WRITE,
     CHELIS_LINT_CHECK,
     EVAL_SYSTEM_GUARD,
+    STD_BUNDLE_TRACKING_GUARD,
 ]
 # A change under either prefix appends the two std legs to `--fast`.
 STD_PATH_PREFIXES: tuple[str, ...] = (
@@ -775,7 +785,8 @@ FULL_GATE_SPLIT_ANNOTATION = "full gate; CI coverage split"
 FAST_DYNAMIC_NOTE = (
     "# --fast runs, fixing in place: <managed-python> scripts/regen_all.py "
     "--tier 0 (and --tier 1 when a std path changed); cargo fmt --all; the "
-    "chelis lint and eval-system guard rows above; cargo clippy -p <crate> "
+    "chelis lint, eval-system guard, and std-bundle tracking rows above; "
+    "cargo clippy -p <crate> "
     "--tests -- -D warnings per changed crate; one nextest run over the "
     "drift tripwires; when a std path changed, cargo nextest run -p "
     "chelis-std-bundle --lib; and "
@@ -1342,7 +1353,8 @@ def fast_command_list(
     lock_guard_changed: bool,
 ) -> list[list[str]]:
     """The `--fast` command list: fix-in-place regeneration and fmt, changed-path
-    classification, lint, evaluator system guard, `cargo clippy -p <crate>
+    classification, lint, evaluator system guard, std-bundle tracking guard,
+    `cargo clippy -p <crate>
     --tests` per changed crate, and one nextest run over the drift tripwires.
     When a std path changed, tier-1 regeneration precedes the checks and the
     bundle self-consistency test follows them. Every writer precedes every
@@ -1375,6 +1387,7 @@ def fast_command_list(
     commands.append(classify_paths_command(changed_paths))
     commands.append(CHELIS_LINT_CHECK)
     commands.append(EVAL_SYSTEM_GUARD)
+    commands.append(STD_BUNDLE_TRACKING_GUARD)
     for crate in crates:
         commands.append(
             ["cargo", "clippy", "-p", crate, "--tests", "--", "-D", "warnings"]

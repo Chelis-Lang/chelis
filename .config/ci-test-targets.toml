@@ -2796,6 +2796,15 @@ reason = "script-unit executes the shared hook's acceptance, rejection, owned-pr
 tracking_issue = "chelis#2287"
 
 [[path_rule]]
+prefix = "scripts/check_commit_message.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the commit-message policy and the staged generated-std warning through both hooks"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
 prefix = "scripts/test_check_commit_message.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -3778,6 +3787,24 @@ reason = "the Rust-policy lint-and-unit stage scans evaluator modules for direct
 tracking_issue = "chelis#1323"
 
 [[path_rule]]
+prefix = "scripts/check_std_bundle_untracked.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust-policy lint-and-unit stage refuses tracked generated chelis-std files: the dist pairs and locks that record the bundled runtime"
+tracking_issue = "chelis#2930"
+
+[[path_rule]]
+prefix = "scripts/test_check_std_bundle_untracked.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the PR script-unit job discovers the std-bundle tracking guard's positive and negative fixtures"
+tracking_issue = "chelis#2930"
+
+[[path_rule]]
 prefix = "scripts/test_eval_system_guard.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -3849,25 +3876,7 @@ reason = "the standing compiler_pin_tripwire target checks the live compiler pin
 tracking_issue = "chelis#2027"
 
 [[path_rule]]
-prefix = "examples/nautilus_quantile_contract/reef.lock"
-disposition = "owner"
-workflow = "ci.yml"
-job = "ci-fast"
-cadence = "pull_request and push"
-reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
-tracking_issue = "chelis#2027"
-
-[[path_rule]]
 prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml"
-disposition = "owner"
-workflow = "ci.yml"
-job = "ci-fast"
-cadence = "pull_request and push"
-reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
-tracking_issue = "chelis#2027"
-
-[[path_rule]]
-prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/reef.lock"
 disposition = "owner"
 workflow = "ci.yml"
 job = "ci-fast"

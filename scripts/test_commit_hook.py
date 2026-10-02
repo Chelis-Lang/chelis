@@ -177,6 +177,31 @@ class CommitHookInterpreterTests(unittest.TestCase):
                 self.env["DEVENV_STATE"] = str(path)
                 self.assert_policy()
 
+    def test_staged_generated_std_file_warns_without_refusing(self) -> None:
+        shutil.copyfile(
+            REPO_ROOT / "scripts/check_std_bundle_untracked.py",
+            self.repo / "scripts/check_std_bundle_untracked.py",
+        )
+        self.interpreter(self.repo / ".venv/bin/python")
+        generated = self.repo / "packages/chelis-std/dist/chelis-std-0.4.0.chb"
+        generated.parent.mkdir(parents=True)
+        generated.write_bytes(b"shell")
+        subprocess.run(
+            ["git", "add", "packages/chelis-std/dist/chelis-std-0.4.0.chb"],
+            cwd=self.repo, env=self.env, check=True, capture_output=True,
+        )
+        message = self.repo / "COMMIT_EDITMSG"
+        message.write_text("docs: a clean subject\n", encoding="utf-8")
+        for hook in (HOOK, REPO_ROOT / ".cargo-husky/hooks/commit-msg"):
+            with self.subTest(hook=hook):
+                result = subprocess.run(
+                    [str(hook), str(message)], cwd=self.repo, env=self.env,
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("std bundle tracking: warning", result.stderr)
+                self.assertIn("packages/chelis-std/dist/chelis-std-0.4.0.chb", result.stderr)
+
     def test_uv_fallback_overrides_inherited_python_preference(self) -> None:
         # Model uv's conflicting-option rejection without downloading Python.
         uv = self.bin / "uv"
