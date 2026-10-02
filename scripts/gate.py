@@ -545,47 +545,17 @@ EMISSION_OBSERVER_TESTS: list[str] = [
 
 # The ownership-ledger harnesses link the runtime their own build carries, so
 # each target requires its package's `ownership-ledger` feature and the
-# featureless workspace runs skip it. The CLI command rebuilds
-# <target>/debug/chelis against the instrumented runtime, so it runs after
-# every command that trusts the binary the producers above built.
+# featureless workspace runs skip it. `ownership_ledger_tests.py` derives each
+# package's targets from that Cargo `required-features` declaration, so adding
+# a target edits no list here or in the macOS nightly job. The CLI command
+# rebuilds <target>/debug/chelis against the instrumented runtime, so it runs
+# after every command that trusts the binary the producers above built.
 OWNERSHIP_LEDGER_API_TESTS: list[str] = [
-    "cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
-    "ownership-ledger",
-    "--test", "builtin_named_kernel_inputs",
-    "--test", "dropout_fixed_stream_api",
-    "--test", "fixed_control_host_c",
-    "--test", "generated_header_native_probe",
-    "--test", "invocation_local_random",
-    "--test", "issue_1684_entry_cleanup",
-    "--test", "issue_1685_multi_root_cleanup",
-    "--test", "issue_2445_match_arm_ownership",
-    "--test", "issue_2485_region_entry_terminals",
-    "--test", "issue_2508_list_step_ownership",
-    "--test", "issue_2522_data_type_c_lane",
-    "--test", "issue_2576_option_items_render",
-    "--test", "issue_2577_filter_named_predicate",
-    "--test", "issue_2599_contextual_nullary_host_types",
-    "--test", "issue_2781_loop_result_captured_by_a_loop",
-    "--test", "issue_2883_extent_declaration_order",
-    "--test", "issue_2891_aggregate_shared_operand",
-    "--test", "key_admission_lanes",
-    "--test", "key_affinity_lanes",
-    "--test", "key_alias_lowering",
-    "--test", "key_extent_lanes",
-    "--test", "key_operand_random_c",
-    "--test", "key_operations_c",
-    "--test", "key_root_lanes",
-    "--test", "key_split_count_lanes",
-    "--test", "key_surface_lanes",
-    "--test", "key_tensor_forms",
-    "--test", "local_ascription_activation",
-    "--test", "rule_d_entered_lanes",
-    "--test", "untaken_arm_gradients",
+    MANAGED_PYTHON, "scripts/ownership_ledger_tests.py", "chelis-compiler-api",
 ]
 
 OWNERSHIP_LEDGER_CLI_TESTS: list[str] = [
-    "cargo", "nextest", "run", "-p", "chelis-cli", "--features",
-    "ownership-ledger", "--test", "issue_1314_json_bigint_ledger",
+    MANAGED_PYTHON, "scripts/ownership_ledger_tests.py", "chelis-cli",
 ]
 
 STAGES: dict[str, list[list[str]]] = {

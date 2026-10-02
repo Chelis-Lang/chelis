@@ -43,6 +43,7 @@ class CiContractPathTests(unittest.TestCase):
             "scripts/phase4b_change_report.py",
             "scripts/check_agent_skills.py",
             "scripts/dtype_phase4b_oracle.py",
+            "scripts/ownership_ledger_tests.py",
         ):
             with self.subTest(path=path):
                 self.assertTrue(contract.is_ci_contract_path(path))

@@ -61,7 +61,20 @@ def _load_oracle_module():
     return mod
 
 
+def _load_ledger_module():
+    """Load the ownership-ledger derivation the gate's ledger commands run."""
+    here = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location(
+        "ownership_ledger_tests", here / "ownership_ledger_tests.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
 gate = _load_module()
+ledger = _load_ledger_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PR_CONTRACT_ACK_YML = (
@@ -877,27 +890,36 @@ class StageUnionTests(unittest.TestCase):
         commands = gate.selected_stage_commands(
             "integration", tests_only=False, support_only=True, partition=None,
         )
+        metadata = ledger.cargo_metadata(REPO_ROOT)
         for command, package in (
             (gate.OWNERSHIP_LEDGER_API_TESTS, "chelis-compiler-api"),
             (gate.OWNERSHIP_LEDGER_CLI_TESTS, "chelis-cli"),
         ):
             with self.subTest(package=package):
+                # The gate names the package; the derivation owns the list.
                 self.assertEqual(
-                    command[:7],
+                    command,
+                    [gate.MANAGED_PYTHON, "scripts/ownership_ledger_tests.py",
+                     package],
+                )
+                derived = ledger.ledger_command(package, metadata)
+                self.assertEqual(
+                    derived[:7],
                     ["cargo", "nextest", "run", "-p", package, "--features",
                      "ownership-ledger"],
                 )
-                self.assertNotIn("--profile", command)
-                self.assertNotIn("--lib", command)
-                names = command[8::2]
-                self.assertEqual(command[7::2], ["--test"] * len(names))
+                self.assertNotIn("--profile", derived)
+                self.assertNotIn("--lib", derived)
+                names = derived[8::2]
+                self.assertTrue(names)
+                self.assertEqual(derived[7::2], ["--test"] * len(names))
                 self.assertEqual(names, sorted(set(names)))
                 self.assertEqual(gate.LOCAL_STATIC_COMMANDS.count(command), 1)
                 self.assertEqual(commands.count(command), 1)
 
     def test_ownership_ledger_commands_select_exactly_the_gated_targets(self):
-        # A static --test list can silently miss a newly gated target, and a
-        # featureless workspace run skips it, so derive the owed set from Cargo.
+        # A featureless workspace run skips a gated target, so the owed set
+        # comes from Cargo and every gated target must reach a gate command.
         metadata = json.loads(subprocess.run(
             ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
             cwd=REPO_ROOT, check=True, stdout=subprocess.PIPE, text=True,
@@ -911,8 +933,12 @@ class StageUnionTests(unittest.TestCase):
             and "ownership-ledger" in target.get("required-features", [])
         )
         selected = []
-        for command in (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS):
+        for gate_command in (
+            gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS
+        ):
+            command = ledger.ledger_command(gate_command[-1], metadata)
             package = command[command.index("-p") + 1]
+            self.assertEqual(package, gate_command[-1])
             self.assertEqual(command[command.index("--features") + 1], "ownership-ledger")
             selected.extend(
                 (package, command[index + 1])
