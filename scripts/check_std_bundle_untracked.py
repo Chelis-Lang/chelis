@@ -15,11 +15,15 @@ refuses three kinds of tracked file:
   binary that wrote it, so such a lock goes stale with any std edit.
 
 It reads every tracked path and its bytes from the index and exits 1 when it
-finds one. `gate.py --fast` and CI's lint-and-unit stage run it.
+finds one. `gate.py --fast` and CI's lint-and-unit stage run it. With
+`--tree DIR` it reads every file below DIR instead, by its path relative to
+DIR, and a symlink by its target; the pre-commit hook runs it that way on a
+copy of the staged files.
 
 Usage:
 
     <managed-python> scripts/check_std_bundle_untracked.py
+    <managed-python> scripts/check_std_bundle_untracked.py --tree DIR
 
 Acceptance is exit 0 with the final line ``std bundle tracking: PASS``.
 """
@@ -28,11 +32,12 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tomllib
-from typing import Sequence, TextIO
+from typing import Callable, Sequence, TextIO
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +79,26 @@ def staged_bytes(repo: Path, path: str) -> bytes:
     return _git(repo, "show", f":{path}")
 
 
+def tree_paths(root: Path) -> list[str]:
+    """Every file and symlink below `root`, relative to it."""
+    paths = []
+    for directory, subdirectories, files in os.walk(root):
+        for name in files + subdirectories:
+            path = Path(directory) / name
+            if path.is_symlink() or path.is_file():
+                paths.append(path.relative_to(root).as_posix())
+    return paths
+
+
+def tree_bytes(root: Path, path: str) -> bytes:
+    """The bytes below `root` for `path`; a symlink's are its target, as in
+    the index."""
+    file = root / path
+    if file.is_symlink():
+        return os.readlink(file).encode("utf-8")
+    return file.read_bytes()
+
+
 def is_lock(path: str) -> bool:
     return path == LOCK_FILE_NAME or path.endswith("/" + LOCK_FILE_NAME)
 
@@ -108,8 +133,8 @@ def lock_violation(path: str, contents: bytes) -> Violation | None:
     return None
 
 
-def violations(repo: Path, paths: Sequence[str]) -> list[Violation]:
-    """The tracked generated files among `paths`, read from the index."""
+def violations(paths: Sequence[str], read: Callable[[str], bytes]) -> list[Violation]:
+    """The generated files among `paths`, whose bytes `read` returns."""
     found = []
     for path in sorted(paths):
         if any(path.startswith(prefix) for prefix in GENERATED_DIRS):
@@ -121,7 +146,7 @@ def violations(repo: Path, paths: Sequence[str]) -> list[Violation]:
                 )
             )
         elif is_lock(path):
-            violation = lock_violation(path, staged_bytes(repo, path))
+            violation = lock_violation(path, read(path))
             if violation is not None:
                 found.append(violation)
     return found
@@ -129,10 +154,24 @@ def violations(repo: Path, paths: Sequence[str]) -> list[Violation]:
 
 def main(argv: Sequence[str], *, out: TextIO = sys.stdout, err: TextIO = sys.stderr) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--repo", type=Path, default=REPO_ROOT, help=argparse.SUPPRESS)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--repo", type=Path, default=REPO_ROOT, help=argparse.SUPPRESS)
+    source.add_argument(
+        "--tree",
+        type=Path,
+        metavar="DIR",
+        help="check every file below DIR, as committed, instead of the index",
+    )
     args = parser.parse_args(argv)
 
-    found = violations(args.repo, tracked_paths(args.repo))
+    if args.tree is not None:
+        if not args.tree.is_dir():
+            parser.error(f"--tree {args.tree} is not a directory")
+        root = args.tree
+        found = violations(tree_paths(root), lambda path: tree_bytes(root, path))
+    else:
+        repo = args.repo
+        found = violations(tracked_paths(repo), lambda path: staged_bytes(repo, path))
     if not found:
         print("std bundle tracking: PASS", file=out)
         return 0

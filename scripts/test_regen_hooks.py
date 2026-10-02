@@ -1,7 +1,8 @@
 """Lock the regeneration hooks: `.githooks/pre-commit` and `.githooks/pre-push`.
 
 Each behavioral test builds a temporary repository holding the conformance
-asset generator and its inputs, installs both templates into the clone's
+asset generator and its inputs and the chelis-std bundle check, installs both
+templates into the clone's
 common hooks directory the way Devenv does, and drives them through real
 `git commit`, sequencer, and `git push` invocations. Neither hook may write a
 file, so several tests also assert that the worktree and index are untouched. The interpreter each hook selects is
@@ -26,21 +27,28 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import check_std_bundle_untracked  # noqa: E402
 import regen_all  # noqa: E402
 import regen_hooks  # noqa: E402
 
 HOOKS = ("pre-commit", "pre-push")
 ASSET = "crates/chelis-conformance/assets/canonical/agents-inheritance.md"
-# The files a temporary repository needs for the conformance leg to run.
+# The files a temporary repository needs for the conformance and
+# std-bundle-untracked legs to run.
 FIXTURE_PATHS = (
     "scripts/regen_hooks.py",
     "scripts/regen_all.py",
     "scripts/regenerate_conformance_assets.py",
+    "scripts/check_std_bundle_untracked.py",
     "AGENTS.md",
     "docs/CHELIS_SURFACE.md",
     "packages/chelis-std/SKILL.md",
     "agent-skills",
     "crates/chelis-conformance/assets",
+)
+STD_LOCK = "packages/chelis-std/reef.lock"
+BUNDLED_STD_LOCK = (
+    '[[dependencies]]\nname = "chelis-std"\n\n[dependencies.source]\nkind = "bundled"\n'
 )
 
 
@@ -102,20 +110,46 @@ def commit_leg_table() -> str:
 
 class LegInputDeclarations(unittest.TestCase):
     def test_commit_leg_rows_match_the_regen_all_manifest(self) -> None:
-        """The pre-commit table and regen_all.py must not drift apart."""
+        """The pre-commit table and regen_all.py must not drift apart.
+
+        regen_all.py lists generators, so a row may be absent from it only
+        when it has a check of its own.
+        """
         manifest = {leg.name: leg for leg in regen_all.regen_legs("PY")}
         rows = regen_hooks.parse_commit_legs(commit_leg_table())
         self.assertEqual(
             [row.name for row in rows],
-            ["conformance-assets", "reviewed-unsupported-wording", "opaque-corpus"],
+            ["conformance-assets", "reviewed-unsupported-wording", "opaque-corpus",
+             "std-bundle-untracked"],
         )
         for row in rows:
             with self.subTest(leg=row.name):
+                if row.name not in manifest:
+                    self.assertIsNotNone(
+                        row.check, f"{row.name} is not in regen_all.py and has no check"
+                    )
+                    for spec in row.inputs:
+                        self.assertTrue(os.path.lexists(REPO_ROOT / spec), spec)
+                    self.assertTrue((REPO_ROOT / row.check[0]).is_file())
+                    self.assertTrue((REPO_ROOT / row.fix[0]).is_file())
+                    continue
                 leg = manifest[row.name]
                 self.assertEqual(row.inputs, leg.inputs)
                 self.assertEqual(row.outputs, leg.writes)
                 self.assertEqual(("PY", *row.fix), leg.write_argv)
                 self.assertTrue((REPO_ROOT / row.fix[0]).is_file())
+
+    def test_std_bundle_row_covers_what_the_check_refuses(self) -> None:
+        """The row selects its leg by the paths the check refuses; a path
+        missing from the row would let a commit through unchecked."""
+        row = next(
+            row for row in regen_hooks.parse_commit_legs(commit_leg_table())
+            if row.name == "std-bundle-untracked"
+        )
+        self.assertEqual(
+            row.outputs, (*check_std_bundle_untracked.GENERATED_DIRS, STD_LOCK)
+        )
+        self.assertEqual(row.check, ("scripts/check_std_bundle_untracked.py", "--tree", "."))
 
     def test_every_hook_leg_declares_existing_inputs(self) -> None:
         """A misspelled input would make a hook skip its leg without a word."""
@@ -433,6 +467,73 @@ class RegenHookRepository(unittest.TestCase):
                 self.assertIn("are inconsistent", result.stderr)
                 self.assertIn(ASSET, result.stderr)
                 self.git("reset", "--quiet", "--hard")
+
+    def stage_file(self, path: str, text: str) -> None:
+        target = self.repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        self.git("add", "--force", path)
+
+    def test_pre_commit_refuses_a_staged_generated_std_file(self) -> None:
+        """A row with its own check prints the check's report and the fix
+        command, and no `git add`."""
+        head = self.git("rev-parse", "HEAD")
+        cases = {
+            "packages/chelis-std/dist/chelis-std-0.4.0.tar.zst": "archive\n",
+            "crates/chelis-std-bundle/dist/chelis-std-0.4.0.chb": "shell\n",
+            STD_LOCK: BUNDLED_STD_LOCK,
+        }
+        for path, text in cases.items():
+            with self.subTest(path=path):
+                self.stage_file(path, text)
+                before = self.index_and_tree()
+                result = self.run_git("commit", "-m", "chore: add a generated file")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(f"  {path}: ", result.stderr)
+                self.assertIn("std bundle tracking: FAIL", result.stderr)
+                self.assertIn(
+                    "pre-commit: the std-bundle-untracked check refuses the staged content.\n",
+                    result.stderr,
+                )
+                self.assertNotIn("inconsistent", result.stderr)
+                self.assertRegex(
+                    result.stderr, r"\n  fix: [^\n]* scripts/check_std_bundle_untracked\.py\n"
+                )
+                self.assertNotIn("then: git add", result.stderr)
+                self.assertEqual(self.git("rev-parse", "HEAD"), head)
+                self.assertEqual(self.index_and_tree(), before, "pre-commit must not write")
+                self.git("rm", "--quiet", "--cached", path)
+                (self.repo / path).unlink()
+
+    def test_pre_commit_passes_the_std_bundle_leg_on_a_clean_tree(self) -> None:
+        check = self.repo / "scripts/check_std_bundle_untracked.py"
+        check.write_text(check.read_text(encoding="utf-8") + "# edited\n", encoding="utf-8")
+        self.git("add", "scripts/check_std_bundle_untracked.py")
+        edited = self.run_git("commit", "-m", "chore: edit the check")
+        self.assertEqual(edited.returncode, 0, edited.stderr)
+        self.assertEqual(edited.stderr, "")
+        self.stage_file(STD_LOCK, '[package]\nname = "chelis-std"\n')
+        lock = self.run_git("commit", "-m", "chore: a lock without the bundled runtime")
+        self.assertEqual(lock.returncode, 0, lock.stderr)
+        self.assertEqual(lock.stderr, "")
+
+    def test_pre_commit_judges_every_staged_generated_std_file(self) -> None:
+        """The copy holds the leg's whole staged tree, so a generated file
+        committed earlier fails any commit that selects the leg until it is
+        untracked, and untracking it passes."""
+        dist = "packages/chelis-std/dist/chelis-std-0.4.0.chb"
+        self.stage_file(dist, "shell\n")
+        self.git("commit", "--quiet", "--no-verify", "-m", "chore: predate the refusal")
+        check = self.repo / "scripts/check_std_bundle_untracked.py"
+        check.write_text(check.read_text(encoding="utf-8") + "# edited\n", encoding="utf-8")
+        self.git("add", "scripts/check_std_bundle_untracked.py")
+        refused = self.run_git("commit", "-m", "chore: edit the check")
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertIn(f"  {dist}: ", refused.stderr)
+        self.git("rm", "--quiet", "--cached", dist)
+        untracked = self.run_git("commit", "-m", "chore: untrack the generated file")
+        self.assertEqual(untracked.returncode, 0, untracked.stderr)
+        self.assertEqual(self.git("ls-files", "packages/chelis-std/dist/"), "")
 
     def test_amend_is_checked(self) -> None:
         self.edit_agents()

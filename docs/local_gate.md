@@ -163,7 +163,9 @@ mtime. `scripts/check_std_bundle_untracked.py` refuses a tracked file under
 `packages/chelis-std/dist/` or `crates/chelis-std-bundle/dist/`, and a tracked
 `reef.lock` that records the bundled runtime: every lock reef writes names the
 running binary's runtime, so a committed one goes stale with the first std
-edit.
+edit. The pre-commit hook runs it with `--tree` on a copy of the staged files
+when a commit stages a path under either `dist/` directory or
+`packages/chelis-std/reef.lock`; the gate and CI check every tracked lock.
 
 Every writer runs before every check, and the path classification is the first
 check because it is the cheapest row that can reject a push: it is the

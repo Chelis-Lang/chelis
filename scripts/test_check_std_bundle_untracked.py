@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Positive and negative fixtures for `check_std_bundle_untracked.py`.
 
-Each test builds a scratch git repository. Clean trees, ignored build
+Each index test builds a scratch git repository. Clean trees, ignored build
 outputs, and locks without a bundled chelis-std pass. A tracked file under
 either generated directory, a tracked lock with a bundled chelis-std entry,
-and an unreadable tracked lock fail.
+and an unreadable tracked lock fail. The `--tree` tests apply the same rules
+to a plain directory, the way the pre-commit hook runs the check on a copy of
+the staged files.
 """
 
 from __future__ import annotations
 
+import contextlib
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -164,6 +168,83 @@ class StdBundleTrackingTests(unittest.TestCase):
         err = self.assert_refused(repo, "packages/chelis-std/dist/a.chb")
         self.assertIn("crates/chelis-std-bundle/dist/b.tar.zst", err)
         self.assertIn("examples/probe/reef.lock", err)
+
+
+class StdBundleTreeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.write("README.md", "probe\n")
+
+    def write(self, relative: str, text: str) -> None:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def run_tree(self, *extra: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        code = guard.main(["--tree", str(self.root), *extra], out=out, err=err)
+        return code, out.getvalue(), err.getvalue()
+
+    def assert_refused(self, *paths: str) -> str:
+        code, out, err = self.run_tree()
+        self.assertEqual(code, 1, err)
+        self.assertIn("std bundle tracking: FAIL", out)
+        for path in paths:
+            self.assertIn(f"  {path}: ", err)
+        return err
+
+    def test_clean_tree_passes(self):
+        self.write("examples/probe/reef.lock", PATH_ONLY_LOCK)
+        self.write("packages/chelis-std/distribution.md", "notes")
+        self.write("packages/chelis-std/src/core.ch", "source")
+        code, out, err = self.run_tree()
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("std bundle tracking: PASS", out)
+
+    def test_each_generated_kind_is_refused(self):
+        cases = {
+            "packages/chelis-std/dist/chelis-std-0.4.0.tar.zst": "archive",
+            "crates/chelis-std-bundle/dist/chelis-std-0.4.0.chb": "shell",
+            "packages/chelis-std/reef.lock": BUNDLED_LOCK,
+        }
+        for path, text in cases.items():
+            with self.subTest(path=path):
+                self.write(path, text)
+                self.assertIn(guard.PRODUCER, self.assert_refused(path))
+                (self.root / path).unlink()
+        self.assertEqual(self.run_tree()[0], 0)
+
+    def test_a_symlinked_lock_is_read_as_its_target_like_the_index(self):
+        (self.root / "examples/probe").mkdir(parents=True)
+        os.symlink("../elsewhere/reef.lock", self.root / "examples/probe/reef.lock")
+        err = self.assert_refused("examples/probe/reef.lock")
+        self.assertIn("cannot be read as a reef lock", err)
+
+    def test_the_tree_is_read_instead_of_the_index(self):
+        repo = Repository(self.root)
+        repo.track("packages/chelis-std/dist/chelis-std-0.4.0.chb", "shell")
+        (self.root / "packages/chelis-std/dist/chelis-std-0.4.0.chb").unlink()
+        self.assertEqual(self.run_tree()[0], 0)
+        self.assertEqual(repo.run()[0], 1)
+        repo.git("rm", "-q", "--cached", "packages/chelis-std/dist/chelis-std-0.4.0.chb")
+        self.write("crates/chelis-std-bundle/dist/chelis-std-0.4.0.tar.zst", "archive")
+        self.assert_refused("crates/chelis-std-bundle/dist/chelis-std-0.4.0.tar.zst")
+        self.assertEqual(repo.run()[0], 0)
+
+    def test_a_missing_tree_is_an_error(self):
+        with contextlib.redirect_stderr(io.StringIO()) as usage:
+            with self.assertRaises(SystemExit) as raised:
+                guard.main(["--tree", str(self.root / "absent")])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("is not a directory", usage.getvalue())
+
+    def test_tree_and_repo_are_exclusive(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                guard.main(["--tree", str(self.root), "--repo", str(self.root)])
+        self.assertEqual(raised.exception.code, 2)
 
 
 if __name__ == "__main__":

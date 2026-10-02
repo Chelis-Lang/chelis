@@ -21,10 +21,13 @@
 # of `-` runs `fix` there instead and reports every output it changes. `fix`
 # is what the message tells the author to run. Adding a leg is one row here,
 # the same row in the cargo-husky copy, and a test in
-# scripts/test_regen_hooks.py, which also ties each row to scripts/regen_all.py.
+# scripts/test_regen_hooks.py, which also ties each row to scripts/regen_all.py
+# unless the row has a check of its own: std-bundle-untracked refuses the
+# generated chelis-std files, which nothing regenerates into the repository.
 legs='conformance-assets|scripts/regenerate_conformance_assets.py AGENTS.md docs/CHELIS_SURFACE.md packages/chelis-std/SKILL.md agent-skills/ .claude/skills .codex/skills|crates/chelis-conformance/assets/skills/ crates/chelis-conformance/assets/canonical/|-|scripts/regenerate_conformance_assets.py
 reviewed-unsupported-wording|scripts/generate_reviewed_unsupported_wording_snapshot.py|crates/chelis-cli/tests/snapshots/issue_1870__reviewed__unsupported_wording.snap|-|scripts/generate_reviewed_unsupported_wording_snapshot.py
-opaque-corpus|tests/corpus/opaque_invariants/generate_corpus.py|tests/corpus/opaque_invariants/manifest.json tests/corpus/opaque_invariants/programs/|-|tests/corpus/opaque_invariants/generate_corpus.py'
+opaque-corpus|tests/corpus/opaque_invariants/generate_corpus.py|tests/corpus/opaque_invariants/manifest.json tests/corpus/opaque_invariants/programs/|-|tests/corpus/opaque_invariants/generate_corpus.py
+std-bundle-untracked|scripts/check_std_bundle_untracked.py|packages/chelis-std/dist/ crates/chelis-std-bundle/dist/ packages/chelis-std/reef.lock|scripts/check_std_bundle_untracked.py --tree .|scripts/check_std_bundle_untracked.py'
 
 set -eu
 # The path lists are split on spaces and must never be globbed.

@@ -104,7 +104,11 @@ sources and print the command that fixes them.
   on a private, always-removed copy of the staged files, so partial staging,
   `git commit <paths>`, and `git commit -a` are judged by what they commit.
   On disagreement it names both files, prints the write command, and asks
-  you to `git add` the result. It never runs cargo. git runs it for
+  you to `git add` the result. One leg checks instead of generating: a
+  staged file under `packages/chelis-std/dist/` or
+  `crates/chelis-std-bundle/dist/`, or a staged `packages/chelis-std/reef.lock`
+  that records the bundled runtime, fails the commit with the files to
+  untrack. It never runs cargo. git runs it for
   `commit`, `commit --amend`, `cherry-pick --continue`, and the commit that
   concludes a conflicted merge, and a refused commit leaves the operation
   resumable; `rebase --continue` and conflict-free merges, cherry-picks, and

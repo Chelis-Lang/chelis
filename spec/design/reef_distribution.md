@@ -397,7 +397,8 @@ to the local-registry path. Three consequences:
    only binaries and test harnesses depend on the bundle, so a library
    that forgets to pass the runtime fails to compile. No dist pair or lock
    recording the bundled runtime is committed;
-   `scripts/check_std_bundle_untracked.py` refuses one in CI, and
+   `scripts/check_std_bundle_untracked.py` refuses one at commit time
+   and in CI, and
    `scripts/check_std_bundle_reproducible.py` requires two independent
    builds to embed the same bytes.
 3. **No registry seeding required.** `chelis reef build` against a

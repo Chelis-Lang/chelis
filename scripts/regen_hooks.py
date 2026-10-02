@@ -16,11 +16,13 @@ pre-commit
     leg's inputs and outputs into a private temporary directory, which is
     removed on every exit path (SIGINT, SIGTERM and SIGHUP included), and runs
     the leg's check there. A check of `-` runs the fix command on the copy
-    and reports each output it changes. Disagreement fails the commit, exit 1,
-    naming the staged sources and the outputs, the fix command, and the
-    `git add` that follows it. Because it reads the index git hands it,
-    partial staging, `git commit <paths>` and `git commit -a` are judged by
-    what they commit. It never runs cargo.
+    and reports each output it changes. Disagreement fails the commit, exit 1.
+    For a leg checked by running its fix, the message names the staged
+    sources, the outputs that changed, the fix command, and the `git add` that
+    follows it; for a leg with its own check, it follows the check's report
+    with the leg's name and the fix command. Because it reads the index git
+    hands it, partial staging, `git commit <paths>` and `git commit -a` are
+    judged by what they commit. It never runs cargo.
 
 pre-push
     Check only; it writes nothing, and no git call it makes takes the index
@@ -271,11 +273,15 @@ def pre_commit(
     for leg, sources, differing in inconsistent:
         print(
             f"pre-commit: {', '.join(sources)} and {', '.join(differing)} are "
-            "inconsistent in the staged content.",
+            "inconsistent in the staged content." if leg.check is None
+            else f"pre-commit: the {leg.name} check refuses the staged content.",
             file=out,
         )
         print(f"  fix: {runnable(repo, python, leg.fix)}", file=out)
-        print(f"  then: git add -- {shlex.join(differing)}", file=out)
+        # A leg with its own check names its declared outputs rather than
+        # files its fix rewrote, so the fix command says what to stage.
+        if leg.check is None:
+            print(f"  then: git add -- {shlex.join(differing)}", file=out)
     print(
         "The derived files are generated from their sources; an edit made by hand "
         "to a derived file belongs in its source instead. --no-verify bypasses "
