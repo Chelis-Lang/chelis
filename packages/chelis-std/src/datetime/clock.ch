@@ -9,8 +9,8 @@ import Std.Datetime (Instant, Duration, instant_from_unix, duration)
 -- because a library definition cannot relabel a builtin's failure.
 --
 -- A monotonic reading is opaque: its origin is unspecified, so the only
--- operation is the exact elapsed time between two readings, and nothing
--- converts one to an Instant.
+-- datetime function over one is the exact elapsed time between two
+-- readings, and nothing converts one to an Instant.
 @opaque
 type MonotonicInstant =
   | MonotonicInstant { second: i64, nanosecond: i64 }

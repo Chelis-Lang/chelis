@@ -184,7 +184,7 @@ program that imports only `Std.Datetime` never reads a clock. `clock_now()`
 returns the wall-clock `Instant`. `monotonic_now()` returns a `MonotonicInstant`
 from a clock that never runs backwards, and `monotonic_until(a, b)` is the exact
 `Duration` from `a` to `b`. A `MonotonicInstant` has an unspecified origin, so
-it has no other operation and does not convert to an `Instant`. Both reads carry
+no other datetime function takes one and it does not convert to an `Instant`. Both reads carry
 `IO`, so every caller declares it. A failed read reports
 `clock_wall_read: io: <detail>` or `clock_monotonic_read: io: <detail>`, naming
 the underlying read. The clocks run under `chelis eval` and `chelis test`;

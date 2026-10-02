@@ -2689,7 +2689,7 @@ def validate_normative_contract(
             "Parsing a value's canonical text returns that value",
             "`clock_now` and `monotonic_now` are the only callables of this atom that "
             "read the host or carry an effect",
-            "`monotonic_until(a,b)` is its only operation",
+            "`monotonic_until(a,b)` is the only datetime callable",
             "No callable converts a `MonotonicInstant` to or from an `Instant`",
             "naming the builtin rather than `clock_now` or `monotonic_now`",
         ),

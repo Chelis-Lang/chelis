@@ -5,12 +5,13 @@ The shipped filesystem, process, and clock evaluator builtins route through
 the mandatory typed `EvalSystem` policy boundary. This separate source scan
 reports conventional direct host calls and imports outside
 `runtime/system_adapter.rs`, including the tested `use std as host` and
-platform-specific filesystem spellings, and direct host clock reads. It skips
-test-only modules.
+platform-specific filesystem spellings, and clock reads spelled
+`SystemTime::now` or `Instant::now`. It skips test-only modules.
 
 This lexical check is NOT proof that the adapter is the only possible Rust
 host-access path: for example, `extern crate std as host` and filesystem
-methods on path values derived through `.to_path_buf()` can evade it.
+methods on path values derived through `.to_path_buf()` can evade it, as can
+a clock type imported under another name or a read through `.elapsed()`.
 Those cases require type-aware analysis; a PASS only means the recognized
 patterns were absent from the scanned production sources.
 

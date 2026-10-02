@@ -3246,8 +3246,8 @@ exact ADT identity by [05-OP-34].
 > `MonotonicInstant` of one `clock_monotonic_read`: a second in [05-OP-75]'s
 > range and a nanosecond in `[0, 10^9)`, measured from that clock's
 > unspecified origin. `monotonic_now` is the only producer of a
-> `MonotonicInstant`, and `monotonic_until(a,b)` is its only operation: the
-> exact `Duration` from `a` to `b`, which never fails. No callable converts a
+> `MonotonicInstant`, and `monotonic_until(a,b)` is the only datetime callable
+> that takes one: the exact `Duration` from `a` to `b`, which never fails. No callable converts a
 > `MonotonicInstant` to or from an `Instant`. A read that fails fails with
 > [05-OP-75]'s message `clock_wall_read: io: <detail>` or
 > `clock_monotonic_read: io: <detail>`, naming the builtin rather than

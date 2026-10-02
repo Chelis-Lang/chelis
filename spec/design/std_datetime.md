@@ -768,7 +768,7 @@ compares `zoned_instant` and `time_zone_name`.
 **API:**
 - `clock_now() -> Instant ! { IO }` reads the host wall clock on the POSIX timescale.
 - `monotonic_now() -> MonotonicInstant ! { IO }` reads a clock that never runs backwards.
-  - `MonotonicInstant` is opaque. Its only operation is
+  - `MonotonicInstant` is opaque. The only datetime callable that takes one is
     `monotonic_until(a, b) -> Duration`, and nothing converts it to an `Instant`.
   - This is the separation Go merges into one type and then documents around (prior
     art §9).

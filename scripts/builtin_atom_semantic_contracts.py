@@ -112,6 +112,8 @@ CALLABLE_CLAUSES = {
         (("cast",), "`cast(value,target_dtype)` returns the same scalar or tensor"),
         (("clamp", "cumsum", "diagonal", "sort", "split", "trace", "where"),
          "`where(condition,a,b)` uses a bool condition and same-shaped same-dtype branches"),
+        (("clock_monotonic_read", "clock_wall_read"),
+         "`clock_wall_read()->(i64,i64)!{IO}` and"),
         (("cmplt",), "`comparison(left, right) -> result` governs exactly the seven language identities"),
         (("count",), "`count(x, axes...) -> result` admits exactly a `bool` tensor operand"),
         (("dict_get", "dict_insert", "dict_merge", "dict_remove"),
