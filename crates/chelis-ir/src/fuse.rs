@@ -110,6 +110,7 @@ fn is_fusible_elementwise(seeds: &crate::dag::TrapSeeds<'_>, node: &DagNode) -> 
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil

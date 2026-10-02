@@ -503,6 +503,7 @@ pub enum FusedStepOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
     Abs,
     Floor,
     Ceil,
@@ -839,6 +840,7 @@ pub enum RiscOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
     Abs,
     Floor,
     Ceil,
@@ -1309,6 +1311,7 @@ pub enum RiscAtomIdentity {
     Cos,
     Tan,
     Atan,
+    Tanh,
     Abs,
     Floor,
     Ceil,
@@ -1389,6 +1392,7 @@ impl RiscAtomIdentity {
         Self::Cos,
         Self::Tan,
         Self::Atan,
+        Self::Tanh,
         Self::Abs,
         Self::Floor,
         Self::Ceil,
@@ -1469,6 +1473,7 @@ impl RiscAtomIdentity {
             Self::Cos => "cos",
             Self::Tan => "tan",
             Self::Atan => "atan",
+            Self::Tanh => "tanh",
             Self::Abs => "abs",
             Self::Floor => "floor",
             Self::Ceil => "ceil",
@@ -1622,6 +1627,7 @@ impl RiscOp {
             Self::Cos => Semantic(Id::Cos),
             Self::Tan => Semantic(Id::Tan),
             Self::Atan => Semantic(Id::Atan),
+            Self::Tanh => Semantic(Id::Tanh),
             Self::Abs => Semantic(Id::Abs),
             Self::Floor => Semantic(Id::Floor),
             Self::Ceil => Semantic(Id::Ceil),
@@ -1949,6 +1955,7 @@ impl RiscOp {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -2389,6 +2396,7 @@ impl DagNode {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
@@ -3550,6 +3558,7 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Cos
         | RiscOp::Tan
         | RiscOp::Atan
+        | RiscOp::Tanh
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
@@ -4768,6 +4777,7 @@ mod tests {
             RiscOp::Cos,
             RiscOp::Tan,
             RiscOp::Atan,
+            RiscOp::Tanh,
             RiscOp::Abs,
             RiscOp::Floor,
             RiscOp::Ceil,
@@ -5073,8 +5083,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            67,
-            "one_of_every_risc_op must list all 67 classified samples"
+            68,
+            "one_of_every_risc_op must list all 68 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5083,9 +5093,10 @@ mod tests {
         let excluded = all.len() - targetable;
 
         // Pinned partition per beacon_plan.md §3.1: the elementwise math
-        // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
+        // (5 binary/cmp + 14 unary, including `round` and the chelis#2957
+        // `tanh` primitive), 5 reductions, 6
         // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
-        // BlasMatmul), and Cast are targetable (34); stochastic (the two
+        // BlasMatmul), and Cast are targetable (35); stochastic (the two
         // key-operand draws and their two AD replays: 4),
         // arg-reductions (2), integer floor/trunc division and remainder (3),
         // `cast_trunc` (1, chelis#759), one_hot (1), the `Shape` metadata read
@@ -5102,7 +5113,7 @@ mod tests {
         // opaque keys, not numeric envelopes (+4 = 31), and so does a
         // branch's key join (+1 = 32).
         assert_eq!(
-            targetable, 34,
+            targetable, 35,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(

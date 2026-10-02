@@ -1624,6 +1624,7 @@ impl HipEmitter {
             RiscOp::Cos => Some(format!("kernel_cos_{}", kind_for_node(node)?.suffix())),
             RiscOp::Tan => Some(format!("kernel_tan_{}", kind_for_node(node)?.suffix())),
             RiscOp::Atan => Some(format!("kernel_atan_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Tanh => Some(format!("kernel_tanh_{}", kind_for_node(node)?.suffix())),
             RiscOp::Abs => Some(format!(
                 "kernel_abs{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -2082,6 +2083,7 @@ impl HipEmitter {
             RiscOp::Cos => kernels::unary_func(self.kernel_rank, name, "cosf", elem_for_unary()?),
             RiscOp::Tan => kernels::unary_func(self.kernel_rank, name, "tanf", elem_for_unary()?),
             RiscOp::Atan => kernels::unary_func(self.kernel_rank, name, "atanf", elem_for_unary()?),
+            RiscOp::Tanh => kernels::unary_func(self.kernel_rank, name, "tanhf", elem_for_unary()?),
             RiscOp::Abs if operand_prec().is_integer() => kernels::unary_checked_abs_integer(
                 self.kernel_rank,
                 name,
@@ -2594,6 +2596,12 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::Atan => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Tanh => self.emit_unary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
@@ -5264,6 +5272,7 @@ impl HipEmitter {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil

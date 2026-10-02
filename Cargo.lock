@@ -586,6 +586,7 @@ dependencies = [
  "chelis-abi",
  "chelis-backend-c",
  "chelis-backend-hip",
+ "chelis-crmath",
  "chelis-deep",
  "chelis-effects",
  "chelis-image-id",
@@ -989,6 +990,7 @@ name = "chelis-types"
 version = "0.18.12"
 dependencies = [
  "bincode",
+ "chelis-crmath",
  "chelis-deep",
  "chelis-macros",
  "chelis-pred",

@@ -105,6 +105,32 @@ pub extern "C" fn chelis_fp_env_leave() {
     });
 }
 
+/// The same entry and exit for Rust hosts of Chelis numerics: the evaluator
+/// runs inside its caller's process (the CLI, and the Python and
+/// compiler-api bindings), whose thread may carry any control state. Holding
+/// the guard pins the IEEE default; dropping it, on return or unwind,
+/// restores the caller's state.
+#[must_use = "the IEEE default holds only while the guard is alive"]
+pub struct FpEnvGuard {
+    // Entry and exit are per thread, so the guard must not cross threads.
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl FpEnvGuard {
+    pub fn enter() -> Self {
+        chelis_fp_env_enter();
+        Self {
+            _not_send: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for FpEnvGuard {
+    fn drop(&mut self) {
+        chelis_fp_env_leave();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +154,28 @@ mod tests {
         );
         chelis_fp_env_leave();
         assert_eq!(read_control(), custom);
+        write_control(caller);
+    }
+
+    #[test]
+    fn guard_installs_the_ieee_default_and_restores_the_caller_on_unwind() {
+        let caller = read_control();
+        #[cfg(target_arch = "aarch64")]
+        let custom = caller | (1 << 24) | (0b10 << 22);
+        #[cfg(target_arch = "x86_64")]
+        let custom = (caller & !0x6000) | 0x8040 | 0x4000;
+        write_control(custom);
+        {
+            let _guard = FpEnvGuard::enter();
+            assert_eq!(read_control(), IEEE_DEFAULT);
+        }
+        assert_eq!(read_control(), custom);
+        let unwound = std::panic::catch_unwind(|| {
+            let _guard = FpEnvGuard::enter();
+            panic!("evaluation failed");
+        });
+        assert!(unwound.is_err());
+        assert_eq!(read_control(), custom, "an unwind restores the caller");
         write_control(caller);
     }
 }

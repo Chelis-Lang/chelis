@@ -288,6 +288,7 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -457,6 +458,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Cos
         | RiscOp::Tan
         | RiscOp::Atan
+        | RiscOp::Tanh
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil

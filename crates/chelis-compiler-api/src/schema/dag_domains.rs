@@ -314,6 +314,7 @@ pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
         | WireRiscOp::Cos
         | WireRiscOp::Tan
         | WireRiscOp::Atan
+        | WireRiscOp::Tanh
         | WireRiscOp::Abs
         | WireRiscOp::Floor
         | WireRiscOp::Ceil
@@ -400,6 +401,7 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
             | WireRiscOp::Cos
             | WireRiscOp::Tan
             | WireRiscOp::Atan
+            | WireRiscOp::Tanh
             | WireRiscOp::Abs
             | WireRiscOp::Floor
             | WireRiscOp::Ceil

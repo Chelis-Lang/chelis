@@ -2868,6 +2868,12 @@ fn eval_compiled(
     bindings: BTreeMap<String, crate::schema::TensorValue>,
     selected_root_names: Option<&[String]>,
 ) -> Result<EvalResult> {
+    // [04-NUM-2] results assume round-to-nearest-even with subnormals kept.
+    // The evaluator runs in its host's thread (the CLI, or a Python or Rust
+    // embedding that may have set a rounding mode or flush-to-zero), so every
+    // evaluation pins the IEEE default and restores the host's state after
+    // (spec/design/correctly_rounded_math.md section 6, chelis#2964).
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // A parameterized tensor entry is a callable declaration in the checked
     // manifest until evaluation selects it and supplies all of its runtime
     // inputs. Specialize that selection into a new manifested program before
@@ -6833,6 +6839,7 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::Cos => WireRiscOp::Cos,
         RiscOp::Tan => WireRiscOp::Tan,
         RiscOp::Atan => WireRiscOp::Atan,
+        RiscOp::Tanh => WireRiscOp::Tanh,
         RiscOp::Abs => WireRiscOp::Abs,
         RiscOp::Floor => WireRiscOp::Floor,
         RiscOp::Ceil => WireRiscOp::Ceil,
@@ -7076,6 +7083,7 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
                         FusedStepOp::Cos => WireFusedStepOp::Cos,
                         FusedStepOp::Tan => WireFusedStepOp::Tan,
                         FusedStepOp::Atan => WireFusedStepOp::Atan,
+                        FusedStepOp::Tanh => WireFusedStepOp::Tanh,
                         FusedStepOp::Abs => WireFusedStepOp::Abs,
                         FusedStepOp::Floor => WireFusedStepOp::Floor,
                         FusedStepOp::Ceil => WireFusedStepOp::Ceil,
@@ -7169,7 +7177,7 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 23);
+        assert_eq!(wire.schema_version, 24);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -7482,7 +7490,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 23);
+        assert_eq!(json["schema_version"], 24);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()

@@ -27,6 +27,9 @@ chelis-effects.workspace = true
 chelis-ir.workspace = true
 chelis-macros.workspace = true
 chelis-pipeline-core.workspace = true
+# The evaluator pins the IEEE default floating-point environment with the
+# runtime's one implementation of the entry/exit guard (chelis#2964).
+chelis-runtime.workspace = true
 chelis-reef.workspace = true
 chelis-surf.workspace = true
 chelis-types.workspace = true
@@ -41,11 +44,11 @@ serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 sha2 = "0.10"
 
 [dev-dependencies]
+chelis-crmath.workspace = true
 tempfile = "3"
 # Tests that link generated C stage the runtime the bundle carries
 # (spec/08-backends.md §2.1) and link that exact archive; `ownership-ledger`
 # enables the ledger in that runtime.
-chelis-runtime.workspace = true
 chelis-runtime-bundle.workspace = true
 chelis-reef.workspace = true
 # Tests link the embedded chelis-std runtime; the library takes it as a

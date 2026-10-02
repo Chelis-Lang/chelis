@@ -2148,7 +2148,10 @@ pub struct WireRecordPatternField {
 /// - `22`: a Load of a resolved top-level value uses an unspellable encoded
 ///   origin label, distinct from every ordinary graph input. A version-21
 ///   reader has no such identity and cannot interpret that label.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 23;
+/// - `24`: `Tanh` and the fused `Tanh` step are the [05-OP-46] Tier 1
+///   primitive (chelis#2957); an earlier graph spelled `tanh` as
+///   `2*sigmoid(2x)-1`, and a version-23 reader does not know the operation.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 24;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -3469,6 +3472,7 @@ fn wire_axis_origin(
         | WireRiscOp::Cos
         | WireRiscOp::Tan
         | WireRiscOp::Atan
+        | WireRiscOp::Tanh
         | WireRiscOp::Abs
         | WireRiscOp::Floor
         | WireRiscOp::Ceil
@@ -3860,6 +3864,7 @@ pub enum WireFusedStepOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
     Abs,
     Floor,
     Ceil,
@@ -4025,6 +4030,7 @@ pub enum WireRiscOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
     Abs,
     Floor,
     Ceil,

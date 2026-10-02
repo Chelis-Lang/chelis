@@ -128,7 +128,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 23,
+        WIRE_DAG_SCHEMA_VERSION, 24,
         "review vocabulary and migration history with every version change"
     );
     assert_eq!(actual.len(), 77);
@@ -180,7 +180,7 @@ fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions(
 fn resolved_global_load_has_a_v22_wire_identity() {
     let global = chelis_ir::LoadStoreName::top_level("Lib.weights");
     let dag = WireDag {
-        schema_version: 23,
+        schema_version: 24,
         declarations: vec!["entry".to_string()],
         nodes: vec![WireDagNode {
             declaration: 0,
@@ -203,7 +203,7 @@ fn resolved_global_load_has_a_v22_wire_identity() {
     let encoded = serde_json::to_string(&dag).expect("v22 producer carries resolved origin");
     let decoded = WireDag::from_validated_json(&encoded).expect("v22 consumer retains origin");
     assert!(matches!(&decoded.nodes[0].op, WireRiscOp::Load { name } if name == global.as_str()));
-    let old = encoded.replace("\"schema_version\":23", "\"schema_version\":22");
+    let old = encoded.replace("\"schema_version\":24", "\"schema_version\":23");
     assert!(
         WireDag::from_validated_json(&old).is_err(),
         "v21 is rejected before label decode"

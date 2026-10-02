@@ -1588,6 +1588,7 @@ impl CEmitter {
             RiscOp::Cos => self.emit_unary_func(id, "cosf", &node.inputs, &node.output_type),
             RiscOp::Tan => self.emit_unary_func(id, "tanf", &node.inputs, &node.output_type),
             RiscOp::Atan => self.emit_unary_func(id, "atanf", &node.inputs, &node.output_type),
+            RiscOp::Tanh => self.emit_unary_func(id, "tanhf", &node.inputs, &node.output_type),
             RiscOp::Abs if node.output_type.precision.is_integer() => {
                 self.emit_integer_abs(id, &node.inputs, &node.output_type)
             }
@@ -2854,6 +2855,7 @@ impl CEmitter {
             "cosf" => "cos",
             "tanf" => "tan",
             "atanf" => "atan",
+            "tanhf" => "tanh",
             "fabsf" => "fabs",
             "floorf" => "floor",
             "ceilf" => "ceil",
@@ -5577,6 +5579,7 @@ impl CEmitter {
                     | FusedStepOp::Cos
                     | FusedStepOp::Tan
                     | FusedStepOp::Atan
+                    | FusedStepOp::Tanh
                     | FusedStepOp::Abs
                     | FusedStepOp::Floor
                     | FusedStepOp::Ceil
@@ -5727,6 +5730,11 @@ impl CEmitter {
                 let f = mf("atanf");
                 format!("{f}({a})")
             }
+            FusedStepOp::Tanh => {
+                let a = resolve(&inputs[0]);
+                let f = mf("tanhf");
+                format!("{f}({a})")
+            }
             FusedStepOp::Abs => {
                 let a = resolve(&inputs[0]);
                 let f = mf("fabsf");
@@ -5841,6 +5849,10 @@ impl CEmitter {
             FusedStepOp::Atan => {
                 let a = resolve(&inputs[0]);
                 format!("_mm256_set1_ps(atanf(_mm256_cvtss_f32({a})))")
+            }
+            FusedStepOp::Tanh => {
+                let a = resolve(&inputs[0]);
+                format!("_mm256_set1_ps(tanhf(_mm256_cvtss_f32({a})))")
             }
             FusedStepOp::Abs => {
                 let a = resolve(&inputs[0]);
@@ -7937,6 +7949,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 FusedStepOp::Atan => {
                     let a = resolve(&step.input_indices[0]);
                     format!("atanf({a})")
+                }
+                FusedStepOp::Tanh => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("tanhf({a})")
                 }
                 FusedStepOp::Abs => {
                     let a = resolve(&step.input_indices[0]);

@@ -303,6 +303,7 @@ impl ElemKind {
                 "cosf" => "cos".into(),
                 "tanf" => "tan".into(),
                 "atanf" => "atan".into(),
+                "tanhf" => "tanh".into(),
                 "fabsf" => "fabs".into(),
                 "floorf" => "floor".into(),
                 "ceilf" => "ceil".into(),
@@ -2123,6 +2124,11 @@ fn fused_step_lines(
             FusedStepOp::Atan => {
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let f = kind.func("atanf");
+                format!("{f}({a})")
+            }
+            FusedStepOp::Tanh => {
+                let a = resolve_fused_input(&step.input_indices[0]);
+                let f = kind.func("tanhf");
                 format!("{f}({a})")
             }
             FusedStepOp::Abs => {

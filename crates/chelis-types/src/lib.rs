@@ -7,6 +7,7 @@
 //! use chelis_types::EffectKind;
 //! ```
 
+pub mod activation;
 pub mod adt;
 pub mod agreement;
 pub mod bitwise;

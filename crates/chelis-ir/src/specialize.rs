@@ -823,6 +823,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Cos
         | RiscOp::Tan
         | RiscOp::Atan
+        | RiscOp::Tanh
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil

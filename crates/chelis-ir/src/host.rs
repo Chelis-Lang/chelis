@@ -17499,6 +17499,7 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Cos
             | crate::dag::RiscOp::Tan
             | crate::dag::RiscOp::Atan
+            | crate::dag::RiscOp::Tanh
             | crate::dag::RiscOp::Abs
             | crate::dag::RiscOp::Floor
             | crate::dag::RiscOp::Ceil
