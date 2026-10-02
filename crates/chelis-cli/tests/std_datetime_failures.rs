@@ -15,7 +15,7 @@ mod common;
 
 use assert_cmd::Command;
 use common::{make_app, write_file};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const IMPORTS: &str = "import Std.Datetime (Weekday, Monday, Sunday, ClampToMonthEnd, RejectInvalidDay, Hours, Minutes, Seconds, Milliseconds, Microseconds, Nanoseconds, Date, Duration, Period, is_leap_year, days_in_year, days_in_month, weekday_from_iso_number, date, date_from_epoch_day, date_iso_week, date_day_of_year, date_from_iso_week, date_add_days, date_add_months, try_date_add_months, date_add_period, try_date_add_period, date_period_until, parse_date, nth_weekday_in_month, last_weekday_in_month, weekday_on_or_after, weekday_on_or_before, easter_sunday_gregorian, easter_sunday_orthodox, time, time_from_nanosecond_of_day, time_add_duration, datetime, datetime_add_duration, datetime_add_period, try_datetime_add_period, datetime_until, parse_time, parse_datetime, offset_from_seconds, parse_offset, instant_from_unix, instant_from_unix_count, instant_to_unix_count, instant_add_duration, instant_until, instant_round_to, instant_to_datetime_at, datetime_to_instant_at, parse_instant, parse_offset_datetime, duration, duration_from_count, duration_to_count, duration_to_seconds_f64, duration_add, duration_sub, duration_negate, duration_mul, parse_duration, try_parse_duration, period, period_negate, period_mul, parse_period, try_parse_period, dates_from_epoch_days, instants_from_unix)\nimport Std.Rounding (RoundTowardNegative, RoundTowardPositive, RoundTowardZero, RoundAwayFromZero, RoundTiesToEven, RoundTiesToAway, RejectInexact)";
@@ -843,15 +843,15 @@ fn extreme_cases() -> Vec<(&'static str, String)> {
     cases
 }
 
-#[test]
-fn std_datetime_extreme_arguments_raise_no_primitive_trap() {
-    let cases = extreme_cases();
+/// Runs `cases` and requires each to succeed or fail under its function's
+/// `domain` or `overflow` message, and the cases to include both outcomes.
+fn check_extreme_cases(dir_name: &str, cases: &[(&'static str, String)]) {
     let expressions: Vec<(String, String)> = cases
         .iter()
         .enumerate()
         .map(|(index, (_, expression))| (format!("case_{index:04}"), expression.clone()))
         .collect();
-    let outcomes = run_expression_suite("datetime-extremes-2859", &expressions);
+    let outcomes = run_expression_suite(dir_name, &expressions);
     let mut failures = 0usize;
     for (index, (function, expression)) in cases.iter().enumerate() {
         let outcome = &outcomes[&format!("case_{index:04}")];
@@ -869,6 +869,24 @@ fn std_datetime_extreme_arguments_raise_no_primitive_trap() {
         "the sweep must exercise both accepted and rejected extremes ({failures} of {})",
         cases.len()
     );
+}
+
+/// The full sweep runs nightly; the canary below runs on every pull request.
+#[test]
+fn std_datetime_extreme_arguments_raise_no_primitive_trap() {
+    check_extreme_cases("datetime-extremes-2859", &extreme_cases());
+}
+
+/// The per-pull-request slice of the full sweep: the first case of each
+/// function, so every swept function meets an extreme argument.
+#[test]
+fn std_datetime_extreme_arguments_canary() {
+    let mut seen = BTreeSet::new();
+    let cases: Vec<(&'static str, String)> = extreme_cases()
+        .into_iter()
+        .filter(|(function, _)| seen.insert(*function))
+        .collect();
+    check_extreme_cases("datetime-extremes-canary-2859", &cases);
 }
 
 /// [05-OP-73] opaque value types: construction, inspection, and field access
