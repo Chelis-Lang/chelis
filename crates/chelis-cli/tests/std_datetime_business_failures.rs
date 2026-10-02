@@ -18,7 +18,7 @@ use common::{make_app, write_file};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const IMPORTS: &str = "import Std.Datetime (Date, date, dates_from_epoch_days, dates_epoch_days)\nimport Std.Datetime.Business (Weekmask, BusinessCalendar, BusinessDayRoll, NonBusinessStart, Unadjusted, Following, Preceding, ModifiedFollowing, ModifiedPreceding, RejectNonBusinessStart, RollStartForward, RollStartBackward, business_calendar, try_business_calendar, is_business_day, try_is_business_day, business_day_roll, try_business_day_roll, business_day_offset, try_business_day_offset, business_day_count, try_business_day_count, business_in_all, try_business_in_all, business_in_any, try_business_in_any, dates_is_business_day, dates_business_day_roll, dates_business_day_offset, dates_business_day_count)\nimport Std.Test (assert_true)";
+const IMPORTS: &str = "import Std.Datetime (Date, Dates, date, dates_from_epoch_days, dates_epoch_days)\nimport Std.Datetime.Business (Weekmask, BusinessCalendar, BusinessDayRoll, NonBusinessStart, Unadjusted, Following, Preceding, ModifiedFollowing, ModifiedPreceding, RejectNonBusinessStart, RollStartForward, RollStartBackward, business_calendar, try_business_calendar, is_business_day, try_is_business_day, business_day_roll, try_business_day_roll, business_day_offset, try_business_day_offset, business_day_count, try_business_day_count, business_in_all, try_business_in_all, business_in_any, try_business_in_any, dates_is_business_day, dates_business_day_roll, dates_business_day_offset, dates_business_day_count)\nimport Std.Test (assert_true)";
 
 /// Calendars shared by every generated fixture: a 2026 Monday-to-Friday
 /// calendar with two holidays, one ending on Saturday 2026-12-26, one starting
@@ -30,6 +30,8 @@ def present[a](value: Option[a]) -> i64 =
     | None => 0i64
   }
 def total(values: List[i64]) -> i64 = fold(fn (acc: i64, value: i64) -> add(acc, value), 0i64, values)
+def run_of[k](start: i64, count: i64) -> tensor[k, i64] = to_tensor(range(start, add(start, count)))
+def days_from[k](start: i64, count: i64) -> Dates[k] = dates_from_epoch_days(run_of(start, count))
 def weekdays() -> Weekmask = Weekmask { monday: true, tuesday: true, wednesday: true, thursday: true, friday: true, saturday: false, sunday: false }
 def weekend() -> Weekmask = Weekmask { monday: false, tuesday: false, wednesday: false, thursday: false, friday: false, saturday: true, sunday: true }
 def no_days() -> Weekmask = Weekmask { monday: false, tuesday: false, wednesday: false, thursday: false, friday: false, saturday: false, sunday: false }
@@ -191,6 +193,19 @@ fn exact_failures() -> Vec<(&'static str, &'static str, String)> {
             format!(
                 "dates_business_day_count: domain: element 1: end 2027-01-02 is outside {HORIZON} and is not the day after it"
             ),
+        ),
+        // A column argument whose length differs from another argument's
+        // fails before any element is read, rather than pairing the shorter
+        // prefix.
+        (
+            "column_offset_lengths_differ",
+            "dates_business_day_offset(cal(), days_from(20458i64, 2i64), run_of(1i64, 3i64), RejectNonBusinessStart)",
+            "dates_business_day_offset: domain: arguments have 2 and 3 elements".into(),
+        ),
+        (
+            "column_count_lengths_differ",
+            "dates_business_day_count(cal(), days_from(20458i64, 2i64), days_from(20460i64, 3i64))",
+            "dates_business_day_count: domain: arguments have 2 and 3 elements".into(),
         ),
     ]
 }
