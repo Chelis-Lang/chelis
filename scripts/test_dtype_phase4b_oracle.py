@@ -2067,14 +2067,15 @@ class ContractValidationTests(unittest.TestCase):
             REPO_ROOT / "spec/registry/stdlib_numeric_manifest.md"
         ).read_text(encoding="utf-8")
         rows = re.findall(r"^\| `([^`]+)` \|", registry, re.MULTILINE)
-        self.assertEqual(len(rows), 206)
-        self.assertEqual(len(set(rows)), 206)
+        self.assertEqual(len(rows), 228)
+        self.assertEqual(len(set(rows)), 228)
         identities = set(rows)
         for identity in (
             "decimal::decimal_add",
             "io/json::json_bigint",
             "io/json::load_json",
             "datetime::date_lt",
+            "datetime/business::business_day_offset",
             "datetime/clock::clock_now",
         ):
             with self.subTest(identity=identity):

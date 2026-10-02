@@ -344,6 +344,7 @@ EXPECTED_OP_MANIFESTS = {
         """\
 | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
 | `decimal::Decimal` | `Decimal { negative: bool, limb0: i64, limb1: i64, limb2: i64, limb3: i64, limb4: i64, scale: i64 }` |
+| `datetime/business::BusinessCalendar` | `BusinessCalendar { weekmask: Weekmask, holidays: List[i64], valid_from: i64, valid_until: i64 }` |
 | `datetime::Date` | `Date { epoch_day: i64 }` |
 | `datetime::Time` | `Time { nanosecond_of_day: i64 }` |
 | `datetime::DateTime` | `DateTime { epoch_day: i64, nanosecond_of_day: i64 }` |
@@ -362,6 +363,28 @@ EXPECTED_OP_MANIFESTS = {
 | `contracts::normal_cdf_contract_samples` | `()->i64` |
 | `contracts::normal_cdf_contract_seed` | `()->i64` |
 | `contracts::standard_contract_tolerance` | `()->f32` |
+| `datetime/business::business_calendar` | `(Weekmask,List[Date],Date,Date)->BusinessCalendar` |
+| `datetime/business::business_calendar_holidays` | `(BusinessCalendar)->List[Date]` |
+| `datetime/business::business_calendar_valid_from` | `(BusinessCalendar)->Date` |
+| `datetime/business::business_calendar_valid_until` | `(BusinessCalendar)->Date` |
+| `datetime/business::business_calendar_weekmask` | `(BusinessCalendar)->Weekmask` |
+| `datetime/business::business_day_count` | `(BusinessCalendar,Date,Date)->i64` |
+| `datetime/business::business_day_offset` | `(BusinessCalendar,Date,i64,NonBusinessStart)->Date` |
+| `datetime/business::business_day_roll` | `(BusinessCalendar,Date,BusinessDayRoll)->Date` |
+| `datetime/business::business_in_all` | `(BusinessCalendar,BusinessCalendar)->BusinessCalendar` |
+| `datetime/business::business_in_any` | `(BusinessCalendar,BusinessCalendar)->BusinessCalendar` |
+| `datetime/business::dates_business_day_count` | `(BusinessCalendar,Dates[n],Dates[n])->tensor[n,i64]` |
+| `datetime/business::dates_business_day_offset` | `(BusinessCalendar,Dates[n],&tensor[n,i64],NonBusinessStart)->Dates[n]` |
+| `datetime/business::dates_business_day_roll` | `(BusinessCalendar,Dates[n],BusinessDayRoll)->Dates[n]` |
+| `datetime/business::dates_is_business_day` | `(BusinessCalendar,Dates[n])->tensor[n,bool]` |
+| `datetime/business::is_business_day` | `(BusinessCalendar,Date)->bool` |
+| `datetime/business::try_business_calendar` | `(Weekmask,List[Date],Date,Date)->Option[BusinessCalendar]` |
+| `datetime/business::try_business_day_count` | `(BusinessCalendar,Date,Date)->Option[i64]` |
+| `datetime/business::try_business_day_offset` | `(BusinessCalendar,Date,i64,NonBusinessStart)->Option[Date]` |
+| `datetime/business::try_business_day_roll` | `(BusinessCalendar,Date,BusinessDayRoll)->Option[Date]` |
+| `datetime/business::try_business_in_all` | `(BusinessCalendar,BusinessCalendar)->Option[BusinessCalendar]` |
+| `datetime/business::try_business_in_any` | `(BusinessCalendar,BusinessCalendar)->Option[BusinessCalendar]` |
+| `datetime/business::try_is_business_day` | `(BusinessCalendar,Date)->Option[bool]` |
 | `datetime/clock::clock_now` | `()->Instant!{IO}` |
 | `datetime/clock::monotonic_now` | `()->MonotonicInstant!{IO}` |
 | `datetime/clock::monotonic_until` | `(MonotonicInstant,MonotonicInstant)->Duration` |
@@ -887,10 +910,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 206 or len(set(identities)) != 206:
+    if len(identities) != 228 or len(set(identities)) != 228:
         violations.append(
             "[05-OP-35] stdlib numeric manifest must have exactly two hundred "
-            "six unique identities"
+            "twenty-eight unique identities"
         )
 
 
@@ -2433,6 +2456,7 @@ def validate_normative_contract(
             "`decimal::Decimal`",
             "`datetime::Date`",
             "`datetime::Instants`",
+            "`datetime/business::BusinessCalendar`",
             "accepts every representable declared field tuple",
             "validation and normalization belong to named stdlib functions",
             "A public signature is numeric when any reachable field of an admitted ADT",
@@ -2449,7 +2473,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the two hundred six final exported stdlib numeric definitions",
+            "exactly the two hundred twenty-eight final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "
@@ -2471,7 +2495,8 @@ def validate_normative_contract(
             "`tensor/construct::stack` | "
             "`(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "Every primitive-width intermediate in a graph whose contract names a dtype",
-            "The `datetime::*` and `datetime/clock::*` identities follow [05-OP-73]",
+            "The `datetime::*`, `datetime/business::*`, and `datetime/clock::*` "
+            "identities follow [05-OP-73]",
             "The `decimal::*` identities follow [05-OP-76]",
             "integer primitive arithmetic is checked",
             "JSON access follows [05-OP-2..5]",
@@ -2668,8 +2693,28 @@ def validate_normative_contract(
             "alias, or compatibility identity belongs to this atom",
         ),
         "05-OP-73": (
-            "governs exactly the `datetime::*` and `datetime/clock::*` identities of "
-            "the [05-OP-34] and [05-OP-35] registries",
+            "governs exactly the `datetime::*`, `datetime/business::*`, and "
+            "`datetime/clock::*` identities of the [05-OP-34] and [05-OP-35] "
+            "registries",
+            "A day of the horizon is a business day when the weekmask includes its "
+            "weekday and it is not a holiday",
+            "so two calendars with the same business days, weekmask, and horizon are "
+            "[05-OP-36]-equal",
+            "A calendar answers only from the days of its horizon",
+            "except that an end of `business_day_count` or `dates_business_day_count` "
+            "may also be the day after `valid_until`",
+            "A result exists when every choice of business days outside the horizon "
+            "gives the same answer and that answer lies inside the horizon",
+            "The `datetime/business::*` callables fail only `domain`, and the four "
+            "calendar readers never fail",
+            "`ModifiedFollowing` gives the `Following` day when it lies in `d`'s month "
+            "and otherwise the `Preceding` day",
+            "so `n = 0` gives the replaced start",
+            "`a <= b` and `-business_day_count(c,b,a)` otherwise",
+            "Each takes the intersection of the two horizons and fails `domain` when it "
+            "is empty",
+            "the call fails `domain` naming the lowest such element index and the "
+            "twin's detail there",
             "The calendar is proleptic Gregorian with astronomical year numbering",
             "The timescale is POSIX: every day has exactly 86 400 seconds",
             "-4 371 587..2 932 896",

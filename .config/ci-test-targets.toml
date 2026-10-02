@@ -127,6 +127,29 @@ cadence = "pull_request and push"
 reason = "script-unit executes the reference's positive and negative rows and the harness comparison logic"
 tracking_issue = "chelis#2859"
 
+# chelis#2860: the Std.Datetime.Business reference and differential harness.
+# The chelis-cli `std_datetime_business_oracle` target runs both against eval
+# and native C; script-unit runs the reference's tests, NumPy differential
+# included, on every pull request.
+[[path_rule]]
+prefix = "scripts/datetime_business_reference.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/datetime_business_differential.py"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/test_datetime_business_reference.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the reference's positive and negative rows and its NumPy differential"
+tracking_issue = "chelis#2860"
+
 # chelis#2778: the Std.Decimal reference and differential harness. The
 # chelis-cli `std_decimal_oracle` target runs both against eval and native C;
 # script-unit runs the reference's tests and the harness's generator and

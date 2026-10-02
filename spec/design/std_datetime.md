@@ -600,8 +600,10 @@ does. Accessors return the weekmask, the normalized holiday list, and both horiz
 **Every query is answerable only inside the horizon.** A calendar has no information
 outside the dates its data covers. A query there fails `domain`, and the `try_` forms
 return `None`. Every operation that takes a calendar, `Unadjusted` rolls included,
-requires its date arguments inside the horizon. The one exception is
-`business_day_count`'s exclusive end, which may be the day after `valid_until`. The surveyed libraries instead error,
+requires its date arguments inside the horizon. The one exception is the ends of
+`business_day_count` and `dates_business_day_count`: either may be the day after
+`valid_until`, which is the exclusive end of a range reaching the horizon's last day and
+the first argument of that range's reversed count. The surveyed libraries instead error,
 silently degrade to weekends-only, or silently project their rules forward (prior
 art §14). Shoals' tables degraded silently, and this rule closes that class.
 
@@ -613,7 +615,13 @@ art §14). Shoals' tables degraded silently, and this rule closes that class.
     one on or before it.
   - `ModifiedFollowing` is `Following` unless that changes the month, and then
     `Preceding`. `ModifiedPreceding` is the mirror.
-  - Fails `domain` when the answer would lie outside the horizon.
+  - Fails `domain` when the answer would lie outside the horizon. An answer that days
+    outside the horizon could change is treated the same way. `ModifiedFollowing` with no
+    business day left in the horizon is answered only when the day after `valid_until`
+    already lies in a later month, because the following business day then changes the
+    month wherever it falls; `ModifiedPreceding` mirrors this at `valid_from`. [05-OP-73]
+    states the rule once: a result exists when every choice of business days outside the
+    horizon gives the same answer inside it.
 - `business_day_offset(cal, d, n: i64, start: NonBusinessStart) -> Date`.
   - If `d` is not a business day, `start` decides: `RejectNonBusinessStart` fails
     `domain`; `RollStartForward` and `RollStartBackward` roll first.
@@ -630,7 +638,9 @@ art §14). Shoals' tables degraded silently, and this rule closes that class.
     This is a settlement calendar: weekmasks are intersected and holidays united.
   - With `business_in_any`, a day is a business day when it is one in either calendar.
   - The horizon of the result is the intersection of the two horizons, and the
-    constructor fails `domain` when that intersection is empty.
+    constructor fails `domain` when that intersection is empty. `business_in_all` also
+    fails `domain` when the two weekmasks share no weekday, because a calendar's weekmask
+    must name a business day; a union of two valid weekmasks always does.
   - QuantLib and Strata spell these as "join", "combine" and "link", which does not say
     which is which (prior art §11); the names here say what they compute.
 - **Vectorized forms** over `Dates[n]`:
@@ -639,12 +649,80 @@ art §14). Shoals' tables degraded silently, and this rule closes that class.
   - `dates_business_day_offset`, with a `tensor[n, i64]` of offsets;
   - `dates_business_day_count`.
 
-  Each fails `domain` if any element is out of horizon.
+  Each fails `domain` with its scalar twin's detail for the lowest element where that
+  twin fails, out-of-horizon elements included.
+  - They consume their `Dates[n]` columns. A sibling module reaches a column's storage only
+    through the consuming accessor `dates_epoch_days`, so a borrowed column would cost a
+    copy on every call. A caller that keeps the column receives implicit linearity's copy,
+    as with S1's accessors.
+  - They borrow the offsets tensor, which they only read.
+- **`try_` forms.** `business_calendar`, `is_business_day`, `business_day_roll`,
+  `business_day_offset`, `business_day_count`, `business_in_all`, and `business_in_any`
+  each have a `try_` twin. The four calendar readers cannot fail, and the vectorized forms
+  have no `try_` twin: §6's masked `try_` rule governs column producers, and these are
+  queries over a column.
 
 **Complexity.** No operation recurses or loops per day. A scalar query is O(log h) in the
-number of holidays or better. The vectorized forms gather from a prefix count of business
-days over the horizon (prior art §10). The S2 PR chooses the internal representation and
-records it here with its measured cost.
+number of holidays.
+
+**Representation (decided in S2).** A `BusinessCalendar` holds exactly what it denotes:
+- the weekmask;
+- the holidays, as ascending unique epoch days in a `List[i64]`, each inside the horizon and
+  on a business weekday;
+- both horizon ends as epoch days.
+
+Nothing proportional to the horizon's length is stored or built:
+- Weekmask days are counted and selected in closed form, through a per-week table of the
+  business weekdays before each weekday.
+- The holidays before a day come from a binary search.
+- The business day with a given number of business days before it comes from a second
+  binary search, over how many holidays it passes. That predicate is monotone, because
+  every holiday is a weekmask day.
+
+The representation is O(h), construction is O(h log h) for the sort, and each scalar query
+reads O(log h) list elements.
+
+**Vectorized forms (decided in S2).** Each vectorized form applies the scalar algorithm to
+every element, at O(n log h) per call with nothing the horizon's length. That also keeps
+each element's failure identical to its scalar twin's by construction. The prefix-count
+gather planned above was built and measured, and four problems ruled it out:
+- A tensor cannot be sized from a scalar (#469). Every call would therefore build a
+  horizon-length `List` first, 7 304 485 elements for a full-range calendar.
+- `chelis eval` rejects `scatter_replace` (#2892).
+- Compiled C rejected the table program at internal shape invariants (#2893, #2907).
+- Compiled C panicked on one variant of it (#2906).
+
+A tensor kernel can replace the per-element loop, without changing the contract, once both
+lanes lower such programs.
+
+**Measured cost.** These costs were measured on one shared Apple-silicon workstation under
+other load, so they bound orders of magnitude rather than fix figures. Compiled C means
+`chelis build --target c` followed by `clang -O2`. `chelis eval` is a release build with the
+module loaded from source. Calendar A is Monday to Friday from 1950-01-01 to 2100-12-31
+(55 152 days) with 1 064 holidays left after normalization. Calendar B is Monday to Friday
+over the whole range (7 304 484 days) with no holidays.
+
+| Operation | Compiled C | `chelis eval` |
+|---|---|---|
+| construct A (1 490 candidate holidays) | 10 ms | 30 ms |
+| `is_business_day` on A | 8 µs | 0.4 ms |
+| `business_day_roll(…, ModifiedFollowing)` on A | 69 µs | 4.6 ms |
+| `business_day_offset(…, 250, RollStartForward)` on A | 101 µs | 6.2 ms |
+| `business_day_count` over 300 days on A | 44 µs | 3.1 ms |
+| `dates_business_day_offset` on A, per element of a 1 000-element column | 99 µs | 5.5 ms |
+| `business_day_offset(…, 10^6, RollStartForward)` on B | 51 µs | 3.0 ms |
+
+Calendar B's offsets cost no more than A's, because no cost scales with the horizon.
+
+Two costs outside this module show up in the measurements:
+- In a debug build of the runtime, compiled C rescans a `bool` tensor's whole storage on
+  every element read (#2903), so there building a column with `dates_from_epoch_days` and
+  reading a `bool` result grow quadratically in the column's length beyond about 10 000
+  elements. `dates_business_day_roll` and `dates_business_day_offset` pay it again building
+  their result columns; each form's per-element work stays linear. A release build
+  of the runtime does not rescan.
+- In `chelis eval`, each `index` into a `List` copies the list (#2335), so the binary
+  searches cost O(h) per probe there.
 
 ## 10. `Std.Datetime.Columns` (stage S3)
 
@@ -904,7 +982,8 @@ holiday tables.
   in `spec/registry/stdlib_adt_identities.md` under [05-OP-34].
 
 [05-OP-35] gains one sentence routing their semantics to a new atom, "`datetime::*`
-identities follow [05-OP-73]", as JSON access already follows [05-OP-2..5]. The capacity
+identities follow [05-OP-73]", as JSON access already follows [05-OP-2..5]. S2 extends the
+sentence and the atom's scope to the `datetime/business::*` identities. The capacity
 census, the frozen-contract oracle (`scripts/dtype_phase4b_oracle.py`) and the registry
 bijection test then need no new structure.
 
@@ -993,7 +1072,9 @@ S6, Shoals keeps its own date layer.
   −1 µs included, and must lie within one unit in the last place wherever its whole
   part satisfies `|w| < 2^53` (§8.6).
 - **Business days.** Differential against `numpy.busday_offset` and `busday_count`
-  under matching roll modes.
+  under matching roll modes. NumPy's `busday_count` counts `(end, begin]` when
+  `begin > end`, which is not antisymmetric, so reversed counts are compared through
+  `count(a, b) = −count(b, a)`.
 - **Zones.** Differential against Python's `zoneinfo` loaded from the same tzdata release,
   including every DST gap and fold under each `Disambiguation`.
 - **Shoals.** Day counts are checked against QuantLib and Strata reference values, with
