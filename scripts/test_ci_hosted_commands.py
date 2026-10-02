@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest import mock
 import subprocess
 import sys
 import tempfile
@@ -35,7 +36,9 @@ class HostedCommandTests(unittest.TestCase):
         venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(self.root / ".venv")
         interpreter = self.root / ".venv" / "bin" / "python"
         ci_hosted_commands.publish(self.root, self.commands, self.github_env, self.github_path)
-        self.assertEqual(self.github_env.read_text(), f"PYO3_PYTHON={interpreter}\n")
+        published_environment = dict(line.split("=", 1) for line in self.github_env.read_text().splitlines())
+        self.assertEqual(published_environment["PYO3_PYTHON"], str(interpreter))
+        self.assertTrue(published_environment["PYO3_ENVIRONMENT_SIGNATURE"].startswith("chelis-pyo3-v1-"))
         environment = {**os.environ, "PATH": self.runner_path(), "PYO3_PYTHON": str(interpreter)}
         command_file = Path(self.temporary.name) / "step"
         command_file.write_text("python -c 'import sys; print(sys.executable)'\nchelis-gate lint-and-unit --list\n")
@@ -58,6 +61,24 @@ class HostedCommandTests(unittest.TestCase):
             subprocess.run(["chelis-ci-shell", "not-run"], env=environment, capture_output=True).returncode,
             64,
         )
+
+    def test_discovery_override_is_rejected_before_anything_is_published(self):
+        venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(self.root / ".venv")
+        with mock.patch.dict(os.environ, {"PYO3_CONFIG_FILE": "/foreign/config"}):
+            with self.assertRaisesRegex(RuntimeError, "PYO3_CONFIG_FILE"):
+                ci_hosted_commands.publish(self.root, self.commands, self.github_env, self.github_path)
+        self.assertFalse(self.commands.exists())
+        self.assertFalse(self.github_env.exists())
+        self.assertEqual(self.github_path.read_text(), "/existing/bin\n")
+
+    def test_republication_replaces_stale_signature_with_deterministic_scalar(self):
+        venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(self.root / ".venv")
+        with mock.patch.dict(os.environ, {"PYO3_ENVIRONMENT_SIGNATURE": "stale"}):
+            ci_hosted_commands.publish(self.root, self.commands, self.github_env, self.github_path)
+            first = self.github_env.read_text()
+            ci_hosted_commands.publish(self.root, self.commands, self.github_env, self.github_path)
+        self.assertEqual(self.github_env.read_text(), first + first)
+        self.assertNotIn("stale", first)
 
     def test_missing_venv_is_refused_before_anything_is_published(self):
         with self.assertRaises(RuntimeError):

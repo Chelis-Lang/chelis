@@ -60,7 +60,10 @@ end of the runtime-representation stage. With no owned interpreter, a runtime
 that is not already uv- or Devenv-managed re-executes through
 `uv run --managed-python --python 3.11 --no-project` before running gate logic,
 so `python3 scripts/gate.py` starts correctly in every environment. It exports
-its selected interpreter as `PYO3_PYTHON` to every child command. Its `--fast`
+its selected interpreter as `PYO3_PYTHON` to every child command and computes
+`PYO3_ENVIRONMENT_SIGNATURE` from that interpreter's build metadata. The
+signature makes PyO3 refresh restored Cargo configuration when the interpreter
+changes behind the same venv path. Its `--fast`
 and `--validation` preflight warns when the worktree has no `.venv/bin/python`
 (create it with `uv venv --python 3.11`): the census legs need it, and direct
 cargo and nextest runs outside the gate fall back to it when `PYO3_PYTHON` is
@@ -91,9 +94,25 @@ Rust test and gate code resolves an interpreter through
 the checkout's `.venv/bin/python` is the fallback. Outside Devenv,
 `.cargo/config.toml` points `PYO3_PYTHON` at `.venv/bin/python`; Devenv
 overrides it with `.devenv/state/venv/bin/python`. For direct Cargo commands in
-a dedicated worktree, export `PYO3_PYTHON="$(uv python find 3.11)"`. An
+a dedicated worktree, use that worktree's owned `.venv/bin/python`. An
 explicit `PYO3_PYTHON` is authoritative: an invalid path must fail loudly
 rather than fall back.
+
+Hosted CI setup, hosted command publication, Devenv environment capture and
+the gate compute the same `PYO3_ENVIRONMENT_SIGNATURE` from the selected
+interpreter: executable and prefix paths, full version, ABI, library directory,
+library name, pointer width and build flags. They reject `PYO3_CONFIG_FILE`,
+`PYO3_NO_PYTHON` and `PYO3_CROSS*` overrides because those bypass native
+interpreter discovery. CI supplies libpython only from that interpreter's
+`LIBDIR`; a sibling installation is not a substitute.
+
+Direct Cargo invocations bypass these entry points. After creating or replacing
+the worktree venv, export its signature before reusing a Cargo target:
+
+```sh
+export PYO3_PYTHON="$PWD/.venv/bin/python"
+export PYO3_ENVIRONMENT_SIGNATURE="$(.venv/bin/python -c 'from pathlib import Path; from scripts.ci_setup_uv_python import pyo3_environment_signature; print(pyo3_environment_signature(Path(".venv/bin/python")))')"
+```
 
 Two invocation forms follow, and the repository uses them consistently: every
 script is `.venv/bin/python scripts/<name>.py`, and the gate is always

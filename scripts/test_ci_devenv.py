@@ -75,6 +75,7 @@ class ProjectActivationTests(unittest.TestCase):
                 value.append(item)
             values[key] = "\n".join(value)
         self.assertNotIn("GITHUB_TOKEN", values)
+        self.assertTrue(values["PYO3_ENVIRONMENT_SIGNATURE"].startswith("chelis-pyo3-v1-"))
         self.assertNotIn("LD_LIBRARY_PATH", values)
         self.assertIn("/project/lib", values["CHELIS_CI_LIBRARY_PATH"].split(os.pathsep))
         # Custom-shell lookup sees the runner's path commands before step env.
@@ -146,7 +147,11 @@ class ProjectActivationTests(unittest.TestCase):
         recorded = json.loads(capture.read_text())
         self.assertEqual(recorded["PYO3_PYTHON"], str(interpreter))
         self.assertEqual(recorded["VIRTUAL_ENV"], str(environment))
+        self.assertTrue(recorded["PYO3_ENVIRONMENT_SIGNATURE"].startswith("chelis-pyo3-v1-"))
         capture.unlink()
+        overridden = subprocess.run(command, env=dict(env, PYO3_CONFIG_FILE=""), capture_output=True, text=True)
+        self.assertNotEqual(overridden.returncode, 0)
+        self.assertFalse(capture.exists())
         env["PYO3_PYTHON"] = sys.executable
         failed = subprocess.run(command, env=env, capture_output=True, text=True)
         self.assertNotEqual(failed.returncode, 0)

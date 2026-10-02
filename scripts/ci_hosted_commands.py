@@ -15,6 +15,8 @@ from pathlib import Path
 import stat
 import sys
 
+from ci_setup_uv_python import pyo3_environment_signature
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SHELL = """#!/usr/bin/env bash
@@ -38,6 +40,7 @@ def publish(root: Path, commands: Path, github_env: Path, github_path: Path) -> 
     interpreter = root / ".venv" / "bin" / "python"
     if not interpreter.is_file():
         raise RuntimeError(f"uv-managed interpreter is missing: {interpreter}")
+    signature = pyo3_environment_signature(interpreter)
     commands.mkdir(parents=True, exist_ok=True)
     gate = GATE.format(interpreter=interpreter, gate=root / "scripts" / "gate.py")
     for name, body in (("chelis-ci-shell", SHELL), ("chelis-gate", gate)):
@@ -46,6 +49,7 @@ def publish(root: Path, commands: Path, github_env: Path, github_path: Path) -> 
         shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     with github_env.open("a", encoding="utf-8") as stream:
         stream.write(f"PYO3_PYTHON={interpreter}\n")
+        stream.write(f"PYO3_ENVIRONMENT_SIGNATURE={signature}\n")
     # The runner prepends entries in reverse order; the venv ends up first.
     with github_path.open("a", encoding="utf-8") as stream:
         stream.write(f"{commands}\n{interpreter.parent}\n")

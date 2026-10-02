@@ -1,55 +1,18 @@
-"""Set up the uv-managed Python for GitHub Actions cargo jobs.
+"""Create CI's owned uv venv and bind native builds to that interpreter.
 
-Creates `.venv/` (using uv, which must already be installed), then writes
-`LD_LIBRARY_PATH` (Linux) or `DYLD_LIBRARY_PATH` (macOS) into
-`$GITHUB_ENV` so subsequent `cargo` invocations can both **build**
-`chelis-python` (via `PYO3_PYTHON=.venv/bin/python` from
-`.cargo/config.toml`) **and** run its test binaries (which dynamically
-load `libpython.so` / `libpython.dylib` from the uv interpreter's
-`sysconfig.LIBDIR`).
-
-The Python version is read from `py/pyproject.toml`'s `requires-python`
-constraint (single source of truth). It can be overridden with
-`--python <version>`.
-
-Background:
-- Pre-PYO3 fix, pyo3-build-config auto-detected the runner's system
-  Python and linked the chelis-python test binaries against
-  `/usr/lib/.../libpython3.X.so`. That lib was already in the dynamic
-  linker's default search path (ld.so.cache on Linux), so the test
-  binaries could dlopen libpython at runtime without any rpath setup.
-- After `.cargo/config.toml` points `PYO3_PYTHON` at
-  `.venv/bin/python`, the test binaries link against the uv-managed
-  `libpython3.X.so.1.0`, which lives at
-  `~/.local/share/uv/python/cpython-3.X.Y-...-none/lib/`. That path
-  is not in any default linker search list, so the binaries fail at
-  load time with `cannot open shared object file: No such file or
-  directory`. This helper computes that lib dir from the venv's
-  sysconfig and writes it into `$GITHUB_ENV` so it's exported for the
-  rest of the job. PR #153's notes flagged this exact runtime-rpath
-  gap as "separate from the link-step fix"; this is the fix.
-
-Local-dev developers do not need this script. On a local workstation,
-`cargo test -p chelis-python` would hit the same runtime-rpath issue,
-but that test was already excluded from the local gate (per PR #153's
-commit message) and the relevant manual phase 3b oracle is invoked
-separately from a shell where developers can `export
-LD_LIBRARY_PATH` themselves. Promoting that to a workspace-wide setup
-is out of scope here.
-
-Usage (CI only):
-    python3 scripts/ci_setup_uv_python.py
-
-Exits non-zero on:
-- uv not installed,
-- venv creation failure,
-- failure to query `sysconfig.LIBDIR`,
-- unsupported runner OS (only Linux and Darwin are wired).
+Python's version pin comes from py/pyproject.toml. Only the selected
+interpreter's LIBDIR can supply libpython; another install is not a fallback.
+The runtime loader path and PyO3's environment signature are exported before
+Cargo cache restoration. PyO3 0.24.2 tracks PYO3_ENVIRONMENT_SIGNATURE even
+when the lexical .venv/bin/python path stays fixed across interpreter updates.
+Local gate children use the same signature query without creating a venv.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import platform
 import re
@@ -168,6 +131,87 @@ def python_abi_version(venv_python: Path) -> str:
     return abi
 
 
+# Query in the selected venv, with ambient Python imports disabled. Resolving
+# executable paths contributes identity only; PYO3_PYTHON stays lexical.
+INTERPRETER_BUILD_PROBE = """
+import json, os, struct, sys, sysconfig
+print(json.dumps({
+    "executable": sys.executable,
+    "resolved_executable": os.path.realpath(sys.executable),
+    "prefix": sys.prefix, "base_prefix": sys.base_prefix,
+    "implementation": sys.implementation.name, "version": sys.version,
+    "version_info": list(sys.version_info[:3]),
+    "pointer_width": struct.calcsize("P") * 8,
+    "libdir": sysconfig.get_config_var("LIBDIR"),
+    "ldlibrary": sysconfig.get_config_var("LDLIBRARY"),
+    "soabi": sysconfig.get_config_var("SOABI"),
+    "build_flags": {name: sysconfig.get_config_var(name) for name in
+                    ("Py_DEBUG", "Py_REF_DEBUG", "Py_TRACE_REFS", "COUNT_ALLOCS", "Py_ENABLE_SHARED", "Py_GIL_DISABLED")},
+}))
+"""
+
+
+def reject_discovery_overrides(environ: dict[str, str]) -> None:
+    """Native project builds must query the selected interpreter."""
+    conflicts = sorted(name for name in environ if name in {
+        "PYO3_CONFIG_FILE", "PYO3_NO_PYTHON",
+    } or name.startswith("PYO3_CROSS"))
+    if conflicts:
+        raise RuntimeError(
+            "Python discovery overrides conflict with the selected interpreter: "
+            + ", ".join(conflicts)
+        )
+
+
+def pyo3_environment_signature(
+    interpreter: Path, *, environ: dict[str, str] | None = None,
+) -> str:
+    """Bind Cargo's PyO3 configuration to the actual interpreter build.
+
+    PyO3's supported PYO3_ENVIRONMENT_SIGNATURE invalidation closes stale
+    build metadata behind an unchanged venv path. Do not hash ambient state,
+    timestamps or cache contents: identical interpreter inputs stay identical.
+    """
+    environment = dict(os.environ if environ is None else environ)
+    reject_discovery_overrides(environment)
+    try:
+        result = subprocess.run(
+            [str(interpreter), "-I", "-c", INTERPRETER_BUILD_PROBE],
+            capture_output=True, text=True, check=True, timeout=30,
+            env=environment,
+        )
+        identity = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise RuntimeError("could not query interpreter build identity") from exc
+    expected = {
+        "executable", "resolved_executable", "prefix", "base_prefix",
+        "implementation", "version", "version_info", "pointer_width",
+        "libdir", "ldlibrary", "soabi", "build_flags",
+    }
+    valid = isinstance(identity, dict) and set(identity) == expected
+    if valid:
+        strings = expected - {"version_info", "pointer_width", "build_flags"}
+        valid = all(isinstance(identity[name], str) and identity[name] for name in strings)
+        valid = valid and all(Path(identity[name]).is_absolute() for name in (
+            "executable", "resolved_executable", "prefix", "base_prefix", "libdir",
+        ))
+        version = identity["version_info"]
+        valid = valid and isinstance(version, list) and len(version) == 3
+        valid = valid and all(type(part) is int and part >= 0 for part in version)
+        valid = valid and tuple(version) >= (3, 11, 0)
+        valid = valid and type(identity["pointer_width"]) is int and identity["pointer_width"] in (32, 64)
+        flags = identity["build_flags"]
+        valid = valid and isinstance(flags, dict) and set(flags) == {
+            "Py_DEBUG", "Py_REF_DEBUG", "Py_TRACE_REFS", "COUNT_ALLOCS", "Py_ENABLE_SHARED", "Py_GIL_DISABLED",
+        }
+        valid = valid and all(value is None or type(value) is int for value in flags.values())
+    if not valid:
+        raise RuntimeError("invalid interpreter build identity")
+    identity["selected_executable"] = str(interpreter.absolute())
+    payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return "chelis-pyo3-v1-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _list_libdir(libdir: Path) -> str:
     """Render a one-line snapshot of `libdir` for error diagnostics."""
     try:
@@ -175,55 +219,6 @@ def _list_libdir(libdir: Path) -> str:
         return ", ".join(entries) if entries else "<empty>"
     except OSError as exc:
         return f"<unreadable: {exc}>"
-
-
-def discover_python_libdirs(primary_libdir: str, abi: str) -> list[Path]:
-    """Return every plausible lib/ dir that contains a libpython<abi> file.
-
-    The primary libdir from `sysconfig.LIBDIR` is the authoritative
-    answer for the venv's interpreter, but pyo3-build-config can end up
-    invoking a different copy of uv's Python install whose sys-paths
-    differ. Searches the documented uv install roots (default
-    `~/.local/share/uv/python/`, plus the `UV_PYTHON_INSTALL_DIR`
-    override) for any `cpython-<abi>*` install and includes its
-    `lib/` subdir if libpython files are present there.
-
-    Returns a de-duplicated list with `primary_libdir` first so the
-    caller links it before any siblings.
-    """
-    results: list[Path] = []
-    seen: set[Path] = set()
-
-    def maybe_add(p: Path) -> None:
-        try:
-            resolved = p.resolve()
-        except OSError:
-            return
-        if resolved in seen:
-            return
-        if not resolved.is_dir():
-            return
-        # Only include lib dirs that actually contain a libpython<abi>
-        # file (versioned or not). Skip unrelated dirs.
-        suffix = ".so" if platform.system() == "Linux" else ".dylib"
-        if not any(resolved.glob(f"libpython{abi}{suffix}*")):
-            return
-        seen.add(resolved)
-        results.append(p)
-
-    maybe_add(Path(primary_libdir))
-
-    candidate_roots: list[Path] = []
-    if "UV_PYTHON_INSTALL_DIR" in os.environ:
-        candidate_roots.append(Path(os.environ["UV_PYTHON_INSTALL_DIR"]))
-    candidate_roots.append(Path.home() / ".local" / "share" / "uv" / "python")
-    for root in candidate_roots:
-        if not root.is_dir():
-            continue
-        for install in sorted(root.glob(f"cpython-{abi}*")):
-            maybe_add(install / "lib")
-
-    return results
 
 
 def ensure_link_symlink(libdir: Path, abi: str) -> None:
@@ -263,7 +258,7 @@ def ensure_link_symlink(libdir: Path, abi: str) -> None:
     # Glob for versioned siblings.
     pattern = f"libpython{abi}{suffix}*"
     candidates = sorted(
-        (p for p in libdir.glob(pattern) if p != link_name),
+        (p for p in libdir.glob(pattern) if p != link_name and p.is_file()),
         key=lambda p: len(p.name),
     )
     if not candidates:
@@ -278,62 +273,6 @@ def ensure_link_symlink(libdir: Path, abi: str) -> None:
         link_name.unlink()
     link_name.symlink_to(target.name)
     print(f"linked {link_name} -> {target.name}")
-
-
-def ensure_default_uv_root_mirror(libdir: str, abi: str) -> None:
-    """Create a libpython symlink at the default uv install root.
-
-    Workaround for the case where pyo3-build-config emits a `-L` flag
-    pointing at `~/.local/share/uv/python/cpython-<install>/lib/` even
-    when uv staged the actual install elsewhere (via
-    `$UV_PYTHON_INSTALL_DIR` or via a stale path cached from a prior
-    build). The path can also persist in cached pyo3-build-config
-    output that Swatinem/rust-cache restores between runs.
-
-    Strategy:
-    1. Find the basename of the actual install directory by walking up
-       from `libdir` (`libdir/../` should be `cpython-<abi>-...-...`).
-    2. Mirror that basename under `~/.local/share/uv/python/`.
-    3. Symlink `libpython<abi>.{so,dylib}` there to the actual lib
-       file by absolute path.
-
-    Idempotent. No-op if the basename doesn't look like a uv install
-    (e.g., libdir is a system Python). No-op if the default root
-    already has a working entry.
-    """
-    suffix = ".so" if platform.system() == "Linux" else (
-        ".dylib" if platform.system() == "Darwin" else None
-    )
-    if suffix is None:
-        return
-
-    libdir_path = Path(libdir)
-    actual_install = libdir_path.parent  # e.g. .../uv-python-dir/cpython-3.11.15-...
-    if not actual_install.name.startswith(f"cpython-{abi}"):
-        # Not a uv-style install layout; nothing to mirror.
-        return
-
-    # Find the actual libpython file inside libdir_path.
-    pattern = f"libpython{abi}{suffix}*"
-    candidates = sorted(
-        (p for p in libdir_path.glob(pattern) if p.is_file()),
-        key=lambda p: len(p.name),
-    )
-    if not candidates:
-        return
-    real_lib = candidates[0].resolve()
-
-    default_root = Path.home() / ".local" / "share" / "uv" / "python"
-    mirror_libdir = default_root / actual_install.name / "lib"
-    mirror_libdir.mkdir(parents=True, exist_ok=True)
-    mirror_link = mirror_libdir / f"libpython{abi}{suffix}"
-    if mirror_link.is_file() or (mirror_link.is_symlink() and mirror_link.exists()):
-        print(f"default-root mirror already present: {mirror_link}")
-        return
-    if mirror_link.is_symlink():
-        mirror_link.unlink()  # stale broken link
-    mirror_link.symlink_to(real_lib)  # absolute target
-    print(f"mirrored {mirror_link} -> {real_lib}")
 
 
 def append_to_github_env(var: str, value: str) -> None:
@@ -374,40 +313,20 @@ def main() -> int:
     args = parser.parse_args()
     python_version = args.python or pinned_python_version()
 
+    reject_discovery_overrides(dict(os.environ))
     var = runner_libpath_var()
     venv_python = create_venv(python_version)
     libdir = libdir_for(venv_python)
     abi = python_abi_version(venv_python)
-    # Ensure the linker can resolve `-lpython<abi>`. The venv's
-    # interpreter reports `sysconfig.LIBDIR` for its actual install
-    # location, but uv may stage Python installs at multiple roots
-    # (`$UV_PYTHON_INSTALL_DIR` and `~/.local/share/uv/python/`) and
-    # pyo3-build-config can end up querying either. Symlink the
-    # unversioned name at every install root we can find so the
-    # linker resolves regardless of which path pyo3 picked.
-    install_libdirs = discover_python_libdirs(libdir, abi)
-    # If pyo3 keeps emitting `-L ~/.local/share/uv/python/<install>/lib`
-    # even when uv installed Python elsewhere (cached path from a prior
-    # build, or pyo3's own path canonicalization through sys.base_prefix),
-    # create a mirror dir at the default uv root with a symlink to the
-    # real libpython. Cheap and safe — if no install_libdirs are found,
-    # this no-ops; if pyo3 doesn't look there, it's an unused symlink.
-    ensure_default_uv_root_mirror(libdir, abi)
-    linked_any = False
-    for d in install_libdirs:
-        try:
-            ensure_link_symlink(d, abi)
-            linked_any = True
-        except RuntimeError as exc:
-            # A specific install root might be a stale cache without a
-            # libpython; non-fatal unless NONE of the roots had one.
-            print(f"warning: skipping {d}: {exc}", file=sys.stderr)
-    if not linked_any:
-        raise RuntimeError(
-            "could not link libpython at any uv install root; "
-            "checked: " + ", ".join(str(p) for p in install_libdirs)
-        )
+    # The current interpreter supplies the library and the cache identity.
+    # A different install cannot repair configuration that Cargo must rebuild.
+    ensure_link_symlink(Path(libdir), abi)
+    signature = pyo3_environment_signature(venv_python)
     append_to_github_env(var, libdir)
+    if github_env := os.environ.get("GITHUB_ENV"):
+        with Path(github_env).open("a", encoding="utf-8") as stream:
+            stream.write(f"PYO3_PYTHON={venv_python}\n")
+            stream.write(f"PYO3_ENVIRONMENT_SIGNATURE={signature}\n")
     return 0
 
 
