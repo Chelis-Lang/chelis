@@ -1158,9 +1158,11 @@
         "value": "host::signature_entry::tests::"
       },
       "expected": [
+        "host::signature_entry::tests::checked_tensor_instantiation_fills_an_authored_type_variable",
         "host::signature_entry::tests::independent_signatures_and_wildcards_create_no_equality",
         "host::signature_entry::tests::internal_rank_axis_identity_has_a_printable_guard_label",
-        "host::signature_entry::tests::later_witnesses_and_literals_follow_parameter_axis_order"
+        "host::signature_entry::tests::later_witnesses_and_literals_follow_parameter_axis_order",
+        "host::signature_entry::tests::recursive_list_contract_keeps_signature_binder_and_empty_slot"
       ],
       "phase": "b"
     },
