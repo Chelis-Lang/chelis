@@ -211,6 +211,8 @@ full-validation fallback rather than reusable evidence.
 
 `.config/ci-test-targets.toml` is the versioned ownership manifest for this surface. `standing_target` rows feed `ci-fast`; `target_exclusion` and `test_exclusion` rows name their exact alternative workflow, job, cadence, reason, and tracking issue; and `path_rule` rows assign shared paths to exact packages or an existing automated owner. Other prose paths use the existing docs-only classifier, including its executable-document exceptions; a new changelog fragment needs no manifest row. Package qualification is retained throughout, including execution, so equal target names in different packages cannot create a Cargo selector cross product.
 
+A test exclusion moves a complete check off pull-request CI without weakening what that check proves. Where pull-request CI keeps a smaller canary of an excluded test in the same target, as for the Std.Decimal differential corpus and extreme-argument sweep (chelis#2794), a green pull request shows only that the canary's named inputs pass. The excluded test runs in its owner job, here the nightly `heavy-e2e.yml` full-workspace shards, in the macOS nightly, and on demand through `docs/manual_gates.md`; until one of those runs passes on a commit that contains a change, the complete check has not run for it.
+
 An exact `manual_only_target` row keeps an all-ignored integration target in
 required change-owned coverage. Its plan-bound execution mode lists ignored
 tests, rejects the row if any default-enabled test appears, and runs the complete

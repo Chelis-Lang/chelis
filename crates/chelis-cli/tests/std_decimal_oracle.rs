@@ -9,6 +9,11 @@
 //! published `chelis-std`, and the strict reference toolchain the `lane-check`
 //! gate uses, then holds the harness to its pass line.
 //!
+//! The canary test is what pull-request CI runs: a few hand-picked edge inputs
+//! through every callable on both lanes, with no failure programs, since
+//! `std_decimal_failures` pins every failure message. It detects a defect only
+//! on the inputs it names.
+//!
 //! The default test is the edge corpus: envelope and limb boundaries, carry
 //! chains, removable zeros, i64 edges, ties in every rounding mode and sign,
 //! subnormal and double-rounding f32 witnesses, the parser's accepted and
@@ -74,6 +79,15 @@ fn run_harness(extra: &[&str]) -> String {
         output.status
     );
     stdout
+}
+
+#[test]
+fn std_decimal_canary_agrees_with_the_reference_on_eval_and_c() {
+    let stdout = run_harness(&["--canary"]);
+    assert!(
+        stdout.contains("on lanes eval+c; canary corpus)"),
+        "{stdout}"
+    );
 }
 
 #[test]

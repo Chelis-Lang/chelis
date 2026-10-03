@@ -12,6 +12,10 @@
 //! and runs it once per case. Opaque construction and inspection outside the
 //! module, the removed names, and `grad` through `decimal_from_f64` are
 //! checked through `chelis check`, `chelis eval`, and `chelis build`.
+//!
+//! Pull-request CI runs both message tests in full and a canary of the extreme
+//! sweep; the complete sweep runs in the nightly workflow
+//! (`.config/ci-test-targets.toml`).
 
 #[path = "common/mod.rs"]
 mod common;
@@ -590,17 +594,119 @@ fn extreme_cases() -> Vec<(&'static str, String)> {
     cases
 }
 
-/// Runs in the nightly workflow, not in pull-request CI
-/// (`.config/ci-test-targets.toml`).
-#[test]
-fn std_decimal_extreme_arguments_raise_no_primitive_trap() {
-    let cases = extreme_cases();
+/// One representative of each extreme class per callable, every one of them a
+/// case of `extreme_cases`: the envelope's ends, scales outside 0..38 and at
+/// the i64 limits, the i64 limits and their ties, subnormal and non-finite
+/// floats, text at the length bound or with an exponent at the i64 limit, a
+/// zero divisor, and a result past the envelope. A scale outside 0..38 comes
+/// with a finite float and a nonzero divisor, since a non-finite float and a
+/// zero divisor are rejected before the scale. A trap that only another
+/// combination of arguments reaches is left to the complete sweep.
+fn extreme_canary_cases() -> Vec<(&'static str, String)> {
+    let dec = |text: &str| format!("decimal(\"{text}\")");
+    let tiny = "0.00000000000000000000000000000000000001";
+    let mut cases: Vec<(&'static str, String)> = Vec::new();
+    for text in [
+        "1e9223372036854775807",
+        "99999999999999999999999999999999999999.5",
+        "\u{0661}",
+    ] {
+        cases.push(("decimal", dec(text)));
+    }
+    cases.push((
+        "decimal",
+        "decimal(string_concat(\"1.\", zeros(998i64)))".to_string(),
+    ));
+    for (value, scale) in [(MAX, "38i64"), (tiny, "9223372036854775807i64")] {
+        cases.push((
+            "decimal_to_fixed_string",
+            format!("decimal_to_fixed_string({}, {scale})", dec(value)),
+        ));
+    }
+    cases.push((
+        "decimal_from_i64",
+        "decimal_from_i64(i64_minimum())".to_string(),
+    ));
+    for (value, mode) in [
+        (MAX, "RoundTowardZero"),
+        ("-9223372036854775808.5", "RoundTowardNegative"),
+        (tiny, "RejectInexact"),
+    ] {
+        cases.push((
+            "decimal_to_i64",
+            format!("decimal_to_i64({}, {mode})", dec(value)),
+        ));
+    }
+    for (float, scale, mode) in [
+        ("5.0e-324f64", "38i64", "RoundTowardZero"),
+        ("neg(1.7976931348623157e308f64)", "0i64", "RejectInexact"),
+        ("div(1.0f64, 0.0f64)", "0i64", "RoundTowardZero"),
+        ("0.1f64", "i64_minimum()", "RoundTiesToEven"),
+    ] {
+        cases.push((
+            "decimal_from_f64",
+            format!("decimal_from_f64({float}, {scale}, {mode})"),
+        ));
+    }
+    cases.push(("decimal_to_f64", format!("decimal_to_f64({})", dec(tiny))));
+    cases.push(("decimal_to_f32", format!("decimal_to_f32({})", dec(tiny))));
+    for (function, left, right) in [
+        ("decimal_add", MAX, MAX),
+        ("decimal_sub", MAX, tiny),
+        ("decimal_mul", tiny, tiny),
+    ] {
+        cases.push((
+            function,
+            format!("{function}({}, {})", dec(left), dec(right)),
+        ));
+    }
+    let carry = "9999999999999999999999999999999999999.5";
+    for (value, scale, mode) in [
+        (carry, "0i64", "RoundAwayFromZero"),
+        (
+            "-0.99999999999999999999999999999999999999",
+            "37i64",
+            "RoundTiesToEven",
+        ),
+        (carry, "i64_minimum()", "RoundTowardZero"),
+    ] {
+        cases.push((
+            "decimal_round",
+            format!("decimal_round({}, {scale}, {mode})", dec(value)),
+        ));
+    }
+    for (numerator, denominator, scale, mode) in [
+        (MAX, tiny, "0i64", "RoundTiesToEven"),
+        (MAX, "0", "0i64", "RejectInexact"),
+        (MAX, "-3", "39i64", "RoundTiesToEven"),
+        (
+            "-0.00000000000000000000000000000000000001",
+            "-3",
+            "38i64",
+            "RejectInexact",
+        ),
+    ] {
+        cases.push((
+            "decimal_div",
+            format!(
+                "decimal_div({}, {}, {scale}, {mode})",
+                dec(numerator),
+                dec(denominator)
+            ),
+        ));
+    }
+    cases
+}
+
+/// Runs `cases` as one suite: each call passes or fails `domain` or
+/// `overflow` under its own callable's name, and the cases include both.
+fn assert_no_primitive_trap(dir_name: &str, cases: &[(&'static str, String)]) {
     let expressions: Vec<(String, String)> = cases
         .iter()
         .enumerate()
         .map(|(index, (_, expression))| (format!("case_{index:04}"), expression.clone()))
         .collect();
-    let outcomes = run_expression_suite("decimal-extremes-2778", &expressions);
+    let outcomes = run_expression_suite(dir_name, &expressions);
     let mut failures = 0usize;
     for (index, (function, expression)) in cases.iter().enumerate() {
         let outcome = &outcomes[&format!("case_{index:04}")];
@@ -618,6 +724,26 @@ fn std_decimal_extreme_arguments_raise_no_primitive_trap() {
         "the sweep must exercise both accepted and rejected extremes ({failures} of {})",
         cases.len()
     );
+}
+
+#[test]
+fn std_decimal_extreme_argument_canary_raises_no_primitive_trap() {
+    let canary = extreme_canary_cases();
+    let sweep = extreme_cases();
+    for case in &canary {
+        assert!(
+            sweep.contains(case),
+            "canary case {case:?} is not in the complete sweep"
+        );
+    }
+    assert_no_primitive_trap("decimal-extreme-canary-2778", &canary);
+}
+
+/// Runs in the nightly workflow, not in pull-request CI
+/// (`.config/ci-test-targets.toml`).
+#[test]
+fn std_decimal_extreme_arguments_raise_no_primitive_trap() {
+    assert_no_primitive_trap("decimal-extremes-2778", &extreme_cases());
 }
 
 /// [05-OP-76]: `Decimal` is opaque. Outside `Std.Decimal`, record
