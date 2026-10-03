@@ -68,6 +68,13 @@ default-filter = '''
 filter = '''(binary_id(/^chelis-compiler-api::capacity_census_wire$/) & test(/^wire_schema_numeric_fields_match_the_reviewed_baseline$/)) + (binary_id(/^chelis-python::capacity_census_bindings$/) & test(/^registered_pyfunctions_match_the_reviewed_rustdoc_signatures$/))'''
 test-group = "capacity-rustdoc-verifiers"
 
+# chelis#2961: the host scalar oracle prints the C compiler its build
+# resolved. Showing a passing run's output puts that compiler in every log,
+# so a Linux CI run shows the gcc evidence the issue's oracle asks for.
+[[profile.default.overrides]]
+filter = '(binary_id(/^chelis-cli::native_build$/) & test(/^host_scalar_transcendentals_match_eval_as_literal_runtime_scalar_and_tensor_element$/))'
+success-output = "immediate"
+
 # chelis#1831 per-test backstop for the profiles unattended jobs run.
 #
 # Without a `terminate-after`, nextest prints `SLOW [> Ns]` every 60 seconds

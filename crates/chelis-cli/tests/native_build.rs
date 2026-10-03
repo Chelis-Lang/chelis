@@ -2168,3 +2168,79 @@ fn compound_activations_match_eval_on_libm_misrounding_inputs_through_the_static
     }
     assert_lanes_agree("chelis#2952 compounds", rows);
 }
+
+/// The chelis#2961 witnesses: inputs at which a C compiler's fold of a
+/// literal, platform libm, and the correctly rounded result disagree.
+const HOST_SCALAR_WITNESSES: [(&str, f64); 4] = [
+    ("atan", 5.531_991_004_943_848),
+    ("exp", 57.802_669_525_146_484),
+    ("cos", 29.123_893_737_792_97),
+    ("sin", -7_755.117_675_781_25),
+];
+
+/// chelis#2961: one built program computes each witness's transcendental as a
+/// scalar literal (a constant the C compiler can fold), as a run-time scalar
+/// argument (the host scalar emitter), and as a run-time tensor element, at
+/// f32 and f64; all three equal eval bit for bit. The test prints the C
+/// compiler `chelis build` resolved, so the CI log names the compiler each
+/// platform's run used, and on a GitHub Actions Linux runner it requires gcc,
+/// the issue's second compiler.
+#[test]
+fn host_scalar_transcendentals_match_eval_as_literal_runtime_scalar_and_tensor_element() {
+    let mut program = String::new();
+    let mut body = String::new();
+    let mut cases = Vec::new();
+    for width in [width_named("f32"), width_named("f64")] {
+        let w = width.name;
+        for (op, witness) in HOST_SCALAR_WITNESSES {
+            let bits = if w == "f32" {
+                f32_bits_of(&[witness])[0]
+            } else {
+                witness.to_bits()
+            };
+            let label = format!("{op}_{w}");
+            program.push_str(&format!(
+                "def l_{label}(x: {w}) -> {w} = {op}({literal})\n\
+                 def s_{label}(x: {w}) -> {w} = {op}(x)\n\
+                 def t_{label}(x: tensor[1, {w}]) -> tensor[1, {w}] = {op}(x)\n",
+                literal = exact_literal(width, bits),
+            ));
+            for lane in ["l", "s"] {
+                body.push_str(&c_scalar_calls(
+                    &format!("{lane}_{label}"),
+                    &format!("{lane}_{label}"),
+                    width,
+                    &[bits],
+                ));
+            }
+            body.push_str(&c_tensor_call(
+                &format!("t_{label}"),
+                &format!("t_{label}"),
+                width,
+                &[bits],
+            ));
+            cases.push((width, op, label, bits));
+        }
+    }
+    let (compiler, c) = run_static_library("host_scalar_parity", &program, &body);
+    println!("chelis#2961 oracle {compiler}");
+    if cfg!(target_os = "linux") && std::env::var_os("GITHUB_ACTIONS").is_some() {
+        assert!(
+            compiler.contains("gcc"),
+            "the Linux CI run of this oracle must use gcc: {compiler}"
+        );
+    }
+
+    let mut rows = Vec::new();
+    for (width, op, label, bits) in cases {
+        let expected = eval_tensor_body("", &format!("{op}(x)"), width, &[bits])[0];
+        for lane in ["l", "s", "t"] {
+            rows.push((
+                format!("{lane}_{label}({bits:#x})"),
+                c_result(&c, &format!("{lane}_{label}"), 0),
+                expected,
+            ));
+        }
+    }
+    assert_lanes_agree("chelis#2961 host scalar transcendentals", rows);
+}
