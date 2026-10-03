@@ -350,10 +350,9 @@ fn a_literal_count_is_its_static_extent() {
                                 })
                         }
                         "sk7" => {
-                            // The rigid generic binder rejects even when this
-                            // particular call has matching extents. It knows
-                            // neither a directional pair nor a call coordinate.
-                            error.expected.is_none() && error.got.is_none() && error.span.is_none()
+                            // This rigid binder conflict is distinct from sk6's
+                            // directional call-site extent disagreement.
+                            error.message.contains("`n`") && error.message.contains("`f`")
                         }
                         "ascribed" => {
                             error.expected.as_deref() == Some("tensor[3, key]")
