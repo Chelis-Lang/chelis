@@ -441,7 +441,7 @@
         "chelis-backend-c::exec_compile::exec_exp_kernel_correct_output",
         "chelis-backend-c::generated_header::tests::sealed_artifact_rejects_conditionally_erased_exports_and_unknown_includes",
         "chelis-backend-c::toolchain::tests::verify_compiler_ignores_hostile_environment",
-        "chelis-backend-c::toolchain::tests::verify_compiler_refuses_a_wrapper_that_changes_the_profile"
+        "chelis-backend-c::toolchain::tests::verify_compiler_rechecks_a_wrapper_edited_after_acceptance"
       ]
     },
     {
