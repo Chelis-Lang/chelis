@@ -37,6 +37,11 @@ lengths.
   conversion is intended.
 - An unsuffixed integer literal has type `i32`; an unsuffixed float literal has
   type `f32`. A suffix such as `1.0f64` selects another dtype explicitly.
+- A nonempty numeric bracket literal in an unannotated binding creates a
+  tensor: `xs = [1.0, 2.0, 3.0]` has type `tensor[3, f32]`. Nested numeric
+  brackets supply its dimensions. Write `xs: List[f32] = [1.0, 2.0, 3.0]`
+  when a list is intended. Explicit suffixes remain exact; mixed dtypes and
+  ragged tensor literals are rejected.
 
 An empty list supplies no element values from which to determine a tensor's
 dtype. Give the list an element type before converting it:

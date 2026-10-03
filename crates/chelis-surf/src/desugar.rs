@@ -145,6 +145,9 @@ struct DesugarCtx {
     /// (chelis#285). When an explicit sig exists, the synthesized one is
     /// strictly redundant and weaker, so we suppress it here.
     explicit_sig_names: UnordSet<String>,
+    /// Standalone value signatures supply binding literal context just as
+    /// inline annotations do. List signatures still preserve List values.
+    top_level_binding_tensor_prec: UnordMap<String, String>,
     /// Explicit effect clauses (`! { ... }`) declared on each `def`, keyed by
     /// name. The effect upper-bound check reads the declared effect set only
     /// from a `defsig`'s `t-fn` `eff` metadata
@@ -207,12 +210,18 @@ impl DesugarCtx {
     fn new(decls: &[Decl], resolved_grad_indices: Vec<(usize, Vec<i64>)>) -> Self {
         let mut top_level_fn_tensor_param_prec = UnordMap::new();
         let mut explicit_sig_names = UnordSet::new();
+        let mut top_level_binding_tensor_prec = UnordMap::new();
         let mut def_effects = UnordMap::new();
         let mut declared_type_binders = UnordMap::new();
         for decl in decls {
             for_each_decl(decl, &mut |d| {
                 collect_top_level_fn_tensor_param_prec(d, &mut top_level_fn_tensor_param_prec);
                 collect_explicit_sig_names(d, &mut explicit_sig_names);
+                if let Decl::Sig { name, ty, .. } = d
+                    && let Some(precision) = tensor_element_prim_name(ty)
+                {
+                    top_level_binding_tensor_prec.insert(name.clone(), precision);
+                }
                 collect_def_effects(d, &mut def_effects);
                 collect_declared_type_binders(d, &mut declared_type_binders);
             });
@@ -221,6 +230,7 @@ impl DesugarCtx {
             resolved_grad_indices,
             top_level_fn_tensor_param_prec,
             explicit_sig_names,
+            top_level_binding_tensor_prec,
             def_effects,
             next_destructure_temp: std::cell::Cell::new(0),
             declared_type_binders,
@@ -1951,7 +1961,14 @@ impl DesugarCtx {
                         .cloned()
                         .unwrap_or_default(),
                 );
-                let body = self.desugar_expr(value);
+                let body = match (self.top_level_binding_tensor_prec.get(name), value) {
+                    (Some(precision), Expr::List(items, _)) =>
+                        self.desugar_list_as_tensor_literal(items, precision, &[]),
+                    _ if !self.explicit_sig_names.contains(name)
+                        && is_bare_numeric_tensor_literal(value) =>
+                        self.desugar_default_tensor_binding(value),
+                    _ => self.desugar_expr(value),
+                };
                 self.current_type_binders.replace(restore_binders);
                 vec![node(DeepTag::Def, vec![sym(name), body])]
             }
@@ -2972,6 +2989,11 @@ impl DesugarCtx {
                         (Some(prec), Expr::List(items, _)) => {
                             self.desugar_list_as_tensor_literal(items, &prec, &[])
                         }
+                        _ if binding.ty.is_none()
+                            && is_bare_numeric_tensor_literal(&binding.value) =>
+                        {
+                            self.desugar_default_tensor_binding(&binding.value)
+                        }
                         _ => self.desugar_expr(&binding.value),
                     };
                     if let Some(ty) = &binding.ty {
@@ -3204,6 +3226,21 @@ fn desugar_list_literal(items: &[deep::Expr]) -> deep::Expr {
 }
 
 // ---------------------------------------------------------------------------
+// A binding without a declared List/tensor context uses the tensor default
+// only for a nonempty numeric bracket literal. Arbitrary computed collections,
+// empty lists, bool and string lists retain their own existing List behavior.
+fn is_bare_numeric_tensor_literal(expr: &Expr) -> bool {
+    fn numeric_leaf_or_list(expr: &Expr) -> bool {
+        match expr {
+            Expr::List(items, _) => !items.is_empty() && items.iter().all(numeric_leaf_or_list),
+            Expr::Lit(Literal::Int(_) | Literal::Float(_) | Literal::TypedInt(_, _) | Literal::TypedFloat(_, _), _) => true,
+            Expr::Unary(UnaryOp::Neg, inner, _) => matches!(inner.as_ref(), Expr::Lit(Literal::Int(_) | Literal::Float(_) | Literal::TypedInt(_, _) | Literal::TypedFloat(_, _), _)),
+            _ => false,
+        }
+    }
+    matches!(expr, Expr::List(_, _)) && numeric_leaf_or_list(expr)
+}
+
 // Contextual tensor-literal inference (spec §P10b / §5.6)
 // ---------------------------------------------------------------------------
 //
@@ -3260,6 +3297,15 @@ impl DesugarCtx {
             .collect();
         let list = desugar_list_literal(&desugared_items);
         node(DeepTag::App, vec![dvar("to_tensor"), list])
+    }
+
+    /// An unannotated numeric binding is a tensor at each leaf's authored
+    /// dtype/default. Do not apply contextual adoption to explicit suffixes.
+    fn desugar_default_tensor_binding(&self, value: &Expr) -> deep::Expr {
+        attach_span_metadata(
+            node(DeepTag::App, vec![dvar("to_tensor"), self.desugar_expr(value)]),
+            expr_span(value),
+        )
     }
 
     /// Desugar a single entry of a contextual tensor literal. Numeric
