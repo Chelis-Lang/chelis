@@ -31,7 +31,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::thread;
@@ -7770,9 +7770,45 @@ struct TestBatchManifestFile {
 }
 
 struct ClassifiedTestJobs {
-    batch_jobs: Vec<TestBatchManifestFile>,
+    /// Eligible files partitioned into bounded shards, each compiled as one
+    /// unit by its own worker. See `MAX_BATCH_FILES`.
+    batch_shards: Vec<Vec<TestBatchManifestFile>>,
     file_jobs: Vec<TestFileJob>,
 }
+
+/// Upper bound on the test files merged into a single `--batch-mode auto`
+/// compilation unit.
+///
+/// One unbounded batch serialized the whole suite: the batch ran in a single
+/// subprocess while `--jobs` was applied only to the files that had been
+/// demoted out of it, so a 42-file batch compiled and evaluated on one thread.
+/// chelis#1391 measured shoals' 49-file suite at 17.68m wall / 19.56m CPU for
+/// `auto` against 5.74m / 21.42m for `file`: 3.1x the wall to save 9% of the
+/// CPU, and a hosted 2-vCPU runner could not fit it in a 2400s budget at all.
+///
+/// The bound is 4 because the merged-unit cost is superlinear in unit size, not
+/// merely serial. Measured on a 36-file synthetic corpus at one commit, varying
+/// only this bound: 36 files in one unit cost 244.4s wall / 244.5s CPU; at 16,
+/// 40.4s / 83.2s; at 8, 10.5s / 43.2s; at 4, 4.2s / 34.2s; at 2, 2.1s / 17.0s.
+/// Bounding the unit therefore cuts CPU as well as wall -- five units of eight
+/// files cost a fifth of the CPU one unit of thirty-six did -- so this is not a
+/// scheduling tweak. 4 sits in the near-linear part of that curve while still
+/// amortizing a shared compile across four files. That corpus is deliberately
+/// declaration-dense and overstates the cost a typical suite pays, so the bound
+/// is chosen from the curve's shape rather than fitted to its minimum.
+///
+/// A file count only bounds the unit indirectly: four very large files can still
+/// reach the superlinear region. Bounding declarations instead would be exact,
+/// and is left to chelis#1391's follow-up rather than guessed at here.
+///
+/// The bound is a constant rather than a function of the worker count so that
+/// batch composition stays machine-independent. `BatchScope` collisions are
+/// judged per batch, so a core-count-dependent partition would make *which*
+/// files demote -- and therefore the `CHELIS_TEST_EXPLAIN_BATCHING` output and
+/// any abandoned-batch warning -- differ between two machines running the same
+/// suite. Smaller scopes also collide less often, so sharding admits strictly
+/// more files to batching than one shared scope did.
+const MAX_BATCH_FILES: usize = 4;
 
 struct TestBatchManifestTempfile {
     #[allow(dead_code)]
@@ -7885,31 +7921,34 @@ fn run_test_jobs_auto(
     failed: &mut usize,
     progress_file: Option<&Path>,
 ) -> Result<bool, String> {
-    let classified = classify_test_jobs_for_batch(test_jobs, filter);
+    let classified = classify_test_jobs_for_batch(test_jobs, filter, MAX_BATCH_FILES);
     let mut rows_by_index = BTreeMap::<usize, Vec<TestRow>>::new();
     let mut file_fallback_jobs = classified.file_jobs;
-    let mut fallback_reason = None::<BatchFallbackReason>;
+    // One entry per shard that was abandoned. A shard falls back on its own,
+    // so one bad shard no longer costs the whole suite its batching.
+    let mut shard_fallbacks = Vec::<(Vec<TestBatchManifestFile>, BatchFallbackReason)>::new();
 
-    if !classified.batch_jobs.is_empty() {
-        match run_test_batch_subprocess(
+    if !classified.batch_shards.is_empty() {
+        let worker_count = jobs.resolve(classified.batch_shards.len());
+        let outcomes = run_test_batch_shards(
             self_path,
             cwd,
-            &classified.batch_jobs,
+            &classified.batch_shards,
+            worker_count,
             timeout_secs,
             compiled_context_handoff,
             progress_file,
-        )? {
-            BatchSubprocessOutcome::Rows(rows) => {
-                if let Some(reason) =
-                    group_batch_rows_by_file(&classified.batch_jobs, rows, &mut rows_by_index)
-                {
-                    file_fallback_jobs.extend(batch_jobs_as_file_jobs(&classified.batch_jobs));
-                    fallback_reason = Some(reason);
+        )?;
+        for (shard, outcome) in classified.batch_shards.iter().zip(outcomes) {
+            let reason = match outcome {
+                BatchSubprocessOutcome::Rows(rows) => {
+                    group_batch_rows_by_file(shard, rows, &mut rows_by_index)
                 }
-            }
-            BatchSubprocessOutcome::Fallback(reason) => {
-                file_fallback_jobs.extend(batch_jobs_as_file_jobs(&classified.batch_jobs));
-                fallback_reason = Some(reason);
+                BatchSubprocessOutcome::Fallback(reason) => Some(reason),
+            };
+            if let Some(reason) = reason {
+                file_fallback_jobs.extend(batch_jobs_as_file_jobs(shard));
+                shard_fallbacks.push((shard.clone(), reason));
             }
         }
     }
@@ -7933,8 +7972,8 @@ fn run_test_jobs_auto(
     // Reported before the rows: the batch was abandoned before any of these
     // rows existed, and a reader who stops at the first failing row still sees
     // that the run did not take the path it asked for.
-    if let Some(reason) = &fallback_reason {
-        emit_batch_fallback_note(out, json, &classified.batch_jobs, reason)?;
+    for (shard, reason) in &shard_fallbacks {
+        emit_batch_fallback_note(out, json, shard, reason)?;
     }
 
     for job in test_jobs {
@@ -7943,7 +7982,110 @@ fn run_test_jobs_auto(
         }
     }
 
-    Ok(fallback_reason.is_some())
+    Ok(!shard_fallbacks.is_empty())
+}
+
+/// Run each batch shard in its own worker, up to `worker_count` at a time, and
+/// return their outcomes in shard order.
+///
+/// This is where chelis#1391's wall-clock regression is paid back: the batch
+/// used to be one subprocess regardless of `--jobs`, so the suite's whole
+/// compile sat on one thread.
+fn run_test_batch_shards(
+    self_path: &Path,
+    cwd: &Path,
+    shards: &[Vec<TestBatchManifestFile>],
+    worker_count: usize,
+    timeout_secs: u64,
+    compiled_context_handoff: &CompiledContextHandoff,
+    progress_file: Option<&Path>,
+) -> Result<Vec<BatchSubprocessOutcome>, String> {
+    let progress = progress_file
+        .map(|path| {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .map(|file| Arc::new(Mutex::new(file)))
+                .map_err(|e| format!("open suite progress file `{}`: {e}", path.display()))
+        })
+        .transpose()?;
+
+    if worker_count <= 1 || shards.len() <= 1 {
+        let mut outcomes = Vec::with_capacity(shards.len());
+        for shard in shards {
+            outcomes.push(run_test_batch_subprocess(
+                self_path,
+                cwd,
+                shard,
+                timeout_secs,
+                compiled_context_handoff,
+                progress.as_deref(),
+            )?);
+        }
+        return Ok(outcomes);
+    }
+
+    let shards_owned = Arc::new(shards.to_vec());
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let (result_tx, result_rx) =
+        std::sync::mpsc::channel::<(usize, Result<BatchSubprocessOutcome, String>)>();
+    let self_path = self_path.to_path_buf();
+    let cwd = cwd.to_path_buf();
+    let mut handles = Vec::new();
+
+    for _ in 0..worker_count.min(shards.len()) {
+        let shards_owned = Arc::clone(&shards_owned);
+        let next_index = Arc::clone(&next_index);
+        let result_tx = result_tx.clone();
+        let self_path = self_path.clone();
+        let cwd = cwd.clone();
+        let handoff = compiled_context_handoff.clone();
+        let progress = progress.clone();
+        handles.push(thread::spawn(move || {
+            loop {
+                let index = next_index.fetch_add(1, Ordering::SeqCst);
+                let Some(shard) = shards_owned.get(index) else {
+                    break;
+                };
+                let outcome = run_test_batch_subprocess(
+                    &self_path,
+                    &cwd,
+                    shard,
+                    timeout_secs,
+                    &handoff,
+                    progress.as_deref(),
+                );
+                if result_tx.send((index, outcome)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    drop(result_tx);
+
+    let mut collected = BTreeMap::new();
+    for (index, outcome) in result_rx {
+        collected.insert(index, outcome);
+    }
+    for handle in handles {
+        handle
+            .join()
+            .map_err(|_| "a test batch shard worker panicked".to_string())?;
+    }
+
+    let mut outcomes = Vec::with_capacity(shards.len());
+    for index in 0..shards.len() {
+        match collected.remove(&index) {
+            Some(outcome) => outcomes.push(outcome?),
+            None => {
+                return Err(format!(
+                    "test batch shard {index} of {} produced no outcome",
+                    shards.len()
+                ));
+            }
+        }
+    }
+    Ok(outcomes)
 }
 
 fn batch_jobs_as_file_jobs(batch_jobs: &[TestBatchManifestFile]) -> Vec<TestFileJob> {
@@ -7990,8 +8132,10 @@ fn group_batch_rows_by_file(
 fn classify_test_jobs_for_batch(
     test_jobs: &[TestFileJob],
     filter: Option<&str>,
+    max_batch_files: usize,
 ) -> ClassifiedTestJobs {
-    let mut batch_jobs = Vec::new();
+    let mut batch_shards: Vec<Vec<TestBatchManifestFile>> = Vec::new();
+    let mut shard: Vec<TestBatchManifestFile> = Vec::new();
     let mut file_jobs = Vec::new();
     let mut batch_scope = BatchScope::default();
 
@@ -8036,22 +8180,34 @@ fn classify_test_jobs_for_batch(
             file_jobs.push(job.clone());
             continue;
         }
+        // Close the shard before admitting into it, so each shard's scope
+        // covers exactly the files that shard compiles together. A file that
+        // collides inside one shard is demoted as before; it is not retried
+        // against the next shard, because retrying would make a file's own
+        // placement depend on the order the shards filled up.
+        if shard.len() >= max_batch_files {
+            batch_shards.push(std::mem::take(&mut shard));
+            batch_scope = BatchScope::default();
+        }
         let scope = test_file_scope_names(&flat);
         if let Some(collision) = batch_scope.admit(&job.rel_display, &scope) {
             explain_batch_demotion(&job.rel_display, &collision);
             file_jobs.push(job.clone());
             continue;
         }
-        batch_jobs.push(TestBatchManifestFile {
+        shard.push(TestBatchManifestFile {
             index: job.index,
             file: job.file.clone(),
             rel_display: job.rel_display.clone(),
             tests: tests.into_iter().map(|test| test.name).collect(),
         });
     }
+    if !shard.is_empty() {
+        batch_shards.push(shard);
+    }
 
     ClassifiedTestJobs {
-        batch_jobs,
+        batch_shards,
         file_jobs,
     }
 }
@@ -8316,7 +8472,7 @@ fn run_test_batch_subprocess(
     batch_jobs: &[TestBatchManifestFile],
     timeout_secs: u64,
     compiled_context_handoff: &CompiledContextHandoff,
-    progress_file: Option<&Path>,
+    progress: Option<&Mutex<fs::File>>,
 ) -> Result<BatchSubprocessOutcome, String> {
     let manifest = TestBatchManifest {
         files: batch_jobs.to_vec(),
@@ -8332,14 +8488,6 @@ fn run_test_batch_subprocess(
         .current_dir(cwd);
     compiled_context_handoff.apply_to(&mut cmd);
 
-    let mut progress = progress_file
-        .map(|path| {
-            fs::OpenOptions::new()
-                .append(true)
-                .open(path)
-                .map_err(|e| format!("open suite progress file `{}`: {e}", path.display()))
-        })
-        .transpose()?;
     let worker_timeout = batch_worker_timeout(batch_jobs, timeout_secs);
     let output = match run_batch_worker_command_with_timeout(cmd, worker_timeout, |line| {
         let line = line.strip_suffix(b"\n").unwrap_or(line);
@@ -8350,10 +8498,17 @@ fn run_test_batch_subprocess(
         if test_row_from_json(&value).is_none() {
             return;
         }
-        if let Some(progress) = progress.as_mut() {
-            let _ = progress.write_all(line);
-            let _ = progress.write_all(b"\n");
-            let _ = progress.flush();
+        if let Some(progress) = progress {
+            // One write per row, under the shared lock: concurrent shards
+            // append to the same file, and a line split across two write calls
+            // could interleave with another shard's and be unparseable.
+            let mut framed = Vec::with_capacity(line.len() + 1);
+            framed.extend_from_slice(line);
+            framed.push(b'\n');
+            if let Ok(mut file) = progress.lock() {
+                let _ = file.write_all(&framed);
+                let _ = file.flush();
+            }
         }
     }) {
         Ok(output) => output,
