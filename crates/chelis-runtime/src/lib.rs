@@ -316,6 +316,10 @@ macro_rules! runtime_fail {
     }};
 }
 
+// Declared after `runtime_fail!` so the module can use it.
+mod fp_env;
+pub use fp_env::FpEnvGuard;
+
 /// Arithmetic used by runtime tensor loops whose operation is governed by
 /// [04-NUM-3]. Float implementations retain IEEE arithmetic; signed integer
 /// implementations detect overflow explicitly so behavior is identical in
@@ -323,6 +327,9 @@ macro_rules! runtime_fail {
 trait RuntimeArithmetic: TensorElement + Copy + Default {
     fn runtime_add(self, rhs: Self, op: &'static str) -> Self;
     fn runtime_mul(self, rhs: Self, op: &'static str) -> Self;
+    /// [04-NUM-2] finalization of an arithmetic result that no operation
+    /// touched (a one-leaf sum): a float NaN becomes the canonical quiet NaN.
+    fn runtime_finalize(self) -> Self;
 }
 
 macro_rules! impl_runtime_float_arithmetic {
@@ -336,6 +343,11 @@ macro_rules! impl_runtime_float_arithmetic {
             #[inline]
             fn runtime_mul(self, rhs: Self, _op: &'static str) -> Self {
                 $finalize(self * rhs)
+            }
+
+            #[inline]
+            fn runtime_finalize(self) -> Self {
+                $finalize(self)
             }
         }
     };
@@ -354,6 +366,11 @@ macro_rules! impl_runtime_integer_arithmetic {
             fn runtime_mul(self, rhs: Self, op: &'static str) -> Self {
                 self.checked_mul(rhs)
                     .unwrap_or_else(|| runtime_fail!("numeric trap: overflow in {op} at {}", $name))
+            }
+
+            #[inline]
+            fn runtime_finalize(self) -> Self {
+                self
             }
         }
     };
@@ -410,6 +427,14 @@ impl RuntimeArithmetic for half::f16 {
     fn runtime_mul(self, rhs: Self, _op: &'static str) -> Self {
         finalize_f16(f32::from(self) * f32::from(rhs))
     }
+
+    fn runtime_finalize(self) -> Self {
+        if self.is_nan() {
+            half::f16::from_bits(0x7e00)
+        } else {
+            self
+        }
+    }
 }
 
 impl RuntimeArithmetic for half::bf16 {
@@ -419,6 +444,14 @@ impl RuntimeArithmetic for half::bf16 {
 
     fn runtime_mul(self, rhs: Self, _op: &'static str) -> Self {
         finalize_bf16(f32::from(self) * f32::from(rhs))
+    }
+
+    fn runtime_finalize(self) -> Self {
+        if self.is_nan() {
+            half::bf16::from_bits(0x7fc0)
+        } else {
+            self
+        }
     }
 }
 
@@ -473,7 +506,7 @@ impl_integer_widening!(i16 => i64);
 impl_integer_widening!(i32 => i64);
 
 macro_rules! impl_reduced_float_accumulation {
-    ($storage:ty, $finalize_f32:ident, $canonical_nan:expr) => {
+    ($storage:ty, $finalize_f32:ident, $narrow_f64:path, $canonical_nan:expr) => {
         impl RuntimeAccumulationSource<f32> for $storage {
             fn into_accumulator(self) -> f32 {
                 f32::from(self)
@@ -494,18 +527,30 @@ macro_rules! impl_reduced_float_accumulation {
 
         impl RuntimeAccumulationOutput<f64> for $storage {
             fn from_accumulator(value: f64) -> Self {
+                // One rounding from f64 to storage ([04-NUM-2]); `half`'s
+                // `bf16::from_f64` misrounds values just above a tie (chelis#3041).
                 if value.is_nan() {
                     <$storage>::from_bits($canonical_nan)
                 } else {
-                    <$storage>::from_f64(value)
+                    <$storage>::from_bits($narrow_f64(value))
                 }
             }
         }
     };
 }
 
-impl_reduced_float_accumulation!(half::f16, finalize_f16, 0x7e00);
-impl_reduced_float_accumulation!(half::bf16, finalize_bf16, 0x7fc0);
+impl_reduced_float_accumulation!(
+    half::f16,
+    finalize_f16,
+    ieee_narrow::f64_to_f16_bits_rne,
+    0x7e00
+);
+impl_reduced_float_accumulation!(
+    half::bf16,
+    finalize_bf16,
+    ieee_narrow::f64_to_bf16_bits_rne,
+    0x7fc0
+);
 
 impl RuntimeAccumulationSource<f64> for f32 {
     fn into_accumulator(self) -> f64 {
@@ -530,7 +575,9 @@ fn runtime_balanced_sum<T: RuntimeArithmetic>(mut leaves: Vec<T>, op: &'static s
         }
         leaves = next;
     }
-    leaves[0]
+    // A sum is arithmetic even when its group has one leaf that no addition
+    // touched, so that leaf finalizes like every other sum ([04-NUM-2]).
+    leaves[0].runtime_finalize()
 }
 
 /// Numeric ordering without any conversion. Float NaNs sort after numeric
@@ -2352,10 +2399,15 @@ fn f32_to_f16_bits(v: f32) -> u16 {
         if exp < -10 {
             return sign;
         }
-        let m = (mant | 0x0080_0000) >> (1 - exp);
-        let lsb = (m >> 13) & 1;
-        let rounded = m + 0x0000_0FFF + lsb;
-        return sign | (rounded >> 13) as u16;
+        let full = mant | 0x0080_0000;
+        let shift = (14 - exp) as u32;
+        let mut kept = full >> shift;
+        let dropped = full & ((1 << shift) - 1);
+        let half = 1 << (shift - 1);
+        if dropped > half || (dropped == half && kept & 1 == 1) {
+            kept += 1;
+        }
+        return sign | kept as u16;
     }
     let lsb = (mant >> 13) & 1;
     let mut rounded = mant + 0x0000_0FFF + lsb;

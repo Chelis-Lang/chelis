@@ -1,6 +1,6 @@
 use chelis_ir::dag::{Dag, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::tier2::{lower_gelu, lower_sigmoid, lower_silu, lower_tanh};
+use chelis_ir::tier2::{lower_gelu, lower_sigmoid, lower_silu};
 use chelis_types::types::Prim;
 use chelis_types::{FloatUnOp, ScalarValue, float_unop, scalar_from_f64, tensor_from_scalars};
 
@@ -11,6 +11,17 @@ type ActivationLowerer = fn(
     &TensorType,
     Option<&str>,
 ) -> chelis_ir::dag::NodeId;
+
+// `tanh` is the [05-OP-46] Tier 1 primitive, not a Tier 2 lowering.
+fn lower_tanh(
+    owner: chelis_ir::dag::Owner,
+    dag: &mut Dag,
+    x: chelis_ir::dag::NodeId,
+    ty: &TensorType,
+    _parent_span: Option<&str>,
+) -> chelis_ir::dag::NodeId {
+    dag.add_node(owner, RiscOp::Tanh, vec![x], ty.clone(), None)
+}
 
 fn evaluate_tier2(prim: Prim, input: ScalarValue, lower: ActivationLowerer) -> ScalarValue {
     let ty = TensorType {

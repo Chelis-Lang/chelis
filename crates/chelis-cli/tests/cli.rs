@@ -1,3 +1,7 @@
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 mod common;
 
 use assert_cmd::Command;
@@ -3636,29 +3640,17 @@ fn phase3h_numeric_acceptance_oracle() {
     assert_reef_std_embedding_builds_to_valid_c();
 }
 
-/// Regression test for the macOS-only bug where `host_emit::emit_host_program`
-/// stripped `#include "chelis_math.h"` from the generated host code, causing
-/// `vvexpf`/`vvlogf` calls to reach the compiler with no declaration in
-/// scope. Direct guard on the include-emission invariant rather than only
-/// transitive coverage via the (slow) `phase3h_numeric_acceptance_oracle`.
-///
-/// The test builds a tiny program that uses a transcendental in a
-/// host-lane scalar context, emits it via `chelis build --target c`, and
-/// asserts the generated `main.c`:
-///   - On macOS: contains both `#include "chelis_math.h"` AND a `vvexpf`
-///     call. If either is missing, the regression is back.
-///   - On Linux without sleef: must NOT contain `chelis_math.h` (the
-///     inner CEmitter selects MathLib::None and the include should stay
-///     out — confirms the `needs_math_header` flag is platform-driven).
+/// A built program carries the correctly rounded kernels it calls
+/// (spec/design/correctly_rounded_math.md section 4.2): the emitted unit
+/// defines `chelis_cr_expf` with internal linkage, defines no kernel it does
+/// not call, and names no math library. The old route through
+/// `chelis_math.h` (Accelerate vForce on macOS, Sleef on Linux) gave
+/// different bits per host.
 #[test]
-fn build_c_host_emits_chelis_math_h_when_program_uses_transcendentals() {
+fn build_c_host_carries_the_correctly_rounded_kernel_it_calls() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("transcendental.ch");
     let out_dir = dir.path().join("c-output");
-    // The phase3h embedding helper exercises the same vForce/vvexpf
-    // path that triggered the original bug. Reusing it keeps the test
-    // shape simple: any `exp` in a host-lane helper must produce a
-    // generated `main.c` that #includes `chelis_math.h`.
     write_file(
         &path,
         r#"
@@ -3682,52 +3674,28 @@ def softplus(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)
         .success();
 
     let main_c = fs::read_to_string(out_dir.join("transcendental.c")).expect("emitted .c");
-
-    #[cfg(target_os = "macos")]
-    {
+    assert_eq!(
+        main_c
+            .matches("static float chelis_cr_expf(float x)")
+            .count(),
+        1,
+        "the unit must define the exp kernel it calls exactly once:\n{main_c}"
+    );
+    assert!(
+        !main_c.contains("chelis_cr_logf(") && !main_c.contains("chelis_cr_exp("),
+        "the unit must not carry kernels it does not call:\n{main_c}"
+    );
+    for library in [
+        "chelis_math.h",
+        "vvexpf",
+        "Sleef_",
+        "CHELIS_EXPF8",
+        "Accelerate",
+    ] {
         assert!(
-            main_c.contains("#include \"chelis_math.h\""),
-            "macOS host_emit must include chelis_math.h when a helper uses \
-             a transcendental. Regression of the vForce header bug. Source:\n{main_c}"
+            !main_c.contains(library),
+            "generated C must name no math library (`{library}`):\n{main_c}"
         );
-        assert!(
-            main_c.contains("vvexpf"),
-            "macOS host_emit should route exp through Accelerate vForce \
-             (`vvexpf`); none found in generated main.c:\n{main_c}"
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        // The `sleef` feature in chelis-backend-c is auto-detected at build
-        // time by `build.rs` via pkg-config (`libsleef` available → feature
-        // on, `MathLib::detect` returns `MathLib::Sleef`). Because the chelis
-        // binary is what's spawned here, the relevant feature state is the
-        // binary's, not this test crate's. We read it back from the
-        // generated code's SLEEF guard marker and assert the include
-        // invariant in both directions.
-        let on_sleef_path = main_c.contains("#ifdef CHELIS_HAS_SLEEF");
-        if on_sleef_path {
-            // SLEEF macros (`CHELIS_EXPF8`, ...) are declared in
-            // `chelis_math.h`; the include must accompany the SLEEF SIMD
-            // body or the compiler sees undeclared identifiers under
-            // `-DCHELIS_HAS_SLEEF`.
-            assert!(
-                main_c.contains("#include \"chelis_math.h\""),
-                "Linux SLEEF host_emit must include chelis_math.h to \
-                 declare CHELIS_EXPF8 and friends. Source:\n{main_c}"
-            );
-        } else {
-            // Linux without the `sleef` feature selects MathLib::None and
-            // emits no `chelis_math.h` include. The include MUST NOT leak
-            // in unconditionally — that would force a useless dependency
-            // on platforms that don't need it.
-            assert!(
-                !main_c.contains("#include \"chelis_math.h\""),
-                "non-macOS host_emit should not include chelis_math.h \
-                 when the inner emitter selected MathLib::None. Source:\n{main_c}"
-            );
-        }
     }
 }
 

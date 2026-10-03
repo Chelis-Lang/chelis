@@ -79,13 +79,8 @@ fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, 
 
     // Resolve the host toolchain the way `chelis build` and the other CLI test
     // harnesses (rank_poly_tier3.rs, parity.rs) do, so the link command carries
-    // every platform-required flag. On macOS the transcendental kernels route
-    // through Accelerate's vForce (`vvexpf`/`vvlogf`/...), so
-    // `toolchain.link_flags` includes `-framework Accelerate`; a hand-rolled
-    // `-lm -lpthread -ldl` link omits it and `ld` fails with
-    // `Undefined symbols ... _vvexpf` on arm64 (the softmax-backward program
-    // emits `vvexpf`). `needs_blas` is read from the emitted C so a BLAS kernel
-    // links cblas too.
+    // every platform-required flag. `needs_blas` is read from the emitted C
+    // so a BLAS kernel links cblas (Accelerate on macOS) too.
     let needs_blas = fs::read_to_string(kernel_c)
         .map(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""))
         .unwrap_or(false);

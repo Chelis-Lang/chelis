@@ -1,3 +1,7 @@
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 // Executable specification test suite for the Chelis language.
 //
 // Tests organized by language behavior, not by crate. Each test exercises the

@@ -292,15 +292,15 @@ fn s4_metal_oracle_richer_combinations_grep() {
         let node = dag.node_mut(n2).unwrap();
         node.merged_spans = vec!["n2.m1".into(), "n2.m2".into()];
     }
-    let n3 = dag.add_node(decl, RiscOp::Exp, vec![n2], vec_f32(4), None);
+    let n3 = dag.add_node(decl, RiscOp::Abs, vec![n2], vec_f32(4), None);
     {
         let node = dag.node_mut(n3).unwrap();
         node.merged_spans = vec!["n3.m1".into(), "n3.m2".into()];
     }
-    let n4 = dag.add_node(decl, RiscOp::Log, vec![n3], vec_f32(4), None);
+    let n4 = dag.add_node(decl, RiscOp::Abs, vec![n3], vec_f32(4), None);
     let n5 = dag.add_node(
         decl,
-        RiscOp::Sin,
+        RiscOp::Floor,
         vec![n4],
         vec_f32(4),
         Some("n5.canonical".into()),
@@ -315,8 +315,8 @@ fn s4_metal_oracle_richer_combinations_grep() {
     // nodes with kernels (Load goes through emit_load which is
     // host-side only — no kernel string for Loads). For this oracle,
     // count host-side AND kernel-side together: total expected is
-    // (Load: 1) + (Neg: 3 host + 3 kernel) + (Exp: 2 host + 2 kernel)
-    // + (Log: 0) + (Sin: 1 host + 1 kernel) = 1 + 6 + 4 + 0 + 2 = 13.
+    // (Load: 1) + (Neg: 3 host + 3 kernel) + (Abs: 2 host + 2 kernel)
+    // + (Abs: 0) + (Floor: 1 host + 1 kernel) = 1 + 6 + 4 + 0 + 2 = 13.
     let expected_min: usize = 1 + 3 + 2 + 1; // host-side per node
     let actual = src.matches("// span: ").count();
     assert!(

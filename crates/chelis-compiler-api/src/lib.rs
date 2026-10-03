@@ -25,6 +25,8 @@ pub use transcript_capture::{
 };
 
 #[cfg(test)]
+mod fp_env_arch;
+#[cfg(test)]
 mod source_arch;
 
 /// Re-export of reef package-root discovery so callers (e.g. the Python
@@ -184,6 +186,7 @@ pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// unexplained recompile-every-run slowness, it also emits a one-time
 /// stderr warning naming itself.
 pub fn build_fingerprint() -> &'static str {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     chelis_image_id::build_fingerprint()
 }
 

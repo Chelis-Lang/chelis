@@ -260,6 +260,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Cos
             | WireRiscOp::Tan
             | WireRiscOp::Atan
+            | WireRiscOp::Tanh
             | WireRiscOp::Abs
             | WireRiscOp::Floor
             | WireRiscOp::Ceil
@@ -623,7 +624,9 @@ const _: () = {
     // labels carry no numeric payload.
     // Version 23 adds the paired sparse batch rank. It is index geometry,
     // not a floating numeric payload or float-envelope transformer.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 23);
+    // Version 24 adds the Tier 1 `Tanh`, a unary float primitive grouped with
+    // `Atan`; it embeds no numeric payload.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 24);
 };
 
 #[cfg(test)]

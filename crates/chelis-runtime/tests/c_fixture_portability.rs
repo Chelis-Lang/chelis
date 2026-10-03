@@ -72,12 +72,11 @@ fn assert_compiles(output: &Output) {
 }
 
 /// The native Random observer prelude's include set. `PRIu64` comes only from
-/// `<inttypes.h>`: on macOS `chelis_math.h` reaches it through Accelerate, and
-/// on Linux nothing here does.
+/// `<inttypes.h>`, which nothing here includes. (Before chelis#2957,
+/// `chelis_math.h` reached it through Accelerate on macOS.)
 const FORMAT_MACRO_HEADERS: &str = "#include \"chelis_runtime.h\"
 #include <assert.h>
 #include <math.h>
-#include \"chelis_math.h\"
 #include <stdio.h>
 #include <string.h>
 ";

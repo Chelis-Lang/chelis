@@ -15145,24 +15145,12 @@ impl<'program> LowerCtx<'program> {
                 );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
-            // Bucket 3: `tanh`, `silu`, `gelu` route through new tier2
-            // decompositions so the RISC DAG path stays self-contained.
-            // Mirrors the relu/sigmoid pattern above.
+            // `tanh` is the [05-OP-46] Tier 1 primitive; `silu` and `gelu`
+            // route through their §3.3 tier2 lowerings, mirroring the
+            // relu/sigmoid pattern above.
             "tanh" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "tanh input");
-                // Elementwise: output dims always come from the lowered
-                // operand (the annotation's dims can be stale symbolics
-                // inside a rank-poly inline body; see chelis#346 red-team
-                // F1/F3). Same contract as the Tier-1 binary arms.
-                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
-                let parent_span = self.current_span_id.clone();
-                let node = tier2::lower_tanh(
-                    self.owner(),
-                    &mut self.dag,
-                    x,
-                    &out_ty,
-                    parent_span.as_deref(),
-                );
+                let node = self.lower_transcendental(RiscOp::Tanh, x, ty);
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "silu" if args.len() == 1 => {

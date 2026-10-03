@@ -62,6 +62,7 @@ carcara = ["smt", "dep:carcara"]
 arb = ["dep:arb-sys"]
 
 [dependencies]
+chelis-reef.workspace = true
 chelis-unord.workspace = true
 cvc5-rs = { version = "0.3", optional = true }
 # WI-14 oracle: FFI to FLINT/Arb. 0.3.6 vendors FLINT 2.8.5 + Arb c2b7e36 (it
@@ -142,6 +143,11 @@ openblas-src = { version = "=0.10.16", optional = true, default-features = false
 clarabel = { version = "0.11", optional = true, features = ["sdp-accelerate"] }
 
 [dev-dependencies]
+# Reference kernels the evaluator tests compare against bit for bit.
+chelis-crmath.workspace = true
+# The embedded chelis-std runtime the tests pass; the library takes it as a
+# parameter and never depends on the bundle.
+chelis-std-bundle.workspace = true
 syn.workspace = true
 
 # A compiled mock `chelis-beacon` binary for the shim integration tests: it reads

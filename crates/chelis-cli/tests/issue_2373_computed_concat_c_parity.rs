@@ -1,4 +1,8 @@
 //! #2373: linked C and Eval execute the same checked computed concat.
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 
 mod common;
 

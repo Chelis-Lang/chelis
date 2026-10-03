@@ -1,4 +1,9 @@
-use chelis_tide::mcp::handle_message;
+use chelis_std_bundle::EMBEDDED_RUNTIME;
+
+// The MCP handler at the runtime this test binary embeds.
+fn handle_message(message: &serde_json::Value) -> Option<serde_json::Value> {
+    chelis_tide::mcp::handle_message(message, &EMBEDDED_RUNTIME)
+}
 use serde_json::json;
 
 #[test]

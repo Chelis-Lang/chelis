@@ -95,11 +95,11 @@ reusable CLI.
 
 ### PD2. The gate needs a separate strict compile/link profile
 
-`chelis_backend_c::toolchain::runtime_toolchain` currently inserts
-`-march=native` and honors `CHELIS_CC`; `chelis build --emit-c` prints that resolver's
-recipe. The reference gate cannot execute or copy this printed shell command:
-the portable profile forbids `-march=native`, and a hostile `CHELIS_CC` changes
-the printed compiler without changing the generated C. The narrower
+`chelis_backend_c::toolchain::runtime_toolchain` honors `CHELIS_CC`;
+`chelis build --emit-c` prints that resolver's recipe. The reference gate cannot
+execute or copy this printed shell command: a hostile `CHELIS_CC` changes the
+printed compiler without changing the generated C, and the printed command runs
+in the caller's environment. The narrower
 `scripts/core_fragment_parity_receipt.py` intentionally executes a printed
 recipe with `shell=True`; its receipt is not the strict Nix acceptance gate.
 
@@ -116,9 +116,15 @@ with derivation-authored closure flags, preserving the pinned sysroot and librar
 paths. Record executed argv, effective profile, and resolved library identities
 in `proof_scope`.
 
-This choice leaves `chelis build`, `parity.rs`, and the e2e crates unchanged.
-Changing the product build's default profile is a separate change, not a
-precondition for [#763]. A constructor-only unit test is insufficient for N1:
+This choice leaves `parity.rs` and the e2e crates unchanged. `chelis build`
+compiles with the same profile: `runtime_toolchain` and the strict-reference
+constructor share one constructor, and differ only in that the product build adds
+OpenMP for a compiler that ships it (the generated parallel loops are element-wise, so
+thread count changes throughput, not values). The product build also spawns its tools
+with an allowlisted environment (`PATH`, `TMPDIR`) and refuses a compiler whose
+predefined macros show the profile was changed; `spec/design/correctly_rounded_math.md`
+describes the profile. The gate still owns the pinned compiler identity, the Nix
+closure, and the single-thread run. A constructor-only unit test is insufficient for N1:
 the runner and Nix check must exercise the spawned compiler under hostile
 `CHELIS_CC`, `CC`, `CFLAGS`, `LDFLAGS`, `NIX_CFLAGS_COMPILE`, `NIX_LDFLAGS`,
 and OpenMP settings. A wrapper can inject fast-math and linker flags after the

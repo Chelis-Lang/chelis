@@ -14,6 +14,7 @@ generalize-sweep-oracle = []
 chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-pred.workspace = true
+chelis-crmath.workspace = true
 chelis-vocab.workspace = true
 half.workspace = true
 serde.workspace = true

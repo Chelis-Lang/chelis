@@ -70,6 +70,7 @@ pub enum ApiEnvelope<T> {
 
 impl<T> ApiEnvelope<T> {
     pub fn success(result: T) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self::Success(ApiSuccess { ok: true, result })
     }
 
@@ -94,6 +95,7 @@ impl<T> ApiEnvelope<T> {
     /// );
     /// ```
     pub fn failure(stage: String, errors: Vec<Diagnostic>) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self::Failure(ApiFailure {
             ok: false,
             stage,
@@ -104,6 +106,7 @@ impl<T> ApiEnvelope<T> {
     /// Build the HTTP request-decoding failure without exposing diagnostic
     /// construction to the transport crate.
     pub fn invalid_request(message: impl Into<String>) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self::failure(
             "http".into(),
             vec![Diagnostic::general(
@@ -237,12 +240,14 @@ pub struct UnsupportedDiagnosticIdentity {
 
 impl Diagnostic {
     pub fn kind(&self) -> DiagnosticKind {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         DiagnosticKind::decode(&self.kind)
             .expect("producer diagnostics are constructed from DiagnosticKind")
     }
 
     /// Wording-independent identity for a production unsupported diagnostic.
     pub fn unsupported_identity(&self) -> Option<UnsupportedDiagnosticIdentity> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.unsupported.as_ref().map(|unsupported| {
             let payload = unsupported.identity();
             UnsupportedDiagnosticIdentity {
@@ -318,6 +323,7 @@ impl Diagnostic {
 impl Diagnostic {
     /// Project a check diagnostic onto the wire carrier.
     pub fn try_from_check_error(error: &chelis_types::errors::CheckError) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         if let chelis_types::errors::CheckErrorKind::UnsupportedFeature { unsupported } =
             &error.kind
         {
@@ -353,6 +359,7 @@ impl Diagnostic {
     /// for them, so dropping them here would keep the very stage-dependence
     /// the atom forbids.
     pub fn from_effect_error(error: &chelis_effects::EffectError, severity: UnitInterval) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self {
             kind: effect_error_kind(&error.kind).as_str().to_owned(),
             message: error.message.clone(),
@@ -713,6 +720,7 @@ pub struct Span {
 impl Span {
     /// Admit a foreign byte range for access to this local UTF-8 source.
     pub fn slice<'a>(&self, source: &'a str) -> Result<&'a str, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let end = self
             .offset
             .checked_add(self.len)
@@ -769,6 +777,7 @@ pub enum DiagnosticSpan {
 impl DiagnosticSpan {
     /// The byte offset, which both variants carry.
     pub fn offset(self) -> u64 {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self {
             Self::Range { offset, .. } | Self::Point { offset } => offset,
         }
@@ -780,6 +789,7 @@ impl DiagnosticSpan {
     /// collection length, and calling it one invites `is_empty`, which would
     /// be meaningless for a source coordinate.
     pub fn extent(self) -> Option<u64> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self {
             Self::Range { len, .. } => Some(len),
             Self::Point { .. } => None,
@@ -1157,6 +1167,7 @@ pub struct OrderedInferredParameters(Vec<WireInferredParameter>);
 
 impl OrderedInferredParameters {
     pub fn as_slice(&self) -> &[WireInferredParameter] {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.0
     }
 }
@@ -2148,7 +2159,10 @@ pub struct WireRecordPatternField {
 /// - `22`: a Load of a resolved top-level value uses an unspellable encoded
 ///   origin label, distinct from every ordinary graph input. A version-21
 ///   reader has no such identity and cannot interpret that label.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 23;
+/// - `24`: `Tanh` and the fused `Tanh` step are the [05-OP-46] Tier 1
+///   primitive (chelis#2957); an earlier graph spelled `tanh` as
+///   `2*sigmoid(2x)-1`, and a version-23 reader does not know the operation.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 24;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2309,11 +2323,13 @@ impl WireDag {
     /// Returns `Ok(())` only for [`WIRE_DAG_SCHEMA_VERSION`]. Older and
     /// future versions both fail closed.
     pub fn validate_schema_version(&self) -> Result<(), WireDagSchemaError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         validate_explicit_wire_dag_schema_version(Some(self.schema_version))
     }
 
     /// Validate fields whose exact encoding depends on surrounding DAG shape.
     pub fn validate_wire_contract(&self) -> Result<(), WireDagContractError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         dag_domains::validate(self)?;
         for (index, node) in self.nodes.iter().enumerate() {
             match &node.op {
@@ -3015,6 +3031,7 @@ impl WireDag {
     /// [`WireDagSchemaError`], and an invalid exact-version cross-node shape
     /// surfaces as [`WireDagContractError`].
     pub fn from_validated_json(json: &str) -> Result<Self, WireDagDecodeError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let found = envelopes::version(json).map_err(WireDagDecodeError::Parse)?;
         validate_explicit_wire_dag_schema_version(found).map_err(WireDagDecodeError::Schema)?;
         let fields: WireDagFields =
@@ -3469,6 +3486,7 @@ fn wire_axis_origin(
         | WireRiscOp::Cos
         | WireRiscOp::Tan
         | WireRiscOp::Atan
+        | WireRiscOp::Tanh
         | WireRiscOp::Abs
         | WireRiscOp::Floor
         | WireRiscOp::Ceil
@@ -3860,6 +3878,7 @@ pub enum WireFusedStepOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
     Abs,
     Floor,
     Ceil,
@@ -4025,6 +4044,7 @@ pub enum WireRiscOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
     Abs,
     Floor,
     Ceil,

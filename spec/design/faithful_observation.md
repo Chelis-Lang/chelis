@@ -128,10 +128,10 @@ round-trip invariant that makes regressions mechanical to catch.
   (the wire's representational capacity is [#729]'s storage decision - §I1).
 - **Not** the `<value>` placeholder (an unclassifiable-value substitution:
   `loud_unsupported.md` census row 4, becomes a diagnostic there).
-- **Not** kernel accuracy. Where lanes legitimately compute different
-  VALUES (libm/SLEEF/vForce, [#719]), this plan documents the per-op bound
-  (§C4) and requires `sqrt` correctly rounded per [#719]; it does not
-  replace kernels. Formatting itself never has tolerance.
+- **Not** kernel accuracy. The transcendentals and `sqrt` are correctly
+  rounded ([05-OP-46]), so lanes do not compute different VALUES; the
+  kernels are designed in `spec/design/correctly_rounded_math.md`. Formatting itself never has
+  tolerance.
 
 ## Vocabulary
 
@@ -361,11 +361,10 @@ For every dtype and every storable value:
    open question 1), consumed directly by the [#687] oracle
    and by [#754]'s shell-facing gate; the `spec/05-risc-primitives.md`
    §8 rendering is generated from or tripwire-checked against it, so
-   prose and data cannot drift. Content: for each transcendental, the
-   documented cross-lane bound (default: 1 ulp at the computed width;
-   `sqrt`: 0 - correctly rounded per IEEE; [#719] is FIXED (PR #760,
-   merged 2026-07-17), so the row is authored by Phase 3;
-   add/sub/mul/div/comparisons: 0 by absence). A row is eligible only
+   prose and data cannot drift. Content: no operation has a nonzero
+   bound, because [05-OP-46] makes every transcendental and `sqrt`
+   correctly rounded (`spec/design/correctly_rounded_math.md`); every operation is 0 by
+   absence. A row is eligible only
    after both lanes establish [04-NUM-8] arithmetic-width conformance;
    in particular, [#897]'s current eval float path may not use the table
    to launder a mismatch. For f16/bf16, a rendered mismatch also requires

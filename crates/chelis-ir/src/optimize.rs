@@ -154,7 +154,30 @@ pub fn constant_fold(dag: &mut Dag) {
         // Unary constant folding.
         if node.inputs.len() == 1 {
             let input = dag.get(node.inputs[0]);
+            // The transcendentals fold through the evaluator's declared-width
+            // kernel, never the f64 wide image: a folded literal must carry the
+            // same correctly rounded bits ([05-OP-46]) as the unfolded node.
+            let transcendental = match &node.op {
+                RiscOp::Exp => Some(chelis_types::FloatUnOp::Exp),
+                RiscOp::Log => Some(chelis_types::FloatUnOp::Log),
+                RiscOp::Sin => Some(chelis_types::FloatUnOp::Sin),
+                RiscOp::Cos => Some(chelis_types::FloatUnOp::Cos),
+                RiscOp::Tan => Some(chelis_types::FloatUnOp::Tan),
+                RiscOp::Atan => Some(chelis_types::FloatUnOp::Atan),
+                RiscOp::Tanh => Some(chelis_types::FloatUnOp::Tanh),
+                _ => None,
+            };
             if let Some(inp) = input
+                && let RiscOp::Const { value: inner } = &inp.op
+                && let Some(op) = transcendental
+            {
+                if inner.prim() == node.output_type.precision
+                    && let Ok(folded) = chelis_types::float_unop(op, *inner)
+                {
+                    let merge_spans = collect_operand_spans(node, &[inp]);
+                    replacements.push((node.id, folded, merge_spans));
+                }
+            } else if let Some(inp) = input
                 && let RiscOp::Const { value: inner } = &inp.op
                 && let Some(v) = wide_image(inner)
             {
@@ -163,13 +186,7 @@ pub fn constant_fold(dag: &mut Dag) {
                         inner.as_bool_exact().map(|value| i64::from(!value) as f64)
                     }
                     RiscOp::Neg => Some(-v),
-                    RiscOp::Exp => Some(v.exp()),
-                    RiscOp::Log => Some(v.ln()),
-                    RiscOp::Sin => Some(v.sin()),
                     RiscOp::Sqrt => Some(v.sqrt()),
-                    RiscOp::Cos => Some(v.cos()),
-                    RiscOp::Tan => Some(v.tan()),
-                    RiscOp::Atan => Some(v.atan()),
                     RiscOp::Abs => Some(v.abs()),
                     RiscOp::Floor => Some(v.floor()),
                     RiscOp::Ceil => Some(v.ceil()),

@@ -230,14 +230,17 @@ fn arithmetic_width_status(prim: Prim) -> ArithmeticWidthStatus {
 /// authority for a tolerance before this harness compiles again.
 fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
     match op {
-        RiscOp::Atan => AgreementOp::Atan,
-        RiscOp::Cos => AgreementOp::Cos,
-        RiscOp::Exp => AgreementOp::Exp,
-        RiscOp::Log => AgreementOp::Log,
-        RiscOp::Sin => AgreementOp::Sin,
-        RiscOp::Sqrt => AgreementOp::Sqrt,
-        RiscOp::Tan => AgreementOp::Tan,
-        RiscOp::Add
+        // [05-OP-46] makes the transcendentals and `sqrt` correctly rounded,
+        // so the lanes agree exactly.
+        RiscOp::Atan
+        | RiscOp::Cos
+        | RiscOp::Exp
+        | RiscOp::Log
+        | RiscOp::Sin
+        | RiscOp::Sqrt
+        | RiscOp::Tan
+        | RiscOp::Tanh
+        | RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul
         | RiscOp::Div
@@ -387,13 +390,14 @@ fn agreement_operation_identity_is_derived_from_ir() {
         (RiscOp::Add, AgreementOp::Exact),
         // [05-OP-54]: i64 range elements agree bit for bit across lanes.
         (RiscOp::Iota, AgreementOp::Exact),
-        (RiscOp::Exp, AgreementOp::Exp),
-        (RiscOp::Log, AgreementOp::Log),
-        (RiscOp::Sin, AgreementOp::Sin),
-        (RiscOp::Sqrt, AgreementOp::Sqrt),
-        (RiscOp::Cos, AgreementOp::Cos),
-        (RiscOp::Tan, AgreementOp::Tan),
-        (RiscOp::Atan, AgreementOp::Atan),
+        (RiscOp::Exp, AgreementOp::Exact),
+        (RiscOp::Log, AgreementOp::Exact),
+        (RiscOp::Sin, AgreementOp::Exact),
+        (RiscOp::Sqrt, AgreementOp::Exact),
+        (RiscOp::Cos, AgreementOp::Exact),
+        (RiscOp::Tan, AgreementOp::Exact),
+        (RiscOp::Atan, AgreementOp::Exact),
+        (RiscOp::Tanh, AgreementOp::Exact),
     ];
     for (risc, expected) in cases {
         assert_eq!(agreement_op_for_risc(&risc), expected);
@@ -485,20 +489,20 @@ fn agreement_width_nonconformance_is_behavioral() {
         ElementRef::F32(f32::from_bits(1.0_f32.to_bits() + 1)),
     );
     let error = compare_rendered_elements(
-        AgreementOp::Exp,
+        AgreementOp::Exact,
         Prim::F32,
         arithmetic_width_status(Prim::F32),
         &eval,
         &compiled,
     )
-    .expect_err("a known arithmetic-width violation cannot borrow exp tolerance");
+    .expect_err("a known arithmetic-width violation cannot pass as a value difference");
     assert!(matches!(
         error,
         AgreementError::ArithmeticWidthNonconforming { issue: 897, .. }
     ));
     record_phase3_receipt(
         "width-nonconformance-canary",
-        "op=exp\terror=ArithmeticWidthNonconforming\tissue=897",
+        "op=exact\terror=ArithmeticWidthNonconforming\tissue=897",
     );
 }
 

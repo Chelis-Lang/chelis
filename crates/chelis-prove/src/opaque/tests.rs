@@ -159,11 +159,20 @@ fn flattened_predicate_validates_with_concrete_eval() {
     let smt = lower_predicate_flattened(inv, "p", &ConstEnv::new()).expect("lowerable");
     let mut env = UnordMap::new();
     env.insert("p.value".to_string(), f32_value(0.5));
-    assert!(eval_bool(&smt, &env), "0.5 satisfies 0<=v<=1");
+    assert!(
+        eval_bool(&smt, &env, &chelis_std_bundle::EMBEDDED_RUNTIME),
+        "0.5 satisfies 0<=v<=1"
+    );
     env.insert("p.value".to_string(), f32_value(1.5));
-    assert!(!eval_bool(&smt, &env), "1.5 violates v<=1");
+    assert!(
+        !eval_bool(&smt, &env, &chelis_std_bundle::EMBEDDED_RUNTIME),
+        "1.5 violates v<=1"
+    );
     env.insert("p.value".to_string(), f32_value(-0.1));
-    assert!(!eval_bool(&smt, &env), "-0.1 violates 0<=v");
+    assert!(
+        !eval_bool(&smt, &env, &chelis_std_bundle::EMBEDDED_RUNTIME),
+        "-0.1 violates 0<=v"
+    );
 }
 
 #[test]
@@ -192,10 +201,16 @@ def make(w: tensor[3, f32]) -> Simplex = Simplex { weights: w }
     env.insert("p.weights.0".to_string(), f32_value(0.2));
     env.insert("p.weights.1".to_string(), f32_value(0.3));
     env.insert("p.weights.2".to_string(), f32_value(0.5));
-    assert!(eval_bool(&smt, &env), "sum 1.0 is within band");
+    assert!(
+        eval_bool(&smt, &env, &chelis_std_bundle::EMBEDDED_RUNTIME),
+        "sum 1.0 is within band"
+    );
     // A vector summing to 1.5 violates the upper band.
     env.insert("p.weights.2".to_string(), f32_value(1.0));
-    assert!(!eval_bool(&smt, &env), "sum 1.5 violates band");
+    assert!(
+        !eval_bool(&smt, &env, &chelis_std_bundle::EMBEDDED_RUNTIME),
+        "sum 1.5 violates band"
+    );
 }
 
 #[test]
@@ -289,7 +304,13 @@ def make(x: f32) -> Probability = Probability { value: x }
     let mut ok = BTreeMap::new();
     ok.insert("p.value".to_string(), f32_value(0.25));
     assert!(
-        validate_env(&ok, inv, &pred, &consts),
+        validate_env(
+            &ok,
+            inv,
+            &pred,
+            &consts,
+            &chelis_std_bundle::EMBEDDED_RUNTIME
+        ),
         "a finite satisfying value is accepted"
     );
 
@@ -298,7 +319,13 @@ def make(x: f32) -> Probability = Probability { value: x }
     let mut nan = BTreeMap::new();
     nan.insert("p.value".to_string(), f32_value(f64::NAN));
     assert!(
-        !validate_env(&nan, inv, &pred, &consts),
+        !validate_env(
+            &nan,
+            inv,
+            &pred,
+            &consts,
+            &chelis_std_bundle::EMBEDDED_RUNTIME
+        ),
         "a NaN field is rejected even though `NaN != 0.5` is true"
     );
 
@@ -306,7 +333,13 @@ def make(x: f32) -> Probability = Probability { value: x }
     let mut inf = BTreeMap::new();
     inf.insert("p.value".to_string(), f32_value(f64::INFINITY));
     assert!(
-        !validate_env(&inf, inv, &pred, &consts),
+        !validate_env(
+            &inf,
+            inv,
+            &pred,
+            &consts,
+            &chelis_std_bundle::EMBEDDED_RUNTIME
+        ),
         "an infinite field is rejected"
     );
 }

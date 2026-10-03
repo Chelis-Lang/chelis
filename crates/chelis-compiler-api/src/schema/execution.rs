@@ -12,6 +12,7 @@ pub struct NumericScalar(ScalarValue);
 
 impl NumericScalar {
     pub fn get(self) -> ScalarValue {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.0
     }
 }
@@ -81,6 +82,7 @@ impl super::TensorValue {
     /// accesses the payload. Zero extents make the product zero independent of
     /// their position; intermediate machine overflow cannot reject an empty tensor.
     pub fn validate(&self) -> Result<(), String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         i32::try_from(self.shape.len()).map_err(|_| "tensor rank exceeds int32")?;
         if self.shape.iter().any(|extent| *extent < 0) {
             return Err("tensor extent must be a nonnegative int64".to_string());

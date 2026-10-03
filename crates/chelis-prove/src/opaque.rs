@@ -1176,6 +1176,8 @@ pub enum GenParamKind {
 pub struct GenModule<'a> {
     pub exprs: &'a [Expr],
     pub source: &'a str,
+    /// The chelis-std runtime whose graphs the predicate evaluator runs.
+    pub runtime: &'static chelis_reef::EmbeddedRuntime,
 }
 
 /// Generate one validated binder value for `inv`. Rejection sampling runs
@@ -1207,7 +1209,7 @@ pub fn generate_binder(
     for _ in 0..budget {
         rej_attempts += 1;
         let env = sample_fields_flat(&inv.fields, &inv.binder, rng);
-        if validate_env(&env, inv, &predicate, consts) {
+        if validate_env(&env, inv, &predicate, consts, module.runtime) {
             // Accepted: rejection sampling succeeded (the per-tier accept
             // counts in the diagnostic are only read when BOTH tiers
             // starve, i.e. when we never reach here).
@@ -1252,7 +1254,7 @@ pub fn generate_binder(
             };
             // STILL validate (a buggy producer costs efficiency, never
             // soundness; RFC D-STARVE M2).
-            if validate_env(&env, inv, &predicate, consts) {
+            if validate_env(&env, inv, &predicate, consts, module.runtime) {
                 let value_expr = record_value_expr(inv, &env);
                 return Ok(GeneratedBinder {
                     env,
@@ -1335,6 +1337,7 @@ fn validate_env(
     _inv: &OpaqueInvariant,
     predicate: &Option<SmtExpr>,
     _consts: &ConstEnv,
+    runtime: &'static chelis_reef::EmbeddedRuntime,
 ) -> bool {
     match predicate {
         Some(smt) => {
@@ -1352,7 +1355,7 @@ fn validate_env(
             // acceptance uses exact `==`/`!=`, never the fuzz `1e-10`
             // tolerance. An epsilon-validated sample would weaken exactly
             // the soundness that validation provides (RFC D-STARVE).
-            crate::concrete_eval::eval_bool_strict(smt, &hash)
+            crate::concrete_eval::eval_bool_strict(smt, &hash, runtime)
         }
         // A predicate that does not lower (e.g. references an unresolved
         // constant) cannot be validated here; treat as not-satisfied so

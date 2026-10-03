@@ -7,6 +7,10 @@
 //! against the IR evaluator's reference math.
 //!
 //! Spec source of truth: `spec/05-risc-primitives.md` §2.2.
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 
 use std::collections::BTreeMap;
 

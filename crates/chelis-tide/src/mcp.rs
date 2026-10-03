@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, Write};
 
+use chelis_reef::EmbeddedRuntime;
 use schemars::{JsonSchema, schema_for};
 use serde_json::{Value, json};
 
@@ -11,14 +12,16 @@ use crate::schema::{
     ReplaceFunctionRequest, ValidateRequest,
 };
 
-pub fn run_stdio() -> io::Result<()> {
+/// Serve MCP over stdio. `runtime` is the chelis-std runtime the binary
+/// embeds; the prove tool evaluates standard-library graphs from it.
+pub fn run_stdio(runtime: &'static EmbeddedRuntime) -> io::Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = io::BufReader::new(stdin.lock());
     let mut writer = io::BufWriter::new(stdout.lock());
 
     while let Some(message) = read_message(&mut reader)? {
-        if let Some(response) = handle_message(&message) {
+        if let Some(response) = handle_message(&message, runtime) {
             write_message(&mut writer, &response)?;
         }
     }
@@ -26,11 +29,11 @@ pub fn run_stdio() -> io::Result<()> {
     writer.flush()
 }
 
-pub fn run_stdio_blocking() -> io::Result<()> {
-    run_stdio()
+pub fn run_stdio_blocking(runtime: &'static EmbeddedRuntime) -> io::Result<()> {
+    run_stdio(runtime)
 }
 
-pub fn handle_message(message: &Value) -> Option<Value> {
+pub fn handle_message(message: &Value, runtime: &'static EmbeddedRuntime) -> Option<Value> {
     let method = message.get("method")?.as_str()?;
     let id = message.get("id").cloned();
     match method {
@@ -48,14 +51,18 @@ pub fn handle_message(message: &Value) -> Option<Value> {
             }),
         )),
         "tools/list" => Some(success(id, json!({ "tools": tool_list() }))),
-        "tools/call" => Some(handle_tool_call(id, message.get("params"))),
+        "tools/call" => Some(handle_tool_call(id, message.get("params"), runtime)),
         "shutdown" => Some(success(id, json!({}))),
         "exit" => None,
         other => Some(error(id, -32601, format!("unknown method `{other}`"))),
     }
 }
 
-fn handle_tool_call(id: Option<Value>, params: Option<&Value>) -> Value {
+fn handle_tool_call(
+    id: Option<Value>,
+    params: Option<&Value>,
+    runtime: &'static EmbeddedRuntime,
+) -> Value {
     let Some(params) = params else {
         return error(id, -32602, "missing params");
     };
@@ -105,7 +112,7 @@ fn handle_tool_call(id: Option<Value>, params: Option<&Value>) -> Value {
         "chelis_change_signature" => {
             deserialize_and_run::<ChangeSignatureRequest, _, _>(&args, compiler::change_signature)
         }
-        "chelis_prove" => handle_prove_tool(&args),
+        "chelis_prove" => handle_prove_tool(&args, runtime),
         other => {
             return error(id, -32601, format!("unknown tool `{other}`"));
         }
@@ -312,7 +319,7 @@ fn prove_tool_schema() -> Value {
     })
 }
 
-fn handle_prove_tool(args: &Value) -> Value {
+fn handle_prove_tool(args: &Value, runtime: &'static EmbeddedRuntime) -> Value {
     let started = std::time::Instant::now();
     let source = match args.get("source").and_then(Value::as_str) {
         Some(s) => s.to_string(),
@@ -420,6 +427,7 @@ fn handle_prove_tool(args: &Value) -> Value {
         only: None,
         invariant_min_rate,
         max_attempts,
+        runtime,
     };
     let property_run = if source_is_deep {
         run_deep_source_properties(&source, &prop_options)
@@ -479,6 +487,7 @@ fn handle_prove_tool(args: &Value) -> Value {
         tier: tier.to_string(),
         only: None,
         invariant_min_rate,
+        runtime,
     };
     // Derived obligations. A type-broken module surfaces a check-failure
     // record rather than silently reporting zero obligations (RT3-F2).

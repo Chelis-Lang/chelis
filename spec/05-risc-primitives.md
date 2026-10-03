@@ -239,6 +239,7 @@ and float precisions as their tensor forms and use the same adjoint rule.
 | `cos` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise cos(x) | `-g * sin(x)` |
 | `tan` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise tan(x) | `g / (cos(x) * cos(x))` (= `g / cos²(x)`) |
 | `atan` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise atan(x) | `g / (1 + x * x)` |
+| `tanh` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise tanh(x) | `g * (1 - y * y)` (using `y = tanh(x)`) |
 | `sqrt` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sqrt(x) | `g / (2 * sqrt(x))` |
 | `abs` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise absolute value | For float operands, `g * sign(x)` (sign = `(x > 0) - (x < 0)`; 0 at x = 0); integer operands are forward-only |
 | `floor` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise floor; identity on integer operands | Float operands are non-differentiable (piecewise constant) and `grad` rejects them; the integer identity may be erased before AD |
@@ -1257,19 +1258,28 @@ three atoms above and never admits `bool` to a numeric capability or kernel.
 |---|---|
 | `relu(x)` | `max_elem(x, const(0.0, x.shape))` |
 | `sigmoid(x)` | `recip(add(const(1.0), exp(neg(x))))` |
-| `tanh(x)` | Hyperbolic tangent, equivalently `sub(mul(const(2.0), sigmoid(mul(const(2.0), x))), const(1.0))` |
+| `tanh(x)` | The Tier 1 primitive `tanh` of §2.2 and [05-OP-46]; it has no lowering |
 | `silu(x)` | `mul(x, sigmoid(x))` |
-| `gelu(x)` | The tanh approximation `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))` |
+| `gelu(x)` | `mul(x, sigmoid(mul(const(2.0), u)))` with `u = mul(const(c), add(x, mul(const(0.044715), mul(mul(x, x), x))))` and `c` the constant sqrt(2/pi) |
 
 All five activation functions admit float tensors and float scalars at f16,
 bf16, f32, and f64. The scalar form returns the same scalar dtype and is the
 rank-zero instance of the tensor operation; non-float operands are type
 errors. Each RISC primitive in the lowering computes at [04-NUM-8]'s declared
 arithmetic width and finalizes to the operand's storage width before the next
-primitive observes it, as required by [04-NUM-1]. The adjoint is the
-derivative of the lowering above for `sigmoid`, `tanh`, `silu`, and `gelu`;
-`relu` instead carries its own adjoint under [05-OP-43] and survives AD as an
-intact Tier-2 identity.
+primitive observes it, as required by [04-NUM-1]. Each constant is the real
+value rounded once to the operand dtype. The `exp` leaf is [05-OP-46]'s
+correctly rounded primitive, so each lowering denotes one result bit pattern
+for each input. `gelu` is the tanh approximation of the Gaussian error linear
+unit, `0.5*x*(1+tanh(u))`, spelled through the identity
+`0.5*(1+tanh(u)) = sigmoid(2u)`: the tanh spelling cancels catastrophically
+for negative `x`, where `tanh(u)` approaches `-1`, and the sigmoid spelling
+does not. `tanh` is a primitive rather than a
+composition: no graph over the other primitives reproduces the correctly
+rounded hyperbolic tangent near zero, where `2*sigmoid(2x)-1` cancels. The
+adjoint is the derivative of the lowering above for `sigmoid`, `silu`, and
+`gelu`, and [05-OP-46]'s adjoint for `tanh`; `relu` instead carries its own
+adjoint under [05-OP-43] and survives AD as an intact Tier-2 identity.
 
 > **[05-OP-43]** `relu(x) -> result` admits every active float dtype on a
 > scalar or tensor surface and returns that same surface, dimensions, and
@@ -1310,7 +1320,7 @@ composition of the operations governed here.
 The following names appear in lowering narratives (§4) as pseudocode or
 pattern-matched operations. Most decompose into Tier 1 primitives. `cos` is a
 first-class unary primitive `RiscOp::Cos` (see §2.2), alongside `tan`,
-`atan`, `abs`, `floor`, and `ceil`, none of which decompose.
+`atan`, `tanh`, `abs`, `floor`, and `ceil`, none of which decompose.
 
 | Helper | Decomposes to |
 |---|---|
@@ -2858,9 +2868,10 @@ exact ADT identity by [05-OP-34].
 > `p=t*(0.254829592+t*(-0.284496736+t*(1.421413741+t*(-1.453152027+t*1.061405429))))`,
 > and `sign(x)*(1-p*exp(-a*a))`. Each decimal literal rounds directly to
 > `p_float`, and each primitive finalizes to `p_float` before its consumer.
-> The `exp` inside this compound graph is correctly rounded to `p_float`; it does
-> not inherit standalone `exp`'s [05-OBS-3] lane tolerance. Consequently the
-> complete callable has [05-OBS-3]'s default zero-ULP cross-lane bound.
+> The `exp` inside this compound graph is [05-OP-46]'s correctly rounded
+> `exp` at `p_float`'s arithmetic width, finalized to `p_float`, so the
+> complete callable denotes one result bit pattern per input and has
+> [05-OBS-3]'s zero-ULP cross-lane bound.
 > Its adjoint is the derivative of that exact finite graph, not a substituted
 > library CDF. The infinities have zero cotangent and NaN propagates the
 > canonical NaN cotangent; no non-finite input traps `Domain`.
@@ -3654,7 +3665,7 @@ path even though bare `round` under `grad` remains a structural
 #### Unary arithmetic
 
 > **[05-OP-46]** Signature: `neg(x)`, `recip(x)`, `exp(x)`, `log(x)`, `sin(x)`, `sqrt(x)`,
-> `cos(x)`, `tan(x)`, `atan(x)`, `abs(x)`, `floor(x)`, `ceil(x)`, and
+> `cos(x)`, `tan(x)`, `atan(x)`, `tanh(x)`, `abs(x)`, `floor(x)`, `ceil(x)`, and
 > `round(x)` preserve the scalar or tensor shape and dtype of one operand.
 >
 > Domain: Negation, absolute value, floor, ceil, and round admit active
@@ -3664,7 +3675,28 @@ path even though bare `round` under `grad` remains a structural
 > errors.
 >
 > Result: Each operation computes its named mathematical operation under the
-> IEEE exceptional-value and finalization rules. Reciprocal is direct
+> IEEE exceptional-value and finalization rules. The transcendental
+> operations `exp`, `log`, `sin`, `cos`, `tan`, `atan`, and `tanh` (natural
+> exponential, natural logarithm, sine, cosine, and tangent of an argument in
+> radians, principal arctangent, hyperbolic tangent), and `sqrt`, are
+> correctly rounded: the result is the exact real value of the function at
+> the operand, rounded once, ties to even, to [04-NUM-8]'s arithmetic width of
+> the operand's dtype, with gradual underflow and overflow to the correctly
+> signed infinity. For f16 and bf16 the operand widens exactly to f32, the
+> function is correctly rounded at f32, and [04-NUM-2] then finalizes that f32
+> value to storage once; the stored result is that composition, not a
+> rounding taken directly to the storage width. The result never depends on
+> the target, on an algorithm, library, or compiler chosen by a lane, on
+> whether the operand is a literal, a folded constant, or a run-time value,
+> or on a dynamic floating-point environment. The IEEE 754 special cases
+> apply: `exp(-inf)` is `+0` and `exp(+inf)` is `+inf`; `log(+0)` and
+> `log(-0)` are `-inf`, `log(+inf)` is `+inf`, and `log` of a value below zero
+> is NaN; `sin`, `cos`, and `tan` of an infinity are NaN; `atan(+-inf)` is
+> `+-pi/2` correctly rounded; `tanh(+-inf)` is `+-1`; `sqrt` of a value
+> below zero is NaN; and `sin`, `tan`, `atan`, `tanh`, and `sqrt` preserve a
+> signed zero while `exp(+-0)` and `cos(+-0)` are `1`. Every NaN result, including one from a NaN operand, finalizes to
+> [04-NUM-2]'s canonical quiet NaN. IEEE status flags are not observable.
+> Reciprocal is direct
 > division of same-dtype one by x. On floats, round selects the nearest
 > integer with ties to even; floor and ceil round toward negative and
 > positive infinity. Floor, ceil, and round are exact identities on
@@ -3678,7 +3710,8 @@ path even though bare `round` under `grad` remains a structural
 > Adjoint: For differentiable float inputs: neg gives -g; reciprocal gives
 > -g*y*y using the forward y=1/x; exp gives g*exp(x); log gives g/x; sin
 > gives g*cos(x); sqrt gives g/(2*sqrt(x)); cos gives -g*sin(x); tan gives
-> g/(cos(x)*cos(x)); atan gives g/(1+x*x); abs gives g*sign(x), where
+> g/(cos(x)*cos(x)); atan gives g/(1+x*x); tanh gives g*(1-y*y) using the
+> forward y=tanh(x); abs gives g*sign(x), where
 > sign(x)=(x>0)-(x<0), including zero for x=0 and NaN. Integer
 > differentiated inputs and float floor/ceil/round structurally reject
 > differentiation; integer rounding identities may be erased before AD.
@@ -3716,7 +3749,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Activation compositions
 
-> **[05-OP-48]** Signature: `sigmoid(x)`, `tanh(x)`, `silu(x)`, and `gelu(x)` preserve one
+> **[05-OP-48]** Signature: `sigmoid(x)`, `silu(x)`, and `gelu(x)` preserve one
 > float scalar or tensor's shape and dtype; `softmax(x,axis)` takes a float
 > tensor and an axis-domain i32 and returns the same tensor type.
 >
@@ -3724,12 +3757,17 @@ path even though bare `round` under `grad` remains a structural
 > Integer/bool/string operands are type errors. Softmax's axis obeys
 > [05-DIM-3], including negative-axis normalization and runtime validation.
 >
-> Result: The pointwise lowerings are the formulas in section 3.3: sigmoid
-> is 1/(1+exp(-x)), tanh is the hyperbolic tangent, silu is x*sigmoid(x),
-> and gelu is the stated tanh approximation. Softmax uses section 4.2's
-> max-shifted exponentials divided by their axis sum. Constants, each
-> primitive intermediate, and results retain the operand dtype; the formulas
-> do not license an f64 evaluation funnel.
+> Result: The pointwise lowerings are section 3.3's primitive graphs:
+> sigmoid is `recip(add(const(1.0), exp(neg(x))))`, silu is
+> `mul(x, sigmoid(x))`, and gelu is `mul(x, sigmoid(mul(const(2.0), u)))`
+> with section 3.3's exact spelling of `u`. Softmax uses section 4.2's max-shifted
+> exponentials divided by their axis sum. Every exponential in these graphs
+> is [05-OP-46]'s correctly rounded primitive, and every other step is a finalized IEEE
+> operation without contraction, so each composition denotes exactly one
+> result bit pattern per input. Constants, each primitive intermediate, and
+> results retain the operand dtype; the formulas do not license an f64
+> evaluation funnel, a fused or library substitute for the stated graph, or
+> a lane-specific approximation.
 >
 > Failure: Invalid axes and shape obligations fail loudly. IEEE exceptional
 > values propagate through the stated primitive graph; no clipping, default
@@ -4726,8 +4764,8 @@ width every `acc` and every temporary is computed at, and §5.7.1 owns the
 accumulator defaults.
 
 The GPU backend must satisfy [05-OBS-3]'s per-operation, per-arithmetic-width
-agreement table. Blanket `1e-6` (f32) / `1e-12` (f64) bounds are not a
-conforming cross-lane oracle.
+agreement table. Blanket `1e-6` (f32) / `1e-12` (f64) bounds, or any other
+absolute or relative tolerance, are not a conforming cross-lane oracle.
 
 ---
 
@@ -4806,9 +4844,11 @@ count allowlist is supporting evidence only and cannot satisfy [05-UNS-1].
 > spellings) SHALL be identical across lanes and is pinned in §8.1.
 
 > **[05-OBS-3]** Cross-lane VALUE differences are permitted only for the
-> ops listed in the per-op tolerance table below, within the listed bound;
-> `sqrt`
-> SHALL be correctly rounded (bound zero). Formatting
+> ops listed in the per-op tolerance table below, within the listed bound.
+> Every operation's value is target-independent: the arithmetic of
+> [04-NUM-2] and [04-NUM-8] is exact by construction, and the transcendental
+> operations and `sqrt` are correctly rounded under [05-OP-46], so no
+> operation needs a nonzero bound and the table grants none. Formatting
 > differences are never within tolerance.
 
 The following table is normative. Implementations SHALL mirror it through a
@@ -4819,13 +4859,6 @@ tripwire-checked byte-for-byte against this block.
 <!-- BEGIN GENERATED OBSERVATION TOLERANCE TABLE -->
 | operation | maximum cross-lane value difference | authority |
 |---|---:|---|
-| `atan` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `cos` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `exp` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `log` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `sin` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `sqrt` | 0 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
-| `tan` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
 <!-- END GENERATED OBSERVATION TOLERANCE TABLE -->
 
 Operations absent from the table have a zero-ULP bound. In particular,
@@ -4844,9 +4877,11 @@ rounding-bin acceptance. Non-finite and signed-zero mismatches are never
 toleranced. Byte-different strings which denote identical stored bits are
 formatting violations under [05-OBS-2], not value differences.
 
-This section is the table's single normative address. The table covers only
-implementation variance at a single width - one lane's libm or SLEEF or
-vForce against another's - and never a structural precision mismatch.
+This section is the table's single normative address. A row could record
+only a bound that an atom itself grants; no lane's choice of math library,
+compiler, or algorithm is a reason for a row, because a correctly rounded
+result admits no such variance. A GPU or other device lane meets the same
+bounds as the C lane; there is no backend-specific tolerance.
 
 > **[05-OBS-4]** A scalar-typed value SHALL render as the bare scalar at
 > every exit in both lanes, including as a top-level labeled root

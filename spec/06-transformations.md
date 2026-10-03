@@ -169,6 +169,9 @@ where `p_1, ..., p_m` are the parameters specified by `wrt`, or every
 parameter containing at least one differentiable float leaf when `wrt` is
 omitted.
 
+Every lane computes this algorithm's operations; a lane may not substitute a
+different differentiation order.
+
 ### 2.4 Gradient Accumulation (Multi-Use Nodes)
 
 When a value `x` is consumed by multiple downstream edges, order those edges

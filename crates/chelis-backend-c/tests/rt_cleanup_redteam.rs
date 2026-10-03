@@ -23,6 +23,7 @@
 //! re-enable them when fixed.
 
 mod support;
+use chelis_crmath::profile::{Output, storage_reference};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::fs;
@@ -519,7 +520,8 @@ int main(void) {{
     // bf16(0.001) rounds to ~9.7656e-4. Expected sum is 4096 * 9.7656e-4
     // ~= 4.0; the tolerance widens slightly relative to BF16_TOL because
     // the per-element rounding error compounds.
-    let expected = 4096.0_f64 * f64::from(half::bf16::from_f64(0.001).to_f32());
+    let bf16_bits = storage_reference(0.001_f64.to_bits(), 64, Output::Bf16);
+    let expected = 4096.0_f64 * half::bf16::from_bits(bf16_bits).to_f64();
     assert!(
         (backend - expected).abs() <= 0.05,
         "backend reduce_sum {backend} not within 0.05 of expected {expected}; \
@@ -795,17 +797,15 @@ fn bf16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
     if !gcc_available() {
         return;
     }
-    // Compute expected bit patterns at test-build time via the `half`
-    // crate so the test pins the post-round-trip value the codegen
-    // uses; if codegen's `half::bf16::from_f64(...).to_bits()` ever
-    // returns something different, this test trips.
+    // Expected bit patterns come from the exact storage reference, the
+    // single round-to-nearest-even [04-NUM-2] requires; `half`'s
+    // `from_f64` misrounds near ties (chelis#3041). If codegen's constant
+    // fill ever returns something different, this test trips.
+    let bf16 = |value: f64| storage_reference(value.to_bits(), 64, Output::Bf16);
     let cases: &[(f64, u16)] = &[
-        (0.1_f64, half::bf16::from_f64(0.1).to_bits()),
-        (0.01_f64, half::bf16::from_f64(0.01).to_bits()),
-        (
-            std::f64::consts::PI,
-            half::bf16::from_f64(std::f64::consts::PI).to_bits(),
-        ),
+        (0.1_f64, bf16(0.1)),
+        (0.01_f64, bf16(0.01)),
+        (std::f64::consts::PI, bf16(std::f64::consts::PI)),
     ];
     for &(value, expected) in cases {
         let n = 4;
@@ -851,13 +851,11 @@ fn f16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
     if !gcc_available() {
         return;
     }
+    let f16 = |value: f64| storage_reference(value.to_bits(), 64, Output::F16);
     let cases: &[(f64, u16)] = &[
-        (0.1_f64, half::f16::from_f64(0.1).to_bits()),
-        (0.01_f64, half::f16::from_f64(0.01).to_bits()),
-        (
-            std::f64::consts::PI,
-            half::f16::from_f64(std::f64::consts::PI).to_bits(),
-        ),
+        (0.1_f64, f16(0.1)),
+        (0.01_f64, f16(0.01)),
+        (std::f64::consts::PI, f16(std::f64::consts::PI)),
     ];
     for &(value, expected) in cases {
         let n = 4;

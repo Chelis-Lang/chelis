@@ -1409,8 +1409,19 @@ pub(super) fn runtime_value_to_dag_input_lossy(
             let precision = fn_expr
                 .and_then(|e| param_precision_at(e, index))
                 .unwrap_or(payload.dtype());
+            // A scalar at the parameter's own dtype moves into the graph as
+            // its stored bits; only a different declared dtype is an ingress
+            // conversion from the wide image.
+            let value = if precision == payload.dtype() {
+                IrTensorValue::from_storage(
+                    vec![],
+                    chelis_types::tensor_from_scalars(precision, &[payload.value()]),
+                )
+            } else {
+                IrTensorValue::scalar(payload.as_f64_lossy())
+            };
             Ok((
-                IrTensorValue::scalar(payload.as_f64_lossy()),
+                value,
                 TensorType {
                     dims: vec![],
                     precision,

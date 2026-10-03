@@ -399,6 +399,7 @@ impl<'a> EvalContext<'a> {
         // the ingress form (identity when the dtypes already agree).
         let element = tensor.value.storage().scalar_at(0);
         let value = match element.as_i64_exact() {
+            _ if element.prim() == prim => element,
             Some(v) => chelis_types::scalar_from_i64("named_axis", prim, v)
                 .map_err(|trap| trap.to_string())?,
             None => chelis_types::scalar_from_f64("named_axis", prim, element.as_f64_lossy())

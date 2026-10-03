@@ -5,12 +5,13 @@ use chelis_ir::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
-    ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericTrap,
-    ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar, compare_scalars,
-    compare_tensors, float_binop, float_scalar_tensor_binop, float_tensor_binop,
-    float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop, int_scalar_tensor_binop,
-    int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop, reduce_tensor_groups,
-    scalar_from_f64, scalar_from_i64, tensor_from_scalars, types::Prim,
+    ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
+    NumericKernelError, NumericTrap, ScalarValue, TensorReduceOp, arg_reduce_tensor_groups,
+    cast_scalar, compare_scalars, compare_tensors, cumsum_tensor_lanes, float_binop,
+    float_scalar_tensor_binop, float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop,
+    float_unop, int_binop, int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop,
+    int_tensor_unop, int_unop, reduce_tensor_groups, scalar_from_f64, scalar_from_i64,
+    scatter_add_tensor_groups, tensor_from_scalars, types::Prim,
 };
 use chelis_types::{PreparedUniformLike, RandomKey};
 
@@ -931,19 +932,32 @@ pub(super) fn nested_list_to_tensor_data(
     Ok((shape, data))
 }
 
-/// Wide ingress buffer for `to_tensor`: exact i64 for the integer/bool
-/// families, exact f64 images for floats (chelis#729 Phase 1; ends the
-/// f64-collapse of exact i64 elements, chelis#684).
+/// Ingress buffer for `to_tensor`: exact i64 for the integer/bool families
+/// (chelis#729 Phase 1; ends the f64-collapse of exact i64 elements,
+/// chelis#684), and the stored float scalars themselves for floats. Moving a
+/// list into a tensor is data movement, not arithmetic or conversion: the
+/// elements already carry the checked dtype, so their bits, a NaN's payload,
+/// sign and signaling bit included, are stored unchanged ([04-NUM-11]). A
+/// float element never passes through an f64 image or `finalize_tensor`.
 pub(super) enum ListTensorData {
     Int(Vec<i64>),
-    Float(Vec<f64>),
+    Float(Vec<chelis_types::ScalarValue>),
 }
 
 impl ListTensorData {
-    pub(super) fn into_raw(self) -> chelis_types::RawTensor {
+    /// Store the elements at `precision`: integers and bools through the
+    /// exact, domain-checked finalization; floats by inserting their bits.
+    pub(super) fn into_storage(
+        self,
+        op: &'static str,
+        precision: Prim,
+    ) -> Result<chelis_types::TensorStorage, String> {
         match self {
-            ListTensorData::Int(v) => chelis_types::RawTensor::Int(v),
-            ListTensorData::Float(v) => chelis_types::RawTensor::Float(v),
+            ListTensorData::Int(v) => {
+                chelis_types::finalize_tensor(op, precision, chelis_types::RawTensor::Int(v))
+                    .map_err(|trap| trap.to_string())
+            }
+            ListTensorData::Float(v) => Ok(chelis_types::tensor_from_scalars(precision, &v)),
         }
     }
 
@@ -987,7 +1001,7 @@ fn list_to_tensor_data(values: &[RuntimeValue], precision: Prim) -> Result<ListT
             RuntimeValue::Scalar(payload)
                 if payload.dtype() == precision && precision.is_float() =>
             {
-                floats.push(payload.as_f64_lossy());
+                floats.push(payload.value());
             }
             RuntimeValue::Bool(value) if precision == Prim::Bool => {
                 ints.push(i64::from(*value));
@@ -1139,7 +1153,7 @@ fn pad_rows(
             Ok(ListTensorData::Int(out))
         }
         ListTensorData::Float(flat) => {
-            let pad_value = payload.as_f64_lossy();
+            let pad_value = payload.value();
             let mut out = Vec::with_capacity(batch * width);
             let mut offset = 0usize;
             for &len in lens {
@@ -1827,7 +1841,12 @@ pub(super) fn extract_bounds_pair_list(
 
 /// Numerically stable softmax along a single axis:
 /// `softmax(x, axis)[i] = exp(x[i] - max(x, axis)) / sum_j exp(x[j] - max(x, axis))`.
-/// Matches the spec §4.2 lowering used by `tier2::lower_softmax`.
+///
+/// [05-OP-48]: every primitive intermediate retains the operand dtype, so
+/// eval executes `tier2::lower_softmax`, the one definition of section 4.2's
+/// graph that compiled C also lowers, through the IR evaluator at the
+/// declared width. A NaN, a `+Inf`, or an all-`-Inf` slice yields NaN across
+/// the slice through that graph (#173).
 ///
 /// Negative axes are normalized to `rank + axis` (e.g. `-1` is the last axis).
 pub(super) fn tensor_softmax_host(
@@ -1852,108 +1871,12 @@ pub(super) fn tensor_softmax_host(
         a
     };
 
-    let in_shape = tensor.value.shape.clone();
-    let axis_size = in_shape[axis_usize];
-    if axis_size == 0 {
+    if tensor.value.shape[axis_usize] == 0 {
         return Err("softmax axis has size 0".to_string());
     }
-    let numel = tensor_numel(&in_shape);
-    let mut out = vec![0.0_f64; numel];
-    let wide_in = tensor.value.to_f64_lossy_vec();
-
-    // Iterate over each "slice" along the reduced axis: for every combination
-    // of the other axes, compute max -> exp(x - max) -> sum -> divide.
-    let mut reduced_shape = in_shape.clone();
-    reduced_shape[axis_usize] = 1;
-    let reduced_numel = tensor_numel(&reduced_shape);
-
-    for slice_linear in 0..reduced_numel {
-        let mut base_indices = linear_to_indices(slice_linear, &reduced_shape);
-        // First pass: max over the axis.
-        //
-        // #173: a slice that contains `+Inf` (then `exp(+Inf - +Inf) =
-        // exp(NaN) = NaN`) or that is all `-Inf` (then `exp(-Inf - -Inf) =
-        // exp(NaN) = NaN`) must yield NaN, exactly as torch's
-        // `torch.softmax` does (verified against torch 2.x CPU: every
-        // `+Inf`-containing or all-`-Inf` slice returns NaN). The C
-        // backend, the IR evaluator, and the spec'd lowering
-        // (`tier2::lower_softmax`: max/sub/exp/sum/div) already produce
-        // NaN via the standard formula; the host runtime previously
-        // special-cased these to "natural limits" (uniform `1/N` for
-        // all-`-Inf`, `1/K` one-hot for `+Inf`), silently diverging from
-        // torch and from every other Chelis lane. The special-cases are
-        // removed so the standard formula runs and NaN propagates. The
-        // ONLY non-finite case the standard formula handles cleanly is a
-        // mixed slice with `-Inf` but no `+Inf` (the finite max makes
-        // `exp(-Inf - max) = 0`); that path is preserved below.
-        let mut max_val = f64::NEG_INFINITY;
-        for k in 0..axis_size {
-            base_indices[axis_usize] = k;
-            let in_linear = indices_to_linear(&base_indices, &in_shape);
-            let v = wide_in[in_linear];
-            if v.is_nan() {
-                // NaN propagates: write NaN across the whole slice and
-                // continue. This matches IEEE behavior of every other
-                // numerical library (PyTorch / NumPy / JAX).
-                for kk in 0..axis_size {
-                    base_indices[axis_usize] = kk;
-                    let l = indices_to_linear(&base_indices, &in_shape);
-                    out[l] = f64::NAN;
-                }
-                // Restart the outer slice loop's bookkeeping cleanly.
-                max_val = f64::NAN;
-                break;
-            }
-            if v > max_val {
-                max_val = v;
-            }
-        }
-        if max_val.is_nan() {
-            // NaN propagation handled above; nothing else to do for this slice.
-            continue;
-        }
-        // Second pass: sum of exp(x - max). When the slice contains a
-        // `+Inf` the max is `+Inf` and `exp(+Inf - +Inf) = exp(NaN) =
-        // NaN`; when the slice is all `-Inf` the max is `-Inf` and
-        // `exp(-Inf - -Inf) = exp(NaN) = NaN`. The NaN flows through the
-        // sum and the normalize below, so every output element of that
-        // slice is NaN — matching torch (#173).
-        //
-        // #170 (DO NOT "fix" this sum into the stride-4 cascade): the f64
-        // accumulator here is intentional and is NOT a torch-parity gap.
-        // (a) This host-eval softmax computes exp/sum/div in f64, whereas the
-        //     lowered path (`tier2::lower_softmax` -> `RiscOp::Sum`) uses f32
-        //     `expf` + the #163 f32 cascade. The two lanes are NOT guaranteed
-        //     bit-identical: the f64 `exp` is more accurate than f32 `expf`
-        //     (cf. #172), so per-element exponentials can differ before the
-        //     sum even runs. What the repo actually proves is agreement within
-        //     the 1e-6 relative parity tolerance the corpus oracle enforces
-        //     (`chelis-cli/tests/parity.rs`) — not bit-identity. Swapping the
-        //     f64 fold for the f32 cascade would not buy bit-identity (the
-        //     exp mismatch remains) and would only lower the host lane's
-        //     precision.
-        // (b) torch's softmax is a FUSED kernel; neither the cascade nor an
-        //     f64 fold reliably bit-matches it. So softmax is DOCUMENTED, not
-        //     cascaded; only `sum`/`trace` take the cascade.
-        let mut sum_exp = 0.0_f64;
-        for k in 0..axis_size {
-            base_indices[axis_usize] = k;
-            let in_linear = indices_to_linear(&base_indices, &in_shape);
-            sum_exp += (wide_in[in_linear] - max_val).exp();
-        }
-        if sum_exp == 0.0 {
-            return Err("softmax sum-of-exp is zero (numerical underflow)".to_string());
-        }
-        // Third pass: write exp(x - max) / sum.
-        for k in 0..axis_size {
-            base_indices[axis_usize] = k;
-            let in_linear = indices_to_linear(&base_indices, &in_shape);
-            let numer = (wide_in[in_linear] - max_val).exp();
-            out[in_linear] = numer / sum_exp;
-        }
-    }
-
-    RuntimeTensorValue::from_wide("softmax", tensor.precision, in_shape, out)
+    eval_composed_unary(tensor, |dag, decl, x, ty| {
+        tier2::lower_softmax(decl.into(), dag, x, axis_usize, ty, None)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2433,17 +2356,17 @@ pub(super) fn tensor_scatter_value(
                 .reuse_overwrite(updates.value.storage(), writes),
         ))),
         "add" => {
-            let mut out = base.value.to_f64_lossy_vec();
-            let upd = updates.value.to_f64_lossy_vec();
+            let mut leaves = vec![Vec::new(); base.value.len()];
             for (out_linear, linear) in writes {
-                out[out_linear] += upd[linear];
+                leaves[out_linear].push(linear);
             }
-            RuntimeTensorValue::from_wide(
-                "scatter_add",
-                base.precision,
+            let storage =
+                scatter_add_tensor_groups(base.value.storage(), updates.value.storage(), &leaves)
+                    .map_err(|err| err.to_string())?;
+            Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
                 base.value.shape.clone(),
-                out,
-            )
+                storage,
+            )))
         }
         other => Err(format!("scatter mode must be replace or add, got {other}")),
     }
@@ -2563,43 +2486,39 @@ pub(super) fn tensor_cumsum_value(
     axis: i64,
 ) -> Result<RuntimeTensorValue, String> {
     let axis = normalize_axis(tensor.value.shape.len(), axis, "cumsum")?;
-    let mut data = tensor.value.to_f64_lossy_vec();
     // An empty operand has nothing to scan, and its axis decomposition is
     // never read. `outer` is the product of the extents BEFORE the axis, which
     // for an empty tensor are unconstrained: the zero elsewhere is what makes
     // the element count representable. Computing it anyway overflows `usize`
     // or spins an empty loop, matching the C runtime's guard in
     // `chelis_tensor_cumsum` / `chelis_tensor_sort`.
-    if tensor.value.is_empty() {
-        return RuntimeTensorValue::from_wide(
-            "cumsum",
-            tensor.precision,
-            tensor.value.shape.clone(),
-            data,
-        );
-    }
-    let axis_size = tensor.value.shape[axis];
-    let inner: usize = tensor.value.shape[axis + 1..]
-        .iter()
-        .product::<usize>()
-        .max(1);
-    let outer: usize = tensor.value.shape[..axis].iter().product::<usize>().max(1);
-    // #170: cumsum is an inherently sequential prefix scan, NOT a reducible
-    // tree — the stride-4 cascade does not apply. The f64 running accumulator
-    // already matches `torch.cumsum` (verified: torch's cumsum is a
-    // step-by-step prefix whose f32 result equals this f64 prefix rounded to
-    // f32). No change needed; left as-is.
-    for outer_idx in 0..outer {
-        for inner_idx in 0..inner {
-            let mut running = 0.0;
-            for axis_idx in 0..axis_size {
-                let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                running += data[linear];
-                data[linear] = running;
-            }
-        }
-    }
-    RuntimeTensorValue::from_wide("cumsum", tensor.precision, tensor.value.shape.clone(), data)
+    let lanes = if tensor.value.is_empty() {
+        Vec::new()
+    } else {
+        let axis_size = tensor.value.shape[axis];
+        let inner: usize = tensor.value.shape[axis + 1..]
+            .iter()
+            .product::<usize>()
+            .max(1);
+        let outer: usize = tensor.value.shape[..axis].iter().product::<usize>().max(1);
+        (0..outer)
+            .flat_map(|outer_idx| {
+                (0..inner).map(move |inner_idx| {
+                    (0..axis_size)
+                        .map(|axis_idx| (outer_idx * axis_size + axis_idx) * inner + inner_idx)
+                        .collect()
+                })
+            })
+            .collect()
+    };
+    // [05-OP-33]: each lane is an increasing-axis prefix scan at §5.7.1's
+    // default sum accumulator, the same order as `chelis_tensor_cumsum`.
+    let storage =
+        cumsum_tensor_lanes(tensor.value.storage(), &lanes).map_err(|err| err.to_string())?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        tensor.value.shape.clone(),
+        storage,
+    )))
 }
 
 pub(super) fn tensor_sort_value(
@@ -2756,7 +2675,7 @@ fn trace_balanced_sum(
     accumulator: Prim,
     result: Prim,
 ) -> Result<ScalarValue, String> {
-    let mut level = group
+    let level = group
         .iter()
         .map(|&index| {
             cast_scalar(
@@ -2767,14 +2686,27 @@ fn trace_balanced_sum(
             .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    balanced_accumulator_sum("trace", level, accumulator, result)
+}
+
+/// Sum leaves already held at `accumulator` width with the C runtime's
+/// `runtime_balanced_sum` order (adjacent pairs per level, an odd leaf carried
+/// up unchanged), finalize the total once, and narrow it to `result`. An empty
+/// group is the accumulator's zero.
+fn balanced_accumulator_sum(
+    op: &'static str,
+    mut level: Vec<ScalarValue>,
+    accumulator: Prim,
+    result: Prim,
+) -> Result<ScalarValue, String> {
     if level.is_empty() {
         let zero = if accumulator.is_integer() {
-            scalar_from_i64("trace", accumulator, 0)
+            scalar_from_i64(op, accumulator, 0)
         } else {
-            scalar_from_f64("trace", accumulator, 0.0)
+            scalar_from_f64(op, accumulator, 0.0)
         }
         .map_err(|error| error.to_string())?;
-        return cast_scalar("trace", zero, result).map_err(|error| error.to_string());
+        return cast_scalar(op, zero, result).map_err(|error| error.to_string());
     }
     while level.len() > 1 {
         let mut source = level.into_iter();
@@ -2782,7 +2714,7 @@ fn trace_balanced_sum(
         while let Some(left) = source.next() {
             let combined = match source.next() {
                 Some(right) if accumulator.is_integer() => {
-                    int_binop(IntBinOp::Add, left, right).map_err(|error| error.to_string())?
+                    int_binop(IntBinOp::Add, left, right).map_err(|error| reported_as(op, error))?
                 }
                 Some(right) => {
                     float_binop(FloatBinOp::Add, left, right).map_err(|error| error.to_string())?
@@ -2793,7 +2725,22 @@ fn trace_balanced_sum(
         }
         level = next;
     }
-    cast_scalar("trace", level[0], result).map_err(|error| error.to_string())
+    // A one-leaf group is still a sum ([05-OP-30]); its value finalizes like
+    // any other arithmetic result, as `sum(diagonal(..))` does.
+    let total = chelis_types::canonical_nan_scalar(level[0]);
+    cast_scalar(op, total, result).map_err(|error| error.to_string())
+}
+
+/// A contraction's integer overflow traps under the contraction's own name,
+/// as the C runtime's `runtime_balanced_sum` and `runtime_mul` report it, not
+/// under the `add` or `mul` it was formed from.
+fn reported_as(op: &'static str, error: NumericKernelError) -> String {
+    match error {
+        NumericKernelError::Trap(NumericTrap::Overflow { prim, .. }) => {
+            NumericTrap::Overflow { op, prim }.to_string()
+        }
+        error => error.to_string(),
+    }
 }
 
 pub(super) fn tensor_trace_value(
@@ -2865,24 +2812,52 @@ pub(super) fn tensor_clamp_value(
             "clamp expects scalar tensor bounds or matching-shape tensor bounds".to_string(),
         );
     }
-    let wide = tensor.value.to_f64_lossy_vec();
-    let lo_wide = lo.value.to_f64_lossy_vec();
-    let hi_wide = hi.value.to_f64_lossy_vec();
-    let mut out = Vec::with_capacity(wide.len());
-    for (linear, value) in wide.into_iter().enumerate() {
-        let lo_value = if lo.value.shape.is_empty() {
-            lo_wide[0]
+    // [05-OP-33]: per row-major position, a NaN bound or `lower > upper`
+    // fails at the first offending position before any selection there;
+    // otherwise the result is the bound the stored input crosses, or the
+    // exact stored input. Comparisons run at the stored dtype, as in
+    // `chelis_tensor_clamp`, whose failure lines these are.
+    let bound = |bound: &RuntimeTensorValue, linear: usize| {
+        let index = if bound.value.shape.is_empty() {
+            0
         } else {
-            lo_wide[linear]
+            linear
         };
-        let hi_value = if hi.value.shape.is_empty() {
-            hi_wide[0]
+        bound.value.storage().scalar_at(index)
+    };
+    let compare = |op: CompareOp, lhs: ScalarValue, rhs: ScalarValue| {
+        compare_scalars(op, lhs, rhs).map_err(|err| err.to_string())
+    };
+    let mut out = Vec::with_capacity(tensor.value.len());
+    for linear in 0..tensor.value.len() {
+        let lo_value = bound(lo, linear);
+        let hi_value = bound(hi, linear);
+        // A value is NaN exactly when it does not equal itself.
+        if !compare(CompareOp::Eq, lo_value, lo_value)?
+            || !compare(CompareOp::Eq, hi_value, hi_value)?
+        {
+            return Err(format!(
+                "Domain: clamp bound is NaN at row-major position {linear}"
+            ));
+        }
+        if compare(CompareOp::Gt, lo_value, hi_value)? {
+            return Err(format!(
+                "Domain: clamp lower bound exceeds upper bound at row-major position {linear}"
+            ));
+        }
+        let value = tensor.value.storage().scalar_at(linear);
+        out.push(if compare(CompareOp::Lt, value, lo_value)? {
+            lo_value
+        } else if compare(CompareOp::Gt, value, hi_value)? {
+            hi_value
         } else {
-            hi_wide[linear]
-        };
-        out.push(value.clamp(lo_value, hi_value));
+            value
+        });
     }
-    RuntimeTensorValue::from_wide("clamp", tensor.precision, tensor.value.shape.clone(), out)
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        tensor.value.shape.clone(),
+        tensor_from_scalars(tensor.precision, &out),
+    )))
 }
 
 pub(super) fn tensor_einsum_value(
@@ -2989,19 +2964,33 @@ pub(super) fn tensor_einsum_value(
     };
     let output_total = checked_product(&out_shape, "output")?;
     let reduction_total = checked_product(&reduction_shape, "reduction")?;
-    // This legacy host einsum still accumulates in f64. Unlike matmul,
-    // it does not yet delegate to the typed contraction implementation;
-    // #1290 owns alignment with [05-OP-33]'s exact tree and widths.
-    let lhs_wide = lhs.value.to_f64_lossy_vec();
-    let rhs_wide = rhs.value.to_f64_lossy_vec();
-    let mut out = vec![0.0; output_total];
-    for (out_linear, slot) in out.iter_mut().enumerate() {
+    if lhs.precision != rhs.precision {
+        return Err("einsum expects matching tensor precision".to_string());
+    }
+    // [05-OP-33] with spec/04-type-system.md §5.7.1: the omitted accumulator
+    // is the reduce-sum default, which the C lane passes to
+    // `chelis_tensor_einsum`. Each product is formed at that width and the
+    // products of one output element are summed in the runtime's balanced
+    // order, so both lanes agree bit for bit. #1290 owns moving both lanes to
+    // [05-OP-33]'s canonical tree.
+    let accumulator = lhs.precision.default_reduce_sum_accumulator()?;
+    let result = lhs.precision.default_reduce_sum_result_precision()?;
+    let widen = |tensor: &RuntimeTensorValue, index: usize| {
+        cast_scalar(
+            "einsum",
+            tensor.value.storage().scalar_at(index),
+            accumulator,
+        )
+        .map_err(|error| error.to_string())
+    };
+    let mut out = Vec::with_capacity(output_total);
+    for out_linear in 0..output_total {
         let out_index = linear_to_indices(out_linear, &out_shape);
         let mut label_values = chelis_unord::UnordMap::<char, usize>::new();
         for (label, value) in out_labels.iter().zip(out_index.iter()) {
             label_values.insert(*label, *value);
         }
-        let mut acc = 0.0_f64;
+        let mut products = Vec::with_capacity(reduction_total);
         for reduction_linear in 0..reduction_total {
             let reduction_index = linear_to_indices(reduction_linear, &reduction_shape);
             for (label, value) in reduction_labels.iter().zip(reduction_index.iter()) {
@@ -3015,12 +3004,28 @@ pub(super) fn tensor_einsum_value(
                 .iter()
                 .map(|label| label_values[label])
                 .collect::<Vec<_>>();
-            acc += lhs_wide[indices_to_linear(&lhs_index, &lhs.value.shape)]
-                * rhs_wide[indices_to_linear(&rhs_index, &rhs.value.shape)];
+            let left = widen(lhs, indices_to_linear(&lhs_index, &lhs.value.shape))?;
+            let right = widen(rhs, indices_to_linear(&rhs_index, &rhs.value.shape))?;
+            products.push(
+                if accumulator.is_integer() {
+                    int_binop(IntBinOp::Mul, left, right)
+                } else {
+                    float_binop(FloatBinOp::Mul, left, right)
+                }
+                .map_err(|error| reported_as("einsum", error))?,
+            );
         }
-        *slot = acc;
+        out.push(balanced_accumulator_sum(
+            "einsum",
+            products,
+            accumulator,
+            result,
+        )?);
     }
-    RuntimeTensorValue::from_wide("einsum", lhs.precision, out_shape, out)
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor_from_scalars(result, &out),
+    )))
 }
 
 /// Every exit in the eval lane truncates tensor element rendering after

@@ -95,6 +95,7 @@ pub enum EditValidationError {
 impl EditValidationError {
     /// The pass that produced this error, as a stable lowercase stage tag.
     pub fn stage(&self) -> &'static str {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self {
             EditValidationError::Type { .. } => "check",
             EditValidationError::Effect { .. } => "effects",
@@ -104,6 +105,7 @@ impl EditValidationError {
 
     /// The diagnostic text the underlying pass produced.
     pub fn message(&self) -> &str {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self {
             EditValidationError::Type { message, .. }
             | EditValidationError::Effect { message, .. }
@@ -167,6 +169,7 @@ impl ReplacementError {
     /// the `stage` strings used elsewhere in the compiler API (`check`,
     /// `effects`, `linearity`) plus `name-resolution` for the resolve miss.
     pub fn stage(&self) -> &'static str {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self {
             ReplacementError::NameResolution { .. } => "name-resolution",
             ReplacementError::Type { .. } => "check",
@@ -177,6 +180,7 @@ impl ReplacementError {
 
     /// The diagnostic text the underlying pass produced.
     pub fn message(&self) -> &str {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self {
             ReplacementError::NameResolution { message, .. }
             | ReplacementError::Type { message, .. }
@@ -208,10 +212,12 @@ pub struct ValidatedModule(Vec<Expr>);
 
 impl ValidatedModule {
     pub fn as_exprs(&self) -> &[Expr] {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.0
     }
 
     pub fn into_exprs(self) -> Vec<Expr> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.0
     }
 }
@@ -230,6 +236,7 @@ pub struct ReplacementReport {
 pub fn check_whole_module_edit(
     rewritten_module: Vec<Expr>,
 ) -> Result<ValidatedModule, EditValidationError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let prepared = crate::pipeline::prepare_deep(rewritten_module.clone(), None);
     let analysis = match crate::pipeline::analyze_prepared(prepared) {
         crate::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
@@ -278,6 +285,7 @@ pub fn check_body_replacement(
     target_qualified_name: &str,
     new_body: &Expr,
 ) -> Result<ReplacementReport, ReplacementError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // Resolve first so a name miss is reported before any check work.
     chelis_deep::resolve_function(module, target_qualified_name)
         .map_err(resolve_error_to_replacement_error)?;

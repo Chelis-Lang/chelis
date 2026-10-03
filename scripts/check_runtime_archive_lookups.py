@@ -282,6 +282,18 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "crates/chelis-compiler-api/src/fp_env_arch.rs",
+        "library-name",
+        lines=(
+            'call.args.is_empty() && segments == ["chelis_runtime", "FpEnvGuard", "enter"]',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "an architecture test matches the Rust path `chelis_runtime::FpEnvGuard::enter` "
+            "in parsed compiler-api source; it names no archive or library"
+        ),
+    ),
+    Row(
         "crates/chelis-cli/src/lane_check.rs",
         "archive-name",
         lines=(
@@ -291,6 +303,19 @@ REVIEWED: tuple[Row, ...] = (
         reason=(
             "links the exact archive the preceding `chelis build --output out` staged "
             "for this program in the same isolated directory"
+        ),
+    ),
+    Row(
+        "crates/chelis-cli/src/native_build.rs",
+        "archive-name",
+        lines=(
+            'runtime_archive: PathBuf::from("out/libchelis_runtime.a"),',
+            'let mut expected = vec![OsStr::new("out/libchelis_runtime.a")];',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "a unit test's fixture path for the staged archive; the test compares the printed "
+            "link requirements with it and nothing links or searches for an archive"
         ),
     ),
     Row(
@@ -787,6 +812,7 @@ REVIEWED: tuple[Row, ...] = (
         lines=(
             '.arg(out.join("libchelis_runtime.a"))',
             '.arg(out.join("libchelis_runtime.a"))',
+            'let runtime = out.join("libchelis_runtime.a");',
             'assert!(argv.contains("libchelis_runtime.a\\n"), "{argv}");',
             'let output = dir.path().join("out/libchelis_runtime.a.c");',
             'let runtime = fs::read(dir.path().join("out/libchelis_runtime.a")).unwrap();',

@@ -4035,7 +4035,7 @@ impl<'a> EvalContext<'a> {
                 // stay exact at full i64 (a scan accumulating above 2^53
                 // no longer collapses through f64 storage).
                 let mut ints: Vec<i64> = Vec::new();
-                let mut floats: Vec<f64> = Vec::new();
+                let mut floats: Vec<chelis_types::ScalarValue> = Vec::new();
                 let mut acc = initial;
                 let callback_type_children = arg_type_exprs
                     .get(1)
@@ -4071,7 +4071,7 @@ impl<'a> EvalContext<'a> {
                             }
                             match payload.value().as_i64_exact() {
                                 Some(v) => ints.push(v),
-                                None => floats.push(payload.as_f64_lossy()),
+                                None => floats.push(payload.value()),
                             }
                         }
                         RuntimeValue::Bool(b) => {
@@ -4092,7 +4092,7 @@ impl<'a> EvalContext<'a> {
                     }
                 }
                 let tensor = if precision.is_float() {
-                    RuntimeTensorValue::from_wide("tensor_scan", precision, vec![n], floats)?
+                    RuntimeTensorValue::from_scalars(precision, vec![n], &floats)
                 } else {
                     RuntimeTensorValue::from_wide_int("tensor_scan", precision, vec![n], ints)?
                 };
@@ -4374,9 +4374,7 @@ impl<'a> EvalContext<'a> {
                 };
                 let (shape, data) =
                     nested_list_to_tensor_data(&values, precision, &expected_shape)?;
-                let storage =
-                    chelis_types::finalize_tensor("to_tensor", precision, data.into_raw())
-                        .map_err(|trap| trap.to_string())?;
+                let storage = data.into_storage("to_tensor", precision)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(shape, storage),
                 )))
@@ -4393,9 +4391,7 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "pad_sequences expects 2 arguments".to_string())?;
                 let (precision, data, batch, width) = pad_sequences_value(&sequences, &pad)?;
-                let storage =
-                    chelis_types::finalize_tensor("pad_sequences", precision, data.into_raw())
-                        .map_err(|trap| trap.to_string())?;
+                let storage = data.into_storage("pad_sequences", precision)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(vec![batch, width], storage),
                 )))
@@ -4408,9 +4404,7 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "pad_sequences_to expects 3 arguments".to_string())?;
                 let (precision, data, batch) = pad_sequences_to_value(&sequences, width, &pad)?;
-                let storage =
-                    chelis_types::finalize_tensor("pad_sequences_to", precision, data.into_raw())
-                        .map_err(|trap| trap.to_string())?;
+                let storage = data.into_storage("pad_sequences_to", precision)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(vec![batch, width.max(0) as usize], storage),
                 )))
@@ -4784,12 +4778,11 @@ impl<'a> EvalContext<'a> {
                     )?))
                 }
                 Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-                    Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_wide(
-                        "scalar_to_tensor",
+                    Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_scalars(
                         payload.dtype(),
                         vec![],
-                        vec![payload.as_f64_lossy()],
-                    )?))
+                        &[payload.value()],
+                    )))
                 }
                 Some(RuntimeValue::Bool(value)) => {
                     Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
@@ -5689,6 +5682,9 @@ fn stage_kernel_argument(
                 vec![payload.as_i64()],
             )?
             .value)
+        }
+        RuntimeValue::Scalar(payload) if payload.dtype() == prim => {
+            Ok(RuntimeTensorValue::from_scalars(prim, vec![], &[payload.value()]).value)
         }
         RuntimeValue::Scalar(payload) => Ok(RuntimeTensorValue::from_wide(
             "kernel argument",

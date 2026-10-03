@@ -172,16 +172,19 @@ pub struct LibraryContext {
 impl LibraryContext {
     /// The proof-bound composed `chelis-std ++ dependencies` library.
     pub fn checked_library(&self) -> &crate::pipeline::CheckedLibrary {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.library
     }
 
     /// The union `chelis-std ++ dependencies` type environment.
     pub fn type_env(&self) -> &TypeEnv {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.library.type_env()
     }
 
     /// The composed `chelis-std ++ dependencies` checked library program.
     pub fn library_checked(&self) -> &CheckedProgram {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.library.program()
     }
 }
@@ -257,6 +260,7 @@ pub fn library_cache_key(
     dependency_decls: &[chelis_surf::ast::Decl],
     stdlib_key: [u8; 32],
 ) -> [u8; 32] {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     library_cache_key_at_version(dependency_decls, stdlib_key, LIBRARY_CACHE_FORMAT_VERSION)
 }
 
@@ -269,6 +273,7 @@ pub fn library_cache_key_input_bytes(
     dependency_decls: &[chelis_surf::ast::Decl],
     stdlib_key: [u8; 32],
 ) -> Vec<u8> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let mut bytes = Vec::new();
     visit_library_cache_key_inputs(
         dependency_decls,
@@ -363,6 +368,7 @@ pub fn load_or_build_library_context(
     stdlib_key: [u8; 32],
     dependency_decls: &[chelis_surf::ast::Decl],
 ) -> Result<Option<LibraryContext>, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     if cache_disabled() {
         return build_library_context(stdlib_ctx, dependency_decls);
     }
@@ -562,6 +568,7 @@ pub fn build_library_context(
     stdlib_ctx: &StdLibContext,
     dependency_decls: &[chelis_surf::ast::Decl],
 ) -> Result<Option<LibraryContext>, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // RFC v5: dependency decls are reef-linker output (internal-name
     // mangled); accept the linker name format while building the context.
     let _linked = chelis_types::install_linked_program_guard();
@@ -615,6 +622,7 @@ pub fn build_library_context(
 /// so the build-lane caller can detect macro cross-talk between the
 /// dependency prefix and the entry (see [`LibraryContext`]).
 pub fn expanded_deep_digest(exprs: &[chelis_deep::ast::Expr]) -> [u8; 32] {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let mut hasher = Sha256::new();
     hasher.update(b"chelis_dep_expanded_deep_v1");
     match bincode::serialize(exprs) {

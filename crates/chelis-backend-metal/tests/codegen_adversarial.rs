@@ -156,7 +156,7 @@ fn m7_chain_of_elementwise_does_not_collapse_to_one_kernel() {
     );
     let m = dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_f32(8), None);
     let s = dag.add_node(decl, RiscOp::Add, vec![m, c], vec_f32(8), None);
-    let e = dag.add_node(decl, RiscOp::Exp, vec![s], vec_f32(8), None);
+    let e = dag.add_node(decl, RiscOp::Abs, vec![s], vec_f32(8), None);
     dag.add_root(e);
 
     let result = codegen_metal(&dag, "chain");

@@ -11683,7 +11683,7 @@ fn run_tide(command: Option<TideCommand>) -> Result<(), Box<dyn std::error::Erro
             Ok(())
         }
         Some(TideCommand::Mcp) => {
-            chelis_tide::mcp::run_stdio_blocking()?;
+            chelis_tide::mcp::run_stdio_blocking(&EMBEDDED_RUNTIME)?;
             Ok(())
         }
         Some(TideCommand::Lsp { .. }) => {

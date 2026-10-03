@@ -74,6 +74,60 @@ def ok(x: tensor[4, f32]) -> tensor[4, f32] =
     .expect("read-only tensor primitives should borrow their tensor inputs");
 }
 
+/// spec/05 section 2.2 gives every float elementwise unary a borrowed operand
+/// (`&tensor[D,p]`), so reading `x` through one and then through `exp` is
+/// accepted. chelis#2959: `tanh` became a primitive with that row but the
+/// checker consumed its operand.
+#[test]
+fn elementwise_unary_primitives_borrow_their_operand() {
+    for op in [
+        "neg", "recip", "exp", "log", "sin", "cos", "tan", "atan", "tanh", "sqrt", "abs", "floor",
+        "ceil", "round",
+    ] {
+        let source = format!(
+            r#"
+def ok(x: tensor[4, f32]) -> tensor[4, f32] =
+  {{
+    y: tensor[4, f32] = {op}(x)
+    z: tensor[4, f32] = exp(x)
+    out: tensor[4, f32] = add(y, z)
+    _ = drop(x)
+    _ = drop(y)
+    _ = drop(z)
+    out
+  }}
+"#
+        );
+        if let Err(errors) = check_surf(&source) {
+            panic!("`{op}` must borrow its operand; got {errors:?}");
+        }
+    }
+}
+
+/// Negative partner: once `realize` consumes `x`, the borrowed read in
+/// `tanh(x)` is a use after consume. While `tanh` consumed its operand, the
+/// second consume was an accepted implicit copy, so this is rejected only
+/// because `tanh` borrows.
+#[test]
+fn tanh_after_a_consuming_builtin_is_rejected() {
+    let errors = check_surf(
+        r#"
+def bad(x: tensor[4, f32]) -> tensor[4, f32] =
+  {
+    y: tensor[4, f32] = realize(x)
+    z: tensor[4, f32] = tanh(x)
+    add(y, z)
+  }
+"#,
+    )
+    .expect_err("tanh must not read a tensor realize consumed");
+    assert!(errors.iter().any(|error| {
+        matches!(error.kind, CheckErrorKind::UseAfterConsume)
+            && error.message.contains("variable `x`")
+            && error.message.contains("realize")
+    }));
+}
+
 #[test]
 fn pipe_auto_borrows_read_only_stage_input() {
     check_surf(

@@ -40,7 +40,7 @@ fn run_surf(source: &str, tier: &str) -> Vec<PropertyOutcome> {
     let opts = PropertyRunOptions {
         tier: tier.to_string(),
         samples: 32,
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     let PropertyRunResult::Ran(o) = run_surf_source_properties(source, &opts).expect("run");
     o
@@ -508,7 +508,7 @@ fn only_selected_nested_grad_ignores_valid_unsupported_sibling() {
     let options = PropertyRunOptions {
         tier: "smt-only".to_string(),
         only: Some("nested_grad_left".to_string()),
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     let PropertyRunResult::Ran(outcomes) =
         run_surf_source_properties(source, &options).expect("run filtered nested gradients");
@@ -589,7 +589,7 @@ inner = grad(square, wrt=xx)
         let options = PropertyRunOptions {
             tier: "smt-only".to_string(),
             only: only.map(str::to_string),
-            ..Default::default()
+            ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
         };
         let result = if is_deep {
             run_deep_source_properties(source, &options)
@@ -700,7 +700,7 @@ def pair(x: f32) -> (f32, f32) = (x, x)
     let options = PropertyRunOptions {
         tier: "smt-only".to_string(),
         only: Some("reflexive".to_string()),
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
 
     let PropertyRunResult::Ran(outcomes) =
@@ -1016,7 +1016,7 @@ fn run_deep(source: &str, tier: &str) -> Vec<PropertyOutcome> {
     let opts = PropertyRunOptions {
         tier: tier.to_string(),
         samples: 16,
-        ..Default::default()
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
     };
     let PropertyRunResult::Ran(o) = run_deep_source_properties(source, &opts).expect("run");
     o
@@ -1187,7 +1187,7 @@ fn f6_deep_chelis_role_property_without_source_kind_is_error() {
       (params {} (x {type: (t-prim {} f32)}))
       (app {} (var {} gte) (var {} x) (var {} x)))))
 "#;
-    let opts = PropertyRunOptions::default();
+    let opts = PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME);
     let result = run_deep_source_properties(source, &opts);
     assert!(
         result.is_err(),
@@ -1213,7 +1213,7 @@ fn f6_deep_invalid_source_kind_is_error() {
       (params {} (x {type: (t-prim {} f32)}))
       (app {} (var {} gte) (var {} x) (var {} x)))))
 "#;
-    let opts = PropertyRunOptions::default();
+    let opts = PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME);
     let result = run_deep_source_properties(source, &opts);
     assert!(
         result.is_err(),
@@ -1237,7 +1237,7 @@ fn f6_deep_bridge_source_kind_is_skipped_not_error() {
       (params {} (x {type: (t-prim {} f32)}))
       (app {} (var {} gte) (var {} x) (var {} x)))))
 "#;
-    let opts = PropertyRunOptions::default();
+    let opts = PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME);
     let PropertyRunResult::Ran(outcomes) =
         run_deep_source_properties(source, &opts).expect("bridge module is not an error");
     assert!(
@@ -1367,8 +1367,11 @@ fn wi8_smt_precondition_discharge_site_stamps_discharge_tier() {
 #[test]
 fn producer_property_marker_has_no_discovery_authority() {
     let source = r#"(def {c_earchin_role: "property_witness", property_source_kind: "user"} ordinary (fn {} (params {}) (lit {type: (t-prim {} bool)} false)))"#;
-    let PropertyRunResult::Ran(outcomes) =
-        run_deep_source_properties(source, &PropertyRunOptions::default()).unwrap();
+    let PropertyRunResult::Ran(outcomes) = run_deep_source_properties(
+        source,
+        &PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME),
+    )
+    .unwrap();
     assert!(outcomes.is_empty(), "{outcomes:?}");
 }
 
@@ -1399,5 +1402,84 @@ fn beacon_pipe_goal_must_end_in_bare_tensor_to_scalar() {
         reason_for("x |> neuron |> tensor_to_scalar"),
         not_bridged,
         "the canonical pipe goal reaches past the bridge matcher"
+    );
+}
+
+// --- chelis#2965: contract verdicts resolve at the consumer's float widths ---
+
+fn widths_of(source: &str) -> Vec<Prim> {
+    let decls = flatten_module_decls(&chelis_surf::parser::parse_str(source).expect("parses"));
+    let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
+    property_float_widths(&decls, &properties[0])
+}
+
+#[test]
+fn chelis_2965_f32_binders_resolve_contracts_at_f32_only() {
+    let widths = widths_of(
+        "module M\n@property p forall(x: f32):\n  (x <= x)\n  with contract = \"std.normal_cdf.range\"\n",
+    );
+    assert_eq!(widths, vec![Prim::F32]);
+}
+
+#[test]
+fn chelis_2965_every_spelled_width_in_reachable_functions_is_a_consumer_width() {
+    // An f64 binder narrowed to f32 inside a reached helper evaluates the
+    // contract-bound call at f32 as well, so the f32 verdict must apply.
+    let widths = widths_of(
+        "module M\ndef narrow(x: f64) -> f32 = cast(x, f32)\n@property p forall(x: f64):\n  (narrow(x) <= narrow(x))\n  with contract = \"std.normal_cdf.range\"\n",
+    );
+    assert!(
+        widths.contains(&Prim::F64) && widths.contains(&Prim::F32),
+        "{widths:?}"
+    );
+    // An unreached helper does not widen the set.
+    let widths = widths_of(
+        "module M\ndef unused(x: f64) -> f16 = cast(x, f16)\n@property p forall(x: f64):\n  (x <= x)\n  with contract = \"std.normal_cdf.range\"\n",
+    );
+    assert_eq!(widths, vec![Prim::F64]);
+}
+
+#[test]
+fn chelis_2965_spelled_widths_cover_suffixes_and_the_unsuffixed_literal_default() {
+    assert_eq!(spelled_float_widths("x: f64"), vec![Prim::F64]);
+    assert_eq!(
+        spelled_float_widths("1.5bf16 + 2f16"),
+        vec![Prim::Bf16, Prim::F16]
+    );
+    assert_eq!(spelled_float_widths("add(x, 1.0)"), vec![Prim::F32]);
+    assert_eq!(spelled_float_widths("1e-3"), vec![Prim::F32]);
+    assert!(spelled_float_widths("xf32 + count_f64 + 3").is_empty());
+}
+
+// --- chelis#2957: a property resolves only the contracts it names ---
+
+fn resolved_rows_of(source: &str) -> Vec<String> {
+    let decls = flatten_module_decls(&chelis_surf::parser::parse_str(source).expect("parses"));
+    let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
+    crate::contracts::RESOLVED_ROWS.with(|rows| rows.borrow_mut().clear());
+    contract_assumptions(&decls, &properties[0], &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("contracts resolve");
+    crate::contracts::RESOLVED_ROWS.with(|rows| rows.borrow().clone())
+}
+
+#[test]
+fn chelis_2957_a_property_without_a_float_contract_resolves_no_float_discharge() {
+    assert!(resolved_rows_of("module M\n@property p forall(x: f32):\n  (x <= x)\n").is_empty());
+    assert_eq!(
+        resolved_rows_of(
+            "module M\n@property p forall(x: f64):\n  (x <= x)\n  with contract = \"std.quantile.range\"\n"
+        ),
+        vec!["std.quantile.range@untyped".to_string()]
+    );
+    // A float contract resolves at the property's widths only, with the
+    // range contract reflection implies.
+    assert_eq!(
+        resolved_rows_of(
+            "module M\n@property p forall(x: f32):\n  (x <= x)\n  with contract = \"std.normal_cdf.reflection\"\n"
+        ),
+        vec![
+            "std.normal_cdf.range@f32".to_string(),
+            "std.normal_cdf.reflection@f32".to_string()
+        ]
     );
 }

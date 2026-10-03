@@ -93,6 +93,7 @@ impl CacheIdentity {
     /// fails (path removed mid-build, permission error), the raw path is
     /// used so the identity is still distinct rather than empty.
     pub fn for_package_root(package_root: &Path) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let canonical = fs::canonicalize(package_root)
             .unwrap_or_else(|_| package_root.to_path_buf())
             .to_string_lossy()
@@ -122,6 +123,7 @@ impl ContextHash {
     /// to disambiguate concatenation collisions; per-file `sha256` is
     /// fixed-width so it's appended directly.
     pub fn from_digests(digests: &[SourceDigest]) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let mut hasher = Sha256::new();
         for d in digests {
             hasher.update((d.package_name.len() as u64).to_le_bytes());
@@ -286,6 +288,7 @@ impl CompiledContext {
     /// digest with it. A producer that can reach its reader over a second
     /// channel should use [`Self::encode_for_handoff`] instead.
     pub fn encode(&self) -> Result<Vec<u8>, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.envelope_bytes()
             .map(|(bytes, _)| bytes)
             .map_err(|e| format!("encode CompiledContext: {e}"))
@@ -299,6 +302,7 @@ impl CompiledContext {
     /// `chelis test` puts it in the worker's environment while the bytes go to a
     /// tempfile -- and the reader can then use [`Self::decode_authenticated`].
     pub fn encode_for_handoff(&self) -> Result<(Vec<u8>, HandoffDigest), String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.envelope_bytes()
             .map_err(|e| format!("encode CompiledContext: {e}"))
     }
@@ -315,6 +319,7 @@ impl CompiledContext {
     /// identity pins them to a producer running this compiler, which ran both
     /// checkers before writing.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         CacheEnvelope::from_bytes(bytes)
             .and_then(CacheEnvelope::into_context)
             .map_err(|e| format!("decode CompiledContext: {e}"))
@@ -336,6 +341,7 @@ impl CompiledContext {
     /// transmitted checked program the same way, as
     /// `both_decode_routes_reconstruct_identical_contexts` requires.
     pub fn decode_authenticated(bytes: &[u8], expected: &HandoffDigest) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         CacheEnvelope::from_bytes(bytes)
             .and_then(|envelope| envelope.into_authenticated_context(expected))
             .map_err(|e| format!("decode CompiledContext: {e}"))
@@ -378,6 +384,7 @@ impl CompiledContext {
     /// a `.tmp.<pid>` orphan but never a half-written final file. Parent
     /// directories are created lazily.
     pub fn save(&self, path: &Path) -> Result<(), CacheError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let (bytes, _) = self.envelope_bytes()?;
 
         if let Some(parent) = path.parent()
@@ -523,6 +530,7 @@ impl CompiledContext {
         package_dir: &Path,
         runtime: &'static EmbeddedRuntime,
     ) -> Result<Option<Self>, CacheError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self::load_if_fresh_for_entries(
             path,
             reef_home,
@@ -543,6 +551,7 @@ impl CompiledContext {
         entries: &EntryImports,
         runtime: &'static EmbeddedRuntime,
     ) -> Result<Option<Self>, CacheError> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         // Read the entire file into memory before any decode work — no
         // streaming-decode windows where a half-written tail looks like
         // a full envelope.
@@ -606,6 +615,7 @@ impl CompiledContext {
         source_hash: ContextHash,
         identity: &CacheIdentity,
     ) -> PathBuf {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         reef_home
             .join(".cache")
             .join("compiled")
@@ -622,6 +632,7 @@ impl CompiledContext {
         source_hash: ContextHash,
         identity: &CacheIdentity,
     ) -> String {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let (name, version) = package_id;
         let src_hex = hex_prefix(&source_hash.0, 8);
         let id_hex = identity.fingerprint_hex();
@@ -646,6 +657,7 @@ impl CompiledContext {
     /// path for `chelis test`. The performance win still comes from
     /// skipping the per-worker reef walk.
     pub fn reef_state(&self) -> &PreparedReefGraph {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.reef_state
     }
 }
@@ -683,6 +695,7 @@ pub fn load_or_compile_for_package(
     verbose_corruption_to_stderr: bool,
     runtime: &'static EmbeddedRuntime,
 ) -> Result<CompiledContext, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // Resolve the compiled-context cache directory. When `CHELIS_REEF_HOME`
     // is set, `reef_home` is non-empty and the cache lives at
     // `<reef_home>/.cache/compiled/`. When it is unset, `reef_home` is
@@ -818,6 +831,7 @@ pub fn load_or_compile_with_local_registry_fallback(
     verbose_corruption_to_stderr: bool,
     runtime: &'static EmbeddedRuntime,
 ) -> Result<(CompiledContext, ContextLoadPath), CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match load_or_compile_for_package(
         reef_home,
         package_dir,
@@ -1151,6 +1165,7 @@ pub struct HandoffDigest([u8; 32]);
 impl HandoffDigest {
     /// Lower-case hex, the form that crosses a process boundary.
     pub fn to_hex(&self) -> String {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         hex_prefix(&self.0, 32)
     }
 
@@ -1161,6 +1176,7 @@ impl HandoffDigest {
     /// silently repairing it would let a truncated value authenticate bytes it
     /// does not cover.
     pub fn from_hex(text: &str) -> Result<Self, String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         if text.len() != 64 {
             return Err(format!(
                 "handoff digest must be 64 lower-case hex characters, got {} characters",
@@ -1351,6 +1367,7 @@ pub fn compile_reef_context(
     package_dir: &Path,
     runtime: &'static EmbeddedRuntime,
 ) -> Result<CompiledContext, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     compile_reef_context_for_entries(reef_home, package_dir, &EntryImports::none(), runtime)
 }
 
@@ -1364,6 +1381,7 @@ pub fn compile_reef_context_for_entries(
     entries: &EntryImports,
     runtime: &'static EmbeddedRuntime,
 ) -> Result<CompiledContext, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // RFC v5 (RT-1 F2 bypass): the entire reef library is linker output
     // (internal-name-mangled), so the reserved linker-name rejection is
     // off for this whole context build.

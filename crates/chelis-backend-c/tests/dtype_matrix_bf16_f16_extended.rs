@@ -20,6 +20,7 @@
 //! Acceptance oracle: `cargo test -p chelis-backend-c --test dtype_matrix_bf16_f16_extended`.
 
 mod support;
+use chelis_crmath::profile::{Output, storage_reference};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
 use chelis_types::types::Prim;
@@ -140,6 +141,26 @@ fn vec_ty(n: usize, prec: Prim) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
         precision: prec,
+    }
+}
+
+/// `value` rounded once, to nearest even, to `prim`'s storage bits by the exact
+/// reference; `half`'s `from_f64` misrounds near ties (chelis#3041).
+fn storage_bits(prim: Prim, value: f64) -> u16 {
+    let output = match prim {
+        Prim::Bf16 => Output::Bf16,
+        Prim::F16 => Output::F16,
+        other => panic!("{} is not a storage format", other.name()),
+    };
+    storage_reference(value.to_bits(), 64, output)
+}
+
+/// `value` rounded once to `prim`, read back exactly as f64.
+fn storage_value(prim: Prim, value: f64) -> f64 {
+    let bits = storage_bits(prim, value);
+    match prim {
+        Prim::Bf16 => half::bf16::from_bits(bits).to_f64(),
+        _ => half::f16::from_bits(bits).to_f64(),
     }
 }
 
@@ -892,7 +913,7 @@ fn f16_prod_reduce_is_structurally_unsupported_today() {
 // ---------------------------------------------------------------------
 
 /// Run a cast f32 -> reduced (bf16 or f16); assert the output bit pattern
-/// is exactly `half::{bf16,f16}::from_f64(value).to_bits()` AND the
+/// is exactly the storage reference's rounding of `value` AND the
 /// round-trip through `chelis_{bf16,f16}_to_f32` lands within tolerance.
 fn run_cast_f32_to_reduced(test_name: &str, dst: Prim, value: f32, tol: f64) {
     if !gcc_available() {
@@ -941,11 +962,7 @@ int main(void) {{
     let bits_line = lines.next().unwrap();
     let round_line = lines.next().unwrap();
     let got_bits = u16::from_str_radix(bits_line.trim().trim_start_matches("0x"), 16).unwrap();
-    let expected_bits = match dst {
-        Prim::Bf16 => half::bf16::from_f64(value as f64).to_bits(),
-        Prim::F16 => half::f16::from_f64(value as f64).to_bits(),
-        _ => unreachable!(),
-    };
+    let expected_bits = storage_bits(dst, f64::from(value));
     assert_eq!(
         got_bits, expected_bits,
         "{test_name}: bit pattern got 0x{got_bits:04X}, expected 0x{expected_bits:04X}"
@@ -999,11 +1016,7 @@ int main(void) {{
     );
     let stdout = compile_and_run_kernel(test_name, &result.c_source, &main_c);
     let got: f64 = stdout.trim().parse().unwrap();
-    let expected = match src {
-        Prim::Bf16 => half::bf16::from_f64(value as f64).to_f64(),
-        Prim::F16 => half::f16::from_f64(value as f64).to_f64(),
-        _ => panic!("src must be reduced"),
-    };
+    let expected = storage_value(src, f64::from(value));
     assert!(
         (got - expected).abs() <= tol,
         "{test_name}: got {got}, expected {expected}, tol {tol}"
@@ -1063,16 +1076,8 @@ int main(void) {{
     // src-precision bit pattern. The cross-narrow-float cast then
     // chains through f32 so the dst-precision bit pattern is the
     // canonical round-to-nearest-even of the src value.
-    let src_value = match src {
-        Prim::Bf16 => half::bf16::from_f64(value as f64).to_f64(),
-        Prim::F16 => half::f16::from_f64(value as f64).to_f64(),
-        _ => panic!("src must be reduced"),
-    };
-    let expected_bits = match dst {
-        Prim::Bf16 => half::bf16::from_f64(src_value).to_bits(),
-        Prim::F16 => half::f16::from_f64(src_value).to_bits(),
-        _ => unreachable!(),
-    };
+    let src_value = storage_value(src, f64::from(value));
+    let expected_bits = storage_bits(dst, src_value);
     assert_eq!(
         got_bits, expected_bits,
         "{test_name}: bit pattern got 0x{got_bits:04X}, expected 0x{expected_bits:04X}"

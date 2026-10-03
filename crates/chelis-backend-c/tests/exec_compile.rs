@@ -6,7 +6,7 @@
 //! The kernel allocates output tensors internally via chelis_alloc.
 //! We link the carried runtime archive, staged into each probe directory.
 
-use chelis_backend_c::{CodegenOptions, MathLib};
+use chelis_backend_c::CodegenOptions;
 
 mod support;
 use chelis_ir::ConcreteHostType as HostType;
@@ -2433,10 +2433,10 @@ static chelis_tensor *make_view_1d(float* data, int64_t n) {
 }
 "#;
 
-// ---- Test 6 / Item 6: MathLib::None exp kernel ----
+// ---- Test 6 / Item 6: exp kernel through the carried correctly rounded kernel ----
 
 #[test]
-fn exec_math_none_exp_kernel_correct_output() {
+fn exec_exp_kernel_correct_output() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -2449,32 +2449,21 @@ fn exec_math_none_exp_kernel_correct_output() {
     dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(4), None);
     let dag = fuse(&dag);
 
-    let result = codegen_with_options(
-        &dag,
-        "test_exp_none",
-        CodegenOptions {
-            math_lib_override: Some(MathLib::None),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let result = codegen_with_options(&dag, "test_exp_none", CodegenOptions::default()).unwrap();
     let src = &result.c_source;
 
     assert!(
-        !src.contains("CHELIS_HAS_SLEEF"),
-        "MathLib::None must not emit Sleef guard"
-    );
-    assert!(
         !src.contains("chelis_math.h"),
-        "MathLib::None must not include chelis_math.h"
+        "generated C must not include chelis_math.h"
     );
     assert!(
-        src.contains("expf("),
-        "MathLib::None must use scalar expf()"
+        src.contains("static float chelis_cr_expf(float x)")
+            && src.contains("__chelis_nan_f32(chelis_cr_expf("),
+        "generated C must define and call the carried exp kernel"
     );
     assert!(
-        src.contains("#pragma omp parallel for simd"),
-        "MathLib::None must use Level-1 omp simd"
+        src.contains("#pragma omp for simd"),
+        "generated C must use the Level-1 omp simd loop"
     );
 
     let harness = format!(
@@ -2508,95 +2497,161 @@ int main() {{
     );
 
     let Some(output) = compile_and_run_kernel("none_exp", src, &harness) else {
-        panic!("MathLib::None exp kernel failed to compile/run");
+        panic!("exp kernel failed to compile/run");
     };
     assert!(
         output.contains("PASS"),
-        "MathLib::None exp kernel wrong output:\n{output}"
+        "exp kernel wrong output:\n{output}"
     );
 }
 
-// ---- Test 4: Sleef kernel scalar fallback (without -DCHELIS_HAS_SLEEF) ----
-//
-// FINDING: A single Load->Exp DAG does NOT generate the Sleef path because
-// fuse() only fuses chains of length >= 2.  The Sleef path lives in
-// emit_fused_elem which is only called for FusedElem nodes.  A single Exp
-// goes through emit_unary_func which never emits Sleef.  This test uses a
-// 2-op chain (Exp -> Neg) so that fuse() produces a FusedElem node.
+// ---- chelis#2957: every OpenMP worker runs under the pinned environment ----
+
+/// Compile `kernel.c` and `main.c` with OpenMP, or `None` when this compiler
+/// has no OpenMP (Apple clang): the property needs a real worker pool.
+fn compile_with_openmp(
+    test_name: &str,
+    c_source: &str,
+    harness: &str,
+) -> Option<(tempfile::TempDir, std::path::PathBuf)> {
+    let probe = common::probe_dir(&format!("exec_{test_name}"));
+    let dir = probe.path().to_path_buf();
+    fs::write(
+        dir.join("omp_probe.c"),
+        "int main(void) {\n#pragma omp parallel\n{ }\nreturn 0;\n}\n",
+    )
+    .unwrap();
+    let has_openmp = Command::new("gcc")
+        .args(["-fopenmp", "-Werror", "-o"])
+        .arg(dir.join("omp_probe"))
+        .arg(dir.join("omp_probe.c"))
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !has_openmp {
+        return None;
+    }
+    fs::write(dir.join("kernel.c"), c_source).unwrap();
+    fs::write(dir.join("main.c"), harness).unwrap();
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
+    let bin = dir.join("omp_bin");
+    let compile = Command::new("gcc")
+        .args([
+            "-O2",
+            "-ffp-contract=off",
+            "-fno-fast-math",
+            "-fopenmp",
+            "-std=c11",
+            "-I",
+        ])
+        .arg(&dir)
+        .arg(dir.join("kernel.c"))
+        .arg(dir.join("main.c"))
+        .arg(&staged.archive)
+        .args(["-fopenmp", "-lm", "-lpthread", "-ldl", "-o"])
+        .arg(&bin)
+        .output()
+        .expect("failed to invoke gcc");
+    assert!(
+        compile.status.success(),
+        "COMPILE FAILED [{test_name}]:\n{}\nKernel C:\n{c_source}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    Some((probe, bin))
+}
+
+/// A host whose OpenMP pool threads already run with flush-to-zero (as after
+/// a `crtfastmath` library or `set_flush_denormal(True)` initialized them)
+/// gets the same bits as a clean process: each worker pins the IEEE default
+/// for its share of the loop. `exp` of these inputs is subnormal in f32.
 #[test]
-fn exec_sleef_kernel_scalar_fallback_correct() {
+fn openmp_workers_compute_under_the_pinned_environment() {
+    const N: usize = 4096;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
         decl,
         RiscOp::Load { name: "a".into() },
         vec![],
-        vec_f32(9),
+        vec_f32(N),
         None,
     );
-    let e = dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(9), None);
-    dag.add_node(decl, RiscOp::Neg, vec![e], vec_f32(9), None); // 2-op chain: fuses into FusedElem
+    dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(N), None);
     let dag = fuse(&dag);
-
-    let result = codegen_with_options(
-        &dag,
-        "test_exp_sleef",
-        CodegenOptions {
-            math_lib_override: Some(MathLib::Sleef),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let result = codegen_with_options(&dag, "test_omp_exp", CodegenOptions::default()).unwrap();
     let src = &result.c_source;
-
     assert!(
-        src.contains("#ifdef CHELIS_HAS_SLEEF"),
-        "Missing Sleef guard"
+        src.contains("#pragma omp parallel\n") && src.contains("#pragma omp for simd"),
+        "the loop must run inside a pinning parallel region:\n{src}"
     );
-    assert!(src.contains("CHELIS_EXPF8("), "Missing CHELIS_EXPF8");
-    assert!(src.contains("_mm256_loadu_ps("), "Missing AVX2 load");
-    assert!(src.contains("_mm256_storeu_ps("), "Missing AVX2 store");
-    assert!(src.contains("for (; __i < "), "Missing scalar tail");
-    assert!(src.contains("#else"), "Missing #else");
-
-    // Compile WITHOUT -DCHELIS_HAS_SLEEF: the scalar #else branch runs for all 9 elements.
     let harness = format!(
         r#"{HARNESS_HEADER}
-extern void test_exp_sleef(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+#include <stdint.h>
+extern void test_omp_exp(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
 
-int main() {{
-    float in_data[9] = {{0.0f, 1.0f, -1.0f, 0.5f, 2.0f, -2.0f, 0.1f, 3.0f, -0.5f}};
-    chelis_tensor *in_t = make_view_1d(in_data, 9);
-    chelis_tensor* in_ptr = in_t;
-    chelis_tensor* inputs[1] = {{in_ptr}};
-    chelis_tensor* out_slot = NULL;
-    chelis_tensor* outputs[1] = {{out_slot}};
+static void flush_to_zero_on_this_thread(void) {{
+#if defined(__aarch64__)
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= (UINT64_C(1) << 24);
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+#elif defined(__x86_64__)
+    unsigned int csr;
+    __asm__ volatile("stmxcsr %0" : "=m"(csr));
+    csr |= 0x8040u;
+    __asm__ volatile("ldmxcsr %0" : : "m"(csr));
+#endif
+}}
 
-    test_exp_sleef(inputs, 1, outputs, 1);
-
-    int ok = 1;
-    for (int i = 0; i < 9; i++) {{
-        // The 2-op chain is exp->neg, so expected = -expf(x)
-        float expected = -expf(in_data[i]);
-        float got = ((float*)chelis_tensor_read_view(outputs[0]).data)[i];
-        float reldiff = fabsf(got - expected) / (fabsf(expected) + 1e-6f);
-        if (reldiff > 1e-4f) {{
-            printf("MISMATCH at %d: got %.6f expected %.6f\n", i, got, expected);
-            ok = 0;
-        }}
+int main(int argc, char** argv) {{
+    if (argc > 1) {{
+#pragma omp parallel
+        flush_to_zero_on_this_thread();
     }}
-    printf("%s\n", ok ? "PASS" : "FAIL");
-    return ok ? 0 : 1;
+    static float in_data[{N}];
+    for (int i = 0; i < {N}; i++) {{
+        in_data[i] = -88.0f - (float)(i % 16);
+    }}
+    chelis_tensor* inputs[1] = {{make_view_1d(in_data, {N})}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_omp_exp(inputs, 1, outputs, 1);
+    const float* out = (const float*)chelis_tensor_read_view(outputs[0]).data;
+    uint64_t hash = 1469598103934665603u;
+    int subnormal = 0;
+    for (int i = 0; i < {N}; i++) {{
+        uint32_t bits;
+        memcpy(&bits, &out[i], sizeof bits);
+        hash = (hash ^ bits) * 1099511628211u;
+        subnormal += bits != 0 && bits < 0x00800000u;
+    }}
+    printf("%016llx %d\n", (unsigned long long)hash, subnormal);
+    return 0;
 }}
 "#
     );
-
-    let Some(output) = compile_and_run_kernel("sleef_exp_neg9", src, &harness) else {
-        panic!("Sleef exp->neg kernel scalar fallback failed to compile/run");
+    let Some((_probe, bin)) = compile_with_openmp("omp_exp", src, &harness) else {
+        eprintln!("SKIP openmp_workers_compute_under_the_pinned_environment: gcc has no OpenMP");
+        return;
     };
+    let run = |args: &[&str]| {
+        let output = Command::new(&bin)
+            .args(args)
+            .env("OMP_NUM_THREADS", "4")
+            .output()
+            .expect("run the OpenMP harness");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let clean = run(&[]);
+    let subnormals: usize = clean.trim().split(' ').nth(1).unwrap().parse().unwrap();
     assert!(
-        output.contains("PASS"),
-        "Sleef exp->neg kernel scalar fallback wrong:\n{output}"
+        subnormals > N / 2,
+        "the witness must produce subnormals: {clean}"
+    );
+    assert_eq!(
+        run(&["dirty"]),
+        clean,
+        "a flush-to-zero worker changed the result"
     );
 }
 
@@ -2697,7 +2752,6 @@ fn exec_count_multi_axis_matches_exact_int64_result() {
         &dag,
         "test_count_multi",
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -2774,7 +2828,6 @@ fn exec_count_selected_zero_extent_returns_zero() {
         &dag,
         "test_count_empty",
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -3093,7 +3146,6 @@ fn exec_div_ieee_corner_cases() {
         &dag,
         "test_div_ieee",
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -3153,7 +3205,6 @@ fn exec_recip_ieee_corner_cases() {
         &dag,
         "test_recip_ieee",
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -3251,7 +3302,6 @@ fn run_int_div_op_exec(
         &dag,
         fn_name,
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -3572,7 +3622,6 @@ fn exec_floor_div_int_zero_divisor_traps() {
         &dag,
         "test_floor_div_trap",
         CodegenOptions {
-            math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
     )
@@ -3738,15 +3787,7 @@ fn exec_zero_size_tensor_does_not_crash() {
     dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(0), None);
     let dag = fuse(&dag);
 
-    let result = codegen_with_options(
-        &dag,
-        "test_exp_zero",
-        CodegenOptions {
-            math_lib_override: Some(MathLib::Sleef),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let result = codegen_with_options(&dag, "test_exp_zero", CodegenOptions::default()).unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -6578,10 +6619,8 @@ int main(void) {{
         let source = codegen(&dag, &function)
             .expect("reduced-float direct subtraction codegen")
             .c_source;
-        assert!(
-            source.contains(canonical_nan),
-            "{tag} subtraction source lacks exact canonical NaN: {source}"
-        );
+        // The runtime's narrowing store owns the canonical f16/bf16 NaN
+        // (chelis#2964); the run below checks the stored bits.
         let harness = format!(
             r#"{HARNESS_HEADER}
 #include <stdint.h>
@@ -8542,7 +8581,6 @@ fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
         "runtime_branch_local_ascription",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -8675,7 +8713,6 @@ fn an_all_interface_class_traps_at_entry_when_its_witnesses_disagree() {
         "guard_entry",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -8738,7 +8775,6 @@ fn an_all_interface_class_runs_when_its_witnesses_agree() {
         "guard_entry_ok",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -8844,7 +8880,6 @@ fn a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c() {
         "bcast_entry",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -9209,7 +9244,6 @@ fn entry_guards_run_in_assigned_slot_order_not_claim_name_order() {
         "entry_order",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -9276,7 +9310,6 @@ fn a_literal_claim_over_a_runtime_read_traps_at_entry_on_c() {
         "lit_entry",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -9404,7 +9437,6 @@ fn a_local_class_guards_at_its_operation_and_renders_the_numeric_trap() {
         "local_guard",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -9588,7 +9620,6 @@ fn numeric_local_extent_claims_execute_exactly() {
                     "numeric_claim",
                     CodegenOptions {
                         use_blas: false,
-                        math_lib_override: Some(MathLib::None),
                         static_entry: false,
                     },
                 )
@@ -9780,7 +9811,6 @@ fn an_interface_member_of_a_mixed_class_is_still_checked() {
         "mixed_class",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -9907,7 +9937,6 @@ fn a_literal_claim_on_a_symbolic_input_in_a_local_class_traps() {
         "sym_mixed",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10036,7 +10065,6 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
         "iface_resolved",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10114,7 +10142,6 @@ fn local_reshape_guards_follow_declaration_order() {
         "order_probe",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10216,7 +10243,6 @@ fn checked_snapshot_shape_capture_survives_submission_repurpose() {
         "snapshot_shape",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10625,7 +10651,6 @@ fn issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares() {
         "three_scopes",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10740,7 +10765,6 @@ fn issue_1788_two_scopes_in_one_function_share_one_declaration() {
         "two_scopes",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -10876,7 +10900,6 @@ fn assert_zero_geometry_both_lanes(
         "gradient_geometry",
         CodegenOptions {
             use_blas: false,
-            math_lib_override: Some(MathLib::None),
             static_entry: false,
         },
     )
@@ -12409,4 +12432,271 @@ fn issue_2512_an_untaken_restamping_expand_declares_its_inserted_extent_and_yiel
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// chelis#2964 (C7): an exported kernel runs under [04-NUM-2]'s IEEE
+/// default environment whatever its caller installed, and hands the
+/// caller's environment back. The host sets flush-to-zero (plus
+/// denormals-are-zero on x86_64, as `crtfastmath` does) and rounds upward,
+/// then checks a subnormal-producing and a rounding-sensitive division
+/// against round-to-nearest-even bits and its own mode after the call.
+#[test]
+fn exported_kernel_pins_ieee_default_fp_environment_and_restores_the_callers() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let ty = vec_prim(2, Prim::F32);
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Div, vec![a, b], ty, None);
+    dag.add_root(out);
+    let function = "exported_fp_env_div";
+    let source = codegen(&dag, function)
+        .expect("direct division codegen")
+        .c_source;
+    // 2^-126 / 2 is the subnormal 2^-127; -1 / 3 rounds to 0xbeaaaaab to
+    // nearest and to 0xbeaaaaaa upward.
+    let expected = [
+        (f32::MIN_POSITIVE / 2.0).to_bits(),
+        (-1.0_f32 / 3.0).to_bits(),
+    ];
+    assert_eq!(expected, [0x0040_0000, 0xbeaa_aaab]);
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <fenv.h>
+#include <stdint.h>
+#include <string.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+#if defined(__aarch64__)
+static uint64_t host_flush_state(void) {{
+    uint64_t fpcr;
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
+    return fpcr & (UINT64_C(1) << 24);
+}}
+static void host_set_flush(void) {{
+    uint64_t fpcr;
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= UINT64_C(1) << 24;
+    __asm__ __volatile__("msr fpcr, %0" : : "r"(fpcr));
+}}
+#elif defined(__x86_64__)
+static uint64_t host_flush_state(void) {{
+    uint32_t mxcsr;
+    __asm__ __volatile__("stmxcsr %0" : "=m"(mxcsr));
+    return mxcsr & UINT32_C(0x8040);
+}}
+static void host_set_flush(void) {{
+    uint32_t mxcsr;
+    __asm__ __volatile__("stmxcsr %0" : "=m"(mxcsr));
+    mxcsr |= UINT32_C(0x8040);
+    __asm__ __volatile__("ldmxcsr %0" : : "m"(mxcsr));
+}}
+#else
+#error "unsupported host architecture"
+#endif
+static int run(int base) {{
+    float a_data[2] = {{ chelis_f32_from_bits(UINT32_C(0x00800000)), -1.0f }};
+    float b_data[2] = {{ 2.0f, 3.0f }};
+    chelis_tensor *a = make_view_typed_1d(a_data, 2, CHELIS_DTYPE_F32);
+    chelis_tensor *b = make_view_typed_1d(b_data, 2, CHELIS_DTYPE_F32);
+    chelis_tensor *inputs[2] = {{ a, b }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    const float *got = (const float *)chelis_tensor_read_view(outputs[0]).data;
+    const uint32_t expected[2] = {{ UINT32_C({e0:#010x}), UINT32_C({e1:#010x}) }};
+    for (int i = 0; i < 2; ++i) {{
+        uint32_t bits = 0;
+        memcpy(&bits, &got[i], sizeof(bits));
+        if (bits != expected[i]) {{
+            printf("case %d element %d: got 0x%08x\n", base, i, (unsigned)bits);
+            return base + i;
+        }}
+    }}
+    return 0;
+}}
+int main(void) {{
+    int status = run(10);
+    if (status != 0) return status;
+    if (fesetround(FE_UPWARD) != 0) return 2;
+    host_set_flush();
+    if (host_flush_state() == 0 || fegetround() != FE_UPWARD) return 3;
+    status = run(20);
+    if (status != 0) return status;
+    if (fegetround() != FE_UPWARD) return 30;
+    if (host_flush_state() == 0) return 31;
+    puts("PASS");
+    return 0;
+}}
+"#,
+        e0 = expected[0],
+        e1 = expected[1],
+    );
+    let (ok, output) = compile_and_run_kernel_capturing(function, &source, &harness);
+    assert!(ok && output.contains("PASS"), "{output}");
+}
+
+/// chelis#2964 (C8): every direct and fused float arithmetic kernel
+/// finalizes the NaNs it produces to [04-NUM-2]'s canonical quiet NaN at
+/// every width, as eval does, instead of propagating the input payload and
+/// sign or the ISA's default NaN. Inputs carry a negative payload NaN and a
+/// signaling NaN on either side.
+#[test]
+fn direct_and_fused_float_arithmetic_finalizes_canonical_nan_at_every_width() {
+    let binary = [
+        RiscOp::Add,
+        RiscOp::Sub,
+        RiscOp::Mul,
+        RiscOp::Div,
+        RiscOp::FloorDiv,
+    ];
+    let unary = [
+        RiscOp::Neg,
+        RiscOp::Recip,
+        RiscOp::Sqrt,
+        RiscOp::Abs,
+        RiscOp::Floor,
+        RiscOp::Ceil,
+        RiscOp::Round,
+    ];
+    // (tag, prim, storage type, dtype, NaN inputs, one, canonical NaN)
+    let widths = [
+        (
+            "f32",
+            Prim::F32,
+            "uint32_t",
+            "CHELIS_DTYPE_F32",
+            ["UINT32_C(0xffc54321)", "UINT32_C(0x7f812345)"],
+            "UINT32_C(0x3f800000)",
+            "UINT32_C(0x7fc00000)",
+        ),
+        (
+            "f64",
+            Prim::F64,
+            "uint64_t",
+            "CHELIS_DTYPE_F64",
+            [
+                "UINT64_C(0xfff8abcd12345678)",
+                "UINT64_C(0x7ff0123456789abc)",
+            ],
+            "UINT64_C(0x3ff0000000000000)",
+            "UINT64_C(0x7ff8000000000000)",
+        ),
+        (
+            "f16",
+            Prim::F16,
+            "uint16_t",
+            "CHELIS_DTYPE_F16",
+            ["UINT16_C(0xfe55)", "UINT16_C(0x7c01)"],
+            "UINT16_C(0x3c00)",
+            "UINT16_C(0x7e00)",
+        ),
+        (
+            "bf16",
+            Prim::Bf16,
+            "uint16_t",
+            "CHELIS_DTYPE_BF16",
+            ["UINT16_C(0xffe5)", "UINT16_C(0x7f81)"],
+            "UINT16_C(0x3f80)",
+            "UINT16_C(0x7fc0)",
+        ),
+    ];
+    for (tag, prim, storage, dtype, nans, one, canonical) in widths {
+        for fused in [false, true] {
+            if fused && matches!(prim, Prim::F16 | Prim::Bf16) {
+                continue;
+            }
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let ty = vec_prim(2, prim);
+            let a = dag.add_node(
+                decl,
+                RiscOp::Load { name: "a".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let b = dag.add_node(
+                decl,
+                RiscOp::Load { name: "b".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let mut roots = 0;
+            for op in &binary {
+                for (lhs, rhs) in [(a, b), (b, a)] {
+                    let node = dag.add_node(decl, op.clone(), vec![lhs, rhs], ty.clone(), None);
+                    if fused {
+                        // A chained arithmetic step fuses with its producer.
+                        let chained =
+                            dag.add_node(decl, RiscOp::Mul, vec![node, b], ty.clone(), None);
+                        dag.add_root(chained);
+                    } else {
+                        dag.add_root(node);
+                    }
+                    roots += 1;
+                }
+            }
+            for op in &unary {
+                let node = dag.add_node(decl, op.clone(), vec![a], ty.clone(), None);
+                if fused {
+                    let chained = dag.add_node(decl, RiscOp::Neg, vec![node], ty.clone(), None);
+                    dag.add_root(chained);
+                } else {
+                    dag.add_root(node);
+                }
+                roots += 1;
+            }
+            let dag = if fused { fuse(&dag) } else { dag };
+            let mode = if fused { "fused" } else { "direct" };
+            let function = format!("canonical_nan_{mode}_{tag}");
+            let source = codegen(&dag, &function)
+                .expect("float arithmetic codegen")
+                .c_source;
+            let harness = format!(
+                r#"{HARNESS_HEADER}
+#include <stdint.h>
+#include <string.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {storage} a_data[2] = {{ {nan0}, {nan1} }};
+    {storage} b_data[2] = {{ {one}, {one} }};
+    chelis_tensor *a = make_view_typed_1d(a_data, 2, {dtype});
+    chelis_tensor *b = make_view_typed_1d(b_data, 2, {dtype});
+    chelis_tensor *inputs[2] = {{ a, b }};
+    chelis_tensor *outputs[{roots}] = {{ NULL }};
+    {function}(inputs, 2, outputs, {roots});
+    int failures = 0;
+    for (int k = 0; k < {roots}; ++k) {{
+        const {storage} *got = (const {storage} *)chelis_tensor_read_view(outputs[k]).data;
+        for (int i = 0; i < 2; ++i) {{
+            if (got[i] != {canonical}) {{
+                printf("output %d element %d: got 0x%llx\n", k, i, (unsigned long long)got[i]);
+                failures++;
+            }}
+        }}
+    }}
+    if (failures != 0) return 1;
+    puts("PASS");
+    return 0;
+}}
+"#,
+                nan0 = nans[0],
+                nan1 = nans[1],
+            );
+            let (ok, output) = compile_and_run_kernel_capturing(&function, &source, &harness);
+            assert!(ok && output.contains("PASS"), "{tag} {mode}:\n{output}");
+        }
+    }
 }

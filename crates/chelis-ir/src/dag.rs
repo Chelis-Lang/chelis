@@ -503,6 +503,7 @@ pub enum FusedStepOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
     Abs,
     Floor,
     Ceil,
@@ -513,6 +514,87 @@ pub enum FusedStepOp {
 ///
 /// `CmpLt` and `Lt` intentionally remain distinct source identities even
 /// though both use the same ordered comparison kernel.
+impl FusedStepOp {
+    /// [05-OP-46]'s transcendental operations, which no device lane may
+    /// compute until it has correctly rounded kernels of its own.
+    pub const fn transcendental_name(self) -> Option<&'static str> {
+        match self {
+            Self::Exp => Some("exp"),
+            Self::Log => Some("log"),
+            Self::Sin => Some("sin"),
+            Self::Cos => Some("cos"),
+            Self::Tan => Some("tan"),
+            Self::Atan => Some("atan"),
+            Self::Tanh => Some("tanh"),
+            Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::FloorDiv
+            | Self::TruncDiv
+            | Self::MaxElem
+            | Self::MinElem
+            | Self::Neg
+            | Self::Recip
+            | Self::Sqrt
+            | Self::Abs
+            | Self::Floor
+            | Self::Ceil
+            | Self::Round => None,
+        }
+    }
+
+    /// The [05-OP-46] operations a device lane may not compute: the
+    /// transcendentals, and `sqrt`, whose correct rounding neither device
+    /// lane establishes (Metal compiles with fast math, and the HIP runtime
+    /// compile does not pin a correctly rounded square root).
+    pub const fn device_fenced_name(self) -> Option<&'static str> {
+        match self {
+            Self::Sqrt => Some("sqrt"),
+            _ => self.transcendental_name(),
+        }
+    }
+}
+
+/// chelis#2957 GPU fence (`spec/design/correctly_rounded_math.md` §4.3): a
+/// device lane has no correctly rounded kernels for [05-OP-46]'s
+/// transcendentals or `sqrt`, so a DAG that computes one, directly or inside
+/// a fused chain, is rejected through [05-UNS-1] rather than computed with a
+/// vendor library.
+pub fn reject_device_correctly_rounded_ops(
+    nodes: &[DagNode],
+    target: &'static str,
+) -> Result<(), chelis_types::unsupported::Unsupported> {
+    for node in nodes {
+        let name = match &node.op {
+            RiscOp::Exp => Some("exp"),
+            RiscOp::Log => Some("log"),
+            RiscOp::Sin => Some("sin"),
+            RiscOp::Cos => Some("cos"),
+            RiscOp::Tan => Some("tan"),
+            RiscOp::Atan => Some("atan"),
+            RiscOp::Tanh => Some("tanh"),
+            RiscOp::Sqrt => Some("sqrt"),
+            RiscOp::FusedElem { ops } => ops.iter().find_map(|step| step.op.device_fenced_name()),
+            _ => None,
+        };
+        if let Some(name) = name {
+            return Err(chelis_types::unsupported::Unsupported::new(
+                chelis_types::unsupported::UnsupportedKind::Op(name.to_string()),
+                format!(
+                    "`{name}` must be correctly rounded and the {target} device lane has no correctly rounded kernel for it; build for `--target c`"
+                ),
+                chelis_types::unsupported::Stage::Codegen(target),
+                chelis_types::deliberate_rejection!(
+                    "[05-OP-46]",
+                    "device transcendentals and sqrt are fenced until the device lane has correctly rounded kernels"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComparisonKind {
@@ -839,6 +921,7 @@ pub enum RiscOp {
     Cos,
     Tan,
     Atan,
+    Tanh,
     Abs,
     Floor,
     Ceil,
@@ -1309,6 +1392,7 @@ pub enum RiscAtomIdentity {
     Cos,
     Tan,
     Atan,
+    Tanh,
     Abs,
     Floor,
     Ceil,
@@ -1389,6 +1473,7 @@ impl RiscAtomIdentity {
         Self::Cos,
         Self::Tan,
         Self::Atan,
+        Self::Tanh,
         Self::Abs,
         Self::Floor,
         Self::Ceil,
@@ -1469,6 +1554,7 @@ impl RiscAtomIdentity {
             Self::Cos => "cos",
             Self::Tan => "tan",
             Self::Atan => "atan",
+            Self::Tanh => "tanh",
             Self::Abs => "abs",
             Self::Floor => "floor",
             Self::Ceil => "ceil",
@@ -1622,6 +1708,7 @@ impl RiscOp {
             Self::Cos => Semantic(Id::Cos),
             Self::Tan => Semantic(Id::Tan),
             Self::Atan => Semantic(Id::Atan),
+            Self::Tanh => Semantic(Id::Tanh),
             Self::Abs => Semantic(Id::Abs),
             Self::Floor => Semantic(Id::Floor),
             Self::Ceil => Semantic(Id::Ceil),
@@ -1949,6 +2036,7 @@ impl RiscOp {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
@@ -2389,6 +2477,7 @@ impl DagNode {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
+            | RiscOp::Tanh
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
@@ -3550,6 +3639,7 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Cos
         | RiscOp::Tan
         | RiscOp::Atan
+        | RiscOp::Tanh
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
@@ -4768,6 +4858,7 @@ mod tests {
             RiscOp::Cos,
             RiscOp::Tan,
             RiscOp::Atan,
+            RiscOp::Tanh,
             RiscOp::Abs,
             RiscOp::Floor,
             RiscOp::Ceil,
@@ -5073,8 +5164,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            67,
-            "one_of_every_risc_op must list all 67 classified samples"
+            68,
+            "one_of_every_risc_op must list all 68 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5083,9 +5174,10 @@ mod tests {
         let excluded = all.len() - targetable;
 
         // Pinned partition per beacon_plan.md §3.1: the elementwise math
-        // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
+        // (5 binary/cmp + 14 unary, including `round` and the chelis#2957
+        // `tanh` primitive), 5 reductions, 6
         // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
-        // BlasMatmul), and Cast are targetable (34); stochastic (the two
+        // BlasMatmul), and Cast are targetable (35); stochastic (the two
         // key-operand draws and their two AD replays: 4),
         // arg-reductions (2), integer floor/trunc division and remainder (3),
         // `cast_trunc` (1, chelis#759), one_hot (1), the `Shape` metadata read
@@ -5102,7 +5194,7 @@ mod tests {
         // opaque keys, not numeric envelopes (+4 = 31), and so does a
         // branch's key join (+1 = 32).
         assert_eq!(
-            targetable, 34,
+            targetable, 35,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(

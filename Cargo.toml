@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/chelis-unord",
+    "crates/chelis-crmath",
     "crates/chelis-repr-inventory",
     "crates/chelis-vocab",
     "crates/chelis-abi",
@@ -57,6 +58,7 @@ unexpected_cfgs = "deny"
 
 [workspace.dependencies]
 chelis-unord = { path = "crates/chelis-unord" }
+chelis-crmath = { path = "crates/chelis-crmath" }
 chelis-vocab = { path = "crates/chelis-vocab" }
 chelis-abi = { path = "crates/chelis-abi" }
 chelis-image-id = { path = "crates/chelis-image-id" }

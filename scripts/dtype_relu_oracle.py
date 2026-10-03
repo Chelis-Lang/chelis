@@ -91,7 +91,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
                 "HostType::Float16 | HostType::BFloat16 => EmittedExpr::conditional(",
                 "BinaryOperator::Less,\n                                numeric_arg(0),\n                                EmittedExpr::integer(0),",
                 "EmittedExpr::integer(0),\n                            arg(0),",
-                '"    return x < {} ? {} : x;"',
+                '"    return x < {zero} ? {zero} : x;"',
                 'assert!(!body.contains("fmax")',
             ),
             ("stored_relu_decoder",),

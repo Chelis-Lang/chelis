@@ -338,7 +338,7 @@ features must preserve ordinary behavior except for their declared observations.
 | [chelis-vocab](../../../crates/chelis-vocab/Cargo.toml) | Closed vocabulary shared by semantic consumers | None declared | [Language](language.md) |
 | [chelis-prove](../../../crates/chelis-prove/Cargo.toml) | Obligation collection, solver models, certificates, and verdicts | `arb`, `carcara`, `clarabel`, `cvc5-rs`, `num-rational`, `smt`, `z3` | [Integration](integration.md) |
 | [chelis-compiler-api](../../../crates/chelis-compiler-api/Cargo.toml) | Public pipeline entries, contexts, schemas, and artifact admission | `emission-observer` | [Integration](integration.md) |
-| [chelis-backend-c](../../../crates/chelis-backend-c/Cargo.toml) | C lowering, generated host execution, and numerical-library selection | `sleef` | [Runtime](runtime.md) |
+| [chelis-backend-c](../../../crates/chelis-backend-c/Cargo.toml) | C lowering, generated host execution, and correctly rounded kernel emission | None declared | [Runtime](runtime.md) |
 | [chelis-ir](../../../crates/chelis-ir/Cargo.toml) | DAG and host IR, evaluation, transforms, and ownership verification | `lowering-trace` | [Runtime](runtime.md) |
 | [chelis-deep](../../../crates/chelis-deep/Cargo.toml) | Structural syntax, roles, metadata, and direct-producer ingress | None declared | [Language](language.md) |
 | [chelis-effects](../../../crates/chelis-effects/Cargo.toml) | Effect inference, declaration checking, and handlers | None declared | [Language](language.md) |

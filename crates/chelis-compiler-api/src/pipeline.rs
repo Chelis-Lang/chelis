@@ -74,10 +74,91 @@ pub use chelis_pipeline_core::{
     LibraryRejection, LoweredCompilation, LoweredLibrary, LoweredParts, LoweringMode, NamedRoots,
     PreparedLibraryAnalysis, PreparedProgram, PreparedTypeAnalysis, PreparedTypeAnalysisOutcome,
     RootCountContext, RootMetadata, SemanticContext, SemanticRejection, TensorRootNames,
-    analyze_prepared, analyze_prepared_library, analyze_prepared_library_with_base,
-    analyze_prepared_with_library, check_prepared_library, complete_checks,
-    complete_context_checks, complete_context_library_checks, complete_library_checks,
 };
+
+// The core's semantic transitions finalize literals and fold constants, so the
+// facade wraps each one under the pinned floating-point environment instead of
+// re-exporting it (spec/design/correctly_rounded_math.md section 6).
+
+/// [`chelis_pipeline_core::analyze_prepared`] under the pinned environment.
+pub fn analyze_prepared(prepared: PreparedProgram) -> PreparedTypeAnalysisOutcome {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    chelis_pipeline_core::analyze_prepared(prepared)
+}
+
+/// [`chelis_pipeline_core::analyze_prepared_library`] under the pinned
+/// environment.
+pub fn analyze_prepared_library(
+    prepared: PreparedProgram,
+) -> Result<PreparedLibraryAnalysis, LibraryRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    chelis_pipeline_core::analyze_prepared_library(prepared)
+}
+
+/// [`chelis_pipeline_core::analyze_prepared_library_with_base`] under the
+/// pinned environment.
+pub fn analyze_prepared_library_with_base(
+    prepared: PreparedProgram,
+    library: &CheckedLibrary,
+) -> Result<ContextualLibraryTypeAnalysis<'_>, chelis_types::InferResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    chelis_pipeline_core::analyze_prepared_library_with_base(prepared, library)
+}
+
+/// [`chelis_pipeline_core::analyze_prepared_with_library`] under the pinned
+/// environment.
+pub fn analyze_prepared_with_library(
+    prepared: PreparedProgram,
+    library: &CheckedLibrary,
+) -> Result<ContextualTypeAnalysis<'_>, chelis_types::InferResult> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    chelis_pipeline_core::analyze_prepared_with_library(prepared, library)
+}
+
+/// [`chelis_pipeline_core::check_prepared_library`] under the pinned
+/// environment.
+pub fn check_prepared_library(
+    prepared: PreparedProgram,
+) -> Result<CheckedLibrary, LibraryRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    chelis_pipeline_core::check_prepared_library(prepared)
+}
+
+/// [`chelis_pipeline_core::complete_checks`] under the pinned environment.
+pub fn complete_checks(
+    analysis: PreparedTypeAnalysis,
+    context: SemanticContext,
+) -> Result<CheckedCompilation, SemanticRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    chelis_pipeline_core::complete_checks(analysis, context)
+}
+
+/// [`chelis_pipeline_core::complete_context_checks`] under the pinned
+/// environment.
+pub fn complete_context_checks(
+    contextual: ContextualTypeAnalysis<'_>,
+) -> Result<ContextCheckedCompilation<'_>, SemanticRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    chelis_pipeline_core::complete_context_checks(contextual)
+}
+
+/// [`chelis_pipeline_core::complete_context_library_checks`] under the pinned
+/// environment.
+pub fn complete_context_library_checks(
+    contextual: ContextualLibraryTypeAnalysis<'_>,
+) -> Result<CheckedLibrary, LibraryRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    chelis_pipeline_core::complete_context_library_checks(contextual)
+}
+
+/// [`chelis_pipeline_core::complete_library_checks`] under the pinned
+/// environment.
+pub fn complete_library_checks(
+    prepared: PreparedLibraryAnalysis,
+) -> Result<CheckedLibrary, LibraryRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    chelis_pipeline_core::complete_library_checks(prepared)
+}
 
 /// The closed set of supported pipeline goals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +198,7 @@ pub enum PreparationError {
 
 impl PreparationError {
     pub fn surf_source(&self) -> Option<&str> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         match self {
             Self::SurfParse { source, .. } => Some(source),
             Self::SurfDesugar(_)
@@ -253,6 +335,7 @@ pub enum PipelineOutcome {
 
 /// Run a source request through the required pipeline prefix.
 pub fn run_source(request: PipelineRequest<'_>) -> Result<PipelineOutcome, PipelineRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     pipeline_bail_if_cancelled("parse")?;
     let prepared = prepare_source(request.source_kind, request.source, request.entry)
         .map_err(PipelineRejection::Preparation)?;
@@ -265,6 +348,7 @@ pub fn run_prepared(
     prepared: PreparedProgram,
     goal: PipelineGoal,
 ) -> Result<PipelineOutcome, PipelineRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match goal {
         PipelineGoal::TypeAnalysis => {
             pipeline_bail_if_cancelled("check")?;
@@ -325,6 +409,7 @@ pub fn prepare_source(
     source: &str,
     entry: Option<&str>,
 ) -> Result<PreparedProgram, PreparationError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match source_kind {
         SourceKind::Surf => {
             let decls = chelis_surf::parser::parse_str(source).map_err(|error| {
@@ -354,6 +439,7 @@ pub fn prepare_surf_decls(
     decls: &[chelis_surf::ast::Decl],
     entry: Option<&str>,
 ) -> Result<PreparedProgram, PreparationError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     prepare_surf_decls_with_context(decls, &[], entry)
 }
 
@@ -362,6 +448,7 @@ pub fn prepare_surf_decls_with_context(
     context: &[chelis_deep::Expr],
     entry: Option<&str>,
 ) -> Result<PreparedProgram, PreparationError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let desugared = chelis_surf::desugar::desugar_program_with_context(decls, context)
         .map_err(PreparationError::SurfDesugar)?;
     let expanded =
@@ -373,6 +460,7 @@ pub fn prepare_surf_decls_with_context(
 
 /// Wrap already-expanded Deep and apply optional entry pruning.
 pub fn prepare_deep(exprs: Vec<DeepExpr>, entry: Option<&str>) -> PreparedProgram {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let expanded_deep = match entry {
         Some(entry) => crate::prune::prune_to_entry(exprs, entry),
         None => exprs,
@@ -382,6 +470,7 @@ pub fn prepare_deep(exprs: Vec<DeepExpr>, entry: Option<&str>) -> PreparedProgra
 
 /// Lower a checked library carrier without target-specific emission.
 pub fn lower_library(library: &CheckedLibrary) -> Result<LoweredLibrary, PipelineRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     pipeline_bail_if_cancelled("lower")?;
     let result = chelis_pipeline_core::lower_library(library);
     pipeline_bail_if_cancelled("lower")?;
@@ -393,6 +482,7 @@ pub fn lower_checked(
     checked: CheckedCompilation,
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, PipelineRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     pipeline_bail_if_cancelled("lower")?;
     let result = chelis_pipeline_core::lower_checked(checked, mode);
     pipeline_bail_if_cancelled("lower")?;
@@ -413,6 +503,7 @@ pub fn lower_checked_for_c_execution(
     ),
     PipelineRejection,
 > {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     pipeline_bail_if_cancelled("lower")?;
     let result = chelis_pipeline_core::lower_checked_for_c_execution(checked, manifest, mode);
     pipeline_bail_if_cancelled("lower")?;
@@ -446,6 +537,7 @@ pub fn lower_checked_with_context(
     library: &LoweredLibrary,
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, PipelineRejection> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     pipeline_bail_if_cancelled("lower")?;
     let result = chelis_pipeline_core::lower_checked_with_context(checked, library, mode);
     pipeline_bail_if_cancelled("lower")?;

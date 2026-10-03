@@ -22,11 +22,15 @@ APPROVED_DIRECT_DEPENDENCIES = frozenset(
 # chelis-abi is the leaf checked-metadata authority (it depends only on
 # chelis-vocab). chelis-ir's DAG evaluator admits each result's extents through
 # it before allocating, the check the C runtime makes (chelis#2491).
+# chelis-crmath is the leaf correctly-rounded kernel authority (no workspace
+# dependencies); chelis-types' dtype kernels compute [05-OP-46]
+# transcendentals through it (chelis#2957).
 APPROVED_WORKSPACE_CLOSURE = frozenset(
     {
         CORE_PACKAGE,
         *APPROVED_DIRECT_DEPENDENCIES,
         "chelis-abi",
+        "chelis-crmath",
         "chelis-pred",
         "chelis-vocab",
     }

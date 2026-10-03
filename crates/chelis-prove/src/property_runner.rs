@@ -29,6 +29,7 @@ use chelis_surf::ast::{
     BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, PropertyOption, TensorPrecision,
     TypeExpr,
 };
+use chelis_types::types::Prim;
 
 mod smt_lower;
 use smt_lower::{
@@ -42,10 +43,7 @@ use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
     NonVacuityRecord, NonVacuityStatus, base_verdict_from_discharge, rollup_composite,
 };
-use crate::contracts::{
-    NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry,
-    standard_contract_registry_with_prover,
-};
+use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry_for};
 use crate::discharge::QualifierSet;
 
 /// The verification status of one user property.
@@ -462,10 +460,14 @@ pub struct PropertyRunOptions {
     pub invariant_min_rate: f64,
     /// Max sampling attempts; `None` derives it from `samples`.
     pub max_attempts: Option<usize>,
+    /// The chelis-std runtime the caller embeds: the standard-library graphs
+    /// properties evaluate and the discharge table is checked against.
+    pub runtime: &'static chelis_reef::EmbeddedRuntime,
 }
 
-impl Default for PropertyRunOptions {
-    fn default() -> Self {
+impl PropertyRunOptions {
+    /// The prove surface's defaults, over the caller's chelis-std `runtime`.
+    pub fn new(runtime: &'static chelis_reef::EmbeddedRuntime) -> Self {
         Self {
             seed: 0,
             samples: 100,
@@ -476,11 +478,10 @@ impl Default for PropertyRunOptions {
             only: None,
             invariant_min_rate: 0.01,
             max_attempts: None,
+            runtime,
         }
     }
-}
 
-impl PropertyRunOptions {
     fn effective_seed(&self, property_seed: Option<u64>) -> u64 {
         if self.seed != 0 {
             self.seed
@@ -747,7 +748,7 @@ fn prove_surf_property(
         return beacon::prove(decls, property, options);
     }
     let seed = options.effective_seed(property.seed);
-    let contract_assumptions = match contract_assumptions(property) {
+    let contract_assumptions = match contract_assumptions(decls, property, options.runtime) {
         Ok(records) => records,
         Err(reason) => {
             return PropertyOutcome::new(
@@ -966,15 +967,23 @@ fn function_reaches_itself(
     })
 }
 
-fn contract_assumptions(property: &Property) -> Result<Vec<AssumptionRecord>, String> {
+fn contract_assumptions(
+    decls: &[Decl],
+    property: &Property,
+    runtime: &'static chelis_reef::EmbeddedRuntime,
+) -> Result<Vec<AssumptionRecord>, String> {
     let contracts = expanded_contracts(property);
     if contracts.is_empty() {
         return Ok(Vec::new());
     }
-    let registry = match BeaconContractProver::from_env() {
-        Some(prover) => standard_contract_registry_with_prover(&prover),
-        None => standard_contract_registry(),
-    };
+    // A float contract is fuzz-discharged per width, and the consumer resolves
+    // it at every width its operands can have (chelis#2965). Only the
+    // contracts the property names are resolved.
+    let widths = property_float_widths(decls, property);
+    let reached = contracts.iter().cloned().collect::<BTreeSet<_>>();
+    let prover = BeaconContractProver::from_env();
+    let registry =
+        standard_contract_registry_for(Some(&reached), &widths, prover.as_ref(), runtime);
     let probe = registry.probe_consumer(
         &property.name,
         CompositeVerdict::Proven,
@@ -988,6 +997,147 @@ fn contract_assumptions(property: &Property) -> Result<Vec<AssumptionRecord>, St
         return Err(format!("unknown contract `{}`", missing.name));
     }
     Ok(probe.assumptions)
+}
+
+/// Every float width a contract-bound call in `property` can be evaluated at,
+/// over-approximated from the source the property reaches. Chelis has no
+/// implicit precision promotion, so a float value's width is spelled somewhere
+/// in that source (a binder or signature type, a cast target, a literal
+/// suffix) or is the `f32` default of an unsuffixed float literal. The scan
+/// reads the property and every user function it reaches; the trusted
+/// chelis-std implementations are generic in their width and are skipped. An
+/// empty result means every admitted width.
+fn property_float_widths(decls: &[Decl], property: &Property) -> Vec<Prim> {
+    let function_names: BTreeSet<String> = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::FunDef { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let property_params = property
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect();
+    let mut pending = BTreeSet::new();
+    collect_expr_refs(
+        &property.body,
+        &property_params,
+        &function_names,
+        &mut pending,
+    );
+    for precondition in &property.preconditions {
+        collect_expr_refs(
+            precondition,
+            &property_params,
+            &function_names,
+            &mut pending,
+        );
+    }
+    // The property rendered as a function, so its binder types are spelled.
+    let mut text = chelis_surf::format::format_program(&[Decl::FunDef {
+        name: property.name.clone(),
+        type_binders: Vec::new(),
+        params: property.params.clone(),
+        ret_ty: None,
+        effects: None,
+        body: property.body.clone(),
+        span: chelis_deep::Span::new(0, 0),
+    }]);
+    for precondition in &property.preconditions {
+        text.push('\n');
+        text.push_str(&chelis_surf::format::format_expression(precondition));
+    }
+    let mut visited = BTreeSet::new();
+    while let Some(name) = pending.pop_first() {
+        if !visited.insert(name.clone()) || name.starts_with("pkg__chelis__std__") {
+            continue;
+        }
+        for decl in decls {
+            if let Decl::FunDef {
+                name: decl_name,
+                params,
+                body,
+                ..
+            } = decl
+                && *decl_name == name
+            {
+                text.push('\n');
+                text.push_str(&chelis_surf::format::format_program(std::slice::from_ref(
+                    decl,
+                )));
+                let names = params.iter().map(|param| param.name.as_str()).collect();
+                collect_expr_refs(body, &names, &function_names, &mut pending);
+            }
+        }
+    }
+    spelled_float_widths(&text)
+}
+
+/// The float dtypes `text` spells as a type name or a literal suffix, plus
+/// `f32` when it holds an unsuffixed float literal.
+fn spelled_float_widths(text: &str) -> Vec<Prim> {
+    let mut widths = Vec::new();
+    let mut add = |prim: Prim| {
+        if !widths.contains(&prim) {
+            widths.push(prim);
+        }
+    };
+    let bytes = text.as_bytes();
+    let word_end = |mut i: usize| {
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        i
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_alphabetic() || c == b'_' {
+            let end = word_end(i);
+            if let Some(prim) = Prim::parse_name(&text[i..end]).filter(Prim::is_float) {
+                add(prim);
+            }
+            i = end;
+        } else if c.is_ascii_digit() {
+            let mut j = i;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'_') {
+                j += 1;
+            }
+            let mut is_float = false;
+            if j + 1 < bytes.len() && bytes[j] == b'.' && bytes[j + 1].is_ascii_digit() {
+                is_float = true;
+                j += 1;
+                while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'_') {
+                    j += 1;
+                }
+            }
+            if j < bytes.len() && matches!(bytes[j], b'e' | b'E') {
+                let mut k = j + 1;
+                if k < bytes.len() && matches!(bytes[k], b'+' | b'-') {
+                    k += 1;
+                }
+                if k < bytes.len() && bytes[k].is_ascii_digit() {
+                    is_float = true;
+                    j = k;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                }
+            }
+            let end = word_end(j);
+            match Prim::parse_name(&text[j..end]).filter(Prim::is_float) {
+                Some(prim) => add(prim),
+                None if is_float => add(Prim::F32),
+                None => {}
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    widths
 }
 
 fn expanded_contracts(property: &Property) -> Vec<String> {

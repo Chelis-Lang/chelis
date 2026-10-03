@@ -424,6 +424,27 @@
       ]
     },
     {
+      "name": "correctly rounded C NaN finalization, include set, and compiler canary execution",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--lib",
+        "--test",
+        "exec_compile",
+        "-E",
+        "(test(toolchain::tests::verify_compiler_) | test(=generated_header::tests::sealed_artifact_rejects_conditionally_erased_exports_and_unknown_includes) | test(=exec_exp_kernel_correct_output) | test(=direct_float_subtraction_finalizes_canonical_nan_bits_at_every_width) | test(=direct_and_fused_float_arithmetic_finalizes_canonical_nan_at_every_width) | test(=direct_extrema_preserve_nan_payloads_and_lhs_signed_zero_at_every_float_width)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
+      ],
+      "required": [
+        "chelis-backend-c::exec_compile::direct_and_fused_float_arithmetic_finalizes_canonical_nan_at_every_width",
+        "chelis-backend-c::exec_compile::direct_extrema_preserve_nan_payloads_and_lhs_signed_zero_at_every_float_width",
+        "chelis-backend-c::exec_compile::direct_float_subtraction_finalizes_canonical_nan_bits_at_every_width",
+        "chelis-backend-c::exec_compile::exec_exp_kernel_correct_output",
+        "chelis-backend-c::generated_header::tests::sealed_artifact_rejects_conditionally_erased_exports_and_unknown_includes",
+        "chelis-backend-c::toolchain::tests::verify_compiler_ignores_hostile_environment",
+        "chelis-backend-c::toolchain::tests::verify_compiler_refuses_a_wrapper_that_changes_the_profile"
+      ]
+    },
+    {
       "name": "checked key callable scalar and tensor C execution",
       "args": [
         "-p",
@@ -1299,12 +1320,7 @@
         "chelis-backend-c::tests::runtime_compiles_standalone",
         "chelis-backend-c::tests::runtime_view_free_is_safe",
         "chelis-backend-c::tests::simd_math_fused_kernel_compiles_and_runs",
-        "chelis-backend-c::tests::simd_math_fused_kernel_generates_sleef_path",
         "chelis-backend-c::tests::simd_math_fused_kernel_matches_scalar_output",
-        "chelis-backend-c::tests::simd_math_none_path_does_not_include_math_header",
-        "chelis-backend-c::tests::simd_pure_arithmetic_fused_kernel_skips_sleef_path",
-        "chelis-backend-c::tests::simd_single_math_op_generates_sleef_path",
-        "chelis-backend-c::tests::simd_single_math_op_sleef_compiles_and_runs",
         "chelis-backend-c::tests::simple_add_compiles",
         "chelis-backend-c::tests::symbolic_batch_codegen_reuses_one_artifact_for_multiple_input_shapes",
         "chelis-backend-c::tests::symbolic_batched_matmul_preserves_primitive_arithmetic",

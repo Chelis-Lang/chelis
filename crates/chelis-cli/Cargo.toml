@@ -68,6 +68,9 @@ ownership-ledger = ["chelis-runtime/ownership-ledger"]
 assert_cmd = "2"
 chelis-reef.workspace = true
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+# `copy_elision.rs` separates the linked correctly rounded kernel text, whose
+# bit casts are memcpy, from the code the probe's own lowering emits.
+chelis-crmath.workspace = true
 chelis-shell.workspace = true
 # `reef_setup.rs` synthesizes a chelis toolchain release tarball
 # (`chelis-vX.Y.Z-<build>.tar.gz`, gzip) so the auto-install-via-chelisup path

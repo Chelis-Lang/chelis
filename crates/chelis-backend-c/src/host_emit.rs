@@ -82,7 +82,6 @@ enum CExpressionBuiltin {
     Ceil,
     Round,
     Recip,
-    Pow,
     Abs,
     Min,
     Max,
@@ -91,88 +90,174 @@ enum CExpressionBuiltin {
 }
 
 impl CExpressionBuiltin {
+    /// Every builtin name the host scalar lane decodes, and so every
+    /// expression it can emit.
+    const NAMES: [(&'static str, Self); 64] = [
+        ("add", Self::Add),
+        ("sub", Self::Sub),
+        ("mul", Self::Mul),
+        ("div", Self::Div),
+        ("trunc_div", Self::TruncDiv),
+        ("floor_div", Self::FloorDiv),
+        ("mod", Self::Mod),
+        ("bitand", Self::BitAnd),
+        ("bitor", Self::BitOr),
+        ("bitxor", Self::BitXor),
+        ("shl", Self::ShiftLeft),
+        ("shr", Self::ShiftRight),
+        ("cmplt", Self::CompareLess),
+        ("lt", Self::Less),
+        ("gt", Self::Greater),
+        ("gte", Self::GreaterEqual),
+        ("lte", Self::LessEqual),
+        ("eq", Self::Equal),
+        ("neq", Self::NotEqual),
+        ("and", Self::And),
+        ("or", Self::Or),
+        ("not", Self::Not),
+        ("neg", Self::Neg),
+        ("string_concat", Self::StringConcat),
+        ("string_trim", Self::StringTrim),
+        ("reshape", Self::Reshape),
+        ("string_slice", Self::StringSlice),
+        ("string_contains", Self::StringContains),
+        ("string_starts_with", Self::StringStartsWith),
+        ("string_ends_with", Self::StringEndsWith),
+        ("string_len", Self::StringLen),
+        ("char_code", Self::CharCode),
+        ("char_from_code", Self::CharFromCode),
+        ("to_string", Self::ToString),
+        ("to_int", Self::ToInt),
+        ("to_float", Self::ToFloat),
+        ("tensor_to_scalar", Self::TensorToScalar),
+        ("scalar_to_tensor", Self::ScalarToTensor),
+        ("len", Self::Len),
+        ("range", Self::Range),
+        ("rank", Self::Rank),
+        ("shape", Self::Shape),
+        ("numel", Self::Numel),
+        ("sqrt", Self::Sqrt),
+        ("exp", Self::Exp),
+        ("log", Self::Log),
+        ("sin", Self::Sin),
+        ("cos", Self::Cos),
+        ("tan", Self::Tan),
+        ("atan", Self::Atan),
+        ("tanh", Self::Tanh),
+        ("relu", Self::Relu),
+        ("sigmoid", Self::Sigmoid),
+        ("silu", Self::Silu),
+        ("gelu", Self::Gelu),
+        ("floor", Self::Floor),
+        ("ceil", Self::Ceil),
+        ("round", Self::Round),
+        ("recip", Self::Recip),
+        ("abs", Self::Abs),
+        ("min", Self::Min),
+        ("max", Self::Max),
+        ("min_elem", Self::MinElem),
+        ("max_elem", Self::MaxElem),
+    ];
+
     fn decode(name: &str) -> Result<Self, Unsupported> {
-        Ok(match name {
-            "add" => Self::Add,
-            "sub" => Self::Sub,
-            "mul" => Self::Mul,
-            "div" => Self::Div,
-            "trunc_div" => Self::TruncDiv,
-            "floor_div" => Self::FloorDiv,
-            "mod" => Self::Mod,
-            "bitand" => Self::BitAnd,
-            "bitor" => Self::BitOr,
-            "bitxor" => Self::BitXor,
-            "shl" => Self::ShiftLeft,
-            "shr" => Self::ShiftRight,
-            "cmplt" => Self::CompareLess,
-            "lt" => Self::Less,
-            "gt" => Self::Greater,
-            "gte" => Self::GreaterEqual,
-            "lte" => Self::LessEqual,
-            "eq" => Self::Equal,
-            "neq" => Self::NotEqual,
-            "and" => Self::And,
-            "or" => Self::Or,
-            "not" => Self::Not,
-            "neg" => Self::Neg,
-            "string_concat" => Self::StringConcat,
-            "string_trim" => Self::StringTrim,
-            "reshape" => Self::Reshape,
-            "string_slice" => Self::StringSlice,
-            "string_contains" => Self::StringContains,
-            "string_starts_with" => Self::StringStartsWith,
-            "string_ends_with" => Self::StringEndsWith,
-            "string_len" => Self::StringLen,
-            "char_code" => Self::CharCode,
-            "char_from_code" => Self::CharFromCode,
-            "to_string" => Self::ToString,
-            "to_int" => Self::ToInt,
-            "to_float" => Self::ToFloat,
-            "tensor_to_scalar" => Self::TensorToScalar,
-            "scalar_to_tensor" => Self::ScalarToTensor,
-            "len" => Self::Len,
-            "range" => Self::Range,
-            "rank" => Self::Rank,
-            "shape" => Self::Shape,
-            "numel" => Self::Numel,
-            "sqrt" => Self::Sqrt,
-            "exp" => Self::Exp,
-            "log" => Self::Log,
-            "sin" => Self::Sin,
-            "cos" => Self::Cos,
-            "tan" => Self::Tan,
-            "atan" => Self::Atan,
-            "tanh" => Self::Tanh,
-            "relu" => Self::Relu,
-            "sigmoid" => Self::Sigmoid,
-            "silu" => Self::Silu,
-            "gelu" => Self::Gelu,
-            "floor" => Self::Floor,
-            "ceil" => Self::Ceil,
-            "round" => Self::Round,
-            "recip" => Self::Recip,
-            "pow" => Self::Pow,
-            "abs" => Self::Abs,
-            "min" => Self::Min,
-            "max" => Self::Max,
-            "min_elem" => Self::MinElem,
-            "max_elem" => Self::MaxElem,
-            other => {
-                return Err(Unsupported::new(
-                    UnsupportedKind::Builtin(other.to_string()),
-                    "`chelis build` host emission",
-                    Stage::Codegen("c"),
-                    chelis_types::deliberate_rejection!(
-                        "[04-TOT-2]",
-                        "the checked builtin vocabulary and C expression vocabulary disagree; \
-                         no fallback expression is permitted"
-                    ),
-                )
-                .with_supported_alternative("run this program with `chelis eval`"));
-            }
-        })
+        match Self::NAMES.iter().find(|(candidate, _)| *candidate == name) {
+            Some((_, builtin)) => Ok(*builtin),
+            None => Err(Unsupported::new(
+                UnsupportedKind::Builtin(name.to_string()),
+                "`chelis build` host emission",
+                Stage::Codegen("c"),
+                chelis_types::deliberate_rejection!(
+                    "[04-TOT-2]",
+                    "the checked builtin vocabulary and C expression vocabulary disagree; \
+                     no fallback expression is permitted"
+                ),
+            )
+            .with_supported_alternative("run this program with `chelis eval`")),
+        }
     }
+
+    /// [04-NUM-2]'s NaN finalization of the builtin's float result, or `None`
+    /// when it produces no float value of its own (integer, bool, string and
+    /// shape builtins, and transport that carries stored bits). Exhaustive,
+    /// so a new builtin does not compile until it is classified. `min` and
+    /// `max` lower to C `fmin`/`fmax`, which no atom declares bit-preserving.
+    fn nan_finalization(self) -> Option<crate::fp_env::NanFinalization> {
+        use crate::fp_env::NanFinalization;
+        match self {
+            Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::FloorDiv
+            | Self::Neg
+            | Self::Sqrt
+            | Self::Exp
+            | Self::Log
+            | Self::Sin
+            | Self::Cos
+            | Self::Tan
+            | Self::Atan
+            | Self::Tanh
+            | Self::Sigmoid
+            | Self::Silu
+            | Self::Gelu
+            | Self::Floor
+            | Self::Ceil
+            | Self::Round
+            | Self::Recip
+            | Self::Abs
+            | Self::Min
+            | Self::Max => Some(NanFinalization::Canonical),
+            Self::Relu | Self::MinElem | Self::MaxElem => Some(NanFinalization::BitPreserving),
+            Self::TruncDiv
+            | Self::Mod
+            | Self::BitAnd
+            | Self::BitOr
+            | Self::BitXor
+            | Self::ShiftLeft
+            | Self::ShiftRight
+            | Self::CompareLess
+            | Self::Less
+            | Self::Greater
+            | Self::GreaterEqual
+            | Self::LessEqual
+            | Self::Equal
+            | Self::NotEqual
+            | Self::And
+            | Self::Or
+            | Self::Not
+            | Self::StringConcat
+            | Self::StringTrim
+            | Self::Reshape
+            | Self::StringSlice
+            | Self::StringContains
+            | Self::StringStartsWith
+            | Self::StringEndsWith
+            | Self::StringLen
+            | Self::CharCode
+            | Self::CharFromCode
+            | Self::ToString
+            | Self::ToInt
+            | Self::ToFloat
+            | Self::TensorToScalar
+            | Self::ScalarToTensor
+            | Self::Len
+            | Self::Range
+            | Self::Rank
+            | Self::Shape
+            | Self::Numel => None,
+        }
+    }
+}
+
+/// The host scalar lane's NaN finalization inventory: every builtin name it
+/// emits with the classification its finalization point applies. Oracles
+/// derive their cases from this list.
+pub fn host_builtin_nan_inventory() -> Vec<(&'static str, Option<crate::fp_env::NanFinalization>)> {
+    CExpressionBuiltin::NAMES
+        .iter()
+        .map(|(name, builtin)| (*name, builtin.nan_finalization()))
+        .collect()
 }
 
 use crate::emit::CEmitter;
@@ -245,12 +330,11 @@ pub(crate) fn emit_host_abi_program(
     let program = projected.program();
     let _site_identity_count = projected.sites().len();
     // Emit helpers and functions into a body buffer first so we can detect which
-    // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
-    // when a helper uses the vForce vvexpf/vvlogf path).  The preamble is then
-    // assembled with the right includes and prepended.  Without this, the
-    // include-stripping in `append_helper` silently drops the inner emitter's
-    // `#include "chelis_math.h"` and the resulting `main.c` calls vvexpf with
-    // no declaration in scope.
+    // runtime headers they transitively require (`chelis_blas.h` when a helper
+    // calls BLAS).  The preamble is then assembled with the right includes and
+    // prepended.  Without this, the include-stripping in `append_helper`
+    // silently drops the inner emitter's include and the resulting `main.c`
+    // calls a function with no declaration in scope.
     let mut body: Vec<String> = Vec::new();
     let mut helper_requirements = HelperRequirements::default();
     append_scalar_conversion_helpers(&mut body);
@@ -268,8 +352,7 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_option_print_helper(&mut body);
     body.push(String::new());
-    append_tensor_math_helpers(&mut body);
-    body.push(String::new());
+    let math_helpers_index = body.len();
     // Authored functions are published in the generated header with external
     // linkage. [05-OBS-11] can make the same translation unit executable by
     // adding `main`, but that observation driver must not contradict the
@@ -537,6 +620,12 @@ pub(crate) fn emit_host_abi_program(
         )?;
     }
 
+    // The scalar activation helpers precede every authored body and are
+    // emitted only when one calls them, so the unit carries only the
+    // correctly rounded kernels it uses. This splice lies after the key
+    // callback index, so it runs first and leaves that index valid.
+    splice_tensor_math_helpers(&mut body, math_helpers_index);
+
     // Insert private key callback support only when a selected body needs
     // its closed carrier or function symbol, before any such declaration.
     if body.iter().any(|line| {
@@ -620,12 +709,10 @@ pub(crate) fn emit_host_abi_program(
         out.push("#include \"chelis_blas.h\"".to_string());
         out.push(CEmitter::blas_integer_support());
     }
-    if helper_requirements.needs_math_header {
-        out.push("#include \"chelis_math.h\"".to_string());
-    }
+    out.extend(crate::fp_env::helper_lines().map(str::to_string));
     out.push(String::new());
     out.extend(body);
-    Ok(out.join("\n"))
+    Ok(crate::fp_env::prune_unused_nan_helpers(&out.join("\n")))
 }
 
 fn global_tensor_helper_name(program_name: &str, index: usize) -> String {
@@ -1133,143 +1220,173 @@ fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
 /// Instantiate the scalar host-expression path at each concrete float ABI.
 ///
 /// Tensor activations lower through `chelis_ir::tier2`; scalar calls in a
-/// Surf `def` reach this emitter after host-ABI projection instead. Reduced
+/// Surf `def` reach this emitter after host-ABI projection instead. Both
+/// lanes take one definition: each composite helper body is emitted from the
+/// very graph `tier2` builds for spec/05 §3.3, one finalized C statement per
+/// primitive, so the scalar and tensor results cannot drift apart. `tanh` is
+/// the [05-OP-46] primitive and `relu` is [05-OP-43]'s selection. Reduced
 /// floats need distinct per-node finalizers even though both compute as C
 /// `float`, so one generated specialization cannot serve every source dtype.
 fn append_activation_helpers(
     out: &mut Vec<String>,
+    prim: Prim,
     suffix: &str,
-    c_type: &str,
-    literal_suffix: &str,
-    exp: &str,
     finalizer: Option<&str>,
+    used: &dyn Fn(&str) -> bool,
 ) {
-    let literal = |value: &str| match suffix {
-        "f16" => format!("chelis_f16_to_f32(chelis_host_f64_to_f16({value}))"),
-        "bf16" => format!("chelis_bf16_to_f32(chelis_host_f64_to_bf16({value}))"),
-        _ => format!("{value}{literal_suffix}"),
+    let c_type = if prim == Prim::F64 { "double" } else { "float" };
+    let zero = if prim == Prim::F64 { "0.0" } else { "0.0f" };
+    let tanh = if prim == Prim::F64 {
+        "chelis_cr_tanh"
+    } else {
+        "chelis_cr_tanhf"
     };
     let finalize = |expr: String| match finalizer {
         Some(function) => format!("{function}({expr})"),
         None => expr,
     };
 
-    out.push(format!(
-        "static inline {c_type} chelis_host_relu_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!(
-        "    return x < {} ? {} : x;",
-        literal("0.0"),
-        literal("0.0")
-    ));
-    out.push("}".to_string());
+    if used(&format!("chelis_host_relu_{suffix}")) {
+        out.push(format!(
+            "static inline {c_type} chelis_host_relu_{suffix}({c_type} x) {{"
+        ));
+        out.push(format!("    return x < {zero} ? {zero} : x;"));
+        out.push("}".to_string());
+    }
 
-    out.push(format!(
-        "static inline {c_type} chelis_host_sigmoid_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!("    {c_type} neg_x = {};", finalize("-x".into())));
-    out.push(format!(
-        "    {c_type} exp_neg_x = {};",
-        finalize(format!("{exp}(neg_x)"))
-    ));
-    out.push(format!("    {c_type} one = {};", finalize(literal("1.0"))));
-    out.push(format!(
-        "    {c_type} denominator = {};",
-        finalize("one + exp_neg_x".into())
-    ));
-    out.push(format!(
-        "    return {};",
-        finalize("one / denominator".into())
-    ));
-    out.push("}".to_string());
+    if used(&format!("chelis_host_tanh_{suffix}")) {
+        out.push(format!(
+            "static inline {c_type} chelis_host_tanh_{suffix}({c_type} x) {{"
+        ));
+        out.push(format!("    return {};", finalize(format!("{tanh}(x)"))));
+        out.push("}".to_string());
+    }
 
-    out.push(format!(
-        "static inline {c_type} chelis_host_tanh_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!("    {c_type} two = {};", finalize(literal("2.0"))));
-    out.push(format!(
-        "    {c_type} two_x = {};",
-        finalize("two * x".into())
-    ));
-    out.push(format!(
-        "    {c_type} sigmoid = chelis_host_sigmoid_{suffix}(two_x);"
-    ));
-    out.push(format!(
-        "    {c_type} two_again = {};",
-        finalize(literal("2.0"))
-    ));
-    out.push(format!(
-        "    {c_type} twice_sigmoid = {};",
-        finalize("two_again * sigmoid".into())
-    ));
-    out.push(format!(
-        "    {c_type} neg_one = {};",
-        finalize(literal("-1.0"))
-    ));
-    out.push(format!(
-        "    return {};",
-        finalize("twice_sigmoid + neg_one".into())
-    ));
-    out.push("}".to_string());
-
-    out.push(format!(
-        "static inline {c_type} chelis_host_silu_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!(
-        "    {c_type} sigmoid = chelis_host_sigmoid_{suffix}(x);"
-    ));
-    out.push(format!("    return {};", finalize("x * sigmoid".into())));
-    out.push("}".to_string());
-
-    out.push(format!(
-        "static inline {c_type} chelis_host_gelu_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!(
-        "    {c_type} c = {};",
-        finalize(literal("0.7978845608028654"))
-    ));
-    out.push(format!(
-        "    {c_type} k = {};",
-        finalize(literal("0.044715"))
-    ));
-    out.push(format!(
-        "    {c_type} x_squared = {};",
-        finalize("x * x".into())
-    ));
-    out.push(format!(
-        "    {c_type} x_cubed = {};",
-        finalize("x_squared * x".into())
-    ));
-    out.push(format!(
-        "    {c_type} scaled_cube = {};",
-        finalize("k * x_cubed".into())
-    ));
-    out.push(format!(
-        "    {c_type} sum_inner = {};",
-        finalize("x + scaled_cube".into())
-    ));
-    out.push(format!(
-        "    {c_type} inner = {};",
-        finalize("c * sum_inner".into())
-    ));
-    out.push(format!(
-        "    {c_type} tanh_inner = chelis_host_tanh_{suffix}(inner);"
-    ));
-    out.push(format!("    {c_type} one = {};", finalize(literal("1.0"))));
-    out.push(format!(
-        "    {c_type} one_plus_tanh = {};",
-        finalize("one + tanh_inner".into())
-    ));
-    out.push(format!(
-        "    {c_type} x_mul = {};",
-        finalize("x * one_plus_tanh".into())
-    ));
-    out.push(format!("    {c_type} half = {};", finalize(literal("0.5"))));
-    out.push(format!("    return {};", finalize("half * x_mul".into())));
-    out.push("}".to_string());
+    let lowerings: [(&str, ActivationLowering); 3] = [
+        ("sigmoid", chelis_ir::tier2::lower_sigmoid),
+        ("silu", chelis_ir::tier2::lower_silu),
+        ("gelu", chelis_ir::tier2::lower_gelu),
+    ];
+    for (name, lower) in lowerings {
+        if !used(&format!("chelis_host_{name}_{suffix}")) {
+            continue;
+        }
+        out.push(format!(
+            "static inline {c_type} chelis_host_{name}_{suffix}({c_type} x) {{"
+        ));
+        out.extend(activation_body(prim, lower, &finalize));
+        out.push("}".to_string());
+    }
 }
 
-fn append_tensor_math_helpers(out: &mut Vec<String>) {
+type ActivationLowering = fn(
+    chelis_ir::dag::Owner,
+    &mut chelis_ir::dag::Dag,
+    chelis_ir::dag::NodeId,
+    &TensorType,
+    Option<&str>,
+) -> chelis_ir::dag::NodeId;
+
+/// The C statements of one activation helper: the `tier2` lowering of a
+/// rank-0 `x` at `prim`, one finalized statement per primitive, in the
+/// graph's construction order (every operand precedes its user).
+fn activation_body(
+    prim: Prim,
+    lower: ActivationLowering,
+    finalize: &dyn Fn(String) -> String,
+) -> Vec<String> {
+    let ty = chelis_ir::tier2::scalar_type(prim);
+    let mut dag = chelis_ir::dag::Dag::new();
+    let owner = chelis_ir::dag::Owner::from(dag.declare("activation"));
+    let x = dag.add_node(
+        owner,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let root = lower(owner, &mut dag, x, &ty, None);
+    let c_type = if prim == Prim::F64 { "double" } else { "float" };
+    let kernel = |f32_name: &str, f64_name: &str| {
+        if prim == Prim::F64 {
+            f64_name.to_string()
+        } else {
+            f32_name.to_string()
+        }
+    };
+    let name = |id: chelis_ir::dag::NodeId| {
+        if id == x {
+            "x".to_string()
+        } else {
+            format!("v{}", id.0)
+        }
+    };
+    let mut lines = Vec::new();
+    for (index, node) in dag.nodes().iter().enumerate() {
+        let id = chelis_ir::dag::NodeId(index);
+        if id == x {
+            continue;
+        }
+        let input = |position: usize| name(node.inputs[position]);
+        let value = match &node.op {
+            RiscOp::Const { value } => {
+                // The constant is already finalized at `prim`; f16, bf16,
+                // and f32 values are exact as C `float`.
+                let wide = value.as_f64_lossy();
+                if prim == Prim::F64 {
+                    format!("chelis_f64_from_bits(UINT64_C(0x{:016x}))", wide.to_bits())
+                } else {
+                    format!(
+                        "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
+                        exact_f64_to_f32(wide).to_bits()
+                    )
+                }
+            }
+            RiscOp::Neg => finalize(format!("-{}", input(0))),
+            RiscOp::Exp => finalize(format!(
+                "{}({})",
+                kernel("chelis_cr_expf", "chelis_cr_exp"),
+                input(0)
+            )),
+            RiscOp::Add => finalize(format!("{} + {}", input(0), input(1))),
+            RiscOp::Mul => finalize(format!("{} * {}", input(0), input(1))),
+            RiscOp::Recip => {
+                let one = if prim == Prim::F64 { "1.0" } else { "1.0f" };
+                finalize(format!("{one} / {}", input(0)))
+            }
+            other => unreachable!(
+                "spec/05 §3.3 activation lowering produced `{other:?}`, which the \
+                 host helper emitter has no C spelling for"
+            ),
+        };
+        lines.push(format!("    {c_type} {} = {value};", name(id)));
+    }
+    lines.push(format!("    return {};", name(root)));
+    lines
+}
+
+/// A finalized f16, bf16, or f32 constant's f64 image narrowed to C `float`.
+/// The image is exactly representable, so the narrowing is exact.
+fn exact_f64_to_f32(wide: f64) -> f32 {
+    let narrow = wide as f32;
+    debug_assert!(f64::from(narrow).to_bits() == wide.to_bits() || wide.is_nan());
+    narrow
+}
+
+/// Insert at `index` the finalizers and every activation helper `body` calls.
+fn splice_tensor_math_helpers(body: &mut Vec<String>, index: usize) {
+    let mut helpers = Vec::new();
+    append_tensor_math_helpers(&mut helpers, &|name| {
+        let call = format!("{name}(");
+        body.iter().any(|line| line.contains(&call))
+    });
+    helpers.push(String::new());
+    body.splice(index..index, helpers);
+}
+
+/// Append the reduced-float finalizers and each activation helper `used`
+/// selects by name.
+fn append_tensor_math_helpers(out: &mut Vec<String>, used: &dyn Fn(&str) -> bool) {
     out.push("static inline float chelis_host_finalize_f16(float x) {".to_string());
     out.push("    return chelis_f16_to_f32(chelis_f32_to_f16(x));".to_string());
     out.push("}".to_string());
@@ -1278,22 +1395,20 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("}".to_string());
     append_activation_helpers(
         out,
+        Prim::F16,
         "f16",
-        "float",
-        "f",
-        "expf",
         Some("chelis_host_finalize_f16"),
+        used,
     );
     append_activation_helpers(
         out,
+        Prim::Bf16,
         "bf16",
-        "float",
-        "f",
-        "expf",
         Some("chelis_host_finalize_bf16"),
+        used,
     );
-    append_activation_helpers(out, "f32", "float", "f", "expf", None);
-    append_activation_helpers(out, "f64", "double", "", "exp", None);
+    append_activation_helpers(out, Prim::F32, "f32", None, used);
+    append_activation_helpers(out, Prim::F64, "f64", None, used);
 }
 
 /// Private scalar-cast helpers for the generated translation unit.
@@ -1329,7 +1444,7 @@ pub(crate) fn append_checked_cast_conversion_helpers(out: &mut Vec<String>) {
             "    if (source_exponent == UINT32_C(0x7ff)) {",
             "        uint16_t target_exponent = (uint16_t)(target_exponent_max << mantissa_bits);",
             "        if (source_mantissa == 0) return (uint16_t)(sign | target_exponent);",
-            "        return (uint16_t)(sign | target_exponent | (UINT16_C(1) << (mantissa_bits - 1)));",
+            "        return (uint16_t)(target_exponent | (UINT16_C(1) << (mantissa_bits - 1)));",
             "    }",
             "    if (source_exponent == 0 && source_mantissa == 0) return sign;",
             "    int exponent;",
@@ -1531,9 +1646,20 @@ pub(crate) fn checked_cast_c_expr(plan: CheckedCastPlan, value: &str) -> String 
             | Prim::String
             | Prim::Key => unreachable!("ExactToFloat plan has a float target"),
         },
+        // [04-NUM-2]: a numeric conversion that produces a NaN finalizes to
+        // the target's canonical quiet NaN; the f16 and bf16 narrowing
+        // helpers already do.
         CheckedCastKind::FloatToFloat => match target {
-            Prim::F64 => cast_float_as_double(plan.source(), value),
-            Prim::F32 => format!("(float)({})", cast_float_as_double(plan.source(), value)),
+            Prim::F64 => crate::fp_env::finalize_float(
+                &cast_float_as_double(plan.source(), value),
+                true,
+                crate::fp_env::NanFinalization::Canonical,
+            ),
+            Prim::F32 => crate::fp_env::finalize_float(
+                &format!("(float)({})", cast_float_as_double(plan.source(), value)),
+                false,
+                crate::fp_env::NanFinalization::Canonical,
+            ),
             Prim::F16 => format!(
                 "chelis_host_f64_to_f16({})",
                 cast_float_as_double(plan.source(), value)
@@ -2023,13 +2149,11 @@ fn emit_host_declarations(
 #[derive(Debug, Clone, Copy, Default)]
 struct HelperRequirements {
     needs_blas_header: bool,
-    needs_math_header: bool,
 }
 
 impl HelperRequirements {
     fn merge(&mut self, other: Self) {
         self.needs_blas_header |= other.needs_blas_header;
-        self.needs_math_header |= other.needs_math_header;
     }
 }
 
@@ -2072,7 +2196,6 @@ fn append_helper(
     let options = crate::CodegenOptions {
         use_blas: uses_blas,
         static_entry: true,
-        ..crate::CodegenOptions::default()
     };
     let helper_src =
         CEmitter::emit_verified_dag_with_options(dag, &helper_name, options, entry_coverage)?;
@@ -2089,17 +2212,14 @@ fn append_helper(
             if line.contains("\"chelis_blas.h\"") {
                 requirements.needs_blas_header = true;
             }
-            if line.contains("\"chelis_math.h\"") {
-                requirements.needs_math_header = true;
-            }
             continue;
         }
-        if line == "/* CHELIS_UNIFORM_HELPERS_BEGIN */" {
+        if line == "/* CHELIS_UNIFORM_HELPERS_BEGIN */" || line == crate::fp_env::HELPERS_BEGIN {
             skipping_helper_prelude = true;
             continue;
         }
         if skipping_helper_prelude {
-            if line == "/* CHELIS_UNIFORM_HELPERS_END */" {
+            if line == "/* CHELIS_UNIFORM_HELPERS_END */" || line == crate::fp_env::HELPERS_END {
                 skipping_helper_prelude = false;
             }
             continue;
@@ -3371,6 +3491,7 @@ fn emit_function(
             &declaration,
         ));
         out.push(format!("{} {{", declaration.trim_end_matches(';')));
+        out.push(format!("    {}", crate::fp_env::ENTRY));
         out.extend(exported_entry.iter().cloned());
         let wrapper_receipt = if entry_work.extent_at_body && delegated_entry_guards.is_empty() {
             let group = entry_groups
@@ -3425,6 +3546,7 @@ fn emit_function(
         out.push(
             "    __chelis_host_result_origin_arena_destroy(__chelis_origin_arena);".to_string(),
         );
+        out.push(format!("    {}", crate::fp_env::EXIT));
         out.push("    return __result;".to_string());
         out.push("}".to_string());
         out.push(crate::generated_header::render_authored_export_end(
@@ -3487,6 +3609,11 @@ fn emit_main(
     external_helpers: &UnordSet<String>,
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
+    // The process starts in the IEEE default environment; entering keeps a
+    // custom C runtime or preloaded library from changing that. A trap
+    // aborts, and returning from main ends the process, so there is no
+    // caller state to restore.
+    out.push(format!("    {}", crate::fp_env::ENTRY));
     append_invocation_origin_context(out);
     // chelis#840: the globals emitter needs the same original-to-emitted
     // function-name map as function bodies, or a global calling a def
@@ -3886,6 +4013,9 @@ fn verified_helper_result_origin(
 
 struct HostEmitter<'a> {
     lines: Vec<String>,
+    /// [04-NUM-2]: the NaN finalization of the tensor builtin whose
+    /// elementwise loop is being emitted.
+    tensor_nan_finalization: Option<crate::fp_env::NanFinalization>,
     indent: String,
     helper_prefix: String,
     emitted_names: UnordMap<String, String>,
@@ -4240,6 +4370,7 @@ impl<'a> HostEmitter<'a> {
     ) -> Self {
         Self {
             lines: Vec::new(),
+            tensor_nan_finalization: None,
             indent,
             helper_prefix: helper_prefix.to_string(),
             emitted_names,
@@ -6624,6 +6755,11 @@ impl<'a> HostEmitter<'a> {
         }
 
         if let HostType::Tensor(_) = ty {
+            // [04-NUM-2]: the elementwise loops below store each element
+            // through the same classification as the scalar lane.
+            self.tensor_nan_finalization = CExpressionBuiltin::decode(name)
+                .ok()
+                .and_then(CExpressionBuiltin::nan_finalization);
             match name {
                 "add"
                     if matches!(
@@ -6754,15 +6890,27 @@ impl<'a> HostEmitter<'a> {
                     return Ok(());
                 }
                 "exp" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
-                    self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "expf");
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_cr_expf",
+                    );
                     return Ok(());
                 }
                 "log" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
-                    self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "logf");
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_cr_logf",
+                    );
                     return Ok(());
                 }
                 "sin" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
-                    self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "sinf");
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_cr_sinf",
+                    );
                     return Ok(());
                 }
                 "sqrt" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
@@ -7410,7 +7558,6 @@ impl<'a> HostEmitter<'a> {
             "ceil",
             "round",
             "recip",
-            "pow",
             "abs",
             "min",
             "max",
@@ -7523,10 +7670,9 @@ impl<'a> HostEmitter<'a> {
                     arg(1),
                     ty,
                 )?,
-                CExpressionBuiltin::Add => finalize_scalar_expr(
-                    binary(BinaryOperator::Add, numeric_arg(0), numeric_arg(1)),
-                    ty,
-                ),
+                CExpressionBuiltin::Add => {
+                    binary(BinaryOperator::Add, numeric_arg(0), numeric_arg(1))
+                }
                 CExpressionBuiltin::Sub if is_integer_abi(ty) => integer_checked_binary_expr(
                     "chelis_int_checked_sub",
                     "sub",
@@ -7534,10 +7680,9 @@ impl<'a> HostEmitter<'a> {
                     arg(1),
                     ty,
                 )?,
-                CExpressionBuiltin::Sub => finalize_scalar_expr(
-                    binary(BinaryOperator::Subtract, numeric_arg(0), numeric_arg(1)),
-                    ty,
-                ),
+                CExpressionBuiltin::Sub => {
+                    binary(BinaryOperator::Subtract, numeric_arg(0), numeric_arg(1))
+                }
                 CExpressionBuiltin::Mul if is_integer_abi(ty) => integer_checked_binary_expr(
                     "chelis_int_checked_mul",
                     "mul",
@@ -7545,10 +7690,9 @@ impl<'a> HostEmitter<'a> {
                     arg(1),
                     ty,
                 )?,
-                CExpressionBuiltin::Mul => finalize_scalar_expr(
-                    binary(BinaryOperator::Multiply, numeric_arg(0), numeric_arg(1)),
-                    ty,
-                ),
+                CExpressionBuiltin::Mul => {
+                    binary(BinaryOperator::Multiply, numeric_arg(0), numeric_arg(1))
+                }
                 // #387: integer scalar `div`/`mod` trap portably on a zero
                 // divisor (ARM64 does not fault on integer div-by-zero), using the
                 // same clean diagnostic the evaluator emits. `chelis_int_div_guard`
@@ -7562,10 +7706,9 @@ impl<'a> HostEmitter<'a> {
                     arg(0),
                     EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
                 ),
-                CExpressionBuiltin::Div => finalize_scalar_expr(
-                    binary(BinaryOperator::Divide, numeric_arg(0), numeric_arg(1)),
-                    ty,
-                ),
+                CExpressionBuiltin::Div => {
+                    binary(BinaryOperator::Divide, numeric_arg(0), numeric_arg(1))
+                }
                 // chelis#178: `trunc_div` is integer-only — the guarded C `/`
                 // quotient (round toward zero).
                 CExpressionBuiltin::TruncDiv => binary(
@@ -7604,16 +7747,13 @@ impl<'a> HostEmitter<'a> {
                     );
                     binary(BinaryOperator::Subtract, quotient, correction)
                 }
-                CExpressionBuiltin::FloorDiv => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "floor", "floorf"),
-                        [binary(
-                            BinaryOperator::Divide,
-                            numeric_arg(0),
-                            numeric_arg(1),
-                        )],
-                    ),
-                    ty,
+                CExpressionBuiltin::FloorDiv => EmittedExpr::call(
+                    float_math_function(ty, "floor", "floorf"),
+                    [binary(
+                        BinaryOperator::Divide,
+                        numeric_arg(0),
+                        numeric_arg(1),
+                    )],
                 ),
                 CExpressionBuiltin::Mod => EmittedExpr::conditional(
                     binary(BinaryOperator::Equal, arg(1), EmittedExpr::integer(-1)),
@@ -7698,9 +7838,7 @@ impl<'a> HostEmitter<'a> {
                         EmittedExpr::string_literal(integer_trap_message(ty, "neg", true)?),
                     ],
                 ),
-                CExpressionBuiltin::Neg => {
-                    finalize_scalar_expr(unary(UnaryOperator::Negate, numeric_arg(0)), ty)
-                }
+                CExpressionBuiltin::Neg => unary(UnaryOperator::Negate, numeric_arg(0)),
                 CExpressionBuiltin::StringConcat => {
                     // chelis#2205: a string the verifier moved at its last
                     // use is consumed by the owned entry point; a borrowed
@@ -7952,38 +8090,37 @@ impl<'a> HostEmitter<'a> {
                     EmittedExpr::call("chelis_tensor_shape", [arg(0), arg(1)])
                 }
                 CExpressionBuiltin::Numel => EmittedExpr::call("chelis_tensor_numel", [arg(0)]),
-                // Scalar math — these run on host `double` values in lowered
-                // closures (e.g. the per-element GELU / RMSNorm map bodies).
-                // The RISC DAG variants of these ops are handled separately in
-                // `emit.rs`, but when a Surf `def` body is routed through the
-                // host interpreter, we need the libm names directly.
-                CExpressionBuiltin::Sqrt => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "sqrt", "sqrtf"), [numeric_arg(0)]),
-                    ty,
+                // Scalar math in a Surf `def` body routed through the host
+                // lane. The RISC DAG variants of these ops are handled in
+                // `emit.rs`; both name the correctly rounded `chelis_cr_*`
+                // kernels ([05-OP-46]) the unit carries, and `sqrt` is the
+                // correctly rounded IEEE square root.
+                CExpressionBuiltin::Sqrt => {
+                    EmittedExpr::call(float_math_function(ty, "sqrt", "sqrtf"), [numeric_arg(0)])
+                }
+                CExpressionBuiltin::Exp => EmittedExpr::call(
+                    float_math_function(ty, "chelis_cr_exp", "chelis_cr_expf"),
+                    [numeric_arg(0)],
                 ),
-                CExpressionBuiltin::Exp => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "exp", "expf"), [numeric_arg(0)]),
-                    ty,
+                CExpressionBuiltin::Log => EmittedExpr::call(
+                    float_math_function(ty, "chelis_cr_log", "chelis_cr_logf"),
+                    [numeric_arg(0)],
                 ),
-                CExpressionBuiltin::Log => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "log", "logf"), [numeric_arg(0)]),
-                    ty,
+                CExpressionBuiltin::Sin => EmittedExpr::call(
+                    float_math_function(ty, "chelis_cr_sin", "chelis_cr_sinf"),
+                    [numeric_arg(0)],
                 ),
-                CExpressionBuiltin::Sin => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "sin", "sinf"), [numeric_arg(0)]),
-                    ty,
+                CExpressionBuiltin::Cos => EmittedExpr::call(
+                    float_math_function(ty, "chelis_cr_cos", "chelis_cr_cosf"),
+                    [numeric_arg(0)],
                 ),
-                CExpressionBuiltin::Cos => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "cos", "cosf"), [numeric_arg(0)]),
-                    ty,
+                CExpressionBuiltin::Tan => EmittedExpr::call(
+                    float_math_function(ty, "chelis_cr_tan", "chelis_cr_tanf"),
+                    [numeric_arg(0)],
                 ),
-                CExpressionBuiltin::Tan => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "tan", "tanf"), [numeric_arg(0)]),
-                    ty,
-                ),
-                CExpressionBuiltin::Atan => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "atan", "atanf"), [numeric_arg(0)]),
-                    ty,
+                CExpressionBuiltin::Atan => EmittedExpr::call(
+                    float_math_function(ty, "chelis_cr_atan", "chelis_cr_atanf"),
+                    [numeric_arg(0)],
                 ),
                 CExpressionBuiltin::Relu
                 | CExpressionBuiltin::Sigmoid
@@ -8026,57 +8163,45 @@ impl<'a> HostEmitter<'a> {
                         _ => unreachable!("non-float ReLU rejected above"),
                     }
                 }
-                CExpressionBuiltin::Sigmoid => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        activation_math_function(
-                            ty,
-                            "chelis_host_sigmoid_f16",
-                            "chelis_host_sigmoid_bf16",
-                            "chelis_host_sigmoid_f32",
-                            "chelis_host_sigmoid_f64",
-                        ),
-                        [numeric_arg(0)],
+                CExpressionBuiltin::Sigmoid => EmittedExpr::call(
+                    activation_math_function(
+                        ty,
+                        "chelis_host_sigmoid_f16",
+                        "chelis_host_sigmoid_bf16",
+                        "chelis_host_sigmoid_f32",
+                        "chelis_host_sigmoid_f64",
                     ),
-                    ty,
+                    [numeric_arg(0)],
                 ),
-                CExpressionBuiltin::Tanh => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        activation_math_function(
-                            ty,
-                            "chelis_host_tanh_f16",
-                            "chelis_host_tanh_bf16",
-                            "chelis_host_tanh_f32",
-                            "chelis_host_tanh_f64",
-                        ),
-                        [numeric_arg(0)],
+                CExpressionBuiltin::Tanh => EmittedExpr::call(
+                    activation_math_function(
+                        ty,
+                        "chelis_host_tanh_f16",
+                        "chelis_host_tanh_bf16",
+                        "chelis_host_tanh_f32",
+                        "chelis_host_tanh_f64",
                     ),
-                    ty,
+                    [numeric_arg(0)],
                 ),
-                CExpressionBuiltin::Silu => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        activation_math_function(
-                            ty,
-                            "chelis_host_silu_f16",
-                            "chelis_host_silu_bf16",
-                            "chelis_host_silu_f32",
-                            "chelis_host_silu_f64",
-                        ),
-                        [numeric_arg(0)],
+                CExpressionBuiltin::Silu => EmittedExpr::call(
+                    activation_math_function(
+                        ty,
+                        "chelis_host_silu_f16",
+                        "chelis_host_silu_bf16",
+                        "chelis_host_silu_f32",
+                        "chelis_host_silu_f64",
                     ),
-                    ty,
+                    [numeric_arg(0)],
                 ),
-                CExpressionBuiltin::Gelu => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        activation_math_function(
-                            ty,
-                            "chelis_host_gelu_f16",
-                            "chelis_host_gelu_bf16",
-                            "chelis_host_gelu_f32",
-                            "chelis_host_gelu_f64",
-                        ),
-                        [numeric_arg(0)],
+                CExpressionBuiltin::Gelu => EmittedExpr::call(
+                    activation_math_function(
+                        ty,
+                        "chelis_host_gelu_f16",
+                        "chelis_host_gelu_bf16",
+                        "chelis_host_gelu_f32",
+                        "chelis_host_gelu_f64",
                     ),
-                    ty,
+                    [numeric_arg(0)],
                 ),
                 CExpressionBuiltin::Floor
                 | CExpressionBuiltin::Ceil
@@ -8085,36 +8210,24 @@ impl<'a> HostEmitter<'a> {
                 {
                     arg(0)
                 }
-                CExpressionBuiltin::Floor => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "floor", "floorf"), [numeric_arg(0)]),
-                    ty,
-                ),
-                CExpressionBuiltin::Ceil => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "ceil", "ceilf"), [numeric_arg(0)]),
-                    ty,
-                ),
-                CExpressionBuiltin::Round => finalize_scalar_expr(
-                    // spec/05 §2.2: `round` is IEEE roundTiesToEven. The C
-                    // `round{,f}` family resolves half ties away from zero;
-                    // `rint{,f}` under the default rounding mode matches the
-                    // evaluator and the typed-DAG C emitter.
-                    EmittedExpr::call(float_math_function(ty, "rint", "rintf"), [numeric_arg(0)]),
-                    ty,
-                ),
-                CExpressionBuiltin::Recip => finalize_scalar_expr(
-                    binary(
-                        BinaryOperator::Divide,
-                        EmittedExpr::integer(1),
-                        numeric_arg(0),
-                    ),
-                    ty,
-                ),
-                CExpressionBuiltin::Pow => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "pow", "powf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
-                    ty,
+                CExpressionBuiltin::Floor => {
+                    EmittedExpr::call(float_math_function(ty, "floor", "floorf"), [numeric_arg(0)])
+                }
+                CExpressionBuiltin::Ceil => {
+                    EmittedExpr::call(float_math_function(ty, "ceil", "ceilf"), [numeric_arg(0)])
+                }
+                CExpressionBuiltin::Round =>
+                // spec/05 §2.2: `round` is IEEE roundTiesToEven. The C
+                // `round{,f}` family resolves half ties away from zero;
+                // `rint{,f}` under the default rounding mode matches the
+                // evaluator and the typed-DAG C emitter.
+                {
+                    EmittedExpr::call(float_math_function(ty, "rint", "rintf"), [numeric_arg(0)])
+                }
+                CExpressionBuiltin::Recip => binary(
+                    BinaryOperator::Divide,
+                    EmittedExpr::integer(1),
+                    numeric_arg(0),
                 ),
                 CExpressionBuiltin::Abs => match arg_vars[0].1 {
                     HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
@@ -8138,12 +8251,9 @@ impl<'a> HostEmitter<'a> {
                     HostType::Float16
                     | HostType::BFloat16
                     | HostType::Float32
-                    | HostType::Float64 => finalize_scalar_expr(
-                        EmittedExpr::call(
-                            float_math_function(ty, "fabs", "fabsf"),
-                            [numeric_arg(0)],
-                        ),
-                        ty,
+                    | HostType::Float64 => EmittedExpr::call(
+                        float_math_function(ty, "fabs", "fabsf"),
+                        [numeric_arg(0)],
                     ),
                     ref other => {
                         return Err(invalid_abi_shape(
@@ -8152,19 +8262,13 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 },
-                CExpressionBuiltin::Min => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "fmin", "fminf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
-                    ty,
+                CExpressionBuiltin::Min => EmittedExpr::call(
+                    float_math_function(ty, "fmin", "fminf"),
+                    [numeric_arg(0), numeric_arg(1)],
                 ),
-                CExpressionBuiltin::Max => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "fmax", "fmaxf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
-                    ty,
+                CExpressionBuiltin::Max => EmittedExpr::call(
+                    float_math_function(ty, "fmax", "fmaxf"),
+                    [numeric_arg(0), numeric_arg(1)],
                 ),
                 CExpressionBuiltin::MinElem if is_integer_abi(ty) => EmittedExpr::conditional(
                     binary(BinaryOperator::LessEqual, arg(0), arg(1)),
@@ -8181,7 +8285,14 @@ impl<'a> HostEmitter<'a> {
             };
             Ok(expr)
         };
-        let expr = build_expression()?;
+        // [04-NUM-1]/[04-NUM-2]: every arm above yields its value at the
+        // computation width; the result is finalized here, once, by the
+        // builtin's classification rather than by each arm.
+        let expr = finalize_scalar_expr(
+            build_expression()?,
+            ty,
+            CExpressionBuiltin::decode(name)?.nan_finalization(),
+        );
         self.lines
             .push(format!("{}{target} = {};", self.indent, expr.as_c()));
         if matches!(ty, HostType::Unit) {
@@ -8480,6 +8591,20 @@ impl<'a> HostEmitter<'a> {
         self.end_tensor_write(&guard);
     }
 
+    /// Finalize one f32 or f64 element of the host tensor elementwise loop
+    /// being emitted through `fp_env::finalize_float`.
+    fn finalize_tensor_elem(&self, arm: DtypeArm, expr: String) -> String {
+        match (arm, self.tensor_nan_finalization) {
+            (DtypeArm::F32, Some(finalization)) => {
+                crate::fp_env::finalize_float(&expr, false, finalization)
+            }
+            (DtypeArm::F64, Some(finalization)) => {
+                crate::fp_env::finalize_float(&expr, true, finalization)
+            }
+            _ => expr,
+        }
+    }
+
     /// Emit one arm of the elementwise binary operator dispatch.
     fn emit_binary_elementwise_arm(
         &mut self,
@@ -8513,7 +8638,8 @@ impl<'a> HostEmitter<'a> {
             "{ind}            int64_t idx_rhs = i * {target}_rhs_step;"
         ));
         self.lines.push(format!(
-            "{ind}            __target_data[i] = __lhs_data[idx_lhs] {op} __rhs_data[idx_rhs];"
+            "{ind}            __target_data[i] = {};",
+            self.finalize_tensor_elem(arm, format!("__lhs_data[idx_lhs] {op} __rhs_data[idx_rhs]"))
         ));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
@@ -8595,7 +8721,8 @@ impl<'a> HostEmitter<'a> {
             "{ind}            int64_t idx = i * {target}_input_step;"
         ));
         self.lines.push(format!(
-            "{ind}            __target_data[i] = {op}__input_data[idx];"
+            "{ind}            __target_data[i] = {};",
+            self.finalize_tensor_elem(arm, format!("{op}__input_data[idx]"))
         ));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
@@ -8628,7 +8755,8 @@ impl<'a> HostEmitter<'a> {
             "{ind}            int64_t idx = i * {target}_input_step;"
         ));
         self.lines.push(format!(
-            "{ind}            __target_data[i] = {func}(__input_data[idx]);"
+            "{ind}            __target_data[i] = {};",
+            self.finalize_tensor_elem(arm, format!("{func}(__input_data[idx])"))
         ));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
@@ -9334,10 +9462,23 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}    {index_type} {offset} = chelis_sparse_data_index({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {linear}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, {selected}));", self.indent));
         match kind {
             SparseSummaryKind::Gather => self.lines.push(format!("{}    (({element}*){view}.data)[{linear}] = ((const {element}*)chelis_host_tensor_data({base}))[{offset}];", self.indent)),
-            SparseSummaryKind::ScatterAdd | SparseSummaryKind::ScatterReplace => {
+            SparseSummaryKind::ScatterAdd => {
                 let updates = &args[summary.input_indices[2]];
-                let op = match kind { SparseSummaryKind::ScatterAdd => "+=", SparseSummaryKind::ScatterReplace => "=", SparseSummaryKind::Gather => unreachable!() };
-                self.lines.push(format!("{}    (({element}*){view}.data)[{offset}] {op} ((const {element}*)chelis_host_tensor_data({updates}))[{linear}];", self.indent));
+                let destination = format!("(({element}*){view}.data)[{offset}]");
+                let sum = CEmitter::scatter_add_sum(
+                    crate::fp_env::risc_nan_finalization(&chelis_ir::dag::RiscOp::ScatterAdd {
+                        axis: summary.axis,
+                        batch_rank: 0,
+                    }),
+                    &destination,
+                    &format!("((const {element}*)chelis_host_tensor_data({updates}))[{linear}]"),
+                    summary.output.precision,
+                );
+                self.lines.push(format!("{}    {destination} = {sum};", self.indent));
+            }
+            SparseSummaryKind::ScatterReplace => {
+                let updates = &args[summary.input_indices[2]];
+                self.lines.push(format!("{}    (({element}*){view}.data)[{offset}] = ((const {element}*)chelis_host_tensor_data({updates}))[{linear}];", self.indent));
             }
         }
         self.lines.push(format!("{}}}", self.indent));
@@ -11828,10 +11969,33 @@ fn scalar_arithmetic_arg_expr(value: &str, ty: &HostType) -> EmittedExpr {
     }
 }
 
-fn finalize_scalar_expr(value: EmittedExpr, ty: &HostType) -> EmittedExpr {
-    match ty {
-        HostType::Float16 => EmittedExpr::call("chelis_f32_to_f16", [value]),
-        HostType::BFloat16 => EmittedExpr::call("chelis_f32_to_bf16", [value]),
+/// The host scalar lane's one finalization point ([04-NUM-1], [04-NUM-2]).
+/// Arithmetic f16 and bf16 values computed at f32 narrow through storage
+/// helpers that canonicalize NaN; f32 and f64 values pass through
+/// `fp_env::finalize_float`. A bit-preserving selection already holds the
+/// selected operand's stored bits, and a non-float result has no NaN.
+fn finalize_scalar_expr(
+    value: EmittedExpr,
+    ty: &HostType,
+    finalization: Option<crate::fp_env::NanFinalization>,
+) -> EmittedExpr {
+    use crate::fp_env::NanFinalization;
+    let Some(finalization) = finalization else {
+        return value;
+    };
+    match (ty, finalization) {
+        (HostType::Float16, NanFinalization::Canonical) => {
+            EmittedExpr::call("chelis_f32_to_f16", [value])
+        }
+        (HostType::BFloat16, NanFinalization::Canonical) => {
+            EmittedExpr::call("chelis_f32_to_bf16", [value])
+        }
+        (HostType::Float32, NanFinalization::Canonical) => {
+            EmittedExpr::call(crate::fp_env::canonical_nan_helper(false), [value])
+        }
+        (HostType::Float64, NanFinalization::Canonical) => {
+            EmittedExpr::call(crate::fp_env::canonical_nan_helper(true), [value])
+        }
         _ => value,
     }
 }
@@ -12464,7 +12628,7 @@ mod expression_dispatch_tests {
         }
 
         let mut helpers = Vec::new();
-        append_tensor_math_helpers(&mut helpers);
+        append_tensor_math_helpers(&mut helpers, &|_| true);
         let emitted = helpers.join("\n");
         for op in ["relu", "sigmoid", "tanh", "silu", "gelu"] {
             for width in ["f16", "bf16", "f32", "f64"] {
@@ -12488,6 +12652,265 @@ mod expression_dispatch_tests {
         assert!(emitted.contains("chelis_host_finalize_bf16"));
     }
 
+    /// The host activation helpers compute with the carried kernels: `tanh`
+    /// is [05-OP-46]'s correctly rounded primitive at every float width, and
+    /// the composite helpers call `chelis_cr_*` kernels and no libm name.
+    /// Compiled and run against `chelis-crmath`'s bits (chelis#2957).
+    #[test]
+    fn activation_helpers_call_the_correctly_rounded_kernels() {
+        let mut helpers = Vec::new();
+        append_tensor_math_helpers(&mut helpers, &|_| true);
+        let emitted = helpers.join("\n");
+        let identifiers: Vec<&str> = emitted
+            .split(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+            .collect();
+        for libm in ["expf", "tanhf", "exp", "tanh"] {
+            assert!(
+                !identifiers.contains(&libm),
+                "helpers must not call `{libm}`:\n{emitted}"
+            );
+        }
+        assert!(emitted.contains("chelis_cr_expf(") && emitted.contains("chelis_cr_tanh("));
+        let witnesses: [f32; 4] = [-0.055_804_74, 1e-3, 1e-5, -3.0];
+        let mut main = String::from(
+            "#include \"chelis_runtime.h\"\n#include <stdio.h>\n#include <string.h>\n",
+        );
+        main.push_str(&emitted);
+        main.push_str("\nint main(void) {\n");
+        for w in witnesses {
+            main.push_str(&format!(
+                "    {{ float y = chelis_host_tanh_f32(chelis_f32_from_bits(UINT32_C(0x{:08x}))); uint32_t b; memcpy(&b, &y, 4); printf(\"%08x\\n\", (unsigned)b); }}\n",
+                w.to_bits()
+            ));
+            main.push_str(&format!(
+                "    {{ double y = chelis_host_tanh_f64(chelis_f64_from_bits(UINT64_C(0x{:016x}))); uint64_t b; memcpy(&b, &y, 8); printf(\"%016llx\\n\", (unsigned long long)b); }}\n",
+                f64::from(w).to_bits()
+            ));
+        }
+        main.push_str("    return 0;\n}\n");
+        let main = crate::crmath_kernels::link_called_kernels(main);
+
+        let dir = tempfile::tempdir().unwrap();
+        let staged = chelis_runtime_bundle::stage(dir.path()).unwrap();
+        std::fs::write(dir.path().join("main.c"), &main).unwrap();
+        let toolchain = crate::toolchain::strict_reference_toolchain(
+            crate::toolchain::c_compiler(),
+            crate::toolchain::CodegenRequirements::default(),
+        );
+        let bin = dir.path().join("helpers");
+        let compiled = std::process::Command::new(&toolchain.compiler)
+            .args(&toolchain.compile_flags)
+            .arg("-std=c11")
+            .arg("-I")
+            .arg(dir.path())
+            .arg(dir.path().join("main.c"))
+            .arg(&staged.archive)
+            .args(&toolchain.link_flags)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let run = std::process::Command::new(&bin).output().unwrap();
+        assert!(run.status.success());
+        let stdout = String::from_utf8(run.stdout).unwrap();
+        let got: Vec<&str> = stdout.lines().collect();
+        let mut want = Vec::new();
+        for w in witnesses {
+            want.push(format!("{:08x}", chelis_crmath::tanh_f32(w).to_bits()));
+            want.push(format!(
+                "{:016x}",
+                chelis_crmath::tanh_f64(f64::from(w)).to_bits()
+            ));
+        }
+        assert_eq!(
+            got, want,
+            "tanh helpers must equal the correctly rounded kernel"
+        );
+    }
+
+    /// spec/05 §3.3's gelu graph at operand width, through `chelis-crmath`'s
+    /// exp: each primitive computes at f32 and `finalize` rounds it to the
+    /// operand dtype before the next primitive reads it.
+    fn gelu_reference_f32(
+        x: f32,
+        finalize: &dyn Fn(f32) -> f32,
+        constant: &dyn Fn(f64) -> f32,
+    ) -> f32 {
+        let c = constant(0.7978845608028654);
+        let k = constant(0.044715);
+        let two = constant(2.0);
+        let one = constant(1.0);
+        let x_squared = finalize(x * x);
+        let x_cubed = finalize(x_squared * x);
+        let u = finalize(c * finalize(x + finalize(k * x_cubed)));
+        let two_u = finalize(two * u);
+        let exp_neg = finalize(chelis_crmath::exp_f32(finalize(-two_u)));
+        let sigmoid = finalize(1.0 / finalize(one + exp_neg));
+        finalize(x * sigmoid)
+    }
+
+    fn gelu_reference_f64(x: f64) -> f64 {
+        let u = 0.7978845608028654 * (x + 0.044715 * ((x * x) * x));
+        x * (1.0 / (1.0 + chelis_crmath::exp_f64(-(2.0 * u))))
+    }
+
+    /// chelis#2997: the host gelu helpers, derived from `tier2::lower_gelu`,
+    /// follow spec/05 §3.3's
+    /// `x*sigmoid(2u)` graph bit for bit, so gelu of a large finite input is
+    /// that input (the old `0.5*x*(1+tanh(u))` helper overflowed to `inf`).
+    /// Checked over every finite f16, at bf16/f32/f64 max finite, and at the
+    /// negative inputs where the tanh spelling cancels.
+    #[test]
+    fn gelu_helpers_follow_the_pinned_sigmoid_graph() {
+        use half::{bf16, f16};
+        let mut helpers = Vec::new();
+        append_tensor_math_helpers(&mut helpers, &|_| true);
+        let mut main = String::from(
+            "#include \"chelis_runtime.h\"\n#include <stdio.h>\n#include <string.h>\n",
+        );
+        main.push_str(&helpers.join("\n"));
+        main.push_str(concat!(
+            "\nint main(void) {\n",
+            "    for (uint32_t b = 0; b < 65536u; b++) {\n",
+            "        if ((b & 0x7c00u) == 0x7c00u) continue;\n",
+            "        float y = chelis_host_gelu_f16(chelis_f16_to_f32((uint16_t)b));\n",
+            "        printf(\"f16 %04x %04x\\n\", (unsigned)b, (unsigned)chelis_f32_to_f16(y));\n",
+            "    }\n",
+        ));
+        let bf16_max = bf16::MAX.to_f32();
+        main.push_str(&format!(
+            "    {{ float y = chelis_host_gelu_bf16(chelis_f32_from_bits(UINT32_C(0x{:08x}))); uint32_t o; memcpy(&o, &y, 4); printf(\"bf16 %08x\\n\", (unsigned)o); }}\n",
+            bf16_max.to_bits()
+        ));
+        let f32_inputs = [f32::MAX, -3.0, -4.0, -5.0, -6.0, -9.336, 2.5, -0.5];
+        for x in f32_inputs {
+            main.push_str(&format!(
+                "    {{ float y = chelis_host_gelu_f32(chelis_f32_from_bits(UINT32_C(0x{:08x}))); uint32_t o; memcpy(&o, &y, 4); printf(\"f32 %08x\\n\", (unsigned)o); }}\n",
+                x.to_bits()
+            ));
+        }
+        let f64_inputs = [f64::MAX, -3.0, -4.0, -5.0, -6.0, -9.336, 2.5, -0.5];
+        for x in f64_inputs {
+            main.push_str(&format!(
+                "    {{ double y = chelis_host_gelu_f64(chelis_f64_from_bits(UINT64_C(0x{:016x}))); uint64_t o; memcpy(&o, &y, 8); printf(\"f64 %016llx\\n\", (unsigned long long)o); }}\n",
+                x.to_bits()
+            ));
+        }
+        main.push_str("    return 0;\n}\n");
+        let main = crate::crmath_kernels::link_called_kernels(main);
+
+        let dir = tempfile::tempdir().unwrap();
+        let staged = chelis_runtime_bundle::stage(dir.path()).unwrap();
+        std::fs::write(dir.path().join("main.c"), &main).unwrap();
+        let toolchain = crate::toolchain::strict_reference_toolchain(
+            crate::toolchain::c_compiler(),
+            crate::toolchain::CodegenRequirements::default(),
+        );
+        let bin = dir.path().join("gelu");
+        let compiled = std::process::Command::new(&toolchain.compiler)
+            .args(&toolchain.compile_flags)
+            .arg("-std=c11")
+            .arg("-I")
+            .arg(dir.path())
+            .arg(dir.path().join("main.c"))
+            .arg(&staged.archive)
+            .args(&toolchain.link_flags)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let run = std::process::Command::new(&bin).output().unwrap();
+        assert!(run.status.success());
+        let stdout = String::from_utf8(run.stdout).unwrap();
+
+        let f16_finalize = |v: f32| f16::from_f32(v).to_f32();
+        let f16_constant = |v: f64| chelis_types::f16_from_f64_rne(v).to_f32();
+        let mut f16_rows = 0;
+        let mut mismatches = Vec::new();
+        for line in stdout.lines().filter(|line| line.starts_with("f16 ")) {
+            let mut fields = line.split(' ').skip(1);
+            let input = u16::from_str_radix(fields.next().unwrap(), 16).unwrap();
+            let got = u16::from_str_radix(fields.next().unwrap(), 16).unwrap();
+            let x = f16::from_bits(input).to_f32();
+            let want = f16::from_f32(gelu_reference_f32(x, &f16_finalize, &f16_constant)).to_bits();
+            f16_rows += 1;
+            if got != want {
+                mismatches.push(format!(
+                    "f16 gelu({input:#06x}): got {got:#06x}, graph {want:#06x}"
+                ));
+            }
+        }
+        assert_eq!(f16_rows, 63488, "every finite f16 input");
+        assert!(
+            stdout.lines().any(|line| line == "f16 7bff 7bff"),
+            "gelu(65504) must be 65504 (chelis#2997)"
+        );
+
+        let bf16_line = stdout
+            .lines()
+            .find(|line| line.starts_with("bf16 "))
+            .unwrap();
+        let got = u32::from_str_radix(&bf16_line[5..], 16).unwrap();
+        assert_eq!(
+            got,
+            bf16_max.to_bits(),
+            "gelu(bf16 max) must be bf16 max (chelis#2997)"
+        );
+
+        let f32_rows: Vec<u32> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("f32 "))
+            .map(|bits| u32::from_str_radix(bits, 16).unwrap())
+            .collect();
+        for (x, got) in f32_inputs.iter().zip(&f32_rows) {
+            let want = gelu_reference_f32(*x, &|v| v, &|v| v as f32).to_bits();
+            if *got != want {
+                mismatches.push(format!(
+                    "f32 gelu({x}): got {got:#010x}, graph {want:#010x}"
+                ));
+            }
+        }
+        assert_eq!(
+            f32_rows[0],
+            f32::MAX.to_bits(),
+            "gelu(f32 max) must be f32 max (chelis#2997)"
+        );
+        let f64_rows: Vec<u64> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("f64 "))
+            .map(|bits| u64::from_str_radix(bits, 16).unwrap())
+            .collect();
+        for (x, got) in f64_inputs.iter().zip(&f64_rows) {
+            let want = gelu_reference_f64(*x).to_bits();
+            if *got != want {
+                mismatches.push(format!(
+                    "f64 gelu({x}): got {got:#018x}, graph {want:#018x}"
+                ));
+            }
+        }
+        assert_eq!(
+            f64_rows[0],
+            f64::MAX.to_bits(),
+            "gelu(f64 max) must be f64 max (chelis#2997)"
+        );
+        assert!(
+            mismatches.is_empty(),
+            "{} mismatches:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
     /// Extent decoding and checked allocation belong to the runtime owner.
     #[test]
     fn reshape_helper_delegates_exact_int64_metadata_to_runtime() {
@@ -12501,5 +12924,149 @@ mod expression_dispatch_tests {
                 "}",
             ]
         );
+    }
+}
+
+/// Generated C's f64 storage conversions against the integer reference
+/// (`chelis_crmath::profile::storage_reference`, [04-NUM-2], [04-NUM-14]): at every
+/// f16 and bf16 rounding boundary per pull request, and over every f32's exact f64
+/// widening as a manual gate (`docs/manual_gates.md`).
+#[cfg(test)]
+mod storage_narrowing_tests {
+    use super::append_checked_cast_conversion_helpers;
+    use crate::toolchain::{CodegenRequirements, strict_reference_toolchain, test_toolchain};
+    use chelis_crmath::profile::{Output, rows, storage_midpoint_inputs, storage_reference};
+    use std::io::Write as _;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// The driver, compiled with the product profile.
+    fn driver(dir: &Path) -> PathBuf {
+        let mut helpers = Vec::new();
+        append_checked_cast_conversion_helpers(&mut helpers);
+        let mut source = String::from("#include <stdint.h>\n#include <string.h>\n");
+        for line in helpers {
+            source.push_str(&line);
+            source.push('\n');
+        }
+        source.push_str(include_str!("../tests/fixtures/f64_storage_narrowing.c"));
+        let path = dir.join("f64_storage_narrowing.c");
+        let program = dir.join("f64_storage_narrowing");
+        std::fs::write(&path, source).unwrap();
+        let compiler = test_toolchain(CodegenRequirements::default()).compiler;
+        let flags =
+            strict_reference_toolchain(String::new(), CodegenRequirements::default()).compile_flags;
+        let output = Command::new(compiler)
+            .args(flags)
+            .arg(&path)
+            .arg("-o")
+            .arg(&program)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        program
+    }
+
+    #[test]
+    fn f64_storage_conversion_matches_the_reference_at_every_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = driver(dir.path());
+        let mut inputs: Vec<u64> = rows()
+            .iter()
+            .filter(|row| {
+                row.primitive.width == 64
+                    && matches!(row.primitive.result, Output::F16 | Output::Bf16)
+            })
+            .map(|row| row.operands[0])
+            .collect();
+        inputs.extend(storage_midpoint_inputs(Output::F16));
+        inputs.extend(storage_midpoint_inputs(Output::Bf16));
+        let mut child = Command::new(&program)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let text: String = inputs.iter().map(|bits| format!("{bits:x}\n")).collect();
+        let mut stdin = child.stdin.take().unwrap();
+        let writer = std::thread::spawn(move || stdin.write_all(text.as_bytes()));
+        let output = child.wait_with_output().unwrap();
+        writer.join().unwrap().unwrap();
+        assert!(output.status.success());
+        let printed = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(printed.lines().count(), inputs.len());
+        let mut bad = Vec::new();
+        for (bits, line) in inputs.iter().zip(printed.lines()) {
+            let (f16, bf16) = line.split_once(' ').unwrap();
+            for (output, got) in [(Output::F16, f16), (Output::Bf16, bf16)] {
+                let got = u16::from_str_radix(got, 16).unwrap();
+                let expected = storage_reference(*bits, 64, output);
+                if got != expected {
+                    bad.push(format!(
+                        "{output:?} {bits:x}: {got:04x}, reference {expected:04x}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} mismatches: {:?}",
+            bad.len(),
+            &bad[..bad.len().min(8)]
+        );
+    }
+
+    #[test]
+    #[ignore = "manual gate: 2^32 inputs (docs/manual_gates.md)"]
+    fn every_f32_widening_narrows_once_to_f16_and_bf16_storage() {
+        const CHUNK: u64 = 1 << 24;
+        let dir = tempfile::tempdir().unwrap();
+        let program = driver(dir.path());
+        let threads = std::thread::available_parallelism()
+            .expect("the host reports its parallelism")
+            .get()
+            .div_ceil(2);
+        let next = AtomicU64::new(0);
+        let total: u64 = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut count = 0_u64;
+                        loop {
+                            let low = next.fetch_add(CHUNK, Ordering::Relaxed);
+                            if low >= 1 << 32 {
+                                break count;
+                            }
+                            let output = Command::new(&program)
+                                .args([format!("{low:x}"), format!("{:x}", low + CHUNK)])
+                                .output()
+                                .unwrap();
+                            assert!(output.status.success());
+                            for (offset, pair) in
+                                output.stdout.as_chunks::<4>().0.iter().enumerate()
+                            {
+                                let bits = low + offset as u64;
+                                let value = f32::from_bits(u32::try_from(bits).unwrap());
+                                let wide = f64::from(value).to_bits();
+                                let f16 = u16::from_ne_bytes([pair[0], pair[1]]);
+                                let bf16 = u16::from_ne_bytes([pair[2], pair[3]]);
+                                count += u64::from(f16 != storage_reference(wide, 64, Output::F16));
+                                count +=
+                                    u64::from(bf16 != storage_reference(wide, 64, Output::Bf16));
+                            }
+                        }
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .sum()
+        });
+        assert_eq!(total, 0, "{total} misrounded conversions over 2^32 inputs");
     }
 }

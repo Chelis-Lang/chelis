@@ -8,6 +8,8 @@ use std::{
     process::Command,
 };
 
+use chelis_backend_c::toolchain::CompilerCheckError;
+
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub(crate) struct NativeBuild {
@@ -58,7 +60,7 @@ impl NativeBuild {
                 let mut command = self.executable_command(&artifact);
                 print_command("Compile", &mut command);
             } else {
-                let mut archive = Command::new(&archiver);
+                let mut archive = self.tool(&archiver);
                 archive.arg("rcs").arg(&artifact);
                 for source in &self.sources {
                     let object = source.with_extension("o");
@@ -70,6 +72,21 @@ impl NativeBuild {
                 self.print_link_requirements();
             }
             return Ok(());
+        }
+
+        // The C compiler is a declared input: record which one ran, and refuse
+        // one whose wrapper or configuration changes the pinned profile.
+        if self.target == "c" {
+            let identity = chelis_backend_c::toolchain::verify_compiler(
+                &self.compiler.to_string_lossy(),
+                &self.compile_flags,
+                &self.link_flags,
+            )
+            .map_err(|error| match error {
+                CompilerCheckError::NotFound(tool) => tool_not_found("compile", self.target, &tool),
+                CompilerCheckError::Refused(reason) => format!("native compile: {reason}"),
+            })?;
+            println!("Compiler: {identity}");
         }
 
         // Same filesystem as the destination: rename publishes only a complete
@@ -95,7 +112,7 @@ impl NativeBuild {
                 true,
             )?;
         } else {
-            let mut archive = Command::new(archiver);
+            let mut archive = self.tool(&archiver);
             archive.arg("rcs").arg(&product);
             for (index, source) in self.sources.iter().enumerate() {
                 let object = scratch.path().join(format!("source-{index}.o"));
@@ -126,20 +143,37 @@ impl NativeBuild {
         Ok(())
     }
 
+    /// Native tools run with an allowlisted environment, so variables such as
+    /// `CCC_OVERRIDE_OPTIONS` or `CPATH` cannot change the compile. hipcc is
+    /// the exception: ROCm locates its installation through the environment,
+    /// and the HIP lane's environment contract is not yet decided.
+    fn tool(&self, program: &OsStr) -> Command {
+        if self.target == "hip" {
+            Command::new(program)
+        } else {
+            chelis_backend_c::toolchain::tool_command(program)
+        }
+    }
+
     fn executable_command(&self, product: &Path) -> Command {
-        let mut command = Command::new(&self.compiler);
-        command
-            .args(&self.compile_flags)
-            .args(&self.sources)
-            .arg(&self.runtime_archive)
-            .args(&self.link_flags)
-            .arg("-o")
-            .arg(product);
+        let mut inputs: Vec<&OsStr> = self
+            .sources
+            .iter()
+            .map(|source| source.as_os_str())
+            .collect();
+        inputs.push(self.runtime_archive.as_os_str());
+        let mut command = self.tool(&self.compiler);
+        command.args(chelis_backend_c::toolchain::link_args(
+            &self.compile_flags,
+            &inputs,
+            &self.link_flags,
+            product.as_os_str(),
+        ));
         command
     }
 
     fn object_command(&self, source: &Path, object: &Path) -> Command {
-        let mut command = Command::new(&self.compiler);
+        let mut command = self.tool(&self.compiler);
         command
             .args(&self.compile_flags)
             .arg("-c")
@@ -150,9 +184,19 @@ impl NativeBuild {
     }
 
     fn print_link_requirements(&self) {
-        let mut command = Command::new(&self.compiler);
+        print_command(
+            "Link requirements (after module archive)",
+            &mut self.link_requirements(),
+        );
+    }
+
+    /// What a static library's consumer links after the module archive: the
+    /// staged runtime archive and the build's own link flags, which carry
+    /// `-fopenmp` whenever the profile compiled the module with OpenMP.
+    fn link_requirements(&self) -> Command {
+        let mut command = self.tool(&self.compiler);
         command.arg(&self.runtime_archive).args(&self.link_flags);
-        print_command("Link requirements (after module archive)", &mut command);
+        command
     }
 }
 
@@ -192,10 +236,7 @@ fn run(
     let tool = command.get_program().to_string_lossy().into_owned();
     let output = command.output().map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
-            format!(
-                "native {stage}: tool `{tool}` was not found; {}",
-                install_guidance(stage, target)
-            )
+            tool_not_found(stage, target, &tool)
         } else {
             format!("native {stage}: cannot run `{tool}`: {error}")
         }
@@ -208,6 +249,13 @@ fn run(
     }
     require_product(product, executable)
         .map_err(|error| format!("native {stage}: `{tool}`: {error}").into())
+}
+
+fn tool_not_found(stage: &str, target: &str, tool: &str) -> String {
+    format!(
+        "native {stage}: tool `{tool}` was not found; {}",
+        install_guidance(stage, target)
+    )
 }
 
 fn install_guidance(stage: &str, target: &str) -> &'static str {
@@ -305,4 +353,34 @@ pub(crate) fn protect_input(file: &Path, output: Option<&Path>, target: &str) ->
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The printed requirements are the staged runtime archive followed by
+    /// exactly the build's link flags, so the `-fopenmp` a gcc profile links
+    /// with (locked in `toolchain`'s tests) reaches the consumer; without it a
+    /// consumer's link leaves the parallel regions' `omp_*` and `GOMP_*`
+    /// symbols undefined.
+    #[test]
+    fn static_library_link_requirements_are_the_build_link_flags() {
+        let link_flags = ["-lm", "-lpthread", "-ldl", "-fopenmp"]
+            .map(String::from)
+            .to_vec();
+        let build = NativeBuild {
+            target: "c",
+            compiler: "gcc".into(),
+            sources: Vec::new(),
+            compile_flags: Vec::new(),
+            link_flags: link_flags.clone(),
+            runtime_archive: PathBuf::from("out/libchelis_runtime.a"),
+            requires_main: false,
+        };
+        let command = build.link_requirements();
+        let mut expected = vec![OsStr::new("out/libchelis_runtime.a")];
+        expected.extend(link_flags.iter().map(OsStr::new));
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+    }
 }

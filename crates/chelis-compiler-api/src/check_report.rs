@@ -50,6 +50,7 @@ impl CheckResult {
     /// check` document, including the ones for failures that occur before
     /// the checker runs ([04-FIT-12]), is this function's output.
     pub fn to_report_json(&self) -> Result<String, serde_json::Error> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let mut bytes = Vec::new();
         let mut serializer =
             serde_json::Serializer::with_formatter(&mut bytes, ReportFormatter::default());
@@ -71,6 +72,7 @@ impl Diagnostic {
     /// transported verbatim rather than derived from the offset ([04-FIT-16]).
     /// `at byte N` is the spelling Surf parse errors already use.
     pub fn render_line(&self) -> String {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let mut line = format!("{}: {}", self.kind().as_str(), self.message);
         match self.span {
             Some(DiagnosticSpan::Point { offset }) => line.push_str(&format!(" at byte {offset}")),
@@ -97,6 +99,7 @@ impl Diagnostic {
 /// projection `chelis check` publishes. A projection failure is returned as
 /// the failure it is; there is no fallback rendering.
 pub fn render_check_errors(errors: &[chelis_types::errors::CheckError]) -> Result<String, String> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     errors
         .iter()
         .enumerate()

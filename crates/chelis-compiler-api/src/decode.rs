@@ -107,6 +107,7 @@ pub fn decode_adt_value(
     program_exprs: &[Expr],
     payload: &ExecutionValue,
 ) -> Result<RuntimeValue, String> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     try_decode_adt_value(program_exprs, payload).map_err(|err| err.to_string())
 }
 
@@ -117,6 +118,7 @@ pub fn try_decode_adt_value(
     program_exprs: &[Expr],
     payload: &ExecutionValue,
 ) -> Result<RuntimeValue, DecodeError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let field_types = collect_ctor_field_types(program_exprs);
     let adt_fields = field_types
         .to_sorted()

@@ -1190,6 +1190,57 @@ class ManifestTests(unittest.TestCase):
             for command in commands
         ))
 
+    def test_correctly_rounded_c_owners_require_exact_execution_controls(self) -> None:
+        expected = (
+            (
+                "crates/chelis-backend-c/src/fp_env.rs",
+                "backend-element-spelling",
+                "HELPERS",
+            ),
+            (
+                "crates/chelis-backend-c/src/fp_env.rs",
+                "backend-element-spelling",
+                "prune_unused_nan_helpers",
+            ),
+            (
+                "crates/chelis-backend-c/src/generated_header.rs",
+                "backend-element-spelling",
+                "validate_generated_include_set::ALLOWED_INCLUDES",
+            ),
+        )
+        self.assertEqual(oracle.CORRECTLY_ROUNDED_C_FINAL_FORMS, expected)
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        for path, kind, owner in expected:
+            self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+            self.assertFalse(
+                oracle.owner_module_final_form(kind, path.replace("chelis-backend-c", "chelis-backend-hip"), owner)
+            )
+            other_kind = (
+                "load-store-template"
+                if kind == "backend-element-spelling"
+                else "backend-element-spelling"
+            )
+            self.assertFalse(oracle.owner_module_final_form(other_kind, path, owner))
+            self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        # The renamed fused step and the extracted activation body stay
+        # transition debt rather than borrowing the final-form authority.
+        for path, owner in (
+            ("crates/chelis-backend-c/src/emit.rs", "CEmitter::scalar_step_raw_expr"),
+            ("crates/chelis-backend-c/src/host_emit.rs", "activation_body"),
+        ):
+            self.assertFalse(
+                oracle.owner_module_final_form("backend-element-spelling", path, owner)
+            )
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
+        self.assertTrue(any(
+            "-p chelis-backend-c --lib --test exec_compile" in command
+            and "test(toolchain::tests::verify_compiler_)" in command
+            and "direct_and_fused_float_arithmetic_finalizes_canonical_nan_at_every_width" in command
+            and "direct_extrema_preserve_nan_payloads_and_lhs_signed_zero_at_every_float_width" in command
+            for command in commands
+        ))
+
     def test_key_callable_load_store_owner_requires_exact_execution_controls(self) -> None:
         path = "crates/chelis-backend-c/src/host_emit.rs"
         kind = "load-store-template"
@@ -1572,7 +1623,7 @@ class RedTeamRegressionTests(unittest.TestCase):
     def test_build_scripts_are_inside_the_universe(self) -> None:
         # A build script is compiled by cargo like any other source, so a root
         # that cannot see one is a closure hole.
-        self.assertIn("crates/chelis-backend-c/build.rs", oracle.INVENTORY_SOURCES)
+        self.assertIn("crates/chelis-runtime/build.rs", oracle.INVENTORY_SOURCES)
         self.assertTrue(
             any(root.endswith("build.rs") for root in oracle.INVENTORY_ROOTS),
             oracle.INVENTORY_ROOTS,
@@ -1590,7 +1641,7 @@ class RedTeamRegressionTests(unittest.TestCase):
         native = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
         self.assertIn(
-            "Seventy-nine are Rust and eleven are C, C++, or Objective-C sources",
+            "Eighty-one are Rust and eleven are C, C++, or Objective-C sources",
             source,
         )
-        self.assertEqual((rust, native), (79, 11))
+        self.assertEqual((rust, native), (81, 11))

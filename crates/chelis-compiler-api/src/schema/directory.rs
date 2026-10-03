@@ -34,14 +34,17 @@ pub struct CheckDirectoryEntry {
 
 impl CheckDirectoryEntry {
     pub fn new(file: EntryPath, report: CheckResult) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         Self { file, report }
     }
 
     pub fn file(&self) -> &str {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.file.0
     }
 
     pub fn report(&self) -> &CheckResult {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.report
     }
 }
@@ -66,6 +69,7 @@ impl EntryPath {
     /// stripping beside the validation, so a refusal names the same path every
     /// other walk failure names.
     pub fn relative_to(target: &Path, walked: &Path) -> Result<Self, UnrepresentablePath> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let Ok(relative) = walked.strip_prefix(target) else {
             // The walk only produces paths below its target, so this is a
             // defect in the caller. It is still reported, not panicked on:
@@ -92,6 +96,7 @@ impl EntryPath {
     }
 
     pub fn as_str(&self) -> &str {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.0
     }
 }
@@ -109,6 +114,7 @@ impl EntryPath {
 /// (`runtime::eval::list_dir_names_to_strings`), so the two cannot drift into
 /// spelling one byte differently.
 pub fn escaped_path(path: &Path) -> String {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     format!(
         "b\"{}\"",
         path.as_os_str().as_encoded_bytes().escape_ascii()
@@ -180,6 +186,7 @@ impl CheckDirectoryReport {
         files: Vec<CheckDirectoryEntry>,
         walk_failures: Vec<String>,
     ) -> Result<Self, EmptyWalk> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         if files.is_empty() && walk_failures.is_empty() {
             return Err(EmptyWalk(()));
         }
@@ -191,10 +198,12 @@ impl CheckDirectoryReport {
     }
 
     pub fn files(&self) -> &[CheckDirectoryEntry] {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.files
     }
 
     pub fn errors(&self) -> &[Diagnostic] {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         &self.errors
     }
 
@@ -204,6 +213,7 @@ impl CheckDirectoryReport {
     /// Reading only the envelope's own `errors` would pass a directory full of
     /// type errors; reading only the entries would pass an unreadable one.
     pub fn has_errors(&self) -> bool {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         !self.errors.is_empty()
             || self
                 .files
@@ -224,6 +234,7 @@ impl EmptyWalk {
     /// diagnostic. `description` names the target and reports what the
     /// exclusions removed.
     pub fn into_report(self, description: String) -> CheckDirectoryReport {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
         CheckDirectoryReport {
             files: Vec::new(),
             errors: vec![Diagnostic::new(

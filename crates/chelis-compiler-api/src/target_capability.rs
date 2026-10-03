@@ -28,6 +28,7 @@ const METAL_TENSOR_CAPABLE_PRIMS: &[Prim] = &[
 /// This match has NO wildcard arm. Adding a `Target` variant without a
 /// corresponding arm is a compile error.
 pub fn tensor_capable_prims(target: Target) -> &'static [Prim] {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     match target {
         Target::Eval => chelis_ir::EVAL_TENSOR_CAPABLE_PRIMS,
         Target::C => chelis_backend_c::TENSOR_CAPABLE_PRIMS,
@@ -42,6 +43,7 @@ pub fn hip_entry_lane(
     program: &chelis_types::CheckedProgram,
     name: &str,
 ) -> Result<chelis_types::types::Lane, chelis_types::unsupported::Unsupported> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     let result = chelis_effects::realizability::infer_realizability(
         program,
         tensor_capable_prims(Target::Hip),

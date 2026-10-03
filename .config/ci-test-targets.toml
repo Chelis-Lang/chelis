@@ -123,6 +123,27 @@ cadence = "pull_request and push"
 reason = "script-unit executes this module's positive and negative parity-receipt rows"
 tracking_issue = "chelis#2102"
 
+# chelis#2957: the CORE-MATH vendoring script regenerates and checks the
+# chelis-crmath amalgamation; script-unit runs its tests, including the
+# repository's own `--check`, on every pull request.
+[[path_rule]]
+prefix = "scripts/vendor_core_math.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the vendoring script's rewrite, manifest, and drift-check tests"
+tracking_issue = "chelis#2957"
+
+[[path_rule]]
+prefix = "scripts/test_vendor_core_math.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the vendoring script's rewrite, manifest, and drift-check tests"
+tracking_issue = "chelis#2957"
+
 # chelis#2859: the Std.Datetime reference and differential harness. The
 # chelis-cli `std_datetime_oracle` target runs both against eval and native C;
 # script-unit runs the reference's own tests on every pull request.
@@ -1300,6 +1321,45 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "real chelis build plus generated-C compilation rebuilds the chelis-std graph"
 tracking_issue = "chelis#1824"
 
+# chelis#3017: the complete scalar-gradient lane sweep builds and runs 26 C
+# executables. Its standing canary is `issue_1741_scalar_gradient_cli`.
+[[target_exclusion]]
+package = "chelis-cli"
+name = "issue_3017_scalar_gradient_sweep"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "every exact gradient body over the 24-input sweep at f32 and f64 builds one C executable per body and dtype"
+tracking_issue = "chelis#3017"
+# Every test in these two targets is `#![cfg(feature = "smt")]`, so a
+# default-feature listing has none, and the cvc5 they link is provisioned only
+# by the SMT jobs. The nightly full SMT prove runs every smt-gated chelis-prove
+# integration target with the feature.
+[[target_exclusion]]
+package = "chelis-prove"
+name = "issue_1475_sqrt_domain"
+workflow = "smt-full-prove.yml"
+job = "full-smt-prove"
+cadence = "daily 09:00 UTC and workflow_dispatch"
+reason = "every test is smt-gated; `cargo test -p chelis-prove --features smt` runs it with cvc5"
+tracking_issue = "chelis#1475"
+[[target_exclusion]]
+package = "chelis-prove"
+name = "transcendental_finance_lowering"
+workflow = "smt-full-prove.yml"
+job = "full-smt-prove"
+cadence = "daily 09:00 UTC and workflow_dispatch"
+reason = "every test is smt-gated; `cargo test -p chelis-prove --features smt` runs it with cvc5"
+tracking_issue = "chelis#434"
+[[target_exclusion]]
+package = "chelis-prove"
+name = "standard_contract_discharge_table"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "recomputes every standard-contract fuzz discharge at every float width; a per-pull-request canary in the chelis-prove lib recomputes one row"
+tracking_issue = "chelis#2957"
+
 # These individual heavy rows remain in otherwise selectable targets. Each
 # exact test is removed from package expansion and retains the same unfiltered
 # Linux nightly owner.
@@ -2192,7 +2252,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -2207,8 +2268,8 @@ packages = [
 prefix = "packages/chelis-std/"
 disposition = "packages"
 packages = [
-  "chelis-cli", "chelis-compiler-api", "chelis-python", "chelis-reef",
-  "chelis-std-bundle",
+  "chelis-cli", "chelis-compiler-api", "chelis-prove", "chelis-python",
+  "chelis-reef", "chelis-std-bundle", "chelis-tide",
 ]
 
 # The configuration-closure implementation and its adversarial controls execute
@@ -3786,7 +3847,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -3802,7 +3864,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -3828,6 +3891,15 @@ job = "lint-rust"
 cadence = "pull_request and push"
 reason = "the Rust policy job's lint-and-unit gate stage runs chelis lint --check ., which loads this repository traversal policy before any rule"
 tracking_issue = "chelis#2867"
+
+[[path_rule]]
+prefix = "scripts/test_pipeline_core_dependency_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the pipeline-core dependency guard's fixture-graph unit contracts with the other scripts/test_*.py suites"
+tracking_issue = "chelis#1824"
 
 [[path_rule]]
 prefix = "scripts/pipeline_core_dependency_guard.py"
@@ -3916,7 +3988,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
@@ -4187,7 +4260,8 @@ disposition = "packages"
 packages = [
   "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
   "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
-  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-conformance", "chelis-cove", "chelis-crmath", "chelis-deep",
+  "chelis-e2e",
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",

@@ -1,4 +1,8 @@
 //! #2373: a computed tensor retains its checked concat geometry at admission.
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#![allow(clippy::disallowed_methods)]
 
 use chelis_compiler_api::compiler::{check, eval};
 use chelis_compiler_api::schema::{CheckRequest, EvalRequest, ExecutionValue, SourceKind};

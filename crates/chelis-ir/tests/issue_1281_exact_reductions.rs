@@ -86,10 +86,16 @@ fn extrema_and_window_extrema_preserve_first_nan_and_first_equal_bits() {
     let values = evaluate_single_input(
         &dag,
         "x",
-        exact_tensor(
+        // Stored bits, not an arithmetic result: `finalize_tensor` would
+        // finalize both NaNs canonically.
+        TensorValue::from_storage(
             vec![3],
-            Prim::F32,
-            RawTensor::Float(vec![f64::from(first_nan), 1.0, f64::from(later_nan)]),
+            chelis_types::tensor_from_scalars(
+                Prim::F32,
+                &[first_nan, 1.0, later_nan].map(|value| {
+                    chelis_types::scalar_from_f64("test", Prim::F32, f64::from(value)).unwrap()
+                }),
+            ),
         ),
     )
     .unwrap();

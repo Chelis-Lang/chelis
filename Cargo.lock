@@ -477,6 +477,7 @@ dependencies = [
 name = "chelis-backend-c"
 version = "0.18.12"
 dependencies = [
+ "chelis-crmath",
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
@@ -486,7 +487,6 @@ dependencies = [
  "chelis-unord",
  "chelis-vocab",
  "half",
- "pkg-config",
  "serde_json",
  "sha2",
  "tempfile",
@@ -516,6 +516,7 @@ name = "chelis-backend-metal"
 version = "0.18.12"
 dependencies = [
  "chelis-backend-c",
+ "chelis-crmath",
  "chelis-effects",
  "chelis-ir",
  "chelis-runtime-bundle",
@@ -540,6 +541,7 @@ dependencies = [
  "chelis-compiler-api",
  "chelis-conformance",
  "chelis-cove",
+ "chelis-crmath",
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
@@ -586,6 +588,7 @@ dependencies = [
  "chelis-abi",
  "chelis-backend-c",
  "chelis-backend-hip",
+ "chelis-crmath",
  "chelis-deep",
  "chelis-effects",
  "chelis-image-id",
@@ -636,6 +639,14 @@ dependencies = [
  "tempfile",
  "tree-sitter",
  "tree-sitter-chelis",
+]
+
+[[package]]
+name = "chelis-crmath"
+version = "0.18.12"
+dependencies = [
+ "cc",
+ "half",
 ]
 
 [[package]]
@@ -790,8 +801,11 @@ dependencies = [
  "bincode",
  "carcara",
  "chelis-compiler-api",
+ "chelis-crmath",
  "chelis-deep",
  "chelis-pred",
+ "chelis-reef",
+ "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",
  "chelis-unord",
@@ -890,6 +904,7 @@ name = "chelis-runtime"
 version = "0.18.12"
 dependencies = [
  "chelis-abi",
+ "chelis-crmath",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
@@ -966,6 +981,8 @@ dependencies = [
  "chelis-compiler-api",
  "chelis-deep",
  "chelis-prove",
+ "chelis-reef",
+ "chelis-std-bundle",
  "chelis-surf",
  "http-body-util",
  "schemars",
@@ -981,6 +998,7 @@ name = "chelis-types"
 version = "0.18.12"
 dependencies = [
  "bincode",
+ "chelis-crmath",
  "chelis-deep",
  "chelis-macros",
  "chelis-pred",

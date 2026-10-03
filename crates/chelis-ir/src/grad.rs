@@ -701,6 +701,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Cos => "cos",
         RiscOp::Tan => "tan",
         RiscOp::Atan => "atan",
+        RiscOp::Tanh => "tanh",
         RiscOp::Abs => "abs",
         RiscOp::Floor => "floor",
         RiscOp::Ceil => "ceil",
@@ -1697,18 +1698,12 @@ fn compute_adjoints(
             Some(vec![(x, dx)])
         }
         RiscOp::Sin => {
-            // d/dx sin(x) = cos(x) = sin(x + pi/2)
+            // [05-OP-46]: d/dx sin(x) = cos(x), the correctly rounded `cos`
+            // primitive. A shifted `sin(x + pi/2)` rounds the shift at the
+            // operand dtype and loses the low bits of `x` (chelis#2989).
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let half_pi = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, std::f64::consts::FRAC_PI_2),
-                vec![],
-                ty.clone(),
-                None,
-            );
-            let shifted = dag.add_node(node.owner, RiscOp::Add, vec![x, half_pi], ty.clone(), None);
-            let cos_x = dag.add_node(node.owner, RiscOp::Sin, vec![shifted], ty.clone(), None);
+            let cos_x = dag.add_node(node.owner, RiscOp::Cos, vec![x], ty.clone(), None);
             let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, cos_x], ty, None);
             Some(vec![(x, dx)])
         }
@@ -1771,6 +1766,29 @@ fn compute_adjoints(
             let x_sq = dag.add_node(node.owner, RiscOp::Mul, vec![x, x], ty.clone(), None);
             let denom = dag.add_node(node.owner, RiscOp::Add, vec![one, x_sq], ty.clone(), None);
             let dx = tier2::lower_div(node.owner, dag, g, denom, &ty, None);
+            Some(vec![(x, dx)])
+        }
+        RiscOp::Tanh => {
+            // [05-OP-46]: tanh gives g * (1 - y * y) using the forward y = tanh(x).
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let one = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, 1.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let y_sq = dag.add_node(
+                node.owner,
+                RiscOp::Mul,
+                vec![node.id, node.id],
+                ty.clone(),
+                None,
+            );
+            let one_minus =
+                dag.add_node(node.owner, RiscOp::Sub, vec![one, y_sq], ty.clone(), None);
+            let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, one_minus], ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Abs => {
@@ -3387,6 +3405,10 @@ fn restore_target(
 }
 
 #[cfg(test)]
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::eval::{TensorValue, eval_scalar};

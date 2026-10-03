@@ -1,4 +1,9 @@
-use chelis_tide::mcp::handle_message;
+use chelis_std_bundle::EMBEDDED_RUNTIME;
+
+// The MCP handler at the runtime this test binary embeds.
+fn handle_message(message: &serde_json::Value) -> Option<serde_json::Value> {
+    chelis_tide::mcp::handle_message(message, &EMBEDDED_RUNTIME)
+}
 use serde_json::json;
 
 mod replace_fixtures;
@@ -923,7 +928,9 @@ fn tide_runs_obligations_via_shared_engine() {
     // Shared-engine path (what the CLI also calls).
     let engine_out = match chelis_prove::obligation_engine::run_surf_source_obligations(
         OPAQUE_MODULE,
-        &chelis_prove::obligation_engine::ObligationRunOptions::default(),
+        &chelis_prove::obligation_engine::ObligationRunOptions::new(
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        ),
     )
     .expect("engine run")
     {
@@ -1218,7 +1225,9 @@ def square(x: f32) -> f32 = x * x
     let chelis_prove::property_runner::PropertyRunResult::Ran(engine) =
         chelis_prove::property_runner::run_surf_source_properties(
             source,
-            &chelis_prove::property_runner::PropertyRunOptions::default(),
+            &chelis_prove::property_runner::PropertyRunOptions::new(
+                &chelis_std_bundle::EMBEDDED_RUNTIME,
+            ),
         )
         .expect("run");
 
@@ -1328,7 +1337,9 @@ fn u4_f8_zero_sample_property_status_matches_cli() {
             source,
             &chelis_prove::property_runner::PropertyRunOptions {
                 tier: "fuzz-only".to_string(),
-                ..Default::default()
+                ..chelis_prove::property_runner::PropertyRunOptions::new(
+                    &chelis_std_bundle::EMBEDDED_RUNTIME,
+                )
             },
         )
         .expect("run");
@@ -1593,7 +1604,9 @@ fn deep_violating_obligation_lowers_tide_status() {
     // obligation set, so tide is not running a weaker check for deep.
     let engine_out = match chelis_prove::obligation_engine::run_deep_source_obligations(
         &deep_source,
-        &chelis_prove::obligation_engine::ObligationRunOptions::default(),
+        &chelis_prove::obligation_engine::ObligationRunOptions::new(
+            &chelis_std_bundle::EMBEDDED_RUNTIME,
+        ),
     )
     .expect("engine run")
     {

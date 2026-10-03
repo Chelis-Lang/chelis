@@ -2071,7 +2071,7 @@ Operations accept same-precision operands only. The table of valid combinations:
 | Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any active numeric dtype (both operands same dtype) → bool |
 | Equality (`eq`, `neq`) | any active numeric dtype or bool (both operands same dtype), plus the recursively comparable host-value domain in [05-OP-36] → bool |
 | Logical (and, or, not) | bool only |
-| Transcendental (exp, log, sin, cos, tan, atan, sqrt) | f32, f64, bf16, f16 only (not integer) |
+| Transcendental (exp, log, sin, cos, tan, atan, tanh, sqrt) | f32, f64, bf16, f16 only (not integer) |
 
 Every reserved name of §1.1.1 - `f8e4m3`, `f8e5m2`, the `uint*` family,
 `int4`/`uint4`, `complex64`/`complex128`, and `decimal128`/`decimal256` - is
@@ -3404,7 +3404,11 @@ Scope:
 > class, not an input payload or sign. A pure bit-moving or selection
 > operation preserves NaN payload bits only when its governing operation atom
 > explicitly says it is bit-preserving. The width at which the op is COMPUTED
-> before finalization is fixed by [04-NUM-8], not by this atom.
+> before finalization is fixed by [04-NUM-8], not by this atom. These rules
+> are the only floating-point environment: no rounding mode, flush-to-zero,
+> denormals-are-zero, or other dynamic state of the process, host, or caller
+> in which a lane runs changes a result, and subnormal operands and results
+> are never flushed.
 
 > **[04-NUM-3]** Integer op results that are not exactly representable
 > in the declared width SHALL trap with the branded overflow diagnostic;
@@ -3489,6 +3493,16 @@ Scope:
 > it. The permission does not extend to transcendentals or any other op
 > where the bits could differ - those compute at f32 per the table. No
 > lane SHALL compute at any width wider than the one declared above.
+>
+> A correctly rounded primitive ([05-OP-46]) is defined by its result: the
+> exact real value of its function rounded once to the arithmetic width.
+> The precision a kernel uses internally to obtain that result, such as an
+> f32 kernel that evaluates in f64 or in multi-word arithmetic and rounds
+> once, is not an operation width and is not governed by this atom. Every
+> operation of a graph, including each primitive inside a composition, still
+> computes and finalizes at the declared width: evaluating a composition, or
+> a transcendental that is not correctly rounded, at f64 and narrowing the
+> result is non-conforming.
 >
 > REDUCED-precision computation - performing an op at an arithmetic width
 > narrower than the one declared above SUCH THAT THE RESULT BITS CAN

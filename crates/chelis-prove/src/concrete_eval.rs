@@ -8,7 +8,8 @@
 //! flattened invariant predicate: a generation method is only ever a
 //! proposal distribution, and every accepted sample is validated against
 //! the predicate via [`eval_bool`] here, so the two surfaces agree by
-//! construction.
+//! construction. `normal_cdf` is the shipped graph from the chelis-std
+//! runtime the caller passes (`crate::std_graph`).
 //!
 //! Semantics notes (kept identical to the pre-lift Tier C behavior so
 //! `tier_c` re-exports are byte-for-byte equivalent):
@@ -23,6 +24,7 @@
 //!   D-STARVE "exact float equality starves by design").
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
+use chelis_reef::EmbeddedRuntime;
 use chelis_types::{
     CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar, compare_scalars,
     float_binop, float_unop, int_binop, int_unop, scalar_from_f64, scalar_from_i64, types::Prim,
@@ -39,8 +41,8 @@ pub type ConcreteEnv = UnordMap<String, ScalarValue>;
 /// comparison semantics: `==`/`!=` carry a `1e-10` tolerance. This is the
 /// user-property postcondition evaluator and must NOT be used for
 /// invariant-sample acceptance (use [`eval_bool_strict`] there).
-pub fn eval_bool(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
-    eval_bool_with(expr, env, false)
+pub fn eval_bool(expr: &SmtExpr, env: &ConcreteEnv, runtime: &'static EmbeddedRuntime) -> bool {
+    eval_bool_with(expr, env, false, runtime)
 }
 
 /// Evaluate a boolean-shaped [`SmtExpr`] with STRICT comparison semantics:
@@ -50,11 +52,20 @@ pub fn eval_bool(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
 /// weaken exactly the soundness that validation provides). NaN operands
 /// compare false under both `==` and (per IEEE) yield `true` for `!=`, so
 /// a NaN representation never spuriously satisfies an equality invariant.
-pub fn eval_bool_strict(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
-    eval_bool_with(expr, env, true)
+pub fn eval_bool_strict(
+    expr: &SmtExpr,
+    env: &ConcreteEnv,
+    runtime: &'static EmbeddedRuntime,
+) -> bool {
+    eval_bool_with(expr, env, true, runtime)
 }
 
-fn eval_bool_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> bool {
+fn eval_bool_with(
+    expr: &SmtExpr,
+    env: &ConcreteEnv,
+    strict: bool,
+    runtime: &'static EmbeddedRuntime,
+) -> bool {
     match expr {
         SmtExpr::BoolLit(v) => *v,
         SmtExpr::Cmp(op, left, right) => {
@@ -63,22 +74,23 @@ fn eval_bool_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> bool {
             // operand keeps the exact-equality semantics under
             // `eval_bool_strict`, instead of silently reverting to the
             // 1e-10 fuzz tolerance via `eval_arith` (strict = false).
-            let Some(l) = eval_scalar_with(left, env, strict) else {
+            let Some(l) = eval_scalar_with(left, env, strict, runtime) else {
                 return false;
             };
-            let Some(r) = eval_scalar_with(right, env, strict) else {
+            let Some(r) = eval_scalar_with(right, env, strict, runtime) else {
                 return false;
             };
             eval_cmp(*op, l, r, strict)
         }
-        SmtExpr::Bool(BoolOp::And, children) => {
-            children.iter().all(|c| eval_bool_with(c, env, strict))
-        }
-        SmtExpr::Bool(BoolOp::Or, children) => {
-            children.iter().any(|c| eval_bool_with(c, env, strict))
-        }
+        SmtExpr::Bool(BoolOp::And, children) => children
+            .iter()
+            .all(|c| eval_bool_with(c, env, strict, runtime)),
+        SmtExpr::Bool(BoolOp::Or, children) => children
+            .iter()
+            .any(|c| eval_bool_with(c, env, strict, runtime)),
         SmtExpr::Bool(BoolOp::Implies, children) if children.len() == 2 => {
-            !eval_bool_with(&children[0], env, strict) || eval_bool_with(&children[1], env, strict)
+            !eval_bool_with(&children[0], env, strict, runtime)
+                || eval_bool_with(&children[1], env, strict, runtime)
         }
         // Non-binary `Implies` (or any other malformed boolean connective)
         // must NOT fall through to the arithmetic catch-all below: that path
@@ -94,20 +106,20 @@ fn eval_bool_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> bool {
         SmtExpr::Bool(BoolOp::Implies, children) => {
             let antecedent = children
                 .split_last()
-                .map(|(_, rest)| rest.iter().all(|c| eval_bool_with(c, env, strict)))
+                .map(|(_, rest)| rest.iter().all(|c| eval_bool_with(c, env, strict, runtime)))
                 .unwrap_or(true);
             let consequent = children
                 .last()
-                .map(|c| eval_bool_with(c, env, strict))
+                .map(|c| eval_bool_with(c, env, strict, runtime))
                 .unwrap_or(true);
             !antecedent || consequent
         }
-        SmtExpr::Not(inner) => !eval_bool_with(inner, env, strict),
+        SmtExpr::Not(inner) => !eval_bool_with(inner, env, strict, runtime),
         SmtExpr::Ite(cond, then_e, else_e) => {
-            if eval_bool_with(cond, env, strict) {
-                eval_bool_with(then_e, env, strict)
+            if eval_bool_with(cond, env, strict, runtime) {
+                eval_bool_with(then_e, env, strict, runtime)
             } else {
-                eval_bool_with(else_e, env, strict)
+                eval_bool_with(else_e, env, strict, runtime)
             }
         }
         // Genuinely arithmetic-shaped expressions used in boolean context:
@@ -117,7 +129,7 @@ fn eval_bool_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> bool {
         // its forms, `Not`, `Cmp`, `Ite`, `BoolLit`) is handled above, so
         // this arm only ever sees arithmetic variants and cannot re-enter
         // `eval_bool_with` for the same `expr` (no unbounded recursion).
-        _ => eval_scalar_with(expr, env, strict).is_some_and(|value| {
+        _ => eval_scalar_with(expr, env, strict, runtime).is_some_and(|value| {
             value
                 .as_bool_exact()
                 .unwrap_or_else(|| value.as_f64_lossy() != 0.0)
@@ -190,13 +202,18 @@ fn align_literal_widths(lhs: ScalarValue, rhs: ScalarValue) -> Option<(ScalarVal
 /// environment with the fuzz comparison semantics (`1e-10` tolerance for
 /// any nested `==`/`!=`). Unbound variables read as `0.0`; division by
 /// zero and out-of-domain transcendentals yield `NaN`.
-pub fn eval_arith(expr: &SmtExpr, env: &ConcreteEnv) -> f64 {
-    eval_scalar_with(expr, env, false)
+pub fn eval_arith(expr: &SmtExpr, env: &ConcreteEnv, runtime: &'static EmbeddedRuntime) -> f64 {
+    eval_scalar_with(expr, env, false, runtime)
         .map(|value| value.as_f64_lossy())
         .unwrap_or(f64::NAN)
 }
 
-fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<ScalarValue> {
+fn eval_scalar_with(
+    expr: &SmtExpr,
+    env: &ConcreteEnv,
+    strict: bool,
+    runtime: &'static EmbeddedRuntime,
+) -> Option<ScalarValue> {
     match expr {
         SmtExpr::Var(name) => env
             .get(name)
@@ -208,7 +225,7 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
             scalar_from_i64("prove-bool-literal", Prim::Bool, i64::from(*v)).ok()
         }
         SmtExpr::Arith(op, left, right) => {
-            let lhs = eval_scalar_with(left, env, strict)?;
+            let lhs = eval_scalar_with(left, env, strict, runtime)?;
             if matches!(op, ArithOp::Neg) {
                 return if lhs.prim().is_integer() {
                     int_unop(IntUnOp::Neg, lhs).ok()
@@ -218,7 +235,7 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
                     None
                 };
             }
-            let rhs = eval_scalar_with(right, env, strict)?;
+            let rhs = eval_scalar_with(right, env, strict, runtime)?;
             let (lhs, rhs) = align_literal_widths(lhs, rhs)?;
             if matches!(op, ArithOp::Div) && rhs.as_f64_lossy() == 0.0 {
                 return None;
@@ -262,25 +279,25 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
         SmtExpr::Apply(name, args) => {
             let values: Vec<ScalarValue> = args
                 .iter()
-                .map(|expr| eval_scalar_with(expr, env, strict))
+                .map(|expr| eval_scalar_with(expr, env, strict, runtime))
                 .collect::<Option<_>>()?;
             match (name.as_str(), values.as_slice()) {
                 ("abs", [value]) if value.prim().is_integer() => {
                     int_unop(IntUnOp::Abs, *value).ok()
                 }
-                ("exp" | "log" | "sqrt" | "sin" | "cos" | "abs", [value])
-                    if value.prim().is_float() =>
-                {
-                    let op = match name.as_str() {
-                        "exp" => FloatUnOp::Exp,
-                        "log" => FloatUnOp::Log,
-                        "sqrt" => FloatUnOp::Sqrt,
-                        "sin" => FloatUnOp::Sin,
-                        "cos" => FloatUnOp::Cos,
-                        "abs" => FloatUnOp::Abs,
-                        _ => unreachable!("matched closed unary intrinsic"),
+                ("exp" | "log" | "sin" | "cos", [value]) if value.prim().is_float() => {
+                    correctly_rounded(name, *value)
+                }
+                ("sqrt" | "abs", [value]) if value.prim().is_float() => {
+                    let op = if name == "sqrt" {
+                        FloatUnOp::Sqrt
+                    } else {
+                        FloatUnOp::Abs
                     };
                     float_unop(op, *value).ok()
+                }
+                ("normal_cdf", [value]) if value.prim().is_float() => {
+                    crate::std_graph::normal_cdf(runtime, *value).ok()
                 }
                 ("min" | "max", [lhs, rhs]) => {
                     let (lhs, rhs) = align_literal_widths(*lhs, *rhs)?;
@@ -322,15 +339,15 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
             }
         }
         SmtExpr::Ite(cond, then_e, else_e) => {
-            if eval_bool_with(cond, env, strict) {
-                eval_scalar_with(then_e, env, strict)
+            if eval_bool_with(cond, env, strict, runtime) {
+                eval_scalar_with(then_e, env, strict, runtime)
             } else {
-                eval_scalar_with(else_e, env, strict)
+                eval_scalar_with(else_e, env, strict, runtime)
             }
         }
         SmtExpr::Cmp(op, left, right) => {
-            let lhs = eval_scalar_with(left, env, strict)?;
-            let rhs = eval_scalar_with(right, env, strict)?;
+            let lhs = eval_scalar_with(left, env, strict, runtime)?;
+            let rhs = eval_scalar_with(right, env, strict, runtime)?;
             scalar_from_i64(
                 "prove-comparison",
                 Prim::Bool,
@@ -341,28 +358,37 @@ fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<S
         SmtExpr::Bool(_, _) | SmtExpr::Not(_) => scalar_from_i64(
             "prove-bool",
             Prim::Bool,
-            i64::from(eval_bool_with(expr, env, strict)),
+            i64::from(eval_bool_with(expr, env, strict, runtime)),
         )
         .ok(),
         SmtExpr::Forall(_, _) | SmtExpr::Exists(_, _) => None, // unreachable after fuzzability check
     }
 }
 
-/// Apply a whitelisted unary/binary intrinsic to its already-evaluated
-/// arguments. Out-of-grammar names and wrong arity yield `NaN` (the
-/// candidate is then rejected / the predicate is unsatisfied) rather than
-/// panicking on an out-of-bounds index (CR-13): the unary intrinsics now
-/// guard `len == 1` exactly as `min`/`max` guard `len == 2`.
+/// One transcendental at the operand's own dtype, through the evaluator's
+/// float kernel ([`float_unop`]), which every language lane shares and which
+/// is correctly rounded ([05-OP-46]; chelis#2965).
+pub(crate) fn correctly_rounded(name: &str, value: ScalarValue) -> Option<ScalarValue> {
+    let op = match name {
+        "exp" => FloatUnOp::Exp,
+        "log" => FloatUnOp::Log,
+        "sin" => FloatUnOp::Sin,
+        "cos" => FloatUnOp::Cos,
+        _ => return None,
+    };
+    float_unop(op, value).ok()
+}
+
+/// Apply a whitelisted intrinsic that has no dtype-carrying form to its
+/// already-evaluated arguments. Out-of-grammar names and wrong arity yield
+/// `NaN` (the candidate is then rejected / the predicate is unsatisfied)
+/// rather than panicking on an out-of-bounds index (CR-13).
+///
+/// Transcendentals and `normal_cdf` are not here: they are evaluated at the
+/// operand's dtype above. `erf` has no shipped graph Chelis exports, so it is
+/// not evaluable and [`crate::inlineability::classify_fuzzability`] rejects it.
 fn apply_intrinsic(name: &str, a: &[f64]) -> f64 {
     match name {
-        "exp" if a.len() == 1 => a[0].exp(),
-        "log" if a.len() == 1 => a[0].ln(),
-        "sqrt" if a.len() == 1 => a[0].sqrt(),
-        "sin" if a.len() == 1 => a[0].sin(),
-        "cos" if a.len() == 1 => a[0].cos(),
-        "abs" if a.len() == 1 => a[0].abs(),
-        "erf" if a.len() == 1 => erf_approx(a[0]),
-        "normal_cdf" if a.len() == 1 => normal_cdf_approx(a[0]),
         "min" if a.len() == 2 => a[0].min(a[1]),
         "max" if a.len() == 2 => a[0].max(a[1]),
         // quantile(xs..., q): last argument is the quantile level q ∈ [0,1],
@@ -375,35 +401,6 @@ fn apply_intrinsic(name: &str, a: &[f64]) -> f64 {
         }
         _ => f64::NAN,
     }
-}
-
-/// Fast `erf` approximation using Abramowitz & Stegun 7.1.26 (maximum
-/// error < 1.5e-7 over the reals). This is the standard rational
-/// approximation for concrete f64 evaluation in the fuzz tier — it does
-/// NOT need to be sound for proof (that is the certified envelope's job);
-/// it only needs to be accurate enough that rejection sampling does not
-/// starve on properties involving `normal_cdf` (chelis#659).
-fn erf_approx(x: f64) -> f64 {
-    // Abramowitz & Stegun 7.1.26: erf(x) ≈ 1 - (a1*t + a2*t² + a3*t³) * exp(-x²)
-    // where t = 1 / (1 + 0.3275911 * |x|). Max error: 1.5e-7.
-    const A1: f64 = 0.254829592;
-    const A2: f64 = -0.284496736;
-    const A3: f64 = 1.421413741;
-    const A4: f64 = -1.453152027;
-    const A5: f64 = 1.061405429;
-    const P: f64 = 0.3275911;
-
-    let sign = if x >= 0.0 { 1.0 } else { -1.0 };
-    let x_abs = x.abs();
-    let t = 1.0 / (1.0 + P * x_abs);
-    let poly = ((((A5 * t + A4) * t + A3) * t + A2) * t + A1) * t;
-    sign * (1.0 - poly * (-x_abs * x_abs).exp())
-}
-
-/// Standard normal CDF: Φ(x) = ½·(1 + erf(x / √2)).
-/// Uses the same fast erf approximation for concrete evaluation.
-fn normal_cdf_approx(x: f64) -> f64 {
-    0.5 * (1.0 + erf_approx(x * std::f64::consts::FRAC_1_SQRT_2))
 }
 
 /// Quantile with linear interpolation between order statistics (numpy
@@ -428,7 +425,8 @@ fn quantile_linear(data: &[f64], q: f64) -> f64 {
     quantile_linear_impl(data, q)
 }
 
-/// Public accessor for use by the contract fuzz validation (contracts.rs).
+/// Accessor for the standard-contract discharge table generator
+/// (contracts/generator.rs).
 pub(crate) fn quantile_linear_pub(data: &[f64], q: f64) -> f64 {
     quantile_linear_impl(data, q)
 }
@@ -458,6 +456,24 @@ fn quantile_linear_impl(data: &[f64], q: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::solver::SmtExpr;
+    use chelis_std_bundle::EMBEDDED_RUNTIME;
+
+    // The evaluators at the runtime this test binary embeds.
+    fn eval_bool(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
+        super::eval_bool(expr, env, &EMBEDDED_RUNTIME)
+    }
+
+    fn eval_bool_strict(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
+        super::eval_bool_strict(expr, env, &EMBEDDED_RUNTIME)
+    }
+
+    fn eval_arith(expr: &SmtExpr, env: &ConcreteEnv) -> f64 {
+        super::eval_arith(expr, env, &EMBEDDED_RUNTIME)
+    }
+
+    fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<ScalarValue> {
+        super::eval_scalar_with(expr, env, strict, &EMBEDDED_RUNTIME)
+    }
 
     fn env(pairs: &[(&str, f64)]) -> ConcreteEnv {
         pairs
@@ -721,49 +737,21 @@ mod tests {
         assert_eq!(eval_arith(&m, &env(&[])), 2.0);
     }
 
-    // --- chelis#659: erf and normal_cdf intrinsic tests ---
+    // --- chelis#659 / chelis#2965: erf and normal_cdf intrinsic tests ---
 
     #[test]
-    fn erf_zero_is_zero() {
-        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(0.0)]);
-        let result = eval_arith(&e, &env(&[]));
-        assert!(result.abs() < 1e-6, "erf(0) should be ≈0, got {result}");
-    }
-
-    #[test]
-    fn erf_large_positive_is_near_one() {
-        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(3.0)]);
-        let result = eval_arith(&e, &env(&[]));
-        assert!(
-            (result - 1.0).abs() < 1e-4,
-            "erf(3) should be ≈1.0, got {result}"
-        );
-    }
-
-    #[test]
-    fn erf_large_negative_is_near_minus_one() {
-        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(-3.0)]);
-        let result = eval_arith(&e, &env(&[]));
-        assert!(
-            (result + 1.0).abs() < 1e-4,
-            "erf(-3) should be ≈-1.0, got {result}"
-        );
-    }
-
-    #[test]
-    fn erf_is_odd_function() {
-        // erf(-x) == -erf(x) for all x
-        for &x in &[0.5, 1.0, 2.0] {
-            let pos = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(x)]);
-            let neg = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(-x)]);
-            let r_pos = eval_arith(&pos, &env(&[]));
-            let r_neg = eval_arith(&neg, &env(&[]));
-            assert!(
-                (r_pos + r_neg).abs() < 1e-7,
-                "erf({x}) + erf(-{x}) should be 0, got {}",
-                r_pos + r_neg
-            );
+    fn erf_has_no_shipped_graph_and_is_not_evaluable() {
+        // Chelis exports no `erf`, so the evaluator has nothing at a declared
+        // dtype to run; it must not fall back to a private approximation.
+        for x in [0.0, 1.0, -3.0] {
+            let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(x)]);
+            assert!(eval_arith(&e, &env(&[])).is_nan(), "erf({x}) evaluated");
         }
+        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::Var("x".into())]);
+        assert!(matches!(
+            crate::inlineability::classify_fuzzability(&e),
+            crate::inlineability::Fuzzability::NotFuzzable(_)
+        ));
     }
 
     #[test]
@@ -854,20 +842,93 @@ mod tests {
     }
 
     #[test]
-    fn erf_wrong_arity_is_nan() {
-        let e = SmtExpr::Apply("erf".into(), vec![]);
-        assert!(eval_arith(&e, &env(&[])).is_nan());
-        let e2 = SmtExpr::Apply(
-            "erf".into(),
-            vec![SmtExpr::RealLit(1.0), SmtExpr::RealLit(2.0)],
-        );
-        assert!(eval_arith(&e2, &env(&[])).is_nan());
-    }
-
-    #[test]
     fn normal_cdf_wrong_arity_is_nan() {
         let e = SmtExpr::Apply("normal_cdf".into(), vec![]);
         assert!(eval_arith(&e, &env(&[])).is_nan());
+    }
+
+    // --- chelis#2965: evaluation at the declared dtype ---
+
+    fn scalar_env(pairs: &[(&str, ScalarValue)]) -> ConcreteEnv {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), *value))
+            .collect()
+    }
+
+    fn f32_bits(bits: u32) -> ScalarValue {
+        scalar_from_f64("prove-test", Prim::F32, f64::from(f32::from_bits(bits))).unwrap()
+    }
+
+    fn apply_x(name: &str) -> SmtExpr {
+        SmtExpr::Apply(name.into(), vec![SmtExpr::Var("x".into())])
+    }
+
+    #[test]
+    fn chelis_2965_f32_transcendentals_are_correctly_rounded_at_f32() {
+        // `exp` at 0xbfdd4c4b: the MPFR-derived bits from the chelis-crmath
+        // canary fixture (#2952, where the macOS expf misrounds).
+        let got = eval_scalar_with(
+            &apply_x("exp"),
+            &scalar_env(&[("x", f32_bits(0xbfdd_4c4b))]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(got.prim(), Prim::F32);
+        assert_eq!((got.as_f64_lossy() as f32).to_bits(), 0x3e35_bda0);
+        // Inputs where the host f32 libm and the correctly rounded kernel
+        // disagree; the evaluator must agree with the kernel bit for bit.
+        type Kernel = fn(f32) -> f32;
+        let cases: [(&str, u32, Kernel); 4] = [
+            ("exp", 0xbc00_008c, chelis_crmath::exp_f32),
+            ("log", 0x3c15_d85f, chelis_crmath::log_f32),
+            ("sin", 0x3c00_155b, chelis_crmath::sin_f32),
+            ("cos", 0x3c0b_32b8, chelis_crmath::cos_f32),
+        ];
+        for (name, bits, kernel) in cases {
+            let got = eval_scalar_with(&apply_x(name), &scalar_env(&[("x", f32_bits(bits))]), true)
+                .unwrap();
+            assert_eq!(got.prim(), Prim::F32, "{name} left f32");
+            assert_eq!(
+                (got.as_f64_lossy() as f32).to_bits(),
+                kernel(f32::from_bits(bits)).to_bits(),
+                "{name}({bits:#010x}) is not the correctly rounded f32 result"
+            );
+        }
+    }
+
+    #[test]
+    fn chelis_2965_strict_exp_positivity_is_false_at_f32_below_underflow() {
+        // exp(-104) at f32 is +0 (the correctly rounded result): the strict
+        // real-model law fails for the float operation, and `>= 0` holds.
+        let strict = SmtExpr::Cmp(
+            CmpOp::Gt,
+            Box::new(apply_x("exp")),
+            Box::new(SmtExpr::RealLit(0.0)),
+        );
+        let weak = SmtExpr::Cmp(
+            CmpOp::Ge,
+            Box::new(apply_x("exp")),
+            Box::new(SmtExpr::RealLit(0.0)),
+        );
+        let at_f32 = scalar_env(&[("x", f32_bits(0xc2d0_0000))]);
+        assert!(!eval_bool_strict(&strict, &at_f32), "exp(-104f32) > 0");
+        assert!(eval_bool_strict(&weak, &at_f32), "exp(-104f32) >= 0");
+        // The same input at f64 does not underflow: the width decides.
+        let at_f64 = env(&[("x", -104.0)]);
+        assert!(eval_bool_strict(&strict, &at_f64));
+    }
+
+    #[test]
+    fn chelis_2965_normal_cdf_runs_the_shipped_graph_at_the_operand_dtype() {
+        let x = f32_bits(0xbfab_01de); // a #2952 normal_cdf witness
+        let got = eval_scalar_with(&apply_x("normal_cdf"), &scalar_env(&[("x", x)]), true).unwrap();
+        assert_eq!(got.prim(), Prim::F32, "normal_cdf left f32");
+        let shipped = crate::std_graph::normal_cdf(&EMBEDDED_RUNTIME, x).unwrap();
+        assert_eq!(
+            got.as_f64_lossy().to_bits(),
+            shipped.as_f64_lossy().to_bits()
+        );
     }
 
     // --- quantile intrinsic tests ---

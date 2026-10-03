@@ -61,7 +61,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
                 && line.contains("= chelis_alloc(1, &__sum_n_")
         })
         .count();
-    let fused = c.matches("parallel for simd").count();
+    let fused = c.matches("omp for simd").count();
     let user_helper_defs = c
         .matches(&format!(
             "static void {}__tensor_",

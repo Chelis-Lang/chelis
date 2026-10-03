@@ -127,12 +127,9 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
     let tan_program = f64_unop_program("tan", "1.5", "3.0");
     let line = c_first_line(&tan_program, "c_f64_tan").expect("C lane should run");
     common::assert_elements_in_domain("f64", &line, "c_f64_tan");
-    // Property-based, not an exact string: the Phase 1 implementation
-    // control uses a 1e-12 separating margin because double tan is not required to
-    // be correctly rounded and may differ by a few ulp between platform
-    // libms (see the eval tan control above). f64 PRECISION is the claim:
-    // the #717 bug's f32-destroyed value is ~5e-7 away from true tan,
-    // while any reasonable libm is within ~1e-15.
+    // f64 PRECISION is the claim: the #717 bug's f32-destroyed value is
+    // ~5e-7 away from true tan. Both lanes compute the correctly rounded
+    // result ([05-OP-46]), so they also agree byte for byte.
     let v = parse_data(&line)[0];
     let truth = 14.10141994717172_f64;
     assert!(
@@ -140,20 +137,17 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
         "C f64 tan(1.5) must be f64-precise (within 1e-12 of {truth}); got {v} in: {line}"
     );
     let eval_line = eval_first_line(&tan_program).expect("eval tan should run");
-    let eval_v = parse_data(&eval_line)[0];
-    assert!(
-        (v - eval_v).abs() <= 1e-12,
-        "Phase 1 f64 tan lane delta exceeds the implementation control's 1e-12 margin: eval={eval_v}, C={v}"
+    assert_eq!(
+        eval_line, line,
+        "f64 tan: eval and C must agree byte for byte"
     );
 
     let exp_program = f64_unop_program("exp", "2.0", "3.0");
     let c_exp_line = c_first_line(&exp_program, "c_f64_exp").expect("C exp should run");
-    let c_exp = parse_data(&c_exp_line)[0];
     let eval_exp_line = eval_first_line(&exp_program).expect("eval exp should run");
-    let eval_exp = parse_data(&eval_exp_line)[0];
-    assert!(
-        (c_exp - eval_exp).abs() <= 1e-12,
-        "Phase 1 f64 exp lane delta exceeds the implementation control's 1e-12 margin: eval={eval_exp}, C={c_exp}"
+    assert_eq!(
+        eval_exp_line, c_exp_line,
+        "f64 exp: eval and C must agree byte for byte"
     );
 
     let line = c_first_line(&f64_unop_program("sqrt", "2.0", "3.0"), "c_f64_sqrt")
@@ -405,4 +399,102 @@ fn eval_f32_tensor_recip_rounds_to_f32() {
         "f32 tensor recip must round its result to f32 (rendered at f32 \
          width per spec/05 section 8.1); got: {line}"
     );
+}
+
+// ===========================================================================
+// chelis#3041 - einsum accumulates at the default accumulator in both lanes
+// ===========================================================================
+
+/// `chelis_tensor_einsum` forms each product at the §5.7.1 default
+/// accumulator (f32 for f16, bf16 and f32 operands) and sums them in the
+/// runtime's balanced order; eval accumulated in f64 ([05-OP-51]: never an
+/// unrequested f64 graph). Each witness rounds differently under the two:
+/// f32 gave 16777220 in eval, bf16 0x3f81 and f16 0x3c01.
+#[test]
+fn einsum_accumulates_at_the_default_accumulator_in_eval_and_the_executable() {
+    let source = "module Probe.Case\n\
+         def wide() -> tensor[1, f32] = einsum(\"ij,j->i\", to_tensor([[16777216.0f32, 1.0f32, 1.0f32, 1.0f32]]), to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))\n\
+         def brain() -> tensor[1, bf16] = einsum(\"ij,j->i\", to_tensor([[1.0bf16, 0.00390625bf16, 9.313225746154785e-10bf16]]), to_tensor([1.0bf16, 1.0bf16, 1.0bf16]))\n\
+         def half() -> tensor[1, f16] = einsum(\"ij,j->i\", to_tensor([[1.0f16, 0.00048828125f16, 5.960464477539063e-8f16]]), to_tensor([1.0f16, 1.0f16, 1.0f16]))\n\
+         a = print(wide())\n\
+         b = print(brain())\n\
+         c = print(half())\n";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("p.ch");
+    write_file(&path, source);
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    assert!(eval.status.success(), "{eval:?}");
+    let eval = String::from_utf8(eval.stdout).expect("utf-8 stdout");
+    let printed = eval.lines().take(3).collect::<Vec<_>>();
+    assert_eq!(
+        printed,
+        [
+            "tensor(shape=[1], data=[16777218.0])",
+            "tensor(shape=[1], data=[1.0])",
+            "tensor(shape=[1], data=[1.0])",
+        ],
+        "{eval}"
+    );
+    assert_eq!(common::build_and_run(source, "p"), eval, "{source}");
+}
+
+/// The `numeric trap:` line a failed run printed to stderr.
+fn trap_line(output: &std::process::Output, lane: &str) -> String {
+    assert!(!output.status.success(), "{lane} did not trap: {output:?}");
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .find(|line| line.starts_with("numeric trap:"))
+        .unwrap_or_else(|| panic!("{lane} failed without a trap line: {output:?}"))
+        .to_string()
+}
+
+/// An integer einsum that leaves the i32 accumulator traps as `einsum` in
+/// both lanes, whether the balanced sum (`[[2147483647, 1]]·[1, 1]`) or a
+/// product (`[[65536]]·[65536]`) overflows; eval once reported the `add` or
+/// `mul` the contraction was formed from.
+#[test]
+fn integer_einsum_overflow_traps_as_einsum_in_eval_and_the_executable() {
+    for (name, lhs, rhs) in [
+        ("sum", "[[2147483647i32, 1i32]]", "[1i32, 1i32]"),
+        ("product", "[[65536i32]]", "[65536i32]"),
+    ] {
+        let source = format!(
+            "module Probe.Case\n\
+             def main() -> tensor[1, i32] = einsum(\"ij,j->i\", to_tensor({lhs}), to_tensor({rhs}))\n"
+        );
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{name}.ch"));
+        let out_dir = dir.path().join(format!("{name}-out"));
+        write_file(&path, &source);
+        let eval = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("chelis eval should run");
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let run = std::process::Command::new(out_dir.join(name))
+            .output()
+            .expect("compiled binary should run");
+        let expected = "numeric trap: overflow in einsum at i32";
+        assert_eq!(trap_line(&run, "the executable"), expected, "{source}");
+        assert_eq!(trap_line(&eval, "eval"), expected, "{source}");
+    }
 }
