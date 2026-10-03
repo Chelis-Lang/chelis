@@ -8,7 +8,9 @@ stdlib manifest, subject to spec/04's decidable-fragment rules.
 
 Keep the single public identities `stack`, `squeeze`, and `unsqueeze`. Instantiate
 an ordinary concrete-rank tensor signature from the resolved callable identity,
-its input shape, and a static i32 axis. Mathematical shape schemas replace the
+its input shape, and a static i32 axis. Known literal List counts produce a literal
+stack extent; unknown counts produce an ordinary wildcard at the known insertion
+position, with declared output claims guarded against the runtime count. Mathematical shape schemas replace the
 old invalid adjacent-spread and literal-anchor signatures. This records the
 required public decision; it does not implement callable shape instantiation.
 
@@ -33,7 +35,9 @@ leading/interior/trailing and normalized negative positions, rank-zero insertion
 all active dtype families, and evaluator/generated-C parity with full values.
 Negative cases: dynamic axes, out-of-range axes, independent wrong result shape,
 non-singleton squeeze, empty stack, inconsistent shapes/dtypes and invalid
-non-tensor input. Runtime shape/empty failures must trap before observation.
+non-tensor input. Include direct and binding-carried literal counts, unknown List
+parameter counts, and exact/incorrect declared output count claims. Runtime
+shape/count/empty failures must trap before observation.
 The stdlib executable corpus must exercise all three exports again.
 
 This PR's decision oracle is the phase4B contract validator and its independent

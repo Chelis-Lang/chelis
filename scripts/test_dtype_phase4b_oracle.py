@@ -78,10 +78,26 @@ class ContractValidationTests(unittest.TestCase):
     def test_repository_contract_passes(self) -> None:
         oracle.validate_contract(REPO_ROOT)
 
+    def test_construct_stack_count_has_only_ordinary_dimensions(self) -> None:
+        oracle.validate_contract(REPO_ROOT)
+        for clause in (
+            "A statically visible List literal of count n inserts d-lit n",
+            "An unknown List count inserts the ordinary wildcard dimension",
+            "A declared result extent at that wildcard position is a runtime claim",
+            "CountDim(xs) denotes d-lit n for a statically visible List literal",
+        ):
+            relative = "spec/registry/stdlib_numeric_manifest.md" if clause.startswith("CountDim") else "spec/05-risc-primitives.md"
+            with self.subTest(clause=clause):
+                relative = Path(relative)
+                original = (self.root / relative).read_text()
+                self.replace(relative, clause, "REMOVED")
+                self.assert_contract_fails("05-OP-35")
+                (self.root / relative).write_text(original)
+
     def test_construct_contract_rejects_old_unrepresentable_spread_schemas(self) -> None:
         for operation, decided, obsolete in [
             ("squeeze", "(&Tensor(S,p),StaticAxis(i32))->Tensor(Remove(S,axis),p)", "(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]"),
-            ("stack", "(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,len(xs)),p)", "(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]"),
+            ("stack", "(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)", "(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]"),
             ("unsqueeze", "(&Tensor(S,p),StaticAxis(i32))->Tensor(Insert(S,axis,1),p)", "(&tensor[..pre,..post,p],i32)->tensor[..pre,1,..post,p]"),
         ]:
             with self.subTest(operation=operation):
@@ -3040,7 +3056,7 @@ class ContractValidationTests(unittest.TestCase):
         for signature in (
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]`",
-            "`tensor/construct::stack` | `(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,len(xs)),p)`",
+            "`tensor/construct::stack` | `(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)`",
             "`test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`",
             "`test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`",
             "`test::assert_shape` | `(&tensor[..r,p],List[i64],string)->unit!{Test}`",
@@ -3056,7 +3072,7 @@ class ContractValidationTests(unittest.TestCase):
                 "(&tensor[a,1,b,p],i32)->tensor[a,b,p]",
             ),
             (
-                "(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,len(xs)),p)",
+                "(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)",
                 "(List[tensor[d,p]],i32)->tensor[rows,d,p]",
             ),
             (

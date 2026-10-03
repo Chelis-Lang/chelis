@@ -636,7 +636,7 @@ EXPECTED_OP_MANIFESTS = {
 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
 | `tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]` |
 | `tensor/construct::squeeze` | `(&Tensor(S,p),StaticAxis(i32))->Tensor(Remove(S,axis),p)` |
-| `tensor/construct::stack` | `(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,len(xs)),p)` |
+| `tensor/construct::stack` | `(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)` |
 | `tensor/construct::unsqueeze` | `(&Tensor(S,p),StaticAxis(i32))->Tensor(Insert(S,axis,1),p)` |
 | `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,i64]` |
 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
@@ -2551,7 +2551,7 @@ def validate_normative_contract(
             "`test::assert_eq_tensor` | "
             "`(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`",
             "`tensor/construct::stack` | "
-            "`(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,len(xs)),p)`",
+            "`(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)`",
             "Every primitive-width intermediate in a graph whose contract names a dtype",
             "The `datetime::*`, `datetime/business::*`, `datetime/clock::*`, "
             "`datetime/columns::*`, and `datetime/zone::*` identities follow [05-OP-73]",
@@ -2600,6 +2600,10 @@ def validate_normative_contract(
             "All three are bit-preserving reshape/concat operations with concrete-rank signature schemas",
             "Concrete-rank schemas are instantiated for the resolved callable identity",
             "The checker computes the result shape from the operand shape and normalized axis",
+            "A statically visible List literal of count n inserts d-lit n",
+            "An unknown List count inserts the ordinary wildcard dimension",
+            "A declared result extent at that wildcard position is a runtime claim",
+            "CountDim(xs) denotes d-lit n for a statically visible List literal",
             "A genuinely dynamic positional axis is a type error",
             "Squeeze normalizes a negative axis by adding the input rank once",
             "requires `0 <= axis < rank`; its selected extent must be one",

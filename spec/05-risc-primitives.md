@@ -2946,8 +2946,14 @@ exact ADT identity by [05-OP-34].
 > Unsqueeze and stack normalize a negative insertion axis by adding the result
 > rank once and then require `0 <= axis <= input_rank`.
 > Stack takes `xs: List[Tensor(S,p)]` at one concrete rank and one common
-> dtype, deriving its inserted extent from `len(xs)`. It rejects an empty list
-> or any inconsistent input dimension list or dtype. Statically established
+> dtype, deriving its inserted extent from the input List count.
+> A statically visible List literal of count n inserts d-lit n; a binding
+> carrying its literal length n has the same result. An unknown List count inserts the ordinary wildcard dimension
+> `(d-name {} *)` at the computed position, while rank and every other dimension
+> remain fixed by the element shape. No type-level `len(xs)` dimension is introduced.
+> A declared result extent at that wildcard position is a runtime claim
+> checked against the actual count before observation; a mismatch traps `Domain`.
+> It rejects an empty list or any inconsistent input dimension list or dtype. Statically established
 > emptiness, extent disagreement, or a non-singleton squeeze is a type error;
 > a runtime empty list traps `Domain`, and runtime extent disagreement or a
 > non-singleton squeeze traps `Domain` before any output is observed.

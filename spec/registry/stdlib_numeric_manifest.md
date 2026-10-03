@@ -11,7 +11,11 @@ ordinary dimension expressions at concrete rank. `Tensor(S,p)` denotes the
 ordinary tensor type with exactly that dimension list and element dtype `p`.
 `StaticAxis(i32)` denotes a statically resolved i32 positional argument, including
 literal integer cast wrappers. `Remove` and `Insert` mean the ordered shape
-transformations defined by [05-OP-35], and `len(xs)` is the input list length.
+transformations defined by [05-OP-35]. CountDim(xs) denotes d-lit n for a statically visible List literal
+or a binding carrying its literal length n; otherwise it denotes the ordinary
+wildcard dimension `(d-name {} *)`. It introduces no type-level length expression.
+The actual inserted extent is the runtime List count, and a declared result
+extent at that wildcard position is guarded against that count.
 These are mathematical signature schemas, not additional Surf type constructors
 or rank-spread syntax. Their instantiation is part of the resolved callable's
 typing rule, not an unconstrained output type variable.
@@ -291,7 +295,7 @@ typing rule, not an unconstrained output type variable.
 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
 | `tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]` |
 | `tensor/construct::squeeze` | `(&Tensor(S,p),StaticAxis(i32))->Tensor(Remove(S,axis),p)` |
-| `tensor/construct::stack` | `(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,len(xs)),p)` |
+| `tensor/construct::stack` | `(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,CountDim(xs)),p)` |
 | `tensor/construct::unsqueeze` | `(&Tensor(S,p),StaticAxis(i32))->Tensor(Insert(S,axis,1),p)` |
 | `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,i64]` |
 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
