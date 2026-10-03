@@ -74,9 +74,7 @@ fn check_surf(src: &str) -> Result<(), Vec<CheckError>> {
     )
     .expect("expand failed")
     .into_exprs();
-    check_ir_program(&exprs)
-        .map(|_| ())
-        .map_err(|r| r.errors)
+    check_ir_program(&exprs).map(|_| ()).map_err(|r| r.errors)
 }
 
 // ---------------------------------------------------------------------
