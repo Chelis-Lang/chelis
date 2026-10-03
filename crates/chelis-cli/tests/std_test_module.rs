@@ -324,7 +324,6 @@ ran = test_case()
 }
 
 #[test]
-#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-pass");
     write_file(
@@ -346,7 +345,6 @@ ran = test_case()
 }
 
 #[test]
-#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-fail");
     write_file(
@@ -371,7 +369,6 @@ ran = test_case()
 }
 
 #[test]
-#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_tensor_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-tensor-pass");
     write_file(
@@ -391,7 +388,6 @@ ran = test_case()
 }
 
 #[test]
-#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_tensor_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-tensor-fail");
     write_file(
@@ -560,7 +556,6 @@ def h() -> unit ! {} = fail("msg")
 }
 
 #[test]
-#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_rejects_negative_tolerance() {
     // `assert_close` must fail with an "invalid tolerance" diagnostic when
     // given a negative tol. The shared tensor comparator preserves Test.
