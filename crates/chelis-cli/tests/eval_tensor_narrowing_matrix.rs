@@ -137,7 +137,10 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
         "C f64 tan(1.5) must be f64-precise (within 1e-12 of {truth}); got {v} in: {line}"
     );
     let eval_line = eval_first_line(&tan_program).expect("eval tan should run");
-    assert_eq!(eval_line, line, "f64 tan: eval and C must agree byte for byte");
+    assert_eq!(
+        eval_line, line,
+        "f64 tan: eval and C must agree byte for byte"
+    );
 
     let exp_program = f64_unop_program("exp", "2.0", "3.0");
     let c_exp_line = c_first_line(&exp_program, "c_f64_exp").expect("C exp should run");

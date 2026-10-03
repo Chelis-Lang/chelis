@@ -145,7 +145,13 @@ fn reduced_float_mismatches_require_pre_final_f32_evidence() {
     let upper = format_element(Prim::F16, ElementRef::F16(half::f16::from_bits(0x3c01)));
 
     assert!(matches!(
-        compare_rendered_elements(AgreementOp::Exact, Prim::F16, WIDTHS_CONFORM, &lower, &upper),
+        compare_rendered_elements(
+            AgreementOp::Exact,
+            Prim::F16,
+            WIDTHS_CONFORM,
+            &lower,
+            &upper
+        ),
         Err(AgreementError::MissingReducedFloatEvidence { .. })
     ));
     assert!(matches!(
@@ -239,7 +245,11 @@ fn phase3_oracles_use_the_shared_comparator_without_f64_fallbacks() {
 fn states_agreement_tolerance(sentence: &str) -> bool {
     let tokens: Vec<String> = sentence
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_'))
-        .map(|token| token.trim_matches(|c| c == '.' || c == '-').to_ascii_lowercase())
+        .map(|token| {
+            token
+                .trim_matches(|c| c == '.' || c == '-')
+                .to_ascii_lowercase()
+        })
         .filter(|token| !token.is_empty())
         .collect();
     let has = |words: &[&str]| tokens.iter().any(|token| words.contains(&token.as_str()));
@@ -248,11 +258,9 @@ fn states_agreement_tolerance(sentence: &str) -> bool {
             && token.chars().all(|c| c.is_ascii_digit() || c == '.')
     };
     let ulp_bound = tokens.iter().enumerate().any(|(index, token)| {
-        let hyphenated = ["-ulp", "-ulps"].iter().any(|suffix| {
-            token
-                .strip_suffix(suffix)
-                .is_some_and(|number| nonzero_number(number))
-        });
+        let hyphenated = ["-ulp", "-ulps"]
+            .iter()
+            .any(|suffix| token.strip_suffix(suffix).is_some_and(&nonzero_number));
         let spaced = nonzero_number(token)
             && tokens
                 .get(index + 1)
@@ -316,9 +324,9 @@ fn sentences(text: &str) -> Vec<String> {
         let starts_item = trimmed.starts_with("- ")
             || trimmed.starts_with("* ")
             || trimmed.starts_with('|')
-            || trimmed
-                .split_once(". ")
-                .is_some_and(|(number, _)| number.chars().all(|c| c.is_ascii_digit()) && !number.is_empty());
+            || trimmed.split_once(". ").is_some_and(|(number, _)| {
+                number.chars().all(|c| c.is_ascii_digit()) && !number.is_empty()
+            });
         if trimmed.is_empty() || starts_item {
             units.push(std::mem::take(&mut current));
         }
@@ -380,7 +388,10 @@ fn no_numbered_chapter_or_design_doc_states_an_agreement_tolerance() {
             let path = entry.expect("spec entry").path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             let numbered = dir.is_empty()
-                && name.as_bytes().get(..2).is_some_and(|prefix| prefix.iter().all(u8::is_ascii_digit));
+                && name
+                    .as_bytes()
+                    .get(..2)
+                    .is_some_and(|prefix| prefix.iter().all(u8::is_ascii_digit));
             if path.extension().is_some_and(|ext| ext == "md") && (numbered || !dir.is_empty()) {
                 documents.push(path);
             }

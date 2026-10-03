@@ -22,8 +22,20 @@ fn f32_vec() -> TensorType {
 fn chain_dag(op: RiscOp) -> Dag {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
-    let a = dag.add_node(decl, RiscOp::Load { name: "a".into() }, vec![], f32_vec(), None);
-    let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], f32_vec(), None);
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        f32_vec(),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        f32_vec(),
+        None,
+    );
     let sum = dag.add_node(decl, RiscOp::Add, vec![a, b], f32_vec(), None);
     let applied = dag.add_node(decl, op, vec![sum], f32_vec(), None);
     let stored = dag.add_node(
@@ -56,7 +68,10 @@ fn every_transcendental_is_rejected_with_a_typed_diagnostic() {
         let rendered = error.to_string();
         assert!(rendered.contains("[05-OP-46]"), "{name}: {rendered}");
         assert!(rendered.contains("codegen:hip"), "{name}: {rendered}");
-        assert!(rendered.contains(&format!("`{name}`")), "{name}: {rendered}");
+        assert!(
+            rendered.contains(&format!("`{name}`")),
+            "{name}: {rendered}"
+        );
     }
 }
 
@@ -79,7 +94,10 @@ fn a_transcendental_inside_a_fused_chain_is_rejected() {
             .nodes()
             .iter()
             .any(|node| matches!(&node.op, RiscOp::FusedElem { .. }))
-            && !fused.nodes().iter().any(|node| matches!(node.op, RiscOp::Tanh)),
+            && !fused
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Tanh)),
         "the witness must reach codegen as a fused chain, not a bare tanh node"
     );
     let error = codegen(&fused, "fused_tanh").expect_err("fused tanh");
