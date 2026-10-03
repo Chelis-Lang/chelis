@@ -419,6 +419,51 @@ fn float_scatter_add_uses_the_balanced_tree_at_operand_width_in_both_lanes() {
     assert_lanes(&source, "scatter-f32", "out", Prim::F32, &expected);
 }
 
+/// chelis#2972's f16 and bf16 witnesses, as the issue's update states them:
+/// a tie at the storage width followed by a small addend. A binary64 running
+/// sum keeps the addend and rounds the last cumsum prefix up to 32800 (f16) or
+/// 33024 (bf16); the scatter-add tree `(base + 1) + (1 + 1)` at the operand
+/// width gives 2050 (f16) or 258 (bf16), where one binary64 sum rounds 2051
+/// (259) to 2052 (260). Evidentiary status: REGRESSION TEST for eval's binary64
+/// funnel at 08939bc0e.
+#[test]
+fn half_precision_cumsum_and_scatter_add_witnesses_match_in_both_lanes() {
+    let tiny = 0.000_976_562_5;
+    for (prim, addend) in [(Prim::F16, 16.0), (Prim::Bf16, 128.0)] {
+        let values = [32_768.0, addend, tiny];
+        let source = format!("out = cumsum({}, 0)\n", float_tensor(prim, &values));
+        let expected = float_cumsum_reference(prim, &values);
+        assert_eq!(
+            expected,
+            floats(prim, &[32_768.0; 3]),
+            "{}: the witness's reference stays at 32768",
+            prim.name()
+        );
+        assert_lanes(&source, prim.name(), "out", prim, &expected);
+    }
+    for (prim, base) in [(Prim::F16, 2048.0), (Prim::Bf16, 256.0)] {
+        let source = format!(
+            "out = scatter({}, to_tensor([0i64, 0i64, 0i64, 1i64]), {}, 0i32, \"add\")\n",
+            float_tensor(prim, &[base, 0.5, 0.0]),
+            float_tensor(prim, &[1.0, 1.0, 1.0, 0.1]),
+        );
+        let add = |left: ScalarValue, right: ScalarValue| {
+            float_binop(FloatBinOp::Add, left, right).expect("finite sum")
+        };
+        let one = float(prim, 1.0);
+        let head = add(add(float(prim, base), one), add(one, one));
+        let tail = add(float(prim, 0.5), float(prim, 0.1));
+        let expected = vec![stored(head), stored(tail), stored(float(prim, 0.0))];
+        assert_eq!(
+            expected[0],
+            stored(float(prim, base + 2.0)),
+            "{}: the witness's tree gives base + 2",
+            prim.name()
+        );
+        assert_lanes(&source, prim.name(), "out", prim, &expected);
+    }
+}
+
 #[test]
 fn i32_scatter_add_overflow_traps_in_both_lanes() {
     let source = format!(
