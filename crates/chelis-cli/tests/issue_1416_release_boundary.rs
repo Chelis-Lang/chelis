@@ -7,18 +7,21 @@ use serde_json::Value;
 #[test]
 fn unsupported_construct_exports_reject_original_concrete_calls_without_artifacts() {
     let (_dir, reef, app) = common::make_app("issue-1416-boundary");
-    for (operation, definition) in [
+    for (operation, definition, reason) in [
         (
             "stack",
             "def run(xs: List[tensor[3, f32]]) = stack(xs, cast(0, i32))",
+            "spread",
         ),
         (
             "squeeze",
             "def run(x: &tensor[1, 3, f32]) = squeeze(x, cast(0, i32))",
+            "Lit(1)",
         ),
         (
             "unsqueeze",
             "def run(x: &tensor[3, f32]) = unsqueeze(x, cast(0, i32))",
+            "spread",
         ),
     ] {
         common::write_file(
@@ -39,6 +42,9 @@ fn unsupported_construct_exports_reject_original_concrete_calls_without_artifact
             !report["errors"].as_array().unwrap().is_empty(),
             "{operation}: {report}"
         );
+        assert!(report["errors"].as_array().unwrap().iter().any(|error| {
+            error["kind"] == "DimensionMismatch" && error["message"].as_str().is_some_and(|message| message.contains(reason))
+        }), "{operation} must refuse its rank schema: {report}");
         let out = app.join(format!("refused-{operation}"));
         let built = Command::cargo_bin("chelis")
             .unwrap()
@@ -50,6 +56,7 @@ fn unsupported_construct_exports_reject_original_concrete_calls_without_artifact
             .output()
             .unwrap();
         assert!(!built.status.success(), "{operation}: {built:?}");
+        assert!(String::from_utf8_lossy(&built.stderr).contains(reason), "{operation} must refuse its rank schema during build: {built:?}");
         assert!(!out.exists(), "refused export must not leave an artifact");
     }
 }
