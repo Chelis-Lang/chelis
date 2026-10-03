@@ -1059,6 +1059,118 @@ fn chelis_test_auto_batch_sig_beside_its_def_stays_batched() {
     );
 }
 
+/// Two files that share a top-level name stay batched when more than
+/// `MAX_BATCH_FILES` files separate them, because each shard carries its own
+/// admission scope.
+///
+/// This is the observable consequence of chelis#1391's shard bound: under one
+/// unbounded scope the later file collided and was demoted to a per-file
+/// worker. Narrower scopes collide less often, so sharding admits at least as
+/// many files to batching as the single scope did.
+#[test]
+fn chelis_test_auto_batch_shard_scope_admits_a_distant_repeated_name() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-shard-scope");
+    // `shared_helper` is declared in the first and last file. With a bound of
+    // 4 they land in different shards; the files between them exist only to
+    // push them apart.
+    for (index, name) in ["a", "b", "c", "d", "e", "f"].iter().enumerate() {
+        let helper = if *name == "a" || *name == "f" {
+            "def shared_helper(x: f32) -> f32 = (x + 1.0)\n".to_string()
+        } else {
+            format!("def helper_{name}(x: f32) -> f32 = (x + 1.0)\n")
+        };
+        write_file(
+            &pkg.join(format!("tests/{index}_{name}.ch")),
+            &format!(
+                "module Smoke.Tests.Shard{upper}\n\
+                 {helper}\
+                 def test_{name}() -> unit = test_assert(true, \"{name}\")\n",
+                upper = name.to_uppercase(),
+            ),
+        );
+    }
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_TEST_EXPLAIN_BATCHING", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "--json", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("is not in the suite batch"),
+        "no file should be demoted once the repeated name falls in another \
+         shard:\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains(BATCH_FALLBACK_NOTE),
+        "sharding must not abandon a batch:\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("{\"summary\":{\"passed\":6,\"failed\":0}}"),
+        "every sharded file must still report its row:\nstdout={stdout}"
+    );
+}
+
+/// A suite larger than the shard bound reports every row exactly once, in
+/// discovery order, and reports it identically on a second run.
+///
+/// Shards execute concurrently, so this pins the two properties concurrency
+/// could break: no row lost or duplicated, and output that does not depend on
+/// which shard finished first.
+#[test]
+fn chelis_test_auto_batch_sharded_suite_is_complete_and_deterministic() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-shard-order");
+    for index in 0..9 {
+        write_file(
+            &pkg.join(format!("tests/f{index}.ch")),
+            &format!(
+                "module Smoke.Tests.Ordered{index}\n\
+                 def test_in_file_{index}() -> unit = test_assert(true, \"f{index}\")\n"
+            ),
+        );
+    }
+
+    let run = || {
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .current_dir(&pkg)
+            .args(["test", "--batch-mode", "auto", "--json", "tests/"])
+            .output()
+            .expect("run");
+        assert_eq!(output.status.code(), Some(0));
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+
+    let first = run();
+    for index in 0..9 {
+        let needle = format!("test_in_file_{index}");
+        assert_eq!(
+            first.matches(&needle).count(),
+            1,
+            "{needle} must appear exactly once across every shard:\nstdout={first}"
+        );
+    }
+    assert!(
+        first.contains("{\"summary\":{\"passed\":9,\"failed\":0}}"),
+        "stdout={first}"
+    );
+    assert_eq!(
+        first,
+        run(),
+        "sharded output must not depend on shard completion order"
+    );
+}
+
 /// Negative parity for the report: a batch that completes says nothing, on
 /// either channel. The note is a degradation signal, not a banner.
 #[test]

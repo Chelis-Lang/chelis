@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- `chelis test --batch-mode auto` no longer merges a whole suite into one
+  compilation unit. Eligible files are partitioned into bounded shards of at
+  most four files, each compiled once in its own worker, and `--jobs` now caps
+  shard concurrency as it already capped file-worker concurrency. The unbounded
+  batch ran in a single subprocess whatever `--jobs` said, so a large suite's
+  entire compile and evaluation sat on one thread
+  ([#1391](https://github.com/Chelis-Lang/chelis/issues/1391)).
+
+  The merged-unit cost turned out to be superlinear in unit size rather than
+  merely serial, so bounding it cuts processor time as well as wall clock.
+  Measured on one 36-file synthetic corpus at one commit, varying only the
+  bound: one unit of 36 files cost 260.6s wall / 260.7s CPU at a parallelism of
+  1.0x; at a bound of 16, 40.4s / 83.2s; at 8, 10.5s / 43.2s; at 4, 4.2s /
+  34.2s. An A/B of the same corpus between two binaries differing only in this
+  change measured 244.4s against 10.6s, a 23.1x reduction in wall clock and
+  5.5x in CPU.
+
+  A suite with no more files than the bound forms exactly one shard and behaves
+  exactly as before. Because admission judges name collisions per batch,
+  narrower scopes collide less often, so sharding admits at least as many files
+  to batching as the single scope did: a repeated top-level name now demotes a
+  file only when it recurs inside the same shard. Each shard is also abandoned
+  on its own, so one unusable shard costs only its own files their batching
+  rather than the whole suite's.
+
+  Reported against 0.18.6 from a downstream shell suite. The figures above are
+  from a declaration-dense synthetic corpus on one machine, chosen to isolate
+  the mechanism; they are not a prediction of any particular suite's speedup,
+  and no hosted-runner timing is included.
+
 ## [0.18.12] - 2026-09-30
 
 ### Added
