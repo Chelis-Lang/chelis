@@ -1943,10 +1943,9 @@ fn cmd_eval_inner(
     {
         style_gate::enforce_style_gate(path, &source, allow_style_violations)?;
     }
-    // Phase H, cmd_eval slice: when the user is evaluating a `--file` whose
-    // reef package is detectable (either the file lives inside a package or
-    // the current working directory does, matching the existing dispatch
-    // inside `chelis_reef::prepare_program_for_eval_file`), build a
+    // Phase H, cmd_eval slice: when the user is evaluating a `--file` that
+    // lives inside a reef package (found by walking up from the file, as
+    // `check` and `build` find it; spec/02 §P2), build a
     // `CompiledContext` once and route the user's source through
     // `eval_in_context`. The library decls (chelis-std + reef deps + the
     // package's own modules) are already type-checked and lowered, so the
@@ -2073,12 +2072,11 @@ fn cmd_eval_inner(
 }
 
 /// Detect whether `chelis eval --file <path>` should route through the
-/// Phase H `compile_reef_context + eval_in_context` fast path. Mirrors the
-/// dispatch baked into `chelis_reef::prepare_program_for_eval_file`:
-/// - if `<path>` parses as a single `module Foo` decl, the package root is
-///   discovered by walking up from `<path>` itself,
-/// - otherwise (a loose snippet file), the package root is discovered by
-///   walking up from the current working directory.
+/// Phase H `compile_reef_context + eval_in_context` fast path. The package is
+/// the one found by walking up from `<path>` itself, whether or not the file
+/// declares a `module`, exactly as `chelis_reef::prepare_program_for_file`
+/// finds it for `check` and `build` (spec/02 §P2, chelis#2918). The current
+/// directory plays no part.
 ///
 /// Returns `Ok(Some(root))` when a reef package applies (route through the
 /// new path), `Ok(None)` when no reef package is in scope (caller falls
@@ -2090,15 +2088,10 @@ fn detect_eval_package_root(file: &Path) -> Result<Option<PathBuf>, Box<dyn std:
     // A parse failure here is non-fatal for routing: fall back to the
     // legacy path so the user sees the same parse error they would have
     // before the refactor.
-    let Ok(decls) = chelis_surf::parser::parse_str(&source) else {
+    if chelis_surf::parser::parse_str(&source).is_err() {
         return Ok(None);
-    };
-    if matches!(decls.as_slice(), [Decl::Module { .. }]) {
-        chelis_reef::find_package_root_for_input(file).map_err(boxed_string_error)
-    } else {
-        let cwd = env::current_dir()?;
-        chelis_reef::find_package_root_for_dir(&cwd).map_err(boxed_string_error)
     }
+    chelis_reef::find_package_root_for_input(file).map_err(boxed_string_error)
 }
 
 /// Outcome from the Phase H context path. Kept distinct from a generic boxed
@@ -7330,30 +7323,26 @@ fn cmd_test(
         ));
     }
 
-    // Bucket 6c: when the user runs `chelis test path/to/file.ch` from a
-    // directory that is not itself inside a reef package, derive the
-    // reef-package root from the target path instead of the raw cwd.
-    // We start the lookup at the target's directory (or the target itself
-    // if it is a directory) and walk upward; if no reef.toml is found we
-    // fall back to the raw cwd so the existing "no reef.toml" error path
-    // still fires with its actionable message.
+    // The tests belong to the reef package found by walking up from the
+    // target itself (the target directory, or a target file's directory),
+    // as every command classifies a file (spec/02 §P2, chelis#2918); the
+    // current directory plays no part beyond being the default target. When
+    // no package contains the target, fall through with the target directory
+    // and let `prepare_reef_graph` emit its standard "no reef.toml" error.
     let target_dir_for_reef = if target.is_dir() {
         target.clone()
     } else {
+        // A bare relative file name has an empty parent: its directory is
+        // the current one.
         target
             .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| raw_cwd.clone())
     };
     let cwd = match chelis_reef::find_package_root_for_dir(&target_dir_for_reef) {
         Ok(Some(root)) => root,
-        // No reef found from the target — try the raw cwd next; if that
-        // fails too, fall through with raw_cwd and let `prepare_reef_graph`
-        // emit its standard error.
-        _ => match chelis_reef::find_package_root_for_dir(&raw_cwd) {
-            Ok(Some(root)) => root,
-            _ => raw_cwd.clone(),
-        },
+        _ => target_dir_for_reef.clone(),
     };
 
     let test_files = discover_test_files(&target)?;
@@ -10588,10 +10577,14 @@ struct EvalDecls {
 }
 
 fn load_eval_decls(file: &Path) -> Result<EvalDecls, Box<dyn std::error::Error>> {
-    let current_dir = env::current_dir()?;
-    if let Some(prepared) =
-        chelis_reef::prepare_program_for_eval_file(file, &current_dir, &EMBEDDED_RUNTIME)
-            .map_err(boxed_string_error)?
+    let source =
+        fs::read_to_string(file).map_err(|e| format!("failed to read {}: {e}", file.display()))?;
+    let decls =
+        chelis_surf::parser::parse_str(&source).map_err(|e| format!("{}: {e}", file.display()))?;
+    // The file is linked by its own location, as `check` and `build` link
+    // it (spec/02 §P2, chelis#2918).
+    if let Some(prepared) = chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME)
+        .map_err(boxed_string_error)?
     {
         return Ok(EvalDecls {
             decls: prepared.decls,
@@ -10599,8 +10592,6 @@ fn load_eval_decls(file: &Path) -> Result<EvalDecls, Box<dyn std::error::Error>>
             linked: true,
         });
     }
-    let source = fs::read_to_string(file)?;
-    let decls = chelis_surf::parser::parse_str(&source)?;
     Ok(EvalDecls {
         entry_decls: decls.clone(),
         decls,

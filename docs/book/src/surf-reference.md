@@ -309,9 +309,13 @@ in every command, and the diagnostic names both. Rename the local declaration, o
 module qualified (`import Std.Scalar`) and call `Std.Scalar.max`. Parameters and local
 bindings may still reuse an imported name.
 
-A file outside every Reef package imports from the compiler-bundled `chelis-std` (`Std.*`)
-under the same rules. Importing any other module needs a `reef.toml` package manifest, and an
-import that names no reachable module is a `chelis check` error.
+A file belongs to the Reef package found by walking up from the file's own directory,
+whatever directory a command runs in. A file inside a package but outside its source roots,
+such as a script beside `reef.toml` or a test under `tests/`, is an entry of that package and
+can import its modules, with or without a `module` line. A file outside every Reef package
+imports from the compiler-bundled `chelis-std` (`Std.*`) under the same rules.
+Importing any other module needs a `reef.toml` package manifest, and an import that names
+no reachable module is a `chelis check` error.
 
 With no `export` declaration, every top-level `def` and `type` is public. Once any `export`
 appears, only the listed names are public. Exporting a type also exports its constructors.

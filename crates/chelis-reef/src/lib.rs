@@ -2402,11 +2402,15 @@ fn find_package_root_from_dir(mut dir: PathBuf) -> Result<Option<PathBuf>, Strin
     }
 }
 
-/// Link the Surf program at `file` with its reef package, or, when `file`
-/// is outside every package, as a single-file program
-/// ([`prepare_single_file_program`]). `Ok(None)` means there is nothing to
-/// link: `file` is outside every package and imports nothing, or it cannot
-/// be read or parsed as Surf, which the caller reports in its own shape.
+/// Link the Surf program at `file` with the reef package found by walking up
+/// from the file itself, or, when `file` is outside every package, as a
+/// single-file program ([`prepare_single_file_program`]). Every command
+/// classifies a file this way (spec/02 §P2); the current directory plays no
+/// part. Inside a package, a module beneath a source root is linked as that
+/// module, and any other file, with or without a `module` declaration, is
+/// linked as an entry of the package. `Ok(None)` means there is nothing to
+/// link: `file` is outside every package and imports nothing, or it cannot be
+/// read or parsed as Surf, which the caller reports in its own shape.
 pub fn prepare_program_for_file(
     file: &Path,
     runtime: &'static EmbeddedRuntime,
@@ -2455,7 +2459,22 @@ pub fn prepare_program_for_file(
         .packages
         .get(&graph.graph.root_package)
         .ok_or_else(|| "root package missing from prepared reef graph".to_string())?;
-    let entry_module = module_name_for_input(&root, file, root_package)?;
+    let Some(entry_module) = module_name_for_input(&root, file, root_package)? else {
+        // spec/02 §P2 (chelis#2918): a file that belongs to this package but
+        // lies outside every source root is an entry of the package, linked
+        // as `chelis eval --file` and `chelis test` link one. A `module`
+        // declaration in it adds no module to the package, so its wrapper is
+        // set aside as theirs is.
+        let source = fs::read_to_string(file)
+            .map_err(|e| format!("failed to read {}: {e}", file.display()))?;
+        let decls = chelis_surf::parser::parse_str(&source)
+            .map_err(|e| format!("{}: {e}", file.display()))?;
+        let entry_decls = match decls.as_slice() {
+            [Decl::Module { decls, .. }] => decls.as_slice(),
+            decls => decls,
+        };
+        return compile_with_reef_graph(&graph, entry_decls, runtime).map(Some);
+    };
     let module = root_package
         .modules
         .get(&entry_module)
@@ -2477,6 +2496,13 @@ pub fn prepare_program_for_file(
     }))
 }
 
+/// Link `file` against the package at or above `context_dir`, a package the
+/// caller names explicitly (`chelis prove --package`). A file that declares a
+/// `module` is linked by its own location, as [`prepare_program_for_file`]
+/// links it; a file with no `module` declaration is linked as an entry of the
+/// named package, or as a single-file program when `context_dir` is outside
+/// every package. A caller without an explicit package uses
+/// [`prepare_program_for_file`], never the current directory (spec/02 §P2).
 pub fn prepare_program_for_eval_file(
     file: &Path,
     context_dir: &Path,
@@ -3756,10 +3782,10 @@ pub fn prepare_program_for_eval_source(
     entry_decls: &[Decl],
     runtime: &'static EmbeddedRuntime,
 ) -> Result<Option<PreparedProgram>, String> {
-    // Convenience wrapper: preserved for existing callers (chelis eval, the
-    // CLI --file path, Deep/IR integration tests) that want the single-shot
-    // preparation and expect `Ok(None)` when there is no reef package. A
-    // caller that then runs the decls links them with
+    // Convenience wrapper: preserved for existing callers
+    // (`prepare_program_for_eval_file`, Deep/IR integration tests) that want
+    // the single-shot preparation and expect `Ok(None)` when there is no reef
+    // package. A caller that then runs the decls links them with
     // `prepare_single_file_program`, as `prepare_program_for_eval_file` does,
     // so their imports are never dropped (chelis#2881).
     // `chelis test` takes the split-path route (prepare_reef_graph +
@@ -9395,31 +9421,25 @@ fn validate_source_signature_pairs(decls: &[Decl], module: &str) -> Result<(), S
     Ok(())
 }
 
+/// The module of `root_pkg` that `file` is, or `None` when `file` lies
+/// outside every declared source root. The loader reads every `.ch` beneath a
+/// source root into the module table, so a loaded package has no other kind
+/// of file beneath one.
 fn module_name_for_input(
     root: &Path,
     file: &Path,
     root_pkg: &LoadedPackage,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let canonical = file
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize {}: {e}", file.display()))?;
     // Multi-root: each module records its own source_root, so we
     // reconstruct the absolute path the same way `source_digests` does.
-    for module in root_pkg.modules.values() {
-        if root.join(&module.source_root).join(&module.file_rel) == canonical {
-            return Ok(module.module_name.clone());
-        }
-    }
-    let declared_roots = std::iter::once("src".to_string())
-        .chain(root_pkg.manifest.package.additional_sources.iter().cloned())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(format!(
-        "{} is not a source file under any declared root of {} (roots: [{}])",
-        file.display(),
-        root.display(),
-        declared_roots,
-    ))
+    Ok(root_pkg
+        .modules
+        .values()
+        .find(|module| root.join(&module.source_root).join(&module.file_rel) == canonical)
+        .map(|module| module.module_name.clone()))
 }
 
 enum ArchiveMember {

@@ -307,19 +307,19 @@ fn cmd_eval_reef_package_path_dep_import_matches_baseline() {
     );
 }
 
-/// Fixture #3: a snippet (no Module wrapper) evaluated from inside the
-/// package via `current_dir`. Covers the
-/// "loose snippet routes through `find_package_root_for_dir`" branch
-/// of the Phase H detector — equivalent to what `eval_reef.rs` already
-/// covers but explicitly compared against the baseline so a regression
-/// in dispatch can't pass silently.
+/// Fixture #3: a snippet (no Module wrapper) inside the package, evaluated
+/// from a directory outside every package. A file belongs to the package
+/// found by walking up from the file itself (spec/02 §P2, chelis#2918), so
+/// the snippet routes through the reef context whatever the current
+/// directory is, and the output is compared against the baseline so a
+/// regression in dispatch can't pass silently.
 #[test]
-fn cmd_eval_reef_package_loose_snippet_via_cwd_matches_baseline() {
+fn cmd_eval_reef_package_loose_snippet_inside_the_package_matches_baseline() {
     let (_dir, root) = path_dep_package();
-    // Place the snippet OUTSIDE the package so the only way to detect
-    // the reef context is via `find_package_root_for_dir(current_dir)`.
-    let snippet_dir = tempdir().expect("snippet tempdir");
-    let entry_path = snippet_dir.path().join("snippet.ch");
+    // Run from a directory outside every package, so only the file's own
+    // location can select the reef context.
+    let elsewhere = tempdir().expect("elsewhere tempdir");
+    let entry_path = root.join("snippet.ch");
     let snippet = "import Mylib.Math (square)\n\n\
                    bench_value: i32 = square(7)\n";
     write_file(&entry_path, snippet);
@@ -329,7 +329,7 @@ fn cmd_eval_reef_package_loose_snippet_via_cwd_matches_baseline() {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .current_dir(&root)
+        .current_dir(elsewhere.path())
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()
         .expect("run chelis eval");
@@ -337,7 +337,7 @@ fn cmd_eval_reef_package_loose_snippet_via_cwd_matches_baseline() {
     let actual = String::from_utf8(output.stdout).expect("utf8 stdout");
     assert_eq!(
         actual, expected,
-        "Phase H cwd-detected reef package must match baseline"
+        "Phase H reef package found from the snippet's location must match baseline"
     );
 }
 
@@ -356,8 +356,8 @@ fn cmd_eval_raw_file_outside_reef_package_uses_legacy_path() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        // Set current_dir to a tempdir guaranteed not to be inside any
-        // reef package so the cwd-detect path also returns None.
+        // Run from the file's own tempdir, which no reef package contains,
+        // so no reef context applies.
         .current_dir(dir.path())
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()
