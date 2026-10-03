@@ -87,7 +87,9 @@ PRs. The ~46m corpus is too heavy for the per-PR path, and `SMT Full Prove
 deadlock branch protection; the per-PR cvc5 signal is ci.yml's fast
 `SMT Feature Build (Linux)` smoke, and prove-stack regressions are caught by
 the nightly run (which opens/closes a tracking issue) or on demand via
-`workflow_dispatch`. It carries the expensive suites: `--features smt`, `carcara`, `z3`, the cvc5+Z3 cross-engine
+`workflow_dispatch`. It also runs `cargo test -p chelis-cli --features smt --test prove`
+to cover CLI sampling and solver dispatch together. It carries the expensive suites:
+`--features smt`, `carcara`, `z3`, the cvc5+Z3 cross-engine
 oracle, `clarabel`, the production `smt clarabel` config, Gappa
 `--check-only`, the Arb certifier, and `--features arb`.
 

@@ -46,6 +46,11 @@ a command-line request alone does not establish the method used. An unsupported 
 establish the property. An explicit `.ch` file discovers properties in that file; imports can
 resolve names but are not additional discovery targets.
 
+The accepted tiers are `auto`, `fuzz-only`, `smt-only`, `induction-only`, and
+`beacon-only`. An unknown tier is a usage error before discovery or verification.
+With `auto`, an SMT proof reports zero samples even when `--samples` was supplied;
+the sample count and seed apply when sampling runs.
+
 ## Read the result
 
 In a standard build, `--json` writes newline-delimited JSON property and obligation records,
