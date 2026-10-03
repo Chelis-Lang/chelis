@@ -44,7 +44,7 @@ const REJECT_CASES: &[RejectCase] = &[
         name: "list",
         source: "module Issue1339.List\n\
                  root = read_later()\n\
-                 later = [1i64, 2i64]\n\
+                 later: List[i64] = [1i64, 2i64]\n\
                  def read_later() -> List[i64] = later\n",
         root: "root",
         later: "later",
@@ -124,7 +124,7 @@ const CYCLIC_ROOT_WITH_UNKNOWN_SOURCE: &str = "module Issue1339.CycleWithUnknown
 const POSITIVE_SOURCE: &str = "module Issue1339.Positive\n\
                                base = 5i32\n\
                                backward = read_base(1i32)\n\
-                               list_base = [1i64, 2i64]\n\
+                               list_base: List[i64] = [1i64, 2i64]\n\
                                backward_list = read_list(0i32)\n\
                                tensor_base = to_tensor([1.0f32, 2.0f32])\n\
                                backward_tensor = read_tensor(0i32)\n\

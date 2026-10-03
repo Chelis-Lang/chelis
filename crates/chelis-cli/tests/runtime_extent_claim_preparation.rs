@@ -2076,7 +2076,7 @@ fn staged_sources_preserve_native_lists_and_host_literals() {
     for n in [4, 6] {
         for (kind, body, axis) in [
             ("tuple_list", "{\n  sizes = ([1i64, 2i64], numel(x))\n  reshape(x, [len(sizes.0), floor_div(sizes.1, 2i64)])\n}".to_owned(), 1),
-            ("list_capture", "{\n  sizes = [1i64, 2i64]\n  reshape(x, [len(sizes), floor_div(numel(x), 2i64)])\n}".to_owned(), 1),
+            ("list_capture", "{\n  sizes: List[i64] = [1i64, 2i64]\n  reshape(x, [len(sizes), floor_div(numel(x), 2i64)])\n}".to_owned(), 1),
             ("nested_list", "{\n  sizes = ([[1i64], [2i64]], numel(x))\n  reshape(x, [len(sizes.0), floor_div(sizes.1, 2i64)])\n}".to_owned(), 1),
             ("string_literal", format!("{{\n  text = \"{}\"\n  reshape(x, [string_len(text), 2i64])\n}}", if n == 4 { "aa" } else { "aaa" }), 0),
         ] {
