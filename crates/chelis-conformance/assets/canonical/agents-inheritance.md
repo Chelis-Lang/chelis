@@ -557,6 +557,7 @@ workspace, or Docker.
 | `hello-chelis` | Example programs; the smallest conforming shell. |
 | `economoist` | Verified economic and dynamic-programming models in Chelis. |
 | `arb-sys` | Rust bindings to the Arb arbitrary-precision library. |
+| `bed` | Versioned external civil data: the IANA time-zone database and the holiday and market-calendar packages that `Std.Datetime` consumes. |
 
 ## Pointers
 
