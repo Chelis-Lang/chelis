@@ -33,7 +33,6 @@ def test_arange_empty_range_produces_empty_tensor() -> unit ! { Test } = {
   xs = to_list(arange(cast(5, i32), cast(5, i32)))
   assert_eq(len(xs), cast(0, i64), "arange(5,5) is empty")
 }
-
 def test_linspace_bf16_exact_rational_weight() -> unit ! { Test } = {
   values = to_list(linspace(0.0bf16, 1.0bf16, 300i64))
   _ = assert_eq(index(values, 0i64), 0.0bf16, "bf16 start endpoint")
