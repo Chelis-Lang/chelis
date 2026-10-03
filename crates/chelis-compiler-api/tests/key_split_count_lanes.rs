@@ -11,8 +11,9 @@
 //! values of their first elements.
 mod ownership_support;
 
-use chelis_compiler_api::compiler::eval_selected;
-use chelis_compiler_api::schema::{EvalRequest, SourceKind};
+use chelis_compiler_api::compiler::{check, eval_selected};
+use chelis_compiler_api::schema::{CheckRequest, EvalRequest, SourceKind};
+use chelis_vocab::DiagnosticKind;
 use std::collections::BTreeMap;
 
 /// `uniform_like(row, 0.0f32, 0, 1)` for each row of
@@ -290,40 +291,74 @@ fn a_literal_count_is_its_static_extent() {
             format!(
                 "def main() -> tensor[3, f32] = {DRAW}(split_keys(key_from_seed(1i64), 2i64), {DATA3})\n"
             ),
-            "dimension mismatch: Lit(2) vs Lit(3)",
         ),
         (
             "sk6",
             format!(
                 "def f[n](k: key, xs: tensor[n, f32]) -> tensor[n, f32] = {DRAW}(split_keys(k, 2i64), xs)\ndef main() -> tensor[3, f32] = f(key_from_seed(1i64), {DATA3})\n"
             ),
-            "polymorphic dim parameter `n` forced to concrete Lit(2)",
         ),
         (
             "sk7",
             format!(
                 "def f[n](k: key, xs: tensor[n, f32]) -> tensor[n, f32] = {DRAW}(split_keys(k, 2i64), xs)\ndef main() -> tensor[2, f32] = f(key_from_seed(1i64), to_tensor([0.0f32, 0.0f32]))\n"
             ),
-            "polymorphic dim parameter `n` forced to concrete Lit(2)",
         ),
         (
             "ascribed",
             "def main() = {\n  ks: tensor[3, key] = split_keys(key_from_seed(1i64), 2i64)\n  ks\n}\n"
                 .to_string(),
-            "dimension mismatch: Lit(2) vs Lit(3)",
         ),
         (
             "negative",
             "def main() -> tensor[2, key] = split_keys(key_from_seed(1i64), -2i64)\n".to_string(),
-            "split_keys requires a non-negative count, got -2 ([05-OP-71])",
         ),
     ];
-    let mut failures = Vec::new();
-    for (label, source, fragment) in &rows {
-        match eval_lines(source) {
-            Err(message) if message.contains(fragment) => {}
-            other => failures.push(format!("{label}: {other:?}\n{source}")),
-        }
+    for (label, source) in &rows {
+        let checked = check(CheckRequest {
+            source_kind: SourceKind::Surf,
+            source: source.clone(),
+        })
+        .expect("a malformed extent still produces a check report");
+        let diagnostic = checked
+            .errors
+            .iter()
+            .find(|error| {
+                error.kind() == DiagnosticKind::DimensionMismatch
+                    && match *label {
+                        "sk2" => {
+                            error.message.contains("vmap")
+                                && error.message.contains("argument 2")
+                                && error.message.contains("axis 0")
+                                && error.expected.as_deref() == Some("2")
+                                && error.got.as_deref() == Some("3")
+                                && error.span.is_some_and(|span| {
+                                    span.offset()
+                                        == u64::try_from(source.find("vmap(").unwrap()).unwrap()
+                                })
+                        }
+                        "sk6" | "sk7" => {
+                            error.message.contains("`n`") && error.message.contains("`f`")
+                        }
+                        "ascribed" => {
+                            error.expected.as_deref() == Some("tensor[3, key]")
+                                && error.got.as_deref() == Some("tensor[2, key]")
+                                && error.span.is_some_and(|span| {
+                                    span.offset()
+                                        == u64::try_from(source.find("tensor[3, key]").unwrap())
+                                            .unwrap()
+                                })
+                        }
+                        "negative" => {
+                            error.message.contains("split_keys") && error.message.contains("-2")
+                        }
+                        _ => unreachable!("complete literal-count case table"),
+                    }
+            })
+            .unwrap_or_else(|| panic!("{label} must reject with its own extent: {checked:?}"));
+        assert!(
+            eval_lines(source).is_err(),
+            "{label}: checked rejection {diagnostic:?} must also prevent evaluation"
+        );
     }
-    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }

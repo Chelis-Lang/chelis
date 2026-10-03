@@ -121,6 +121,68 @@ fn nested_callback_arity_names_the_first_argument_and_direction() {
 }
 
 #[test]
+fn a_returned_vmap_callable_names_its_source_and_rejected_axis() {
+    let source = |count| {
+        format!(
+            "def main() -> tensor[3, f32] = vmap(fn (j: key, v: tensor[f32]) -> uniform_like(j, v, 0.0f32, 1.0f32))(split_keys(key_from_seed(1i64), {count}i64), to_tensor([0.0f32, 0.0f32, 0.0f32]))\n"
+        )
+    };
+    let bad = source(2);
+    let error = checked_error(&bad, "DimensionMismatch", "vmap(", "2", "3");
+    let message = error["message"].as_str().expect("diagnostic message");
+    assert!(
+        message.contains("argument 2") && message.contains("axis 0"),
+        "{error}"
+    );
+
+    let good = source(3);
+    let (ok, stdout, stderr) = run("check", &good);
+    let report: Value = serde_json::from_str(&stdout).expect("valid nested call JSON");
+    assert!(ok, "{stderr}: {report}");
+    assert_eq!(report["errors"], serde_json::json!([]));
+}
+
+#[test]
+fn a_returned_grad_callable_names_its_source_and_rejected_axis() {
+    let prefix = "def loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n";
+    let bad = format!("{prefix}out = grad(loss)(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n");
+    let error = checked_error(&bad, "DimensionMismatch", "grad(", "2", "3");
+    let message = error["message"].as_str().expect("diagnostic message");
+    assert!(
+        message.contains("argument 1") && message.contains("axis 0"),
+        "{error}"
+    );
+
+    let good = format!("{prefix}out = grad(loss)(to_tensor([1.0f32, 2.0f32]))\n");
+    let (ok, stdout, stderr) = run("check", &good);
+    let report: Value = serde_json::from_str(&stdout).expect("valid grad JSON");
+    assert!(ok, "{stderr}: {report}");
+    assert_eq!(report["errors"], serde_json::json!([]));
+}
+
+#[test]
+fn a_named_factory_returned_callable_names_the_factory_and_rejected_axis() {
+    let source = |values| {
+        format!("def mk() = fn (x: tensor[2, f32]) -> x\nout = (mk())(to_tensor([{values}]))\n")
+    };
+    let bad = source("1.0f32, 2.0f32, 3.0f32");
+    let error = checked_error(&bad, "DimensionMismatch", "mk())(", "2", "3");
+    let message = error["message"].as_str().expect("diagnostic message");
+    assert!(
+        message.contains("`mk(...)`")
+            && message.contains("argument 1")
+            && message.contains("axis 0"),
+        "{error}"
+    );
+
+    let good = source("1.0f32, 2.0f32");
+    let (ok, stdout, stderr) = run("check", &good);
+    let report: Value = serde_json::from_str(&stdout).expect("valid factory JSON");
+    assert!(ok, "{stderr}: {report}");
+    assert_eq!(report["errors"], serde_json::json!([]));
+}
+
+#[test]
 fn reduction_rejections_name_the_axis_or_bool_tensor_requirement() {
     let source = "out = sum(to_tensor([1.0f32]), 2i32)\n";
     let error = checked_error(source, "DimensionMismatch", "sum(", "axis in -1..1", "2");

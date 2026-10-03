@@ -29,6 +29,39 @@ pub(super) fn auto_borrow_call_arg_types(
         .collect()
 }
 
+/// An application may call a function returned by a named call or a
+/// source-level transform, as in `vmap(f)(xs)`. Keep the authored producer and
+/// returned-call depth instead of labeling the failed operand "function
+/// application". This is inspected only after a checked call rejects.
+fn returned_call_source(site: &deep::Expr) -> Option<(&str, usize)> {
+    let (DeepTag::App, _, children) = stamped_parts(site)? else {
+        return None;
+    };
+    let mut callee = children.first()?;
+    let mut returned = 0;
+    loop {
+        let (tag, _, children) = stamped_parts(callee)?;
+        match tag {
+            DeepTag::App => {
+                callee = children.first()?;
+                returned += 1;
+            }
+            // Authored callable transforms have dedicated Deep tags, not
+            // applications of a variable; their tag spells the source callee.
+            tag @ (DeepTag::Grad | DeepTag::Vmap | DeepTag::Jit | DeepTag::Realize) => {
+                return Some((tag.as_str(), returned + 1));
+            }
+            DeepTag::Var if returned > 0 => {
+                return children
+                    .first()
+                    .and_then(symbol_name)
+                    .map(|name| (name, returned));
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Apply the checked function contract shared by ordinary and specialized
 /// application paths.
 ///
@@ -71,8 +104,13 @@ pub(super) fn unify_checked_call_contract(
                 return Err(rejected);
             }
             let mut error: CheckError = te.into();
+            let (callee, returned) = callee
+                .map(|name| (name, 0))
+                .or_else(|| returned_call_source(site))
+                .unwrap_or(("function application", 0));
             if let Some((context, expected, got)) = describe_failed_call_operand(
-                callee.unwrap_or("function application"),
+                callee,
+                returned,
                 func_ty,
                 &unify_arg_tys,
                 subst,
@@ -105,6 +143,7 @@ pub(super) fn unify_checked_call_contract(
 /// from `TypeError.message` (whose internal unification order may differ).
 fn describe_failed_call_operand(
     callee: &str,
+    returned: usize,
     func_ty: &Type,
     arguments: &[Type],
     subst: &Subst,
@@ -125,9 +164,12 @@ fn describe_failed_call_operand(
                 .next()
                 .is_some_and(|ch| ch.is_ascii_uppercase())
         });
-    let callee = module
+    let mut callee = module
         .map(|module| format!("{module}.{source_name}"))
         .unwrap_or(source_name);
+    for _ in 0..returned {
+        callee.push_str("(...)");
+    }
     let Type::Fn(params, _) = subst.apply(func_ty) else {
         return None;
     };
