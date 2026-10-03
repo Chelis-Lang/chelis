@@ -10,7 +10,7 @@ use chelis_deep::ast::{Atom, Expr};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
-use crate::builtins::{BUILTIN_NAMES, BuiltinSiblingCaseId, builtin_decl};
+use crate::builtins::{BUILTIN_NAMES, BuiltinSiblingCaseId, COMPARISON_OPS, builtin_decl};
 use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
@@ -3300,21 +3300,19 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
     let Some(name) = name else {
         return false;
     };
+    if COMPARISON_OPS.contains(&name) {
+        return arg_index < 2;
+    }
     matches!(
         name,
         "add"
             | "mul"
             | "max_elem"
+            | "min_elem"
             | "sub"
             | "div"
             | "floor_div"
             | "trunc_div"
-            | "eq"
-            | "neq"
-            | "lt"
-            | "gt"
-            | "lte"
-            | "gte"
             | "and"
             | "or"
             | "matmul"
@@ -3339,13 +3337,14 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "floor"
                 | "ceil"
                 | "round"
-                | "cmplt"
                 | "not"
                 | "relu"
                 | "sigmoid"
+                | "tanh"
+                | "silu"
+                | "gelu"
                 | "softmax"
                 | "mean"
-                | "min_elem"
                 | "sum"
                 | "max_reduce"
                 | "min_reduce"

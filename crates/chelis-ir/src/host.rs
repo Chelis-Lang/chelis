@@ -9532,7 +9532,7 @@ pub(crate) fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
         return false;
     }
     let name = callee.children_slice().first().and_then(symbol_name);
-    if name == Some("cmplt")
+    if name.is_some_and(|name| chelis_types::COMPARISON_OPS.contains(&name))
         && list
             .children_slice()
             .iter()
@@ -9540,8 +9540,8 @@ pub(crate) fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
             .any(should_keep_tensor_expr_in_host_lane)
     {
         // A host-only descendant is evaluated before the surrounding tensor
-        // comparison. Keep this legacy host-capable identity on the same lane
-        // so `chelis_tensor_cmplt` performs its exact runtime shape check.
+        // comparison. Keep every comparison identity on the same lane
+        // so the existing runtime/elementwise arm checks operand agreement.
         // Extracting only the outer op into a helper would turn the descendant
         // result and its source sibling into unrelated wildcard Loads, losing
         // the checker-proven relation at the partition boundary.
@@ -20476,11 +20476,16 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         },
         "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "char_code" | "string_len"
         | "rank" | "shape" | "numel" => Some(HostTypeTerm::Int64),
-        "cmplt" => match arg_tys.first() {
+        name if chelis_types::COMPARISON_OPS.contains(&name) => match arg_tys.first() {
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: tensor_ty.dims.clone(),
                 precision: chelis_types::types::Prim::Bool,
             })),
+            Some(HostTypeTerm::PolymorphicTensor(tensor_ty)) => {
+                let mut result = tensor_ty.clone();
+                result.precision = HostPrecisionTerm::Concrete(Prim::Bool);
+                Some(HostTypeTerm::PolymorphicTensor(result))
+            }
             _ => Some(HostTypeTerm::Bool),
         },
         // Movement ops preserve the element precision and stay tensors.
@@ -20501,8 +20506,9 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(tensor_ty.clone())),
             _ => Some(fresh_host_inference()),
         },
-        "lt" | "gt" | "gte" | "lte" | "eq" | "neq" | "and" | "or" | "not" | "string_contains"
-        | "string_starts_with" | "string_ends_with" => Some(HostTypeTerm::Bool),
+        "and" | "or" | "not" | "string_contains" | "string_starts_with" | "string_ends_with" => {
+            Some(HostTypeTerm::Bool)
+        }
         "char_from_code" | "string_concat" | "string_trim" | "string_slice" | "to_string" => {
             Some(HostTypeTerm::String)
         }
@@ -22067,6 +22073,50 @@ mod tests {
     use super::*;
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
+
+    #[test]
+    fn issue_1248_comparison_family_preserves_operand_surface() {
+        let dims = vec![DimInfo::Named("n".into(), None), DimInfo::Lit(3)];
+        let shape = HostShapeTerm::Polymorphic(vec![
+            crate::host_type_state::HostShapeSlot::RankVariable("r".into()),
+            crate::host_type_state::HostShapeSlot::Dim(DimInfo::Named("n".into(), None)),
+        ]);
+        let fixtures = [
+            (HostTypeTerm::Float32, HostTypeTerm::Bool),
+            (
+                HostTypeTerm::Tensor(TensorType {
+                    dims: dims.clone(),
+                    precision: Prim::F32,
+                }),
+                HostTypeTerm::Tensor(TensorType {
+                    dims,
+                    precision: Prim::Bool,
+                }),
+            ),
+            (
+                HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                    precision: HostPrecisionTerm::Variable("p".into()),
+                    shape: shape.clone(),
+                }),
+                HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                    precision: HostPrecisionTerm::Concrete(Prim::Bool),
+                    shape,
+                }),
+            ),
+        ];
+        for name in ["cmplt", "lt", "gt", "gte", "lte", "eq", "neq"] {
+            for (input, expected) in &fixtures {
+                assert_eq!(
+                    must_infer_builtin_host_type_from_arg_tys(
+                        name,
+                        &[input.clone(), input.clone()]
+                    ),
+                    Some(expected.clone()),
+                    "{name}: {input:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn tensor_helper_scope_keeps_shape_only_binders_and_excludes_global_aliases() {

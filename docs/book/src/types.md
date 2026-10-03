@@ -70,3 +70,12 @@ For named dimensions, rank polymorphism, generic casts, ownership, the
 difference between the two bound forms, and the corresponding Deep forms, see
 the [Type System Reference](type-reference.md).
 For effects in function types, continue to [Effects](effects.md).
+
+## Read-only tensor calls
+
+Comparisons, `max_elem` / `min_elem`, and unary activations (`sigmoid`, `tanh`,
+`silu`, `gelu`) borrow their tensor inputs. Both operands of a comparison or
+extremum remain available for a later call, including when `<` or `>` is used.
+A prior consuming call such as `realize(x)` still makes a later read of `x` an
+error. Comparisons require matching dimensions and dtypes; borrowing does not
+permit implicit broadcasting or promotion.
