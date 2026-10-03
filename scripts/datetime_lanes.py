@@ -19,8 +19,6 @@ import shutil
 import subprocess
 import time
 
-BOTH = ("eval", "c")
-
 
 @dataclass(frozen=True)
 class Toolchain:

@@ -22,13 +22,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import datetime_lanes as lanes  # noqa: E402
 
 # `chelis --version` prints a version; `eval` prints a binding; `build --emit-c`
-# writes the C sources and the staged archive. FAIL_BUILD fails the build.
+# writes the C sources and the staged archive. FAIL_EVAL fails the eval and
+# FAIL_BUILD the build. Each call also logs the lane environment it saw.
 CHELIS = """\
 import json, os, pathlib, sys
 log = pathlib.Path(os.environ["LANES_LOG"])
 log.open("a").write(json.dumps(["chelis", *sys.argv[1:]]) + "\\n")
+seen = {name: os.environ.get(name) for name in ("CHELIS_REEF_HOME", "CHELIS_STYLE_GATE_DISABLE", "OMP_NUM_THREADS")}
+pathlib.Path(os.environ["LANES_LOG"] + ".env").open("a").write(json.dumps(seen) + "\\n")
 if sys.argv[1:] == ["--version"]:
     print("chelis 9.9.9")
+elif sys.argv[1] == "eval" and os.environ.get("FAIL_EVAL"):
+    print("error: date: domain: x", file=sys.stderr)
+    sys.exit(2)
 elif sys.argv[1] == "eval":
     print("x = [1]")
 elif os.environ.get("FAIL_BUILD"):
@@ -41,7 +47,8 @@ else:
     (out / "libchelis_runtime.a").write_text("")
 """
 
-# Writes `-o`'s target as a script that prints a binding, unless FAIL_LINK.
+# Writes `-o`'s target as a script that prints a binding, or traps with status
+# 134 under FAIL_RUN; FAIL_LINK fails the link.
 COMPILER = """\
 import json, os, pathlib, sys
 log = pathlib.Path(os.environ["LANES_LOG"])
@@ -50,7 +57,7 @@ if os.environ.get("FAIL_LINK"):
     print("ld: undefined symbol", file=sys.stderr)
     sys.exit(1)
 target = pathlib.Path(sys.argv[sys.argv.index("-o") + 1])
-target.write_text("#!/bin/sh\\necho 'x = [1]'\\n")
+target.write_text("#!/bin/sh\\nif [ -n \\"$FAIL_RUN\\" ]; then echo 'overflow in add' >&2; exit 134; fi\\necho 'x = [1]'\\n")
 target.chmod(0o755)
 """
 
@@ -121,6 +128,36 @@ class LaneTests(unittest.TestCase):
         with mock.patch.object(self.runner, "run", expire):
             result = self.runner.lane("case_1", "module Demo.Main\n", "eval")
         self.assertEqual((result.status, result.stage, result.stderr), (None, "timeout", "timed out after 60 s"))
+
+    def test_a_failing_executable_keeps_its_status_and_stderr(self) -> None:
+        with mock.patch.dict(os.environ, {"FAIL_RUN": "1"}):
+            result = self.runner.lane("case_1", "module Demo.Main\n", "c")
+        self.assertEqual((result.status, result.stage, result.stderr), (134, "run", "overflow in add\n"))
+
+    def test_a_failing_eval_keeps_its_status_and_stderr(self) -> None:
+        with mock.patch.dict(os.environ, {"FAIL_EVAL": "1"}):
+            result = self.runner.lane("case_1", "module Demo.Main\n", "eval")
+        self.assertEqual((result.status, result.stage, result.stderr), (2, "eval", "error: date: domain: x\n"))
+
+    def test_every_lane_process_gets_the_reef_home_and_the_timeout(self) -> None:
+        with mock.patch.object(lanes.subprocess, "run", wraps=subprocess.run) as run:
+            self.runner.lane("case_1", "module Demo.Main\n", "eval")
+            self.runner.lane("case_1", "module Demo.Main\n", "c")
+        self.assertEqual(run.call_count, 4)
+        self.assertTrue(all(call.kwargs["timeout"] == 60 for call in run.call_args_list))
+        lane_envs = [json.loads(line) for line in Path(f"{self.log}.env").read_text().splitlines()][1:]
+        self.assertEqual(lane_envs, [{
+            "CHELIS_REEF_HOME": str(Path(self.tmp.name) / "reef"),
+            "CHELIS_STYLE_GATE_DISABLE": "1",
+            "OMP_NUM_THREADS": "1",
+        }] * 2)
+
+    def test_a_rerun_starts_from_a_fresh_package(self) -> None:
+        stale = Path(self.tmp.name) / "work" / "eval" / "case_1" / "stale.txt"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("left over")
+        self.runner.lane("case_1", "module Demo.Main\n", "eval")
+        self.assertFalse(stale.exists())
 
     def test_the_c_lane_needs_a_toolchain(self) -> None:
         self.runner.toolchain = None
