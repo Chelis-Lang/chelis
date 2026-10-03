@@ -2506,13 +2506,11 @@ fn host_runtime_trace_f64_uses_canonical_balanced_tree() {
 fn host_runtime_reduce_window_max_min_preserve_first_nan_bits() {
     let first_nan = f32::from_bits(0xffc1_2345);
     let second_nan = f32::from_bits(0x7fc5_4321);
-    let tensor = RuntimeTensorValue::from_wide(
-        "test",
-        Prim::F32,
-        vec![4],
-        vec![f64::from(first_nan), 1.0, 2.0, f64::from(second_nan)],
-    )
-    .expect("typed f32 input");
+    // The input is stored bits, not an arithmetic result, which `from_wide`
+    // would finalize to the canonical NaN.
+    let stored = [first_nan, 1.0, 2.0, second_nan]
+        .map(|value| chelis_types::scalar_from_f64("test", Prim::F32, f64::from(value)).unwrap());
+    let tensor = RuntimeTensorValue::from_scalars(Prim::F32, vec![4], &stored);
     let max = tensor_reduce_window_host(
         &tensor,
         &[2],
