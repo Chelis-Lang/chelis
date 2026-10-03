@@ -22,7 +22,10 @@ const GUARD: &str = "chelis_runtime::FpEnvGuard::enter()";
 /// why. Anything else re-exported from another crate is wrapped.
 const EXTERNAL_REEXPORTS_WITHOUT_ARITHMETIC: &[(&str, &str)] = &[
     ("find_package_root_for_dir", "filesystem walk for reef.toml"),
-    ("find_package_root_for_input", "filesystem walk for reef.toml"),
+    (
+        "find_package_root_for_input",
+        "filesystem walk for reef.toml",
+    ),
     ("current_cancel_token", "thread-local read"),
     ("install_cancel_token", "thread-local write"),
     ("is_cancellation", "string search"),
@@ -97,12 +100,7 @@ fn impl_owner(self_ty: &syn::Type) -> String {
 }
 
 /// The public functions in `items` and whether each opens with the guard.
-fn scan_items(
-    path: &str,
-    items: &[Item],
-    checked: &mut Vec<String>,
-    unguarded: &mut Vec<String>,
-) {
+fn scan_items(path: &str, items: &[Item], checked: &mut Vec<String>, unguarded: &mut Vec<String>) {
     for item in items {
         match item {
             Item::Fn(function) if !is_cfg_test(&function.attrs) => check_function(
@@ -163,7 +161,11 @@ fn use_leaves(tree: &UseTree, prefix: &mut Vec<String>, leaves: &mut Vec<(Vec<St
 
 /// Function re-exports from another crate in `items` that are neither wrapped
 /// nor named in [`EXTERNAL_REEXPORTS_WITHOUT_ARITHMETIC`].
-fn unwrapped_external_reexports(path: &str, items: &[Item], crate_modules: &[String]) -> Vec<String> {
+fn unwrapped_external_reexports(
+    path: &str,
+    items: &[Item],
+    crate_modules: &[String],
+) -> Vec<String> {
     let mut local = crate_modules.to_vec();
     local.extend(items.iter().filter_map(|item| match item {
         Item::Mod(module) => Some(module.ident.to_string()),
@@ -179,7 +181,8 @@ fn unwrapped_external_reexports(path: &str, items: &[Item], crate_modules: &[Str
         use_leaves(&item_use.tree, &mut Vec::new(), &mut leaves);
         for (prefix, leaf) in leaves {
             let root = prefix.first().map(String::as_str).unwrap_or_default();
-            let is_local = matches!(root, "crate" | "self" | "super") || local.iter().any(|m| m == root);
+            let is_local =
+                matches!(root, "crate" | "self" | "super") || local.iter().any(|m| m == root);
             let is_function = leaf == "*" || leaf.starts_with(|c: char| c.is_ascii_lowercase());
             if !is_local
                 && is_function
@@ -271,7 +274,11 @@ fn every_public_operation_pins_the_floating_point_environment() {
         let relative = file.strip_prefix(&src).unwrap().display().to_string();
         let parsed = parse(file);
         scan_items(&relative, &parsed.items, &mut checked, &mut unguarded);
-        reexports.extend(unwrapped_external_reexports(&relative, &parsed.items, &declared));
+        reexports.extend(unwrapped_external_reexports(
+            &relative,
+            &parsed.items,
+            &declared,
+        ));
     }
     assert!(
         unguarded.is_empty(),

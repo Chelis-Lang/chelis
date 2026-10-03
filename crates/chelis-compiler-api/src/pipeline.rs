@@ -117,7 +117,9 @@ pub fn analyze_prepared_with_library(
 
 /// [`chelis_pipeline_core::check_prepared_library`] under the pinned
 /// environment.
-pub fn check_prepared_library(prepared: PreparedProgram) -> Result<CheckedLibrary, LibraryRejection> {
+pub fn check_prepared_library(
+    prepared: PreparedProgram,
+) -> Result<CheckedLibrary, LibraryRejection> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
     chelis_pipeline_core::check_prepared_library(prepared)
 }

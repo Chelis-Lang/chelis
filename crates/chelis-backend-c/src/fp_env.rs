@@ -228,6 +228,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "must precede a braced for loop")]
     fn a_parallel_pragma_without_a_braced_loop_is_a_compiler_bug() {
-        pin_parallel_regions("#pragma omp parallel for\nfor (i = 0; i < n; i++) x[i] = 0;\n".into());
+        pin_parallel_regions(
+            "#pragma omp parallel for\nfor (i = 0; i < n; i++) x[i] = 0;\n".into(),
+        );
     }
 }

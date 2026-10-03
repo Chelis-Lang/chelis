@@ -314,8 +314,16 @@ const CANARY_INPUTS: [u64; 10] = [
 /// check, the operation it evaluates, and the result's bits. The kernel rows
 /// are the correctly rounded results (checked against 300-bit mpmath).
 const CANARY_CASES: [(&str, &str, u64); 7] = [
-    ("exp", "chelis_cr_exp(0x1.3333333337111p-2)", 0x3ff5_9905_8c8c_2f76),
-    ("tanh", "chelis_cr_tanh(0x1.3333333337111p-2)", 0x3fd2_a4dd_a7d9_4d98),
+    (
+        "exp",
+        "chelis_cr_exp(0x1.3333333337111p-2)",
+        0x3ff5_9905_8c8c_2f76,
+    ),
+    (
+        "tanh",
+        "chelis_cr_tanh(0x1.3333333337111p-2)",
+        0x3fd2_a4dd_a7d9_4d98,
+    ),
     ("contraction", "(1+2^-27)*(1+2^-27) - (1+2^-26)", 0),
     ("reassociation", "(2^53 + 1) - 2^53", 0),
     ("reciprocal", "5 / 3", 0x3ffa_aaaa_aaaa_aaab),
@@ -374,12 +382,13 @@ struct CanaryDir(PathBuf);
 impl CanaryDir {
     fn create() -> Result<Self, String> {
         let base = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.subsec_nanos());
-        for attempt in 0..100u32 {
+        // A process-wide sequence keeps concurrent checks in one process apart;
+        // `create_dir` failing on an existing name keeps processes apart.
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        for _ in 0..100 {
+            let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let dir = base.join(format!(
-                "chelis-compiler-canary-{}-{nanos}-{attempt}",
+                "chelis-compiler-canary-{}-{sequence}",
                 std::process::id()
             ));
             match std::fs::create_dir(&dir) {
@@ -752,7 +761,11 @@ mod tests {
             ("finite-cc", "-ffinite-math-only", "__FINITE_MATH_ONLY__"),
             ("unoptimised-cc", "-O0", "__OPTIMIZE__"),
             ("contract-cc", contract, "contraction: "),
-            ("unsafe-cc", "-funsafe-math-optimizations", "reassociation: "),
+            (
+                "unsafe-cc",
+                "-funsafe-math-optimizations",
+                "reassociation: ",
+            ),
             ("reciprocal-cc", "-freciprocal-math", "reciprocal: "),
             ("signed-zero-cc", "-fno-signed-zeros", "signed-zero: "),
             (

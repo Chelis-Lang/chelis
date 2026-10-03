@@ -2509,10 +2509,18 @@ int main() {{
 
 /// Compile `kernel.c` and `main.c` with OpenMP, or `None` when this compiler
 /// has no OpenMP (Apple clang): the property needs a real worker pool.
-fn compile_with_openmp(test_name: &str, c_source: &str, harness: &str) -> Option<(tempfile::TempDir, std::path::PathBuf)> {
+fn compile_with_openmp(
+    test_name: &str,
+    c_source: &str,
+    harness: &str,
+) -> Option<(tempfile::TempDir, std::path::PathBuf)> {
     let probe = common::probe_dir(&format!("exec_{test_name}"));
     let dir = probe.path().to_path_buf();
-    fs::write(dir.join("omp_probe.c"), "int main(void) {\n#pragma omp parallel\n{ }\nreturn 0;\n}\n").unwrap();
+    fs::write(
+        dir.join("omp_probe.c"),
+        "int main(void) {\n#pragma omp parallel\n{ }\nreturn 0;\n}\n",
+    )
+    .unwrap();
     let has_openmp = Command::new("gcc")
         .args(["-fopenmp", "-Werror", "-o"])
         .arg(dir.join("omp_probe"))
@@ -2528,7 +2536,14 @@ fn compile_with_openmp(test_name: &str, c_source: &str, harness: &str) -> Option
         .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     let bin = dir.join("omp_bin");
     let compile = Command::new("gcc")
-        .args(["-O2", "-ffp-contract=off", "-fno-fast-math", "-fopenmp", "-std=c11", "-I"])
+        .args([
+            "-O2",
+            "-ffp-contract=off",
+            "-fno-fast-math",
+            "-fopenmp",
+            "-std=c11",
+            "-I",
+        ])
         .arg(&dir)
         .arg(dir.join("kernel.c"))
         .arg(dir.join("main.c"))
@@ -2554,7 +2569,13 @@ fn openmp_workers_compute_under_the_pinned_environment() {
     const N: usize = 4096;
     let mut dag = Dag::new();
     let decl = dag.declare("test");
-    let a = dag.add_node(decl, RiscOp::Load { name: "a".into() }, vec![], vec_f32(N), None);
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(N),
+        None,
+    );
     dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(N), None);
     let dag = fuse(&dag);
     let result = codegen_with_options(&dag, "test_omp_exp", CodegenOptions::default()).unwrap();
@@ -2623,8 +2644,15 @@ int main(int argc, char** argv) {{
     };
     let clean = run(&[]);
     let subnormals: usize = clean.trim().split(' ').nth(1).unwrap().parse().unwrap();
-    assert!(subnormals > N / 2, "the witness must produce subnormals: {clean}");
-    assert_eq!(run(&["dirty"]), clean, "a flush-to-zero worker changed the result");
+    assert!(
+        subnormals > N / 2,
+        "the witness must produce subnormals: {clean}"
+    );
+    assert_eq!(
+        run(&["dirty"]),
+        clean,
+        "a flush-to-zero worker changed the result"
+    );
 }
 
 // ---- Test 10: Scalar ReduceSum preserves the canonical tree ----
