@@ -3276,15 +3276,19 @@ y = to_tensor([
 }
 
 #[test]
-fn host_runtime_to_tensor_rejects_ragged_2d_literal() {
-    // Negative parity for 4b: ragged inner-list shapes must error
-    // out at the host runtime, not silently produce a malformed
-    // tensor.
-    let checked = checked_surf(
-        r#"
-y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32)]])
-"#,
-    );
+fn host_runtime_to_tensor_rejects_ragged_runtime_rows() {
+    // Known ragged literals reject during checking. Hide row lengths behind
+    // a callable to retain the separate host-runtime rejection obligation.
+    let source = r#"
+def row(short: bool) -> List[f32] = if short then [3.0f32] else [1.0f32, 2.0f32]
+y = to_tensor([row(false), row(true)])
+"#;
+    let rectangular = checked_surf(&source.replace("row(true)", "row(false)"));
+    let outcome = evaluate_host_program(&rectangular, &UnordMap::new())
+        .expect("rectangular runtime rows must form a tensor");
+    assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
+    assert_eq!(first_tensor_data(&outcome, "y"), vec![1.0, 2.0, 1.0, 2.0]);
+    let checked = checked_surf(source);
     let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("ragged nested list must fail to_tensor");
     assert!(
