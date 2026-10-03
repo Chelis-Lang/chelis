@@ -442,3 +442,59 @@ fn einsum_accumulates_at_the_default_accumulator_in_eval_and_the_executable() {
     );
     assert_eq!(common::build_and_run(source, "p"), eval, "{source}");
 }
+
+/// The `numeric trap:` line a failed run printed to stderr.
+fn trap_line(output: &std::process::Output, lane: &str) -> String {
+    assert!(!output.status.success(), "{lane} did not trap: {output:?}");
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .find(|line| line.starts_with("numeric trap:"))
+        .unwrap_or_else(|| panic!("{lane} failed without a trap line: {output:?}"))
+        .to_string()
+}
+
+/// An integer einsum that leaves the i32 accumulator traps as `einsum` in
+/// both lanes, whether the balanced sum (`[[2147483647, 1]]·[1, 1]`) or a
+/// product (`[[65536]]·[65536]`) overflows; eval once reported the `add` or
+/// `mul` the contraction was formed from.
+#[test]
+fn integer_einsum_overflow_traps_as_einsum_in_eval_and_the_executable() {
+    for (name, lhs, rhs) in [
+        ("sum", "[[2147483647i32, 1i32]]", "[1i32, 1i32]"),
+        ("product", "[[65536i32]]", "[65536i32]"),
+    ] {
+        let source = format!(
+            "module Probe.Case\n\
+             def main() -> tensor[1, i32] = einsum(\"ij,j->i\", to_tensor({lhs}), to_tensor({rhs}))\n"
+        );
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{name}.ch"));
+        let out_dir = dir.path().join(format!("{name}-out"));
+        write_file(&path, &source);
+        let eval = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("chelis eval should run");
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let run = std::process::Command::new(out_dir.join(name))
+            .output()
+            .expect("compiled binary should run");
+        let expected = "numeric trap: overflow in einsum at i32";
+        assert_eq!(trap_line(&run, "the executable"), expected, "{source}");
+        assert_eq!(trap_line(&eval, "eval"), expected, "{source}");
+    }
+}

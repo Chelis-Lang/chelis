@@ -2623,6 +2623,45 @@ fn host_runtime_einsum_accumulates_at_the_default_accumulator_like_the_c_runtime
     assert_eq!(out.value.to_f64_lossy_vec(), vec![1.0]);
 }
 
+/// An integer contraction's overflow traps as the contraction, as
+/// `chelis_tensor_einsum` and `chelis_tensor_trace` report it, whether the
+/// product (`[[65536]]·[65536]`) or the balanced sum
+/// (`[[2147483647, 1]]·[1, 1]`) leaves the i32 accumulator.
+#[test]
+fn host_runtime_contraction_overflow_traps_under_the_contraction_name() {
+    let tensor = |shape: Vec<usize>, values: Vec<f64>| {
+        RuntimeTensorValue::from_wide("test", Prim::Int32, shape, values)
+            .expect("i32 fixtures are in range")
+    };
+    let sum = tensor_einsum_value(
+        "ij,j->i",
+        &tensor(vec![1, 2], vec![2_147_483_647.0, 1.0]),
+        &tensor(vec![2], vec![1.0, 1.0]),
+    );
+    assert_eq!(
+        sum.err().as_deref(),
+        Some("numeric trap: overflow in einsum at i32")
+    );
+    let product = tensor_einsum_value(
+        "ij,j->i",
+        &tensor(vec![1, 1], vec![65_536.0]),
+        &tensor(vec![1], vec![65_536.0]),
+    );
+    assert_eq!(
+        product.err().as_deref(),
+        Some("numeric trap: overflow in einsum at i32")
+    );
+    let trace = tensor_trace_value(
+        &tensor(vec![2, 2], vec![2_147_483_647.0, 0.0, 0.0, 1.0]),
+        0,
+        1,
+    );
+    assert_eq!(
+        trace.err().as_deref(),
+        Some("numeric trap: overflow in trace at i32")
+    );
+}
+
 #[test]
 fn host_runtime_einsum_accepts_the_legal_rank_zero_grammar() {
     let lhs = RuntimeTensorValue {

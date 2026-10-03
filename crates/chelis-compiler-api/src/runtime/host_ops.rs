@@ -5,14 +5,13 @@ use chelis_ir::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
-    ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericKernelError,
-    NumericTrap,
-    ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar, compare_scalars,
-    compare_tensors, cumsum_tensor_lanes, float_binop, float_scalar_tensor_binop,
-    float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop,
-    int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop,
-    reduce_tensor_groups, scalar_from_f64, scalar_from_i64, scatter_add_tensor_groups,
-    tensor_from_scalars, types::Prim,
+    ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
+    NumericKernelError, NumericTrap, ScalarValue, TensorReduceOp, arg_reduce_tensor_groups,
+    cast_scalar, compare_scalars, compare_tensors, cumsum_tensor_lanes, float_binop,
+    float_scalar_tensor_binop, float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop,
+    float_unop, int_binop, int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop,
+    int_tensor_unop, int_unop, reduce_tensor_groups, scalar_from_f64, scalar_from_i64,
+    scatter_add_tensor_groups, tensor_from_scalars, types::Prim,
 };
 use chelis_types::{PreparedUniformLike, RandomKey};
 
@@ -2715,8 +2714,7 @@ fn balanced_accumulator_sum(
         while let Some(left) = source.next() {
             let combined = match source.next() {
                 Some(right) if accumulator.is_integer() => {
-                    int_binop(IntBinOp::Add, left, right)
-                        .map_err(|error| reported_as(op, error))?
+                    int_binop(IntBinOp::Add, left, right).map_err(|error| reported_as(op, error))?
                 }
                 Some(right) => {
                     float_binop(FloatBinOp::Add, left, right).map_err(|error| error.to_string())?
