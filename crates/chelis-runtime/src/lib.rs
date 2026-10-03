@@ -477,7 +477,7 @@ impl_integer_widening!(i16 => i64);
 impl_integer_widening!(i32 => i64);
 
 macro_rules! impl_reduced_float_accumulation {
-    ($storage:ty, $finalize_f32:ident, $canonical_nan:expr) => {
+    ($storage:ty, $finalize_f32:ident, $narrow_f64:path, $canonical_nan:expr) => {
         impl RuntimeAccumulationSource<f32> for $storage {
             fn into_accumulator(self) -> f32 {
                 f32::from(self)
@@ -498,18 +498,25 @@ macro_rules! impl_reduced_float_accumulation {
 
         impl RuntimeAccumulationOutput<f64> for $storage {
             fn from_accumulator(value: f64) -> Self {
+                // One rounding from f64 to storage ([04-NUM-2]); `half`'s
+                // `bf16::from_f64` misrounds values just above a tie (chelis#3041).
                 if value.is_nan() {
                     <$storage>::from_bits($canonical_nan)
                 } else {
-                    <$storage>::from_f64(value)
+                    <$storage>::from_bits($narrow_f64(value))
                 }
             }
         }
     };
 }
 
-impl_reduced_float_accumulation!(half::f16, finalize_f16, 0x7e00);
-impl_reduced_float_accumulation!(half::bf16, finalize_bf16, 0x7fc0);
+impl_reduced_float_accumulation!(half::f16, finalize_f16, ieee_narrow::f64_to_f16_bits_rne, 0x7e00);
+impl_reduced_float_accumulation!(
+    half::bf16,
+    finalize_bf16,
+    ieee_narrow::f64_to_bf16_bits_rne,
+    0x7fc0
+);
 
 impl RuntimeAccumulationSource<f64> for f32 {
     fn into_accumulator(self) -> f64 {

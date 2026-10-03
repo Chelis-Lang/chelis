@@ -12721,7 +12721,7 @@ mod expression_dispatch_tests {
         let stdout = String::from_utf8(run.stdout).unwrap();
 
         let f16_finalize = |v: f32| f16::from_f32(v).to_f32();
-        let f16_constant = |v: f64| f16::from_f64(v).to_f32();
+        let f16_constant = |v: f64| chelis_types::f16_from_f64_rne(v).to_f32();
         let mut f16_rows = 0;
         let mut mismatches = Vec::new();
         for line in stdout.lines().filter(|line| line.starts_with("f16 ")) {

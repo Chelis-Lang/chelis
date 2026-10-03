@@ -37,6 +37,9 @@ sha2 = "0.10"
 # keeps zero checker dependencies; this edge exists only for
 # `tests/format_shortest_matches_reference.rs`.
 chelis-types = { workspace = true }
+# Test-only: the floating-point profile's obligation rows for the f16 and bf16
+# storage conversions, whose production lane is this crate's finalization.
+chelis-crmath = { workspace = true }
 
 [lints]
 workspace = true

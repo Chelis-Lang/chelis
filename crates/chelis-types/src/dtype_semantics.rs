@@ -5005,7 +5005,7 @@ mod tests {
     fn int_ingest_into_bf16_single_rounds_not_via_f64() {
         let x: i64 = 18_084_767_253_659_649;
         let single = fin_i(Prim::Bf16, x).unwrap().as_f64_lossy();
-        let double = f64::from(half::bf16::from_f64(x as f64));
+        let double = f64::from(bf16_from_f64_rne(x as f64));
         assert_ne!(
             single, double,
             "bf16 integer ingest must not round through f64"
