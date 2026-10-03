@@ -10,6 +10,7 @@ use chelis_compiler_api::schema::{
     CompileRequest, CompileResult, CompileTarget, EvalRequest, EvalResult, SourceKind, TensorValue,
 };
 use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+use chelis_crmath::profile::{Output, storage_reference};
 use chelis_std_bundle::EMBEDDED_RUNTIME;
 use half::{bf16, f16};
 use serde_json::json;
@@ -458,7 +459,7 @@ fn normal_cdf_matches_the_correctly_rounded_reference_bit_for_bit() {
 #[test]
 fn gelu_is_the_pinned_graph_on_every_finite_f16_input() {
     let r = |x: f32| f16::from_f32(x).to_f32();
-    let k = |x: f64| f16::from_f64(x).to_f32();
+    let k = |x: f64| f16::from_bits(storage_reference(x.to_bits(), 64, Output::F16)).to_f32();
     let sigmoid = |x: f32| r(1.0 / r(1.0 + chelis_crmath::exp_f16(f16::from_f32(-x)).to_f32()));
     let gelu = |x: f32| {
         let u = r(k(0.797_884_560_802_865_4) * r(x + r(k(0.044715) * r(r(x * x) * x))));

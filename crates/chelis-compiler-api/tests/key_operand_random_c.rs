@@ -3,6 +3,7 @@
 //! and [05-OP-8] from the spec text, and against the DAG evaluator.
 mod ownership_support;
 
+use chelis_crmath::profile::{Output, storage_reference};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType, UniformBound};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
@@ -107,8 +108,8 @@ fn storage_bits(prim: Prim, value: f64) -> u64 {
     match prim {
         Prim::F64 => value.to_bits(),
         Prim::F32 => u64::from((value as f32).to_bits()),
-        Prim::F16 => u64::from(half::f16::from_f64(value).to_bits()),
-        Prim::Bf16 => u64::from(half::bf16::from_f64(value).to_bits()),
+        Prim::F16 => u64::from(storage_reference(value.to_bits(), 64, Output::F16)),
+        Prim::Bf16 => u64::from(storage_reference(value.to_bits(), 64, Output::Bf16)),
         other => panic!("{other:?}"),
     }
 }

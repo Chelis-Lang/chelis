@@ -516,6 +516,7 @@ name = "chelis-backend-metal"
 version = "0.18.12"
 dependencies = [
  "chelis-backend-c",
+ "chelis-crmath",
  "chelis-effects",
  "chelis-ir",
  "chelis-runtime-bundle",

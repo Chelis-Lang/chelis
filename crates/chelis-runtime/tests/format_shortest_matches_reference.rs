@@ -22,6 +22,7 @@ use chelis_runtime::{
     chelis_scalar, chelis_scalar_from_bits, chelis_string_data, chelis_string_from_scalar,
     chelis_string_release,
 };
+use chelis_crmath::profile::{Output, storage_reference};
 use chelis_types::types::Prim;
 use chelis_types::{format_element, ElementRef};
 use chelis_vocab::RuntimeDType;
@@ -29,8 +30,8 @@ fn scalar_from_f64(value: f64, dtype: RuntimeDType) -> chelis_scalar {
     let bits = match dtype {
         RuntimeDType::F64 => value.to_bits(),
         RuntimeDType::F32 => u64::from((value as f32).to_bits()),
-        RuntimeDType::F16 => u64::from(half::f16::from_f64(value).to_bits()),
-        RuntimeDType::Bf16 => u64::from(half::bf16::from_f64(value).to_bits()),
+        RuntimeDType::F16 => u64::from(storage_reference(value.to_bits(), 64, Output::F16)),
+        RuntimeDType::Bf16 => u64::from(storage_reference(value.to_bits(), 64, Output::Bf16)),
         _ => panic!("floating reference helper received {}", dtype.name()),
     };
     chelis_scalar_from_bits(dtype.id() as u8, bits)
@@ -150,7 +151,7 @@ fn f32_table_and_edges_match_reference_bytes() {
 #[test]
 fn f16_table_matches_reference_bytes() {
     for &v in F16_TABLE {
-        let h = half::f16::from_f64(v);
+        let h = half::f16::from_bits(storage_reference(v.to_bits(), 64, Output::F16));
         assert_eq!(
             c_format(f64::from(h), RuntimeDType::F16),
             format_element(Prim::F16, ElementRef::F16(h)),
@@ -162,7 +163,7 @@ fn f16_table_matches_reference_bytes() {
 #[test]
 fn bf16_table_matches_reference_bytes() {
     for &v in BF16_TABLE {
-        let h = half::bf16::from_f64(v);
+        let h = half::bf16::from_bits(storage_reference(v.to_bits(), 64, Output::Bf16));
         assert_eq!(
             c_format(f64::from(h), RuntimeDType::Bf16),
             format_element(Prim::Bf16, ElementRef::Bf16(h)),

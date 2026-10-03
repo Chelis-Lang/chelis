@@ -14,6 +14,7 @@
 //! produces one, so a bf16 planted mutant has no input to be reported on.
 
 use chelis_crmath as cr;
+use chelis_crmath::profile::{Output, storage_reference};
 use half::{bf16, f16};
 
 type Kernels = (
@@ -114,9 +115,10 @@ fn planted_direct_rounding_is_reported() {
     let mut f16_reports = 0;
     for (_, (_, _, k32, k64)) in KERNELS {
         // The rounded value is exactly representable (or infinite), so the
-        // final conversion is exact on every `half` code path.
+        // final conversion is exact.
         f16_reports += reported_f16(k32, |x| {
-            f16::from_f64(round_once(k64(x.to_f64()), 10, -14)).to_bits()
+            let rounded = round_once(k64(x.to_f64()), 10, -14);
+            storage_reference(rounded.to_bits(), 64, Output::F16)
         })
         .len();
     }

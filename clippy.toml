@@ -56,4 +56,6 @@ disallowed-methods = [
   { path = "f64::atanh", reason = "host-library precision varies by platform; [05-OP-46] requires correctly rounded results, so use chelis_crmath (spec/design/correctly_rounded_math.md)" },
   { path = "f64::cbrt", reason = "host-library precision varies by platform; [05-OP-46] requires correctly rounded results, so use chelis_crmath (spec/design/correctly_rounded_math.md)" },
   { path = "f64::hypot", reason = "host-library precision varies by platform; [05-OP-46] requires correctly rounded results, so use chelis_crmath (spec/design/correctly_rounded_math.md)" },
+  { path = "half::f16::from_f64", reason = "a borrowed f64 narrowing (chelis#3041: bf16::from_f64 misrounds just above a tie); [04-NUM-2] requires one round-to-nearest-even, so use chelis_crmath::profile::storage_reference or the runtime's Chelis-owned narrowing" },
+  { path = "half::bf16::from_f64", reason = "a borrowed f64 narrowing (chelis#3041: bf16::from_f64 misrounds just above a tie); [04-NUM-2] requires one round-to-nearest-even, so use chelis_crmath::profile::storage_reference or the runtime's Chelis-owned narrowing" },
 ]
