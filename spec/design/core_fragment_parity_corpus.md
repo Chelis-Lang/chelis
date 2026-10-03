@@ -16,8 +16,9 @@ numbered chapter disagree, the chapter wins and this document has a bug.
 ## 1. What this deliverable is, and what it is not
 
 chelis#1362 guarantee 2 is *"`eval` and `build --target c` agree on observations
-and traps."* Nothing in the repository currently executes that guarantee over a
-corpus of real programs. #2102 is the evidence artifact that does, and it is also
+and traps."* #2102 executes the observation guarantee over the pinned real-program
+corpus. Its current required cases all expect values; the unsettled real-trap
+boundary remains explicit in §2.3 and §10. It is also
 the **only authority for `demo-path` tagging** on the launch ledger: an issue
 earns `demo-path` because it breaks a case this manifest pins, and for no other
 reason.
@@ -173,17 +174,11 @@ rather than silently rotting.
 
 ### 3.2 No tolerance, and why this receipt cannot grant one
 
-`[05-OBS-3]` permits a cross-lane value difference only for the seven listed
-transcendental operations, only within the listed bound, and only when **both
-lanes compute at `[04-NUM-8]`'s declared arithmetic width**. chelis#897 records
-that the evaluator currently computes float operations in f64 regardless of the
-declared width, so that precondition is unmet for float arithmetic. The atom is
-explicit that a lane pair failing the precondition *"is a failed comparison and
-may not be laundered through the table."*
-
-The receipt therefore runs with **no tolerance at all**, and this is the spec's
-instruction rather than a strictness preference. A float mismatch is a named,
-issue-linked failure.
+`[05-OBS-3]` grants no nonzero cross-lane value bound: arithmetic follows
+`[04-NUM-2]` and `[04-NUM-8]`, and transcendental operations and `sqrt` are
+correctly rounded under `[05-OP-46]`. The receipt compares complete stdout
+streams byte-exactly, with no numeric tolerance. A mismatch remains a failure;
+this evidence artifact cannot grant an allowance absent from the owning atom.
 
 ### 3.3 The comparison is per case, over complete streams
 
@@ -538,9 +533,9 @@ is written to `--out` and records the pins of §4, the per-case verdicts, the
 non-vacuity figures of §5, the exclusion ledger of §6.3, and every command
 executed, verbatim, in execution order.
 
-This oracle is **not** part of the default workspace pass. It needs the three
-corpora at their pinned revisions, a C toolchain, and a built compiler, so it is
-a documented manual gate under `AGENTS.md` §"Manual Gates". It is long-running by
+This oracle is **not** part of the default workspace pass. It needs every
+corpus actually pinned in the manifest (currently C Note and Sonar), a C
+toolchain, and a built compiler, so it is a documented manual gate under `AGENTS.md` §"Manual Gates". It is long-running by
 construction.
 
 `scripts/test_core_fragment_parity_receipt.py` is the separate, fast, default-run
@@ -549,6 +544,9 @@ oracle for the runner's own decision logic, including the negative rows
 running it.
 
 ## 9. First receipt, and what it measured
+
+Sections 9.1 and 9.2 describe the original measurement before the math correction.
+The current Linux release receipt is recorded in §9.3.
 
 Manifest version 3, run on macOS `arm64` with a sealed-runtime `chelis` built
 from this branch, staging receipt `mode: sealed`, runtime archive `de658fb0…`,
@@ -667,6 +665,25 @@ contraction-insensitive. That does not contradict chelis#2782, whose
 series; the notebook corpus's closed-form pricing has no such recursion. It does
 mean **#2782 earns `demo-path` from the benchmark third of the corpus, not from
 these two**, and the benchmark third is not in manifest version 3 (§10).
+
+### 9.3 Linux release receipt after the math correction
+
+The 2026-10-03 sealed compiler from main `c39ff41ed2d2fb3ecc3d582bc3e3afa71ee89d36`
+passes all 13 required cases at the unchanged C Note and Sonar pins. All 13
+observations agree byte-exactly, with no truncated root, pin failure or missing
+root. See [the release evidence](../../docs/investigations/core_fragment_release_receipt_2026_10_03.md)
+for binary/archive/header digests, case results and reproduction commands.
+
+Both #2379 corpus rows now pass and have no `known_divergence` annotation. Their
+required status, expected values, roots and source revisions remain unchanged,
+as do all 119 exclusion rows. Manifest version 3 remains appropriate under §6.1:
+removing defect metadata does not change what the receipt is asked to prove.
+The corpus evidence no longer justifies #2379's `demo-path` modifier; its owner
+retains the wider issue and its independent acceptance scope.
+
+Voyage capture/provenance follow-up is #3051, assigned to Makis (`glampouras`),
+and does not add a release gate. No Voyage program or real trap case was measured
+by this receipt; the remaining scope limits in §10 still apply.
 
 ## 10. Residual scope
 
