@@ -127,8 +127,8 @@ def g(x: tensor[2, 4, f32], y: tensor[2, 4, f32]) -> tensor[4, 4, f32] = concat(
 fn concat_list_overload_does_not_apply_the_axis_contract() {
     assert_clean(
         r#"
-xs = [1.0, 2.0]
-ys = concat(xs, [3.0, 4.0])
+xs: List[f32] = [1.0, 2.0]
+ys: List[f32] = concat(xs, [3.0, 4.0])
 "#,
         "ordinary List concat has no axis slot",
     );
