@@ -1321,7 +1321,7 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "real chelis build plus generated-C compilation rebuilds the chelis-std graph"
 tracking_issue = "chelis#1824"
 
-# chelis#3017: the complete scalar-gradient lane sweep builds and runs 26 C
+# chelis#3017: the complete scalar-gradient lane sweep builds and runs 32 C
 # executables. Its standing canary is `issue_1741_scalar_gradient_cli`.
 [[target_exclusion]]
 package = "chelis-cli"

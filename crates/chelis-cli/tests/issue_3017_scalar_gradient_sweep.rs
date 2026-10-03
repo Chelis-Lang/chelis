@@ -15,7 +15,7 @@ include!("support/scalar_gradient_lanes.rs");
 /// can only come from the differentiation order (#3017's witnesses first).
 /// The transcendentals are correctly rounded in both lanes ([05-OP-46],
 /// chelis#2957), so bodies through them are bit-exact too.
-const EXACT_BODIES: [&str; 13] = [
+const EXACT_BODIES: [&str; 16] = [
     "add(mul(x, x), x)",
     "mul(x, sqrt(x))",
     "sqrt(sqrt(x))",
@@ -29,6 +29,9 @@ const EXACT_BODIES: [&str; 13] = [
     "exp(neg(mul(x, x)))",
     "tanh(mul(x, sin(x)))",
     "log(add(x, 1.0{t}))",
+    "mul(x, sin(x))",
+    "exp(sin(cos(x)))",
+    "mul(tanh(x), tanh(mul(x, x)))",
 ];
 
 /// One program printing `grad(f)` at the 24 inputs 0.1, 0.237, ..., 3.251.
