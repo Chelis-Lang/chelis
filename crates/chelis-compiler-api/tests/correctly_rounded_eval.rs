@@ -10,6 +10,7 @@ use chelis_compiler_api::schema::{
     CompileRequest, CompileResult, CompileTarget, EvalRequest, EvalResult, SourceKind, TensorValue,
 };
 use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+use chelis_std_bundle::EMBEDDED_RUNTIME;
 use half::{bf16, f16};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -80,7 +81,7 @@ fn eval_package_on_this_thread(
     )
     .unwrap();
     std::fs::write(directory.path().join("src/values.ch"), library).unwrap();
-    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let context = compile_reef_context(directory.path(), directory.path(), &EMBEDDED_RUNTIME).unwrap();
     let result = prepare_eval_in_context(&context, client)
         .unwrap_or_else(|error| panic!("compile {client}: {error:?}"))
         .eval_root(
