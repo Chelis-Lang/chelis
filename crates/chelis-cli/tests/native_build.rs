@@ -2244,3 +2244,108 @@ fn host_scalar_transcendentals_match_eval_as_literal_runtime_scalar_and_tensor_e
     }
     assert_lanes_agree("chelis#2961 host scalar transcendentals", rows);
 }
+
+/// chelis#2989's inputs at `width`: the issue's moderate and large magnitudes,
+/// the largest finite value, signed zeros, both infinities, and NaN.
+fn sin_adjoint_inputs(width: &NanWidth) -> Vec<u64> {
+    let finite = [0.7, 1.3, 100.0, 500.0, 1e4, -3.5];
+    let mut bits: Vec<u64> = match width.name {
+        "f16" => finite
+            .iter()
+            .map(|x| u64::from(half::f16::from_f32(*x as f32).to_bits()))
+            .chain([u64::from(half::f16::MAX.to_bits())])
+            .collect(),
+        "bf16" => finite
+            .iter()
+            .map(|x| u64::from(half::bf16::from_f32(*x as f32).to_bits()))
+            .chain([u64::from(half::bf16::MAX.to_bits())])
+            .collect(),
+        "f32" => f32_bits_of(&finite)
+            .into_iter()
+            .chain([u64::from(f32::MAX.to_bits())])
+            .collect(),
+        _ => f64_bits_of(&finite)
+            .into_iter()
+            .chain([f64::MAX.to_bits()])
+            .collect(),
+    };
+    bits.extend([
+        width.zero,
+        width.sign(),
+        width.inf,
+        width.inf | width.sign(),
+        width.canonical,
+    ]);
+    bits
+}
+
+/// chelis#2989: at every float width, `grad(sum(sin(x)))` and
+/// `vmap(grad(sin))` equal the same lane's forward `cos(x)` bit for bit, on
+/// large magnitudes, signed zeros and non-finite inputs, in eval and in a
+/// built static library; the C forward `cos` equals eval's.
+#[test]
+fn sin_adjoint_is_the_cos_primitive_in_eval_and_c_at_every_float_width() {
+    let mut program = String::new();
+    let mut body = String::new();
+    let mut cases = Vec::new();
+    for width in &NAN_WIDTHS {
+        let (w, inputs) = (width.name, sin_adjoint_inputs(width));
+        let n = inputs.len();
+        let helpers = format!(
+            "def sum_sin_{w}(x: tensor[{n}, {w}]) -> tensor[{w}] = sum(sin(x), 0i32)\n\
+             def sin_at_{w}(x: tensor[{w}]) -> {w} = tensor_to_scalar(sin(x))\n"
+        );
+        program.push_str(&helpers);
+        for (label, call) in [
+            ("cos", "cos(x)".to_string()),
+            ("grad", format!("grad(sum_sin_{w})(x)")),
+            ("vmap", format!("vmap(grad(sin_at_{w}))(x)")),
+        ] {
+            program.push_str(&format!(
+                "def {label}_{w}(x: tensor[{n}, {w}]) -> tensor[{n}, {w}] = {call}\n"
+            ));
+            body.push_str(&c_tensor_call(
+                &format!("{label}_{w}"),
+                &format!("{label}_{w}"),
+                width,
+                &inputs,
+            ));
+            cases.push((width, label, call, helpers.clone(), inputs.clone()));
+        }
+    }
+    let (_, c) = run_static_library("sin_adjoint", &program, &body);
+
+    let mut rows = Vec::new();
+    for width in &NAN_WIDTHS {
+        let inputs = sin_adjoint_inputs(width);
+        let forward = eval_tensor_body("", "cos(x)", width, &inputs);
+        for (case_width, label, call, helpers, _) in &cases {
+            if case_width.name != width.name {
+                continue;
+            }
+            let eval = eval_tensor_body(helpers, call, width, &inputs);
+            for (index, input) in inputs.iter().enumerate() {
+                let what = format!("{label}_{}({input:#x})", width.name);
+                // Each lane's adjoint equals that lane's own forward cos.
+                rows.push((
+                    format!("C {what} vs C cos"),
+                    c_result(&c, &format!("{label}_{}", width.name), index),
+                    c_result(&c, &format!("cos_{}", width.name), index),
+                ));
+                rows.push((
+                    format!("eval {what} vs eval cos"),
+                    forward[index],
+                    eval[index],
+                ));
+            }
+        }
+        for (index, input) in inputs.iter().enumerate() {
+            rows.push((
+                format!("cos_{}({input:#x})", width.name),
+                c_result(&c, &format!("cos_{}", width.name), index),
+                forward[index],
+            ));
+        }
+    }
+    assert_lanes_agree("chelis#2989 sin adjoint", rows);
+}
