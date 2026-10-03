@@ -2,15 +2,16 @@
 
 It also completes the source distribution. `crates/chelis-std-bundle/build.rs`
 packs the chelis-std runtime from `packages/chelis-std`, which is no crate, so
-maturin leaves it out of the sdist; the sdist gains its `reef.toml` and the
-`.ch` files under `src/`, the inputs the build script stages.
+maturin leaves it out of the sdist. The sdist gains every git-tracked file
+under `packages/chelis-std`, and the build script selects its inputs from that
+copy as it does in a checkout.
 """
 from __future__ import annotations
 
 import gzip
 import io
-import os
 from pathlib import Path
+import subprocess
 import tarfile
 from typing import Any
 
@@ -88,29 +89,33 @@ def prepare_metadata_for_build_editable(
     )
 
 
-def _runtime_package() -> Path:
-    """`packages/chelis-std` of the workspace this project builds from: two
-    levels up in a checkout, at the root of an extracted sdist."""
+RUNTIME_PACKAGE = "packages/chelis-std"
+
+
+def _workspace_root() -> Path:
+    """The checkout this project builds from, two levels above it."""
     here = Path.cwd().resolve()
     for root in (here, *here.parents):
-        package = root / "packages" / "chelis-std"
-        if (package / "reef.toml").is_file():
-            return package
-    raise RuntimeError(f"no packages/chelis-std/reef.toml above {here}")
+        if (root / RUNTIME_PACKAGE / "reef.toml").is_file():
+            return root
+    raise RuntimeError(f"no {RUNTIME_PACKAGE}/reef.toml above {here}")
 
 
-def _runtime_sources(package: Path) -> list[Path]:
-    """The manifest and every `.ch` file under `src/`, package-relative."""
-    sources = [Path("reef.toml")]
-    for directory, _, files in os.walk(package / "src"):
-        for name in files:
-            if name.endswith(".ch"):
-                sources.append((Path(directory) / name).relative_to(package))
-    return sorted(sources, key=lambda path: path.as_posix())
+def runtime_package_files(root: Path) -> list[str]:
+    """Every git-tracked file under `packages/chelis-std`, root-relative."""
+    listing = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--", RUNTIME_PACKAGE],
+        check=True,
+        capture_output=True,
+    ).stdout
+    files = sorted(path for path in listing.decode("utf-8").split("\0") if path)
+    if not files:
+        raise RuntimeError(f"git tracks no files under {RUNTIME_PACKAGE} in {root}")
+    return files
 
 
-def _add_runtime_sources(sdist: Path) -> None:
-    """Rewrite `sdist` with the runtime sources under its workspace root."""
+def add_runtime_package(sdist: Path, root: Path) -> None:
+    """Rewrite `sdist` with `runtime_package_files(root)` under its top directory."""
     with tarfile.open(sdist, "r:gz") as existing:
         members = [(member, existing.extractfile(member)) for member in existing.getmembers()]
         members = [
@@ -120,12 +125,11 @@ def _add_runtime_sources(sdist: Path) -> None:
     prefix = members[0][0].name.split("/", 1)[0]
     mtime = members[0][0].mtime
     present = {member.name for member, _ in members}
-    package = _runtime_package()
-    for relative in _runtime_sources(package):
-        name = f"{prefix}/packages/chelis-std/{relative.as_posix()}"
+    for relative in runtime_package_files(root):
+        name = f"{prefix}/{relative}"
         if name in present:
             continue
-        data = (package / relative).read_bytes()
+        data = (root / relative).read_bytes()
         info = tarfile.TarInfo(name)
         info.size = len(data)
         info.mode = 0o644
@@ -141,7 +145,7 @@ def _add_runtime_sources(sdist: Path) -> None:
 
 def build_sdist(sdist_directory: str, config_settings: ConfigSettings = None) -> str:
     name = maturin.build_sdist(sdist_directory, config_settings=config_settings)
-    _add_runtime_sources(Path(sdist_directory) / name)
+    add_runtime_package(Path(sdist_directory) / name, _workspace_root())
     return name
 
 

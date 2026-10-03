@@ -160,12 +160,18 @@ class StdBundleTrackingTests(unittest.TestCase):
         repo.track("reef.lock", BUNDLED_LOCK)
         self.assert_refused(repo, "reef.lock")
 
-    def test_tracked_lock_with_the_older_runtime_spelling_is_refused(self):
-        repo = self.repository()
+    def test_tracked_lock_with_chelis_std_from_a_local_registry_is_refused(self):
+        """reef never loads chelis-std from a local registry, at any version."""
         self.assertIn('kind = "local_registry"', LOCAL_REGISTRY_LOCK)
-        repo.track("examples/probe/reef.lock", LOCAL_REGISTRY_LOCK)
-        err = self.assert_refused(repo, "examples/probe/reef.lock")
-        self.assertIn("local_registry", err)
+        for version in ("0.4.0", "0.3.0"):
+            with self.subTest(version=version):
+                repo = self.repository()
+                repo.track(
+                    "examples/probe/reef.lock",
+                    LOCAL_REGISTRY_LOCK.replace('version = "0.4.0"', f'version = "{version}"'),
+                )
+                err = self.assert_refused(repo, "examples/probe/reef.lock")
+                self.assertIn("from a local registry", err)
 
     def test_local_registry_lock_of_another_package_passes(self):
         repo = self.repository()
