@@ -2,9 +2,10 @@
 //! rounded kernels they carry (spec/design/correctly_rounded_math.md section 4.2,
 //! tests 6 and 8).
 //!
-//! The canaries run the #2957 witnesses through each C emission route a
-//! transcendental can take: a scalar literal, a run-time rank-1 tensor
-//! (contiguous), a permuted view (the strided path), a rank-0 tensor, a fused
+//! The canaries run the #2957 witnesses and the chelis#2958 subnormal inputs
+//! through each C emission route a transcendental can take: a scalar literal, a
+//! run-time rank-1 tensor (contiguous), a permuted view (the strided path), an
+//! expanded smaller tensor (a zero-stride view), a rank-0 tensor, a fused
 //! elementwise chain, and (at f32) a fused chain inlined into a reduction. Every
 //! route must give the bits `chelis-crmath` gives, which are the correctly rounded
 //! results [05-OP-46] defines; the expectation needs no evaluator.
@@ -22,7 +23,7 @@ use std::fs;
 use std::process::Command;
 
 use chelis_backend_c::toolchain::{CodegenRequirements, strict_reference_toolchain};
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 
@@ -37,6 +38,24 @@ const WITNESSES: [f64; 6] = [
     -1.3359944820404053,
     5.531991004943848,
 ];
+
+/// chelis#2958's subnormal rows: subnormal inputs at each width (the f32
+/// extremes, the f64 extremes) and inputs whose `exp` is subnormal (-100 at f32,
+/// -740 at f64). Each value is also a leaf at the other width, where it may be
+/// normal or round to zero.
+const SUBNORMALS: [f64; 6] = [
+    1.401_298_464_324_817e-45,
+    -1.175_494_210_692_441_1e-38,
+    5e-324,
+    -f64::from_bits(0x000f_ffff_ffff_ffff),
+    -100.0,
+    -740.0,
+];
+
+/// Every canary input: the witnesses, then the subnormal rows.
+fn route_inputs() -> Vec<f64> {
+    WITNESSES.iter().chain(SUBNORMALS.iter()).copied().collect()
+}
 
 #[derive(Clone, Copy)]
 enum Function {
@@ -120,6 +139,13 @@ fn witness_bits(w: f64, precision: Prim) -> u64 {
     }
 }
 
+fn is_subnormal(bits: u64, precision: Prim) -> bool {
+    match precision {
+        Prim::F32 => f32::from_bits(u32::try_from(bits).expect("f32 bits")).is_subnormal(),
+        _ => f64::from_bits(bits).is_subnormal(),
+    }
+}
+
 fn expected_bits(function: Function, x_bits: u64, precision: Prim) -> u64 {
     match precision {
         Prim::F32 => {
@@ -139,14 +165,13 @@ struct Route {
 }
 
 /// Every route for every function at `precision`, as one DAG with one Store per
-/// route. Inputs: `x` (the witnesses), `m` (each witness twice, `[k, 2]`, read
-/// through a permutation), and `s<k>` (each witness as a rank-0 tensor).
+/// route. Inputs: `x` (the [`route_inputs`]), `m` (each input twice, `[k, 2]`,
+/// read through a permutation), and `s<k>` (each input as a rank-0 tensor);
+/// `x` expanded to `[2, k]` is the expanded route.
 fn canary_dag(precision: Prim) -> (Dag, Vec<Route>) {
-    let k = WITNESSES.len();
-    let bits: Vec<u64> = WITNESSES
-        .iter()
-        .map(|w| witness_bits(*w, precision))
-        .collect();
+    let inputs = route_inputs();
+    let k = inputs.len();
+    let bits: Vec<u64> = inputs.iter().map(|w| witness_bits(*w, precision)).collect();
     let mut dag = Dag::new();
     let decl = dag.declare("canary");
     let vector = ty(vec![k], precision);
@@ -198,7 +223,7 @@ fn canary_dag(precision: Prim) -> (Dag, Vec<Route>) {
     };
     for function in FUNCTIONS {
         let name = function.name();
-        for (i, w) in WITNESSES.iter().enumerate() {
+        for (i, w) in inputs.iter().enumerate() {
             let literal = dag.add_node(
                 decl,
                 RiscOp::synth_const(precision, *w),
@@ -249,6 +274,31 @@ fn canary_dag(precision: Prim) -> (Dag, Vec<Route>) {
             inputs: bits.iter().chain(bits.iter()).copied().collect(),
         });
 
+        let expanded = dag.add_node(
+            decl,
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(2),
+            },
+            vec![x],
+            ty(vec![2, k], precision),
+            None,
+        );
+        let value = dag.add_node(
+            decl,
+            function.op(),
+            vec![expanded],
+            ty(vec![2, k], precision),
+            None,
+        );
+        let label = format!("{name}_expanded");
+        store(&mut dag, label.clone(), value, ty(vec![2, k], precision));
+        routes.push(Route {
+            label,
+            function,
+            inputs: bits.iter().chain(bits.iter()).copied().collect(),
+        });
+
         // neg(neg(x)) is x bit for bit, so the fused chain's leaf sees the witness.
         let once = dag.add_node(decl, RiscOp::Neg, vec![x], vector.clone(), None);
         let twice = dag.add_node(decl, RiscOp::Neg, vec![once], vector.clone(), None);
@@ -287,21 +337,19 @@ fn bits_literal(bits: u64, precision: Prim) -> String {
     }
 }
 
-/// A `main` that binds each input label to its witness data, runs the kernel,
-/// and prints `label index bits` for every output element.
+/// A `main` that binds each input label to its slice of `inputs`, runs the
+/// kernel, and prints `label index bits` for every output element.
 fn harness(
     entry: &str,
     precision: Prim,
+    inputs: &[f64],
     input_labels: &[String],
     output_labels: &[String],
 ) -> String {
     let c_type = c_float_type(precision);
     let dtype = dtype_macro(precision);
-    let k = WITNESSES.len();
-    let bits: Vec<u64> = WITNESSES
-        .iter()
-        .map(|w| witness_bits(*w, precision))
-        .collect();
+    let k = inputs.len();
+    let bits: Vec<u64> = inputs.iter().map(|w| witness_bits(*w, precision)).collect();
     let mut body = String::new();
     for (slot, label) in input_labels.iter().enumerate() {
         let (shape, values): (Vec<usize>, Vec<u64>) = if label == "x" {
@@ -429,12 +477,14 @@ fn assert_routes_are_correctly_rounded(precision: Prim) {
     let main = harness(
         &entry,
         precision,
+        &route_inputs(),
         &result.input_labels,
         &result.output_labels,
     );
     let stdout = compile_and_run(&entry, &result.c_source, &main);
 
     let mut checked = 0usize;
+    let mut subnormal_results = 0usize;
     let mut mismatches = Vec::new();
     for route in &routes {
         let lines: Vec<&str> = stdout
@@ -452,6 +502,9 @@ fn assert_routes_are_correctly_rounded(precision: Prim) {
             let got = u64::from_str_radix(line.rsplit(' ').next().unwrap(), 16).unwrap();
             let want = expected_bits(route.function, *input, precision);
             checked += 1;
+            if is_subnormal(want, precision) {
+                subnormal_results += 1;
+            }
             if got != want {
                 mismatches.push(format!(
                     "{}({input:#x}) via {}: got {got:#x}, correctly rounded {want:#x}",
@@ -462,6 +515,11 @@ fn assert_routes_are_correctly_rounded(precision: Prim) {
         }
     }
     assert!(checked > 0, "no route was checked");
+    assert!(
+        subnormal_results > 0,
+        "the {} canary must reach a subnormal result",
+        precision.name()
+    );
     assert!(
         mismatches.is_empty(),
         "{} of {checked} {} results are not correctly rounded:\n{}",
@@ -544,6 +602,7 @@ fn f32_fused_reduction_routes_are_correctly_rounded() {
     let main = harness(
         entry,
         Prim::F32,
+        &WITNESSES,
         &result.input_labels,
         &result.output_labels,
     );
