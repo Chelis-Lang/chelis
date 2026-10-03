@@ -90,6 +90,9 @@ host wrappers do not promise that report.
 
 ## Numerical behavior and availability
 
+See [C support and exclusions](c-support.md) for the source-derived build gates,
+their rejection scopes, and the separate builtin and stdlib I/O routes.
+
 CPU is the primary delivery and acceptance lane. HIP and Metal are prerelease
 and have known imperfections; native compilation does not imply full backend
 coverage. The native-build acceptance suite covers CPU execution and local
