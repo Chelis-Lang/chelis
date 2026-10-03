@@ -6,6 +6,16 @@ Authority rules: it is incorporated by reference into
 numbered-spec change under the same review discipline. Rows are keyed by
 identity; row order is not semantic and no ordinal is part of any identity.
 
+For the three tensor construction schemas, `S` is a finite ordered list of
+ordinary dimension expressions at concrete rank. `Tensor(S,p)` denotes the
+ordinary tensor type with exactly that dimension list and element dtype `p`.
+`StaticAxis(i32)` denotes a statically resolved i32 positional argument, including
+literal integer cast wrappers. `Remove` and `Insert` mean the ordered shape
+transformations defined by [05-OP-35], and `len(xs)` is the input list length.
+These are mathematical signature schemas, not additional Surf type constructors
+or rank-spread syntax. Their instantiation is part of the resolved callable's
+typing rule, not an unconstrained output type variable.
+
 | identity | exact final signature |
 |---|---|
 | `contracts::normal_cdf` | `(p_float)->p_float` |
@@ -280,9 +290,9 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `sort::sort` | `(&tensor[..r,p_numeric],i32)->(tensor[..r,p_numeric],tensor[..r,i64])` |
 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
 | `tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]` |
-| `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]` |
-| `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]` |
-| `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],i32)->tensor[..pre,1,..post,p]` |
+| `tensor/construct::squeeze` | `(&Tensor(S,p),StaticAxis(i32))->Tensor(Remove(S,axis),p)` |
+| `tensor/construct::stack` | `(List[Tensor(S,p)],StaticAxis(i32))->Tensor(Insert(S,axis,len(xs)),p)` |
+| `tensor/construct::unsqueeze` | `(&Tensor(S,p),StaticAxis(i32))->Tensor(Insert(S,axis,1),p)` |
 | `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,i64]` |
 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
