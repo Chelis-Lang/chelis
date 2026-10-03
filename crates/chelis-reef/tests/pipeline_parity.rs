@@ -136,7 +136,7 @@ fn rejected_packages_keep_type_effect_and_linearity_boundaries() {
         &BuildOptions { auto_fetch: false },
         &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
-        .expect_err("both unbound names must reject the package");
+    .expect_err("both unbound names must reject the package");
     let decls = parse_str(TYPE_REJECTION_SOURCE).expect("rejected package source must parse");
     let exprs = desugar_program(&decls).expect("rejected package source must desugar");
     let report = check_typed_program(&exprs).expect_err("both unbound names must reject at check");
@@ -157,7 +157,7 @@ fn rejected_packages_keep_type_effect_and_linearity_boundaries() {
         &BuildOptions { auto_fetch: false },
         &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
-        .expect_err("undeclared IO must reject");
+    .expect_err("undeclared IO must reject");
     assert!(
         effect.contains("effects `{}`") && effect.contains("effects `{IO}`"),
         "the undeclared effect must be identified: {effect}"
@@ -169,7 +169,7 @@ fn rejected_packages_keep_type_effect_and_linearity_boundaries() {
         &BuildOptions { auto_fetch: false },
         &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
-        .expect_err("using both consumed tensors must reject");
+    .expect_err("using both consumed tensors must reject");
     assert_eq!(
         linearity.matches("already consumed by realize").count(),
         2,
