@@ -10,16 +10,18 @@ that key from a ref the consumer can restore. These checks keep that true:
   and a job that can land on a self-hosted runner skips the step there;
 * each family has exactly one writer job, which saves only from main and only
   after a successful build;
-* only the workflows in WRITERS may save a cache, each proven main-only from
-  its own triggers and checkouts; every other workflow either saves nothing or
-  holds `cache-mode: read`, and the families a read-only workflow restores are
+* only the workflows in WRITERS may declare a Rust build cache save or an
+  actions/cache save, each proven main-only from its own triggers and
+  checkouts; every other workflow declares no such save or holds
+  `cache-mode: read`, and the families a read-only workflow restores are
   written by ci-cache-warm.yml;
 * every job in a family declares the same key inputs and build environment;
 * ci-cache-warm.yml writes from main's own code only and repeats only commands
   its family's consumers run.
 
-The checks read what the workflows declare. An environment variable a step
-exports through GITHUB_ENV is outside them.
+The checks read what the workflows declare. Outside them: an environment
+variable a step exports through GITHUB_ENV, the cache astral-sh/setup-uv saves
+on its own, and any cache a composite action saves internally.
 """
 
 from __future__ import annotations
