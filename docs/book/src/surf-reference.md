@@ -303,6 +303,12 @@ exported name, and `import M` makes only qualified access (`M.name`) available. 
 reference works for values, constructors, and types, and is the way to disambiguate two
 modules that export the same name.
 
+A module cannot both import a name into unqualified scope and declare it:
+`import Std.Scalar (max)`, or `import Std.Scalar (..)`, beside a local `def max` is an error
+in every command, and the diagnostic names both. Rename the local declaration, or import the
+module qualified (`import Std.Scalar`) and call `Std.Scalar.max`. Parameters and local
+bindings may still reuse an imported name.
+
 A file outside every Reef package imports from the compiler-bundled `chelis-std` (`Std.*`)
 under the same rules. Importing any other module needs a `reef.toml` package manifest, and an
 import that names no reachable module is a `chelis check` error.

@@ -9333,6 +9333,41 @@ fn collect_symbol_kinds(decls: &[Decl]) -> BTreeMap<String, SymbolKind> {
     symbols
 }
 
+/// The first top-level declaration of `name` among `decls`, spelled for a
+/// diagnostic: its keyword and name, or a constructor with its type. It covers
+/// every declaration `collect_symbol_kinds` records.
+fn local_declaration_spelling(decls: &[Decl], name: &str) -> Option<String> {
+    decls.iter().find_map(|decl| match decl {
+        Decl::FunDef { name: declared, .. } if declared == name => Some(format!("`def {name}`")),
+        Decl::Sig { name: declared, .. } if declared == name => Some(format!("`sig {name}`")),
+        Decl::LetDef { name: declared, .. } if declared == name => {
+            Some(format!("the top-level binding `{name} = ...`"))
+        }
+        Decl::Property { name: declared, .. } if declared == name => {
+            Some(format!("`@property {name}`"))
+        }
+        Decl::MacroDef { name: declared, .. } if declared == name => {
+            Some(format!("`macro {name}`"))
+        }
+        Decl::TypeDef { name: declared, .. } | Decl::TypeAlias { name: declared, .. }
+            if declared == name =>
+        {
+            Some(format!("`type {name}`"))
+        }
+        Decl::TypeDef {
+            name: type_name,
+            variants,
+            ..
+        } if variants.iter().any(|variant| variant.name == name) => {
+            Some(format!("the constructor `{name}` of `type {type_name}`"))
+        }
+        Decl::Dim { names, .. } if names.iter().any(|declared| declared == name) => {
+            Some(format!("`dim {name}`"))
+        }
+        _ => None,
+    })
+}
+
 /// Enforce the authored-source half of the `defsig` pairing contract before
 /// Reef rewrites names or replaces dependency bodies with a trusted shell
 /// interface. A linked shell is allowed to contain signature-only ABI rows;
@@ -10687,10 +10722,13 @@ fn build_name_resolver(
     // importing module path for diagnostics. A bare name that resolves to
     // two or more *distinct* internal names across imports is an ambiguous
     // unqualified reference; the user must qualify it (chelis#157). A name
-    // the module declares itself (`module_internal`) shadows imports and is
-    // never ambiguous. Re-importing the *same* internal name from two paths
-    // is idempotent and not an error.
+    // the module also declares itself is rejected before that check
+    // (spec/02 §P2, chelis#2885). Re-importing the *same* internal name from
+    // two paths is idempotent and not an error.
     let mut import_sources: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+    // The import declarations, as written, that bring each bare name into
+    // unqualified scope; the collision diagnostic names them.
+    let mut import_spellings: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for decl in &module.decls {
         let Decl::Import {
@@ -10757,6 +10795,15 @@ fn build_name_resolver(
             })
             .collect::<UnordMap<_, _>>();
         qualified.insert(import_module.clone(), qualified_map.clone());
+        let spelling = chelis_surf::format::format_program(std::slice::from_ref(decl))
+            .trim_end()
+            .to_string();
+        let mut record_spelling = |name: &str| {
+            let spellings = import_spellings.entry(name.to_string()).or_default();
+            if !spellings.contains(&spelling) {
+                spellings.push(spelling.clone());
+            }
+        };
         match kind {
             ImportKind::Qualified => {}
             ImportKind::All => {
@@ -10767,6 +10814,7 @@ fn build_name_resolver(
                         .entry(internal.clone())
                         .or_default()
                         .insert(import_module.clone());
+                    record_spelling(&name);
                     unqualified.insert(name, internal);
                 }
             }
@@ -10791,20 +10839,45 @@ fn build_name_resolver(
                         .entry(internal.clone())
                         .or_default()
                         .insert(import_module.clone());
+                    record_spelling(name);
                     unqualified.insert(name.clone(), internal.clone());
                 }
             }
         }
     }
 
-    // Reject genuinely ambiguous unqualified references. A name the module
-    // declares itself shadows any import, so only flag names that were
-    // brought in solely by imports and resolved to more than one distinct
-    // internal target.
+    // spec/02 §P2 (chelis#2885): a module never both imports a name into
+    // unqualified scope and declares it, and no precedence rule picks one.
+    // Every lane links through this resolver, the eval entry whose own
+    // names are not in `internal_maps` included, so the declared names come
+    // from the module's own symbol table rather than `module_internal`.
+    if let Some((name, spellings)) = import_spellings
+        .iter()
+        .find(|(name, _)| module.symbols.contains_key(*name))
+    {
+        let imports = spellings
+            .iter()
+            .map(|spelling| format!("`{spelling}`"))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let declaration = local_declaration_spelling(&module.decls, name)
+            .unwrap_or_else(|| format!("a declaration of `{name}`"));
+        let qualified_example = import_sources
+            .get(name)
+            .and_then(|internals| internals.values().flatten().next())
+            .map(|from| format!(" (`{from}.{name}`)"))
+            .unwrap_or_default();
+        return Err(format!(
+            "`{name}` is both imported and declared locally: {imports} brings it into \
+             unqualified scope, and {declaration} declares it. Rename the local declaration, \
+             or stop importing `{name}` unqualified and refer to the imported one by its \
+             qualified name{qualified_example}"
+        ));
+    }
+
+    // Reject genuinely ambiguous unqualified references: names brought in
+    // by imports that resolve to more than one distinct internal target.
     for (name, internals) in &import_sources {
-        if module_internal.contains_key(name) {
-            continue;
-        }
         if internals.len() > 1 {
             let mut from_modules: BTreeSet<String> = BTreeSet::new();
             for modules in internals.values() {
@@ -14073,20 +14146,10 @@ path = "./coral"
             .expect("single imported constructor must resolve and type-check");
     }
 
-    /// Regression (#157): a module that declares its own constructor `Mark`
-    /// AND imports a different `Mark` from a dependency must resolve a
-    /// *pattern* head the same way it resolves a *construction* head:
-    /// own-module-first. The design rule is "a name the module declares
-    /// itself shadows imports", and the ambiguity check honors it for
-    /// expressions. Before the `resolve_ctor_pattern_name` fix, the pattern
-    /// rewrite checked `imported_names` first; since an import overwrites
-    /// the own seed in that map, `Tag(Mark)` was *constructed* with the own
-    /// mangled name but `| Tag(Mark) =>` was *matched* against the imported
-    /// (other-package) mangled name. The two never unified and the program
-    /// failed to type-check. This test pins construction and destructuring
-    /// to the same own internal name.
-    #[test]
-    fn own_ctor_shadows_imported_same_name_in_pattern() {
+    /// A package `school` whose module declares its own `type Tag = | Mark(f32)`
+    /// and imports the dependency `coral`'s different `Mark` with
+    /// `import_line`.
+    fn own_and_imported_mark_fixture(import_line: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("school");
         let dep_root = root.join("coral");
@@ -14112,8 +14175,8 @@ module_prefix = "Coral"
         );
 
         // Root module declares its OWN `Tag` with an own `Mark` constructor
-        // (positional, single field), imports the dependency's different
-        // `Mark`, then both builds and matches its own `Mark`.
+        // (positional, single field), imports the dependency's module, then
+        // both builds and matches its own `Mark`.
         write(
             &root.join("reef.toml"),
             &format!(
@@ -14131,11 +14194,13 @@ coral = {{ path = "./coral" }}
         );
         write(
             &root.join("src/main.ch"),
-            "module School.Main\n\
-             import Coral.Frame (Stamp, Mark)\n\
-             type Tag = | Mark(f32)\n\
-             def build(x: f32) -> Tag = Mark(x)\n\
-             def unwrap(t: Tag) -> f32 = match t with { | Mark(v) => v }\n",
+            &format!(
+                "module School.Main\n\
+                 {import_line}\n\
+                 type Tag = | Mark(f32)\n\
+                 def build(x: f32) -> Tag = Mark(x)\n\
+                 def unwrap(t: Tag) -> f32 = match t with {{ | Mark(v) => v }}\n"
+            ),
         );
         write(
             &root.join("reef.lock"),
@@ -14155,7 +14220,38 @@ kind = "path"
 path = "./coral"
 "#,
         );
+        (dir, root)
+    }
 
+    /// spec/02 §P2 (chelis#2885): a module that declares its own constructor
+    /// `Mark` and also imports a different `Mark` into unqualified scope is
+    /// rejected, naming the import and the local constructor. Before the rule,
+    /// the own `Mark` shadowed the import here while the eval entry resolved
+    /// the import, so the lanes disagreed on which `Mark` a use meant.
+    #[test]
+    fn own_ctor_colliding_with_a_selectively_imported_ctor_is_rejected() {
+        let (_dir, root) = own_and_imported_mark_fixture("import Coral.Frame (Stamp, Mark)");
+        let error = prepare_program_for_file(&root.join("src/main.ch"), test_runtime())
+            .expect_err("an imported and locally declared `Mark` must be rejected");
+        assert_eq!(
+            error,
+            "`Mark` is both imported and declared locally: `import Coral.Frame (Stamp, Mark)` \
+             brings it into unqualified scope, and the constructor `Mark` of `type Tag` declares \
+             it. Rename the local declaration, or stop importing `Mark` unqualified and refer to \
+             the imported one by its qualified name (`Coral.Frame.Mark`)"
+        );
+    }
+
+    /// Regression (#157), the negative-parity control of the collision rule:
+    /// with a qualified-only import the dependency's `Mark` stays reachable as
+    /// `Coral.Frame.Mark` and never enters unqualified scope, so the module's
+    /// own `Mark` is the only unqualified meaning. Construction and
+    /// destructuring must both resolve to it; before the
+    /// `resolve_ctor_pattern_name` fix they mangled differently and the
+    /// program failed to type-check.
+    #[test]
+    fn own_ctor_beside_a_qualified_import_resolves_own_in_construction_and_pattern() {
+        let (_dir, root) = own_and_imported_mark_fixture("import Coral.Frame");
         let entry = root.join("src/main.ch");
         let prepared = prepare_program_for_file(&entry, test_runtime())
             .expect("prepare ok")
@@ -14208,8 +14304,173 @@ path = "./coral"
         // destructuring agree on one mangled constructor.
         let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
         checked_program_with_effects(&deep).expect(
-            "own constructor shadowing an imported same-name must construct and match consistently",
+            "an own constructor beside a qualified import must construct and match consistently",
         );
+    }
+
+    /// [`shared_graph_fixture`] with a dependency exporting `combine` and
+    /// `scale`, names that are not builtins, so a local declaration of either
+    /// in an entry is not also a builtin shadow (spec/04 §8.6).
+    fn combine_scale_graph_fixture() -> (tempfile::TempDir, PathBuf) {
+        let (dir, root) = shared_graph_fixture();
+        write(
+            &root.join("mylib/src/math.ch"),
+            "module Mylib.Math\n\n\
+             export (combine, scale)\n\
+             def combine(x: i32, y: i32) -> i32 = x + y\n\
+             def scale(x: i32, y: i32) -> i32 = x * y\n",
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module Myapp.Main\n\nimport Mylib.Math (combine)\ndef double(x: i32) -> i32 = combine(x, x)\n",
+        );
+        (dir, root)
+    }
+
+    /// spec/02 §P2 (chelis#2885): the collision check lives in the one name
+    /// resolver every route links through, so a package module, an eval or
+    /// check entry, a `chelis test` batch entry, a single-file program, and
+    /// the declaration surface all reject the same module with the same
+    /// diagnostic. The eval entry is the route whose own names are absent
+    /// from the internal-name maps, which is why the check reads the module's
+    /// own symbol table.
+    #[test]
+    fn import_local_collision_is_rejected_by_every_link_route() {
+        let (_dir, root) = combine_scale_graph_fixture();
+        let expected = |import: &str| {
+            format!(
+                "`combine` is both imported and declared locally: `{import}` brings it into \
+                 unqualified scope, and `def combine` declares it. Rename the local declaration, \
+                 or stop importing `combine` unqualified and refer to the imported one by its \
+                 qualified name (`Mylib.Math.combine`)"
+            )
+        };
+        let collision = "import Mylib.Math (combine)\n\
+                         def combine(x: i32, y: i32) -> i32 = x\n\
+                         def test_value() -> bool = eq(combine(1, 2), 1)\n";
+
+        // An eval, check, or build entry with no `module` declaration.
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
+        let declarations = chelis_surf::parser::parse_str(collision).expect("parse entry");
+        assert_eq!(
+            compile_with_reef_graph(&graph, &declarations, test_runtime())
+                .err()
+                .as_deref(),
+            Some(expected("import Mylib.Math (combine)").as_str()),
+            "eval entry"
+        );
+
+        // A `chelis test` batch entry.
+        let entry = IsolatedEntryModule {
+            manifest_index: 0,
+            declarations: declarations.clone(),
+            selected_roots: vec![selected_entry_root(&declarations, "test_value")],
+        };
+        assert_eq!(
+            rewrite_isolated_entry_modules_with_reef_graph(&graph, &[entry])
+                .err()
+                .as_deref(),
+            Some(expected("import Mylib.Math (combine)").as_str()),
+            "test batch entry"
+        );
+
+        // `import M (..)` brings `combine` in as surely as naming it does.
+        let wildcard = chelis_surf::parser::parse_str(
+            &collision.replace("import Mylib.Math (combine)", "import Mylib.Math (..)"),
+        )
+        .expect("parse wildcard entry");
+        assert_eq!(
+            compile_with_reef_graph(&graph, &wildcard, test_runtime())
+                .err()
+                .as_deref(),
+            Some(expected("import Mylib.Math (..)").as_str()),
+            "wildcard import"
+        );
+
+        // A package module, linked with the rest of its package.
+        write(
+            &root.join("src/main.ch"),
+            &format!("module Myapp.Main\n{collision}"),
+        );
+        assert_eq!(
+            prepare_program_for_file(&root.join("src/main.ch"), test_runtime())
+                .err()
+                .as_deref(),
+            Some(expected("import Mylib.Math (combine)").as_str()),
+            "package module"
+        );
+
+        // A single-file program outside every package, against chelis-std.
+        let single = chelis_surf::parser::parse_str(
+            "import Std.Scalar (max)\n\
+             def max(a: i64, b: i64) -> i64 = a\n\
+             def main() -> i64 = max(1i64, 2i64)\n",
+        )
+        .expect("parse single-file program");
+        assert_eq!(
+            prepare_single_file_program("probe.ch", &single, test_runtime())
+                .err()
+                .as_deref(),
+            Some(
+                "`max` is both imported and declared locally: `import Std.Scalar (max)` brings \
+                 it into unqualified scope, and `def max` declares it. Rename the local \
+                 declaration, or stop importing `max` unqualified and refer to the imported one \
+                 by its qualified name (`Std.Scalar.max`)"
+            ),
+            "single-file program"
+        );
+
+        // The in-memory declaration surface.
+        let library = chelis_surf::parser::parse_str(
+            "module Pkg.Library\ndef combine(x: i32, y: i32) -> i32 = x + y\n",
+        )
+        .expect("parse library");
+        let consumer = chelis_surf::parser::parse_str(
+            "module Pkg.Consumer\n\
+             import Pkg.Library (combine)\n\
+             def combine(x: i32, y: i32) -> i32 = x\n",
+        )
+        .expect("parse consumer");
+        let surface_error = declared_surface::link_package_declarations(
+            "pkg",
+            &[
+                ("library.ch".to_string(), library),
+                ("consumer.ch".to_string(), consumer),
+            ],
+        )
+        .expect_err("the declaration surface must reject the collision");
+        assert!(
+            surface_error.starts_with(
+                "`combine` is both imported and declared locally: \
+                 `import Pkg.Library (combine)`"
+            ),
+            "declaration surface: {surface_error}"
+        );
+    }
+
+    /// The negative-parity controls of the collision rule: an import alone, a
+    /// local declaration alone, a local declaration beside an import of a
+    /// different name, a local declaration beside a qualified-only import of
+    /// the module exporting it, and a parameter that reuses an imported name
+    /// all link.
+    #[test]
+    fn import_and_local_declaration_without_collision_link() {
+        let (_dir, root) = combine_scale_graph_fixture();
+        let graph = prepare_reef_graph(&root, test_runtime()).expect("prepare graph");
+        for program in [
+            "import Mylib.Math (combine)\nvalue = combine(1, 2)\n",
+            "def combine(x: i32, y: i32) -> i32 = x\nvalue = combine(1, 2)\n",
+            "import Mylib.Math (scale)\ndef combine(x: i32, y: i32) -> i32 = x\nvalue = combine(scale(2, 3), 2)\n",
+            "import Mylib.Math\ndef combine(x: i32, y: i32) -> i32 = x\nvalue = combine(Mylib.Math.combine(1, 2), 2)\n",
+            "import Mylib.Math (combine)\ndef pick(combine: i32) -> i32 = combine\nvalue = pick(combine(1, 2))\n",
+        ] {
+            let declarations = chelis_surf::parser::parse_str(program).expect("parse entry");
+            let prepared = compile_with_reef_graph(&graph, &declarations, test_runtime())
+                .unwrap_or_else(|error| panic!("{program:?} must link: {error}"));
+            let deep = expanded_desugared_program(&prepared.decls).expect("desugar entry");
+            checked_program_with_effects(&deep)
+                .unwrap_or_else(|error| panic!("{program:?} must type-check: {error}"));
+        }
     }
 
     /// Issue #316: two modules in one package each declare

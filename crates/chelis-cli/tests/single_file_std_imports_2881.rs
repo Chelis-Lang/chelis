@@ -85,6 +85,10 @@ const NONEXISTENT_PROPERTY: &str = "import Std.Nonexistent (max)
 
 const NONEXISTENT_DIAGNOSTIC: &str = "unresolved import `Std.Nonexistent`";
 const MANIFEST_DIAGNOSTIC: &str = "needs a `reef.toml` package manifest";
+const COLLISION_DIAGNOSTIC: &str = "`max` is both imported and declared locally: \
+     `import Std.Scalar (max)` brings it into unqualified scope, and `def max` declares it. \
+     Rename the local declaration, or stop importing `max` unqualified and refer to the imported \
+     one by its qualified name (`Std.Scalar.max`)";
 
 /// A directory outside every reef package holding one program file.
 struct SingleFile {
@@ -221,13 +225,24 @@ fn single_file_qualified_import_resolves_and_its_absence_does_not() {
         .stderr(contains("unknown constructor: Std"));
 }
 
-/// A declaration shadows an import of the same name, as it does in a
-/// package module, in both evaluation and compiled C.
+/// A declaration of an imported name is rejected, as it is in a package
+/// module (spec/02 §P2, chelis#2885), by every command and with one
+/// diagnostic naming the import and the local declaration.
 #[test]
-fn single_file_declaration_shadows_an_imported_name() {
+fn single_file_declaration_colliding_with_an_import_is_rejected() {
     let program = single_file("shadowed_max", SHADOWED_MAX);
-    program.eval().success().stdout("main = 1\n");
-    assert_eq!(program.build_and_run(), "main = 1\n");
+    program
+        .check()
+        .code(2)
+        .stdout(contains(COLLISION_DIAGNOSTIC));
+    program
+        .eval()
+        .failure()
+        .stderr(contains(COLLISION_DIAGNOSTIC))
+        .stdout(contains("main =").not());
+    let (assert, out_dir) = program.build();
+    assert.failure().stderr(contains(COLLISION_DIAGNOSTIC));
+    assert!(!out_dir.exists(), "a rejected build must publish no output");
 }
 
 #[test]
