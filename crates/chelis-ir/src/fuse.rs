@@ -91,58 +91,36 @@ fn is_fusible_elementwise(seeds: &crate::dag::TrapSeeds<'_>, node: &DagNode) -> 
     {
         return false;
     }
-    matches!(
-        node.op,
-        RiscOp::Add
-            | RiscOp::Sub
-            | RiscOp::Mul
-            | RiscOp::Div
-            | RiscOp::FloorDiv
-            | RiscOp::TruncDiv
-            | RiscOp::MaxElem
-            | RiscOp::MinElem
-            | RiscOp::Neg
-            | RiscOp::Recip
-            | RiscOp::Exp
-            | RiscOp::Log
-            | RiscOp::Sin
-            | RiscOp::Sqrt
-            | RiscOp::Cos
-            | RiscOp::Tan
-            | RiscOp::Atan
-            | RiscOp::Tanh
-            | RiscOp::Abs
-            | RiscOp::Floor
-            | RiscOp::Ceil
-            | RiscOp::Round
-    )
+    fused_step_op(&node.op).is_some()
 }
 
-/// Convert a RiscOp to its FusedStepOp equivalent.
-fn to_fused_step_op(op: &RiscOp) -> FusedStepOp {
+/// The FusedStepOp a fusible elementwise RiscOp becomes. This one table
+/// decides both eligibility and conversion, so they cannot drift apart.
+fn fused_step_op(op: &RiscOp) -> Option<FusedStepOp> {
     match op {
-        RiscOp::Add => FusedStepOp::Add,
-        RiscOp::Sub => FusedStepOp::Sub,
-        RiscOp::Mul => FusedStepOp::Mul,
-        RiscOp::Div => FusedStepOp::Div,
-        RiscOp::FloorDiv => FusedStepOp::FloorDiv,
-        RiscOp::TruncDiv => FusedStepOp::TruncDiv,
-        RiscOp::MaxElem => FusedStepOp::MaxElem,
-        RiscOp::MinElem => FusedStepOp::MinElem,
-        RiscOp::Neg => FusedStepOp::Neg,
-        RiscOp::Recip => FusedStepOp::Recip,
-        RiscOp::Exp => FusedStepOp::Exp,
-        RiscOp::Log => FusedStepOp::Log,
-        RiscOp::Sin => FusedStepOp::Sin,
-        RiscOp::Sqrt => FusedStepOp::Sqrt,
-        RiscOp::Cos => FusedStepOp::Cos,
-        RiscOp::Tan => FusedStepOp::Tan,
-        RiscOp::Atan => FusedStepOp::Atan,
-        RiscOp::Abs => FusedStepOp::Abs,
-        RiscOp::Floor => FusedStepOp::Floor,
-        RiscOp::Ceil => FusedStepOp::Ceil,
-        RiscOp::Round => FusedStepOp::Round,
-        _ => panic!("not a fusible elementwise op: {op:?}"),
+        RiscOp::Add => Some(FusedStepOp::Add),
+        RiscOp::Sub => Some(FusedStepOp::Sub),
+        RiscOp::Mul => Some(FusedStepOp::Mul),
+        RiscOp::Div => Some(FusedStepOp::Div),
+        RiscOp::FloorDiv => Some(FusedStepOp::FloorDiv),
+        RiscOp::TruncDiv => Some(FusedStepOp::TruncDiv),
+        RiscOp::MaxElem => Some(FusedStepOp::MaxElem),
+        RiscOp::MinElem => Some(FusedStepOp::MinElem),
+        RiscOp::Neg => Some(FusedStepOp::Neg),
+        RiscOp::Recip => Some(FusedStepOp::Recip),
+        RiscOp::Exp => Some(FusedStepOp::Exp),
+        RiscOp::Log => Some(FusedStepOp::Log),
+        RiscOp::Sin => Some(FusedStepOp::Sin),
+        RiscOp::Sqrt => Some(FusedStepOp::Sqrt),
+        RiscOp::Cos => Some(FusedStepOp::Cos),
+        RiscOp::Tan => Some(FusedStepOp::Tan),
+        RiscOp::Atan => Some(FusedStepOp::Atan),
+        RiscOp::Tanh => Some(FusedStepOp::Tanh),
+        RiscOp::Abs => Some(FusedStepOp::Abs),
+        RiscOp::Floor => Some(FusedStepOp::Floor),
+        RiscOp::Ceil => Some(FusedStepOp::Ceil),
+        RiscOp::Round => Some(FusedStepOp::Round),
+        _ => None,
     }
 }
 
@@ -437,7 +415,7 @@ fn build_fused_elem(
         }
 
         steps.push(FusedStep {
-            op: to_fused_step_op(&node.op),
+            op: fused_step_op(&node.op).expect("a chain holds only fusible elementwise ops"),
             input_indices,
         });
     }
