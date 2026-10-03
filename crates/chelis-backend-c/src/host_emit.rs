@@ -12913,8 +12913,10 @@ mod storage_narrowing_tests {
         const CHUNK: u64 = 1 << 24;
         let dir = tempfile::tempdir().unwrap();
         let program = driver(dir.path());
-        let threads =
-            std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).max(1));
+        let threads = std::thread::available_parallelism()
+            .expect("the host reports its parallelism")
+            .get()
+            .div_ceil(2);
         let next = AtomicU64::new(0);
         let total: u64 = std::thread::scope(|scope| {
             let workers: Vec<_> = (0..threads)
@@ -12931,7 +12933,9 @@ mod storage_narrowing_tests {
                                 .output()
                                 .unwrap();
                             assert!(output.status.success());
-                            for (offset, pair) in output.stdout.as_chunks::<4>().0.iter().enumerate() {
+                            for (offset, pair) in
+                                output.stdout.as_chunks::<4>().0.iter().enumerate()
+                            {
                                 let bits = low + offset as u64;
                                 let value = f32::from_bits(u32::try_from(bits).unwrap());
                                 let wide = f64::from(value).to_bits();

@@ -150,7 +150,10 @@ fn f64_accumulator_matches_the_reference_at_every_boundary() {
 #[test]
 #[ignore = "manual gate: 2^32 inputs (docs/manual_gates.md)"]
 fn every_f32_finalizes_once_to_f16_and_bf16_storage() {
-    let threads = std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).max(1));
+    let threads = std::thread::available_parallelism()
+        .expect("the host reports its parallelism")
+        .get()
+        .div_ceil(2);
     let span = (1_u64 << 32) / threads as u64 + 1;
     let total: u64 = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads as u64)
