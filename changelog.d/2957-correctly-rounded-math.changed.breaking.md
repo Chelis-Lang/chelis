@@ -1,7 +1,6 @@
 Transcendentals are correctly rounded in every CPU lane. `exp`, `log`, `sin`,
 `cos`, `tan`, `atan`, and `tanh` return the exact value rounded once, at f32
-and f64 alike, in `chelis eval`, constant folding, `chelis prove`, and built C
-programs. The kernels are the vendored CORE-MATH sources, which generated C
+and f64 alike, in `chelis eval`, `chelis prove`, and built C programs. The kernels are the vendored CORE-MATH sources, which generated C
 defines as `static` functions; built programs no longer call the platform math
 library, Accelerate vForce, or Sleef, and the `sleef` feature is gone. See
 [#2957](https://github.com/Chelis-Lang/chelis/issues/2957).
@@ -21,5 +20,23 @@ What changes for existing programs:
   because f32 was evaluated at f64 can now fail; `std.exp.positivity` is stated
   as `exp(x) >= 0`.
 - The serialized graph schema moves from 23 to 24.
-- HIP and Metal reject the transcendentals at build time until the device
-  lanes have correctly rounded kernels.
+- HIP and Metal reject the transcendentals and `sqrt` at build time until the
+  device lanes have correctly rounded kernels for them.
+- Every arithmetic result and every float-to-float conversion that produces a
+  NaN stores the canonical quiet NaN in both `chelis eval` and built C
+  programs, while selection and data movement keep the operand's NaN bits
+  ([#2964](https://github.com/Chelis-Lang/chelis/issues/2964)).
+- f64 accumulators narrow to f16 and bf16 storage with one round to nearest
+  even; the runtime previously misrounded some values, for example
+  `1 + 2^-8 + 2^-30` to bf16 `0x3f80` instead of `0x3f81`
+  ([#3041](https://github.com/Chelis-Lang/chelis/issues/3041)).
+- f16 and bf16 scatter-add, including the gradient of a gather with repeated
+  indices, adds at f32 and narrows once in built C programs; it previously
+  added the storage bit patterns as integers
+  ([#3047](https://github.com/Chelis-Lang/chelis/issues/3047)).
+- A top-level scalar f32 gradient in a built program is computed and printed
+  at f32 rather than in double from the f64 literal
+  ([#2993](https://github.com/Chelis-Lang/chelis/issues/2993)), and built
+  scalar gradients follow the reverse-mode differentiation order `chelis eval`
+  uses, so the two lanes agree bit for bit on multi-operation bodies
+  ([#3017](https://github.com/Chelis-Lang/chelis/issues/3017)).
