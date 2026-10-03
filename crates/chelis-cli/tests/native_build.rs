@@ -2349,3 +2349,93 @@ fn sin_adjoint_is_the_cos_primitive_in_eval_and_c_at_every_float_width() {
     }
     assert_lanes_agree("chelis#2989 sin adjoint", rows);
 }
+
+/// [05-OP-46]'s tanh adjoint `g * (1 - y * y)` with `y = tanh(x)` at a
+/// half-precision width: each primitive computed at f32 and rounded once to
+/// storage ([04-NUM-8]), the cotangent `g` of `sum` being one, and a NaN
+/// finalized to the canonical quiet NaN.
+fn tanh_adjoint_reference(width: &NanWidth, bits: u16) -> u64 {
+    let is_f16 = width.name == "f16";
+    // A value rounded once to the width's storage, with its storage bits.
+    let round = |v: f32| -> (f32, u16) {
+        if is_f16 {
+            let r = half::f16::from_f32(v);
+            (r.to_f32(), r.to_bits())
+        } else {
+            let r = half::bf16::from_f32(v);
+            (r.to_f32(), r.to_bits())
+        }
+    };
+    let x = if is_f16 {
+        half::f16::from_bits(bits).to_f32()
+    } else {
+        half::bf16::from_bits(bits).to_f32()
+    };
+    let (y, _) = round(chelis_crmath::tanh_f32(x));
+    let (y_sq, _) = round(y * y);
+    let (one_minus, _) = round(1.0 - y_sq);
+    let (dx, dx_bits) = round(1.0 * one_minus);
+    if dx.is_nan() {
+        width.canonical
+    } else {
+        u64::from(dx_bits)
+    }
+}
+
+/// chelis#2967 item 6: `grad(sum(tanh(x)))` equals [05-OP-46]'s pinned
+/// adjoint on all 65,536 f16 and bf16 storage patterns, in eval and in a
+/// built static library whose driver generates the inputs at run time.
+#[test]
+fn tanh_adjoint_is_the_pinned_graph_on_every_half_precision_input_in_eval_and_c() {
+    let mut program = String::new();
+    let mut body = String::new();
+    for w in ["f16", "bf16"] {
+        let width = width_named(w);
+        program.push_str(&format!(
+            "def sum_tanh_{w}(x: tensor[65536, {w}]) -> tensor[{w}] = sum(tanh(x), 0i32)\n\
+             def grad_tanh_{w}(x: tensor[65536, {w}]) -> tensor[65536, {w}] = grad(sum_tanh_{w})(x)\n"
+        ));
+        body.push_str(&format!(
+            "    {{ static uint16_t d[65536]; static const int64_t shape[1] = {{ 65536 }};\n      \
+             for (int i = 0; i < 65536; ++i) d[i] = (uint16_t)i;\n      \
+             chelis_tensor *r = {def}(chelis_tensor_entry_borrow(1, shape, {dtype}, d, sizeof d));\n      \
+             const uint16_t *o = (const uint16_t *)chelis_tensor_read_view(r).data;\n      \
+             for (int i = 0; i < 65536; ++i) printf(\"grad_tanh_{w} %d %llx\\n\", i, (unsigned long long)o[i]); }}\n",
+            def = mangled(&format!("grad_tanh_{w}")),
+            dtype = width.dtype,
+        ));
+    }
+    let (_, c) = run_static_library("tanh_adjoint", &program, &body);
+
+    let all: Vec<u64> = (0..=u16::MAX).map(u64::from).collect();
+    let mut failures = Vec::new();
+    for w in ["f16", "bf16"] {
+        let width = width_named(w);
+        let eval = eval_tensor_body(
+            &format!("def sum_tanh(x: tensor[65536, {w}]) -> tensor[{w}] = sum(tanh(x), 0i32)\n"),
+            "grad(sum_tanh)(x)",
+            width,
+            &all,
+        );
+        for (index, eval) in eval.iter().enumerate() {
+            let want = tanh_adjoint_reference(width, index as u16);
+            let got = c_result(&c, &format!("grad_tanh_{w}"), index);
+            if *eval != want || got != want {
+                failures.push(format!(
+                    "{w} x={index:#06x}: eval {eval:#x}, C {got:#x}, pinned {want:#x}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of 131072 half-precision tanh adjoints differ from the pinned graph:\n{}",
+        failures.len(),
+        failures
+            .iter()
+            .take(16)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
