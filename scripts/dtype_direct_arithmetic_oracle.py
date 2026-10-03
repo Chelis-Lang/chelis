@@ -70,20 +70,27 @@ def source_contracts() -> tuple[SourceContract, ...]:
                 "    )",
             ),
         ),
+        # [04-NUM-2] finalizes every NaN that float arithmetic produces, so
+        # subtraction reaches the canonical NaN through the one finalizer that
+        # every non-selection binary operation shares (chelis#2964); only the
+        # [05-OP-40] extrema, which copy the selected operand's bits, bypass it.
         SourceContract(
-            "evaluator canonical subtraction NaNs",
+            "evaluator canonical arithmetic NaNs",
             "crates/chelis-types/src/dtype_semantics.rs",
             (
-                "fn canonicalize_subtraction_f32(value: f32) -> f32 {",
+                "fn canonical_nan_f32(value: f32) -> f32 {",
                 "f32::from_bits(0x7fc0_0000)",
-                "fn canonicalize_subtraction_f64(value: f64) -> f64 {",
+                "fn canonical_nan_f64(value: f64) -> f64 {",
                 "f64::from_bits(0x7ff8_0000_0000_0000)",
-                "FloatBinOp::Sub => canonicalize_subtraction_f32(value),",
-                "FloatBinOp::Sub => canonicalize_subtraction_f64(value),",
+                "        FloatBinOp::Sub => lhs - rhs,",
+                "        FloatBinOp::Max | FloatBinOp::Min => value,\n"
+                "        _ => canonical_nan_f32(value),",
+                "        FloatBinOp::Max | FloatBinOp::Min => value,\n"
+                "        _ => canonical_nan_f64(value),",
             ),
             (
-                "_ => canonicalize_subtraction_f32(value),",
-                "_ => canonicalize_subtraction_f64(value),",
+                "fn canonicalize_subtraction_f32(",
+                "fn canonicalize_subtraction_f64(",
             ),
         ),
         SourceContract(
@@ -94,17 +101,34 @@ def source_contracts() -> tuple[SourceContract, ...]:
                 '"-" => "sub",',
             ),
         ),
+        # chelis#2964 moved C subtraction onto the shared [04-NUM-2] NaN
+        # finalizer: f32/f64 results pass through the fp_env helpers and the
+        # f16/bf16 narrowing stores emit their canonical encodings.
         SourceContract(
             "C subtraction canonical NaNs",
             "crates/chelis-backend-c/src/emit.rs",
             (
-                'Prim::F32 => Some("chelis_f32_from_bits(UINT32_C(0x7fc00000))"),',
-                'Prim::F64 => Some("chelis_f64_from_bits(UINT64_C(0x7ff8000000000000))"),',
-                'Prim::F16 => "UINT16_C(0x7e00)",',
-                'Prim::Bf16 => "UINT16_C(0x7fc0)",',
-                "isnan({raw}) ? {canonical_nan} : {raw}",
-                "isnan({raw}) ? {canonical_nan} : {store}({raw})",
-                "_mm256_set1_ps(chelis_f32_from_bits(UINT32_C(0x7fc00000)))",
+                'if is_float && matches!(op, "+" | "-" | "*" | "/") {',
+                'return crate::fp_env::canonical_nan(&format!("({lhs}) {op} ({rhs})"), is_f64);',
+                'format!("{store}(__av {op} __bv)")',
+                "FusedStepOp::MaxElem | FusedStepOp::MinElem => raw,\n"
+                "            _ => crate::fp_env::canonical_nan(&raw, is_f64),",
+            ),
+        ),
+        SourceContract(
+            "C wide canonical NaN finalizer",
+            "crates/chelis-backend-c/src/fp_env.rs",
+            (
+                "return isnan(value) ? chelis_f32_from_bits(UINT32_C(0x7fc00000)) : value;",
+                "return isnan(value) ? chelis_f64_from_bits(UINT64_C(0x7ff8000000000000)) : value;",
+            ),
+        ),
+        SourceContract(
+            "C reduced canonical NaN stores",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            (
+                "        return (uint16_t)0x7FC0u;",
+                "            return (uint16_t)0x7E00u;",
             ),
         ),
         SourceContract(
@@ -210,7 +234,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "current WireDag identities",
             "crates/chelis-compiler-api/src/schema.rs",
             (
-                "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 23;",
+                "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 24;",
                 "pub enum WireFusedStepOp {\n    Add,\n    Sub,",
                 "MaxElem,\n    MinElem,\n    ExtremaAdjoint {",
                 'r#"{\"kind\":\"extrema_adjoint\",\"extrema\":\"max\",\"operand\":\"left\"}"#',
