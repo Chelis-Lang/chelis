@@ -69,6 +69,25 @@ class PipelineCoreDependencyGuardTests(unittest.TestCase):
                 manifest_with(*APPROVED_DEPENDENCIES), graph
             )
 
+    def test_correctly_rounded_kernel_leaf_is_approved(self) -> None:
+        graph = approved_graph()
+        graph["chelis-types"].append("chelis-crmath")
+        graph["chelis-crmath"] = []
+
+        guard.validate_fixture(manifest_with(*APPROVED_DEPENDENCIES), graph)
+
+    def test_correctly_rounded_kernels_must_stay_a_leaf(self) -> None:
+        graph = approved_graph()
+        graph["chelis-types"].append("chelis-crmath")
+        graph["chelis-crmath"] = ["chelis-conformance"]
+        graph["chelis-conformance"] = []
+
+        with self.assertRaisesRegex(
+            guard.DependencyBoundaryError,
+            "chelis-pipeline-core -> chelis-types -> chelis-crmath -> chelis-conformance",
+        ):
+            guard.validate_fixture(manifest_with(*APPROVED_DEPENDENCIES), graph)
+
     def test_metadata_excludes_dev_only_edges(self) -> None:
         raw = {
             "packages": [
