@@ -644,6 +644,23 @@ class HarnessLogic(unittest.TestCase):
         self.assertEqual(len(exhaustive.days), ref.MAX_EPOCH_DAY - ref.MIN_EPOCH_DAY + 1)
         self.assertTrue(any(grid.lanes == harness.EVAL_ONLY for grid in exhaustive.bulk))
 
+    def test_canary_is_an_unchanged_ci_subset_on_both_lanes(self) -> None:
+        programs = harness.make_programs(harness.build_ci_corpus(), 150)
+        canary = harness.canary_programs(programs)
+        self.assertEqual([program.name for program in canary], list(harness.CANARY_PROGRAMS))
+        self.assertTrue(all(program in programs for program in canary))
+        self.assertTrue(all(program.lanes == harness.BOTH for program in canary))
+        self.assertEqual({program.failure.kind for program in canary if program.failure}, {"domain", "overflow"})
+        names = " ".join(harness.CANARY_PROGRAMS)
+        self.assertIn("days_first_400", names)
+        self.assertIn("days_last_400", names)
+
+    def test_canary_rejects_a_name_the_ci_profile_lacks(self) -> None:
+        programs = [program for program in harness.make_programs(harness.build_ci_corpus(), 150)
+                    if program.name != harness.CANARY_PROGRAMS[0]]
+        with self.assertRaisesRegex(AssertionError, harness.CANARY_PROGRAMS[0]):
+            harness.canary_programs(programs)
+
     def test_grid_source_nests_one_loop_per_axis(self) -> None:
         corpus = harness.Corpus()
         corpus.grid("g", [harness.range_axis("a", 0, 2), harness.int_axis("b", [5, 6])], "[a + b]", lambda a, b: [a + b])

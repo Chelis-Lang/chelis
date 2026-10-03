@@ -63,6 +63,7 @@ NEXTEST_TOML = REPO_ROOT / ".config" / "nextest.toml"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import ci_change_owned  # noqa: E402
 import dtype_oracle_manifest  # noqa: E402
 
 
@@ -705,6 +706,23 @@ class ProfilePartitionTests(unittest.TestCase):
         self.assertTrue(census)
         self.assertLessEqual(census, active(self.dtype_flat))
         self.assertEqual(active(_list_filterset(f"not ({CENSUS_SELECTOR})")), full - census)
+
+    def test_linux_workspace_and_module_oracles_cover_the_module_oracle_tests(self):
+        # `full-workspace` also negates the module-oracles filterset that
+        # `ci_change_owned.py module-oracles` derives from the test
+        # exclusions, and `module-oracles` runs each of those tests. The
+        # filterset must name exactly those tests, each one an active test.
+        active = lambda listing: {k for k, (status, ignored) in listing.items() if status == "matches" and not ignored}
+        full = active(self.full)
+        config = ci_change_owned.read_config(REPO_ROOT / ".config/ci-test-targets.toml")
+        tests = ci_change_owned.module_oracle_tests(config)
+        filterset = ci_change_owned.module_oracles_filterset(config)
+        module = active(_list_filterset(filterset))
+        self.assertEqual(module, {identity.canonical for identity in tests})
+        self.assertLessEqual(module, full)
+        census = {k for k in full if k.startswith(("chelis-compiler-api::capacity_census_wire::", "chelis-python::capacity_census_bindings::"))}
+        workspace = active(_list_filterset(f"not ({CENSUS_SELECTOR} | {filterset})"))
+        self.assertEqual(workspace, full - census - module)
 
     def test_every_profile_serializes_exactly_the_shared_target_owners(self):
         profiles = tuple(tomllib.loads(NEXTEST_TOML.read_text())["profile"])

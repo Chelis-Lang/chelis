@@ -1834,7 +1834,7 @@ def _ci_job_block(job: str) -> str:
         return _workflow_job_block(PR_PACKAGE_EXPANSION_YML, job)
     if job in {"macos-workspace-shard", "macos-smoke", "smt-build-darwin-arm64"}:
         return _workflow_job_block(CI_YML.with_name("macos-nightly.yml"), job)
-    if job in {'backend-sanitizers-full', 'dtype-phase3-oracle', 'compiled-value-ownership-phase0-oracle', 'faithful-observation-phase2-oracle', 'generalize-sweep-oracle-shard', 'full-workspace', 'runtime-representation-phase0-oracle', 'integration-support', 'generalize-sweep-oracle'}:
+    if job in {'backend-sanitizers-full', 'dtype-phase3-oracle', 'compiled-value-ownership-phase0-oracle', 'faithful-observation-phase2-oracle', 'generalize-sweep-oracle-shard', 'full-workspace', 'runtime-representation-phase0-oracle', 'integration-support', 'generalize-sweep-oracle', 'module-oracles'}:
         return _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), job)
     return _workflow_job_block(CI_YML, job)
 
@@ -2415,6 +2415,10 @@ class CiParityTests(unittest.TestCase):
             "macos-workspace-shard": (
                 "junit-macos-workspace-${{ matrix.shard }}",
                 "target/nextest/ci-full/junit.xml",
+            ),
+            "module-oracles": (
+                "junit-linux-module-oracles-${{ matrix.shard }}",
+                "target/nextest/module-oracles/junit.xml",
             ),
         }
         for job, (artifact, path) in expectations.items():

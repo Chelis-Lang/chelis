@@ -3034,6 +3034,39 @@ def target_command(
     return command
 
 
+# The nightly job that runs each test exclusion it owns on a runner of its
+# own, and that the nightly workspace suite leaves out by the same filter.
+MODULE_ORACLES_WORKFLOW = "heavy-e2e.yml"
+MODULE_ORACLES_JOB = "module-oracles"
+
+
+def module_oracle_tests(config: Config) -> list[TestIdentity]:
+    """The test exclusions owned by the nightly `module-oracles` job, sorted."""
+    tests = sorted(
+        identity
+        for identity, owner in config.test_exclusions.items()
+        if owner.workflow == MODULE_ORACLES_WORKFLOW and owner.job == MODULE_ORACLES_JOB
+    )
+    if not tests:
+        raise ValueError(
+            f"no test_exclusion is owned by {MODULE_ORACLES_WORKFLOW} "
+            f"job {MODULE_ORACLES_JOB}"
+        )
+    return tests
+
+
+def test_filterset(identity: TestIdentity) -> str:
+    """The nextest filterset that selects exactly one test of one target."""
+    binary = f"{identity.package}::{identity.target}".replace(".", r"\.")
+    return f"(binary_id(/^{binary}$/) & test(/^{re.escape(identity.test)}$/))"
+
+
+def module_oracles_filterset(config: Config) -> str:
+    """One filterset selecting every module oracle test: the nightly
+    `module-oracles` job runs it, and the workspace suite negates it."""
+    return " | ".join(test_filterset(identity) for identity in module_oracle_tests(config))
+
+
 def execution_groups(
     plan: Mapping[str, Any],
     *,
@@ -5064,6 +5097,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=ROOT / ".config/ci-test-targets.toml",
     )
 
+    module_oracles = subparsers.add_parser(
+        "module-oracles",
+        help="print the nightly module-oracles filterset derived from the test exclusions",
+    )
+    module_oracles.add_argument(
+        "--config",
+        type=Path,
+        default=ROOT / ".config/ci-test-targets.toml",
+    )
+
     report = subparsers.add_parser("report", help="validate or summarize receipts")
     report.add_argument("--plan", type=Path, required=True)
     report.add_argument("--lane", choices=tuple(LANE_KEYS), required=True)
@@ -5087,6 +5130,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "module-oracles":
+        print(module_oracles_filterset(read_config(args.config)))
+        return 0
     if args.command == "plan":
         targeted_packages = (
             tuple(args.targeted_packages.split(","))

@@ -40,6 +40,9 @@ Profiles:
   over seeded columns that include the range edges, under every `TimeUnit`,
   `Rounding` mode and `DayOverflow` policy; column bindings run in programs of
   their own, and each column failure is a named program of its own.
+- `canary`: four unchanged `ci` programs on both lanes (`CANARY_PROGRAMS`):
+  the first and last 400 days of the range, a domain failure and an
+  overflow failure. It runs on every pull request; `ci` runs nightly.
 - `exhaustive`: the manual gate of `docs/manual_gates.md`. Every one of the
   7 304 484 days in compiled C (field round trip, weekday, day of year, ISO
   week and its inverse, text round trip), `date_period_until`'s defining
@@ -1617,6 +1620,27 @@ def make_programs(corpus: Corpus, chunk: int) -> list[Program]:
     return programs
 
 
+# The `ci` programs the canary keeps: the first and last 400 days of the
+# range, a domain failure, and an overflow failure. Each compiled C program
+# builds the standard library, so the canary keeps to one program per
+# harness job.
+CANARY_PROGRAMS = (
+    "b000_days_first_400",
+    "b001_days_last_400",
+    "f0021_date",
+    "f0064_months_trap",
+)
+
+
+def canary_programs(programs: list[Program]) -> list[Program]:
+    """The `CANARY_PROGRAMS` of the `ci` programs, each unchanged; a missing name fails."""
+    by_name = {program.name: program for program in programs}
+    missing = [name for name in CANARY_PROGRAMS if name not in by_name]
+    if missing:
+        raise AssertionError(f"canary programs missing from the ci profile: {missing}")
+    return [by_name[name] for name in CANARY_PROGRAMS]
+
+
 class Runner:
     def __init__(self, chelis: Path, reef_home: Path, app_template: Path, work: Path, toolchain: Toolchain | None, timeout: int):
         self.chelis = chelis
@@ -1827,7 +1851,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--chelis", type=Path, required=True, help="the chelis binary under test")
     parser.add_argument("--reef-home", type=Path, required=True, help="a reef home with chelis-std published")
     parser.add_argument("--toolchain-json", help="strict reference toolchain: {compiler, compile_flags, link_flags}")
-    parser.add_argument("--profile", choices=("ci", "exhaustive"), required=True)
+    parser.add_argument("--profile", choices=("canary", "ci", "exhaustive"), required=True)
     parser.add_argument("--lanes", default="eval,c")
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--chunk", type=int, default=150, help="value bindings per program")
@@ -1848,14 +1872,20 @@ def main(argv: list[str] | None = None) -> int:
         toolchain = Toolchain(spec["compiler"], tuple(spec["compile_flags"]), tuple(spec["link_flags"]))
 
     ref.check_range_constants()
-    corpus = build_ci_corpus() if args.profile == "ci" else build_exhaustive_corpus()
+    corpus = build_exhaustive_corpus() if args.profile == "exhaustive" else build_ci_corpus()
     programs = make_programs(corpus, args.chunk)
+    if args.profile == "canary":
+        programs = canary_programs(programs)
     if args.only:
         programs = [program for program in programs if re.search(args.only, program.name)]
     programs = [program for program in programs if set(program.lanes) & set(lanes)]
-    summary = (f"{len(corpus.days)} days in day rows, {len(corpus.bulk)} grids, {len(corpus.values)} values, "
-               f"{len(corpus.columns)} column values, "
-               f"{len(corpus.failures)} failure cases, {len(programs)} programs")
+    if args.profile == "canary":
+        summary = (f"canary: {sum(len(p.bindings) for p in programs)} bindings, "
+                   f"{sum(p.failure is not None for p in programs)} failure cases, {len(programs)} programs")
+    else:
+        summary = (f"{len(corpus.days)} days in day rows, {len(corpus.bulk)} grids, {len(corpus.values)} values, "
+                   f"{len(corpus.columns)} column values, "
+                   f"{len(corpus.failures)} failure cases, {len(programs)} programs")
     print(f"corpus: {summary}", flush=True)
     if args.list:
         for program in programs:

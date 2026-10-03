@@ -195,6 +195,17 @@ slow-timeout = { period = "60s", terminate-after = 50 }
 # changing their selection contract.
 path = "junit.xml"
 
+# The nightly `module-oracles` job: the module sweeps and eval-and-C
+# differentials that pull-request CI runs only as canaries. A slow night must
+# not cut one short, so its per-test backstop is two hours, not ci-full's 50
+# minutes; the slowest measured on a Linux runner took 1588 s.
+[profile.module-oracles]
+inherits = "ci-full"
+slow-timeout = { period = "60s", terminate-after = 120 }
+
+[profile.module-oracles.junit]
+path = "junit.xml"
+
 # The #1294 oracle runs inside integration support. Its nested nextest must
 # not overwrite the workspace shard's ci/ci-full execution receipts.
 [profile.builtin-atom-closure]

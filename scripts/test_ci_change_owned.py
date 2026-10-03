@@ -7,6 +7,7 @@ from dataclasses import replace
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -1025,7 +1026,7 @@ class SchemaTests(unittest.TestCase):
             *config.test_exclusions.values(),
         ):
             self.assertEqual(owner.workflow, "heavy-e2e.yml")
-            self.assertEqual(owner.job, "full-workspace")
+            self.assertIn(owner.job, {"full-workspace", owned.MODULE_ORACLES_JOB})
             self.assertEqual(owner.cadence, "daily 03:17 UTC and workflow_dispatch")
         self.assertEqual(
             sum(
@@ -1090,6 +1091,7 @@ class SchemaTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         heavy = (root / ".github/workflows/heavy-e2e.yml").read_text()
         self.assertIn("\n  full-workspace:\n", heavy)
+        self.assertIn(f"\n  {owned.MODULE_ORACLES_JOB}:\n", heavy)
         self.assertIn('cron: "17 3 * * *"', heavy)
         heavy_rule = next(
             rule
@@ -6322,6 +6324,77 @@ class AncestorDistanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not present in this clone"):
                 owned._ancestor_distance(root, "e" * 40, head)
 
+
+
+class ModuleOracleSelectionTests(unittest.TestCase):
+    def module_config(self, *tests: tuple[str, str, str, str]) -> owned.Config:
+        text = config_text()
+        for package, target, name, job in tests:
+            owner = "\n".join(
+                f"{key} = {json.dumps(job if key == 'job' else value)}"
+                for key, value in OWNER.items()
+            )
+            text += f"""
+[[test_exclusion]]
+package = {json.dumps(package)}
+target = {json.dumps(target)}
+name = {json.dumps(name)}
+{owner}
+"""
+        return load_config(text)
+
+    def test_selection_is_exactly_the_module_oracles_rows(self) -> None:
+        config = self.module_config(
+            ("q", "zone", "on_eval", owned.MODULE_ORACLES_JOB),
+            ("p", "oracle", "agrees", owned.MODULE_ORACLES_JOB),
+        )
+        self.assertEqual(
+            owned.module_oracles_filterset(config),
+            "(binary_id(/^p::oracle$/) & test(/^agrees$/)) | "
+            "(binary_id(/^q::zone$/) & test(/^on_eval$/))",
+        )
+
+    def test_full_workspace_rows_are_not_module_oracles(self) -> None:
+        # The default fixture's only test exclusion belongs to full-workspace.
+        with self.assertRaisesRegex(ValueError, "no test_exclusion is owned"):
+            owned.module_oracles_filterset(load_config())
+
+    def test_a_dotted_target_matches_literally(self) -> None:
+        config = self.module_config(("p", "a.b", "case", owned.MODULE_ORACLES_JOB))
+        self.assertEqual(
+            owned.module_oracles_filterset(config),
+            r"(binary_id(/^p::a\.b$/) & test(/^case$/))",
+        )
+
+    def test_workflow_runs_and_negates_the_derived_filterset(self) -> None:
+        heavy = (Path(__file__).resolve().parents[1] / ".github/workflows/heavy-e2e.yml").read_text()
+        self.assertIn(
+            "filterset=$(.venv/bin/python scripts/ci_change_owned.py module-oracles)\n", heavy
+        )
+        self.assertNotIn('echo "filterset=$(', heavy)
+        self.assertEqual(heavy.count("${{ needs.module-oracles-plan.outputs.filterset }}"), 2)
+
+    @staticmethod
+    def missing_tests(root: Path, tests: list[owned.TestIdentity]) -> list[str]:
+        missing = []
+        for identity in tests:
+            source = root / "crates" / identity.package / "tests" / f"{identity.target}.rs"
+            if not source.is_file() or f"fn {identity.test}()" not in source.read_text():
+                missing.append(identity.canonical)
+        return missing
+
+    def test_repository_selection_names_existing_tests(self) -> None:
+        # A source-text check: per pull request it catches a renamed or
+        # deleted test. A test moved into a module or given #[ignore] still
+        # passes here; the nightly exact-selection check in
+        # test_nextest_profile_partition catches that drift (chelis#3024).
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        tests = owned.module_oracle_tests(config)
+        self.assertTrue(tests)
+        self.assertEqual(self.missing_tests(root, tests), [])
+        unknown = owned.TestIdentity("chelis-cli", "std_datetime_oracle", "no_such_test")
+        self.assertEqual(self.missing_tests(root, [unknown]), [unknown.canonical])
 
 if __name__ == "__main__":
     unittest.main()

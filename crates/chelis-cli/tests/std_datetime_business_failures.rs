@@ -234,6 +234,7 @@ fn run_chelis(app_pkg: &Path, reef_home: &Path, args: &[&str]) -> (bool, String)
 fn run_expression_suite(
     dir_name: &str,
     expressions: &[(String, String)],
+    limits: &[&str],
 ) -> BTreeMap<String, Option<String>> {
     let (_dir, reef_home, app_pkg) = make_app(dir_name);
     let mut source = format!("module Demo.Tests.Business\n{IMPORTS}\n{PRELUDE}");
@@ -251,7 +252,12 @@ fn run_expression_suite(
     let (_, rendered) = run_chelis(
         &app_pkg,
         &reef_home,
-        &["test", "--batch-mode", "file", path.to_str().unwrap()],
+        &[
+            &["test", "--batch-mode", "file"],
+            limits,
+            &[path.to_str().unwrap()],
+        ]
+        .concat(),
     );
     let mut outcomes = BTreeMap::new();
     for line in rendered.lines() {
@@ -286,7 +292,7 @@ fn std_datetime_business_failures_report_their_exact_message() {
         .iter()
         .map(|(name, expression, _)| (name.to_string(), expression.to_string()))
         .collect();
-    let outcomes = run_expression_suite("business-failures-2860", &expressions);
+    let outcomes = run_expression_suite("business-failures-2860", &expressions, &[]);
     for (name, expression, expected) in &cases {
         assert_eq!(
             outcomes.get(*name),
@@ -296,34 +302,151 @@ fn std_datetime_business_failures_report_their_exact_message() {
     }
 }
 
+/// The extreme-argument sweep: calendars at both range edges, with and
+/// without holidays at the edges, meet the edge dates, i64 extremes, every
+/// roll and start, and every pairing of calendars.
+const SWEEP_CALENDARS: [&str; 4] = [
+    "cal()",
+    "everything()",
+    "everything_weekend()",
+    "weekends()",
+];
+const SWEEP_DAYS: [&str; 6] = [
+    "date(-9999i64, 1i64, 1i64)",
+    "date(-9999i64, 1i64, 2i64)",
+    "date(9999i64, 12i64, 31i64)",
+    "date(9999i64, 12i64, 30i64)",
+    "date(2026i64, 1i64, 1i64)",
+    "date(2026i64, 12i64, 31i64)",
+];
+const SWEEP_COUNTS: [&str; 7] = [
+    "9223372036854775807i64",
+    "i64_minimum()",
+    "0i64",
+    "1i64",
+    "-1i64",
+    "5000000i64",
+    "-5000000i64",
+];
+const SWEEP_ROLLS: [&str; 5] = [
+    "Unadjusted",
+    "Following",
+    "Preceding",
+    "ModifiedFollowing",
+    "ModifiedPreceding",
+];
+const SWEEP_STARTS: [&str; 3] = [
+    "RejectNonBusinessStart",
+    "RollStartForward",
+    "RollStartBackward",
+];
+
+/// The verdicts a sweep test may report besides PASS, which means its calls
+/// returned both `Some` and `None`. Any other FAIL message is a trap.
+const NONE_ACCEPTED: &str = "no call accepted";
+const ALL_ACCEPTED: &str = "every call accepted";
+
+/// Seconds the slowest sweep test takes alone on a quiet machine with the
+/// debug build, compiling the fixture included, since the compile may fall
+/// within the first test's timer: 9 (a single test runs in 5 to 9 s, almost
+/// all of it the compile; each further test adds under 1 s).
+const SWEEP_TEST_SECS: u64 = 9;
+
+/// Seconds a quiet machine takes, with the debug build, to compile the sweep
+/// fixture once and run all of its tests: 32.
+const SWEEP_SUITE_SECS: u64 = 32;
+
+/// Every limit is this many times its quiet-machine time: 90 s per test and
+/// 320 s for the suite. A loaded CI runner runs `chelis test` several times
+/// slower than a quiet local machine, and 10 keeps the limits clear of it.
+/// `chelis test` kills a file worker only after
+/// `timeout x (tests + 1) + 10` seconds, which exceeds the suite limit.
+const LIMIT_MARGIN: u64 = 10;
+
+/// One sweep test: `found` counts the calls that return `Some`, and the test
+/// fails under one of the two verdict labels when they all agree.
+fn sweep_test(bindings: &str, found: &str, calls: usize) -> String {
+    let lists = format!(
+        "  calendars = [{}]\n  days = [{}]\n  counts = [{}]\n  rolls = [{}]\n  starts = [{}]\n",
+        SWEEP_CALENDARS.join(", "),
+        SWEEP_DAYS.join(", "),
+        SWEEP_COUNTS.join(", "),
+        SWEEP_ROLLS.join(", "),
+        SWEEP_STARTS.join(", "),
+    );
+    format!(
+        "{{\n{lists}{bindings}  found = {found}\n  if eq(found, 0i64) then assert_true(false, \"{NONE_ACCEPTED}\") else assert_true(neq(found, {calls}i64), \"{ALL_ACCEPTED}\")\n}}"
+    )
+}
+
+/// The sweep, one test per calendar and day plus one per calendar for its
+/// pairings, so no test carries the whole sweep: `(name, expression, calls)`.
+fn extreme_sweep() -> Vec<(String, String, usize)> {
+    let per_day_calls =
+        1 + SWEEP_ROLLS.len() + SWEEP_COUNTS.len() * SWEEP_STARTS.len() + SWEEP_DAYS.len();
+    let per_day = "add(add(present(try_is_business_day(c, d)), total(map(fn (r: BusinessDayRoll) -> present(try_business_day_roll(c, d, r)), rolls))), add(total(map(fn (n: i64) -> total(map(fn (s: NonBusinessStart) -> present(try_business_day_offset(c, d, n, s)), starts)), counts)), total(map(fn (e: Date) -> present(try_business_day_count(c, d, e)), days))))";
+    let pairing_calls = 2 * SWEEP_CALENDARS.len();
+    let pairings = "total(map(fn (o: BusinessCalendar) -> add(present(try_business_in_all(c, o)), present(try_business_in_any(c, o))), calendars))";
+    let mut tests = Vec::new();
+    for (ci, calendar) in SWEEP_CALENDARS.iter().enumerate() {
+        for (di, day) in SWEEP_DAYS.iter().enumerate() {
+            tests.push((
+                format!("sweep_{ci}_day_{di}"),
+                sweep_test(
+                    &format!("  c = {calendar}\n  d = {day}\n"),
+                    per_day,
+                    per_day_calls,
+                ),
+                per_day_calls,
+            ));
+        }
+        tests.push((
+            format!("sweep_{ci}_pairings"),
+            sweep_test(&format!("  c = {calendar}\n"), pairings, pairing_calls),
+            pairing_calls,
+        ));
+    }
+    tests
+}
+
 /// Extreme calls through the `try_` forms, which share their trapping twins'
 /// checks, arithmetic, and detail text: each returns `Some` or `None`, and a
-/// primitive trap anywhere would fail the test under a primitive's message
-/// instead. Calendars at both range edges, with and without holidays at the
-/// edges, meet the edge dates, i64 extremes, every roll and start, and every
-/// pairing of calendars.
-const EXTREME_SWEEP: &str = "{
-  calendars = [cal(), everything(), everything_weekend(), weekends()]
-  days = [date(-9999i64, 1i64, 1i64), date(-9999i64, 1i64, 2i64), date(9999i64, 12i64, 31i64), date(9999i64, 12i64, 30i64), date(2026i64, 1i64, 1i64), date(2026i64, 12i64, 31i64)]
-  counts = [9223372036854775807i64, i64_minimum(), 0i64, 1i64, -1i64, 5000000i64, -5000000i64]
-  rolls = [Unadjusted, Following, Preceding, ModifiedFollowing, ModifiedPreceding]
-  starts = [RejectNonBusinessStart, RollStartForward, RollStartBackward]
-  per_day = fn (c: BusinessCalendar, d: Date) -> add(add(present(try_is_business_day(c, d)), total(map(fn (r: BusinessDayRoll) -> present(try_business_day_roll(c, d, r)), rolls))), add(total(map(fn (n: i64) -> total(map(fn (s: NonBusinessStart) -> present(try_business_day_offset(c, d, n, s)), starts)), counts)), total(map(fn (e: Date) -> present(try_business_day_count(c, d, e)), days))))
-  per_calendar = fn (c: BusinessCalendar) -> add(total(map(fn (d: Date) -> per_day(c, d), days)), total(map(fn (o: BusinessCalendar) -> add(present(try_business_in_all(c, o)), present(try_business_in_any(c, o))), calendars)))
-  found = total(map(per_calendar, calendars))
-  assert_true(and(gt(found, 0i64), lt(found, 824i64)), \"both accepted and rejected extremes\")
-}";
-
+/// primitive trap anywhere fails its test under the primitive's message
+/// instead of a verdict label.
 #[test]
 fn std_datetime_business_extreme_arguments_raise_no_primitive_trap() {
+    let sweep = extreme_sweep();
+    let calls: usize = sweep.iter().map(|(_, _, calls)| calls).sum();
+    assert_eq!(calls, 824, "the sweep makes every extreme try_ call");
+    let expressions: Vec<(String, String)> = sweep
+        .iter()
+        .map(|(name, expression, _)| (name.clone(), expression.clone()))
+        .collect();
+    let timeout = (LIMIT_MARGIN * SWEEP_TEST_SECS).to_string();
+    let suite_timeout = (LIMIT_MARGIN * SWEEP_SUITE_SECS).to_string();
     let outcomes = run_expression_suite(
         "business-extremes-2860",
-        &[("sweep".to_string(), EXTREME_SWEEP.to_string())],
+        &expressions,
+        &["--timeout", &timeout, "--suite-timeout", &suite_timeout],
     );
-    assert_eq!(
-        outcomes.get("sweep"),
-        Some(&None),
-        "824 extreme try_ calls must neither trap nor agree on presence"
+    let none_accepted = format!("assert failed: {NONE_ACCEPTED}");
+    let all_accepted = format!("assert failed: {ALL_ACCEPTED}");
+    for (name, outcome) in &outcomes {
+        assert!(
+            outcome.is_none()
+                || outcome.as_ref() == Some(&none_accepted)
+                || outcome.as_ref() == Some(&all_accepted),
+            "{name}: an extreme try_ call trapped: {outcome:?}"
+        );
+    }
+    assert!(
+        outcomes
+            .values()
+            .any(|outcome| outcome.as_ref() != Some(&none_accepted))
+            && outcomes
+                .values()
+                .any(|outcome| outcome.as_ref() != Some(&all_accepted)),
+        "824 extreme try_ calls must neither trap nor agree on presence: {outcomes:?}"
     );
 }
 

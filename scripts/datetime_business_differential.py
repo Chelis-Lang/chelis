@@ -27,6 +27,14 @@ must equal the reference.
   function equals the expected one, and a vectorized failure must name the
   element the reference names.
 
+Profiles:
+
+- `full`: the edge calendars and `--calendars` seeded ones, the
+  combinations, and every failure path. It runs nightly.
+- `canary`: both range-edge calendars on both lanes and one vectorized
+  failure; every observation is one `full` also makes.
+  It runs on every pull request.
+
 The reference itself is checked against NumPy by
 `test_datetime_business_reference.py`. The supported entry point is
 `crates/chelis-cli/tests/std_datetime_business_oracle.rs`, which supplies
@@ -318,8 +326,7 @@ def failure_programs() -> list[Program]:
             for index, (function, expression, element) in enumerate(cases)]
 
 
-def build_programs(random_calendars: int) -> list[Program]:
-    specs = ref.build_calendars(SEED, random_calendars)
+def calendar_programs(specs: list[ref.CalendarSpec]) -> list[Program]:
     programs = []
     for lane in BOTH:
         # Each C program pays for compiling the standard library, so compiled C
@@ -330,8 +337,13 @@ def build_programs(random_calendars: int) -> list[Program]:
             members = singles[start:start + group]
             programs.append(Program(f"calendars_{start:03d}_{lane}", "\n".join(m.body for m in members),
                                     {k: v for m in members for k, v in m.expected.items()}, lanes=(lane,)))
+    return programs
+
+
+def combination_programs(count: int) -> list[Program]:
     rng = ref.random.Random(SEED + 1)
-    for index in range(max(4, random_calendars // 4)):
+    programs = []
+    for index in range(count):
         valid_from = rng.randint(-50_000, 50_000)
         pair = []
         for side in range(2):
@@ -340,7 +352,32 @@ def build_programs(random_calendars: int) -> list[Program]:
             pair.append(ref.CalendarSpec(weekmask, start, start + rng.choice([30, 90, 200]) - 1, density=100,
                                          seed=SEED + 101 * index + side))
         programs.append(combination_program(index, *pair))
-    return programs + failure_programs()
+    return programs
+
+
+def build_programs(random_calendars: int) -> list[Program]:
+    specs = ref.build_calendars(SEED, random_calendars)
+    return calendar_programs(specs) + combination_programs(max(4, random_calendars // 4)) + failure_programs()
+
+
+# The failure the canary keeps: a vectorized roll that must name its failing
+# element. The calendar programs already reach both i64 extremes through the
+# `try_` offsets.
+CANARY_FAILURES = ("failure_13_dates_business_day_roll",)
+
+
+def build_canary_programs() -> list[Program]:
+    """The per-pull-request subset of the full corpus.
+
+    Both range-edge calendars on both lanes and the `CANARY_FAILURES`; every
+    observation is one the full corpus also makes. Each compiled C program
+    builds the standard library, so the canary keeps to two of them.
+    """
+    failures = {program.name: program for program in failure_programs()}
+    missing = [name for name in CANARY_FAILURES if name not in failures]
+    if missing:
+        raise AssertionError(f"canary failures missing from the full corpus: {missing}")
+    return calendar_programs(ref.edge_calendars()[:2]) + [failures[name] for name in CANARY_FAILURES]
 
 
 @dataclass(frozen=True)
@@ -486,8 +523,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--chelis", type=Path, required=True, help="the chelis binary under test")
     parser.add_argument("--reef-home", type=Path, required=True, help="a reef home with chelis-std published")
     parser.add_argument("--toolchain-json", help="strict reference toolchain: {compiler, compile_flags, link_flags}")
+    parser.add_argument("--profile", choices=("full", "canary"), required=True)
     parser.add_argument("--lanes", default="eval,c")
-    parser.add_argument("--calendars", type=int, default=16, help="random calendars beyond the edge calendars")
+    parser.add_argument("--calendars", type=int, default=16, help="full profile: random calendars beyond the edge calendars")
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--timeout", type=int, default=1800, help="seconds per lane process")
     parser.add_argument("--work", type=Path, help="keep generated programs here instead of a temporary directory")
@@ -503,8 +541,12 @@ def main(argv: list[str] | None = None) -> int:
         spec = json.loads(args.toolchain_json)
         toolchain = Toolchain(spec["compiler"], tuple(spec["compile_flags"]), tuple(spec["link_flags"]))
 
-    programs = [p for p in build_programs(args.calendars) if set(p.lanes) & set(lanes)]
-    summary = f"{len(programs)} programs over {args.calendars + len(ref.edge_calendars())} calendars"
+    if args.profile == "full":
+        corpus, calendars = build_programs(args.calendars), args.calendars + len(ref.edge_calendars())
+    else:
+        corpus, calendars = build_canary_programs(), 2
+    programs = [p for p in corpus if set(p.lanes) & set(lanes)]
+    summary = f"{len(programs)} programs over {calendars} calendars"
     print(f"corpus: {summary}", flush=True)
     problems: list[str] = []
     observations = 0

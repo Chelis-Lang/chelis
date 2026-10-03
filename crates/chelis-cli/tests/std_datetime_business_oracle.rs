@@ -18,6 +18,9 @@
 //! vectorized forms, both combinations, and one failure per failing path.
 //! Compiled C observes every query; `chelis eval` observes a subset of each
 //! calendar's queries.
+//!
+//! The full corpus runs nightly. The canary runs on every pull request: both
+//! range-edge calendars on both lanes and one vectorized failure.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -53,8 +56,7 @@ fn toolchain_json() -> String {
     .to_string()
 }
 
-#[test]
-fn std_datetime_business_agrees_with_the_reference_on_eval_and_c() {
+fn run_harness(profile: &str) -> String {
     let python =
         managed_python::managed_python(&repo_root()).unwrap_or_else(|error| panic!("{error}"));
     let chelis = assert_cmd::cargo_bin!("chelis").to_path_buf();
@@ -64,7 +66,14 @@ fn std_datetime_business_agrees_with_the_reference_on_eval_and_c() {
         .arg(&chelis)
         .arg("--reef-home")
         .arg(&common::SHARED_REEF.reef_home)
-        .args(["--toolchain-json", &toolchain_json(), "--lanes", "eval,c"])
+        .args([
+            "--toolchain-json",
+            &toolchain_json(),
+            "--profile",
+            profile,
+            "--lanes",
+            "eval,c",
+        ])
         .output()
         .expect("spawn the business-day differential harness");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -75,4 +84,16 @@ fn std_datetime_business_agrees_with_the_reference_on_eval_and_c() {
         output.status
     );
     assert!(stdout.contains("on lanes eval+c"), "{stdout}");
+    stdout
+}
+
+#[test]
+fn std_datetime_business_agrees_with_the_reference_on_eval_and_c() {
+    run_harness("full");
+}
+
+#[test]
+fn std_datetime_business_canary_agrees_with_the_reference_on_eval_and_c() {
+    let stdout = run_harness("canary");
+    assert!(stdout.contains("over 2 calendars"), "{stdout}");
 }
