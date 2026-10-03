@@ -1693,6 +1693,34 @@ inputs into a text record, and the module exposes that record as an
 `include_str!` constant. The structural scan finds no new representation seam,
 with no foundation, classifier or mutation change.
 
+Correctly rounded math (chelis#2957) registers three sources:
+`chelis-backend-c/src/crmath_kernels.rs`, which links `chelis-crmath`'s kernel
+text into generated C, and the two floating-point environment modules
+`chelis-backend-c/src/fp_env.rs` and `chelis-runtime/src/fp_env.rs`. The
+deleted `chelis-backend-c/build.rs` leaves the universe, which now holds 92
+sources (81 Rust and eleven C/C++/Objective-C). Four new scanner owners are
+exact final forms. `fp_env.rs`'s `HELPERS` and `prune_unused_nan_helpers` spell
+the two IEEE widths whose arithmetic NaNs [04-NUM-2] finalizes to the
+canonical quiet NaN, selected by a width flag, never a runtime dtype id.
+`validate_generated_include_set::ALLOWED_INCLUDES` admits ISO C `<float.h>`,
+whose spelling is a header name rather than an element type. The `toolchain.rs`
+`CANARY_MAIN` driver is a fixed scalar probe that the compiler check builds and
+runs outside every generated artifact; its byte copies move one `double`'s bits
+through argv and stdout, never tensor storage. None adds a public carrier or
+ABI. Their exact path, kind and owner identities have wrong-path, wrong-kind and
+wrong-owner negatives, and a Phase 0 execution leg binds them to the compiler
+canary's acceptance and refusal tests, the unknown-include rejection, compiled
+correctly rounded `exp`, canonical NaN finalization of direct and fused float
+arithmetic at every width, and extrema that keep their NaN payloads. Two rows
+remain transition debt. Splitting the fused scalar step behind the NaN
+finalizer renames `CEmitter::scalar_step_expr` to
+`CEmitter::scalar_step_raw_expr`, and emitting the composite activations from
+the `tier2` graph moves their per-precision C spelling into `activation_body`
+beside `append_activation_helpers`; both select `float` or `double` from `Prim`
+exactly as the owners they come from, so Phase 4's typed lane renderer deletes
+them with the rest. The append-only foundation extends from 372 to 374 rows,
+active debt moves from 233 to 234, and the freeze digest moves.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and
@@ -1808,6 +1836,9 @@ The named List entry and result-witness leg is also inherited from Phase 0.
 It pairs the `issue_2627_list_entry_extents` and `issue_1788_entry_obligations`
 execution targets; the Phase 1 manifest now freezes their 46 selected test
 identities and the exact inherited command.
+
+The correctly rounded C leg is inherited the same way: the Phase 1 manifest
+freezes its seven selected test identities and the exact inherited command.
 
 The integer-unary typed-lane amendment retains two inherited Phase 0 execution
 legs in the Phase 1 manifest: integer-to-float finalization freezes two native

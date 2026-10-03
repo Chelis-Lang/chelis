@@ -65,7 +65,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # design amendment when the finished foundation or a mutation binding changes.
 # Release reproducers, hardware probes, counts, and ordinary configuration are
 # deliberately outside this digest.
-FREEZE_SHA256 = "a90d2e9c1e42b01cdcd2338444f5c982e6f0163bb57c9ec38d326e6cef3aefa2"
+FREEZE_SHA256 = "7a24b73e809011eb0511e3584045f656333b57e04ef0d7e28b70a7e49f23e306"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -455,6 +455,33 @@ LIST_ENTRY_METADATA_FINAL_FORMS = (
         "retained_list_pass::walk",
     ),
 )
+# chelis#2957: the C lane's correctly rounded math support. The NaN helpers
+# and their pruning spell the two IEEE widths [04-NUM-2]'s canonical quiet NaN
+# finalizes; the include allowlist names ISO C's <float.h>, a header, not an
+# element type; the compiler canary is a fixed scalar probe program that runs
+# outside every generated artifact and never touches tensor storage.
+CORRECTLY_ROUNDED_C_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-c/src/fp_env.rs",
+        "backend-element-spelling",
+        "HELPERS",
+    ),
+    (
+        "crates/chelis-backend-c/src/fp_env.rs",
+        "backend-element-spelling",
+        "prune_unused_nan_helpers",
+    ),
+    (
+        "crates/chelis-backend-c/src/generated_header.rs",
+        "backend-element-spelling",
+        "validate_generated_include_set::ALLOWED_INCLUDES",
+    ),
+    (
+        "crates/chelis-backend-c/src/toolchain.rs",
+        "load-store-template",
+        "CANARY_MAIN",
+    ),
+)
 PHASE2_FINAL_FORMS = (
     ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::byte_capacity"),
     ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::count"),
@@ -564,6 +591,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         (path, kind, owner) in RESULT_CLAIM_METADATA_FINAL_FORMS
     ) or (
         (path, kind, owner) in LIST_ENTRY_METADATA_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in CORRECTLY_ROUNDED_C_FINAL_FORMS
     ) or (
         (path, kind, owner) in PHASE2_FINAL_FORMS
     )
@@ -951,6 +980,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *UTF8_STRING_FINAL_FORMS,
         *RESULT_CLAIM_METADATA_FINAL_FORMS,
         *LIST_ENTRY_METADATA_FINAL_FORMS,
+        *CORRECTLY_ROUNDED_C_FINAL_FORMS,
         *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
         *((ELEMENT_OWNER, "dtype-contract", owner) for owner in ELEMENT_FINAL_CONTRACT_OWNERS),
         (ELEMENT_OWNER, "width-arithmetic", "assert_registration"),
@@ -2355,6 +2385,19 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "cargo", "nextest", "run", "-p", "chelis-cli",
                 "--test", "issue_2627_list_entry_extents",
                 "--test", "issue_1788_entry_obligations",
+            ),
+        ),
+        OracleLeg(
+            "correctly rounded C NaN finalization, include set, and compiler canary execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-backend-c",
+                "--lib", "--test", "exec_compile", "-E",
+                "test(toolchain::tests::verify_compiler_) | "
+                "test(=generated_header::tests::sealed_artifact_rejects_conditionally_erased_exports_and_unknown_includes) | "
+                "test(=exec_exp_kernel_correct_output) | "
+                "test(=direct_float_subtraction_finalizes_canonical_nan_bits_at_every_width) | "
+                "test(=direct_and_fused_float_arithmetic_finalizes_canonical_nan_at_every_width) | "
+                "test(=direct_extrema_preserve_nan_payloads_and_lhs_signed_zero_at_every_float_width)",
             ),
         ),
         OracleLeg(
