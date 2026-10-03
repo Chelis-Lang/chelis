@@ -78,10 +78,7 @@ fn every_transcendental_and_sqrt_is_rejected_with_a_typed_diagnostic() {
 
 #[test]
 fn exact_operations_are_admitted() {
-    for (op, name) in [
-        (RiscOp::Neg, "neg"),
-        (RiscOp::Abs, "abs"),
-    ] {
+    for (op, name) in [(RiscOp::Neg, "neg"), (RiscOp::Abs, "abs")] {
         codegen(&chain_dag(op), name).unwrap_or_else(|error| panic!("{name}: {error}"));
     }
 }
