@@ -2532,7 +2532,9 @@ impl<'a> EvalContext<'a> {
             }
             return self.eval_under_result_claim(region.initializer(), &claims);
         }
-        let lowering = lowering.for_local_ascription_region(region);
+        let lowering = lowering
+            .for_local_ascription_region(region)
+            .claiming_parameter_binders_at_activation();
         let mut scoped_types = UnordMap::new();
         let mut staged_inputs = UnordMap::new();
         for (name, value) in self.bindings.to_sorted() {

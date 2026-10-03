@@ -790,37 +790,111 @@ fn a_binder_only_the_body_names_is_refused_on_both_lanes() {
     );
 }
 
+/// A function whose `List[tensor[n, f32]]` parameter carries `n`, called with
+/// two elements of `width` values each. `c0` is one of the elements, and the
+/// runtime flag is true, so `c0` is `xs[0]`.
+fn list_binder_source(sites: &str, width: usize) -> String {
+    let element = |start: usize| {
+        let values = (start..start + width)
+            .map(|value| format!("{value}.0f32"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("to_tensor([{values}])")
+    };
+    format!(
+        "def f[n](xs: List[tensor[n, f32]], k: i64, flag: bool) -> tensor[n, f32] = {{\n\
+         \x20 c0 = if flag then index(xs, 0i64) else index(xs, 1i64)\n\
+         {sites}\
+         }}\n\
+         out = f([{}, {}], {RUNTIME_THREE}, {})\n",
+        element(1),
+        element(1 + width),
+        runtime_flag(2)
+    )
+}
+
+const LIST_ONE_SITE: &str = "\x20 b: tensor[n, f32] = insert(sum(c0, 0i32), 0i32, k)\n\
+                             \x20 if flag then add(b, b) else b\n";
+
+const LIST_TWO_SITES: &str = "\x20 b: tensor[n, f32] = insert(sum(c0, 0i32), 0i32, k)\n\
+                              \x20 d: tensor[n, f32] = insert(sum(c0, 0i32), 0i32, add(k, 1i64))\n\
+                              \x20 if flag then add(b, b) else add(c0, c0)\n";
+
 /// A binder an element type of a `List` parameter names is the parameter's,
-/// not output-inferred, so a site naming it never binds it first. The host
-/// regions have no witness for it and keep the refusal on both lanes.
+/// not output-inferred, so a site naming it is a section 4.7 claim against
+/// that parameter, never its first site. Compiled C claims it through `c0`,
+/// whose checked type names `n`; `chelis eval` claims it against the extent
+/// its activation recorded from the list's elements. With `n` = 2 and an
+/// extent of 3, both lanes trap at the first site.
 #[test]
-fn a_list_parameter_binder_is_never_bound_by_a_site() {
+fn a_list_parameter_binder_is_claimed_at_a_site() {
     for (stem, sites) in [
-        (
-            "list_binder_one_site",
-            "\x20 b: tensor[n, f32] = insert(sum(c0, 0i32), 0i32, k)\n\
-             \x20 if flag then add(b, b) else b\n",
-        ),
-        (
-            "list_binder_two_sites",
-            "\x20 b: tensor[n, f32] = insert(sum(c0, 0i32), 0i32, k)\n\
-             \x20 d: tensor[n, f32] = insert(sum(c0, 0i32), 0i32, add(k, 1i64))\n\
-             \x20 if flag then add(b, b) else add(c0, c0)\n",
-        ),
+        ("list_binder_one_site", LIST_ONE_SITE),
+        ("list_binder_two_sites", LIST_TWO_SITES),
     ] {
-        assert_lanes_refuse(
+        assert_lanes_trap_identically(
             stem,
-            &format!(
-                "def f[n](xs: List[tensor[n, f32]], k: i64, flag: bool) -> tensor[n, f32] = {{\n\
-                 \x20 c0 = if flag then index(xs, 0i64) else index(xs, 1i64)\n\
-                 {sites}\
-                 }}\n\
-                 out = f([to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32])], {RUNTIME_THREE}, {})\n",
-                runtime_flag(2)
-            ),
-            "cannot resolve authored extent `n`",
+            &list_binder_source(sites, 2),
+            &["extent `n`: claimed = 2, insert axis 0 = 3", INSERT_TRAP],
         );
     }
+}
+
+/// The agreeing control: with `n` = 3 the site meets its claim and both lanes
+/// print `add(b, b)` of the inserted sum of `xs[0]` (1 + 2 + 3 = 6). A later
+/// site that disagrees is still a claim against the parameter.
+#[test]
+fn an_agreeing_list_parameter_binder_site_executes() {
+    assert_lanes_agree(
+        "list_binder_agrees",
+        &list_binder_source(LIST_ONE_SITE, 3),
+        "out = tensor(shape=[3], data=[12.0, 12.0, 12.0])",
+    );
+    assert_lanes_trap_identically(
+        "list_binder_later_site_disagrees",
+        &list_binder_source(LIST_TWO_SITES, 3),
+        &["extent `n`: claimed = 3, insert axis 0 = 4", INSERT_TRAP],
+    );
+}
+
+/// With no local whose type names `n` in scope, compiled C has no witness
+/// for a `List` parameter's binder inside the region and keeps the refusal,
+/// while `chelis eval` claims the site against its activation record and
+/// traps. Neither lane binds `n` at the site. When C claims it, this row
+/// must become an identical-trap row.
+#[test]
+fn a_list_parameter_binder_site_without_a_witness_is_claimed_only_by_eval() {
+    let stem = "list_binder_no_witness";
+    let dir = tempdir().expect("tempdir");
+    let path = write_fixture(
+        &dir,
+        stem,
+        &format!(
+            "def f[n](xs: List[tensor[n, f32]], k: i64) -> i64 = {{\n\
+             \x20 b: tensor[n, f32] = insert(sum(to_tensor([1.0f32]), 0i32), 0i32, k)\n\
+             \x20 shape(b, 0i32)\n\
+             }}\n\
+             out = f([to_tensor([1.0f32, 2.0f32])], {RUNTIME_THREE})\n"
+        ),
+    );
+    assert!(check(&path).status.success(), "{stem}: check accepts");
+    let evaluated = eval(&path);
+    let eval_out = combined(&evaluated);
+    assert!(
+        !evaluated.status.success()
+            && eval_out.contains("extent `n`: claimed = 2, insert axis 0 = 3")
+            && eval_out.contains(INSERT_TRAP)
+            && !eval_out.contains("out = "),
+        "{stem}: eval must claim `n` against the list: {eval_out}"
+    );
+    let compiled = build_and_run(&dir, stem, &path);
+    let c_out = combined(&compiled);
+    assert!(
+        !compiled.status.success()
+            && c_out.contains("cannot resolve authored extent `n`")
+            && !c_out.contains("numeric trap"),
+        "{stem}: C must refuse rather than bind `n`: {c_out}"
+    );
 }
 
 /// A lambda's ascription naming the enclosing definition's parameter binder
