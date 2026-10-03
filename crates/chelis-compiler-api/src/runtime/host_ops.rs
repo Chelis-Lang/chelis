@@ -5,7 +5,8 @@ use chelis_ir::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
-    ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericTrap,
+    ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericKernelError,
+    NumericTrap,
     ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar, compare_scalars,
     compare_tensors, cumsum_tensor_lanes, float_binop, float_scalar_tensor_binop,
     float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop,
@@ -2714,7 +2715,8 @@ fn balanced_accumulator_sum(
         while let Some(left) = source.next() {
             let combined = match source.next() {
                 Some(right) if accumulator.is_integer() => {
-                    int_binop(IntBinOp::Add, left, right).map_err(|error| error.to_string())?
+                    int_binop(IntBinOp::Add, left, right)
+                        .map_err(|error| reported_as(op, error))?
                 }
                 Some(right) => {
                     float_binop(FloatBinOp::Add, left, right).map_err(|error| error.to_string())?
@@ -2729,6 +2731,18 @@ fn balanced_accumulator_sum(
     // any other arithmetic result, as `sum(diagonal(..))` does.
     let total = chelis_types::canonical_nan_scalar(level[0]);
     cast_scalar(op, total, result).map_err(|error| error.to_string())
+}
+
+/// A contraction's integer overflow traps under the contraction's own name,
+/// as the C runtime's `runtime_balanced_sum` and `runtime_mul` report it, not
+/// under the `add` or `mul` it was formed from.
+fn reported_as(op: &'static str, error: NumericKernelError) -> String {
+    match error {
+        NumericKernelError::Trap(NumericTrap::Overflow { prim, .. }) => {
+            NumericTrap::Overflow { op, prim }.to_string()
+        }
+        error => error.to_string(),
+    }
 }
 
 pub(super) fn tensor_trace_value(
@@ -3000,7 +3014,7 @@ pub(super) fn tensor_einsum_value(
                 } else {
                     float_binop(FloatBinOp::Mul, left, right)
                 }
-                .map_err(|error| error.to_string())?,
+                .map_err(|error| reported_as("einsum", error))?,
             );
         }
         out.push(balanced_accumulator_sum(

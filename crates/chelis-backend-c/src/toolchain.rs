@@ -956,6 +956,22 @@ mod tests {
         verify_compiler_wrapper_excess_precision_fast: "-fexcess-precision=fast" => Verdict::Harmless;
     }
 
+    /// A profile that compiles with OpenMP also links with it, so an
+    /// executable link and a static library's printed link requirements both
+    /// resolve the parallel regions' `omp_*` and `GOMP_*` symbols on gcc.
+    #[test]
+    fn an_openmp_profile_links_with_openmp() {
+        for needs_blas in [false, true] {
+            let requirements = CodegenRequirements {
+                wants_openmp: true,
+                needs_blas,
+            };
+            let profile = pinned_toolchain("gcc".into(), requirements, true);
+            assert!(profile.compile_flags.contains(&"-fopenmp".to_string()));
+            assert!(profile.link_flags.contains(&"-fopenmp".to_string()));
+        }
+    }
+
     /// The canary is linked as a real build is: the profile's compile flags,
     /// then its link flags (`-lm` among them, which glibc needs for `fma`,
     /// `roundeven`, and `sqrt`), for every requirement combination.

@@ -184,9 +184,19 @@ impl NativeBuild {
     }
 
     fn print_link_requirements(&self) {
+        print_command(
+            "Link requirements (after module archive)",
+            &mut self.link_requirements(),
+        );
+    }
+
+    /// What a static library's consumer links after the module archive: the
+    /// staged runtime archive and the build's own link flags, which carry
+    /// `-fopenmp` whenever the profile compiled the module with OpenMP.
+    fn link_requirements(&self) -> Command {
         let mut command = self.tool(&self.compiler);
         command.arg(&self.runtime_archive).args(&self.link_flags);
-        print_command("Link requirements (after module archive)", &mut command);
+        command
     }
 }
 
@@ -343,4 +353,32 @@ pub(crate) fn protect_input(file: &Path, output: Option<&Path>, target: &str) ->
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The printed requirements are the staged runtime archive followed by
+    /// exactly the build's link flags, so the `-fopenmp` a gcc profile links
+    /// with (locked in `toolchain`'s tests) reaches the consumer; without it a
+    /// consumer's link leaves the parallel regions' `omp_*` and `GOMP_*`
+    /// symbols undefined.
+    #[test]
+    fn static_library_link_requirements_are_the_build_link_flags() {
+        let link_flags = ["-lm", "-lpthread", "-ldl", "-fopenmp"].map(String::from).to_vec();
+        let build = NativeBuild {
+            target: "c",
+            compiler: "gcc".into(),
+            sources: Vec::new(),
+            compile_flags: Vec::new(),
+            link_flags: link_flags.clone(),
+            runtime_archive: PathBuf::from("out/libchelis_runtime.a"),
+            requires_main: false,
+        };
+        let command = build.link_requirements();
+        let mut expected = vec![OsStr::new("out/libchelis_runtime.a")];
+        expected.extend(link_flags.iter().map(OsStr::new));
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+    }
 }
