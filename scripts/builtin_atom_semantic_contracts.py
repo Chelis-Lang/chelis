@@ -106,7 +106,7 @@ CASE_CLAUSES = {
 CALLABLE_CLAUSES = {
     operation: clause
     for operations, clause in (
-        (("abs", "cos", "exp", "log", "neg", "round", "sqrt"),
+        (("abs", "cos", "exp", "log", "neg", "recip", "round", "sqrt"),
          "`neg(x)`, `recip(x)`, `exp(x)`, `log(x)`"),
         (("add", "div", "mul"), "`add(x,y)`, `mul(x,y)`, `div(x,y)`"),
         (("cast",), "`cast(value,target_dtype)` returns the same scalar or tensor"),
