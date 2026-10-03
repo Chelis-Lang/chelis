@@ -172,6 +172,26 @@ impl fmt::Display for CompilerIdentity {
     }
 }
 
+/// Why [`verify_compiler`] did not accept a compiler. A missing compiler is
+/// its own variant so the caller reports it through the same tool-not-found
+/// diagnostic as every other native tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompilerCheckError {
+    /// Neither the named path nor a `PATH` lookup found an executable.
+    NotFound(String),
+    /// The compiler ran but did not identify itself or apply the profile.
+    Refused(String),
+}
+
+impl fmt::Display for CompilerCheckError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(compiler) => write!(f, "native compiler `{compiler}` was not found"),
+            Self::Refused(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// Resolve `compiler`'s identity and check that, given `compile_flags`, it
 /// compiles with the profile's floating-point semantics. A wrapper script is
 /// opaque on the command line, so the check reads what the compiler itself
@@ -182,9 +202,13 @@ impl fmt::Display for CompilerIdentity {
 pub fn verify_compiler(
     compiler: &str,
     compile_flags: &[String],
-) -> Result<CompilerIdentity, String> {
+) -> Result<CompilerIdentity, CompilerCheckError> {
     let path = resolve_executable(compiler)
-        .ok_or_else(|| format!("native compiler `{compiler}` was not found"))?;
+        .ok_or_else(|| CompilerCheckError::NotFound(compiler.to_string()))?;
+    check_compiler(path, compile_flags).map_err(CompilerCheckError::Refused)
+}
+
+fn check_compiler(path: PathBuf, compile_flags: &[String]) -> Result<CompilerIdentity, String> {
     let version = tool_command(&path)
         .arg("--version")
         .stdin(Stdio::null())
@@ -512,10 +536,18 @@ mod tests {
         ] {
             let hostile = wrapper(dir.path(), name, extra);
             let error = verify_compiler(&hostile, &flags).expect_err(name);
-            assert!(error.contains(expected), "{name}: {error}");
+            assert!(
+                matches!(&error, CompilerCheckError::Refused(reason) if reason.contains(expected)),
+                "{name}: {error}"
+            );
         }
         let missing = dir.path().join("missing-cc");
-        assert!(verify_compiler(missing.to_str().unwrap(), &flags).is_err());
+        assert_eq!(
+            verify_compiler(missing.to_str().unwrap(), &flags),
+            Err(CompilerCheckError::NotFound(
+                missing.to_str().unwrap().to_string()
+            ))
+        );
     }
 
     #[test]

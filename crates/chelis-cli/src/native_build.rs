@@ -8,6 +8,8 @@ use std::{
     process::Command,
 };
 
+use chelis_backend_c::toolchain::CompilerCheckError;
+
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub(crate) struct NativeBuild {
@@ -79,7 +81,10 @@ impl NativeBuild {
                 &self.compiler.to_string_lossy(),
                 &self.compile_flags,
             )
-            .map_err(|error| format!("native compile: {error}"))?;
+            .map_err(|error| match error {
+                CompilerCheckError::NotFound(tool) => tool_not_found("compile", self.target, &tool),
+                CompilerCheckError::Refused(reason) => format!("native compile: {reason}"),
+            })?;
             println!("Compiler: {identity}");
         }
 
@@ -215,10 +220,7 @@ fn run(
     let tool = command.get_program().to_string_lossy().into_owned();
     let output = command.output().map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
-            format!(
-                "native {stage}: tool `{tool}` was not found; {}",
-                install_guidance(stage, target)
-            )
+            tool_not_found(stage, target, &tool)
         } else {
             format!("native {stage}: cannot run `{tool}`: {error}")
         }
@@ -231,6 +233,13 @@ fn run(
     }
     require_product(product, executable)
         .map_err(|error| format!("native {stage}: `{tool}`: {error}").into())
+}
+
+fn tool_not_found(stage: &str, target: &str, tool: &str) -> String {
+    format!(
+        "native {stage}: tool `{tool}` was not found; {}",
+        install_guidance(stage, target)
+    )
 }
 
 fn install_guidance(stage: &str, target: &str) -> &'static str {
