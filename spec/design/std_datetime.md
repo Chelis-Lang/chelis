@@ -1185,7 +1185,8 @@ whose cut-overs are S6 and S8.
 **Parallelism.** S2, S3, S4a and S5 are written in parallel once S1 merges.
 - They merge one at a time, because each touches the same registries, census, count
   literals and standard-library bundle.
-- Each bundle regeneration builds the compiler, so their builds are sequenced.
+- The compiler packs the standard library as it builds, so each stage's build
+  rebuilds the compiler, and their builds are sequenced.
 
 **Downstream hold.** The Shoals and hello-chelis cut-overs (S6, S8) wait until the chelis
 and `bed` stages are finished, or until a maintainer approves an earlier cut-over. Until

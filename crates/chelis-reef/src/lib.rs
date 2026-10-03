@@ -3556,21 +3556,43 @@ fn assess_transitive_lock(
     let mut reasons = Vec::new();
     let mut pending = vec![root_manifest.typed.package.name.to_string()];
     let mut reachable = BTreeSet::new();
+    // The locked runtime is current only when it names the embedded runtime
+    // by version, source, and both hashes. A std edit changes the hashes
+    // alone, so a lock written before it is stale like one from another
+    // release, and the runtime is resolved again.
     if let Some(locked_runtime) = lock_by_name.get(CHELIS_STD_PACKAGE_NAME) {
-        let source_matches = match &locked_runtime.source {
-            LockSource::Bundled { compiler_version } => {
-                compiler_version.trim_start_matches('=') == env!("CARGO_PKG_VERSION")
-            }
-            _ => false,
-        };
-        if locked_runtime.version == options.runtime.version() && source_matches {
+        let runtime = options.runtime;
+        let mut differences = Vec::new();
+        if locked_runtime.version != runtime.version() {
+            differences.push(format!(
+                "version `{}` is not the compiler-bundled `{}`",
+                locked_runtime.version,
+                runtime.version()
+            ));
+        }
+        let bundled_here = matches!(
+            &locked_runtime.source,
+            LockSource::Bundled { compiler_version }
+                if compiler_version.trim_start_matches('=') == env!("CARGO_PKG_VERSION")
+        );
+        if !bundled_here {
+            differences.push(format!(
+                "source {:?} is not this compiler's bundled runtime",
+                locked_runtime.source
+            ));
+        }
+        if locked_runtime.archive_sha256 != runtime.archive_sha256() {
+            differences.push("archive hash differs from the compiler-bundled runtime".to_string());
+        }
+        if locked_runtime.shell_sha256 != runtime.shell_sha256() {
+            differences.push("shell hash differs from the compiler-bundled runtime".to_string());
+        }
+        if differences.is_empty() {
             pending.push(CHELIS_STD_PACKAGE_NAME.to_string());
         } else {
             reasons.push(format!(
-                "locked runtime `{}` from {:?} differs from compiler-bundled `{}`",
-                locked_runtime.version,
-                locked_runtime.source,
-                options.runtime.version()
+                "locked runtime `{CHELIS_STD_PACKAGE_NAME}`: {}",
+                differences.join("; ")
             ));
         }
     }
@@ -9399,8 +9421,9 @@ where
         ArchiveMember::Snapshot(manifest_bytes),
     );
     if manifest.package.name != CHELIS_STD_PACKAGE_NAME {
-        // chelis-std has a self-referential lock entry. Excluding its lock
-        // lets the committed bundle hash reach a fixed point.
+        // chelis-std's own lock names the runtime's hashes, so archiving it
+        // would make the archive depend on itself. Leaving it out lets the
+        // packed runtime reach a fixed point.
         let lock_path = root.join("reef.lock");
         match fs::read(&lock_path) {
             Ok(bytes) => {
@@ -12146,6 +12169,172 @@ mod tests {
             graph.packages[CHELIS_STD_PACKAGE_NAME].source,
             LoadedSourceKind::Root { .. }
         ));
+    }
+
+    fn runtime_load_options() -> LoadOptions {
+        LoadOptions {
+            auto_fetch: false,
+            runtime: test_runtime(),
+        }
+    }
+
+    /// A package with no declared dependency, which the runtime joins, and
+    /// the lock a build of it writes against [`test_runtime`].
+    fn implicit_runtime_package() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("app");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\ncompiler = \"{CURRENT_COMPILER_VERSION}\"\nmodule_prefix = \"App\"\n\n[dependencies]\n"
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module App.Main\nimport Std.Text (join)\n\ndef probe(parts: List[string]) -> string = join(parts, \",\")\n",
+        );
+        let (graph, _) = load_package_graph_with_lock_preference(
+            &root,
+            runtime_load_options(),
+            remote_discovery::LockPublication::InMemory,
+        )
+        .expect("resolve the package");
+        write_lockfile(
+            &root.join("reef.lock"),
+            &build_lockfile(&graph, test_runtime()),
+        )
+        .expect("write the lock");
+        (dir, root)
+    }
+
+    fn locked_runtime(root: &Path) -> LockedDependency {
+        read_lockfile(&root.join("reef.lock"))
+            .expect("read the lock")
+            .raw
+            .dependencies
+            .into_iter()
+            .find(|dependency| dependency.name == CHELIS_STD_PACKAGE_NAME)
+            .expect("the lock records the runtime")
+    }
+
+    fn edit_locked_runtime(root: &Path, edit: impl FnOnce(&mut LockedDependency)) {
+        let lock_path = root.join("reef.lock");
+        let mut lock = read_lockfile(&lock_path).expect("read the lock").raw;
+        edit(
+            lock.dependencies
+                .iter_mut()
+                .find(|dependency| dependency.name == CHELIS_STD_PACKAGE_NAME)
+                .expect("the lock records the runtime"),
+        );
+        write_lockfile(&lock_path, &lock).expect("write the lock");
+    }
+
+    fn assess_runtime_lock(root: &Path) -> package_versioning::LockAssessment {
+        let manifest = read_manifest(&root.join("reef.toml")).expect("read the manifest");
+        let lock = read_lockfile(&root.join("reef.lock")).expect("read the lock");
+        assess_transitive_lock(root, &manifest, &lock, runtime_load_options())
+            .expect("assess the lock")
+    }
+
+    /// Negative control: a lock that names the embedded runtime by version,
+    /// source, and both hashes is reused, and a build leaves it unchanged.
+    #[test]
+    fn a_lock_naming_the_embedded_runtime_is_reused() {
+        let (_dir, root) = implicit_runtime_package();
+        assert!(matches!(
+            assess_runtime_lock(&root),
+            package_versioning::LockAssessment::Reusable
+        ));
+        let before = fs::read(root.join("reef.lock")).expect("read the lock");
+        build_package_with_options(&root, &BuildOptions { auto_fetch: false }, test_runtime())
+            .expect("build against the current lock");
+        assert_eq!(
+            fs::read(root.join("reef.lock")).expect("read the lock"),
+            before
+        );
+    }
+
+    /// A lock from another compiler release, or naming another runtime
+    /// version, is stale as well, and the reason names what differs.
+    #[test]
+    fn a_lock_from_another_compiler_or_runtime_version_is_stale() {
+        for (difference, edit) in [
+            (
+                "source",
+                Box::new(|runtime: &mut LockedDependency| {
+                    runtime.source = LockSource::Bundled {
+                        compiler_version: "0.0.1".to_string(),
+                    }
+                }) as Box<dyn FnOnce(&mut LockedDependency)>,
+            ),
+            (
+                "version",
+                Box::new(|runtime: &mut LockedDependency| runtime.version = "0.0.1".to_string()),
+            ),
+        ] {
+            let (_dir, root) = implicit_runtime_package();
+            edit_locked_runtime(&root, edit);
+            match assess_runtime_lock(&root) {
+                package_versioning::LockAssessment::Stale { reasons } => assert!(
+                    reasons.iter().any(|reason| reason.contains(difference)),
+                    "the reason must name the {difference}: {reasons:?}"
+                ),
+                package_versioning::LockAssessment::Reusable => {
+                    panic!("a lock with another runtime {difference} was reused")
+                }
+            }
+        }
+    }
+
+    /// A std edit changes the embedded runtime's hashes but neither its
+    /// version nor the compiler version, so a lock written before it differs
+    /// from the runtime only in a hash. That lock is stale like one from
+    /// another release: a check resolves the runtime again, and a build
+    /// rewrites the lock to name the embedded hashes.
+    #[test]
+    fn a_lock_naming_other_runtime_hashes_is_stale() {
+        let other = "0".repeat(64);
+        for kind in ["archive", "shell"] {
+            let (_dir, root) = implicit_runtime_package();
+            edit_locked_runtime(&root, |runtime| match kind {
+                "archive" => runtime.archive_sha256 = other.clone(),
+                _ => runtime.shell_sha256 = other.clone(),
+            });
+            match assess_runtime_lock(&root) {
+                package_versioning::LockAssessment::Stale { reasons } => assert!(
+                    reasons
+                        .iter()
+                        .any(|reason| reason.contains(&format!("{kind} hash"))),
+                    "the reason must name the {kind} hash: {reasons:?}"
+                ),
+                package_versioning::LockAssessment::Reusable => {
+                    panic!("a lock naming another runtime {kind} hash was reused")
+                }
+            }
+            // Check and eval resolve the runtime again in memory and never
+            // write the lock; a build writes it.
+            let stale = fs::read(root.join("reef.lock")).expect("read the lock");
+            prepare_program_for_file(&root.join("src/main.ch"), test_runtime())
+                .unwrap_or_else(|error| panic!("check with a stale {kind} hash: {error}"))
+                .expect("the file is inside a package");
+            let snippet = root.join("snippet.ch");
+            write(
+                &snippet,
+                "import Std.Text (join)\n\ndef probe(parts: List[string]) -> string = join(parts, \",\")\n",
+            );
+            prepare_program_for_eval_file(&snippet, &root, test_runtime())
+                .unwrap_or_else(|error| panic!("eval with a stale {kind} hash: {error}"))
+                .expect("the snippet is inside a package");
+            assert_eq!(
+                fs::read(root.join("reef.lock")).expect("read the lock"),
+                stale
+            );
+            build_package_with_options(&root, &BuildOptions { auto_fetch: false }, test_runtime())
+                .unwrap_or_else(|error| panic!("build with a stale {kind} hash: {error}"));
+            let rewritten = locked_runtime(&root);
+            assert_eq!(rewritten.archive_sha256, test_runtime().archive_sha256());
+            assert_eq!(rewritten.shell_sha256, test_runtime().shell_sha256());
+        }
     }
 
     /// Negative parity for the version sync: a soft-verify mismatch must

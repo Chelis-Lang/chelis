@@ -43,10 +43,12 @@ use chelis_reef::{LockSource, ReefLock};
 use chelis_std_bundle::{
     BUNDLED_CHELIS_STD_VERSION, CHELIS_STD_ARCHIVE, CHELIS_STD_SHELL, EMBEDDED_RUNTIME,
 };
+use predicates::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
+use walkdir::WalkDir;
 
 fn std_package_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std")
@@ -103,13 +105,38 @@ fn locked_runtime_hashes(root: &Path) -> (String, String) {
     (entry.archive_sha256.clone(), entry.shell_sha256.clone())
 }
 
-/// The embedded archive holds exactly the runtime inputs of
+/// `reef.toml` and every `.ch` file below `src/` of the package at `root`,
+/// found by walking the tree rather than by the build script's own selection.
+fn manifest_and_ch_sources(root: &Path) -> Vec<PathBuf> {
+    let mut found = vec![PathBuf::from("reef.toml")];
+    for entry in WalkDir::new(root.join("src")) {
+        let entry = entry.expect("walk the std sources");
+        if entry.file_type().is_file()
+            && entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "ch")
+        {
+            found.push(
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("a source lies below its package")
+                    .to_path_buf(),
+            );
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The embedded archive holds exactly the manifest and the `.ch` sources of
 /// `packages/chelis-std`, byte for byte, so a binary never carries a runtime
 /// built from other sources.
 #[test]
 fn bundled_chelis_std_sources_match_the_checked_in_runtime_package() {
     let package_root = std_package_root();
-    let inputs = chelis_std_bundle::stage::runtime_inputs(&package_root).expect("runtime inputs");
+    let inputs = manifest_and_ch_sources(&package_root);
     let embedded = EMBEDDED_RUNTIME
         .archive_files()
         .expect("read the embedded archive");
@@ -471,4 +498,148 @@ fn phaseA_item1_negative_parity_explicit_version_mismatch() {
         "soft-verify mismatch must not write reef.lock; the synthesis \
          path must not paper over the explicit declaration"
     );
+}
+
+/// The lock at `root` with the `kind` hash of `package`'s entry replaced by
+/// zeros, written back; returns the edited text.
+fn poison_locked_hash(root: &Path, package: &str, kind: &str) -> String {
+    let lock_path = root.join("reef.lock");
+    let text = fs::read_to_string(&lock_path).expect("read reef.lock");
+    let entry = read_lockfile(root)
+        .dependencies
+        .into_iter()
+        .find(|dependency| dependency.name == package)
+        .unwrap_or_else(|| panic!("the lock records {package}"));
+    let hash = match kind {
+        "archive" => entry.archive_sha256,
+        _ => entry.shell_sha256,
+    };
+    let field = format!("{kind}_sha256");
+    let poisoned = text.replacen(
+        &format!("{field} = \"{hash}\""),
+        &format!("{field} = \"{}\"", "0".repeat(64)),
+        1,
+    );
+    assert_ne!(poisoned, text, "the {package} {kind} hash must be replaced");
+    fs::write(&lock_path, &poisoned).expect("write reef.lock");
+    poisoned
+}
+
+fn chelis_in(root: &Path, reef_home: &Path) -> Command {
+    let mut command = Command::cargo_bin("chelis").expect("chelis binary");
+    command
+        .current_dir(root)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
+        .env_remove("SOURCE_DATE_EPOCH");
+    command
+}
+
+/// A lock written before a std edit names other runtime hashes under the same
+/// versions. `chelis check` resolves the runtime again in memory and leaves
+/// the lock alone; `chelis reef build` resolves it again and writes the lock
+/// it would have written.
+#[test]
+fn check_and_build_resolve_a_lock_with_old_runtime_hashes_again() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let app = dir.path().join("app");
+    write_implicit_runtime_project(&app, "Downstream");
+    reef_build(&app, &reef_home);
+    let current = fs::read_to_string(app.join("reef.lock")).expect("read reef.lock");
+    for kind in ["archive", "shell"] {
+        let poisoned = poison_locked_hash(&app, "chelis-std", kind);
+        chelis_in(&app, &reef_home)
+            .args(["check", "src/main.ch"])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains(format!(
+                "{kind} hash differs from the compiler-bundled runtime"
+            )));
+        assert_eq!(
+            fs::read_to_string(app.join("reef.lock")).expect("read reef.lock"),
+            poisoned,
+            "chelis check never writes the lock"
+        );
+        reef_build(&app, &reef_home);
+        assert_eq!(
+            fs::read_to_string(app.join("reef.lock")).expect("read reef.lock"),
+            current,
+            "chelis reef build rewrites the lock to name the embedded runtime"
+        );
+    }
+}
+
+/// Negative control: a locked registry package whose recorded hash differs
+/// from its bytes is an integrity failure for both commands, and the lock is
+/// kept. Only the runtime entry, which names the compiler's own bytes, goes
+/// stale on a hash mismatch.
+#[test]
+fn a_registry_package_hash_mismatch_still_fails_hard() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let compiler = format!("={}", env!("CARGO_PKG_VERSION"));
+    let helper = dir.path().join("monorepo/packages/helper");
+    fs::create_dir_all(helper.join("src")).expect("mkdir helper/src");
+    fs::write(
+        helper.join("reef.toml"),
+        format!(
+            "[package]\nname = \"helper\"\nversion = \"0.1.0\"\ncompiler = \"{compiler}\"\nmodule_prefix = \"Helper\"\n\n[dependencies]\n"
+        ),
+    )
+    .expect("write helper reef.toml");
+    fs::write(
+        helper.join("src/core.ch"),
+        "module Helper.Core\nexport (twice)\n\ndef twice(x: i32) -> i32 = x\n",
+    )
+    .expect("write helper source");
+    reef_build(&helper, &reef_home);
+    chelis_in(dir.path(), &reef_home)
+        .args([
+            "reef",
+            "install",
+            "--from-monorepo",
+            dir.path().join("monorepo").to_str().unwrap(),
+            "helper=0.1.0",
+        ])
+        .assert()
+        .success();
+
+    let app = dir.path().join("app");
+    fs::create_dir_all(app.join("src")).expect("mkdir app/src");
+    fs::write(
+        app.join("reef.toml"),
+        format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\ncompiler = \"{compiler}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nhelper = {{ version = \"0.1.0\" }}\n"
+        ),
+    )
+    .expect("write app reef.toml");
+    fs::write(
+        app.join("src/main.ch"),
+        "module App.Main\nimport Helper.Core (twice)\n\ndef four() -> i32 = twice(4)\n",
+    )
+    .expect("write app source");
+    reef_build(&app, &reef_home);
+    let current = fs::read_to_string(app.join("reef.lock")).expect("read reef.lock");
+
+    for kind in ["archive", "shell"] {
+        let poisoned = poison_locked_hash(&app, "helper", kind);
+        let mismatch = format!("locked {kind} hash mismatch for `helper`");
+        chelis_in(&app, &reef_home)
+            .args(["check", "src/main.ch"])
+            .assert()
+            .failure()
+            .stdout(predicate::str::contains(&mismatch));
+        chelis_in(&app, &reef_home)
+            .args(["reef", "build", "--no-auto-fetch", "."])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(&mismatch));
+        assert_eq!(
+            fs::read_to_string(app.join("reef.lock")).expect("read reef.lock"),
+            poisoned,
+            "an integrity failure keeps the lock"
+        );
+        fs::write(app.join("reef.lock"), &current).expect("restore reef.lock");
+    }
 }

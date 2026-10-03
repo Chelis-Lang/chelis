@@ -173,11 +173,32 @@ mod tests {
         assert_eq!(in_memory, &on_disk);
     }
 
-    /// The archive holds exactly the staged inputs: the manifest and the
-    /// `.ch` sources, nothing else from the source tree.
+    /// `reef.toml` and every `.ch` file below `src/`, found by walking the
+    /// tree rather than by the build script's own selection.
+    fn manifest_and_ch_sources(root: &Path) -> Vec<PathBuf> {
+        fn walk(root: &Path, relative: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(root.join(relative)).expect("read a source directory") {
+                let entry = entry.expect("read a source entry");
+                let child = relative.join(entry.file_name());
+                let file_type = entry.file_type().expect("stat a source entry");
+                if file_type.is_dir() {
+                    walk(root, &child, found);
+                } else if child.extension().is_some_and(|extension| extension == "ch") {
+                    found.push(child);
+                }
+            }
+        }
+        let mut found = vec![PathBuf::from("reef.toml")];
+        walk(root, Path::new("src"), &mut found);
+        found.sort();
+        found
+    }
+
+    /// The archive holds exactly the manifest and the `.ch` sources, nothing
+    /// else from the source tree.
     #[test]
     fn archive_members_are_the_runtime_inputs() {
-        let inputs = stage::runtime_inputs(&std_root()).expect("runtime inputs");
+        let inputs = manifest_and_ch_sources(&std_root());
         let members = EMBEDDED_RUNTIME
             .archive_files()
             .expect("archive files")

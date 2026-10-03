@@ -13,9 +13,8 @@ refuses three kinds of tracked file:
 - a `reef.lock` that records a `chelis-std` dependency with source kind
   `bundled` or `local_registry`. Every lock reef writes records the runtime by
   the hashes of the binary that wrote it, so a `bundled` entry goes stale with
-  any std edit; reef never loads chelis-std from a local registry, so it treats
-  a `local_registry` entry, at any version, as stale and resolves the runtime
-  again.
+  any std edit, and a reef build treats a `local_registry` chelis-std entry, at
+  any version, as stale and resolves the runtime again.
 
 It reads every tracked path and its bytes from the index and exits 1 when it
 finds one. `gate.py --fast` and CI's lint-and-unit stage run it. With
@@ -53,14 +52,14 @@ GENERATED_DIRS = (
 )
 LOCK_FILE_NAME = "reef.lock"
 RUNTIME_PACKAGE = "chelis-std"
-# The chelis-std source kinds a committed lock cannot keep current: reef
-# serves the runtime only from the binary, and treats a `local_registry`
-# chelis-std entry at any version as stale.
+# The chelis-std source kinds a committed lock cannot keep current: a reef
+# build reuses only an entry naming the embedded runtime, and treats a
+# `local_registry` chelis-std entry at any version as stale.
 RUNTIME_SOURCE_KINDS = {
     "bundled": "records the bundled chelis-std by the hashes of the binary that "
     "wrote it",
-    "local_registry": "records chelis-std from a local registry, which reef never "
-    "loads it from, so it treats the entry as stale",
+    "local_registry": "records chelis-std from a local registry, an entry a reef "
+    "build treats as stale at any version",
 }
 PRODUCER = "crates/chelis-std-bundle/build.rs"
 

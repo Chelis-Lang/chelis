@@ -15,7 +15,7 @@
 //! Fail-old / pass-new contract: against the pre-#311 bundle this test
 //! fails at `chelis check` because the std shell does not export the
 //! `JsonInt` constructor (`does not export 'JsonInt'`). Against the
-//! regenerated bundle it type-checks clean (score 1) and evaluates,
+//! embedded bundle it type-checks clean (score 1) and evaluates,
 //! proving the constructor symbol crosses the module boundary through
 //! the bundle.
 
@@ -75,7 +75,7 @@ chelis-std = {{ version = "0.4.0" }}
 /// constructor by name from `Std.Io.Json`, parses a JSON integer, and
 /// pattern-matches the result on `JsonInt(n)` to extract the value.
 /// The match arm naming `JsonInt` is the cross-module-constructor use
-/// that the regenerated bundle must support.
+/// that the embedded bundle must support.
 const CROSS_MODULE_CTOR_PROGRAM: &str = r#"module Demo.Main
 
 import Std.Io.Json (Json, JsonInt, parse_json)

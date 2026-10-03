@@ -383,7 +383,12 @@ to the local-registry path. Three consequences:
    `Bundled` entry is produced; when absent, the lockfile-build step
    appends it after iterating the graph. The `archive_sha256` and
    `shell_sha256` fields come from the embedded runtime for both paths
-   so the recorded entry is byte-identical.
+   so the recorded entry is byte-identical. A lock's chelis-std entry is
+   reused only when its version, its `Bundled` source with this compiler's
+   version, and both hashes name the embedded runtime. Any difference,
+   a std rebuild that changes only the hashes included, makes the lock
+   stale, and reef resolves the graph again as it does after a compiler
+   upgrade.
 2. **Build-time packing, nothing committed.** The bundle crate's build
    script stages `packages/chelis-std/reef.toml`, the `.ch` files under
    its declared source roots, and its declared metadata files, then packs
@@ -399,9 +404,12 @@ to the local-registry path. Three consequences:
    does not depend on the bundle: the bundle build-depends on reef, and
    only binaries and test harnesses depend on the bundle, so a library
    that forgets to pass the runtime fails to compile. No dist pair or lock
-   recording the bundled runtime is committed;
-   `scripts/check_std_bundle_untracked.py` refuses one at commit time
-   and in CI, and
+   recording the bundled runtime is committed:
+   `scripts/check_std_bundle_untracked.py` refuses, in the gate and in CI,
+   a tracked file under either `dist/` directory and a tracked lock
+   anywhere that records the bundled runtime, and the pre-commit hook
+   runs it on a commit that stages a file under either `dist/` directory
+   or `packages/chelis-std/reef.lock`.
    `scripts/check_std_bundle_reproducible.py` requires two runs of the
    bundle's build script, in separate processes and output directories,
    to pack the same bytes.

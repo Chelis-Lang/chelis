@@ -119,11 +119,11 @@ Reef verifies the root identity, direct requirements, source kinds, canonical pa
 
 A valid lock causes no version search and no lock rewrite. This rule prevents implicit compatible upgrades during normal commands.
 
-A changed requirement or source declaration invalidates the lock preference. Reef then runs bounded local-first resolution.
+A changed requirement or source declaration invalidates the lock preference. So does a locked `chelis-std` entry that does not name the compiler's embedded runtime by version, bundled source, and archive and shell hashes: a std rebuild or a compiler upgrade makes that entry stale, not corrupt. Reef then runs bounded local-first resolution.
 
 If no local graph completes, Reef uses bounded provider discovery. An explicit update uses refresh mode even when a local graph completes.
 
-A locked hash failure or unavailable origin is an integrity failure. Reef does not search for replacement bytes after that failure.
+A locked hash failure of any other package, or an unavailable origin, is an integrity failure. Reef does not search for replacement bytes after that failure.
 
 Manifest schema 1 retains exact dependency versions. Manifest schema 2 activates resolver-2 ranges and bounded GitHub discovery.
 

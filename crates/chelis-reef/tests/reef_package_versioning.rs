@@ -1141,8 +1141,13 @@ fn malformed_lock_identity_fails_at_the_lock_boundary() {
     assert!(error.contains("invalid package name"), "{error}");
 }
 
+/// A lock names the bundled runtime by the hashes of the binary that wrote
+/// it, so a runtime hash that differs from the embedded runtime's marks the
+/// lock stale, not corrupt: the build resolves the runtime again and writes
+/// the lock it would have written. A locked registry package's hash mismatch
+/// stays a hard failure (`crates/chelis-cli/tests/reef_remote_discovery.rs`).
 #[test]
-fn locked_hash_failure_is_hard_and_preserves_the_lock() {
+fn a_runtime_hash_mismatch_is_stale_and_the_build_rewrites_the_lock() {
     let directory = tempdir().unwrap();
     let root = directory.path().join("hash-root");
     write_manifest(&root, "hash-root", "");
@@ -1164,16 +1169,16 @@ fn locked_hash_failure_is_hard_and_preserves_the_lock() {
         1,
     );
     std::fs::write(&lock_path, &poisoned).unwrap();
+    assert_ne!(poisoned, lock);
 
-    let error = build_package_with_options(
+    build_package_with_options(
         &root,
         &BuildOptions { auto_fetch: false },
         &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains("locked archive hash mismatch"), "{error}");
-    assert_eq!(std::fs::read_to_string(lock_path).unwrap(), poisoned);
+    assert_eq!(std::fs::read_to_string(lock_path).unwrap(), lock);
 }
 
 #[test]
