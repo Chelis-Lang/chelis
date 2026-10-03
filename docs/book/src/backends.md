@@ -73,6 +73,15 @@ keeps its environment. The C compiler is a declared input: the build prints
 script, that predefines `__FAST_MATH__`, a nonzero `__FINITE_MATH_ONLY__`, or no
 `__OPTIMIZE__` under the profile.
 
+Transcendentals (`exp`, `log`, `sin`, `cos`, `tan`, `atan`, `tanh`) are
+correctly rounded, so every lane returns the same bits for them. Generated C
+does not call the platform math library, Accelerate vForce, or Sleef: each unit
+defines the kernels it uses as `static` functions, taken byte for byte from the
+compiler's vendored CORE-MATH kernels that `chelis eval` also runs. A static
+library therefore exports no extra math symbol, and `chelis_math.h` declares
+nothing. Activations such as `sigmoid`, `silu`, `gelu`, and `softmax` are
+graphs over these kernels and IEEE arithmetic, so they agree bit for bit too.
+
 Static libraries contain module and support objects, with no process entry.
 Consumers include the generated header, link the module archive followed by the
 staged `libchelis_runtime.a`, and add the native dependencies reported by the
@@ -124,8 +133,12 @@ been compared across targets.
 - Metal `bf16` kernels require an Apple7 GPU family device.
 - HIP support for `bf16` and `f16` depends on the operation. A target limit
   produces a diagnostic rather than silently changing the calculation.
-- Floating-point comparisons across platforms use operation-appropriate
-  tolerances; Metal transcendental kernels can require wider `f32` tolerance.
+- HIP and Metal reject the transcendentals and anything built from them, such
+  as `sigmoid` or `softmax`, at build time: the device lanes have no correctly
+  rounded kernels yet, and the build reports the operation rather than
+  computing it with a vendor library. Use `c` for such a program.
+- Every target computes the same bits for an admitted operation; there is no
+  per-operation or per-target tolerance.
 
 Use `chelis eval --file app.ch` to execute locally without generating native
 source. It evaluates host code and tensor operations through the compiler's
