@@ -20,10 +20,7 @@
       "case_id": "c-note/docs/qa_evidence/ground_truth/greeks.ch",
       "corpus": "c-note",
       "expected": "value",
-      "known_divergence": {
-        "issue": 2379
-      },
-      "notes": "eval returns a value; `build --target c` refuses. Verified discriminator: a `cast` node in the scalar-`wrt` differentiated body. Identical on 0.18.11 and main",
+      "notes": "",
       "roots": [
         "delta"
       ],
@@ -71,10 +68,7 @@
       "case_id": "c-note/fixtures/black_scholes/call.ch",
       "corpus": "c-note",
       "expected": "value",
-      "known_divergence": {
-        "issue": 2379
-      },
-      "notes": "eval returns a value; `build --target c` refuses. Verified discriminator: a `cast` node in the scalar-`wrt` differentiated body. Identical on 0.18.11 and main",
+      "notes": "",
       "roots": [
         "price",
         "delta"
