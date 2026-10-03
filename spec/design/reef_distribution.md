@@ -383,12 +383,15 @@ to the local-registry path. Three consequences:
    `Bundled` entry is produced; when absent, the lockfile-build step
    appends it after iterating the graph. The `archive_sha256` and
    `shell_sha256` fields come from the embedded runtime for both paths
-   so the recorded entry is byte-identical. A lock's chelis-std entry is
-   reused only when its version, its `Bundled` source with this compiler's
-   version, and both hashes name the embedded runtime. Any difference,
-   a std rebuild that changes only the hashes included, makes the lock
-   stale, and reef resolves the graph again as it does after a compiler
-   upgrade.
+   so the recorded entry is byte-identical. The graph-loading commands
+   (`chelis check`, `build`, `eval`, `test`, and `reef build`) reuse a
+   lock's chelis-std entry only when its version, its `Bundled` source
+   with this compiler's version, and both hashes name the embedded
+   runtime. For them any difference, a std rebuild that changes only the
+   hashes included, makes the lock stale, and reef resolves the graph
+   again as it does after a compiler upgrade. `reef export-bundle` and
+   `reef install --from-lockfile` read the lock without that assessment
+   (chelis#3025).
 2. **Build-time packing, nothing committed.** The bundle crate's build
    script stages `packages/chelis-std/reef.toml`, the `.ch` files under
    its declared source roots, and its declared metadata files, then packs

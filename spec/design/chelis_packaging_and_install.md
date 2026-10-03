@@ -119,7 +119,7 @@ Reef verifies the root identity, direct requirements, source kinds, canonical pa
 
 A valid lock causes no version search and no lock rewrite. This rule prevents implicit compatible upgrades during normal commands.
 
-A changed requirement or source declaration invalidates the lock preference. So does a locked `chelis-std` entry that does not name the compiler's embedded runtime by version, bundled source, and archive and shell hashes: a std rebuild or a compiler upgrade makes that entry stale, not corrupt. Reef then runs bounded local-first resolution.
+A changed requirement or source declaration invalidates the lock preference. For the graph-loading commands (`chelis check`, `build`, `eval`, `test`, and `reef build`), so does a locked `chelis-std` entry that does not name the compiler's embedded runtime by version, bundled source, and archive and shell hashes: a std rebuild or a compiler upgrade makes that entry stale, not corrupt. Reef then runs bounded local-first resolution. `reef export-bundle` and `reef install --from-lockfile` read the lock without that assessment (chelis#3025).
 
 If no local graph completes, Reef uses bounded provider discovery. An explicit update uses refresh mode even when a local graph completes.
 
