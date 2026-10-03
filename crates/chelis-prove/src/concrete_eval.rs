@@ -408,7 +408,8 @@ fn quantile_linear(data: &[f64], q: f64) -> f64 {
     quantile_linear_impl(data, q)
 }
 
-/// Public accessor for use by the contract fuzz validation (contracts.rs).
+/// Accessor for the standard-contract discharge table generator
+/// (contracts/generator.rs).
 pub(crate) fn quantile_linear_pub(data: &[f64], q: f64) -> f64 {
     quantile_linear_impl(data, q)
 }

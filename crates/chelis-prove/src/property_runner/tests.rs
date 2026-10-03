@@ -1447,3 +1447,35 @@ fn chelis_2965_spelled_widths_cover_suffixes_and_the_unsuffixed_literal_default(
     assert_eq!(spelled_float_widths("1e-3"), vec![Prim::F32]);
     assert!(spelled_float_widths("xf32 + count_f64 + 3").is_empty());
 }
+
+// --- chelis#2957: a property resolves only the contracts it names ---
+
+fn resolved_rows_of(source: &str) -> Vec<String> {
+    let decls = flatten_module_decls(&chelis_surf::parser::parse_str(source).expect("parses"));
+    let properties = collect_surf_properties(&decls, &decls, None).expect("properties");
+    crate::contracts::RESOLVED_ROWS.with(|rows| rows.borrow_mut().clear());
+    contract_assumptions(&decls, &properties[0]).expect("contracts resolve");
+    crate::contracts::RESOLVED_ROWS.with(|rows| rows.borrow().clone())
+}
+
+#[test]
+fn chelis_2957_a_property_without_a_float_contract_resolves_no_float_discharge() {
+    assert!(resolved_rows_of("module M\n@property p forall(x: f32):\n  (x <= x)\n").is_empty());
+    assert_eq!(
+        resolved_rows_of(
+            "module M\n@property p forall(x: f64):\n  (x <= x)\n  with contract = \"std.quantile.range\"\n"
+        ),
+        vec!["std.quantile.range@untyped".to_string()]
+    );
+    // A float contract resolves at the property's widths only, with the
+    // range contract reflection implies.
+    assert_eq!(
+        resolved_rows_of(
+            "module M\n@property p forall(x: f32):\n  (x <= x)\n  with contract = \"std.normal_cdf.reflection\"\n"
+        ),
+        vec![
+            "std.normal_cdf.range@f32".to_string(),
+            "std.normal_cdf.reflection@f32".to_string()
+        ]
+    );
+}

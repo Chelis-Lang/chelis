@@ -1,0 +1,329 @@
+{
+  "schema": "chelis-prove-standard-contract-discharges-v1",
+  "std_graph_digest": "44c84d54a0c36db8c51cdaf9141f0216de93538ee4e3896c63127c15439b4582",
+  "rows": [
+    {
+      "contract": "std.normal_cdf.range",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 8192,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "normal-cdf finite domain [-10, 10]",
+      "dtype": "f16"
+    },
+    {
+      "contract": "std.normal_cdf.range",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 8192,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "normal-cdf finite domain [-10, 10]",
+      "dtype": "bf16"
+    },
+    {
+      "contract": "std.normal_cdf.range",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 8192,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "normal-cdf finite domain [-10, 10]",
+      "dtype": "f32"
+    },
+    {
+      "contract": "std.normal_cdf.range",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 8192,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "normal-cdf finite domain [-10, 10]",
+      "dtype": "f64"
+    },
+    {
+      "contract": "std.normal_cdf.reflection",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 4098,
+      "max_error": 0.000244140625,
+      "counterexample": {
+        "error": 0.000244140625,
+        "x": 0.0026397705078125
+      },
+      "domain": "normal-cdf finite domain [-10, 10]",
+      "dtype": "f16"
+    },
+    {
+      "contract": "std.normal_cdf.reflection",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 4104,
+      "max_error": 0.001953125,
+      "counterexample": {
+        "error": 0.001953125,
+        "x": 0.0174560546875
+      },
+      "domain": "normal-cdf finite domain [-10, 10]",
+      "dtype": "bf16"
+    },
+    {
+      "contract": "std.normal_cdf.reflection",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 4097,
+      "max_error": 2.9802322387695312e-8,
+      "counterexample": {
+        "error": 2.9802322387695312e-8,
+        "x": 0.0010967479320243
+      },
+      "domain": "normal-cdf finite domain [-10, 10]",
+      "dtype": "f32"
+    },
+    {
+      "contract": "std.normal_cdf.reflection",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 8192,
+      "max_error": 5.551115123125783e-17,
+      "counterexample": null,
+      "domain": "normal-cdf finite domain [-10, 10]",
+      "dtype": "f64"
+    },
+    {
+      "contract": "std.normal_cdf.monotonicity",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 4096,
+      "max_error": 0.0009765625,
+      "counterexample": {
+        "error": 0.0009765625,
+        "hi": 0.0007686614990234375,
+        "lo": -0.0011310577392578125
+      },
+      "domain": "ordered normal-cdf finite pairs in [-10, 10]",
+      "dtype": "f16"
+    },
+    {
+      "contract": "std.normal_cdf.monotonicity",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 8192,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered normal-cdf finite pairs in [-10, 10]",
+      "dtype": "bf16"
+    },
+    {
+      "contract": "std.normal_cdf.monotonicity",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 8192,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered normal-cdf finite pairs in [-10, 10]",
+      "dtype": "f32"
+    },
+    {
+      "contract": "std.normal_cdf.monotonicity",
+      "samples": 8192,
+      "seed": 3235848230,
+      "checked_samples": 8192,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered normal-cdf finite pairs in [-10, 10]",
+      "dtype": "f64"
+    },
+    {
+      "contract": "std.exp.positivity",
+      "samples": 4096,
+      "seed": 14688294,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "exp over finite samples spanning the underflow to +0 and the overflow to +inf",
+      "dtype": "f16"
+    },
+    {
+      "contract": "std.exp.positivity",
+      "samples": 4096,
+      "seed": 14688294,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "exp over finite samples spanning the underflow to +0 and the overflow to +inf",
+      "dtype": "bf16"
+    },
+    {
+      "contract": "std.exp.positivity",
+      "samples": 4096,
+      "seed": 14688294,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "exp over finite samples spanning the underflow to +0 and the overflow to +inf",
+      "dtype": "f32"
+    },
+    {
+      "contract": "std.exp.positivity",
+      "samples": 4096,
+      "seed": 14688294,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "exp over finite samples spanning the underflow to +0 and the overflow to +inf",
+      "dtype": "f64"
+    },
+    {
+      "contract": "std.exp.monotonicity",
+      "samples": 4096,
+      "seed": 925734,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered exp finite pairs in [-10, 10]",
+      "dtype": "f16"
+    },
+    {
+      "contract": "std.exp.monotonicity",
+      "samples": 4096,
+      "seed": 925734,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered exp finite pairs in [-10, 10]",
+      "dtype": "bf16"
+    },
+    {
+      "contract": "std.exp.monotonicity",
+      "samples": 4096,
+      "seed": 925734,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered exp finite pairs in [-10, 10]",
+      "dtype": "f32"
+    },
+    {
+      "contract": "std.exp.monotonicity",
+      "samples": 4096,
+      "seed": 925734,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered exp finite pairs in [-10, 10]",
+      "dtype": "f64"
+    },
+    {
+      "contract": "std.log.monotonicity",
+      "samples": 4096,
+      "seed": 1056806,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered positive pairs in [1e-6, 1e6] (1e-4..1e4 at f16)",
+      "dtype": "f16"
+    },
+    {
+      "contract": "std.log.monotonicity",
+      "samples": 4096,
+      "seed": 1056806,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered positive pairs in [1e-6, 1e6] (1e-4..1e4 at f16)",
+      "dtype": "bf16"
+    },
+    {
+      "contract": "std.log.monotonicity",
+      "samples": 4096,
+      "seed": 1056806,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered positive pairs in [1e-6, 1e6] (1e-4..1e4 at f16)",
+      "dtype": "f32"
+    },
+    {
+      "contract": "std.log.monotonicity",
+      "samples": 4096,
+      "seed": 1056806,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "ordered positive pairs in [1e-6, 1e6] (1e-4..1e4 at f16)",
+      "dtype": "f64"
+    },
+    {
+      "contract": "std.log.one",
+      "samples": 64,
+      "seed": 1056806,
+      "checked_samples": 64,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "log anchor x = 1",
+      "dtype": "f16"
+    },
+    {
+      "contract": "std.log.one",
+      "samples": 64,
+      "seed": 1056806,
+      "checked_samples": 64,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "log anchor x = 1",
+      "dtype": "bf16"
+    },
+    {
+      "contract": "std.log.one",
+      "samples": 64,
+      "seed": 1056806,
+      "checked_samples": 64,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "log anchor x = 1",
+      "dtype": "f32"
+    },
+    {
+      "contract": "std.log.one",
+      "samples": 64,
+      "seed": 1056806,
+      "checked_samples": 64,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "log anchor x = 1",
+      "dtype": "f64"
+    },
+    {
+      "contract": "std.quantile.range",
+      "samples": 8192,
+      "seed": 13246502,
+      "checked_samples": 8192,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "quantile range bounded by [min, max]",
+      "dtype": null
+    },
+    {
+      "contract": "std.quantile.monotonicity",
+      "samples": 8192,
+      "seed": 13312038,
+      "checked_samples": 8192,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "quantile monotone in q: p <= q => quantile(p) <= quantile(q)",
+      "dtype": null
+    },
+    {
+      "contract": "std.quantile.boundary",
+      "samples": 4096,
+      "seed": 13377574,
+      "checked_samples": 4096,
+      "max_error": 0.0,
+      "counterexample": null,
+      "domain": "quantile boundary: q=0 -> min, q=1 -> max",
+      "dtype": null
+    }
+  ]
+}

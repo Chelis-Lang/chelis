@@ -43,10 +43,7 @@ use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
     NonVacuityRecord, NonVacuityStatus, base_verdict_from_discharge, rollup_composite,
 };
-use crate::contracts::{
-    NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry,
-    standard_contract_registry_with_prover,
-};
+use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry_for};
 use crate::discharge::QualifierSet;
 
 /// The verification status of one user property.
@@ -976,12 +973,12 @@ fn contract_assumptions(
         return Ok(Vec::new());
     }
     // A float contract is fuzz-discharged per width, and the consumer resolves
-    // it at every width its operands can have (chelis#2965).
+    // it at every width its operands can have (chelis#2965). Only the
+    // contracts the property names are resolved.
     let widths = property_float_widths(decls, property);
-    let registry = match BeaconContractProver::from_env() {
-        Some(prover) => standard_contract_registry_with_prover(&prover, &widths),
-        None => standard_contract_registry(&widths),
-    };
+    let reached = contracts.iter().cloned().collect::<BTreeSet<_>>();
+    let prover = BeaconContractProver::from_env();
+    let registry = standard_contract_registry_for(Some(&reached), &widths, prover.as_ref());
     let probe = registry.probe_consumer(
         &property.name,
         CompositeVerdict::Proven,

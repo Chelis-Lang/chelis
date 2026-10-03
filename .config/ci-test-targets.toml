@@ -1331,6 +1331,14 @@ job = "full-workspace"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "every exact gradient body over the 24-input sweep at f32 and f64 builds one C executable per body and dtype"
 tracking_issue = "chelis#3017"
+[[target_exclusion]]
+package = "chelis-prove"
+name = "standard_contract_discharge_table"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "recomputes every standard-contract fuzz discharge at every float width; a per-pull-request canary in the chelis-prove lib recomputes one row"
+tracking_issue = "chelis#2957"
 
 # These individual heavy rows remain in otherwise selectable targets. Each
 # exact test is removed from package expansion and retains the same unfiltered

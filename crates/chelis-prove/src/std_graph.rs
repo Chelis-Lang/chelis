@@ -18,6 +18,7 @@ use std::sync::{Mutex, OnceLock};
 use chelis_compiler_api::compiler;
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_types::{ScalarValue, tensor_from_scalars, types::Prim};
+use sha2::{Digest, Sha256};
 
 type Memo = Mutex<BTreeMap<(&'static str, u64), ScalarValue>>;
 
@@ -88,6 +89,26 @@ pub fn normal_cdf_batch(inputs: &[ScalarValue]) -> Result<Vec<ScalarValue>, Stri
 /// `Std.Contracts.normal_cdf` at the input's own dtype.
 pub fn normal_cdf(input: ScalarValue) -> Result<ScalarValue, String> {
     normal_cdf_batch(std::slice::from_ref(&input)).map(|mut values| values.remove(0))
+}
+
+/// A digest of the chelis-std slice a `normal_cdf` program links, in canonical
+/// formatting. The committed standard-contract discharge table records it, so
+/// a `normal_cdf` verdict computed against one shipped graph is never served
+/// for another. It covers the std source the graph is built from, not the
+/// evaluator or the kernels; the table's recomputation check covers those.
+pub fn normal_cdf_graph_digest() -> Result<String, String> {
+    static DIGEST: OnceLock<Result<String, String>> = OnceLock::new();
+    DIGEST
+        .get_or_init(|| {
+            let entry = chelis_surf::parser::parse_str("import Std.Contracts (normal_cdf)\n")
+                .map_err(|err| format!("normal_cdf digest probe did not parse: {err:?}"))?;
+            let program = chelis_reef::prepare_single_file_program("prove-normal-cdf", &entry)?
+                .ok_or("normal_cdf digest probe did not link chelis-std")?;
+            let text = chelis_surf::format::format_program(&program.stdlib_decls);
+            let digest = Sha256::digest(text.as_bytes());
+            Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+        })
+        .clone()
 }
 
 fn evaluate_normal_cdf(
