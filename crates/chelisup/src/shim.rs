@@ -95,7 +95,7 @@ fn not_installed_message(store: &Store, resolution: &Resolution) -> String {
 fn no_toolchain_message(store: &Store, cwd: &Path) -> String {
     format!(
         "chelis: no chelis toolchain resolved.\n  \
-         not inside a reef package (no reef.toml with a compiler pin above {cwd}), \
+         no applicable reef.toml compiler selection above {cwd}, \
          no chelis-toolchain file, CHELIS_TOOLCHAIN is unset, and no default is recorded.\n  \
          installed: {installed}\n  \
          pick a default: chelisup default <ver>  (after chelisup install <ver>)",

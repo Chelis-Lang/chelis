@@ -73,15 +73,18 @@ packages.
 
 ## Install dependencies for a project
 
-In a cloned project, first install the exact `X.Y.Z` from its `reef.toml`
-`[package] compiler = "=X.Y.Z"` pin with `chelisup install X.Y.Z`. The
-`chelis` shim needs that toolchain before it can start `reef setup` inside
-the project. Then run:
+In a cloned project, use an installed current default compiler to provision
+the project's exact `reef.toml` compiler pin and dependencies:
 
 ```sh
 chelis reef setup
 chelis reef build
 ```
+
+The installed shim routes bare `reef setup` to the recorded default compiler;
+the project pin is setup's provisioning target. Explicit version, environment,
+and `chelis-toolchain` overrides still take precedence. Ordinary compiler verbs
+use the project pin and reject a missing toolchain before execution.
 
 Setup reads `reef.lock` when present and attempts to install its remotely
 sourced packages and host binaries. Path dependencies and the compiler-bundled

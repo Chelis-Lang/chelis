@@ -348,3 +348,168 @@ fn setup_stops_before_doctor_when_src_sync_fails() {
         .stdout(predicate::str::contains("no reef.lock"))
         .stdout(predicate::str::contains("--- doctor ---").not());
 }
+
+// The installed shim must reach the current setup orchestrator before the
+// project's missing compiler can be provisioned. Direct-binary tests above
+// cannot prove this dispatch boundary.
+#[cfg(unix)]
+fn issue_2818_installed_shim(home: &Path) -> PathBuf {
+    let installer = chelisup_bin();
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for name in ["chelis", "chelisup"] {
+        fs::copy(&installer, bin.join(name)).unwrap();
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let compiler = home.join("toolchains").join(version).join("bin/chelis");
+    fs::create_dir_all(compiler.parent().unwrap()).unwrap();
+    fs::copy(assert_cmd::cargo::cargo_bin("chelis"), compiler).unwrap();
+    fs::write(home.join("default"), format!("{version}\n")).unwrap();
+    bin.join("chelis")
+}
+
+#[cfg(unix)]
+fn issue_2818_shim_command(shim: &Path, home: &Path, shell: &Path) -> Command {
+    let mut command = Command::new(shim);
+    command
+        .current_dir(shell)
+        .env("CHELIS_HOME", home)
+        .env_remove("CHELIS_TOOLCHAIN")
+        .env_remove("CHELISUP_BIN")
+        .env_remove("GITHUB_TOKEN");
+    command
+}
+
+#[cfg(unix)]
+#[test]
+fn issue_2818_installed_shim_provisions_a_different_missing_pin() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let shell = tmp.path().join("shell");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
+    let shim = issue_2818_installed_shim(&home);
+    let releases = tmp.path().join("releases");
+    fs::create_dir_all(&releases).unwrap();
+    write_release_tarball(&releases, "0.9.9", &host_build("0.9.9"));
+
+    for args in [
+        vec!["--version"],
+        vec!["check", "src/main.ch"],
+        vec!["eval", "--file", "src/main.ch"],
+    ] {
+        issue_2818_shim_command(&shim, &home, &shell)
+            .env("CHELISUP_RELEASE_BASE", &releases)
+            .args(args)
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("chelisup install 0.9.9"));
+    }
+    assert!(!home.join("toolchains/0.9.9").exists());
+    issue_2818_shim_command(&shim, &home, &shell)
+        .env("CHELISUP_RELEASE_BASE", &releases)
+        .args(["reef", "setup"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("running `chelisup install 0.9.9`"))
+        .stdout(predicate::str::contains("toolchain: ok"))
+        .stdout(predicate::str::contains("--- doctor ---"));
+    assert!(home.join("toolchains/0.9.9/bin/chelis").is_file());
+    assert_eq!(
+        fs::read_to_string(home.join("default")).unwrap().trim(),
+        env!("CARGO_PKG_VERSION")
+    );
+    let installer_bytes = fs::read(chelisup_bin()).unwrap();
+    for name in ["chelis", "chelisup"] {
+        assert_eq!(
+            fs::read(home.join("bin").join(name)).unwrap(),
+            installer_bytes
+        );
+    }
+    // Once B exists, bare setup still selects A: the old B fixture has no
+    // setup implementation. Selection is based on purpose, not availability.
+    issue_2818_shim_command(&shim, &home, &shell)
+        .env("CHELISUP_RELEASE_BASE", &releases)
+        .args(["reef", "setup"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--- doctor ---"));
+}
+
+#[cfg(unix)]
+#[test]
+fn issue_2818_failed_download_preserves_default_and_installer() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let shell = tmp.path().join("shell");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
+    let shim = issue_2818_installed_shim(&home);
+    let releases = tmp.path().join("empty-releases");
+    fs::create_dir_all(&releases).unwrap();
+    issue_2818_shim_command(&shim, &home, &shell)
+        .env("CHELISUP_RELEASE_BASE", &releases)
+        .args(["reef", "setup"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("running `chelisup install 0.9.9`"))
+        .stdout(predicate::str::contains("--- doctor ---").not())
+        .stderr(predicate::str::contains("install failed"));
+    assert!(!home.join("toolchains/0.9.9").exists());
+    assert_eq!(
+        fs::read_to_string(home.join("default")).unwrap().trim(),
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(fs::read(&shim).unwrap(), fs::read(chelisup_bin()).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn issue_2818_missing_explicit_overrides_do_not_fall_back() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let shell = tmp.path().join("shell");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
+    let shim = issue_2818_installed_shim(&home);
+    issue_2818_shim_command(&shim, &home, &shell)
+        .args(["+0.9.9", "reef", "setup"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("the +<ver> argument"));
+    issue_2818_shim_command(&shim, &home, &shell)
+        .env("CHELIS_TOOLCHAIN", "0.9.9")
+        .args(["reef", "setup"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("CHELIS_TOOLCHAIN"));
+    fs::write(shell.join("chelis-toolchain"), "0.9.9\n").unwrap();
+    issue_2818_shim_command(&shim, &home, &shell)
+        .args(["reef", "setup"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("chelis-toolchain"));
+    assert!(!home.join("toolchains/0.9.9").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn issue_2818_help_and_invalid_flags_do_not_provision() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let shell = tmp.path().join("shell");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
+    let shim = issue_2818_installed_shim(&home);
+    issue_2818_shim_command(&shim, &home, &shell)
+        .args(["reef", "setup", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage:"));
+    issue_2818_shim_command(&shim, &home, &shell)
+        .args(["reef", "setup", "--unknown-flag"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unexpected argument"));
+    assert!(!home.join("toolchains/0.9.9").exists());
+}

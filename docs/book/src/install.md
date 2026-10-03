@@ -54,30 +54,31 @@ version overrides and project pins must be changed separately.
 ## Use a project
 
 A Reef project's `reef.toml` declares its toolchain under `[package]`, for
-example `compiler = "=0.18.12"`. Install that version **before** invoking
-`chelis` inside the project:
+example `compiler = "=0.18.12"`. With a current default toolchain installed,
+provision a fresh clone in one command:
 
 ```sh
 cd path/to/project
-chelisup install 0.18.12
 chelis reef setup
 chelis reef build
 ```
 
-Replace `0.18.12` with the `X.Y.Z` in your project's compiler pin. The shim
-checks the pin before starting `chelis reef setup`, so setup cannot install a
-missing pinned toolchain when invoked this way. Setup installs dependencies
-recorded in `reef.lock`, if the file exists; it also syncs declared Chelis
-source crates and reports toolchain, source-crate, and binary-artifact status.
-`chelis reef build` is a separate command. See [Reef and Packages](reef.md) for
-its outputs and dependency workflow.
+Bare `chelis reef setup` uses the recorded default compiler as its orchestrator,
+then installs the project's exact pin if missing. Setup also installs dependencies
+recorded in `reef.lock`, syncs declared Chelis source crates, and reports status.
+Build is a separate command and uses the project's pin. Explicit `+X.Y.Z`,
+`CHELIS_TOOLCHAIN`, and `chelis-toolchain` overrides still select the setup
+orchestrator; that selected compiler must already be installed and support setup.
+A missing default requires installing a current toolchain and recording it with
+`chelisup default X.Y.Z`.
 
 The shim chooses an installed toolchain in this order: a leading `+X.Y.Z`
 argument, `CHELIS_TOOLCHAIN`, the nearest `chelis-toolchain` file, the nearest
 `reef.toml` compiler pin, then the recorded default. For example,
 `chelis +0.18.12 --version` selects that installed version for one command.
 A missing selected version produces an error naming `chelisup install X.Y.Z`;
-there is no automatic fallback. `+latest` is unsupported.
+there is no automatic fallback. `+latest` is unsupported. The project-pin
+level is skipped only for the explicit `reef setup` provisioning command.
 
 `chelis reef doctor` reports the installed toolchain, source-crate sync, and
 binary artifacts for the current project without installing anything. With

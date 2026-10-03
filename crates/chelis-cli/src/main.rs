@@ -739,6 +739,8 @@ enum ReefCommand {
     },
     /// Bring a freshly-cloned shell to its pins in one command.
     ///
+    /// Bare shim invocation uses the recorded default compiler as the
+    /// orchestrator; explicit toolchain overrides retain precedence.
     /// Reads the `reef.toml` compiler pin, then, in order:
     /// 1. ensures the pinned toolchain is installed, auto-installing it by
     ///    delegating to `chelisup` when it is missing;
