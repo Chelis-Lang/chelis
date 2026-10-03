@@ -337,8 +337,23 @@ fn a_literal_count_is_its_static_extent() {
                                         == u64::try_from(source.find("vmap(").unwrap()).unwrap()
                                 })
                         }
-                        "sk6" | "sk7" => {
-                            error.message.contains("`n`") && error.message.contains("`f`")
+                        "sk6" => {
+                            error.message.contains("`f`")
+                                && error.message.contains("argument 2")
+                                && error.message.contains("axis 0")
+                                && error.expected.as_deref() == Some("2")
+                                && error.got.as_deref() == Some("3")
+                                && error.span.is_some_and(|span| {
+                                    span.offset()
+                                        == u64::try_from(source.find("f(key_from_seed(").unwrap())
+                                            .unwrap()
+                                })
+                        }
+                        "sk7" => {
+                            // The rigid generic binder rejects even when this
+                            // particular call has matching extents. It knows
+                            // neither a directional pair nor a call coordinate.
+                            error.expected.is_none() && error.got.is_none() && error.span.is_none()
                         }
                         "ascribed" => {
                             error.expected.as_deref() == Some("tensor[3, key]")
@@ -350,7 +365,15 @@ fn a_literal_count_is_its_static_extent() {
                                 })
                         }
                         "negative" => {
-                            error.message.contains("split_keys") && error.message.contains("-2")
+                            error.message.contains("split_keys")
+                                && error.message.contains("argument 2")
+                                && error.expected.as_deref() == Some("non-negative count")
+                                && error.got.as_deref() == Some("-2")
+                                && error.span.is_some_and(|span| {
+                                    span.offset()
+                                        == u64::try_from(source.find("split_keys(").unwrap())
+                                            .unwrap()
+                                })
                         }
                         _ => unreachable!("complete literal-count case table"),
                     }

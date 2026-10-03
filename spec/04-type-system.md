@@ -2667,9 +2667,10 @@ Each element of `errors` carries:
 > compiler measured one.
 
 > **[04-FIT-27]** For a checker rejection of `to_list`,
-> `tensor_to_scalar`, `copy`, `cast`, `expand` (axis or size), `shrink`
-> (arity, tensor, or bounds), `reshape` (shape type, tensor input, or
-> element count), a reduction's tensor input or selected axis, or a function
+> `tensor_to_scalar`, `copy`, `cast`, `split_keys` (count), `expand`
+> (axis or size), `shrink` (arity, tensor, or bounds), `reshape`
+> (shape type, tensor input, or element count), a reduction's tensor input
+> or selected axis, or a function
 > application's argument count or tensor-dimension match, the diagnostic SHALL
 > retain the available location of the rejecting call or offending operand,
 > not substitute a containing declaration or unrelated argument. Its message

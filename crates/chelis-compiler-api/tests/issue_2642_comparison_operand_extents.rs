@@ -32,7 +32,10 @@
 mod ownership_support;
 
 use chelis_compiler_api::compiler::{compile, eval};
-use chelis_compiler_api::schema::{CompileRequest, CompileTarget, EvalRequest, SourceKind};
+use chelis_compiler_api::schema::{
+    CompileRequest, CompileTarget, Diagnostic, DiagnosticSpan, EvalRequest, SourceKind,
+};
+use chelis_vocab::DiagnosticKind;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -266,12 +269,39 @@ fn disagreeing_extents_still_fail_in_both_lanes() {
 
 #[test]
 fn contradicting_literal_extents_are_refused_before_running() {
-    let refused = evaluator_failure(CONTRADICTION.source);
-    assert!(
-        refused.contains("dimension mismatch: Lit(2) vs Lit(3)"),
-        "evaluator: {refused}"
-    );
-    let error = compile(CompileRequest {
+    let call_offset = u64::try_from(
+        CONTRADICTION
+            .source
+            .find("lt(")
+            .expect("authored comparison call"),
+    )
+    .expect("source offset fits u64");
+    let assert_refusal = |errors: &[Diagnostic]| {
+        let mismatch = errors
+            .iter()
+            .find(|error| {
+                error.kind() == DiagnosticKind::DimensionMismatch
+                    && error.message.contains("`lt`")
+                    && error.message.contains("argument 2")
+                    && error.message.contains("axis 0")
+            })
+            .unwrap_or_else(|| panic!("the comparison must reject at its operand: {errors:?}"));
+        assert_eq!(mismatch.expected.as_deref(), Some("2"), "{errors:?}");
+        assert_eq!(mismatch.got.as_deref(), Some("3"), "{errors:?}");
+        assert_eq!(
+            mismatch.span,
+            Some(DiagnosticSpan::Point {
+                offset: call_offset
+            }),
+            "{errors:?}"
+        );
+    };
+
+    let evaluated = eval(request(CONTRADICTION.source))
+        .expect_err("the evaluator must refuse contradictory literal extents");
+    assert_refusal(&evaluated.errors);
+
+    let compiled = compile(CompileRequest {
         source_kind: SourceKind::Surf,
         source: CONTRADICTION.source.to_string(),
         target: CompileTarget::C,
@@ -279,14 +309,5 @@ fn contradicting_literal_extents_are_refused_before_running() {
     })
     .err()
     .unwrap_or_else(|| panic!("{}: the C build must refuse", CONTRADICTION.name));
-    let messages = error
-        .errors
-        .iter()
-        .map(|diagnostic| diagnostic.message.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        messages.contains("dimension mismatch: Lit(2) vs Lit(3)"),
-        "compiled: {messages}"
-    );
+    assert_refusal(&compiled.errors);
 }

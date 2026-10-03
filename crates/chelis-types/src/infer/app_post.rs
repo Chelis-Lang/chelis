@@ -406,7 +406,14 @@ pub(super) fn finish_unified_app(
             }
             "split_keys" => {
                 checked_route_observed = true;
-                result_ty = check_split_keys_signature(&kids[1..], &result_ty, env, subst, errors);
+                result_ty = check_split_keys_signature(
+                    source_site,
+                    &kids[1..],
+                    &result_ty,
+                    env,
+                    subst,
+                    errors,
+                );
             }
             "scatter_elements" if owes_shape_replay => {
                 checked_route_observed = true;

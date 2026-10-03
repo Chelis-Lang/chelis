@@ -1502,6 +1502,7 @@ pub(super) fn check_expand_signature(
 /// meets it. The scheme's free result dimension is never the answer: it
 /// would take whatever extent the context offers, whatever the count.
 pub(super) fn check_split_keys_signature(
+    site: CheckSite<'_>,
     arg_exprs: &[deep::Expr],
     result_ty: &Type,
     env: &Env,
@@ -1514,13 +1515,18 @@ pub(super) fn check_split_keys_signature(
     {
         Some(count) if count >= 0 => Dim::Lit(count),
         Some(count) => {
-            return report(
+            let expected = "non-negative count";
+            let got = count.to_string();
+            return report_at_check_site(
                 errors,
-                CheckError::new(
+                CheckError::with_types(
                     CheckErrorKind::DimensionMismatch,
-                    format!("split_keys requires a non-negative count, got {count} ([05-OP-71])"),
+                    format!("split_keys argument 2: expected {expected}, got {got} ([05-OP-71])"),
+                    expected.to_string(),
+                    got,
                     vec![],
                 ),
+                site,
             );
         }
         None => Dim::Wildcard,
