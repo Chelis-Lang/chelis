@@ -794,6 +794,29 @@ mod tests {
         Harmless,
     }
 
+    /// Why the test compiler does not accept `extra` on top of `flags`, when
+    /// it rejects the options themselves: an empty translation unit fails to
+    /// compile and the diagnostic names one of them. A flag one compiler lacks
+    /// (gcc has no `-fno-honor-nans`) cannot reach that compiler's builds, so
+    /// its row has nothing to observe there. Any other failure is not a skip.
+    #[cfg(unix)]
+    fn rejected_flag(flags: &[String], extra: &str) -> Option<String> {
+        let compiler = test_toolchain(CodegenRequirements::default()).compiler;
+        let probe = tool_command(&compiler)
+            .args(flags)
+            .args(extra.split_whitespace())
+            .args(["-fsyntax-only", "-x", "c", "-"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&probe.stderr);
+        (!probe.status.success()
+            && extra
+                .split_whitespace()
+                .any(|flag| stderr.contains(flag.split('=').next().unwrap_or(flag))))
+        .then(|| format!("{compiler} rejects `{extra}`: {}", stderr.trim()))
+    }
+
     /// Check one wrapper. Contraction changes values only where the target
     /// has a fused multiply-add instruction, which the x86-64 baseline lacks;
     /// `-mfma` is what a `-march=native` wrapper would add there.
@@ -807,6 +830,10 @@ mod tests {
         } else {
             extra.to_string()
         };
+        if let Some(reason) = rejected_flag(&flags, &extra) {
+            eprintln!("skipping {name}: {reason}");
+            return;
+        }
         let hostile = wrapper(dir.path(), name, &extra);
         let result = verify_compiler(&hostile, &flags, &links);
         match verdict {
