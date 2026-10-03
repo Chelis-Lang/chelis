@@ -226,6 +226,16 @@ wholesale. Precedence, first match wins:
    That is a genuine advantage over rustup's separate `rust-toolchain.toml`.
 5. **recorded default** (`chelisup default`) — used outside any package.
 
+For the explicit management invocation `chelis reef setup`, level 4 is skipped:
+the project compiler pin is the provisioning target, and the recorded default
+selects the setup orchestrator. The three explicit overrides retain their
+precedence. This dispatch applies whenever the first two forwarded arguments
+are exactly `reef setup`, regardless of whether the project pin is installed.
+The shim only routes; setup itself delegates installation to `chelisup`.
+A missing selected orchestrator fails normally. It never searches installed
+versions for an alternative. Compiler commands and other Reef verbs retain
+all five resolution levels.
+
 ### 5.3 Invariants
 
 **No auto-install, no silent fallback.** A resolved-but-not-installed version is
@@ -416,9 +426,21 @@ also report binary-artifact deps (#468) and the active toolchain/shim
 (chelisup), as the read-only health counterpart of `setup`.
 
 `reef setup` is the canonical *current-chelis* entry point for the cross-version
-case §5.4 decided: it runs from a current chelis (it may itself install the
-pinned toolchain), so a clone-and-`setup` does the right thing without the user
-reaching for `+<ver>`. WS-C also lands §5.4's unknown-subcommand hint in chelis.
+case §5.4 decided. The installed shim selects the recorded default compiler for
+this explicit provisioning verb, as §5.2 specifies; it treats the manifest pin
+as setup's target rather than a prerequisite for starting setup. A concrete
+`+<ver>`, `CHELIS_TOOLCHAIN`, or `chelis-toolchain` override still selects the
+orchestrator deliberately. Thus an installed current default can provision a
+fresh clone pinned to an absent or older compiler. Setup continues to read the
+manifest through its existing parse-only management path. No management
+implementation moves into the installer or the shim.
+
+The installed-shim regression oracle is
+`cargo test -p chelis-cli --test reef_setup issue_2818`: seed installed compiler
+A and its actual shim, pin the clone to absent B, run bare `chelis reef setup`,
+and verify B is installed, A remains the default, and both installer copies
+remain chelisup. The corresponding missing-release and explicit-missing-
+override cases fail; ordinary compiler commands still reject an absent pin.
 
 ### 7.1 Shell-scaffolding synchronization
 
