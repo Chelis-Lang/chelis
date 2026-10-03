@@ -172,6 +172,11 @@ path = "tests/issue_2907_scatter_update_extents.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_3029_scatter_replace_update_extents"
+path = "tests/issue_3029_scatter_replace_update_extents.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "issue_2914_record_operand_routing"
 path = "tests/issue_2914_record_operand_routing.rs"
 required-features = ["ownership-ledger"]

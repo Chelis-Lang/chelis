@@ -4275,6 +4275,9 @@ fn verify_sparse_batch_prefix(
 /// Inputs are `[target, indices, updates]`; output shape equals
 /// `target`; `updates` shape equals `target.dims[..axis] +
 /// indices.dims + target.dims[axis+1..]`. Indices must be i32/i64.
+/// The runtime compares the update shape with the gathered shape before it
+/// writes anything, so as for scatter-elements only a static contradiction
+/// of that update shape is a structural error (chelis#3029).
 fn verify_scatter_like(
     node: &crate::dag::DagNode,
     dag: &Dag,
@@ -4336,7 +4339,7 @@ fn verify_scatter_like(
             expected_updates.extend_from_slice(&target.output_type.dims[..axis]);
             expected_updates.extend(indices.output_type.dims[batch_rank..].iter().cloned());
             expected_updates.extend_from_slice(&target.output_type.dims[axis + 1..]);
-            if updates.output_type.dims != expected_updates {
+            if extents_contradict(&updates.output_type.dims, &expected_updates) {
                 errors.push(format!(
                     "{label} at node {} has update dims {:?}, expected {:?}",
                     node.id.0, updates.output_type.dims, expected_updates
@@ -4676,6 +4679,70 @@ mod tests {
             &[DimInfo::Lit(3)]
         ));
         assert!(extents_contradict(&[named("n")], &[named("n"), named("m")]));
+    }
+
+    /// chelis#3029: the gather-shaped scatters refuse only a static
+    /// contradiction of the update shape, as chelis#2907's element-wise
+    /// scatter does, because the runtime compares the update shape with the
+    /// gathered shape before it writes anything.
+    #[test]
+    fn gather_shaped_scatter_update_extents_contradict_only_statically() {
+        let named = |name: &str| DimInfo::Named(name.into(), None);
+        let errors = |op: RiscOp, indices: DimInfo, updates: DimInfo| {
+            let mut dag = Dag::new();
+            let decl = dag.declare("scatter");
+            let i64_tensor = |dim: DimInfo| TensorType {
+                dims: vec![dim],
+                precision: Prim::Int64,
+            };
+            let load = |dag: &mut Dag, name: &str, dim: DimInfo| {
+                dag.add_node(
+                    decl,
+                    RiscOp::Load { name: name.into() },
+                    vec![],
+                    i64_tensor(dim),
+                    None,
+                )
+            };
+            let base = load(&mut dag, "base", DimInfo::Lit(4));
+            let positions = load(&mut dag, "positions", indices);
+            let values = load(&mut dag, "values", updates);
+            dag.add_node(
+                decl,
+                op,
+                vec![base, positions, values],
+                i64_tensor(DimInfo::Lit(4)),
+                None,
+            );
+            verify(&dag)
+                .into_iter()
+                .filter(|error| error.contains("has update dims"))
+                .collect::<Vec<_>>()
+        };
+        for op in [
+            RiscOp::Scatter {
+                axis: 0,
+                batch_rank: 0,
+            },
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
+        ] {
+            assert!(
+                errors(op.clone(), named("_anon_dim_2_0"), named("_anon_dim_1_0")).is_empty(),
+                "{op:?}: two run-time extents prove nothing"
+            );
+            assert!(
+                errors(op.clone(), DimInfo::Lit(2), DimInfo::Lit(2)).is_empty(),
+                "{op:?}: equal static extents"
+            );
+            assert_eq!(
+                errors(op.clone(), DimInfo::Lit(2), DimInfo::Lit(3)).len(),
+                1,
+                "{op:?}: a static contradiction is refused"
+            );
+        }
     }
 
     /// A graph with one group of nodes per entry, each group built by
