@@ -1232,7 +1232,9 @@ fn census_checked_program(source: &str) -> chelis_types::CheckedProgram {
         &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
     .expect("resolve every census import");
-    let _linked = prepared.as_ref().map(|_| chelis_types::install_linked_program_guard());
+    let _linked = prepared
+        .as_ref()
+        .map(|_| chelis_types::install_linked_program_guard());
     let resolved_deep = prepared.map(|program| {
         chelis_deep::printer::print_canonical(
             &chelis_surf::desugar::desugar_program(&program.decls)
@@ -1922,7 +1924,12 @@ fn no_shipped_example_gains_a_host_lane_guard() {
 fn the_census_resolves_stdlib_imports_before_independent_signature_checks() {
     let source = "module Census.Imported\nimport Std.Tensor.Construct (linspace)\ndef sample() -> f32 = index(to_list(linspace(0.0f32, 1.0f32, 3i64)), 1i64)\n";
     let checked = census_checked_program(source);
-    assert!(checked.signature_inference().functions.contains_key("sample"));
+    assert!(
+        checked
+            .signature_inference()
+            .functions
+            .contains_key("sample")
+    );
 }
 
 #[test]
