@@ -12851,7 +12851,11 @@ mod storage_narrowing_tests {
             .arg(&program)
             .output()
             .unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         program
     }
 
@@ -12889,11 +12893,18 @@ mod storage_narrowing_tests {
                 let got = u16::from_str_radix(got, 16).unwrap();
                 let expected = storage_reference(*bits, 64, output);
                 if got != expected {
-                    bad.push(format!("{output:?} {bits:x}: {got:04x}, reference {expected:04x}"));
+                    bad.push(format!(
+                        "{output:?} {bits:x}: {got:04x}, reference {expected:04x}"
+                    ));
                 }
             }
         }
-        assert!(bad.is_empty(), "{} mismatches: {:?}", bad.len(), &bad[..bad.len().min(8)]);
+        assert!(
+            bad.is_empty(),
+            "{} mismatches: {:?}",
+            bad.len(),
+            &bad[..bad.len().min(8)]
+        );
     }
 
     #[test]
@@ -12902,7 +12913,8 @@ mod storage_narrowing_tests {
         const CHUNK: u64 = 1 << 24;
         let dir = tempfile::tempdir().unwrap();
         let program = driver(dir.path());
-        let threads = std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).max(1));
+        let threads =
+            std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).max(1));
         let next = AtomicU64::new(0);
         let total: u64 = std::thread::scope(|scope| {
             let workers: Vec<_> = (0..threads)
@@ -12919,20 +12931,24 @@ mod storage_narrowing_tests {
                                 .output()
                                 .unwrap();
                             assert!(output.status.success());
-                            for (offset, pair) in output.stdout.chunks_exact(4).enumerate() {
+                            for (offset, pair) in output.stdout.as_chunks::<4>().0.iter().enumerate() {
                                 let bits = low + offset as u64;
                                 let value = f32::from_bits(u32::try_from(bits).unwrap());
                                 let wide = f64::from(value).to_bits();
                                 let f16 = u16::from_ne_bytes([pair[0], pair[1]]);
                                 let bf16 = u16::from_ne_bytes([pair[2], pair[3]]);
                                 count += u64::from(f16 != storage_reference(wide, 64, Output::F16));
-                                count += u64::from(bf16 != storage_reference(wide, 64, Output::Bf16));
+                                count +=
+                                    u64::from(bf16 != storage_reference(wide, 64, Output::Bf16));
                             }
                         }
                     })
                 })
                 .collect();
-            workers.into_iter().map(|worker| worker.join().unwrap()).sum()
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .sum()
         });
         assert_eq!(total, 0, "{total} misrounded conversions over 2^32 inputs");
     }

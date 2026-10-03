@@ -307,7 +307,10 @@ fn covers_reads_classes_from_bits() {
 #[test]
 fn storage_reference_matches_every_conversion_row() {
     let mut checked = 0;
-    for row in rows().iter().filter(|row| matches!(row.primitive.result, Output::F16 | Output::Bf16)) {
+    for row in rows()
+        .iter()
+        .filter(|row| matches!(row.primitive.result, Output::F16 | Output::Bf16))
+    {
         let got = storage_reference(row.operands[0], row.primitive.width, row.primitive.result);
         assert_eq!(u64::from(got), row.expected, "{row}");
         checked += 1;
@@ -328,11 +331,21 @@ fn storage_reference_ties_to_even_and_breaks_ties_by_one_ulp() {
             let (middle, above, below) = (code(0), code(2), code(4));
             assert_eq!(above.wrapping_sub(below), 1, "{output:?} {:x}", group[0]);
             assert!(middle == above || middle == below);
-            assert_eq!(middle & 1, 0, "{output:?} midpoint {:x} ties to odd", group[0]);
+            assert_eq!(
+                middle & 1,
+                0,
+                "{output:?} midpoint {:x} ties to odd",
+                group[0]
+            );
             assert_eq!(code(6), above);
             assert_eq!(code(8), below);
             for index in (0..10).step_by(2) {
-                assert_eq!(code(index + 1), code(index) | 0x8000, "sign of {:x}", group[index]);
+                assert_eq!(
+                    code(index + 1),
+                    code(index) | 0x8000,
+                    "sign of {:x}",
+                    group[index]
+                );
             }
         }
     }

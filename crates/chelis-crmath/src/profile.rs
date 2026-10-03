@@ -706,7 +706,11 @@ pub fn storage_reference(bits: u64, width: u32, output: Output) -> u16 {
     let target_exponent_max = (1_u16 << target_exponent_bits) - 1;
     let infinity = sign | (target_exponent_max << target_fraction_bits);
     if exponent == exponent_mask {
-        return if fraction == 0 { infinity } else { canonical_nan };
+        return if fraction == 0 {
+            infinity
+        } else {
+            canonical_nan
+        };
     }
     if exponent == 0 && fraction == 0 {
         return sign;
@@ -714,19 +718,19 @@ pub fn storage_reference(bits: u64, width: u32, output: Output) -> u16 {
     // The value is `significand * 2^scale` exactly.
     let source_bias = (1_i32 << (exponent_bits - 1)) - 1;
     let (significand, scale) = if exponent == 0 {
-        (fraction, 1 - source_bias - fraction_bits as i32)
+        (fraction, 1 - source_bias - fraction_bits)
     } else {
         (
             fraction | (1_u64 << fraction_bits),
-            exponent as i32 - source_bias - fraction_bits as i32,
+            exponent as i32 - source_bias - fraction_bits,
         )
     };
     let target_bias = (1_i32 << (target_exponent_bits - 1)) - 1;
     // The exponent of the target's quantum: its ulp at the value's binade, never
     // below the subnormal ulp.
     let leading = 63 - significand.leading_zeros() as i32;
-    let quantum = (scale + leading - target_fraction_bits as i32)
-        .max(1 - target_bias - target_fraction_bits as i32);
+    let quantum =
+        (scale + leading - target_fraction_bits).max(1 - target_bias - target_fraction_bits);
     let shift = quantum - scale;
     let mut count = if shift <= 0 {
         significand << -shift
@@ -741,7 +745,7 @@ pub fn storage_reference(bits: u64, width: u32, output: Output) -> u16 {
     if count < 1 << target_fraction_bits {
         return sign | count as u16;
     }
-    let mut biased = quantum + target_fraction_bits as i32 + target_bias;
+    let mut biased = quantum + target_fraction_bits + target_bias;
     if count >> (target_fraction_bits + 1) != 0 {
         count >>= 1;
         biased += 1;

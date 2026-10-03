@@ -120,8 +120,12 @@ fn f64_accumulator_rounds_to_bf16_once() {
 fn accumulator_bits(bits: u64, output: Output) -> u16 {
     let value = f64::from_bits(bits);
     match output {
-        Output::F16 => <half::f16 as RuntimeAccumulationOutput<f64>>::from_accumulator(value).to_bits(),
-        Output::Bf16 => <half::bf16 as RuntimeAccumulationOutput<f64>>::from_accumulator(value).to_bits(),
+        Output::F16 => {
+            <half::f16 as RuntimeAccumulationOutput<f64>>::from_accumulator(value).to_bits()
+        }
+        Output::Bf16 => {
+            <half::bf16 as RuntimeAccumulationOutput<f64>>::from_accumulator(value).to_bits()
+        }
         _ => unreachable!("not a storage format"),
     }
 }
@@ -170,7 +174,13 @@ fn every_f32_finalizes_once_to_f16_and_bf16_storage() {
                 })
             })
             .collect();
-        workers.into_iter().map(|worker| worker.join().unwrap()).sum()
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .sum()
     });
-    assert_eq!(total, 0, "{total} misrounded finalizations over 2^32 inputs");
+    assert_eq!(
+        total, 0,
+        "{total} misrounded finalizations over 2^32 inputs"
+    );
 }

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chelis_crmath::profile::{Output, rows, storage_midpoint_inputs, storage_reference};
+use chelis_crmath::profile::{rows, storage_midpoint_inputs, storage_reference, Output};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -43,7 +43,13 @@ fn driver(scratch: &Scratch) -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = scratch.0.join("storage_narrowing");
     let output = Command::new("cc")
-        .args(["-std=c11", "-O2", "-ffp-contract=off", "-fno-fast-math", "-I"])
+        .args([
+            "-std=c11",
+            "-O2",
+            "-ffp-contract=off",
+            "-fno-fast-math",
+            "-I",
+        ])
         .arg(manifest.join("include"))
         .arg(manifest.join("tests/fixtures/storage_narrowing.c"))
         .arg("-o")
@@ -139,7 +145,12 @@ fn header_narrowing_matches_the_reference_at_every_f32_boundary() {
             }
         }
     }
-    assert!(bad.is_empty(), "{} mismatches, first: {:?}", bad.len(), &bad[..bad.len().min(8)]);
+    assert!(
+        bad.is_empty(),
+        "{} mismatches, first: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(8)]
+    );
 }
 
 #[test]
@@ -150,7 +161,10 @@ fn evaluator_narrowing_matches_the_reference_at_every_f64_boundary() {
             .iter()
             .filter(|row| row.primitive.width == 64 && row.primitive.result == output)
             .map(|row| row.operands[0]);
-        for bits in storage_midpoint_inputs(output).into_iter().chain(row_inputs) {
+        for bits in storage_midpoint_inputs(output)
+            .into_iter()
+            .chain(row_inputs)
+        {
             let expected = storage_reference(bits, 64, output);
             let got = evaluator_bits(bits, output);
             if got != expected {
@@ -158,7 +172,12 @@ fn evaluator_narrowing_matches_the_reference_at_every_f64_boundary() {
             }
         }
     }
-    assert!(bad.is_empty(), "{} mismatches, first: {:?}", bad.len(), &bad[..bad.len().min(8)]);
+    assert!(
+        bad.is_empty(),
+        "{} mismatches, first: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(8)]
+    );
 }
 
 /// Manual gate: every f32 bit pattern through the header, and its exact f64
@@ -195,15 +214,19 @@ fn every_f32_narrows_once_to_f16_and_bf16_storage() {
                         assert!(output.status.success());
                         let words: Vec<u16> = output
                             .stdout
-                            .chunks_exact(2)
-                            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|pair| u16::from_ne_bytes(*pair))
                             .collect();
                         assert_eq!(words.len() as u64, 2 * CHUNK);
                         for offset in 0..CHUNK {
                             let bits = low + offset;
                             let value = f32::from_bits(u32::try_from(bits).unwrap());
                             let wide = f64::from(value).to_bits();
-                            for (index, output) in [Output::F16, Output::Bf16].into_iter().enumerate() {
+                            for (index, output) in
+                                [Output::F16, Output::Bf16].into_iter().enumerate()
+                            {
                                 let expected = storage_reference(bits, 32, output);
                                 let header = words[(2 * offset) as usize + index];
                                 let evaluator = evaluator_bits(wide, output);
@@ -211,7 +234,8 @@ fn every_f32_narrows_once_to_f16_and_bf16_storage() {
                                     if got != expected {
                                         count += 1;
                                         if examples.len() < 4 {
-                                            examples.push(mismatch(lane, bits, output, got, expected));
+                                            examples
+                                                .push(mismatch(lane, bits, output, got, expected));
                                         }
                                     }
                                 }
@@ -222,7 +246,10 @@ fn every_f32_narrows_once_to_f16_and_bf16_storage() {
                 })
             })
             .collect();
-        workers.into_iter().map(|worker| worker.join().unwrap()).collect()
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
     });
     let total: u64 = counts.iter().map(|(count, _)| count).sum();
     let examples: Vec<&String> = counts.iter().flat_map(|(_, examples)| examples).collect();
