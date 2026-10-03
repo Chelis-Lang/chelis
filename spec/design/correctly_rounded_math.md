@@ -272,8 +272,17 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
   register (`fesetround` alone leaves FTZ and DAZ untouched), and restore the saved
   value on every return path, a trap return included. The helper lives in the runtime as a pair of internal functions over an
   opaque saved-state carrier, so no numeric value crosses it.
-- **Evaluator.** Each thread that computes sets the same state once, and a debug
-  assertion checks it at kernel entry.
+- **Compiler and evaluator.** Literal finalization, constant folding, evaluation, and
+  differentiation run in the host's thread, so every public `chelis-compiler-api`
+  function opens with the runtime's `FpEnvGuard`, which nests and restores the caller's
+  state when dropped. An architecture test derives the public surface from the crate's
+  `lib.rs` and fails on any public function, or function re-exported from another
+  crate, that skips the guard.
+- **OpenMP workers.** Entry writes only the calling thread's register, and a host's
+  OpenMP pool threads keep whatever state they last had. Each emitted parallel loop is
+  therefore an `omp for` inside a bare `omp parallel` region in which every
+  participating thread enters before its share and leaves after it. The
+  generated-artifact contract rejects the combined `omp parallel for` form.
 - **NaN.** Every float operation in both lanes finalizes a NaN result to the canonical
   pattern, not only subtraction as before. The kernels' wrapper does this for the
   transcendentals; the evaluator's binop and unop arms and the emitted C's arithmetic

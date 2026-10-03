@@ -1,4 +1,6 @@
-// chelis#2957 S2: Rust std transcendental until S2 moves this to chelis-crmath.
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
 #![allow(clippy::disallowed_methods)]
 use super::host_ops::*;
 use super::transforms::*;

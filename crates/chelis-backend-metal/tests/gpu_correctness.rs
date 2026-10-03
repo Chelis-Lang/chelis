@@ -15,7 +15,9 @@
 //! variants. We use a Metal-specific tolerance that's wider than HIP's
 //! for transcendental-heavy kernels — see ABS_TOL/REL_TOL constants and
 //! the per-test relaxations.
-// chelis#2957 S7: Rust std transcendental until S7 moves this to chelis-crmath.
+// Tests only: Rust std functions on the clippy disallowed list compute
+// reference or input values here; the list holds production code to
+// chelis-crmath (chelis#2957).
 #![allow(clippy::disallowed_methods)]
 
 mod support;
