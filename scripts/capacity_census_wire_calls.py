@@ -622,12 +622,80 @@ def fixture_externs(root: Path, target: Path, directory: Path) -> dict:
     return result
 
 
-def _artifact_id(path: Path, root: Path) -> str:
-    metadata = _run(["rustc", "-Zls=root", str(path)], cwd=root)
-    found = re.findall(r" stable_crate_id StableCrateId\((\d+)\)", metadata)
-    if len(found) != 1:
+@dataclass(frozen=True)
+class RlibIdentity:
+    """The identity rustc records in one compiled library's metadata.
+
+    `dependencies` pairs the crate name and crate hash of every crate the
+    library was compiled against, the hashes rustc itself checks when it loads
+    a dependency.
+    """
+
+    crate_hash: str
+    stable_crate_id: str
+    dependencies: tuple[tuple[str, str], ...]
+
+    def dependency_hash(self, name: str) -> str:
+        found = [crate_hash for crate, crate_hash in self.dependencies if crate == name]
+        if len(found) != 1:
+            raise ValueError(f"missing or ambiguous recorded dependency {name}")
+        return found[0]
+
+
+_DEPENDENCY_LINE = re.compile(
+    r"\d+ ([A-Za-z0-9_]+)(?:-\S*)? hash ([0-9a-f]+) host_hash .+ kind \S+ (?:public|private)"
+)
+
+
+def parse_rlib_identity(metadata: str) -> RlibIdentity:
+    """Read `rustc -Zls=root` output."""
+    own = re.findall(
+        r"(?m)^hash ([0-9a-f]+) stable_crate_id StableCrateId\((\d+)\)$", metadata
+    )
+    if len(own) != 1:
         raise ValueError("missing or ambiguous artifact stable crate identity")
-    return f"{int(found[0]):016x}"
+    _, marker, listing = metadata.partition("=External Dependencies=\n")
+    if not marker:
+        raise ValueError("missing artifact dependency listing")
+    dependencies = []
+    for line in listing.splitlines():
+        if not line:
+            break
+        matched = _DEPENDENCY_LINE.fullmatch(line)
+        if matched is None:
+            raise ValueError(f"unrecognized artifact dependency line: {line}")
+        dependencies.append((matched[1], matched[2]))
+    crate_hash, stable_crate_id = own[0]
+    return RlibIdentity(crate_hash, f"{int(stable_crate_id):016x}", tuple(dependencies))
+
+
+def rlib_identity(path: Path, root: Path) -> RlibIdentity:
+    return parse_rlib_identity(_run(["rustc", "-Zls=root", str(path)], cwd=root))
+
+
+def matching_rlibs(name: str, artifacts: list[dict], expected: str, identify) -> list:
+    """Every Cargo artifact named `name` whose one rlib `identify` maps to `expected`.
+
+    A crate that a build script also links compiles once for the build script
+    and once for the crates that link it, so one Cargo build can report two
+    artifacts with the same name, package, features and profile fields. Only
+    the identity rustc records tells them apart.
+    """
+    matches = []
+    for artifact in artifacts:
+        if artifact.get("target", {}).get("name") != name:
+            continue
+        paths = [Path(path) for path in artifact["filenames"] if path.endswith(".rlib")]
+        if len(paths) != 1:
+            raise ValueError(f"missing or ambiguous {name} rlib")
+        identity = identify(paths[0])
+        if identity == expected:
+            matches.append((artifact, paths[0], identity))
+    return matches
+
+
+def _artifact_id(path: Path, root: Path) -> str:
+    return rlib_identity(path, root).stable_crate_id
 
 
 def _locked_registry_package(root: Path, name: str, package_id: str) -> bool:
@@ -685,14 +753,9 @@ def _resolve_defining_artifact(
     ]
     if not candidates:
         raise ValueError(f"unresolved defining {name} Cargo origin")
-    matches = []
-    for artifact in candidates:
-        paths = [Path(path) for path in artifact["filenames"] if path.endswith(".rlib")]
-        if len(paths) != 1:
-            raise ValueError(f"missing defining {name} artifact")
-        stable_id = _artifact_id(paths[0], root)
-        if stable_id == expected_id:
-            matches.append((artifact, paths[0], stable_id))
+    matches = matching_rlibs(
+        name, candidates, expected_id, lambda path: _artifact_id(path, root)
+    )
     if not matches:
         raise ValueError(f"compiler/Cargo {name} identity mismatch")
     if len(matches) != 1:
