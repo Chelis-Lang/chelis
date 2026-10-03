@@ -371,9 +371,11 @@ enum Command {
         /// floor, and an exhausted generator is then reported as an error.
         #[clap(long, default_value = "0.01")]
         invariant_min_rate: f64,
-        /// Resolve imports through the reef package rooted at this path.
-        /// If not set, auto-detects by walking ancestor directories for
-        /// reef.toml.
+        /// Link files with no `module` declaration against the reef package
+        /// rooted at this path. A file that declares a `module` belongs to
+        /// the package found from its own location, and naming a different
+        /// package for it is an error. If not set, every file uses the
+        /// package found by walking up from its own directory.
         #[clap(long)]
         package: Option<PathBuf>,
         /// Print machine-readable JSON describing prove capabilities
@@ -7326,9 +7328,7 @@ fn cmd_test(
     // The tests belong to the reef package found by walking up from the
     // target itself (the target directory, or a target file's directory),
     // as every command classifies a file (spec/02 §P2, chelis#2918); the
-    // current directory plays no part beyond being the default target. When
-    // no package contains the target, fall through with the target directory
-    // and let `prepare_reef_graph` emit its standard "no reef.toml" error.
+    // current directory plays no part beyond being the default target.
     let target_dir_for_reef = if target.is_dir() {
         target.clone()
     } else {
@@ -7340,12 +7340,23 @@ fn cmd_test(
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| raw_cwd.clone())
     };
-    let cwd = match chelis_reef::find_package_root_for_dir(&target_dir_for_reef) {
-        Ok(Some(root)) => root,
-        _ => target_dir_for_reef.clone(),
+    let Some(cwd) = chelis_reef::find_package_root_for_dir(&target_dir_for_reef)? else {
+        let default_target = if path.is_none() {
+            "; with no path it runs `tests/` under the current directory"
+        } else {
+            ""
+        };
+        return Err(format!(
+            "no reef.toml found in `{}` or any parent up to $HOME: `chelis test` runs the tests \
+             of the reef package that contains its target, and `{}` lies in no reef \
+             package{default_target}",
+            target_dir_for_reef.display(),
+            target.display(),
+        ));
     };
 
     let test_files = discover_test_files(&target)?;
+    require_test_files_in_one_package(&test_files, &cwd)?;
     if test_files.is_empty() {
         // An `--expect` suite that finds zero probes is a misconfiguration, not
         // a pass: a guard that runs nothing is silently green (the exact
@@ -8843,6 +8854,34 @@ fn preflight_test_selection(
             None => TestSelectionPreflight::NeedsExecution,
         }
     }
+}
+
+/// Each file belongs to the reef package found by walking up from its own
+/// directory (spec/02 §P2, chelis#2918). A `chelis test` run executes one
+/// package's files against that package's context, so a discovered file that
+/// belongs to another package, such as one inside a package nested under the
+/// target, is rejected rather than run in a package it does not belong to.
+fn require_test_files_in_one_package(
+    test_files: &[PathBuf],
+    package_root: &Path,
+) -> Result<(), String> {
+    for file in test_files {
+        let own = chelis_reef::find_package_root_for_input(file)?;
+        if own.as_deref() == Some(package_root) {
+            continue;
+        }
+        let belongs = match &own {
+            Some(root) => format!("the reef package at `{}`", root.display()),
+            None => "no reef package".to_string(),
+        };
+        return Err(format!(
+            "`{}` belongs to {belongs}, not to the reef package at `{}` whose tests this run \
+             executes; run `chelis test` on that package's files separately",
+            file.display(),
+            package_root.display(),
+        ));
+    }
+    Ok(())
 }
 
 /// The modules `files` import (chelis#2558). A file that cannot be read or

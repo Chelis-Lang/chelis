@@ -3479,7 +3479,7 @@ module_prefix = "Graph"
     write_file(
         &root.join("src/a.ch"),
         "module Graph.A\n\
-         import Graph.B (same, from_b, b_cycle)\n\
+         import Graph.B (from_b, b_cycle)\n\
          def same(x: f32) -> f32 = x\n\
          def unused(x: f32) -> f32 = x\n\
          def through_b(x: f32) -> f32 = from_b(x)\n\
@@ -3599,7 +3599,7 @@ module_prefix = "Graph"
         edges
             .iter()
             .any(|edge| edge["from"] == from_b["id"] && edge["to"] == b_same["id"]),
-        "same-name imported/local declarations must resolve by linker identity: {edges:?}"
+        "same-name declarations in two modules must resolve by linker identity: {edges:?}"
     );
     assert_eq!(rows["kind"], "dimension");
     assert!(

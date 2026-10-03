@@ -550,10 +550,16 @@ libraries that build on `chelis-std`, such as `nautilus`, `coral`,
 
 ### 6.5 Module identity inside a reef package
 
-**Rule:** A `.ch` source file inside a reef package declares exactly one
-module, and that module's name is fixed by the package's `module_prefix`
-(§2.6) together with the file's path beneath its source root. The file
-does not choose its own name.
+**Rule:** A `.ch` file beneath one of a reef package's source roots
+declares exactly one module, and that module's name is fixed by the
+package's `module_prefix` (§2.6) together with the file's path beneath its
+source root. The file does not choose its own name.
+
+A `.ch` file inside the package but outside every source root, such as a
+script beside `reef.toml` or a test under `tests/`, is not a module of the
+package. It is an entry of the package (`spec/02-surf-syntax.md` §P2), and a
+`module` declaration in it declares no module and is subject to none of the
+rules below.
 
 The name is built by taking `module_prefix`, then one component per path
 segment beneath the source root, in order, with the file's extension

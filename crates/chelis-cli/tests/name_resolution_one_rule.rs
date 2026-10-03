@@ -17,7 +17,7 @@
 mod common;
 
 use assert_cmd::Command;
-use common::{make_app, write_file};
+use common::{COMPILER_VERSION, make_app, write_file};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Output};
 
@@ -369,10 +369,13 @@ fn chelis_test_finds_the_package_from_the_target_not_the_current_directory() {
          stdout: {}",
         utf8(&rejected.stdout)
     );
+    let stderr = utf8(&rejected.stderr);
     assert!(
-        utf8(&rejected.stderr).contains("no reef.toml found"),
-        "the rejection names the missing manifest:\n{}",
-        utf8(&rejected.stderr)
+        stderr.contains("no reef.toml found")
+            && stderr.contains("lies in no reef package")
+            && !stderr.contains("run from inside one")
+            && !stderr.contains("--project-root"),
+        "the rejection names the missing manifest and nothing untrue:\n{stderr}"
     );
 }
 
@@ -404,4 +407,132 @@ fn module_file_outside_the_source_roots_is_a_package_entry_in_every_lane() {
         utf8(&ran.stderr)
     );
     assert!(utf8(&ran.stdout).contains("1 passed, 0 failed"));
+}
+
+/// chelis#2918: `chelis test DIR` classifies each discovered file by walking
+/// up from that file. A package nested under the target owns its own files,
+/// so the outer run refuses them instead of running them in the outer
+/// package, and the nested package's own run passes.
+#[test]
+fn chelis_test_refuses_a_discovered_file_of_a_nested_package() {
+    let fixture = loose_fixture("test-nested");
+    let nested = fixture.package.join("tests/fixture");
+    write_file(
+        &nested.join("reef.toml"),
+        &format!(
+            "schema = \"1\"\n\n[package]\nname = \"fix\"\nversion = \"0.1.0\"\n\
+             compiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Fix\"\n"
+        ),
+    );
+    write_file(
+        &nested.join("src/special.ch"),
+        "module Fix.Special\ndef answer() -> i32 = 7\n",
+    );
+    write_file(
+        &nested.join("tests/answer.ch"),
+        "import Fix.Special (answer)\n\
+         def test_answer() -> unit = test_assert(eq(answer(), 7), \"answer\")\n",
+    );
+    write_file(&fixture.package.join("tests/truth.ch"), PASSING_TEST);
+
+    let outer = chelis_test(
+        &fixture.reef_home,
+        &fixture.outside,
+        &fixture.package.join("tests"),
+    );
+    assert!(
+        !outer.status.success(),
+        "the outer run must refuse the nested package's files\nstdout: {}",
+        utf8(&outer.stdout)
+    );
+    let stderr = utf8(&outer.stderr);
+    assert!(
+        stderr.contains("belongs to the reef package at")
+            && stderr.contains("tests/fixture")
+            && stderr.contains("run `chelis test` on that package's files separately"),
+        "the refusal names the nested package:\n{stderr}"
+    );
+
+    let inner = chelis_test(&fixture.reef_home, &fixture.outside, &nested.join("tests"));
+    assert!(
+        inner.status.success(),
+        "the nested package's own run passes\nstdout: {}\nstderr: {}",
+        utf8(&inner.stdout),
+        utf8(&inner.stderr)
+    );
+    assert!(utf8(&inner.stdout).contains("1 passed, 0 failed"));
+}
+
+fn prove(reef_home: &Path, cwd: &Path, file: &Path, package: Option<&Path>) -> Output {
+    let mut command = chelis(reef_home, cwd);
+    command.arg("prove").arg(file);
+    if let Some(package) = package {
+        command.arg("--package").arg(package);
+    }
+    command
+        .args(["--tier", "fuzz-only"])
+        .output()
+        .expect("run chelis prove")
+}
+
+const ANSWER_PROPERTY: &str = "@property answer_is_seven forall(x: bool):\n  answer() == 7\n";
+
+/// spec/02 §P2: an explicit `chelis prove --package` is a declared input. It
+/// links a file with no `module` declaration into the named package, and a
+/// file that declares a `module` keeps the package its own location finds:
+/// naming that same package is accepted, and naming a different one is an
+/// error rather than being silently ignored.
+#[test]
+fn prove_package_option_links_loose_files_and_refuses_a_mismatched_module_file() {
+    let fixture = loose_fixture("prove-package");
+    let (_other_dir, _, other) = make_app("prove-other");
+
+    let loose = fixture.outside.join("loose_property.ch");
+    write_file(
+        &loose,
+        &format!("import Demo.Special (answer)\n{ANSWER_PROPERTY}"),
+    );
+    let linked = prove(
+        &fixture.reef_home,
+        &fixture.outside,
+        &loose,
+        Some(&fixture.package),
+    );
+    assert!(
+        linked.status.success(),
+        "--package links a file with no module declaration\nstdout: {}\nstderr: {}",
+        utf8(&linked.stdout),
+        utf8(&linked.stderr)
+    );
+
+    let module = fixture.package.join("src/props.ch");
+    write_file(
+        &module,
+        &format!("module Demo.Props\nimport Demo.Special (answer)\n{ANSWER_PROPERTY}"),
+    );
+    let own = prove(
+        &fixture.reef_home,
+        &fixture.outside,
+        &module,
+        Some(&fixture.package),
+    );
+    assert!(
+        own.status.success(),
+        "--package naming the module file's own package is accepted\nstdout: {}\nstderr: {}",
+        utf8(&own.stdout),
+        utf8(&own.stderr)
+    );
+
+    let mismatched = prove(&fixture.reef_home, &fixture.outside, &module, Some(&other));
+    assert!(
+        !mismatched.status.success(),
+        "--package naming another package for a module file must be refused\nstdout: {}",
+        utf8(&mismatched.stdout)
+    );
+    let stderr = utf8(&mismatched.stderr);
+    assert!(
+        stderr.contains("declares a `module`, so it belongs to the reef package at")
+            && stderr.contains("links only files with no `module` declaration"),
+        "the refusal names both packages:\n{stderr}"
+    );
 }
