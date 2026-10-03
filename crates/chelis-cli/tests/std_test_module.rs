@@ -361,13 +361,12 @@ ran = test_case()
 "#,
     );
     assert_check_clean(&reef_home, &app_pkg);
-    // `assert_close` builds its own diagnostic via string_concat:
-    // `assert_close (<label>): expected <expected>, got <actual>, tol <tol>`.
-    // Float rendering preserves the decimal point for integral float values.
+    // Scalar closeness delegates to the tensor comparator with rank-zero
+    // operands, sharing its own-width arithmetic and branded diagnostics.
     assert_eval_fails_with(
         &reef_home,
         &app_pkg,
-        &["assert failed: assert_close (close-fail): expected 2.0, got 1.0, tol 0.001"],
+        &["assert_close_tensor (close-fail): at index 0 expected 2.0, got 1.0, tol 0.001"],
     );
 }
 
@@ -564,8 +563,7 @@ def h() -> unit ! {} = fail("msg")
 #[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_rejects_negative_tolerance() {
     // `assert_close` must fail with an "invalid tolerance" diagnostic when
-    // given a negative tol. The failure is routed through test_assert(false,
-    // ...) so the Test effect propagates and the eval surfaces the message.
+    // given a negative tol. The shared tensor comparator preserves Test.
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-test-neg-tol");
     write_file(
         &app_pkg.join("src/main.ch"),

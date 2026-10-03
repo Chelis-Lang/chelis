@@ -107,6 +107,14 @@ the same key cannot be consumed twice.
   length truncate. Differentiation follows the
   [standard-library operation rules](https://github.com/Chelis-Lang/chelis/blob/main/spec/05-risc-primitives.md).
 - `Std.Scalar` exports numeric `max`, `min`, and `abs` for scalars.
+  `max` and `min` preserve the first NaN's bits and choose the first operand
+  on ties, including signed zeros; their gradient follows that selection.
+  `abs` clears the sign of zero, returns positive infinity for negative
+  infinity, and has zero derivative at both zeros and NaN. Signed integer
+  `abs` traps on the minimum value. Compiled gradients through imported
+  scalar definitions retain the known [#2995](https://github.com/Chelis-Lang/chelis/issues/2995)
+  restriction at `f32` and `f64`; the package route can reject other dtypes
+  too. These refusals do not imply that forward calls are unsupported.
   `Std.Text.join(parts, sep)` joins strings. `Std.Contracts` provides
   `normal_cdf`, contract names, and settings for numerical tests.
 
@@ -145,6 +153,11 @@ under `chelis eval` and in supported generated C host programs.
 `assert_close`, `assert_close_tensor`, `assert_eq_tensor`, `assert_shape`,
 and `fail` for `def test_*()` functions run by `chelis test`. Assertions carry
 the `Test` effect. Generated builds reject these assertion calls.
+Scalar and tensor `assert_close` use `f32` comparison arithmetic for `f16`,
+`bf16`, and `f32`, and `f64` for `f64`. Tolerances must be finite and
+nonnegative. NaN never compares close; infinities compare close only to the
+same signed infinity. Scalar calls use the tensor assertion diagnostic,
+with the caller's label and mismatch index zero.
 
 `Std.Process.run(cmd, args)` passes an argument list to an external program
 and returns `(exit_code, stdout, stderr)`. `run_chelis(args)` invokes the
