@@ -244,7 +244,10 @@ it has no f64. Turning fast math off therefore does not make Metal reach CPU bit
 this design makes no such claim: codegen rejects every f64 operation on Metal under
 [04-TGT-1], and rejects `sqrt` on both device lanes alongside the transcendentals,
 because MSL compiles it under fast math and the HIP runtime compile does not pin a
-correctly rounded square root. Whether a device-kernel route
+correctly rounded square root. The fence covers those operations only: f32 division and
+reciprocal on Metal also compile under MSL's default fast math, which does not promise
+correct rounding, and the fence does not reject them. That gap is part of #2968, and a Metal
+artifact makes no CPU-bits promise until it closes. Whether a device-kernel route
 exists for f32 on Metal is an open question for the deferred GPU work. The other GPU
 items in #2968 and #2969 (NaN-dropping reductions, the f16 max/min identity,
 `atomicAdd` scatter order) are outside this design and stay open.
