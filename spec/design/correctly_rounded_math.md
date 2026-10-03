@@ -207,6 +207,9 @@ Emission changes:
   the `chelis_cr_*` call. The hand-written host activation helpers are replaced by one
   emitter driven by the same §3.3 lowering the evaluator uses, so `sigmoid`, `silu`,
   `gelu`, and `softmax` have one definition per lane pair rather than two hand copies.
+  `sqrtf` and `sqrt` are the one libm name kept deliberately: C Annex F (F.3) binds
+  them to the IEEE 754 square root, which is correctly rounded, so libm already gives
+  the [05-OP-46] result and both lanes only finalize its NaN.
 - `emit.rs`: `vforce_func`, `sleef_macro`, the Sleef `simd_step_expr` arms, and the
   `emit_fused_reduce` math routes are removed; fused kernels call the scalar
   `chelis_cr_*` functions per element. The `sleef` cargo feature, `MathLib`,

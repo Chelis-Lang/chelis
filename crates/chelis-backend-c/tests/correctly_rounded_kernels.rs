@@ -10,7 +10,7 @@
 //! results [05-OP-46] defines; the expectation needs no evaluator.
 //!
 //! The structural scan checks the emitted C itself: no host math library
-//! identifier (libm transcendental, vForce, Sleef) appears, and every
+//! identifier (a rounded libm function other than `sqrt`, vForce, Sleef) appears, and every
 //! `chelis_cr_*` entry the unit calls is defined in the unit with internal linkage.
 //! A planted `expf(` call is the scan's negative control.
 
@@ -561,41 +561,23 @@ fn f32_fused_reduction_routes_are_correctly_rounded() {
     }
 }
 
-/// Identifiers that would route a transcendental to a host math library. Each
-/// is matched as a whole C identifier, so `chelis_cr_expf` does not match `expf`.
-const HOST_MATH_IDENTIFIERS: &[&str] = &[
-    "exp",
-    "expf",
-    "log",
-    "logf",
-    "sin",
-    "sinf",
-    "cos",
-    "cosf",
-    "tan",
-    "tanf",
-    "atan",
-    "atanf",
-    "tanh",
-    "tanhf",
-    "pow",
-    "powf",
-    "erf",
-    "erff",
-    "exp2",
-    "exp2f",
-    "expm1",
-    "expm1f",
-    "log2",
-    "log2f",
-    "log10",
-    "log10f",
-    "log1p",
-    "log1pf",
-    "sinh",
-    "sinhf",
-    "cosh",
-    "coshf",
+/// The C library `<math.h>` functions whose result is not an exact operation:
+/// the transcendentals plus `sqrt`, `cbrt`, and `hypot` (C11 7.12). The exact ones
+/// (`floor`, `fma`, `fmax`, `roundeven`, ...) are absent: they have one correct
+/// result, so the library cannot change it.
+const LIBM_ROUNDED_FUNCTIONS: &[&str] = &[
+    "acos", "asin", "atan", "atan2", "cos", "sin", "tan", "acosh", "asinh", "atanh", "cosh",
+    "sinh", "tanh", "exp", "exp2", "expm1", "log", "log10", "log1p", "log2", "pow", "sqrt",
+    "cbrt", "hypot", "erf", "erfc", "lgamma", "tgamma",
+];
+
+/// The one rounded libm function generated code may call: C Annex F (F.3)
+/// requires `sqrt` to be IEEE 754 correctly rounded, so libm's result is the
+/// [05-OP-46] result (spec/design/correctly_rounded_math.md section 4.2).
+const LIBM_KEPT: &[&str] = &["sqrt"];
+
+/// Vendor vector-library and Sleef identifiers, none of which is correctly rounded.
+const VENDOR_MATH_IDENTIFIERS: &[&str] = &[
     "vvexpf",
     "vvlogf",
     "vvsinf",
@@ -606,6 +588,18 @@ const HOST_MATH_IDENTIFIERS: &[&str] = &[
     "CHELIS_SINF8",
     "CHELIS_MATH_USE_VFORCE",
 ];
+
+/// Whether `word` names a host math library routine generated code must not
+/// call: a rounded libm function other than [`LIBM_KEPT`] at any precision
+/// suffix, or a vendor identifier. Each is matched as a whole C identifier, so
+/// `chelis_cr_expf` does not match `expf`.
+fn is_host_math_identifier(word: &str) -> bool {
+    let libm = LIBM_ROUNDED_FUNCTIONS
+        .iter()
+        .filter(|name| !LIBM_KEPT.contains(name))
+        .any(|name| ["", "f", "l"].iter().any(|suffix| word == format!("{name}{suffix}")));
+    libm || VENDOR_MATH_IDENTIFIERS.contains(&word) || word.starts_with("Sleef_")
+}
 
 /// `source` with comments and string and character literals blanked, so
 /// prose such as a kernel's "natural exp(x)" comment is not read as code.
@@ -659,7 +653,7 @@ fn host_math_findings(source: &str) -> Vec<String> {
         .filter(|word| !word.is_empty())
         .collect();
     for word in &words {
-        if HOST_MATH_IDENTIFIERS.contains(word) || word.starts_with("Sleef_") {
+        if is_host_math_identifier(word) {
             findings.push(format!("host math identifier `{word}`"));
         }
     }
@@ -759,4 +753,29 @@ fn host_math_scan_reports_planted_libm_call_and_missing_kernel() {
             .any(|finding| finding.starts_with("`chelis_cr_sinf` is called")),
         "the scan must report a called kernel the unit does not define"
     );
+}
+
+/// The scan's exemption is `sqrt` alone: a planted `sqrtf` or `sqrt` passes,
+/// and every other rounded libm name, `cbrt` and `hypot` included, is reported.
+#[test]
+fn host_math_scan_exempts_only_sqrt() {
+    let (_, source) = transcendental_corpus().remove(0);
+    for kept in ["sqrtf", "sqrt", "sqrtl"] {
+        let planted = source.replacen("chelis_cr_expf(__in", &format!("{kept}(__in"), 1);
+        assert_ne!(planted, source, "the plant must change the unit");
+        assert!(host_math_findings(&planted).is_empty(), "{kept} is kept");
+    }
+    for name in LIBM_ROUNDED_FUNCTIONS
+        .iter()
+        .filter(|name| !LIBM_KEPT.contains(name))
+    {
+        for suffix in ["", "f", "l"] {
+            let call = format!("{name}{suffix}");
+            let planted = source.replacen("chelis_cr_expf(__in", &format!("{call}(__in"), 1);
+            assert!(
+                host_math_findings(&planted).contains(&format!("host math identifier `{call}`")),
+                "the scan must report a planted `{call}` call"
+            );
+        }
+    }
 }
