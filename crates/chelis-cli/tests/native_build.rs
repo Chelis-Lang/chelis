@@ -227,7 +227,12 @@ fn hip_and_metal_build_commands_include_support_and_ordered_flags() {
 if [ "$1" = "--version" ]; then echo 'clang version test'; exit 0; fi
 printf '%s\n' "$@" > "$NATIVE_TEST_LOG"
 while [ "$#" -gt 0 ]; do
-    if [ "$1" = "-o" ]; then shift; cp /usr/bin/true "$1"; exit 0; fi
+    if [ "$1" = "-o" ]; then
+        shift
+        printf '#!/bin/sh\nexit 0\n' > "$1"
+        chmod 755 "$1"
+        exit 0
+    fi
     shift
 done
 exit 1"#,
