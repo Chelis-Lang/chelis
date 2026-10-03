@@ -4,6 +4,24 @@
 version = 3
 
 [[path_rule]]
+prefix = "scripts/generate_c_support_inventory.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks generated C support against its source rosters and route decisions"
+tracking_issue = "chelis#1170"
+
+[[path_rule]]
+prefix = "scripts/test_generate_c_support_inventory.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs source-roster and published-inventory positive and negative controls"
+tracking_issue = "chelis#1170"
+
+[[path_rule]]
 prefix = "pyrightconfig.json"
 disposition = "owner"
 workflow = "ci.yml"

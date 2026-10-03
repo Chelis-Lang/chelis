@@ -1,0 +1,152 @@
+"""Generate the interim C exclusion inventory from its actual source rosters."""
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import re
+
+if __package__:
+    from .check_single_compile import tokenize
+else:
+    from check_single_compile import tokenize
+
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT = Path("docs/book/src/c-support.md")
+
+
+def literal_roster(source: str, name: str) -> tuple[str, ...]:
+    tokens = tokenize(source)
+    declarations = [i for i in range(len(tokens) - 1)
+                    if tokens[i].text == "const" and tokens[i + 1].text == name]
+    if len(declarations) != 1:
+        raise ValueError(f"expected one literal roster {name}, found {len(declarations)}")
+    start = declarations[0] + 2
+    while start < len(tokens) and tokens[start].text not in {"=", ";"}:
+        start += 1
+    if [t.text for t in tokens[start:start + 3]] != ["=", "&", "["]:
+        raise ValueError(f"{name} must be a literal string slice")
+    cursor = start + 3
+    rows: list[str] = []
+    while cursor < len(tokens) and tokens[cursor].text != "]":
+        token = tokens[cursor]
+        if token.kind != "str" or not re.fullmatch(r"[a-z][a-z0-9_]*", token.text):
+            raise ValueError(f"nonliteral identity in {name} at line {token.line}")
+        rows.append(token.text)
+        cursor += 1
+        if cursor < len(tokens) and tokens[cursor].text == ",":
+            cursor += 1
+        elif cursor >= len(tokens) or tokens[cursor].text != "]":
+            raise ValueError(f"invalid separator in {name}")
+    if [t.text for t in tokens[cursor:cursor + 2]] != ["]", ";"]:
+        raise ValueError(f"unterminated {name}")
+    if len(rows) != len(set(rows)):
+        raise ValueError(f"duplicate identity in {name}")
+    return tuple(rows)
+
+
+def route_metadata(name: str) -> str:
+    """Reviewed route decisions; unknown source additions require a decision."""
+    if name == "tensor_scan":
+        return "Use eval/test, or rewrite the recurrence with supported tensor primitives."
+    if name == "process_run":
+        return "No equivalent compiled builtin; execute the child process in the embedding host."
+    if name in {"clock_wall_read", "clock_monotonic_read"}:
+        return "No compiled clock-read route ([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)); measure in the embedding host."
+    if name == "round_to":
+        return "No equivalent compiled builtin; specify decimal rounding explicitly using admitted arithmetic, or use eval."
+    if name in {"parse_csv", "csv_f64s", "csv_ints", "csv_strs", "csv_nrows", "csv_cols", "csv_f64", "csv_int", "csv_str"}:
+        return "Stdlib route: `Std.Io.Csv.read_csv` / `try_read_csv` returns `List[Dict[string,string]]`; use `len`, `dict_keys`, `dict_get`, and explicit string-to-number conversion. This changes the document representation; it is not a drop-in builtin alias."
+    if name == "to_csv":
+        return "Stdlib route: `Std.Io.Csv.to_csv` / `write_csv` accepts string-valued rows; convert numeric fields explicitly."
+    raise ValueError(f"missing reviewed route metadata for {name}")
+
+
+def exclusions(root: Path) -> list[tuple[str, str, str]]:
+    compiler = root / "crates/chelis-compiler-api/src/compiler.rs"
+    host = root / "crates/chelis-ir/src/host.rs"
+    groups = [
+        (literal_roster(compiler.read_text(), "HOST_ONLY_BUILTINS"), "Whole checked program"),
+        (literal_roster(host.read_text(), "EVAL_ONLY_HOST_BUILTINS"), "Whole lowered host program"),
+    ]
+    rows = [(name, scope, route_metadata(name)) for names, scope in groups for name in names]
+    if len({row[0] for row in rows}) != len(rows):
+        raise ValueError("overlapping exclusion rosters require one reviewed scope")
+    return rows
+
+
+def assertions(root: Path) -> tuple[str, ...]:
+    spec = (root / "spec/05-risc-primitives.md").read_text()
+    section = spec.split("### 3.6.1 The `test_*` assertion family", 1)[1].split("> **[05-HOST-3]**", 1)[0]
+    names = tuple(re.findall(r"`(test_[a-z_]+)`", section))
+    if not names or len(names) != len(set(names)):
+        raise ValueError("assertion-family inventory is missing or ambiguous")
+    builtins = literal_roster((root / "crates/chelis-types/src/builtins.rs").read_text(), "BUILTIN_NAMES")
+    if set(names) != {name for name in builtins if name.startswith("test_")}:
+        raise ValueError("normative assertion family and builtin vocabulary disagree")
+    return names
+
+
+def render(root: Path) -> str:
+    csv_source = (root / "packages/chelis-std/src/io/csv.ch").read_text()
+    exported = re.search(r"^export \(([^)]+)\)", csv_source, re.MULTILINE)
+    required = {"read_csv", "try_read_csv", "to_csv", "write_csv"}
+    if not exported or not required <= {name.strip() for name in exported[1].split(",")}:
+        raise ValueError("published CSV alternative no longer exports the cited functions")
+    lines = [
+        "# C support and exclusions", "",
+        "Generated by `scripts/generate_c_support_inventory.py`; edit its route decisions or the owning source, then regenerate. This is an interim exclusion inventory, not a guarantee that every other program compiles.", "",
+        "`chelis check` verifies language validity. `chelis build --target c` additionally checks whether the selected program can be emitted. A typed `unsupported` error is a refusal, never an approximate result or a success with a placeholder value.", "",
+        "## Explicit build gates", "",
+        "These identities come directly from the compiler's two exclusion rosters. Eval availability remains subject to each operation's ordinary type, effect and runtime prerequisites. Whole checked program means even an entry-unreachable helper is rejected. Whole lowered host program means every global and function retained in that host program is inspected, not only the selected entry's live calls.", "",
+        "| Identity | Entry route | Eval/test | C | Rejection scope | Supported alternative |",
+        "|---|---|---|---|---|---|",
+    ]
+    for name, scope, alternative in exclusions(root):
+        lines.append(f"| `{name}` | builtin | Available | Rejected | {scope} | {alternative} |")
+    lines += [
+        "", "Source owners: `crates/chelis-compiler-api/src/compiler.rs::HOST_ONLY_BUILTINS` and `crates/chelis-ir/src/host.rs::EVAL_ONLY_HOST_BUILTINS`. The private, same-named kernel-routing roster in `host.rs` chooses the host lane; it is not a C exclusion list. For example, `print` and string operations have compiled host implementations.", "",
+        "## Assertions and other live host code", "",
+        "The assertion identities below are derived from spec/05 §3.6.1 and checked against the builtin vocabulary. [05-HOST-3] requires host-runtime execution in every language execution mode. Their missing C emission is an implementation gap, not an evaluator-only normative restriction. An unsupported assertion in a live emitted function refuses the build; an entry-unreachable helper can become an abort stub. Std.Test wrappers retain this restriction when they reach these builtins.", "",
+        "| Identity | Entry route | Eval/test | C | Rejection scope | Supported alternative |",
+        "|---|---|---|---|---|---|",
+    ]
+    for name in assertions(root):
+        lines.append(f"| `{name}` | builtin | Available | Rejected where live | Emitted live host code | Execute assertions with `chelis test` / `eval`; no equivalent compiled Test assertion. |")
+    lines += [
+        "", "The C host emitter has a closed builtin dispatch and rejects unimplemented live expressions. This catch-all is not a finite roster of missing capabilities; the four assertion rows do not enumerate every possible refusal.", "",
+        "## Structured I/O routes", "",
+        "The builtin Csv document is different from the source-defined `Std.Io.Csv` module. The latter's file reader, string renderer and writer compile through ordinary List/Dict/string/IO support. Its cells are strings, and numeric conversion must be explicit. The line-based reader does not support quoted fields containing embedded newlines ([#954](https://github.com/Chelis-Lang/chelis/issues/954)).", "",
+        "`Std.Io.Json` is likewise a separate source-defined route. The removed JSON builtins are not current exclusions. Import resolution needs the `chelis-std` dependency; an unresolved import on both lanes is a dependency error, not evidence of a C capability gap.", "",
+        "## Partial surfaces and release boundary", "",
+        "| Surface | Eval | C and scope | Owning work / alternative |",
+        "|---|---|---|---|",
+        "| General function values stored or passed as data | Language-valid forms can execute | Partial; live lowering/ABI forms can refuse | [#909](https://github.com/Chelis-Lang/chelis/issues/909); use direct named calls or a documented admitted higher-order form. |",
+        "| `to_string` of tensors/lists | Available | Live C host emission refuses these representations | [#1059](https://github.com/Chelis-Lang/chelis/issues/1059); extract and render admitted scalar elements explicitly. |",
+        "| Dimension-generic ADTs read through generic containers | Can execute | Partial; live host lowering can refuse unresolved dimensions/types | [#730](https://github.com/Chelis-Lang/chelis/issues/730), [#1226](https://github.com/Chelis-Lang/chelis/issues/1226), and [coral#26](https://github.com/Chelis-Lang/coral/issues/26). No universal source-level workaround is promised. |",
+        "", "These partial surfaces are recorded boundaries, not whole-family bans. Successful concrete cases do not prove all instantiations. The launch contract and executable eval/C receipt are tracked by [#1362](https://github.com/Chelis-Lang/chelis/issues/1362) and [#2102](https://github.com/Chelis-Lang/chelis/issues/2102). GPU limits are described separately in [Backends](backends.md).", "",
+        "Regenerate with `.venv/bin/python scripts/generate_c_support_inventory.py --write`; check source agreement with the same command's `--check`. The owning [#1170](https://github.com/Chelis-Lang/chelis/issues/1170) class remains until its interim rosters are derived or retired by the capability table.", "",
+    ]
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--write", action="store_true")
+    group.add_argument("--check", action="store_true")
+    args = parser.parse_args()
+    try:
+        text = render(ROOT)
+        if args.write:
+            (ROOT / OUTPUT).write_text(text)
+        elif not (ROOT / OUTPUT).is_file() or (ROOT / OUTPUT).read_text() != text:
+            raise ValueError("published C inventory is stale; regenerate and review the diff")
+    except (ValueError, OSError, IndexError) as error:
+        print(f"C SUPPORT INVENTORY: FAIL: {error}")
+        return 1
+    print("C SUPPORT INVENTORY: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

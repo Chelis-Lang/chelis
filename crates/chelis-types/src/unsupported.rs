@@ -580,7 +580,7 @@ impl Unsupported {
     pub fn compiled_host_only_builtin(name: impl Into<String>, target: &'static str) -> Self {
         Self::new(
             UnsupportedKind::Builtin(name.into()),
-            format!("`chelis build --target {target}` host emission"),
+            format!("`chelis build --target {target}` host emission (rejection scope: whole checked program)"),
             Stage::Codegen(target),
             crate::deliberate_rejection!(
                 "[05-HOST-1]",

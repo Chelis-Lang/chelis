@@ -4719,7 +4719,7 @@ pub fn reject_eval_only_builtins(
         return Err(unsupported_stage_error(
             chelis_types::unsupported::Unsupported::new(
                 chelis_types::unsupported::UnsupportedKind::Builtin(name.to_string()),
-                "compiled targets (the host interpreter's eval/test lanes only)",
+                "compiled targets (the host interpreter's eval/test lanes only) (rejection scope: whole lowered host program)",
                 chelis_types::unsupported::Stage::Codegen(target.as_str()),
                 chelis_types::deliberate_rejection!(
                     "[05-HOST-2]",
