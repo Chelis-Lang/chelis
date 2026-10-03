@@ -539,13 +539,17 @@ mod dtype_name {
         prim.map(|prim| prim.name()).serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Prim>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Prim>, D::Error> {
         Option::<String>::deserialize(deserializer)?
             .map(|name| {
                 CONTRACT_FLOAT_WIDTHS
                     .into_iter()
                     .find(|prim| prim.name() == name)
-                    .ok_or_else(|| D::Error::custom(format!("`{name}` is not a contract float width")))
+                    .ok_or_else(|| {
+                        D::Error::custom(format!("`{name}` is not a contract float width"))
+                    })
             })
             .transpose()
     }
@@ -641,8 +645,10 @@ thread_local! {
 fn run_fuzz_discharge(id: &str, samples: usize, seed: u64, prim: Option<Prim>) -> FuzzOutcome {
     #[cfg(test)]
     RESOLVED_ROWS.with(|rows| {
-        rows.borrow_mut()
-            .push(format!("{id}@{}", prim.map_or("untyped", |prim| prim.name())));
+        rows.borrow_mut().push(format!(
+            "{id}@{}",
+            prim.map_or("untyped", |prim| prim.name())
+        ));
     });
     table_outcome(
         committed_discharge_table(),
@@ -680,7 +686,10 @@ fn table_outcome(
         Err(message) => return unavailable(serde_json::json!(message)),
     };
     let Some(row) = table.rows.iter().find(|row| {
-        row.contract == id && row.samples == samples && row.seed == seed && row.outcome.dtype == prim
+        row.contract == id
+            && row.samples == samples
+            && row.seed == seed
+            && row.outcome.dtype == prim
     }) else {
         return unavailable(serde_json::json!(format!(
             "{DISCHARGE_TABLE_PATH} has no row for {id} at {} with {samples} samples and seed {seed}",
@@ -1030,10 +1039,16 @@ mod tests {
             .unwrap()
             .rows
             .iter()
-            .find(|row| row.contract == NORMAL_CDF_REFLECTION && row.outcome.dtype == Some(Prim::F32))
+            .find(|row| {
+                row.contract == NORMAL_CDF_REFLECTION && row.outcome.dtype == Some(Prim::F32)
+            })
             .unwrap();
-        let recomputed =
-            recompute_fuzz_discharge(NORMAL_CDF_REFLECTION, committed.samples, committed.seed, Some(Prim::F32));
+        let recomputed = recompute_fuzz_discharge(
+            NORMAL_CDF_REFLECTION,
+            committed.samples,
+            committed.seed,
+            Some(Prim::F32),
+        );
         assert_eq!(&recomputed, &committed.outcome);
         assert!(recomputed.counterexample.is_some());
     }
@@ -1044,7 +1059,14 @@ mod tests {
         let rows = table
             .rows
             .iter()
-            .map(|row| (row.contract.as_str(), row.samples, row.seed, row.outcome.dtype))
+            .map(|row| {
+                (
+                    row.contract.as_str(),
+                    row.samples,
+                    row.seed,
+                    row.outcome.dtype,
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(rows, discharge_plan());
         assert_eq!(
@@ -1063,7 +1085,12 @@ mod tests {
             CompositeVerdict::Proven,
             [NORMAL_CDF_REFLECTION, EXP_POSITIVITY, QUANTILE_RANGE],
         );
-        assert!(probe.assumptions.iter().all(|record| record.discharge.is_some()));
+        assert!(
+            probe
+                .assumptions
+                .iter()
+                .all(|record| record.discharge.is_some())
+        );
         assert_eq!(RECOMPUTED.with(std::cell::Cell::get), 0);
     }
 
@@ -1074,11 +1101,19 @@ mod tests {
             let reached = contracts.iter().map(|id| id.to_string()).collect();
             let registry = standard_contract_registry_for(Some(&reached), widths, None);
             let probe = registry.probe_consumer("consumer", CompositeVerdict::Proven, contracts);
-            assert!(probe.assumptions.iter().all(|record| record.discharge.is_some()));
+            assert!(
+                probe
+                    .assumptions
+                    .iter()
+                    .all(|record| record.discharge.is_some())
+            );
             RESOLVED_ROWS.with(|rows| rows.borrow().clone())
         };
         // No float contract reached: no float discharge is resolved.
-        assert_eq!(resolved(&[QUANTILE_RANGE], &[]), vec![format!("{QUANTILE_RANGE}@untyped")]);
+        assert_eq!(
+            resolved(&[QUANTILE_RANGE], &[]),
+            vec![format!("{QUANTILE_RANGE}@untyped")]
+        );
         assert!(resolved(&[EXP_ZERO], &[]).is_empty());
         assert!(resolved(&[], &[]).is_empty());
         assert_eq!(
@@ -1088,7 +1123,10 @@ mod tests {
         // The unfiltered registry resolves every row of the plan.
         RESOLVED_ROWS.with(|rows| rows.borrow_mut().clear());
         let _ = standard_contract_registry(&CONTRACT_FLOAT_WIDTHS);
-        assert_eq!(RESOLVED_ROWS.with(|rows| rows.borrow().len()), discharge_plan().len());
+        assert_eq!(
+            RESOLVED_ROWS.with(|rows| rows.borrow().len()),
+            discharge_plan().len()
+        );
     }
 
     #[test]
@@ -1100,22 +1138,63 @@ mod tests {
             outcome.counterexample.expect("a failed outcome")["discharge_table"].clone()
         };
         // The committed row is served.
-        let served = table_outcome(Ok(table), shipped, NORMAL_CDF_RANGE, 8192, 0xC0DF_2026, Some(Prim::F64));
+        let served = table_outcome(
+            Ok(table),
+            shipped,
+            NORMAL_CDF_RANGE,
+            8192,
+            0xC0DF_2026,
+            Some(Prim::F64),
+        );
         assert!(served.counterexample.is_none());
         // A sample plan the table does not hold.
-        let reason = failed(table_outcome(Ok(table), shipped, NORMAL_CDF_RANGE, 8191, 0xC0DF_2026, Some(Prim::F64)));
+        let reason = failed(table_outcome(
+            Ok(table),
+            shipped,
+            NORMAL_CDF_RANGE,
+            8191,
+            0xC0DF_2026,
+            Some(Prim::F64),
+        ));
         assert!(reason.as_str().unwrap().contains("has no row"), "{reason}");
         // A width the table does not hold for an untyped contract.
-        failed(table_outcome(Ok(table), shipped, QUANTILE_RANGE, 8192, 0xCA_2026, Some(Prim::F64)));
+        failed(table_outcome(
+            Ok(table),
+            shipped,
+            QUANTILE_RANGE,
+            8192,
+            0xCA_2026,
+            Some(Prim::F64),
+        ));
         // A normal_cdf row recorded against another shipped graph.
         let other = || Ok("0".repeat(64));
-        let reason = failed(table_outcome(Ok(table), other, NORMAL_CDF_RANGE, 8192, 0xC0DF_2026, Some(Prim::F64)));
+        let reason = failed(table_outcome(
+            Ok(table),
+            other,
+            NORMAL_CDF_RANGE,
+            8192,
+            0xC0DF_2026,
+            Some(Prim::F64),
+        ));
         assert_eq!(reason["shipped_std_graph_digest"], "0".repeat(64));
         // The digest does not gate a row that does not read the graph.
-        let exp = table_outcome(Ok(table), other, EXP_POSITIVITY, 4096, 0xE0_2026, Some(Prim::F64));
+        let exp = table_outcome(
+            Ok(table),
+            other,
+            EXP_POSITIVITY,
+            4096,
+            0xE0_2026,
+            Some(Prim::F64),
+        );
         assert!(exp.counterexample.is_none());
         // An unreadable table.
-        failed(table_outcome(Err("broken".to_string()), shipped, EXP_POSITIVITY, 4096, 0xE0_2026, Some(Prim::F64)));
+        failed(table_outcome(
+            Err("broken".to_string()),
+            shipped,
+            EXP_POSITIVITY,
+            4096,
+            0xE0_2026,
+            Some(Prim::F64),
+        ));
     }
-
 }

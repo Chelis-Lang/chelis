@@ -74,7 +74,13 @@ fn run_untyped_fuzz_discharge(id: &str, samples: usize, seed: u64) -> FuzzOutcom
         QUANTILE_RANGE => fuzz_quantile_range(samples, seed),
         QUANTILE_MONOTONICITY => fuzz_quantile_monotonicity(samples, seed),
         QUANTILE_BOUNDARY => fuzz_quantile_boundary(samples, seed),
-        _ => FuzzOutcome::new(0, f64::INFINITY, Some(serde_json::json!({"unsupported_contract": id})), "unsupported standard contract", None),
+        _ => FuzzOutcome::new(
+            0,
+            f64::INFINITY,
+            Some(serde_json::json!({"unsupported_contract": id})),
+            "unsupported standard contract",
+            None,
+        ),
     }
 }
 
@@ -113,7 +119,13 @@ fn run_float_fuzz_discharge(id: &str, samples: usize, seed: u64, prim: Prim) -> 
         ),
         LOG_ONE => {
             let error = kernel("log", at_dtype(prim, 1.0)).as_f64_lossy().abs();
-            FuzzOutcome::new(samples.max(1), error, counterexample_if(error, serde_json::json!({"x": 1.0})), "log anchor x = 1", Some(prim))
+            FuzzOutcome::new(
+                samples.max(1),
+                error,
+                counterexample_if(error, serde_json::json!({"x": 1.0})),
+                "log anchor x = 1",
+                Some(prim),
+            )
         }
         _ => run_untyped_fuzz_discharge(id, samples, seed),
     }
@@ -152,7 +164,15 @@ fn normal_cdf_values(
     domain: &'static str,
     prim: Prim,
 ) -> Result<Vec<ScalarValue>, FuzzOutcome> {
-    crate::std_graph::normal_cdf_batch(inputs).map_err(|message| FuzzOutcome::new(0, f64::INFINITY, Some(serde_json::json!({"evaluation_error": message})), domain, Some(prim)))
+    crate::std_graph::normal_cdf_batch(inputs).map_err(|message| {
+        FuzzOutcome::new(
+            0,
+            f64::INFINITY,
+            Some(serde_json::json!({"evaluation_error": message})),
+            domain,
+            Some(prim),
+        )
+    })
 }
 
 fn signed_samples(prim: Prim, samples: usize, seed: u64, radius: f64) -> Vec<ScalarValue> {
@@ -333,13 +353,25 @@ fn fuzz_quantile_range(samples: usize, seed: u64) -> FuzzOutcome {
         let err = low_err.max(high_err);
         max_error = max_error.max(err);
         if err > FUZZ_TOLERANCE {
-            return FuzzOutcome::new(i + 1, max_error, Some(serde_json::json!({
+            return FuzzOutcome::new(
+                i + 1,
+                max_error,
+                Some(serde_json::json!({
                     "data": data, "q": q, "result": result,
                     "min": min_val, "max": max_val, "error": err
-                })), "quantile range bounded by [min, max]", None);
+                })),
+                "quantile range bounded by [min, max]",
+                None,
+            );
         }
     }
-    FuzzOutcome::new(samples, max_error, None, "quantile range bounded by [min, max]", None)
+    FuzzOutcome::new(
+        samples,
+        max_error,
+        None,
+        "quantile range bounded by [min, max]",
+        None,
+    )
 }
 
 fn fuzz_quantile_monotonicity(samples: usize, seed: u64) -> FuzzOutcome {
@@ -357,13 +389,25 @@ fn fuzz_quantile_monotonicity(samples: usize, seed: u64) -> FuzzOutcome {
         let err = (rp - rq).max(0.0);
         max_error = max_error.max(err);
         if err > FUZZ_TOLERANCE {
-            return FuzzOutcome::new(i + 1, max_error, Some(serde_json::json!({
+            return FuzzOutcome::new(
+                i + 1,
+                max_error,
+                Some(serde_json::json!({
                     "data": data, "p": p, "q": q,
                     "quantile_p": rp, "quantile_q": rq, "error": err
-                })), "quantile monotone in q: p <= q => quantile(p) <= quantile(q)", None);
+                })),
+                "quantile monotone in q: p <= q => quantile(p) <= quantile(q)",
+                None,
+            );
         }
     }
-    FuzzOutcome::new(samples, max_error, None, "quantile monotone in q: p <= q => quantile(p) <= quantile(q)", None)
+    FuzzOutcome::new(
+        samples,
+        max_error,
+        None,
+        "quantile monotone in q: p <= q => quantile(p) <= quantile(q)",
+        None,
+    )
 }
 
 fn fuzz_quantile_boundary(samples: usize, seed: u64) -> FuzzOutcome {
@@ -380,15 +424,27 @@ fn fuzz_quantile_boundary(samples: usize, seed: u64) -> FuzzOutcome {
         let err = (q0 - min_val).abs().max((q1 - max_val).abs());
         max_error = max_error.max(err);
         if err > FUZZ_TOLERANCE {
-            return FuzzOutcome::new(i + 1, max_error, Some(serde_json::json!({
+            return FuzzOutcome::new(
+                i + 1,
+                max_error,
+                Some(serde_json::json!({
                     "data": data,
                     "quantile_0": q0, "min": min_val,
                     "quantile_1": q1, "max": max_val,
                     "error": err
-                })), "quantile boundary: q=0 -> min, q=1 -> max", None);
+                })),
+                "quantile boundary: q=0 -> min, q=1 -> max",
+                None,
+            );
         }
     }
-    FuzzOutcome::new(samples, max_error, None, "quantile boundary: q=0 -> min, q=1 -> max", None)
+    FuzzOutcome::new(
+        samples,
+        max_error,
+        None,
+        "quantile boundary: q=0 -> min, q=1 -> max",
+        None,
+    )
 }
 
 fn counterexample_if(error: f64, counterexample: serde_json::Value) -> Option<serde_json::Value> {
