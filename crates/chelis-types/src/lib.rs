@@ -56,9 +56,9 @@ pub use bitwise::{BitwiseError, BitwiseKind, bitwise_scalar, bitwise_tensor};
 pub use builtins::{
     AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinCapabilityDecl, BuiltinDecl,
     BuiltinInferenceRule, BuiltinSemanticDomain, BuiltinSiblingCaseDecl, BuiltinSiblingCaseId,
-    CaseKeys, InferenceDisposition, KeyParameter, KeyParameterSite, KeyRouting, Realizability,
-    ShapeClass, axis_argument_layout, builtin_decl, builtin_env, case_keys, prelude_adt_defs,
-    realizability, shape_class,
+    COMPARISON_OPS, CaseKeys, InferenceDisposition, KeyParameter, KeyParameterSite, KeyRouting,
+    Realizability, ShapeClass, axis_argument_layout, builtin_decl, builtin_env, case_keys,
+    prelude_adt_defs, realizability, shape_class,
 };
 pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,

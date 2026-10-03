@@ -21,6 +21,22 @@ and every backend receives the borrow/move/clone disposition before emission.
 Slot planners treat terminal consumes and `Drop` as authoritative live-range
 closes.
 
+## Read-only numeric families
+
+The controlling borrow rule is spec/05 §1.3.1. Comparisons, elementwise
+extrema, and unary activations leave their tensor inputs live. The checker
+uses the comparison identity enumeration for every member; host coarse typing
+returns an operand-shaped bool tensor for every direct tensor comparison,
+and a scalar bool for scalar or recursive equality. A comparison containing a
+host-evaluated operand stays on the host lane so runtime operand agreement is
+checked before comparison. The C emitter supplies that family through its
+existing runtime or typed elementwise comparison arms.
+
+The regression oracle is `cargo test -p chelis-cli --test
+issue_1248_read_only_families`: family and operator reuse succeeds, reuse after
+`realize` fails, and host-produced tensor comparisons execute with eval/C parity
+while incompatible shape or dtype inputs fail checking.
+
 ## Drop Insertion
 
 An owned linear value without a consuming use receives an inserted `Drop`. The shipped

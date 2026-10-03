@@ -31,6 +31,13 @@ lowering first records explicit borrow, move, clone, and terminal `Drop` obligat
 in the verified ownership representation consumed by every backend. Consuming
 operations such as `realize` and explicit `drop` keep owned parameters.
 
+The comparison family [05-OP-36] and `max_elem` / `min_elem` borrow both
+tensor operands. The unary activations `sigmoid`, `tanh`, `silu`, and `gelu`
+borrow their tensor operand, as do the read-only unary primitives composing
+them. Operator and function-call spellings have the same ownership disposition.
+A genuine consuming use still makes a later call in any of these families a
+use-after-consume.
+
 The same observational rule covers the read-only `List` / `Dict` queries `len` and
 `index`: they auto-borrow their container argument rather than consuming it, so the
 idiomatic "read a list's length / element, then reuse the list" pattern type-checks

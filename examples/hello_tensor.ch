@@ -5,6 +5,7 @@ def choose_scalar(a: f32, b: f32) -> f32 = a |> max_elem(b) |> min_elem(1.0f32)
 def main[n]() -> tensor[n, f32] = {
   a = to_tensor([1.0, 2.0, 3.0])
   b = to_tensor([4.0, 5.0, 6.0])
-  out = add(a, b)
+  selected = where((a < b), a, b)
+  out = add(selected, b)
   out
 }

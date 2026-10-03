@@ -10,7 +10,7 @@ use chelis_deep::ast::{Atom, Expr};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
-use crate::builtins::{BUILTIN_NAMES, BuiltinSiblingCaseId, builtin_decl};
+use crate::builtins::{BUILTIN_NAMES, BuiltinSiblingCaseId, COMPARISON_OPS, builtin_decl};
 use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
@@ -1175,6 +1175,11 @@ impl Checker {
     fn check_app(&mut self, expr: &Expr, children: &[Expr], scope: &mut LinearScope) {
         let builtin = children.first().and_then(var_name);
         let builtin_callee = builtin.filter(|name| self.is_builtin_reference(name, scope));
+        // Borrow dispositions also cover intrinsic calls such as `dropout`,
+        // which intentionally lives outside the ordinary builtin vocabulary.
+        // The closed borrow policy below recognizes the intrinsic; lexical
+        // bindings must still use their actual function signature.
+        let borrowing_callee = builtin.filter(|name| scope.top_id(name).is_none());
         // A builtin callee is judged operand by operand below; a builtin
         // named as a value is judged by the type checker
         // (`infer::expr::forbid_keys_a_builtin_value_does_not_admit`).
@@ -1210,13 +1215,13 @@ impl Checker {
                 // A callee position that only borrows cannot take one.
                 if verdicts[index - 1] != KeyOperand::Refused
                     && !observational
-                    && self.arg_is_borrowed(children.first(), builtin, index - 1, scope)
+                    && self.arg_is_borrowed(children.first(), borrowing_callee, index - 1, scope)
                 {
                     self.reject_key_read(arg, "borrowed by this call");
                 } else {
                     self.consume_var_expr(arg, scope, app_site(expr, children));
                 }
-            } else if self.arg_is_borrowed(children.first(), builtin, index - 1, scope)
+            } else if self.arg_is_borrowed(children.first(), borrowing_callee, index - 1, scope)
                 && is_var_expr(arg)
                 && self.expr_is_owned_linear(arg, scope)
             {
@@ -3300,21 +3305,19 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
     let Some(name) = name else {
         return false;
     };
+    if COMPARISON_OPS.contains(&name) {
+        return arg_index < 2;
+    }
     matches!(
         name,
         "add"
             | "mul"
             | "max_elem"
+            | "min_elem"
             | "sub"
             | "div"
             | "floor_div"
             | "trunc_div"
-            | "eq"
-            | "neq"
-            | "lt"
-            | "gt"
-            | "lte"
-            | "gte"
             | "and"
             | "or"
             | "matmul"
@@ -3339,13 +3342,14 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "floor"
                 | "ceil"
                 | "round"
-                | "cmplt"
                 | "not"
                 | "relu"
                 | "sigmoid"
+                | "tanh"
+                | "silu"
+                | "gelu"
                 | "softmax"
                 | "mean"
-                | "min_elem"
                 | "sum"
                 | "max_reduce"
                 | "min_reduce"
