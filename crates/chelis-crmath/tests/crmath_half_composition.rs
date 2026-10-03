@@ -6,8 +6,12 @@
 //! of the 65,536 inputs of each dtype is checked for each function.
 //!
 //! Negative partner: a planted direct-to-storage rounding (the f64 result rounded
-//! straight to f16 or bf16, which is what "correctly rounded at the storage width"
-//! would mean) is reported by the same check at f16 and at bf16.
+//! once, straight to f16, which is what "correctly rounded at the storage width"
+//! would mean) is reported by the same check. At bf16 the two readings agree on
+//! every input of these seven kernels (measured exhaustively): the readings differ
+//! only where the f32 result lands exactly on a bf16 tie that the exact value
+//! does not, and with 16 more bits in f32 than in bf16 none of these kernels
+//! produces one, so a bf16 planted mutant has no input to be reported on.
 
 use chelis_crmath as cr;
 use half::{bf16, f16};
@@ -88,19 +92,36 @@ fn bf16_api_is_the_f32_composition_on_every_input() {
     }
 }
 
+/// `x` rounded once, ties to even, to a binary format with `mantissa_bits`
+/// fraction bits and minimum normal exponent `min_exponent`; the result is a
+/// value of that format, exact in f64 (or an infinity on overflow). `half`'s
+/// own `from_f64` cannot be the planted mutant: with F16C on x86_64 it
+/// narrows through f32 first, which rounds twice and turns the direct
+/// rounding back into the composition.
+fn round_once(x: f64, mantissa_bits: i32, min_exponent: i32) -> f64 {
+    if !x.is_finite() || x == 0.0 {
+        return x;
+    }
+    let exponent = (((x.to_bits() >> 52) & 0x7ff) as i32 - 1023).max(min_exponent);
+    let quantum = 2.0_f64.powi(exponent - mantissa_bits);
+    // Scaling by a power of two is exact, and so is rounding the scaled
+    // value to an integer.
+    (x / quantum).round_ties_even() * quantum
+}
+
 #[test]
 fn planted_direct_rounding_is_reported() {
-    let (mut f16_reports, mut bf16_reports) = (0, 0);
+    let mut f16_reports = 0;
     for (_, (_, _, k32, k64)) in KERNELS {
-        f16_reports += reported_f16(k32, |x| f16::from_f64(k64(x.to_f64())).to_bits()).len();
-        bf16_reports += reported_bf16(k32, |x| bf16::from_f64(k64(x.to_f64())).to_bits()).len();
+        // The rounded value is exactly representable (or infinite), so the
+        // final conversion is exact on every `half` code path.
+        f16_reports += reported_f16(k32, |x| {
+            f16::from_f64(round_once(k64(x.to_f64()), 10, -14)).to_bits()
+        })
+        .len();
     }
     assert!(
         f16_reports > 0,
         "no f16 input distinguishes direct rounding from the composition"
-    );
-    assert!(
-        bf16_reports > 0,
-        "no bf16 input distinguishes direct rounding from the composition"
     );
 }
