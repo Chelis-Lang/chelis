@@ -4,7 +4,7 @@ pub mod blas;
 mod crmath_kernels;
 mod emit;
 mod emitted_expr;
-mod fp_env;
+pub mod fp_env;
 mod generated_header;
 mod host_abi;
 mod host_emit;
@@ -12,6 +12,7 @@ pub mod integer_float;
 pub mod memory;
 pub mod toolchain;
 
+pub use host_emit::host_builtin_nan_inventory;
 pub use generated_header::{GeneratedDeclaration, GeneratedHeader, GeneratedHeaderError};
 
 /// Primitive types the C backend's tensor-DAG path can realize.

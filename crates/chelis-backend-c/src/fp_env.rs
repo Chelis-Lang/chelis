@@ -20,7 +20,8 @@
 //! restore.
 //!
 //! The same block carries the static helpers that finalize f32 and f64
-//! arithmetic NaNs to [04-NUM-2]'s canonical quiet NaN.
+//! arithmetic and conversion NaNs to [04-NUM-2]'s canonical quiet NaN, and
+//! this module owns the one function that applies them ([`finalize_float`]).
 
 /// First line of the helper block, so a host program that splices
 /// standalone kernels can drop their copies and keep exactly one.
@@ -56,12 +57,164 @@ const HELPERS: &[&str] = &[
     HELPERS_END,
 ];
 
-/// Wrap one f32 or f64 arithmetic result in [04-NUM-2]'s NaN finalization.
-pub(crate) fn canonical_nan(expr: &str, is_f64: bool) -> String {
+/// How [04-NUM-2] finalizes the NaN that a float-producing operation yields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NanFinalization {
+    /// Arithmetic or numeric conversion: every NaN becomes the target dtype's
+    /// canonical quiet NaN, whatever the input payload and sign.
+    Canonical,
+    /// Selection whose governing atom says it preserves the selected operand's
+    /// stored bits: [05-OP-40] `max_elem`/`min_elem`, [05-OP-12] and
+    /// [05-OP-13] `max_reduce`/`min_reduce`, [05-OP-43] `relu`, and the
+    /// [05-OP-43] and [05-OP-40] adjoints that route a cotangent unchanged.
+    BitPreserving,
+}
+
+/// The one place the C lane finalizes a float result computed in `float` or
+/// `double`. Every emitter routes each float value it produces through this
+/// function with the finalization its operation's classification selects
+/// (`host_emit::CExpressionBuiltin::nan_finalization`,
+/// [`risc_nan_finalization`], [`fused_step_nan_finalization`] and
+/// `host_emit::checked_cast_c_expr`); f16 and bf16 results compute at f32 and
+/// narrow through storage helpers that already canonicalize.
+pub(crate) fn finalize_float(expr: &str, is_f64: bool, finalization: NanFinalization) -> String {
+    match finalization {
+        NanFinalization::BitPreserving => expr.to_string(),
+        NanFinalization::Canonical => format!("{}({expr})", canonical_nan_helper(is_f64)),
+    }
+}
+
+/// The helper [`finalize_float`] applies, for an emitter that builds its call
+/// through the closed expression vocabulary instead of text.
+pub(crate) fn canonical_nan_helper(is_f64: bool) -> &'static str {
     if is_f64 {
-        format!("__chelis_nan_f64({expr})")
+        "__chelis_nan_f64"
     } else {
-        format!("__chelis_nan_f32({expr})")
+        "__chelis_nan_f32"
+    }
+}
+
+/// The NaN finalization of every typed-DAG operation, or `None` for an
+/// operation that produces no float value of its own (integer, bool, key and
+/// shape operations, and data movement that transports stored bits). The match
+/// is exhaustive, so a new operation does not compile until it is classified.
+pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalization> {
+    use chelis_ir::dag::RiscOp;
+    match op {
+        RiscOp::Add
+        | RiscOp::Sub
+        | RiscOp::Mul
+        | RiscOp::Div
+        | RiscOp::FloorDiv
+        | RiscOp::Neg
+        | RiscOp::Exp
+        | RiscOp::Log
+        | RiscOp::Sin
+        | RiscOp::Sqrt
+        | RiscOp::Cos
+        | RiscOp::Tan
+        | RiscOp::Atan
+        | RiscOp::Tanh
+        | RiscOp::Abs
+        | RiscOp::Floor
+        | RiscOp::Ceil
+        | RiscOp::Round
+        | RiscOp::Recip
+        | RiscOp::Sum { .. }
+        | RiscOp::ProdReduce { .. }
+        | RiscOp::OrderedAdjointSum { .. }
+        | RiscOp::ReduceWindowGrad { .. }
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
+        | RiscOp::UniformBoundAdjoint { .. }
+        | RiscOp::BlasMatmul { .. }
+        | RiscOp::ScatterAdd { .. }
+        | RiscOp::Cast { .. }
+        | RiscOp::FusedElem { .. } => Some(NanFinalization::Canonical),
+        RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::MaxReduce { .. }
+        | RiscOp::MinReduce { .. }
+        | RiscOp::Relu
+        | RiscOp::ReluAdjoint
+        | RiscOp::ExtremaAdjoint { .. } => Some(NanFinalization::BitPreserving),
+        RiscOp::ReduceWindow { reducer, .. } => Some(match reducer {
+            chelis_ir::dag::ReduceWindowKind::Max | chelis_ir::dag::ReduceWindowKind::Min => {
+                NanFinalization::BitPreserving
+            }
+            chelis_ir::dag::ReduceWindowKind::Sum | chelis_ir::dag::ReduceWindowKind::Mean => {
+                NanFinalization::Canonical
+            }
+        }),
+        RiscOp::Iota
+        | RiscOp::ListMapCapture { .. }
+        | RiscOp::TruncDiv
+        | RiscOp::Mod
+        | RiscOp::Bitwise(..)
+        | RiscOp::Compare(..)
+        | RiscOp::Logical(..)
+        | RiscOp::Where
+        | RiscOp::GuardedFail { .. }
+        | RiscOp::UniformLike
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::SplitN { .. }
+        | RiscOp::KeySelect
+        | RiscOp::Count { .. }
+        | RiscOp::Argmax { .. }
+        | RiscOp::Argmin { .. }
+        | RiscOp::Reshape { .. }
+        | RiscOp::Permute { .. }
+        | RiscOp::Expand { .. }
+        | RiscOp::OneHot { .. }
+        | RiscOp::Pad { .. }
+        | RiscOp::Shrink { .. }
+        | RiscOp::Stride { .. }
+        | RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedUnitAxis { .. }
+        | RiscOp::Const { .. }
+        | RiscOp::ConstTensor { .. }
+        | RiscOp::Load { .. }
+        | RiscOp::Store { .. }
+        | RiscOp::Copy
+        | RiscOp::Drop
+        | RiscOp::Realize
+        | RiscOp::CastTrunc { .. }
+        | RiscOp::Gather { .. }
+        | RiscOp::Scatter { .. }
+        | RiscOp::ScatterElements { .. } => None,
+    }
+}
+
+/// The NaN finalization of one fused elementwise step: arithmetic canonical,
+/// [05-OP-40] extrema bit-preserving. Exhaustive like [`risc_nan_finalization`].
+pub fn fused_step_nan_finalization(op: &chelis_ir::dag::FusedStepOp) -> NanFinalization {
+    use chelis_ir::dag::FusedStepOp;
+    match op {
+        FusedStepOp::MaxElem | FusedStepOp::MinElem => NanFinalization::BitPreserving,
+        FusedStepOp::Add
+        | FusedStepOp::Sub
+        | FusedStepOp::Mul
+        | FusedStepOp::Div
+        | FusedStepOp::FloorDiv
+        | FusedStepOp::TruncDiv
+        | FusedStepOp::Neg
+        | FusedStepOp::Recip
+        | FusedStepOp::Exp
+        | FusedStepOp::Log
+        | FusedStepOp::Sin
+        | FusedStepOp::Sqrt
+        | FusedStepOp::Cos
+        | FusedStepOp::Tan
+        | FusedStepOp::Atan
+        | FusedStepOp::Tanh
+        | FusedStepOp::Abs
+        | FusedStepOp::Floor
+        | FusedStepOp::Ceil
+        | FusedStepOp::Round => NanFinalization::Canonical,
     }
 }
 

@@ -49,6 +49,10 @@ pub struct CEmitter {
     /// prologue already compares, so the witness does not emit a second
     /// comparison of the same two axes (spec/04 §4.7, "exactly once").
     entry_covered_claims: Vec<(NodeId, usize)>,
+    /// [04-NUM-2]: the NaN finalization of the node being emitted, set once
+    /// per node from `fp_env::risc_nan_finalization`. Every element value an
+    /// op emitter produces passes through [`finalize_elem`] with it.
+    nan_finalization: Option<crate::fp_env::NanFinalization>,
     /// Exact immutable input comparisons proven by the enclosing host entry.
     /// Only the private helper emitter accepts this projection; public DAG
     /// entry always supplies an empty set and retains every check.
@@ -191,6 +195,22 @@ impl UnaryEmission {
 /// word converts exactly to and from the `uint64_t` parameters and results of
 /// the runtime's key helpers.
 const RANDOM_WORD_C_TYPE: &str = "unsigned long long";
+
+/// Finalize one f32 or f64 element value of the node being emitted through
+/// `fp_env::finalize_float`. Integer and reduced-float element types pass
+/// through: integers have no NaN, and f16/bf16 narrow through storage helpers
+/// that canonicalize.
+fn finalize_elem(
+    finalization: Option<crate::fp_env::NanFinalization>,
+    expr: String,
+    ty: &TensorType,
+) -> String {
+    match (finalization, ty.precision) {
+        (Some(finalization), Prim::F32) => crate::fp_env::finalize_float(&expr, false, finalization),
+        (Some(finalization), Prim::F64) => crate::fp_env::finalize_float(&expr, true, finalization),
+        _ => expr,
+    }
+}
 
 struct MatmulEmitSpec {
     a: NodeId,
@@ -456,6 +476,7 @@ impl CEmitter {
             lines: Vec::new(),
             indent: 0,
             entry_covered_claims: dag.entry_covered_witness_claims(),
+            nan_finalization: None,
             host_entry_coverage: entry_coverage.to_vec(),
             use_blas: dag
                 .nodes()
@@ -1364,6 +1385,7 @@ impl CEmitter {
 
     fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
+        self.nan_finalization = crate::fp_env::risc_nan_finalization(&node.op);
         self.emit_activation_gate(node, dag);
         // chelis#664/#1948: every semantic same-shape producer validates its
         // complete positive-rank operand relation before the op emitters index
@@ -3246,7 +3268,7 @@ impl CEmitter {
         let checked_int =
             ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/" | "%" | "shl" | "shr");
         let is_float = matches!(ty.precision, Prim::F32 | Prim::F64);
-        let is_f64 = Self::is_f64(ty);
+        let nan = self.nan_finalization;
         let elem_expr = |lhs: String, rhs: String| -> String {
             if matches!(op, "shl" | "shr") {
                 let bits = Self::integer_width(ty.precision);
@@ -3262,7 +3284,7 @@ impl CEmitter {
             }
             if !checked_int {
                 if is_float && matches!(op, "+" | "-" | "*" | "/") {
-                    return crate::fp_env::canonical_nan(&format!("({lhs}) {op} ({rhs})"), is_f64);
+                    return finalize_elem(nan, format!("({lhs}) {op} ({rhs})"), ty);
                 }
                 return format!("{lhs} {op} {rhs}");
             }
@@ -3387,6 +3409,7 @@ impl CEmitter {
         // expressions for the two operands. For ints, guard the divisor and
         // apply the remainder-sign correction; for floats use the math fn.
         let floor_fn = if Self::is_f64(ty) { "floor" } else { "floorf" };
+        let nan = self.nan_finalization;
         let elem_expr = |av: &str, bv: &str| -> String {
             if is_int {
                 format!(
@@ -3395,10 +3418,7 @@ impl CEmitter {
                      (((({av}) % chelis_int_div_guard((int64_t)({bv}))) < 0) != (({bv}) < 0))) ? 1 : 0))"
                 )
             } else {
-                crate::fp_env::canonical_nan(
-                    &format!("{floor_fn}(({et})({av}) / ({et})({bv}))"),
-                    Self::is_f64(ty),
-                )
+                finalize_elem(nan, format!("{floor_fn}(({et})({av}) / ({et})({bv}))"), ty)
             }
         };
         let identity = self.emit_elementwise_index_steps(id, inputs, ty);
@@ -3983,6 +4003,7 @@ impl CEmitter {
         }
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
+        let nan = self.nan_finalization;
         let elem_expr = |value: String| -> String {
             if matches!(op, UnaryEmission::Neg) && ty.precision.is_integer() {
                 let message = NumericTrap::Overflow {
@@ -3995,7 +4016,7 @@ impl CEmitter {
                     Self::integer_width(ty.precision)
                 )
             } else {
-                crate::fp_env::canonical_nan(&op.expression(&value), Self::is_f64(ty))
+                finalize_elem(nan, op.expression(&value), ty)
             }
         };
         let identity = self.emit_elementwise_index_steps(id, inputs, ty);
@@ -4137,8 +4158,7 @@ impl CEmitter {
         self.line("#pragma omp parallel for simd");
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
-        let recip =
-            crate::fp_env::canonical_nan(&format!("{one} / __in_a_{id}[i]"), Self::is_f64(ty));
+        let recip = finalize_elem(self.nan_finalization, format!("{one} / __in_a_{id}[i]"), ty);
         self.line(&format!("__out_{id}[i] = {recip};"));
         self.indent -= 1;
         self.line("}");
@@ -4150,7 +4170,7 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("int64_t idx = i * t{id}_input{a}_step;"));
         let recip =
-            crate::fp_env::canonical_nan(&format!("{one} / __in_a_{id}[idx]"), Self::is_f64(ty));
+            finalize_elem(self.nan_finalization, format!("{one} / __in_a_{id}[idx]"), ty);
         self.line(&format!("__out_{id}[i] = {recip};"));
         self.indent -= 1;
         self.line("}");
@@ -4179,14 +4199,16 @@ impl CEmitter {
             func
         };
         let zero = if is_f64 { "0.0" } else { "0.0f" };
+        let nan = self.nan_finalization;
         let elem_expr = |value: String| -> String {
-            if is_relu {
+            let raw = if is_relu {
                 // [05-OP-43] is selection, not fmax: retain the input's exact
                 // stored bits for NaN and -0 and replace only x < +0.
                 format!("({value}) < {zero} ? {zero} : ({value})")
             } else {
-                crate::fp_env::canonical_nan(&format!("{f}({value})"), is_f64)
-            }
+                format!("{f}({value})")
+            };
+            finalize_elem(nan, raw, ty)
         };
         let identity = self.emit_elementwise_index_steps(id, inputs, ty);
         self.emit_slot_wrapper(id, ty);
@@ -5498,10 +5520,7 @@ impl CEmitter {
         is_f64: bool,
     ) -> String {
         let raw = Self::scalar_step_raw_expr(op, resolve, inputs, is_f64);
-        match op {
-            FusedStepOp::MaxElem | FusedStepOp::MinElem => raw,
-            _ => crate::fp_env::canonical_nan(&raw, is_f64),
-        }
+        crate::fp_env::finalize_float(&raw, is_f64, crate::fp_env::fused_step_nan_finalization(op))
     }
 
     fn scalar_step_raw_expr(
@@ -7660,10 +7679,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             };
             // [04-NUM-2]: arithmetic finalizes NaN to the canonical quiet
             // NaN; extrema select and keep their operand's bits.
-            let expr = match step.op {
-                FusedStepOp::MaxElem | FusedStepOp::MinElem => expr,
-                _ => crate::fp_env::canonical_nan(&expr, false),
-            };
+            let expr = crate::fp_env::finalize_float(
+                &expr,
+                false,
+                crate::fp_env::fused_step_nan_finalization(&step.op),
+            );
             self.line(&format!("float v{s} = {expr};"));
         }
 

@@ -351,7 +351,20 @@ impl CheckedCastPlan {
             Some(i) => RawScalar::Int(i),
             None => RawScalar::Float(value.as_f64_lossy()),
         };
-        finalize_scalar(op, self.target, raw)
+        finalize_scalar(op, self.target, self.conversion_raw(raw))
+    }
+
+    /// [04-NUM-2]: a float-to-float conversion that produces a NaN finalizes
+    /// to the target's canonical quiet NaN. The f16 and bf16 targets already
+    /// round every NaN to it; the f32 and f64 targets would keep the source
+    /// payload and sign through the exact f64 widening.
+    fn conversion_raw(self, raw: RawScalar) -> RawScalar {
+        match (self.kind, raw) {
+            (CheckedCastKind::FloatToFloat, RawScalar::Float(value)) => {
+                RawScalar::Float(canonical_nan_f64(value))
+            }
+            _ => raw,
+        }
     }
 
     fn cast_raw(self, op: &'static str, raw: RawScalar) -> Result<ScalarValue, NumericTrap> {
@@ -378,7 +391,7 @@ impl CheckedCastPlan {
             }
         };
         assert!(family_matches, "checked-cast raw source family mismatch");
-        finalize_scalar(op, self.target, raw)
+        finalize_scalar(op, self.target, self.conversion_raw(raw))
     }
 }
 
@@ -7048,6 +7061,24 @@ mod tests {
                     got, canonical,
                     "{name} tensor {op:?}({input:#x}) gave {got:#x}"
                 );
+            }
+        }
+        // Every float-to-float conversion of a payload or signaling NaN.
+        for (source, _, nans, ..) in widths {
+            for (target, canonical, ..) in widths {
+                if source == target {
+                    continue;
+                }
+                for nan in nans {
+                    let got = raw_bits(cast_scalar("cast", scalar(source, nan), target).unwrap());
+                    assert_eq!(
+                        got,
+                        canonical,
+                        "cast {}->{}({nan:#x}) gave {got:#x}",
+                        source.name(),
+                        target.name()
+                    );
+                }
             }
         }
     }

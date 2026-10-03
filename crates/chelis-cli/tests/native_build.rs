@@ -571,3 +571,427 @@ fn c_build_ignores_compiler_environment_and_refuses_profile_changing_wrapper() {
             .stderr(predicate::str::contains(diagnostic));
     }
 }
+
+/// One float storage width of the NaN finalization oracle: its Surf name, C
+/// storage type, dtype macro, canonical quiet NaN, and the input classes
+/// (positive payload NaN, negative NaN, signaling NaN, one, minus one, +inf,
+/// zero) as stored bits.
+struct NanWidth {
+    name: &'static str,
+    storage: &'static str,
+    dtype: &'static str,
+    canonical: u64,
+    payload: u64,
+    negative: u64,
+    signaling: u64,
+    one: u64,
+    minus_one: u64,
+    inf: u64,
+    zero: u64,
+}
+
+const NAN_WIDTHS: [NanWidth; 4] = [
+    NanWidth {
+        name: "f16",
+        storage: "uint16_t",
+        dtype: "CHELIS_DTYPE_F16",
+        canonical: 0x7e00,
+        payload: 0x7e55,
+        negative: 0xfe55,
+        signaling: 0x7c01,
+        one: 0x3c00,
+        minus_one: 0xbc00,
+        inf: 0x7c00,
+        zero: 0,
+    },
+    NanWidth {
+        name: "bf16",
+        storage: "uint16_t",
+        dtype: "CHELIS_DTYPE_BF16",
+        canonical: 0x7fc0,
+        payload: 0x7fc5,
+        negative: 0xffe5,
+        signaling: 0x7f81,
+        one: 0x3f80,
+        minus_one: 0xbf80,
+        inf: 0x7f80,
+        zero: 0,
+    },
+    NanWidth {
+        name: "f32",
+        storage: "uint32_t",
+        dtype: "CHELIS_DTYPE_F32",
+        canonical: 0x7fc0_0000,
+        payload: 0x7fc1_2345,
+        negative: 0xffc5_4321,
+        signaling: 0x7f81_2345,
+        one: 0x3f80_0000,
+        minus_one: 0xbf80_0000,
+        inf: 0x7f80_0000,
+        zero: 0,
+    },
+    NanWidth {
+        name: "f64",
+        storage: "uint64_t",
+        dtype: "CHELIS_DTYPE_F64",
+        canonical: 0x7ff8_0000_0000_0000,
+        payload: 0x7ff8_0000_0000_0055,
+        negative: 0xfff8_abcd_1234_5678,
+        signaling: 0x7ff0_1234_5678_9abc,
+        one: 0x3ff0_0000_0000_0000,
+        minus_one: 0xbff0_0000_0000_0000,
+        inf: 0x7ff0_0000_0000_0000,
+        zero: 0,
+    },
+];
+
+impl NanWidth {
+    fn is_nan(&self, bits: u64) -> bool {
+        let exponent = self.inf;
+        bits & exponent == exponent && bits & !(exponent | self.sign()) != 0
+    }
+
+    fn sign(&self) -> u64 {
+        match self.name {
+            "f16" | "bf16" => 0x8000,
+            "f32" => 0x8000_0000,
+            _ => 0x8000_0000_0000_0000,
+        }
+    }
+
+    fn hex_digits(&self) -> usize {
+        match self.name {
+            "f16" | "bf16" => 4,
+            "f32" => 8,
+            _ => 16,
+        }
+    }
+
+    /// One case per input class: three NaN encodings on either side and the
+    /// non-NaN operands from which invalid operations produce a NaN.
+    fn unary_cases(&self) -> Vec<Vec<u64>> {
+        [
+            self.payload,
+            self.negative,
+            self.signaling,
+            self.minus_one,
+            self.inf,
+        ]
+        .map(|x| vec![x])
+        .to_vec()
+    }
+
+    fn binary_cases(&self) -> Vec<Vec<u64>> {
+        vec![
+            vec![self.payload, self.one],
+            vec![self.negative, self.one],
+            vec![self.signaling, self.one],
+            vec![self.one, self.signaling],
+            vec![self.inf, self.inf],
+            vec![self.zero, self.zero],
+        ]
+    }
+}
+
+/// The arity of a float builtin in the host lane's NaN inventory. A builtin
+/// added to the inventory fails here until the oracle knows how to call it.
+fn nan_inventory_arity(name: &str) -> usize {
+    match name {
+        "add" | "sub" | "mul" | "div" | "floor_div" | "min" | "max" | "min_elem" | "max_elem" => 2,
+        "neg" | "sqrt" | "exp" | "log" | "sin" | "cos" | "tan" | "atan" | "tanh" | "relu"
+        | "sigmoid" | "silu" | "gelu" | "floor" | "ceil" | "round" | "recip" | "abs" => 1,
+        other => panic!("classify the arity of new float builtin `{other}` in this oracle"),
+    }
+}
+
+/// Builtins the host lane can emit but the checker admits from no source
+/// program; the oracle requires eval to reject them, so admitting one makes
+/// the oracle cover it.
+const NAN_INVENTORY_UNREACHABLE: [&str; 2] = ["min", "max"];
+
+fn nan_eval_bits(source: &str, inputs: &[(&str, &NanWidth, Vec<u64>)], out: &NanWidth) -> Vec<u64> {
+    let bindings = inputs
+        .iter()
+        .map(|(name, width, bits)| {
+            let bits: Vec<String> = bits
+                .iter()
+                .map(|bits| format!("{bits:0digits$x}", digits = width.hex_digits()))
+                .collect();
+            (
+                name.to_string(),
+                chelis_compiler_api::schema::TensorValue {
+                    shape: vec![bits.len() as i64],
+                    data: serde_json::from_value(
+                        serde_json::json!({"dtype": width.name, "bits": bits}),
+                    )
+                    .unwrap(),
+                },
+            )
+        })
+        .collect();
+    let result = chelis_compiler_api::compiler::eval_selected(
+        chelis_compiler_api::schema::EvalRequest {
+            source_kind: chelis_compiler_api::schema::SourceKind::Surf,
+            source: source.to_string(),
+            bindings,
+        },
+        &["main".to_string()],
+    )
+    .unwrap_or_else(|error| panic!("evaluate {source}: {error:?}"));
+    let root = result
+        .roots
+        .iter()
+        .find(|root| root.name.as_deref() == Some("main"))
+        .expect("main root");
+    let value = serde_json::to_value(&root.value).unwrap();
+    let data = &value["value"]["data"];
+    assert_eq!(data["dtype"], out.name, "{value}");
+    data["bits"]
+        .as_array()
+        .expect("tensor bits")
+        .iter()
+        .map(|bits| u64::from_str_radix(bits.as_str().unwrap(), 16).unwrap())
+        .collect()
+}
+
+/// One oracle row: an operation at one input and output width, called as a
+/// scalar `def` (host scalar lane) and a tensor `def` (typed-DAG lane).
+struct NanRow {
+    label: String,
+    call: String,
+    input: &'static NanWidth,
+    output: &'static NanWidth,
+    arity: usize,
+    cases: Vec<Vec<u64>>,
+    bit_preserving: bool,
+}
+
+/// chelis#2957 round 2, chelis#2964: [04-NUM-2] in a built static library.
+/// Every float builtin of the host lane's NaN inventory
+/// (`chelis_backend_c::host_builtin_nan_inventory`) and every float-to-float
+/// conversion, at f16, bf16, f32 and f64, through the scalar and the tensor
+/// C ABI, agrees bit for bit with eval on payload, negative and signaling
+/// NaNs and on the non-NaN operands of invalid operations. Canonicalizing
+/// rows produce only the canonical quiet NaN; bit-preserving rows only an
+/// input's NaN.
+#[test]
+fn every_float_result_finalizes_nan_like_eval_through_the_static_library_abi() {
+    use chelis_backend_c::fp_env::NanFinalization;
+    let mut rows = Vec::new();
+    for (name, finalization) in chelis_backend_c::host_builtin_nan_inventory() {
+        let Some(finalization) = finalization else {
+            continue;
+        };
+        let arity = nan_inventory_arity(name);
+        if NAN_INVENTORY_UNREACHABLE.contains(&name) {
+            let params = if arity == 1 { "x" } else { "x, y" };
+            let source = format!("def main(x: f32, y: f32) -> f32 = {name}({params})\n");
+            let rejected = chelis_compiler_api::compiler::eval_selected(
+                chelis_compiler_api::schema::EvalRequest {
+                    source_kind: chelis_compiler_api::schema::SourceKind::Surf,
+                    source,
+                    bindings: Default::default(),
+                },
+                &["main".to_string()],
+            );
+            assert!(rejected.is_err(), "`{name}` is now admitted; remove it from the unreachable list");
+            continue;
+        }
+        for width in &NAN_WIDTHS {
+            rows.push(NanRow {
+                label: format!("{name}_{}", width.name),
+                call: format!("{name}({})", if arity == 1 { "x" } else { "x, y" }),
+                input: width,
+                output: width,
+                arity,
+                cases: if arity == 1 {
+                    width.unary_cases()
+                } else {
+                    width.binary_cases()
+                },
+                bit_preserving: finalization == NanFinalization::BitPreserving,
+            });
+        }
+    }
+    for source in &NAN_WIDTHS {
+        for target in &NAN_WIDTHS {
+            if source.name != target.name {
+                rows.push(NanRow {
+                    label: format!("cast_{}_{}", source.name, target.name),
+                    call: format!("cast(x, {})", target.name),
+                    input: source,
+                    output: target,
+                    arity: 1,
+                    cases: source.unary_cases(),
+                    bit_preserving: false,
+                });
+            }
+        }
+    }
+
+    let mut program = String::new();
+    let mut harness = String::from(
+        "#include <stdio.h>\n#include <stdint.h>\n#include <string.h>\n\
+         #include \"chelis_runtime.h\"\n#include \"nan_oracle.h\"\n\
+         static float f32_of(uint32_t b) { float x; memcpy(&x, &b, 4); return x; }\n\
+         static double f64_of(uint64_t b) { double x; memcpy(&x, &b, 8); return x; }\n\
+         static uint32_t f32_bits(float x) { uint32_t b; memcpy(&b, &x, 4); return b; }\n\
+         static uint64_t f64_bits(double x) { uint64_t b; memcpy(&b, &x, 8); return b; }\n\
+         int main(void) {\n",
+    );
+    let mangle = |name: &str| -> String {
+        let hex: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
+        format!("chelis_fn_{hex}")
+    };
+    let scalar_in = |width: &NanWidth, bits: u64| match width.name {
+        "f32" => format!("f32_of(UINT32_C({bits:#x}))"),
+        "f64" => format!("f64_of(UINT64_C({bits:#x}))"),
+        _ => format!("(uint16_t){bits:#x}"),
+    };
+    let scalar_out = |width: &NanWidth, call: String| match width.name {
+        "f32" => format!("(unsigned long long)f32_bits({call})"),
+        "f64" => format!("(unsigned long long)f64_bits({call})"),
+        _ => format!("(unsigned long long){call}"),
+    };
+    for row in &rows {
+        let (input, output) = (row.input, row.output);
+        let n = row.cases.len();
+        let params = ["x", "y"][..row.arity]
+            .iter()
+            .map(|param| format!("{param}: {}", input.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tensor_params = ["x", "y"][..row.arity]
+            .iter()
+            .map(|param| format!("{param}: tensor[{n}, {}]", input.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        program.push_str(&format!(
+            "def s_{label}({params}) -> {out} = {call}\n\
+             def t_{label}({tensor_params}) -> tensor[{n}, {out}] = {call}\n",
+            label = row.label,
+            out = output.name,
+            call = row.call,
+        ));
+        for (case, operands) in row.cases.iter().enumerate() {
+            let args = operands
+                .iter()
+                .map(|bits| scalar_in(input, *bits))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let call = format!("{}({args})", mangle(&format!("s_{}", row.label)));
+            harness.push_str(&format!(
+                "    printf(\"s_{} {case} %llx\\n\", {});\n",
+                row.label,
+                scalar_out(output, call)
+            ));
+        }
+        let mut tensors = Vec::new();
+        for operand in 0..row.arity {
+            let data = row
+                .cases
+                .iter()
+                .map(|case| format!("{:#x}", case[operand]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let var = format!("t_{}_{operand}", row.label);
+            harness.push_str(&format!(
+                "    chelis_tensor *{var};\n    {{ static const {storage} d[{n}] = {{ {data} }}; static const int64_t shape[1] = {{ {n} }};\n      \
+                 {var} = chelis_tensor_entry_borrow(1, shape, {dtype}, d, sizeof d); }}\n",
+                storage = input.storage,
+                dtype = input.dtype,
+            ));
+            tensors.push(var);
+        }
+        harness.push_str(&format!(
+            "    {{ chelis_tensor *r = {}({}); const {} *o = (const {} *)chelis_tensor_read_view(r).data;\n      \
+             for (int i = 0; i < {n}; ++i) printf(\"t_{} %d %llx\\n\", i, (unsigned long long)o[i]); }}\n",
+            mangle(&format!("t_{}", row.label)),
+            tensors.join(", "),
+            output.storage,
+            output.storage,
+            row.label,
+        ));
+    }
+    harness.push_str("    return 0;\n}\n");
+
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("nan_oracle.ch");
+    let out = dir.path().join("out");
+    fs::write(&file, &program).unwrap();
+    build(&file, &out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Built static library"));
+    let driver = out.join("driver.c");
+    fs::write(&driver, &harness).unwrap();
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let status = Process::new(toolchain.compiler)
+        .arg(&driver)
+        .arg(out.join("libnan_oracle.a"))
+        .arg(out.join("libchelis_runtime.a"))
+        .args(toolchain.link_flags)
+        .arg("-o")
+        .arg(out.join("driver"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "the oracle driver must link");
+    let run = Process::new(out.join("driver")).output().unwrap();
+    assert!(run.status.success(), "{run:?}");
+    let stdout = String::from_utf8(run.stdout).unwrap();
+    let c_bits = |lane: &str, label: &str, case: usize| -> u64 {
+        let prefix = format!("{lane}_{label} {case} ");
+        let line = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("missing {prefix}"));
+        u64::from_str_radix(line, 16).unwrap()
+    };
+
+    let mut failures = Vec::new();
+    for row in &rows {
+        let n = row.cases.len();
+        let tensor_params = ["x", "y"][..row.arity]
+            .iter()
+            .map(|param| format!("{param}: tensor[{n}, {}]", row.input.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            "def main({tensor_params}) -> tensor[{n}, {}] = {}\n",
+            row.output.name, row.call
+        );
+        let inputs: Vec<_> = (0..row.arity)
+            .map(|operand| {
+                (
+                    ["x", "y"][operand],
+                    row.input,
+                    row.cases.iter().map(|case| case[operand]).collect(),
+                )
+            })
+            .collect();
+        let eval = nan_eval_bits(&source, &inputs, row.output);
+        for (case, operands) in row.cases.iter().enumerate() {
+            let expected = eval[case];
+            if row.output.is_nan(expected) {
+                let admitted = if row.bit_preserving {
+                    operands.contains(&expected)
+                } else {
+                    expected == row.output.canonical
+                };
+                if !admitted {
+                    failures.push(format!("eval {} {operands:x?} gave {expected:#x}", row.label));
+                }
+            }
+            for lane in ["s", "t"] {
+                let got = c_bits(lane, &row.label, case);
+                if got != expected {
+                    failures.push(format!(
+                        "{lane}_{} {operands:x?}: C {got:#x}, eval {expected:#x}",
+                        row.label
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} disagreements:\n{}", failures.len(), failures.join("\n"));
+}

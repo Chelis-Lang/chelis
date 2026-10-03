@@ -3060,11 +3060,11 @@ loss = (mean(x, 0) : tensor[f32])
             f32_lane_value(f32::tanh, x),
         );
 
-        // `gelu` lowers through the tanh approximation in
-        // `chelis_ir::tier2::lower_gelu`; mirror that exact formula so
-        // the assertion tests precision, not a different definition of
-        // gelu. Its `Const` operands (sqrt(2/pi), 0.044715) also
-        // exercise the f64 const-fill path.
+        // spec/05 section 3.3 pins `gelu` as `x*sigmoid(2u)` with
+        // `u = sqrt(2/pi)*(x + 0.044715*x^3)`; the tanh spelling below is the
+        // same function, `0.5*(1+tanh(u)) = sigmoid(2u)`, and agrees with it
+        // well inside `TOL` at this input. Its `Const` operands (sqrt(2/pi),
+        // 0.044715) also exercise the f64 const-fill path.
         let gelu_ref = {
             let c = 0.7978845608028654_f64;
             let k = 0.044715_f64;

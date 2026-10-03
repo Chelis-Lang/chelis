@@ -90,87 +90,176 @@ enum CExpressionBuiltin {
 }
 
 impl CExpressionBuiltin {
+    /// Every builtin name the host scalar lane decodes, and so every
+    /// expression it can emit.
+    const NAMES: [(&'static str, Self); 64] = [
+        ("add", Self::Add),
+        ("sub", Self::Sub),
+        ("mul", Self::Mul),
+        ("div", Self::Div),
+        ("trunc_div", Self::TruncDiv),
+        ("floor_div", Self::FloorDiv),
+        ("mod", Self::Mod),
+        ("bitand", Self::BitAnd),
+        ("bitor", Self::BitOr),
+        ("bitxor", Self::BitXor),
+        ("shl", Self::ShiftLeft),
+        ("shr", Self::ShiftRight),
+        ("cmplt", Self::CompareLess),
+        ("lt", Self::Less),
+        ("gt", Self::Greater),
+        ("gte", Self::GreaterEqual),
+        ("lte", Self::LessEqual),
+        ("eq", Self::Equal),
+        ("neq", Self::NotEqual),
+        ("and", Self::And),
+        ("or", Self::Or),
+        ("not", Self::Not),
+        ("neg", Self::Neg),
+        ("string_concat", Self::StringConcat),
+        ("string_trim", Self::StringTrim),
+        ("reshape", Self::Reshape),
+        ("string_slice", Self::StringSlice),
+        ("string_contains", Self::StringContains),
+        ("string_starts_with", Self::StringStartsWith),
+        ("string_ends_with", Self::StringEndsWith),
+        ("string_len", Self::StringLen),
+        ("char_code", Self::CharCode),
+        ("char_from_code", Self::CharFromCode),
+        ("to_string", Self::ToString),
+        ("to_int", Self::ToInt),
+        ("to_float", Self::ToFloat),
+        ("tensor_to_scalar", Self::TensorToScalar),
+        ("scalar_to_tensor", Self::ScalarToTensor),
+        ("len", Self::Len),
+        ("range", Self::Range),
+        ("rank", Self::Rank),
+        ("shape", Self::Shape),
+        ("numel", Self::Numel),
+        ("sqrt", Self::Sqrt),
+        ("exp", Self::Exp),
+        ("log", Self::Log),
+        ("sin", Self::Sin),
+        ("cos", Self::Cos),
+        ("tan", Self::Tan),
+        ("atan", Self::Atan),
+        ("tanh", Self::Tanh),
+        ("relu", Self::Relu),
+        ("sigmoid", Self::Sigmoid),
+        ("silu", Self::Silu),
+        ("gelu", Self::Gelu),
+        ("floor", Self::Floor),
+        ("ceil", Self::Ceil),
+        ("round", Self::Round),
+        ("recip", Self::Recip),
+        ("abs", Self::Abs),
+        ("min", Self::Min),
+        ("max", Self::Max),
+        ("min_elem", Self::MinElem),
+        ("max_elem", Self::MaxElem),
+    ];
+
     fn decode(name: &str) -> Result<Self, Unsupported> {
-        Ok(match name {
-            "add" => Self::Add,
-            "sub" => Self::Sub,
-            "mul" => Self::Mul,
-            "div" => Self::Div,
-            "trunc_div" => Self::TruncDiv,
-            "floor_div" => Self::FloorDiv,
-            "mod" => Self::Mod,
-            "bitand" => Self::BitAnd,
-            "bitor" => Self::BitOr,
-            "bitxor" => Self::BitXor,
-            "shl" => Self::ShiftLeft,
-            "shr" => Self::ShiftRight,
-            "cmplt" => Self::CompareLess,
-            "lt" => Self::Less,
-            "gt" => Self::Greater,
-            "gte" => Self::GreaterEqual,
-            "lte" => Self::LessEqual,
-            "eq" => Self::Equal,
-            "neq" => Self::NotEqual,
-            "and" => Self::And,
-            "or" => Self::Or,
-            "not" => Self::Not,
-            "neg" => Self::Neg,
-            "string_concat" => Self::StringConcat,
-            "string_trim" => Self::StringTrim,
-            "reshape" => Self::Reshape,
-            "string_slice" => Self::StringSlice,
-            "string_contains" => Self::StringContains,
-            "string_starts_with" => Self::StringStartsWith,
-            "string_ends_with" => Self::StringEndsWith,
-            "string_len" => Self::StringLen,
-            "char_code" => Self::CharCode,
-            "char_from_code" => Self::CharFromCode,
-            "to_string" => Self::ToString,
-            "to_int" => Self::ToInt,
-            "to_float" => Self::ToFloat,
-            "tensor_to_scalar" => Self::TensorToScalar,
-            "scalar_to_tensor" => Self::ScalarToTensor,
-            "len" => Self::Len,
-            "range" => Self::Range,
-            "rank" => Self::Rank,
-            "shape" => Self::Shape,
-            "numel" => Self::Numel,
-            "sqrt" => Self::Sqrt,
-            "exp" => Self::Exp,
-            "log" => Self::Log,
-            "sin" => Self::Sin,
-            "cos" => Self::Cos,
-            "tan" => Self::Tan,
-            "atan" => Self::Atan,
-            "tanh" => Self::Tanh,
-            "relu" => Self::Relu,
-            "sigmoid" => Self::Sigmoid,
-            "silu" => Self::Silu,
-            "gelu" => Self::Gelu,
-            "floor" => Self::Floor,
-            "ceil" => Self::Ceil,
-            "round" => Self::Round,
-            "recip" => Self::Recip,
-            "abs" => Self::Abs,
-            "min" => Self::Min,
-            "max" => Self::Max,
-            "min_elem" => Self::MinElem,
-            "max_elem" => Self::MaxElem,
-            other => {
-                return Err(Unsupported::new(
-                    UnsupportedKind::Builtin(other.to_string()),
-                    "`chelis build` host emission",
-                    Stage::Codegen("c"),
-                    chelis_types::deliberate_rejection!(
-                        "[04-TOT-2]",
-                        "the checked builtin vocabulary and C expression vocabulary disagree; \
-                         no fallback expression is permitted"
-                    ),
-                )
-                .with_supported_alternative("run this program with `chelis eval`"));
-            }
-        })
+        match Self::NAMES.iter().find(|(candidate, _)| *candidate == name) {
+            Some((_, builtin)) => Ok(*builtin),
+            None => Err(Unsupported::new(
+                UnsupportedKind::Builtin(name.to_string()),
+                "`chelis build` host emission",
+                Stage::Codegen("c"),
+                chelis_types::deliberate_rejection!(
+                    "[04-TOT-2]",
+                    "the checked builtin vocabulary and C expression vocabulary disagree; \
+                     no fallback expression is permitted"
+                ),
+            )
+            .with_supported_alternative("run this program with `chelis eval`")),
+        }
     }
+
+    /// [04-NUM-2]'s NaN finalization of the builtin's float result, or `None`
+    /// when it produces no float value of its own (integer, bool, string and
+    /// shape builtins, and transport that carries stored bits). Exhaustive,
+    /// so a new builtin does not compile until it is classified. `min` and
+    /// `max` lower to C `fmin`/`fmax`, which no atom declares bit-preserving.
+    fn nan_finalization(self) -> Option<crate::fp_env::NanFinalization> {
+        use crate::fp_env::NanFinalization;
+        match self {
+            Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::FloorDiv
+            | Self::Neg
+            | Self::Sqrt
+            | Self::Exp
+            | Self::Log
+            | Self::Sin
+            | Self::Cos
+            | Self::Tan
+            | Self::Atan
+            | Self::Tanh
+            | Self::Sigmoid
+            | Self::Silu
+            | Self::Gelu
+            | Self::Floor
+            | Self::Ceil
+            | Self::Round
+            | Self::Recip
+            | Self::Abs
+            | Self::Min
+            | Self::Max => Some(NanFinalization::Canonical),
+            Self::Relu
+            | Self::MinElem
+            | Self::MaxElem => Some(NanFinalization::BitPreserving),
+            Self::TruncDiv
+            | Self::Mod
+            | Self::BitAnd
+            | Self::BitOr
+            | Self::BitXor
+            | Self::ShiftLeft
+            | Self::ShiftRight
+            | Self::CompareLess
+            | Self::Less
+            | Self::Greater
+            | Self::GreaterEqual
+            | Self::LessEqual
+            | Self::Equal
+            | Self::NotEqual
+            | Self::And
+            | Self::Or
+            | Self::Not
+            | Self::StringConcat
+            | Self::StringTrim
+            | Self::Reshape
+            | Self::StringSlice
+            | Self::StringContains
+            | Self::StringStartsWith
+            | Self::StringEndsWith
+            | Self::StringLen
+            | Self::CharCode
+            | Self::CharFromCode
+            | Self::ToString
+            | Self::ToInt
+            | Self::ToFloat
+            | Self::TensorToScalar
+            | Self::ScalarToTensor
+            | Self::Len
+            | Self::Range
+            | Self::Rank
+            | Self::Shape
+            | Self::Numel => None,
+        }
+    }
+}
+
+/// The host scalar lane's NaN finalization inventory: every builtin name it
+/// emits with the classification its finalization point applies. Oracles
+/// derive their cases from this list.
+pub fn host_builtin_nan_inventory() -> Vec<(&'static str, Option<crate::fp_env::NanFinalization>)> {
+    CExpressionBuiltin::NAMES
+        .iter()
+        .map(|(name, builtin)| (*name, builtin.nan_finalization()))
+        .collect()
 }
 
 use crate::emit::CEmitter;
@@ -1559,9 +1648,20 @@ pub(crate) fn checked_cast_c_expr(plan: CheckedCastPlan, value: &str) -> String 
             | Prim::String
             | Prim::Key => unreachable!("ExactToFloat plan has a float target"),
         },
+        // [04-NUM-2]: a numeric conversion that produces a NaN finalizes to
+        // the target's canonical quiet NaN; the f16 and bf16 narrowing
+        // helpers already do.
         CheckedCastKind::FloatToFloat => match target {
-            Prim::F64 => cast_float_as_double(plan.source(), value),
-            Prim::F32 => format!("(float)({})", cast_float_as_double(plan.source(), value)),
+            Prim::F64 => crate::fp_env::finalize_float(
+                &cast_float_as_double(plan.source(), value),
+                true,
+                crate::fp_env::NanFinalization::Canonical,
+            ),
+            Prim::F32 => crate::fp_env::finalize_float(
+                &format!("(float)({})", cast_float_as_double(plan.source(), value)),
+                false,
+                crate::fp_env::NanFinalization::Canonical,
+            ),
             Prim::F16 => format!(
                 "chelis_host_f64_to_f16({})",
                 cast_float_as_double(plan.source(), value)
@@ -3915,6 +4015,9 @@ fn verified_helper_result_origin(
 
 struct HostEmitter<'a> {
     lines: Vec<String>,
+    /// [04-NUM-2]: the NaN finalization of the tensor builtin whose
+    /// elementwise loop is being emitted.
+    tensor_nan_finalization: Option<crate::fp_env::NanFinalization>,
     indent: String,
     helper_prefix: String,
     emitted_names: UnordMap<String, String>,
@@ -4269,6 +4372,7 @@ impl<'a> HostEmitter<'a> {
     ) -> Self {
         Self {
             lines: Vec::new(),
+            tensor_nan_finalization: None,
             indent,
             helper_prefix: helper_prefix.to_string(),
             emitted_names,
@@ -6653,6 +6757,11 @@ impl<'a> HostEmitter<'a> {
         }
 
         if let HostType::Tensor(_) = ty {
+            // [04-NUM-2]: the elementwise loops below store each element
+            // through the same classification as the scalar lane.
+            self.tensor_nan_finalization = CExpressionBuiltin::decode(name)
+                .ok()
+                .and_then(CExpressionBuiltin::nan_finalization);
             match name {
                 "add"
                     if matches!(
@@ -7563,10 +7672,7 @@ impl<'a> HostEmitter<'a> {
                     arg(1),
                     ty,
                 )?,
-                CExpressionBuiltin::Add => finalize_scalar_expr(
-                    binary(BinaryOperator::Add, numeric_arg(0), numeric_arg(1)),
-                    ty,
-                ),
+                CExpressionBuiltin::Add => binary(BinaryOperator::Add, numeric_arg(0), numeric_arg(1)),
                 CExpressionBuiltin::Sub if is_integer_abi(ty) => integer_checked_binary_expr(
                     "chelis_int_checked_sub",
                     "sub",
@@ -7574,10 +7680,7 @@ impl<'a> HostEmitter<'a> {
                     arg(1),
                     ty,
                 )?,
-                CExpressionBuiltin::Sub => finalize_scalar_expr(
-                    binary(BinaryOperator::Subtract, numeric_arg(0), numeric_arg(1)),
-                    ty,
-                ),
+                CExpressionBuiltin::Sub => binary(BinaryOperator::Subtract, numeric_arg(0), numeric_arg(1)),
                 CExpressionBuiltin::Mul if is_integer_abi(ty) => integer_checked_binary_expr(
                     "chelis_int_checked_mul",
                     "mul",
@@ -7585,10 +7688,7 @@ impl<'a> HostEmitter<'a> {
                     arg(1),
                     ty,
                 )?,
-                CExpressionBuiltin::Mul => finalize_scalar_expr(
-                    binary(BinaryOperator::Multiply, numeric_arg(0), numeric_arg(1)),
-                    ty,
-                ),
+                CExpressionBuiltin::Mul => binary(BinaryOperator::Multiply, numeric_arg(0), numeric_arg(1)),
                 // #387: integer scalar `div`/`mod` trap portably on a zero
                 // divisor (ARM64 does not fault on integer div-by-zero), using the
                 // same clean diagnostic the evaluator emits. `chelis_int_div_guard`
@@ -7602,10 +7702,7 @@ impl<'a> HostEmitter<'a> {
                     arg(0),
                     EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
                 ),
-                CExpressionBuiltin::Div => finalize_scalar_expr(
-                    binary(BinaryOperator::Divide, numeric_arg(0), numeric_arg(1)),
-                    ty,
-                ),
+                CExpressionBuiltin::Div => binary(BinaryOperator::Divide, numeric_arg(0), numeric_arg(1)),
                 // chelis#178: `trunc_div` is integer-only — the guarded C `/`
                 // quotient (round toward zero).
                 CExpressionBuiltin::TruncDiv => binary(
@@ -7644,8 +7741,7 @@ impl<'a> HostEmitter<'a> {
                     );
                     binary(BinaryOperator::Subtract, quotient, correction)
                 }
-                CExpressionBuiltin::FloorDiv => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::FloorDiv => EmittedExpr::call(
                         float_math_function(ty, "floor", "floorf"),
                         [binary(
                             BinaryOperator::Divide,
@@ -7653,8 +7749,6 @@ impl<'a> HostEmitter<'a> {
                             numeric_arg(1),
                         )],
                     ),
-                    ty,
-                ),
                 CExpressionBuiltin::Mod => EmittedExpr::conditional(
                     binary(BinaryOperator::Equal, arg(1), EmittedExpr::integer(-1)),
                     EmittedExpr::integer(0),
@@ -7739,7 +7833,7 @@ impl<'a> HostEmitter<'a> {
                     ],
                 ),
                 CExpressionBuiltin::Neg => {
-                    finalize_scalar_expr(unary(UnaryOperator::Negate, numeric_arg(0)), ty)
+                    unary(UnaryOperator::Negate, numeric_arg(0))
                 }
                 CExpressionBuiltin::StringConcat => {
                     // chelis#2205: a string the verifier moved at its last
@@ -7997,52 +8091,31 @@ impl<'a> HostEmitter<'a> {
                 // `emit.rs`; both name the correctly rounded `chelis_cr_*`
                 // kernels ([05-OP-46]) the unit carries, and `sqrt` is the
                 // correctly rounded IEEE square root.
-                CExpressionBuiltin::Sqrt => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "sqrt", "sqrtf"), [numeric_arg(0)]),
-                    ty,
-                ),
-                CExpressionBuiltin::Exp => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Sqrt => EmittedExpr::call(float_math_function(ty, "sqrt", "sqrtf"), [numeric_arg(0)]),
+                CExpressionBuiltin::Exp => EmittedExpr::call(
                         float_math_function(ty, "chelis_cr_exp", "chelis_cr_expf"),
                         [numeric_arg(0)],
                     ),
-                    ty,
-                ),
-                CExpressionBuiltin::Log => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Log => EmittedExpr::call(
                         float_math_function(ty, "chelis_cr_log", "chelis_cr_logf"),
                         [numeric_arg(0)],
                     ),
-                    ty,
-                ),
-                CExpressionBuiltin::Sin => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Sin => EmittedExpr::call(
                         float_math_function(ty, "chelis_cr_sin", "chelis_cr_sinf"),
                         [numeric_arg(0)],
                     ),
-                    ty,
-                ),
-                CExpressionBuiltin::Cos => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Cos => EmittedExpr::call(
                         float_math_function(ty, "chelis_cr_cos", "chelis_cr_cosf"),
                         [numeric_arg(0)],
                     ),
-                    ty,
-                ),
-                CExpressionBuiltin::Tan => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Tan => EmittedExpr::call(
                         float_math_function(ty, "chelis_cr_tan", "chelis_cr_tanf"),
                         [numeric_arg(0)],
                     ),
-                    ty,
-                ),
-                CExpressionBuiltin::Atan => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Atan => EmittedExpr::call(
                         float_math_function(ty, "chelis_cr_atan", "chelis_cr_atanf"),
                         [numeric_arg(0)],
                     ),
-                    ty,
-                ),
                 CExpressionBuiltin::Relu
                 | CExpressionBuiltin::Sigmoid
                 | CExpressionBuiltin::Tanh
@@ -8084,8 +8157,7 @@ impl<'a> HostEmitter<'a> {
                         _ => unreachable!("non-float ReLU rejected above"),
                     }
                 }
-                CExpressionBuiltin::Sigmoid => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Sigmoid => EmittedExpr::call(
                         activation_math_function(
                             ty,
                             "chelis_host_sigmoid_f16",
@@ -8095,10 +8167,7 @@ impl<'a> HostEmitter<'a> {
                         ),
                         [numeric_arg(0)],
                     ),
-                    ty,
-                ),
-                CExpressionBuiltin::Tanh => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Tanh => EmittedExpr::call(
                         activation_math_function(
                             ty,
                             "chelis_host_tanh_f16",
@@ -8108,10 +8177,7 @@ impl<'a> HostEmitter<'a> {
                         ),
                         [numeric_arg(0)],
                     ),
-                    ty,
-                ),
-                CExpressionBuiltin::Silu => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Silu => EmittedExpr::call(
                         activation_math_function(
                             ty,
                             "chelis_host_silu_f16",
@@ -8121,10 +8187,7 @@ impl<'a> HostEmitter<'a> {
                         ),
                         [numeric_arg(0)],
                     ),
-                    ty,
-                ),
-                CExpressionBuiltin::Gelu => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Gelu => EmittedExpr::call(
                         activation_math_function(
                             ty,
                             "chelis_host_gelu_f16",
@@ -8134,8 +8197,6 @@ impl<'a> HostEmitter<'a> {
                         ),
                         [numeric_arg(0)],
                     ),
-                    ty,
-                ),
                 CExpressionBuiltin::Floor
                 | CExpressionBuiltin::Ceil
                 | CExpressionBuiltin::Round
@@ -8143,30 +8204,18 @@ impl<'a> HostEmitter<'a> {
                 {
                     arg(0)
                 }
-                CExpressionBuiltin::Floor => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "floor", "floorf"), [numeric_arg(0)]),
-                    ty,
-                ),
-                CExpressionBuiltin::Ceil => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "ceil", "ceilf"), [numeric_arg(0)]),
-                    ty,
-                ),
-                CExpressionBuiltin::Round => finalize_scalar_expr(
-                    // spec/05 §2.2: `round` is IEEE roundTiesToEven. The C
+                CExpressionBuiltin::Floor => EmittedExpr::call(float_math_function(ty, "floor", "floorf"), [numeric_arg(0)]),
+                CExpressionBuiltin::Ceil => EmittedExpr::call(float_math_function(ty, "ceil", "ceilf"), [numeric_arg(0)]),
+                CExpressionBuiltin::Round => // spec/05 §2.2: `round` is IEEE roundTiesToEven. The C
                     // `round{,f}` family resolves half ties away from zero;
                     // `rint{,f}` under the default rounding mode matches the
                     // evaluator and the typed-DAG C emitter.
                     EmittedExpr::call(float_math_function(ty, "rint", "rintf"), [numeric_arg(0)]),
-                    ty,
-                ),
-                CExpressionBuiltin::Recip => finalize_scalar_expr(
-                    binary(
+                CExpressionBuiltin::Recip => binary(
                         BinaryOperator::Divide,
                         EmittedExpr::integer(1),
                         numeric_arg(0),
                     ),
-                    ty,
-                ),
                 CExpressionBuiltin::Abs => match arg_vars[0].1 {
                     HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
                         let prim = match arg_vars[0].1 {
@@ -8189,13 +8238,10 @@ impl<'a> HostEmitter<'a> {
                     HostType::Float16
                     | HostType::BFloat16
                     | HostType::Float32
-                    | HostType::Float64 => finalize_scalar_expr(
-                        EmittedExpr::call(
+                    | HostType::Float64 => EmittedExpr::call(
                             float_math_function(ty, "fabs", "fabsf"),
                             [numeric_arg(0)],
                         ),
-                        ty,
-                    ),
                     ref other => {
                         return Err(invalid_abi_shape(
                             format!("abs carries non-numeric argument type `{other:?}`"),
@@ -8203,20 +8249,14 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 },
-                CExpressionBuiltin::Min => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Min => EmittedExpr::call(
                         float_math_function(ty, "fmin", "fminf"),
                         [numeric_arg(0), numeric_arg(1)],
                     ),
-                    ty,
-                ),
-                CExpressionBuiltin::Max => finalize_scalar_expr(
-                    EmittedExpr::call(
+                CExpressionBuiltin::Max => EmittedExpr::call(
                         float_math_function(ty, "fmax", "fmaxf"),
                         [numeric_arg(0), numeric_arg(1)],
                     ),
-                    ty,
-                ),
                 CExpressionBuiltin::MinElem if is_integer_abi(ty) => EmittedExpr::conditional(
                     binary(BinaryOperator::LessEqual, arg(0), arg(1)),
                     arg(0),
@@ -8232,7 +8272,14 @@ impl<'a> HostEmitter<'a> {
             };
             Ok(expr)
         };
-        let expr = build_expression()?;
+        // [04-NUM-1]/[04-NUM-2]: every arm above yields its value at the
+        // computation width; the result is finalized here, once, by the
+        // builtin's classification rather than by each arm.
+        let expr = finalize_scalar_expr(
+            build_expression()?,
+            ty,
+            CExpressionBuiltin::decode(name)?.nan_finalization(),
+        );
         self.lines
             .push(format!("{}{target} = {};", self.indent, expr.as_c()));
         if matches!(ty, HostType::Unit) {
@@ -8531,6 +8578,20 @@ impl<'a> HostEmitter<'a> {
         self.end_tensor_write(&guard);
     }
 
+    /// Finalize one f32 or f64 element of the host tensor elementwise loop
+    /// being emitted through `fp_env::finalize_float`.
+    fn finalize_tensor_elem(&self, arm: DtypeArm, expr: String) -> String {
+        match (arm, self.tensor_nan_finalization) {
+            (DtypeArm::F32, Some(finalization)) => {
+                crate::fp_env::finalize_float(&expr, false, finalization)
+            }
+            (DtypeArm::F64, Some(finalization)) => {
+                crate::fp_env::finalize_float(&expr, true, finalization)
+            }
+            _ => expr,
+        }
+    }
+
     /// Emit one arm of the elementwise binary operator dispatch.
     fn emit_binary_elementwise_arm(
         &mut self,
@@ -8564,7 +8625,11 @@ impl<'a> HostEmitter<'a> {
             "{ind}            int64_t idx_rhs = i * {target}_rhs_step;"
         ));
         self.lines.push(format!(
-            "{ind}            __target_data[i] = __lhs_data[idx_lhs] {op} __rhs_data[idx_rhs];"
+            "{ind}            __target_data[i] = {};",
+            self.finalize_tensor_elem(
+                arm,
+                format!("__lhs_data[idx_lhs] {op} __rhs_data[idx_rhs]")
+            )
         ));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
@@ -8646,7 +8711,8 @@ impl<'a> HostEmitter<'a> {
             "{ind}            int64_t idx = i * {target}_input_step;"
         ));
         self.lines.push(format!(
-            "{ind}            __target_data[i] = {op}__input_data[idx];"
+            "{ind}            __target_data[i] = {};",
+            self.finalize_tensor_elem(arm, format!("{op}__input_data[idx]"))
         ));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
@@ -8679,7 +8745,8 @@ impl<'a> HostEmitter<'a> {
             "{ind}            int64_t idx = i * {target}_input_step;"
         ));
         self.lines.push(format!(
-            "{ind}            __target_data[i] = {func}(__input_data[idx]);"
+            "{ind}            __target_data[i] = {};",
+            self.finalize_tensor_elem(arm, format!("{func}(__input_data[idx])"))
         ));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
@@ -11879,10 +11946,33 @@ fn scalar_arithmetic_arg_expr(value: &str, ty: &HostType) -> EmittedExpr {
     }
 }
 
-fn finalize_scalar_expr(value: EmittedExpr, ty: &HostType) -> EmittedExpr {
-    match ty {
-        HostType::Float16 => EmittedExpr::call("chelis_f32_to_f16", [value]),
-        HostType::BFloat16 => EmittedExpr::call("chelis_f32_to_bf16", [value]),
+/// The host scalar lane's one finalization point ([04-NUM-1], [04-NUM-2]).
+/// Arithmetic f16 and bf16 values computed at f32 narrow through storage
+/// helpers that canonicalize NaN; f32 and f64 values pass through
+/// `fp_env::finalize_float`. A bit-preserving selection already holds the
+/// selected operand's stored bits, and a non-float result has no NaN.
+fn finalize_scalar_expr(
+    value: EmittedExpr,
+    ty: &HostType,
+    finalization: Option<crate::fp_env::NanFinalization>,
+) -> EmittedExpr {
+    use crate::fp_env::NanFinalization;
+    let Some(finalization) = finalization else {
+        return value;
+    };
+    match (ty, finalization) {
+        (HostType::Float16, NanFinalization::Canonical) => {
+            EmittedExpr::call("chelis_f32_to_f16", [value])
+        }
+        (HostType::BFloat16, NanFinalization::Canonical) => {
+            EmittedExpr::call("chelis_f32_to_bf16", [value])
+        }
+        (HostType::Float32, NanFinalization::Canonical) => {
+            EmittedExpr::call(crate::fp_env::canonical_nan_helper(false), [value])
+        }
+        (HostType::Float64, NanFinalization::Canonical) => {
+            EmittedExpr::call(crate::fp_env::canonical_nan_helper(true), [value])
+        }
         _ => value,
     }
 }
