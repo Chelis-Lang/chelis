@@ -1029,8 +1029,12 @@ fn every_float_result_finalizes_nan_like_eval_through_the_static_library_abi() {
 
 /// One kernel row of the NaN finalization oracle: a tensor `def` whose result
 /// an emitter writes through its own store (a reduction's total, a window, a
-/// BLAS call, a draw), with each input's shape and stored bits, and the
-/// helper `def` its call names, if any.
+/// BLAS call, a draw, a selection or a data movement), with each input's
+/// shape and stored bits, the helper `def` its call names, if any, and the
+/// [04-NUM-2] finalization `fp_env::risc_nan_finalization` gives the atom the
+/// row exercises (`None` for data movement). A gradient row's result is the
+/// gradient's adjoint accumulation, which is arithmetic, so it expects the
+/// canonical NaN whatever the atom acting inside it.
 struct NanKernelRow {
     label: String,
     width: &'static NanWidth,
@@ -1038,122 +1042,451 @@ struct NanKernelRow {
     output: Vec<i64>,
     call: String,
     helper: Option<String>,
+    finalization: Option<chelis_backend_c::fp_env::NanFinalization>,
+    gradient: bool,
 }
 
-/// chelis#2957 round 2: the reduction, matmul, window and dropout emitters
-/// finalize [04-NUM-2]'s canonical NaN like eval, at f16, bf16, f32 and f64,
-/// through the static library ABI. Each row puts an invalid operation inside
-/// the kernel (`inf + -inf` in a sum or window, `0 * inf` in a product or a
-/// matmul's inner product) and carries payload, negative and signaling NaNs
-/// through it, including a one-element group that no addition touches.
-/// `prod_reduce` and the window reductions are f32-only in `chelis build`
-/// (chelis#729). The `gather_grad` rows (chelis#3047) differentiate a gather
-/// with duplicate indices, so the autodiff-only scatter-add accumulates two
-/// contributions into one element, a finite one and a NaN one; at f16 and
-/// bf16 that sum must be taken at f32, not on the storage words.
-#[test]
-fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_library_abi() {
-    let mut rows = Vec::new();
-    for w in &NAN_WIDTHS {
-        let neg_inf = w.inf | w.sign();
-        let name = w.name;
-        let row = |label: &str, params, output: Vec<i64>, call: String| NanKernelRow {
-            label: format!("{label}_{name}"),
-            width: w,
-            params,
-            output,
-            call,
-            helper: None,
-        };
-        if name != "f64" {
-            let gather = "gather(x, to_tensor([0i64, 0i64, 2i64, 2i64]), 0i32)";
-            rows.push(NanKernelRow {
-                helper: Some(format!(
-                    "def gather_loss_{name}(x: tensor[4, {name}]) -> {name} = \
-                     tensor_to_scalar(sum(mul({gather}, {gather}), 0i32))\n"
-                )),
-                ..row(
-                    "gather_grad",
-                    vec![("x", vec![4], vec![w.one, w.negative, w.payload, w.one])],
-                    vec![4],
-                    format!("grad(gather_loss_{name}, wrt=x)(x)"),
-                )
-            });
-        }
-        rows.push(row(
-            "sum",
-            vec![(
-                "x",
-                vec![4, 2],
-                vec![
-                    w.inf,
-                    neg_inf,
-                    w.payload,
-                    w.one,
-                    w.negative,
-                    w.one,
-                    w.signaling,
-                    w.one,
-                ],
-            )],
+/// How the kernel oracle covers one RISC atom.
+enum NanAtomCoverage {
+    /// Kernel rows below, built by [`nan_atom_rows`].
+    Rows,
+    /// The builtin oracle above covers it through the host builtin inventory.
+    BuiltinInventory,
+    /// The builtin oracle above covers it through its cast rows.
+    CastRows,
+    /// The atom yields no float value: integer, bool, key or shape results.
+    NoFloatValue,
+}
+
+/// One representative operation for each semantic RISC atom, and how the
+/// oracle covers it. The match is exhaustive over the atom universe, so a new
+/// atom does not compile until it is classified here; the representative's
+/// disposition is checked against the atom, and its NaN finalization is read
+/// from `fp_env::risc_nan_finalization`, never restated.
+fn nan_atom_coverage(
+    atom: chelis_ir::dag::RiscAtomIdentity,
+) -> (chelis_ir::dag::RiscOp, NanAtomCoverage) {
+    use NanAtomCoverage::{BuiltinInventory, CastRows, NoFloatValue, Rows};
+    use chelis_ir::dag::{
+        ComparisonKind, DimExpr, ExtremaKind, ExtremaOperand, KeyBranch, LogicalKind,
+        ReduceWindowKind, RiscAtomIdentity as Id, RiscOp, RtDim, UniformBound,
+    };
+    use chelis_types::{BitwiseKind, types::Prim};
+    let window = |reducer| RiscOp::ReduceWindow {
+        reducer,
+        window_shape: vec![2],
+        strides: vec![1],
+    };
+    match atom {
+        Id::Add => (RiscOp::Add, BuiltinInventory),
+        Id::Sub => (RiscOp::Sub, BuiltinInventory),
+        Id::Mul => (RiscOp::Mul, BuiltinInventory),
+        Id::Div => (RiscOp::Div, BuiltinInventory),
+        Id::FloorDiv => (RiscOp::FloorDiv, BuiltinInventory),
+        Id::MaxElem => (RiscOp::MaxElem, BuiltinInventory),
+        Id::MinElem => (RiscOp::MinElem, BuiltinInventory),
+        Id::Relu => (RiscOp::Relu, BuiltinInventory),
+        Id::Neg => (RiscOp::Neg, BuiltinInventory),
+        Id::Exp => (RiscOp::Exp, BuiltinInventory),
+        Id::Log => (RiscOp::Log, BuiltinInventory),
+        Id::Sin => (RiscOp::Sin, BuiltinInventory),
+        Id::Sqrt => (RiscOp::Sqrt, BuiltinInventory),
+        Id::Cos => (RiscOp::Cos, BuiltinInventory),
+        Id::Tan => (RiscOp::Tan, BuiltinInventory),
+        Id::Atan => (RiscOp::Atan, BuiltinInventory),
+        Id::Tanh => (RiscOp::Tanh, BuiltinInventory),
+        Id::Abs => (RiscOp::Abs, BuiltinInventory),
+        Id::Floor => (RiscOp::Floor, BuiltinInventory),
+        Id::Ceil => (RiscOp::Ceil, BuiltinInventory),
+        Id::Round => (RiscOp::Round, BuiltinInventory),
+        Id::Recip => (RiscOp::Recip, BuiltinInventory),
+        Id::Cast => (
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            CastRows,
+        ),
+        Id::ReluAdjoint => (RiscOp::ReluAdjoint, Rows),
+        Id::ExtremaAdjoint => (
+            RiscOp::ExtremaAdjoint {
+                kind: ExtremaKind::Max,
+                operand: ExtremaOperand::Left,
+            },
+            Rows,
+        ),
+        Id::Where => (RiscOp::Where, Rows),
+        Id::Dropout => (RiscOp::Dropout, Rows),
+        Id::DropoutReplay => (RiscOp::DropoutReplay, Rows),
+        Id::UniformBoundAdjoint => (
+            RiscOp::UniformBoundAdjoint {
+                bound: UniformBound::Low,
+            },
+            Rows,
+        ),
+        Id::Sum => (
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            Rows,
+        ),
+        Id::MaxReduce => (RiscOp::MaxReduce { axis: 0 }, Rows),
+        Id::MinReduce => (RiscOp::MinReduce { axis: 0 }, Rows),
+        Id::ProdReduce => (RiscOp::ProdReduce { axis: 0 }, Rows),
+        Id::ReduceWindowMax => (window(ReduceWindowKind::Max), Rows),
+        Id::ReduceWindowMin => (window(ReduceWindowKind::Min), Rows),
+        Id::ReduceWindowSum => (window(ReduceWindowKind::Sum), Rows),
+        Id::ReduceWindowMean => (window(ReduceWindowKind::Mean), Rows),
+        Id::ReduceWindowGrad => (
+            RiscOp::ReduceWindowGrad {
+                reducer: ReduceWindowKind::Sum,
+                window_shape: vec![2],
+                strides: vec![1],
+            },
+            Rows,
+        ),
+        Id::Reshape => (
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Lit(3)],
+            },
+            Rows,
+        ),
+        Id::Permute => (RiscOp::Permute { axes: vec![1, 0] }, Rows),
+        Id::Expand => (
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(2),
+            },
+            Rows,
+        ),
+        Id::Pad => (
+            RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(0))]),
+            Rows,
+        ),
+        Id::Shrink => (
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(1), RtDim::Lit(3))],
+            },
+            Rows,
+        ),
+        Id::Stride => (
+            RiscOp::Stride {
+                strides: vec![RtDim::Lit(2)],
+            },
+            Rows,
+        ),
+        Id::Matmul => (
+            RiscOp::BlasMatmul {
+                batch_dims: vec![],
+                m: DimExpr::Concrete(2),
+                n: DimExpr::Concrete(2),
+                k: DimExpr::Concrete(2),
+                accumulator: Prim::F32,
+            },
+            Rows,
+        ),
+        Id::Gather => (
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
+            Rows,
+        ),
+        Id::Scatter => (
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
+            Rows,
+        ),
+        Id::ScatterReplace => (
+            RiscOp::Scatter {
+                axis: 0,
+                batch_rank: 0,
+            },
+            Rows,
+        ),
+        Id::ScatterElements => (RiscOp::ScatterElements { axis: 0 }, Rows),
+        Id::Count => (RiscOp::Count { axes: vec![0] }, NoFloatValue),
+        Id::TruncDiv => (RiscOp::TruncDiv, NoFloatValue),
+        Id::Mod => (RiscOp::Mod, NoFloatValue),
+        Id::BitAnd => (RiscOp::Bitwise(BitwiseKind::And), NoFloatValue),
+        Id::BitOr => (RiscOp::Bitwise(BitwiseKind::Or), NoFloatValue),
+        Id::BitXor => (RiscOp::Bitwise(BitwiseKind::Xor), NoFloatValue),
+        Id::ShiftLeft => (RiscOp::Bitwise(BitwiseKind::ShiftLeft), NoFloatValue),
+        Id::ShiftRight => (RiscOp::Bitwise(BitwiseKind::ShiftRight), NoFloatValue),
+        Id::CmpLt => (RiscOp::Compare(ComparisonKind::CmpLt), NoFloatValue),
+        Id::Lt => (RiscOp::Compare(ComparisonKind::Lt), NoFloatValue),
+        Id::Eq => (RiscOp::Compare(ComparisonKind::Eq), NoFloatValue),
+        Id::Neq => (RiscOp::Compare(ComparisonKind::Neq), NoFloatValue),
+        Id::Gt => (RiscOp::Compare(ComparisonKind::Gt), NoFloatValue),
+        Id::Gte => (RiscOp::Compare(ComparisonKind::Gte), NoFloatValue),
+        Id::Lte => (RiscOp::Compare(ComparisonKind::Lte), NoFloatValue),
+        Id::And => (RiscOp::Logical(LogicalKind::And), NoFloatValue),
+        Id::Or => (RiscOp::Logical(LogicalKind::Or), NoFloatValue),
+        Id::Not => (RiscOp::Logical(LogicalKind::Not), NoFloatValue),
+        Id::GuardedFail => (
+            RiscOp::GuardedFail {
+                message: String::new(),
+                trap_on_true: true,
+            },
+            NoFloatValue,
+        ),
+        // A uniform draw's bits come from the key, not from a float operand.
+        Id::UniformLike => (RiscOp::UniformLike, NoFloatValue),
+        Id::KeyFromSeed => (RiscOp::KeyFromSeed, NoFloatValue),
+        Id::SplitKey => (
+            RiscOp::Split {
+                branch: KeyBranch::Left,
+            },
+            NoFloatValue,
+        ),
+        Id::SplitKeys => (
+            RiscOp::SplitN {
+                count: RtDim::Lit(2),
+            },
+            NoFloatValue,
+        ),
+        Id::FoldIn => (RiscOp::FoldIn, NoFloatValue),
+        Id::ArgmaxReduce => (RiscOp::Argmax { axis: 0 }, NoFloatValue),
+        Id::ArgminReduce => (RiscOp::Argmin { axis: 0 }, NoFloatValue),
+        Id::Shape => (RiscOp::Shape { axis: 0 }, NoFloatValue),
+        Id::CastTrunc => (
+            RiscOp::CastTrunc {
+                new_precision: Prim::Int32,
+            },
+            NoFloatValue,
+        ),
+    }
+}
+
+/// The kernel rows of one atom at one width, each carrying the payload,
+/// negative and signaling NaNs through the atom; an invalid operation inside
+/// an arithmetic kernel (`inf + -inf`, `0 * inf`); and a one-element group
+/// that no addition touches. Widths an atom does not build at in
+/// `chelis build` are skipped with the reason beside them.
+fn nan_atom_rows(atom: chelis_ir::dag::RiscAtomIdentity, w: &'static NanWidth) -> Vec<NanKernelRow> {
+    use chelis_ir::dag::RiscAtomIdentity as Id;
+    let name = w.name;
+    let neg_inf = w.inf | w.sign();
+    let (p, n, s) = (w.payload, w.negative, w.signaling);
+    let row = |label: &str, params: Vec<(&'static str, Vec<i64>, Vec<u64>)>, output: Vec<i64>, call: String| NanKernelRow {
+        label: format!("{label}_{name}"),
+        width: w,
+        params,
+        output,
+        call,
+        helper: None,
+        finalization: None,
+        gradient: false,
+    };
+    let helped = |label: &str, params, output, call: String, helper: String| NanKernelRow {
+        helper: Some(helper),
+        finalization: Some(chelis_backend_c::fp_env::NanFinalization::Canonical),
+        gradient: true,
+        ..row(label, params, output, call)
+    };
+    let x3 = || vec![("x", vec![3], vec![p, n, s])];
+    // `prod_reduce`, the windows and their gradients build at f32 only
+    // (chelis#729).
+    let f32_only = name == "f32";
+    match atom {
+        Id::Sum => vec![
+            row("sum", vec![("x", vec![4, 2], vec![w.inf, neg_inf, p, w.one, n, w.one, s, w.one])], vec![4], "sum(x, 1i32)".into()),
+            row("sum_carry", vec![("x", vec![3, 1], vec![p, n, s])], vec![3], "sum(x, 1i32)".into()),
+            // [05-OP-30]'s two spellings of a one-element diagonal sum agree.
+            row("trace_carry", vec![("x", vec![2, 1, 1], vec![p, n])], vec![2], "trace(x, 1i32, 2i32)".into()),
+            row("diagonal_sum", vec![("x", vec![2, 1, 1], vec![p, n])], vec![2], "sum(diagonal(x, 1i32, 2i32), 1i32)".into()),
+        ],
+        Id::MaxReduce => vec![
+            row("max_reduce", vec![("x", vec![3, 2], vec![p, w.one, n, w.one, s, w.one])], vec![3], "max_reduce(x, 1i32)".into()),
+            row("max_reduce_first", vec![("x", vec![2, 2], vec![p, n, n, p])], vec![2], "max_reduce(x, 1i32)".into()),
+        ],
+        Id::MinReduce => vec![
+            row("min_reduce", vec![("x", vec![3, 2], vec![w.one, p, w.one, n, w.one, s])], vec![3], "min_reduce(x, 1i32)".into()),
+            row("min_reduce_first", vec![("x", vec![2, 2], vec![p, n, n, p])], vec![2], "min_reduce(x, 1i32)".into()),
+        ],
+        Id::ProdReduce if f32_only => vec![row("prod", vec![("x", vec![3, 2], vec![w.zero, w.inf, p, w.one, n, s])], vec![3], "prod_reduce(x, 1i32)".into())],
+        Id::ReduceWindowSum if f32_only => vec![
+            row("window_sum", vec![("x", vec![4], vec![w.inf, neg_inf, p, w.one])], vec![3], "reduce_window_sum(x, [2i64], [1i64])".into()),
+            row("window_carry", x3(), vec![3], "reduce_window_sum(x, [1i64], [1i64])".into()),
+        ],
+        Id::ReduceWindowMean if f32_only => vec![row("window_mean", vec![("x", vec![4], vec![w.inf, neg_inf, n, w.one])], vec![3], "reduce_window_mean(x, [2i64], [1i64])".into())],
+        Id::ReduceWindowMax if f32_only => vec![row("window_max", vec![("x", vec![4], vec![p, w.one, n, s])], vec![3], "reduce_window_max(x, [2i64], [1i64])".into())],
+        Id::ReduceWindowMin if f32_only => vec![row("window_min", vec![("x", vec![4], vec![p, w.one, n, s])], vec![3], "reduce_window_min(x, [2i64], [1i64])".into())],
+        Id::ReduceWindowGrad if f32_only => vec![helped(
+            "window_grad",
+            vec![("x", vec![4], vec![w.inf, neg_inf, p, w.one])],
             vec![4],
-            "sum(x, 1i32)".into(),
-        ));
-        rows.push(row(
-            "sum_carry",
-            vec![("x", vec![3, 1], vec![w.payload, w.negative, w.signaling])],
-            vec![3],
-            "sum(x, 1i32)".into(),
-        ));
-        rows.push(row(
+            format!("grad(lwin_{name}, wrt=x)(x)"),
+            format!("def lwin_{name}(x: tensor[4, {name}]) -> {name} = {{\n  w = reduce_window_sum(x, [2i64], [1i64])\n  tensor_to_scalar(sum(mul(w, copy(w)), 0i32))\n}}\n"),
+        )],
+        Id::ProdReduce | Id::ReduceWindowSum | Id::ReduceWindowMean | Id::ReduceWindowMax | Id::ReduceWindowMin | Id::ReduceWindowGrad => Vec::new(),
+        Id::Matmul => vec![row(
             "matmul",
-            vec![
-                ("a", vec![2, 2], vec![w.zero, w.one, w.payload, w.one]),
-                ("b", vec![2, 2], vec![w.inf, w.one, w.one, w.signaling]),
-            ],
+            vec![("a", vec![2, 2], vec![w.zero, w.one, p, w.one]), ("b", vec![2, 2], vec![w.inf, w.one, w.one, s])],
             vec![2, 2],
             "matmul(a, b)".into(),
-        ));
-        if name == "f32" {
-            rows.push(row(
-                "window_sum",
-                vec![("x", vec![4], vec![w.inf, neg_inf, w.payload, w.one])],
-                vec![3],
-                "reduce_window_sum(x, [2i64], [1i64])".into(),
-            ));
-            rows.push(row(
-                "window_mean",
-                vec![("x", vec![4], vec![w.inf, neg_inf, w.negative, w.one])],
-                vec![3],
-                "reduce_window_mean(x, [2i64], [1i64])".into(),
-            ));
-            rows.push(row(
-                "window_carry",
-                vec![("x", vec![3], vec![w.payload, w.negative, w.signaling])],
-                vec![3],
-                "reduce_window_sum(x, [1i64], [1i64])".into(),
-            ));
-        }
-        rows.push(row(
-            "dropout",
-            vec![("x", vec![3], vec![w.payload, w.negative, w.signaling])],
+        )],
+        Id::Dropout => vec![row("dropout", x3(), vec![3], format!("dropout(key_from_seed(7i64), x, cast(0.0, {name}))"))],
+        Id::DropoutReplay => vec![helped(
+            "dropout_grad",
+            x3(),
             vec![3],
-            format!("dropout(key_from_seed(7i64), x, cast(0.0, {name}))"),
-        ));
-        if name == "f32" {
-            rows.push(row(
-                "prod",
-                vec![(
-                    "x",
-                    vec![3, 2],
-                    vec![w.zero, w.inf, w.payload, w.one, w.negative, w.signaling],
-                )],
-                vec![3],
-                "prod_reduce(x, 1i32)".into(),
-            ));
+            format!("grad(ldrop_{name}, wrt=x)(x)"),
+            format!("def ldrop_{name}(x: tensor[3, {name}]) -> {name} = tensor_to_scalar(sum(mul(dropout(key_from_seed(7i64), x, cast(0.5, {name})), x), 0i32))\n"),
+        )],
+        // The checker admits `uniform_like` bounds at f32 only.
+        Id::UniformBoundAdjoint if name == "f32" => vec![helped(
+            "uniform_low_grad",
+            vec![("x", vec![3], vec![p, w.one, n]), ("lo", vec![1], vec![w.zero])],
+            vec![1],
+            format!("grad(lunif_{name}, wrt=lo)(lo, x)"),
+            format!("def lunif_{name}(lo: tensor[1, {name}], x: tensor[3, {name}]) -> {name} = {{\n  b = tensor_to_scalar(sum(lo, 0i32))\n  tensor_to_scalar(sum(mul(uniform_like(key_from_seed(1i64), x, b, cast(2.0, {name})), x), 0i32))\n}}\n"),
+        )],
+        Id::UniformBoundAdjoint => Vec::new(),
+        Id::ReluAdjoint => vec![helped(
+            "relu_grad",
+            vec![("x", vec![3], vec![p, w.one, n])],
+            vec![3],
+            format!("grad(lrelu_{name}, wrt=x)(x)"),
+            format!("def lrelu_{name}(x: tensor[3, {name}]) -> {name} = tensor_to_scalar(sum(mul(relu(x), x), 0i32))\n"),
+        )],
+        Id::ExtremaAdjoint => vec![helped(
+            "max_elem_grad",
+            vec![("x", vec![3], vec![p, w.one, n])],
+            vec![3],
+            format!("grad(lmax_{name}, wrt=x)(x)"),
+            format!("def lmax_{name}(x: tensor[3, {name}]) -> {name} = tensor_to_scalar(sum(mul(max_elem(x, neg(x)), x), 0i32))\n"),
+        )],
+        // Selection and data movement: every NaN out is a NaN in, bit for bit.
+        Id::Where => vec![row(
+            "where",
+            vec![("x", vec![3], vec![p, n, s]), ("y", vec![3], vec![w.one, w.one, w.one])],
+            vec![3],
+            "where(cmplt(copy(x), copy(y)), y, x)".into(),
+        )],
+        Id::Reshape => vec![row("reshape", x3(), vec![1, 3], "reshape(x, [1i64, 3i64])".into())],
+        Id::Permute => vec![row("permute", vec![("x", vec![2, 2], vec![p, n, s, w.one])], vec![2, 2], "permute(x, 1i32, 0i32)".into())],
+        Id::Expand => vec![row("expand", vec![("x", vec![1], vec![s])], vec![3], "expand(x, 0i32, 3i64)".into())],
+        Id::Pad => vec![row("pad", x3(), vec![4], format!("pad(x, [[1i64, 0i64]], cast(0.0, {name}))"))],
+        Id::Shrink => vec![row("shrink", x3(), vec![2], "shrink(x, [[1i64, 3i64]])".into())],
+        Id::Stride => vec![row("stride", x3(), vec![2], "stride(x, 2i64)".into())],
+        Id::Gather => vec![row("gather", x3(), vec![4], "gather(x, to_tensor([2i64, 0i64, 1i64, 2i64]), 0i32)".into())],
+        Id::ScatterReplace => vec![row(
+            "scatter_replace",
+            vec![("x", vec![3], vec![w.one, w.one, w.one]), ("y", vec![2], vec![s, n])],
+            vec![3],
+            "scatter(x, to_tensor([2i64, 0i64]), y, 0i32, \"replace\")".into(),
+        )],
+        Id::ScatterElements => vec![row(
+            "scatter_elements",
+            vec![("x", vec![3], vec![w.one, w.one, w.one]), ("y", vec![3], vec![p, n, s])],
+            vec![3],
+            "scatter_elements(x, to_tensor([2i64, 0i64, 1i64]), y, 0i32)".into(),
+        )],
+        // chelis#3047: a gather with duplicate indices differentiates to a
+        // scatter-add of a finite and a NaN contribution into one element; at
+        // f16 and bf16 that sum is taken at f32. The f64 gradient does not
+        // build (chelis#729).
+        Id::Scatter if name != "f64" => {
+            let gather = "gather(x, to_tensor([0i64, 0i64, 2i64, 2i64]), 0i32)";
+            vec![helped(
+                "gather_grad",
+                vec![("x", vec![4], vec![w.one, n, p, w.one])],
+                vec![4],
+                format!("grad(gather_loss_{name}, wrt=x)(x)"),
+                format!("def gather_loss_{name}(x: tensor[4, {name}]) -> {name} = tensor_to_scalar(sum(mul({gather}, {gather}), 0i32))\n"),
+            )]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// chelis#2957 rounds 2 and 3: every emitter that writes a float element
+/// through its own store agrees bit for bit with eval through the static
+/// library ABI at f16, bf16, f32 and f64, and both lanes finalize NaNs as
+/// [04-NUM-2] classifies the atom: arithmetic and conversion to the
+/// canonical quiet NaN, [05-OP-12]/[05-OP-40] selection and data movement
+/// keeping an input NaN's exact bits. The rows are derived from the atom
+/// universe (`RiscAtomIdentity::ALL`) through [`nan_atom_coverage`], and the
+/// expected finalization from `fp_env::risc_nan_finalization`, so a new atom
+/// or a reclassification changes what this oracle checks. `to_tensor` is a
+/// list builtin and `einsum` a runtime kernel, neither with a RISC atom, so
+/// their rows are listed by name.
+#[test]
+fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_library_abi() {
+    use chelis_ir::dag::{RiscAtomDisposition, RiscAtomIdentity};
+    let inventory = chelis_backend_c::host_builtin_nan_inventory();
+    let mut rows = Vec::new();
+    for &atom in RiscAtomIdentity::ALL {
+        let (op, coverage) = nan_atom_coverage(atom);
+        assert_eq!(
+            op.atom_disposition(),
+            RiscAtomDisposition::Semantic(atom),
+            "the representative of `{}` is another atom",
+            atom.as_str()
+        );
+        let finalization = chelis_backend_c::fp_env::risc_nan_finalization(&op);
+        match coverage {
+            NanAtomCoverage::Rows => {
+                let mut covered = false;
+                for w in &NAN_WIDTHS {
+                    for mut row in nan_atom_rows(atom, w) {
+                        if !row.gradient {
+                            row.finalization = finalization;
+                        }
+                        rows.push(row);
+                        covered = true;
+                    }
+                }
+                assert!(covered, "`{}` has no kernel row at any width", atom.as_str());
+            }
+            NanAtomCoverage::BuiltinInventory => assert!(
+                inventory.contains(&(atom.as_str(), finalization)),
+                "`{}` is not in the host builtin inventory as {finalization:?}",
+                atom.as_str()
+            ),
+            NanAtomCoverage::CastRows => assert_eq!(
+                finalization,
+                Some(chelis_backend_c::fp_env::NanFinalization::Canonical),
+                "the cast rows expect a canonical conversion"
+            ),
+            NanAtomCoverage::NoFloatValue => assert_eq!(
+                finalization,
+                None,
+                "`{}` produces a float value; give it kernel rows",
+                atom.as_str()
+            ),
         }
     }
-
+    for w in &NAN_WIDTHS {
+        rows.push(NanKernelRow {
+            label: format!("to_tensor_{}", w.name),
+            width: w,
+            params: vec![("x", vec![3], vec![w.payload, w.negative, w.signaling])],
+            output: vec![3],
+            call: "to_tensor(to_list(x))".into(),
+            helper: None,
+            finalization: None,
+            gradient: false,
+        });
+        // `einsum` is a runtime kernel with no RISC atom; its products and
+        // sums are arithmetic (chelis#1290 owns its accumulation order).
+        rows.push(NanKernelRow {
+            label: format!("einsum_{}", w.name),
+            width: w,
+            params: vec![
+                ("a", vec![2, 1], vec![w.payload, w.signaling]),
+                ("b", vec![1, 1], vec![w.one]),
+            ],
+            output: vec![2, 1],
+            call: "einsum(\"ij,jk->ik\", a, b)".into(),
+            helper: None,
+            finalization: Some(chelis_backend_c::fp_env::NanFinalization::Canonical),
+            gradient: false,
+        });
+    }
     let dims = |shape: &[i64]| -> String {
         shape
             .iter()
@@ -1271,11 +1604,27 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
             .collect();
         let eval = nan_eval_shaped_bits(&source, &inputs, w);
         let mut saw_nan = false;
+        let input_bits: Vec<u64> = row
+            .params
+            .iter()
+            .flat_map(|(_, _, bits)| bits.iter().copied())
+            .collect();
         for (index, expected) in eval.iter().enumerate() {
             if w.is_nan(*expected) {
                 saw_nan = true;
-                if *expected != w.canonical {
-                    failures.push(format!("eval {} [{index}] gave {expected:#x}", row.label));
+                let admitted = match row.finalization {
+                    Some(chelis_backend_c::fp_env::NanFinalization::Canonical) => {
+                        *expected == w.canonical
+                    }
+                    Some(chelis_backend_c::fp_env::NanFinalization::BitPreserving) | None => {
+                        input_bits.contains(expected)
+                    }
+                };
+                if !admitted {
+                    failures.push(format!(
+                        "eval {} [{index}] gave {expected:#x}, not a {:?} NaN",
+                        row.label, row.finalization
+                    ));
                 }
             }
             let prefix = format!("t_{} {index} ", row.label);
@@ -1291,7 +1640,9 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
                 ));
             }
         }
-        assert!(saw_nan, "row {} must produce a NaN to test", row.label);
+        if !saw_nan {
+            failures.push(format!("row {} must produce a NaN to test", row.label));
+        }
     }
     assert!(
         failures.is_empty(),
