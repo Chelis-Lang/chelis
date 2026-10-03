@@ -137,8 +137,10 @@ been compared across targets.
   them, such as `sigmoid` or `softmax`, at build time: the device lanes have no
   correctly rounded kernels for them yet, and the build reports the operation rather than
   computing it with a vendor library. Use `c` for such a program.
-- Every target computes the same bits for an admitted operation; there is no
-  per-operation or per-target tolerance.
+- Every CPU target computes the same bits for an admitted operation; there is no
+  per-operation or per-target tolerance. Metal is not yet held to this: its f32
+  division and reciprocal can differ under the device compiler's fast math
+  ([#2968](https://github.com/Chelis-Lang/chelis/issues/2968)).
 
 Use `chelis eval --file app.ch` to execute locally without generating native
 source. It evaluates host code and tensor operations through the compiler's

@@ -258,10 +258,13 @@ items in #2968 and #2969 (NaN-dropping reductions, the f16 max/min identity,
 target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build driver:
 
 - `-march=native` is removed; the target's CPU baseline is part of the declared target.
-- Every native tool runs with a cleared environment plus an allowlist (`PATH` for tool
-  resolution, `TMPDIR`, the SDK variables Apple's driver needs, and the explicit
-  compiler selection). `CFLAGS`, `CPPFLAGS`, `LDFLAGS`, `CCC_OVERRIDE_OPTIONS`,
-  `NIX_CFLAGS_COMPILE`, `NIX_LDFLAGS`, and OpenMP variables are not on it.
+- Every native tool runs with a cleared environment plus the allowlist
+  `toolchain::TOOL_ENVIRONMENT`, which is exactly `PATH` (tool resolution) and `TMPDIR`
+  (driver intermediates). The compiler is selected by its path, not through the
+  environment. `CFLAGS`, `CPPFLAGS`, `LDFLAGS`, `CCC_OVERRIDE_OPTIONS`,
+  `NIX_CFLAGS_COMPILE`, `NIX_LDFLAGS`, locale and OpenMP variables are not on it, and on
+  macOS neither are `SDKROOT` nor `DEVELOPER_DIR`: the SDK follows the `xcode-select`
+  default, and another Xcode is chosen by naming its compiler in `CHELIS_CC`.
 - The profile is `-O2 -ffp-contract=off -fno-fast-math` plus the target's required
   flags, the same strict profile `cross_lane_gate.md` PD2 defines, now the product
   default.
