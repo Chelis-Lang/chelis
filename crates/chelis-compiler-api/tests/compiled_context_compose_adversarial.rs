@@ -596,21 +596,34 @@ fn g7_eval_many_in_context_runtime_isolation_matches_combined() {
 
 // ─── G9 — Name shadowing across stages ───────────────────────────────────
 
+/// The collision diagnostic for new code that imports `name` from
+/// `Mylib.Math` and also declares it (spec/02 §P2, chelis#2885).
+fn import_collision_diagnostic(name: &str) -> String {
+    format!(
+        "`{name}` is both imported and declared locally: `import Mylib.Math ({name})` brings it \
+         into unqualified scope, and `def {name}` declares it. Rename the local declaration, or \
+         stop importing `{name}` unqualified and refer to the imported one by its qualified name \
+         (`Mylib.Math.{name}`)"
+    )
+}
+
+/// The single diagnostic message of a rejected compile.
+fn sole_error_message(error: &chelis_compiler_api::compiler::CompilerError) -> &str {
+    assert_eq!(error.errors.len(), 1, "one diagnostic: {error:?}");
+    &error.errors[0].message
+}
+
 #[test]
-fn g9_newcode_shadows_library_def_for_new_callers() {
-    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
-    // library (internal-name mangled) and evaluates it; declare the linked
-    // provenance, matching the now-guarded production paths.
-    let _linked = chelis_compiler_api::install_linked_program_guard();
+fn g9_newcode_redeclaring_an_imported_library_def_is_rejected_at_every_stage() {
+    // New code that imports the library's `foo` and declares its own `foo`
+    // gives `foo` two candidate meanings. No precedence rule picks one
+    // (spec/02 §P2, chelis#2885): the in-context eval and check, and the
+    // monolithic reef link the baseline uses, all reject it with the same
+    // diagnostic naming the import and the local declaration.
     let library = "module Mylib.Math\nexport (foo)\n\n\
                    def foo(x: i32) -> i32 = x + 100\n";
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
-
-    // New-code redef of foo with a different body. Another new-code def
-    // calls foo. Per the Phase C plan, new code shadows the library on
-    // name collision. So `caller(0)` must use the new-code's foo
-    // (returns 0 + 1 = 1), NOT the library's (which returns 100).
     let snippet = "module App.Eval\nimport Mylib.Math (foo)\n\n\
                    def foo(x: i32) -> i32 = x + 1\n\
                    def caller() -> i32 = foo(0)\n";
@@ -621,10 +634,55 @@ fn g9_newcode_shadows_library_def_for_new_callers() {
         &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
     .expect("ctx");
-    let result = eval_in_context(&ctx, snippet).expect("eval ok");
-    let by = collect_named_roots_json(&result.roots, &["caller"]);
+    let expected = import_collision_diagnostic("foo");
+    let evaluated = eval_in_context(&ctx, snippet).expect_err("eval must reject the collision");
+    assert_eq!(sole_error_message(&evaluated), expected, "eval_in_context");
+    let checked = check_in_context(&ctx, snippet).expect_err("check must reject the collision");
+    assert_eq!(sole_error_message(&checked), expected, "check_in_context");
 
-    // Baseline parity:
+    let graph = chelis_reef::prepare_reef_graph(&root, &chelis_std_bundle::EMBEDDED_RUNTIME)
+        .expect("prepare_reef_graph");
+    let entry = flatten_module_decls(&chelis_surf::parser::parse_str(snippet).expect("parse"));
+    let linked =
+        chelis_reef::compile_with_reef_graph(&graph, &entry, &chelis_std_bundle::EMBEDDED_RUNTIME)
+            .err();
+    assert_eq!(
+        linked.as_deref(),
+        Some(expected.as_str()),
+        "monolithic link"
+    );
+}
+
+#[test]
+fn g9_newcode_def_beside_a_qualified_library_import_keeps_both_identities() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
+    let library = "module Mylib.Math\nexport (foo)\n\n\
+                   def foo(x: i32) -> i32 = x + 100\n";
+    let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
+    let (_dir, root) = build_pkg(library, main);
+
+    // A qualified-only import leaves the library's `foo` reachable as
+    // `Mylib.Math.foo` and out of unqualified scope, so new code may declare
+    // its own `foo`. A bare `foo` is the new code's (0 + 1 = 1); the
+    // qualified one is the library's (0 + 100 = 100), in the context and in
+    // the monolithic baseline alike.
+    let snippet = "module App.Eval\nimport Mylib.Math\n\n\
+                   def foo(x: i32) -> i32 = x + 1\n\
+                   def caller() -> i32 = foo(0)\n\
+                   def library_caller() -> i32 = Mylib.Math.foo(0)\n";
+
+    let ctx = compile_reef_context(
+        Path::new("/tmp/x"),
+        &root,
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .expect("ctx");
+    let result = eval_in_context(&ctx, snippet).expect("eval ok");
+    let by = collect_named_roots_json(&result.roots, &["caller", "library_caller"]);
+
     let formatted = format_library_plus_snippet(&root, snippet);
     let baseline = eval(EvalRequest {
         source_kind: SourceKind::Surf,
@@ -632,11 +690,12 @@ fn g9_newcode_shadows_library_def_for_new_callers() {
         bindings: BTreeMap::new(),
     })
     .expect("baseline");
-    let by_baseline = collect_named_roots_json(&baseline.roots, &["caller"]);
+    let by_baseline = collect_named_roots_json(&baseline.roots, &["caller", "library_caller"]);
     assert_eq!(
         by, by_baseline,
-        "shadow result for caller must match monolithic baseline (regardless of which side wins)"
+        "both identities must agree with the monolithic baseline"
     );
+    assert_eq!(by.len(), 2, "both roots are observed: {by:?}");
 }
 
 // ─── G11 — check_in_context does NOT eval ────────────────────────────────
@@ -1108,23 +1167,24 @@ fn gextra_source_hash_independent_of_tempdir_path() {
     );
 }
 
-// ─── G9-deep — Effects/linearity respect new-code shadow of library def ──
+// ─── G9-deep — Effect inference uses the new code's own def ─────────────
 
 #[test]
-fn g9deep_effect_inference_uses_newcode_shadow_not_library_for_inferred_row() {
+fn g9deep_effect_inference_uses_the_newcode_def_not_the_same_named_library_def() {
     // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
     // library (internal-name mangled) and evaluates it; declare the linked
     // provenance, matching the now-guarded production paths.
     let _linked = chelis_compiler_api::install_linked_program_guard();
     // Library has `lib_io(x)` that performs Io (calls print).
-    // New code redefines `lib_io(x)` with NO effects (just identity).
-    // Another new-code def `caller(x)` calls `lib_io(x)`.
-    // The inferred effect of `caller` MUST be the new-code shadow (no
-    // effects), NOT the library's Io effect — otherwise Phase D's
-    // effect-shadow contract is broken.
+    // New code imports the library qualified and declares its own pure
+    // `lib_io(x)` (just identity). Another new-code def `caller(x)` calls the
+    // bare `lib_io(x)`, which is the new code's own (spec/02 §P2: a
+    // qualified-only import brings no name into unqualified scope). The
+    // inferred effect of `caller` MUST be the new code's (no effects), NOT
+    // the library's Io effect.
     //
     // We probe via the declared-vs-inferred validator: declare `caller`
-    // with `! {}`. If the new-code shadow is honoured, that succeeds.
+    // with `! {}`. If the new code's def is the one called, that succeeds.
     // If the library's Io leaks through, the validator rejects.
     let library = "module Mylib.Math\nexport (lib_io)\n\n\
                    def lib_io(x: i32) -> i32 = { ignore = print(\"in lib\")\n  x }\n";
@@ -1137,26 +1197,23 @@ fn g9deep_effect_inference_uses_newcode_shadow_not_library_for_inferred_row() {
     )
     .expect("ctx");
 
-    let snippet = "module App.Eval\nimport Mylib.Math (lib_io)\n\n\
+    let snippet = "module App.Eval\nimport Mylib.Math\n\n\
                    def lib_io(x: i32) -> i32 = x\n\
                    sig caller: i32 -> i32 ! {}\n\
                    def caller(x: i32) -> i32 = lib_io(x)\n";
 
-    // Parity vs monolithic prepare_eval.
     let mono = prepare_eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: format_library_plus_snippet(&root, snippet),
         bindings: BTreeMap::new(),
     });
     let inctx = check_in_context(&ctx, snippet);
-    let mono_rejects = mono.is_err();
-    let inctx_rejects = inctx.is_err();
-    let mono_err = mono.err();
-    let inctx_err = inctx.err();
-    assert_eq!(
-        mono_rejects, inctx_rejects,
-        "shadow-respecting effect verdict must match monolithic; \
-         mono_err={mono_err:?}, inctx_err={inctx_err:?}"
+    assert!(
+        mono.is_ok() && inctx.is_ok(),
+        "the pure new-code def must satisfy `! {{}}` in both paths; \
+         mono_err={:?}, inctx_err={:?}",
+        mono.err(),
+        inctx.err()
     );
 }
 

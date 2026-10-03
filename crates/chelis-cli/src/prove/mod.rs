@@ -523,6 +523,7 @@ fn prove_surf_file(
         fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
     let parsed = chelis_surf::parser::parse_str(&source)
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
+    require_package_option_to_match_module_file(path, &parsed, options.package)?;
     let flat = flatten_module_decls(&parsed);
     let mut file_status = Status::Passed;
     // Default (no obligation engine) build: type-check the module up-front so a
@@ -3049,6 +3050,38 @@ impl Lcg {
         let unit = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
         min + (max - min) * unit
     }
+}
+
+/// spec/02 §P2: `--package` names the package that a file with no `module`
+/// declaration is linked into. A file that declares a `module` belongs to the
+/// package its own location finds, so naming a different package for it is
+/// rejected rather than silently ignored.
+fn require_package_option_to_match_module_file(
+    path: &Path,
+    parsed: &[Decl],
+    explicit: Option<&Path>,
+) -> Result<(), String> {
+    let Some(explicit) = explicit else {
+        return Ok(());
+    };
+    if !matches!(parsed, [Decl::Module { .. }]) {
+        return Ok(());
+    }
+    let located = chelis_reef::find_package_root_for_input(path)?;
+    let named = chelis_reef::find_package_root_for_dir(explicit)?;
+    if located == named {
+        return Ok(());
+    }
+    let located = match &located {
+        Some(root) => format!("the reef package at `{}`", root.display()),
+        None => "no reef package".to_string(),
+    };
+    Err(format!(
+        "`{}` declares a `module`, so it belongs to {located} by its own location; \
+         `--package {}` links only files with no `module` declaration",
+        path.display(),
+        explicit.display(),
+    ))
 }
 
 /// Resolve the effective package root: explicit `--package` wins, otherwise
