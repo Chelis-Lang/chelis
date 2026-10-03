@@ -935,3 +935,8 @@ fn parity_native_program() {
 fn parity_native_library() {
     drive_parity(&examples_root().join("native_library.ch"), false);
 }
+
+#[test]
+fn parity_construct_alternatives() {
+    drive_parity(&examples_root().join("construct_alternatives.ch"), true);
+}

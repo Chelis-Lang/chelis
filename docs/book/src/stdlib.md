@@ -97,7 +97,7 @@ the same key cannot be consumed twice.
   generated C. Imported calls do not enforce every endpoint dtype family
   restriction, so use the stated types. Its `stack`, `squeeze`, and
   `unsqueeze` names are exported, but concrete tensor calls do not
-  type-check; do not depend on them in a runnable program.
+  type-check; see [known issues and supported concrete alternatives](known-issues.md#tensor-construction-helpers).
 - `Std.Tensor.Mask.where_indices(mask)` returns the increasing flat `i64`
   indices of true elements. `Std.Sort.sort` exposes the built-in tensor sort
   through a module import.

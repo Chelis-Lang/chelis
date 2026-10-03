@@ -12,6 +12,7 @@
 - [Checking Properties](proving.md)
 - [Opaque Types With Declared Invariants](opaque-invariants.md)
 - [Examples](examples.md)
+- [Known Issues](known-issues.md)
 
 # Language Reference
 

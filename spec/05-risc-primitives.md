@@ -2938,13 +2938,38 @@ exact ADT identity by [05-OP-34].
 > declared `p_float` composition `start + (stop-start)*weight` executes in that
 > order. Squeeze removes the selected singleton dimension. Unsqueeze inserts a
 > singleton dimension and stack inserts the input-list length at the selected
-> position; all three are rank-polymorphic, bit-preserving reshape/concat
-> operations. Squeeze normalizes a negative axis by adding the input rank once
+> position. All three are bit-preserving reshape/concat operations with
+> concrete-rank signature schemas. Concrete-rank schemas are instantiated for the resolved callable identity
+> before ordinary argument unification; imports, aliases and higher-order uses
+> retain that same constraint. This does not permit rank spreads in List
+> elements, adjacent unanchored spreads, or a literal split anchor under
+> spec/04 §4.5.1 and §4.5.3. The checker computes the result shape from the operand shape and normalized axis:
+> `Remove(S,axis)` deletes exactly the selected entry of `S`, and
+> `Insert(S,axis,n)` inserts the dimension `n` at that position. The resulting
+> ordinary tensor type must unify with every declared result type; the caller
+> cannot select an independent result shape. Concrete rank does not require
+> every extent to be a compile-time literal: named and runtime extents retain
+> their normal dimension identities and obligations.
+> A genuinely dynamic positional axis is a type error. A literal or an
+> integer-cast-wrapped literal that has i32 type is resolved statically,
+> including negative forms. Squeeze normalizes a negative axis by adding the input rank once
 > and then requires `0 <= axis < rank`; its selected extent must be one.
 > Unsqueeze and stack normalize a negative insertion axis by adding the result
 > rank once and then require `0 <= axis <= input_rank`.
-> Stack rejects an empty list or any inconsistent input dimension list or
-> dtype. `where_indices`
+> Stack takes `xs: List[Tensor(S,p)]` at one concrete rank and one common
+> dtype, deriving its inserted extent from the input List count.
+> A statically visible List literal of count n inserts d-lit n; a binding
+> carrying its literal length n has the same result. An unknown List count inserts the ordinary wildcard dimension
+> `(d-name {} *)` at the computed position, while rank and every other dimension
+> remain fixed by the element shape. No type-level `len(xs)` dimension is introduced.
+> A declared result extent at that wildcard position is a runtime claim
+> checked against the actual count before observation; a mismatch traps `Domain`.
+> It rejects an empty list or any inconsistent input dimension list or dtype. Statically established
+> emptiness, extent disagreement, or a non-singleton squeeze is a type error;
+> a runtime empty list traps `Domain`, and runtime extent disagreement or a
+> non-singleton squeeze traps `Domain` before any output is observed.
+> The supported dtype domain remains all active tensor element dtypes.
+> `where_indices`
 > returns the increasing row-major i64 flat indices of true elements. The
 > float `squeeze` and `unsqueeze` adjoints are the reverse reshape graph.
 > The float `stack` adjoint slices the output cotangent along the inserted axis
