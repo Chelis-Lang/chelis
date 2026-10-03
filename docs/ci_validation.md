@@ -23,7 +23,7 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 | `smt-full-prove.yml` | Existing nightly/manual cadence | Full SMT proof validation |
 | `release.yml` and release-triggered Nix checks | Release/manual cadence | Existing shipping-artifact validation, including Mac |
 
-Migrated Devenv-backed jobs reserve cold setup headroom without changing execution commands or script deadlines. The total job timeout starts at job launch and includes setup, execution and artifact upload; it is not a separate script execution deadline. Thus `ci-fast` retains its prior 30-minute budget within a 55-minute job timeout, and required change-owned shards retain their prior 60-minute budget within an 85-minute job timeout. Native Nix validation has total job timeouts of 135 minutes on Linux and 145 minutes on Darwin. The manual package-expansion lane remains separate: its executor's 80-minute deadline starts at `run-shard`, inside the unchanged 90-minute total job timeout.
+Migrated Devenv-backed jobs reserve cold setup headroom without changing execution commands or script deadlines. The total job timeout starts at job launch and includes setup, execution and artifact upload; it is not a separate script execution deadline. Thus `ci-fast` retains its prior 30-minute budget within a 55-minute job timeout, and required change-owned shards retain their prior 60-minute budget within an 85-minute job timeout. Native Nix validation has total job timeouts of 135 minutes on Linux and 145 minutes on Darwin. Its manual and published-release jobs use native GitHub-hosted builders on both systems, including dispatches on `main`; the complete sandboxed flake check set, Devenv smoke, and package correspondence commands remain mandatory. Protected-runner availability is not a prerequisite for this package acceptance lane. The manual package-expansion lane remains separate: its executor's 80-minute deadline starts at `run-shard`, inside the unchanged 90-minute total job timeout.
 
 Rust policy and the native SMT feature lane retain total job timeouts of 75 and 90 minutes respectively. These are cold-build safety limits, not a measured performance result.
 
@@ -511,3 +511,18 @@ seconds and outcome. A start without a finish identifies interrupted work.
 Stages and subprocesses can overlap, so their seconds cannot be added to
 obtain job wall time. These rows are diagnostics outside the authoritative
 selection, evidence digests and pass/fail decisions.
+
+## Runtime package acceptance routing (#3090)
+
+The reviewed Nix workflow recipe moves from SHA-256
+`894b49911f105fb5941e460a1ff25555882af56221eca3f3932a41bdcff10763` to
+`3a27a6745ad437c437f29f1a026e594da3bb57bd0fb06362c710aeaf51d044e2`.
+This is a reviewed freeze move, preserving the manual-dispatch/published-release
+policy and both complete native recipes. Linux uses `ubuntu-latest` on every
+ref, as release and branch validation already did. The private-cache steps are
+removed from this hosted-only job. System checks, sandboxing, signature checks,
+resource limits, and all three acceptance commands remain enforced. Negative
+workflow controls reject protected or event-dependent routing, omitted checks,
+and relaxed sandboxing. No runtime acceptance claim follows from routing alone:
+#3090 requires an inspected green main run on both native systems and the six
+same-head source-mutant receipts separately.

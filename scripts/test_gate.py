@@ -512,7 +512,7 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "894b49911f105fb5941e460a1ff25555882af56221eca3f3932a41bdcff10763"
+    "3a27a6745ad437c437f29f1a026e594da3bb57bd0fb06362c710aeaf51d044e2"
 )
 
 
@@ -3319,6 +3319,23 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             "Nix package jobs must stay separate from the canonical Cargo gate",
         )
 
+    def test_native_nix_linux_checks_run_hosted_even_for_main_dispatch(self):
+        # #3090: native package acceptance must not depend on the protected
+        # runner starting. The same complete recipe runs on a hosted builder.
+        block = _workflow_job_blocks(_read_nix_packages_workflow())["nix-linux-x86-64"]
+        self.assertIn("    runs-on: ubuntu-latest\n", block)
+        self.assertNotIn("chelis-ci-warm-x64", block)
+        self.assertNotIn("fromJSON", block)
+
+    def test_protected_or_event_dependent_linux_route_fails_recipe_lock(self):
+        workflow = _read_nix_packages_workflow()
+        for route in ("chelis-ci-warm-x64", "${{ github.ref == 'refs/heads/main' && 'no-such-runner' || 'ubuntu-latest' }}"):
+            with self.subTest(route=route):
+                mutated = workflow.replace("    runs-on: ubuntu-latest\n", f"    runs-on: {route}\n", 1)
+                self.assertNotEqual(mutated, workflow)
+                with self.assertRaisesRegex(AssertionError, "reviewed native recipe"):
+                    _assert_nix_intentional_events_only(mutated)
+
     def test_each_native_job_rejects_the_wrong_runner_system(self):
         text = _read_nix_packages_workflow()
         self.assertEqual(text.count("name: Verify the runner system"), 2)
@@ -3447,8 +3464,8 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             ),
             "event-dependent runner": (
                 text.replace(
-                    "chelis-ci-warm-x64",
-                    "no-such-runner",
+                    "runs-on: ubuntu-latest",
+                    "runs-on: no-such-runner",
                     1,
                 ),
                 "reviewed native recipe",
