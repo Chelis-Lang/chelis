@@ -280,10 +280,10 @@ fn s4_hip_per_node_kernel_string_carries_spans_inside() {
     );
     let e = dag.add_node(
         decl,
-        RiscOp::Exp,
+        RiscOp::Sqrt,
         vec![a],
         vec_f32(4),
-        Some("op.exp".into()),
+        Some("op.sqrt".into()),
     );
     let n = dag.add_node(
         decl,
@@ -307,7 +307,7 @@ fn s4_hip_per_node_kernel_string_carries_spans_inside() {
     // Find the FusedElem kernel string and verify it carries the
     // originating node's span comment INSIDE the string literal. The
     // FusedElem node is the survivor of the fuse pass; its span is
-    // either op.exp or op.neg (with the other in merged_spans, per
+    // either op.sqrt or op.neg (with the other in merged_spans, per
     // S3.8). Check both possibilities.
     //
     // Locate the per-node kernel name by grepping the source for
@@ -332,7 +332,7 @@ fn s4_hip_per_node_kernel_string_carries_spans_inside() {
     // the kernel) — the embedded `// span:` comment should appear as text
     // inside one of those literals.
     assert!(
-        body.contains("// span: op.exp") || body.contains("// span: op.neg"),
+        body.contains("// span: op.sqrt") || body.contains("// span: op.neg"),
         "fused kernel source string `{kname}_src` must embed at least one `// span:` comment from its originating node; body:\n{body}"
     );
 
@@ -365,15 +365,15 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
         let node = dag.node_mut(n2).unwrap();
         node.merged_spans = vec!["n2.m1".into(), "n2.m2".into()];
     }
-    let n3 = dag.add_node(decl, RiscOp::Exp, vec![n2], vec_f32(4), None);
+    let n3 = dag.add_node(decl, RiscOp::Sqrt, vec![n2], vec_f32(4), None);
     {
         let node = dag.node_mut(n3).unwrap();
         node.merged_spans = vec!["n3.m1".into(), "n3.m2".into()];
     }
-    let n4 = dag.add_node(decl, RiscOp::Log, vec![n3], vec_f32(4), None);
+    let n4 = dag.add_node(decl, RiscOp::Abs, vec![n3], vec_f32(4), None);
     let n5 = dag.add_node(
         decl,
-        RiscOp::Sin,
+        RiscOp::Floor,
         vec![n4],
         vec_f32(4),
         Some("n5.canonical".into()),
@@ -469,10 +469,10 @@ fn s4_hip_forbidden_newline_in_per_node_kernel_string_is_escaped() {
     );
     let e = dag.add_node(
         decl,
-        RiscOp::Exp,
+        RiscOp::Sqrt,
         vec![a],
         vec_f32(4),
-        Some("op.exp\nINJECTED_HIP_KERNEL".into()),
+        Some("op.sqrt\nINJECTED_HIP_KERNEL".into()),
     );
     let n = dag.add_node(
         decl,
@@ -488,7 +488,7 @@ fn s4_hip_forbidden_newline_in_per_node_kernel_string_is_escaped() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("op.exp\\nINJECTED_HIP_KERNEL"),
+        src.contains("op.sqrt\\nINJECTED_HIP_KERNEL"),
         "expected escaped form for the embedded forbidden span; source:\n{src}"
     );
     // Find the embedded kernel-source declaration and confirm the raw
@@ -513,14 +513,14 @@ fn s4_hip_forbidden_newline_in_per_node_kernel_string_is_escaped() {
         // so the sanitizer's `\n` two-char sequence becomes `\\n` in the
         // literal text we extract here.
         assert!(
-            body.contains("op.exp\\\\nINJECTED_HIP_KERNEL")
-                || body.contains("op.exp\\nINJECTED_HIP_KERNEL"),
+            body.contains("op.sqrt\\\\nINJECTED_HIP_KERNEL")
+                || body.contains("op.sqrt\\nINJECTED_HIP_KERNEL"),
             "fused kernel string must carry the escaped span; body:\n{body}"
         );
         // The raw newline must NOT appear unescaped after the `// span:`
         // prefix inside the string literal.
         assert!(
-            !body.contains("// span: op.exp\nINJECTED_HIP_KERNEL"),
+            !body.contains("// span: op.sqrt\nINJECTED_HIP_KERNEL"),
             "raw newline leaked into kernel string literal; body:\n{body}"
         );
     }

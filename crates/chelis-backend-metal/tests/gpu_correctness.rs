@@ -590,28 +590,6 @@ fn m6_unary_neg_matches_evaluator() {
 
 #[test]
 #[ignore]
-fn m6_unary_exp_matches_evaluator_with_fastmath_tolerance() {
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    let a = dag.add_node(
-        decl,
-        RiscOp::Load { name: "a".into() },
-        vec![],
-        vec_f32(4),
-        None,
-    );
-    let e = dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(4), None);
-    dag.add_root(e);
-
-    let inputs = vec![TestInput::new("a", &[4], &[0.0, 0.5, 1.0, 1.5])];
-    let actual = compile_and_run_single_output(&dag, "exp_test", &inputs);
-    let expected = evaluator_single_output(&dag, &inputs);
-    // MSL `exp` is fast-math — widen relative tolerance for transcendentals.
-    assert_close(&actual, &expected, 1e-3, 1e-3, "unary exp (fastmath)");
-}
-
-#[test]
-#[ignore]
 fn m6_unary_sqrt_matches_evaluator() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
@@ -634,7 +612,8 @@ fn m6_unary_sqrt_matches_evaluator() {
 #[test]
 #[ignore]
 fn m6_chained_elementwise_matches_evaluator() {
-    // exp(add(mul(a, b), c)) — three kernels, single output.
+    // sqrt(add(mul(a, b), c)) — three kernels, single output; the
+    // transcendentals are fenced on device lanes (chelis#2957).
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let a = dag.add_node(
@@ -660,7 +639,7 @@ fn m6_chained_elementwise_matches_evaluator() {
     );
     let m = dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_f32(8), None);
     let s = dag.add_node(decl, RiscOp::Add, vec![m, c], vec_f32(8), None);
-    let e = dag.add_node(decl, RiscOp::Exp, vec![s], vec_f32(8), None);
+    let e = dag.add_node(decl, RiscOp::Sqrt, vec![s], vec_f32(8), None);
     dag.add_root(e);
 
     let inputs = vec![
@@ -670,8 +649,7 @@ fn m6_chained_elementwise_matches_evaluator() {
     ];
     let actual = compile_and_run_single_output(&dag, "chain_test", &inputs);
     let expected = evaluator_single_output(&dag, &inputs);
-    // exp at the tail; widen for fastmath.
-    assert_close(&actual, &expected, 1e-3, 1e-3, "chain exp(add(mul, c))");
+    assert_close(&actual, &expected, 1e-3, 1e-3, "chain sqrt(add(mul, c))");
 }
 
 #[test]
@@ -949,7 +927,7 @@ fn m6_span_attributed_program_compiles_and_matches_evaluator() {
         let node = dag.node_mut(neg).unwrap();
         node.merged_spans = vec!["op.merged_b".into(), "op.merged_a".into()];
     }
-    let exp = dag.add_node(decl, RiscOp::Exp, vec![neg], vec_f32(8), None);
+    let exp = dag.add_node(decl, RiscOp::Abs, vec![neg], vec_f32(8), None);
     {
         // merged_spans only (no canonical) — the defensive case the
         // emitter must still handle correctly.
@@ -969,13 +947,12 @@ fn m6_span_attributed_program_compiles_and_matches_evaluator() {
     // comments. compile_and_run_single_output asserts this internally.
     let actual = compile_and_run_single_output(&dag, "span_test", &inputs);
     let expected = evaluator_single_output(&dag, &inputs);
-    // Tail op is exp — fastmath tolerance.
     assert_close(
         &actual,
         &expected,
         1e-3,
         1e-3,
-        "span-attributed exp(neg(a))",
+        "span-attributed abs(neg(a))",
     );
 
     // Structural assertion: regenerate the source and verify the spans

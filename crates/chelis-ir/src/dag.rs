@@ -514,6 +514,74 @@ pub enum FusedStepOp {
 ///
 /// `CmpLt` and `Lt` intentionally remain distinct source identities even
 /// though both use the same ordered comparison kernel.
+impl FusedStepOp {
+    /// [05-OP-46]'s transcendental operations, which no device lane may
+    /// compute until it has correctly rounded kernels of its own.
+    pub const fn transcendental_name(self) -> Option<&'static str> {
+        match self {
+            Self::Exp => Some("exp"),
+            Self::Log => Some("log"),
+            Self::Sin => Some("sin"),
+            Self::Cos => Some("cos"),
+            Self::Tan => Some("tan"),
+            Self::Atan => Some("atan"),
+            Self::Tanh => Some("tanh"),
+            Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::FloorDiv
+            | Self::TruncDiv
+            | Self::MaxElem
+            | Self::MinElem
+            | Self::Neg
+            | Self::Recip
+            | Self::Sqrt
+            | Self::Abs
+            | Self::Floor
+            | Self::Ceil
+            | Self::Round => None,
+        }
+    }
+}
+
+/// chelis#2957 GPU fence (`spec/design/correctly_rounded_math.md` §4.3): a
+/// device lane has no correctly rounded transcendental kernels, so a DAG
+/// that computes one, directly or inside a fused chain, is rejected through
+/// [05-UNS-1] rather than computed with a vendor library.
+pub fn reject_device_transcendentals(
+    nodes: &[DagNode],
+    target: &'static str,
+) -> Result<(), chelis_types::unsupported::Unsupported> {
+    for node in nodes {
+        let name = match &node.op {
+            RiscOp::Exp => Some("exp"),
+            RiscOp::Log => Some("log"),
+            RiscOp::Sin => Some("sin"),
+            RiscOp::Cos => Some("cos"),
+            RiscOp::Tan => Some("tan"),
+            RiscOp::Atan => Some("atan"),
+            RiscOp::Tanh => Some("tanh"),
+            RiscOp::FusedElem { ops } => ops.iter().find_map(|step| step.op.transcendental_name()),
+            _ => None,
+        };
+        if let Some(name) = name {
+            return Err(chelis_types::unsupported::Unsupported::new(
+                chelis_types::unsupported::UnsupportedKind::Op(name.to_string()),
+                format!(
+                    "`{name}` must be correctly rounded and the {target} device lane has no correctly rounded kernel for it; build for `--target c`"
+                ),
+                chelis_types::unsupported::Stage::Codegen(target),
+                chelis_types::deliberate_rejection!(
+                    "[05-OP-46]",
+                    "device transcendentals are fenced until the device lane has correctly rounded kernels"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComparisonKind {

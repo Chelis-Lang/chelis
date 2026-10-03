@@ -206,7 +206,7 @@ fn m2_simple_add_emits_raw_string_literal_and_dispatch_site() {
 
 #[test]
 fn m2_chained_elementwise_emits_one_kernel_per_compute_node() {
-    // exp(add(a, b)) — three compute nodes (add + exp), so two kernel
+    // sqrt(add(a, b)) — two compute nodes (add + sqrt), so two kernel
     // declarations and two dispatch sites until M4 fusion lands.
     let mut dag = Dag::new();
     let decl = dag.declare("test");
@@ -225,7 +225,7 @@ fn m2_chained_elementwise_emits_one_kernel_per_compute_node() {
         None,
     );
     let s = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(8), None);
-    let e = dag.add_node(decl, RiscOp::Exp, vec![s], vec_f32(8), None);
+    let e = dag.add_node(decl, RiscOp::Sqrt, vec![s], vec_f32(8), None);
     let stored = dag.add_node(
         decl,
         RiscOp::Store { name: "out".into() },
@@ -240,7 +240,7 @@ fn m2_chained_elementwise_emits_one_kernel_per_compute_node() {
     let kernel_void_count = src.matches("kernel void").count();
     assert_eq!(
         kernel_void_count, 2,
-        "expected 2 kernels for unfused (add, exp); got {kernel_void_count}: {src}"
+        "expected 2 kernels for unfused (add, sqrt); got {kernel_void_count}: {src}"
     );
 
     // Both kernels exist as raw-string literals (one per node).
@@ -250,10 +250,10 @@ fn m2_chained_elementwise_emits_one_kernel_per_compute_node() {
         "expected 2 pipeline lookups (one per kernel); got {pso_lookup_count}: {src}"
     );
 
-    // exp body uses MSL's overloaded `exp` (not `expf`).
+    // sqrt body uses MSL's overloaded `sqrt` (not `sqrtf`).
     assert!(
-        src.contains("out[tid] = exp(a[tid]);"),
-        "expected MSL `exp(a[tid])` body: {src}"
+        src.contains("out[tid] = sqrt(a[tid]);"),
+        "expected MSL `sqrt(a[tid])` body: {src}"
     );
 }
 
