@@ -129,8 +129,19 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         | RiscOp::UniformBoundAdjoint { .. }
         | RiscOp::BlasMatmul { .. }
         | RiscOp::ScatterAdd { .. }
-        | RiscOp::Cast { .. }
-        | RiscOp::FusedElem { .. } => Some(NanFinalization::Canonical),
+        | RiscOp::Cast { .. } => Some(NanFinalization::Canonical),
+        // A fused chain finalizes per step; the node as a whole is canonical
+        // when any step is, and bit-preserving when every step selects.
+        RiscOp::FusedElem { ops } => Some(
+            if ops
+                .iter()
+                .any(|step| fused_step_nan_finalization(&step.op) == NanFinalization::Canonical)
+            {
+                NanFinalization::Canonical
+            } else {
+                NanFinalization::BitPreserving
+            },
+        ),
         RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::MaxReduce { .. }

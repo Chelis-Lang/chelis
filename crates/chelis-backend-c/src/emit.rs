@@ -1387,6 +1387,7 @@ impl CEmitter {
 
     fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
+        let first_line = self.lines.len();
         self.nan_finalization = crate::fp_env::risc_nan_finalization(&node.op);
         self.emit_activation_gate(node, dag);
         // chelis#664/#1948: every semantic same-shape producer validates its
@@ -1916,7 +1917,49 @@ impl CEmitter {
                 );
             }
         }
+        self.assert_nan_finalized(node, dag, first_line);
         self.close_inactive_zeros(node)
+    }
+
+    /// [04-NUM-2]: a node whose classification is canonical and whose result is
+    /// f32 or f64 produced its value through `fp_env::finalize_float`, so the C
+    /// it emitted calls the canonicalizing helper. An emitter that writes its
+    /// result another way (a BLAS call, a reduction's own store, a runtime
+    /// helper) fails here, at every build that reaches it, instead of
+    /// disagreeing with eval on a NaN's bits. f16 and bf16 results narrow
+    /// through storage helpers that canonicalize, and a conversion from a
+    /// non-float or from the same dtype produces no new NaN.
+    fn assert_nan_finalized(&self, node: &DagNode, dag: VerifiedDagView<'_>, first_line: usize) {
+        if self.nan_finalization != Some(crate::fp_env::NanFinalization::Canonical) {
+            return;
+        }
+        let is_f64 = match node.output_type.precision {
+            Prim::F32 => false,
+            Prim::F64 => true,
+            _ => return,
+        };
+        if let RiscOp::Cast { new_precision } = node.op {
+            let source = dag
+                .get(node.inputs[0])
+                .expect("verified cast operand")
+                .output_type
+                .precision;
+            if !source.is_float() || source == new_precision {
+                return;
+            }
+        }
+        let helper = format!("{}(", crate::fp_env::canonical_nan_helper(is_f64));
+        assert!(
+            self.lines[first_line..]
+                .iter()
+                .any(|line| line.contains(&helper)),
+            "C backend: node {} (`{}`) produces a {} result its classification \
+             finalizes canonically ([04-NUM-2]), but its emitter wrote it without \
+             `fp_env::finalize_float`",
+            node.id.0,
+            chelis_ir::grad::risc_op_name(&node.op),
+            node.output_type.precision.name(),
+        );
     }
 
     /// The condition under which a claim-sized node computes
@@ -4959,13 +5002,23 @@ impl CEmitter {
             Prim::F64 => {
                 self.line(&format!("{binary64} rate = {rate};"));
                 self.line(&format!(
-                    "(({storage}*)t{id}_data)[i] = {unit} < rate ? 0.0 : ((const {storage}*)t{data}_data)[i] / (1.0 - rate);"
+                    "(({storage}*)t{id}_data)[i] = {unit} < rate ? 0.0 : {};",
+                    finalize_elem(
+                        self.nan_finalization,
+                        format!("((const {storage}*)t{data}_data)[i] / (1.0 - rate)"),
+                        &node.output_type,
+                    )
                 ));
             }
             Prim::F32 => {
                 self.line(&format!("{binary32} rate = {rate};"));
                 self.line(&format!(
-                    "(({storage}*)t{id}_data)[i] = ({binary32}){unit} < rate ? 0.0f : ((const {storage}*)t{data}_data)[i] / (1.0f - rate);"
+                    "(({storage}*)t{id}_data)[i] = ({binary32}){unit} < rate ? 0.0f : {};",
+                    finalize_elem(
+                        self.nan_finalization,
+                        format!("((const {storage}*)t{data}_data)[i] / (1.0f - rate)"),
+                        &node.output_type,
+                    )
                 ));
             }
             Prim::F16 | Prim::Bf16 => {
@@ -5108,8 +5161,9 @@ impl CEmitter {
             chelis_ir::dag::UniformBound::Low => format!("(({arithmetic})1 - u)"),
             chelis_ir::dag::UniformBound::High => "u".to_string(),
         };
+        let nan_finalization = self.nan_finalization;
         let store = |value: &str| match prim {
-            Prim::F64 | Prim::F32 => value.to_string(),
+            Prim::F64 | Prim::F32 => finalize_elem(nan_finalization, value.to_string(), ty),
             _ => format!("{}({value})", Self::f32_to_reduced_fn(prim)),
         };
         let per_row = !ty.dims.is_empty();
@@ -5906,6 +5960,20 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         )
     }
 
+    /// Finalize, in place, every element of node `id`'s f32 or f64 result that a
+    /// vendor routine (BLAS) wrote directly, so its NaNs are canonical like every
+    /// other emitter's ([04-NUM-2]). The result is the node's own contiguous
+    /// allocation of `t{id}_size` elements.
+    fn emit_finalize_written_result(&mut self, id: usize, ty: &TensorType) {
+        let element = Self::elem_type(ty);
+        let index = Self::prim_elem_type(Prim::Int64);
+        let value = format!("(({element}*)t{id}_data)[t{id}_nan_i]");
+        let finalized = finalize_elem(self.nan_finalization, value.clone(), ty);
+        self.line(&format!(
+            "for ({index} t{id}_nan_i = 0; t{id}_nan_i < t{id}_size; ++t{id}_nan_i) {value} = {finalized};"
+        ));
+    }
+
     fn emit_matmul_plan(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
         let a = spec.a.0;
         let b = spec.b.0;
@@ -5975,6 +6043,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("{gemm}(CblasRowMajor, CblasNoTrans, CblasNoTrans, (chelis_blas_integer)t{id}_m, (chelis_blas_integer)t{id}_n, (chelis_blas_integer)t{id}_k, {alpha}, (const {element}*)t{a}_data + t{id}_a_offset, (chelis_blas_integer)t{id}_k, (const {element}*)t{b}_data + t{id}_b_offset, (chelis_blas_integer)t{id}_n, {beta}, ({element}*)t{id}_data + t{id}_out_offset, (chelis_blas_integer)t{id}_n);"));
         self.indent -= 1;
         self.line("}");
+        self.emit_finalize_written_result(id, ty);
         self.indent -= 1;
         self.line("}");
         self.line(&format!("chelis_matmul_plan_release(t{id}_matmul);"));
@@ -6064,6 +6133,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         }
         self.indent -= 1;
         self.line("}");
+        // An f32 result was written by `cblas_sgemm` directly; a reduced one
+        // narrowed through its canonicalizing storage helper above.
+        if !output_reduced {
+            self.emit_finalize_written_result(id, ty);
+        }
         self.line(&format!("chelis_matmul_plan_release(t{id}_matmul);"));
     }
 
@@ -6118,7 +6192,15 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("{index_type} t{id}_index_slot = chelis_sparse_index_slot(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i));"));
         self.line(&format!("{index_type} t{id}_selected = ((const {index_element}*)t{indices}_data)[t{id}_index_slot];"));
         self.line(&format!("{index_type} t{id}_base_index = chelis_sparse_data_index(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i), chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_selected));"));
-        if let (Some(updates), Some(update)) = (updates, update) {
+        if let (Some(updates), Some("+=")) = (updates, update) {
+            let destination = format!("(({element}*)t{id}_data)[t{id}_base_index]");
+            let sum = finalize_elem(
+                self.nan_finalization,
+                format!("{destination} + ((const {element}*)t{updates}_data)[t{id}_i]"),
+                ty,
+            );
+            self.line(&format!("{destination} = {sum};"));
+        } else if let (Some(updates), Some(update)) = (updates, update) {
             self.line(&format!("(({element}*)t{id}_data)[t{id}_base_index] {update} ((const {element}*)t{updates}_data)[t{id}_i];"));
         } else {
             self.line(&format!("(({element}*)t{id}_data)[t{id}_i] = ((const {element}*)t{base}_data)[t{id}_base_index];"));
@@ -6468,9 +6550,28 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("__sum_n_{id} = __next_n_{id};"));
         self.indent -= 1;
         self.line("}");
-        self.line(&format!(
-            "(({et}*)t{id}_data)[outer] = __sum_n_{id} ? __sum_level_{id}[0] : {zero};"
-        ));
+        // [04-NUM-2]: the stored total is finalized once. A carried leaf (a
+        // one-element group) has had no addition, so at f16 and bf16 it
+        // finalizes by the same widening and canonicalizing narrowing a sum
+        // takes.
+        let total = format!("__sum_n_{id} ? __sum_level_{id}[0] : {zero}");
+        let total = if matches!(precision, Prim::F16 | Prim::Bf16) {
+            format!(
+                "{}({}({total}))",
+                Self::f32_to_reduced_fn(precision),
+                Self::reduced_to_f32_fn(precision)
+            )
+        } else {
+            finalize_elem(
+                self.nan_finalization,
+                total,
+                &TensorType {
+                    dims: vec![],
+                    precision,
+                },
+            )
+        };
+        self.line(&format!("(({et}*)t{id}_data)[outer] = {total};"));
         self.line(&format!("chelis_tensor_end_write(__sum_guard_{id});"));
         self.line(&format!("chelis_tensor_release(__sum_scratch_{id});"));
     }
@@ -6750,9 +6851,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             let fn_name = simd_fn.unwrap();
             self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
             self.indent += 1;
-            self.line(&format!(
-                "((float*)t{id}_data)[0] = {fn_name}((const float*)t{a}_data, t{a}_size);"
-            ));
+            let reduced = finalize_elem(
+                self.nan_finalization,
+                format!("{fn_name}((const float*)t{a}_data, t{a}_size)"),
+                ty,
+            );
+            self.line(&format!("((float*)t{id}_data)[0] = {reduced};"));
             self.indent -= 1;
             self.line("} else {");
             self.indent += 1;
@@ -6772,7 +6876,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&update);
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("((float*)t{id}_data)[outer] = acc;"));
+        let acc = finalize_elem(self.nan_finalization, "acc".into(), ty);
+        self.line(&format!("((float*)t{id}_data)[outer] = {acc};"));
         self.indent -= 1;
         self.line("}");
         if use_simd {
@@ -7093,8 +7198,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     Self::f32_to_reduced_fn(prim)
                 ));
             } else {
+                let result = finalize_elem(self.nan_finalization, "result".into(), ty);
                 self.line(&format!(
-                    "(({storage_et}*)t{id}_data)[outer] = ({storage_et})result;"
+                    "(({storage_et}*)t{id}_data)[outer] = ({storage_et}){result};"
                 ));
             }
             self.line("chelis_tensor_end_write(level_guard);");
@@ -7324,8 +7430,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 Self::f32_to_reduced_fn(prim)
             ));
         } else {
+            let result = finalize_elem(self.nan_finalization, "result".into(), ty);
             self.line(&format!(
-                "(({storage_et}*)t{id}_data)[dst_idx] = ({storage_et})result;"
+                "(({storage_et}*)t{id}_data)[dst_idx] = ({storage_et}){result};"
             ));
         }
         self.line("chelis_tensor_end_write(contribution_guard);");
@@ -11312,7 +11419,9 @@ mod tests {
 
         assert!(c.contains("((const int64_t*)t1_data)[t3_index_slot]"));
         assert!(c.contains("memcpy(t3_data, t0_data, (size_t)t3_byte_capacity);"));
-        assert!(c.contains("((double*)t3_data)[t3_base_index] += ((const double*)t2_data)[t3_i];"));
+        assert!(c.contains(
+            "((double*)t3_data)[t3_base_index] = __chelis_nan_f64(((double*)t3_data)[t3_base_index] + ((const double*)t2_data)[t3_i]);"
+        ));
     }
 
     #[test]

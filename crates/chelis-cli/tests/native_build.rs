@@ -718,9 +718,23 @@ fn nan_inventory_arity(name: &str) -> usize {
 const NAN_INVENTORY_UNREACHABLE: [&str; 2] = ["min", "max"];
 
 fn nan_eval_bits(source: &str, inputs: &[(&str, &NanWidth, Vec<u64>)], out: &NanWidth) -> Vec<u64> {
+    let shaped: Vec<_> = inputs
+        .iter()
+        .map(|(name, width, bits)| (*name, *width, vec![bits.len() as i64], bits.clone()))
+        .collect();
+    nan_eval_shaped_bits(source, &shaped, out)
+}
+
+/// [`nan_eval_bits`] with each input's shape given; the result is flattened
+/// in row-major order.
+fn nan_eval_shaped_bits(
+    source: &str,
+    inputs: &[(&str, &NanWidth, Vec<i64>, Vec<u64>)],
+    out: &NanWidth,
+) -> Vec<u64> {
     let bindings = inputs
         .iter()
-        .map(|(name, width, bits)| {
+        .map(|(name, width, shape, bits)| {
             let bits: Vec<String> = bits
                 .iter()
                 .map(|bits| format!("{bits:0digits$x}", digits = width.hex_digits()))
@@ -728,7 +742,7 @@ fn nan_eval_bits(source: &str, inputs: &[(&str, &NanWidth, Vec<u64>)], out: &Nan
             (
                 name.to_string(),
                 chelis_compiler_api::schema::TensorValue {
-                    shape: vec![bits.len() as i64],
+                    shape: shape.clone(),
                     data: serde_json::from_value(
                         serde_json::json!({"dtype": width.name, "bits": bits}),
                     )
@@ -1006,6 +1020,248 @@ fn every_float_result_finalizes_nan_like_eval_through_the_static_library_abi() {
                 }
             }
         }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} disagreements:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// One kernel row of the NaN finalization oracle: a tensor `def` whose result
+/// an emitter writes through its own store (a reduction's total, a window, a
+/// BLAS call, a draw), with each input's shape and stored bits.
+struct NanKernelRow {
+    label: String,
+    width: &'static NanWidth,
+    params: Vec<(&'static str, Vec<i64>, Vec<u64>)>,
+    output: Vec<i64>,
+    call: String,
+}
+
+/// chelis#2957 round 2: the reduction, matmul, window and dropout emitters
+/// finalize [04-NUM-2]'s canonical NaN like eval, at f16, bf16, f32 and f64,
+/// through the static library ABI. Each row puts an invalid operation inside
+/// the kernel (`inf + -inf` in a sum or window, `0 * inf` in a product or a
+/// matmul's inner product) and carries payload, negative and signaling NaNs
+/// through it, including a one-element group that no addition touches.
+/// `prod_reduce` and the window reductions are f32-only in `chelis build`
+/// (chelis#729).
+#[test]
+fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_library_abi() {
+    let mut rows = Vec::new();
+    for w in &NAN_WIDTHS {
+        let neg_inf = w.inf | w.sign();
+        let name = w.name;
+        let row = |label: &str, params, output: Vec<i64>, call: String| NanKernelRow {
+            label: format!("{label}_{name}"),
+            width: w,
+            params,
+            output,
+            call,
+        };
+        rows.push(row(
+            "sum",
+            vec![(
+                "x",
+                vec![4, 2],
+                vec![w.inf, neg_inf, w.payload, w.one, w.negative, w.one, w.signaling, w.one],
+            )],
+            vec![4],
+            "sum(x, 1i32)".into(),
+        ));
+        rows.push(row(
+            "sum_carry",
+            vec![("x", vec![3, 1], vec![w.payload, w.negative, w.signaling])],
+            vec![3],
+            "sum(x, 1i32)".into(),
+        ));
+        rows.push(row(
+            "matmul",
+            vec![
+                ("a", vec![2, 2], vec![w.zero, w.one, w.payload, w.one]),
+                ("b", vec![2, 2], vec![w.inf, w.one, w.one, w.signaling]),
+            ],
+            vec![2, 2],
+            "matmul(a, b)".into(),
+        ));
+        if name == "f32" {
+            rows.push(row(
+                "window_sum",
+                vec![("x", vec![4], vec![w.inf, neg_inf, w.payload, w.one])],
+                vec![3],
+                "reduce_window_sum(x, [2i64], [1i64])".into(),
+            ));
+            rows.push(row(
+                "window_mean",
+                vec![("x", vec![4], vec![w.inf, neg_inf, w.negative, w.one])],
+                vec![3],
+                "reduce_window_mean(x, [2i64], [1i64])".into(),
+            ));
+            rows.push(row(
+                "window_carry",
+                vec![("x", vec![3], vec![w.payload, w.negative, w.signaling])],
+                vec![3],
+                "reduce_window_sum(x, [1i64], [1i64])".into(),
+            ));
+        }
+        rows.push(row(
+            "dropout",
+            vec![("x", vec![3], vec![w.payload, w.negative, w.signaling])],
+            vec![3],
+            format!("dropout(key_from_seed(7i64), x, cast(0.0, {name}))"),
+        ));
+        if name == "f32" {
+            rows.push(row(
+                "prod",
+                vec![(
+                    "x",
+                    vec![3, 2],
+                    vec![w.zero, w.inf, w.payload, w.one, w.negative, w.signaling],
+                )],
+                vec![3],
+                "prod_reduce(x, 1i32)".into(),
+            ));
+        }
+    }
+
+    let dims = |shape: &[i64]| -> String {
+        shape
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mangle = |name: &str| -> String {
+        let hex: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
+        format!("chelis_fn_{hex}")
+    };
+    let mut program = String::new();
+    let mut harness = String::from(
+        "#include <stdio.h>\n#include <stdint.h>\n\
+         #include \"chelis_runtime.h\"\n#include \"nan_kernels.h\"\n\
+         int main(void) {\n",
+    );
+    for row in &rows {
+        let w = row.width;
+        let params = row
+            .params
+            .iter()
+            .map(|(param, shape, _)| format!("{param}: tensor[{}, {}]", dims(shape), w.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        program.push_str(&format!(
+            "def t_{}({params}) -> tensor[{}, {}] = {}\n",
+            row.label,
+            dims(&row.output),
+            w.name,
+            row.call
+        ));
+        let mut tensors = Vec::new();
+        for (param, shape, bits) in &row.params {
+            let data = bits
+                .iter()
+                .map(|bits| format!("{bits:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let var = format!("t_{}_{param}", row.label);
+            harness.push_str(&format!(
+                "    chelis_tensor *{var};\n    {{ static const {storage} d[{len}] = {{ {data} }}; static const int64_t shape[{rank}] = {{ {shape} }};\n      \
+                 {var} = chelis_tensor_entry_borrow({rank}, shape, {dtype}, d, sizeof d); }}\n",
+                storage = w.storage,
+                len = bits.len(),
+                rank = shape.len(),
+                shape = dims(shape),
+                dtype = w.dtype,
+            ));
+            tensors.push(var);
+        }
+        let count: i64 = row.output.iter().product();
+        harness.push_str(&format!(
+            "    {{ chelis_tensor *r = {}({}); const {storage} *o = (const {storage} *)chelis_tensor_read_view(r).data;\n      \
+             for (int i = 0; i < {count}; ++i) printf(\"t_{} %d %llx\\n\", i, (unsigned long long)o[i]); }}\n",
+            mangle(&format!("t_{}", row.label)),
+            tensors.join(", "),
+            row.label,
+            storage = w.storage,
+        ));
+    }
+    harness.push_str("    return 0;\n}\n");
+
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("nan_kernels.ch");
+    let out = dir.path().join("out");
+    fs::write(&file, &program).unwrap();
+    build(&file, &out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Built static library"));
+    let driver = out.join("driver.c");
+    fs::write(&driver, &harness).unwrap();
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: false,
+            needs_blas: true,
+        },
+    );
+    let status = Process::new(toolchain.compiler)
+        .arg(&driver)
+        .arg(out.join("libnan_kernels.a"))
+        .arg(out.join("libchelis_runtime.a"))
+        .args(toolchain.link_flags)
+        .arg("-o")
+        .arg(out.join("driver"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "the oracle driver must link");
+    let run = Process::new(out.join("driver")).output().unwrap();
+    assert!(run.status.success(), "{run:?}");
+    let stdout = String::from_utf8(run.stdout).unwrap();
+
+    let mut failures = Vec::new();
+    for row in &rows {
+        let w = row.width;
+        let params = row
+            .params
+            .iter()
+            .map(|(param, shape, _)| format!("{param}: tensor[{}, {}]", dims(shape), w.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            "def main({params}) -> tensor[{}, {}] = {}\n",
+            dims(&row.output),
+            w.name,
+            row.call
+        );
+        let inputs: Vec<_> = row
+            .params
+            .iter()
+            .map(|(param, shape, bits)| (*param, w, shape.clone(), bits.clone()))
+            .collect();
+        let eval = nan_eval_shaped_bits(&source, &inputs, w);
+        let mut saw_nan = false;
+        for (index, expected) in eval.iter().enumerate() {
+            if w.is_nan(*expected) {
+                saw_nan = true;
+                if *expected != w.canonical {
+                    failures.push(format!("eval {} [{index}] gave {expected:#x}", row.label));
+                }
+            }
+            let prefix = format!("t_{} {index} ", row.label);
+            let got = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .map(|bits| u64::from_str_radix(bits, 16).unwrap());
+            if got != Some(*expected) {
+                let got = got.map_or("nothing".to_string(), |bits| format!("{bits:#x}"));
+                failures.push(format!(
+                    "t_{} [{index}]: C {got}, eval {expected:#x}",
+                    row.label
+                ));
+            }
+        }
+        assert!(saw_nan, "row {} must produce a NaN to test", row.label);
     }
     assert!(
         failures.is_empty(),

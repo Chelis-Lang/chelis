@@ -2608,7 +2608,42 @@ fn reduce_sum_group(
     }
 }
 
+/// [04-NUM-2]: the NaN an arithmetic reduction yields (a sum, product, or
+/// mean, including a one-leaf group that no operation touched) finalizes to
+/// the accumulator's canonical quiet NaN; extrema select and keep their bits.
+fn canonical_nan_scalar(value: ScalarValue) -> ScalarValue {
+    match value.bits {
+        Bits::F32(value) => ScalarValue {
+            bits: Bits::F32(canonical_nan_f32(value)),
+        },
+        Bits::F64(value) => ScalarValue {
+            bits: Bits::F64(canonical_nan_f64(value)),
+        },
+        _ => value,
+    }
+}
+
 fn reduce_group(
+    op: TensorReduceOp,
+    input: &TensorStorage,
+    group: &[usize],
+    accumulator: Prim,
+) -> Result<ScalarValue, NumericKernelError> {
+    match op {
+        TensorReduceOp::Sum { .. }
+        | TensorReduceOp::ReduceWindowSum
+        | TensorReduceOp::ReduceWindowMean
+        | TensorReduceOp::ProdReduce => {
+            reduce_arithmetic_group(op, input, group, accumulator).map(canonical_nan_scalar)
+        }
+        TensorReduceOp::MaxReduce
+        | TensorReduceOp::MinReduce
+        | TensorReduceOp::ReduceWindowMax
+        | TensorReduceOp::ReduceWindowMin => reduce_extreme_group(op, input, group),
+    }
+}
+
+fn reduce_arithmetic_group(
     op: TensorReduceOp,
     input: &TensorStorage,
     group: &[usize],
@@ -2643,6 +2678,19 @@ fn reduce_group(
         TensorReduceOp::MaxReduce
         | TensorReduceOp::MinReduce
         | TensorReduceOp::ReduceWindowMax
+        | TensorReduceOp::ReduceWindowMin => unreachable!("extrema reduce in reduce_extreme_group"),
+    }
+}
+
+fn reduce_extreme_group(
+    op: TensorReduceOp,
+    input: &TensorStorage,
+    group: &[usize],
+) -> Result<ScalarValue, NumericKernelError> {
+    match op {
+        TensorReduceOp::MaxReduce
+        | TensorReduceOp::MinReduce
+        | TensorReduceOp::ReduceWindowMax
         | TensorReduceOp::ReduceWindowMin => {
             let Some((&first_index, remaining)) = group.split_first() else {
                 return Err(NumericTrap::Domain {
@@ -2668,6 +2716,10 @@ fn reduce_group(
             }
             Ok(acc)
         }
+        TensorReduceOp::Sum { .. }
+        | TensorReduceOp::ReduceWindowSum
+        | TensorReduceOp::ReduceWindowMean
+        | TensorReduceOp::ProdReduce => unreachable!("arithmetic reduces in reduce_arithmetic_group"),
     }
 }
 
@@ -3098,7 +3150,7 @@ pub fn reduce_window_grad_tensor_groups(
                 Some(value) => value,
                 None => reduction_seed(forward_op, accumulator, 0, 0.0)?,
             };
-            reduction_result_scalar(forward_op, value, prim)
+            reduction_result_scalar(forward_op, canonical_nan_scalar(value), prim)
         })
         .collect::<Result<Vec<_>, NumericKernelError>>()?;
     Ok(tensor_from_scalars(prim, &values))
