@@ -73,14 +73,14 @@ pub use dtype_semantics::{
     NUMERIC_TRAP_OVERFLOW_KIND, NUMERIC_TRAP_PREFIX, NumericFamily, NumericKernelError,
     NumericTrap, PreparedDropout, PreparedUniformLike, RandomKey, RawScalar, RawTensor,
     ReduceWindowGradOp, ScalarValue, StorageView, TensorReduceOp, TensorStorage, UniformBound,
-    arg_reduce_tensor_groups, bf16_from_f64_rne, cast_raw, cast_scalar, cast_trunc_raw,
-    cast_trunc_scalar, cast_trunc_tensor, compare_scalar_tensor, compare_scalars,
+    arg_reduce_tensor_groups, bf16_from_f64_rne, canonical_nan_scalar, cast_raw, cast_scalar,
+    cast_trunc_raw, cast_trunc_scalar, cast_trunc_tensor, compare_scalar_tensor, compare_scalars,
     compare_tensor_scalar, compare_tensors, count_tensor_groups, cumsum_tensor_lanes,
     f16_from_f64_rne, finalize_scalar, finalize_tensor, float_binop, float_scalar_tensor_binop,
     float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop,
     int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop,
     reduce_tensor_groups, reduce_window_grad_tensor_groups, scalar_from_f64, scalar_from_i64,
-    canonical_nan_scalar, scatter_add_tensor_groups, tensor_from_scalars, uniform_like_bound_adjoint,
+    scatter_add_tensor_groups, tensor_from_scalars, uniform_like_bound_adjoint,
 };
 pub use fitness::{
     FitnessReport, StructuralStats, TypeAnalysisOutcome, analyze_ir_program,

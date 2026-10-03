@@ -4201,10 +4201,7 @@ pub fn finalize_tensor(
             RawTensor::Int(v) => v.into_iter().map(|i| i as f64).collect(),
         }),
         Prim::F32 => Buf::F32(match raw {
-            RawTensor::Float(v) => v
-                .into_iter()
-                .map(|x| canonical_nan_f32(x as f32))
-                .collect(),
+            RawTensor::Float(v) => v.into_iter().map(|x| canonical_nan_f32(x as f32)).collect(),
             RawTensor::Int(v) => v.into_iter().map(|i| i as f32).collect(),
         }),
         Prim::F16 => Buf::F16(match raw {

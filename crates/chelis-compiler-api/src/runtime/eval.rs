@@ -4374,8 +4374,7 @@ impl<'a> EvalContext<'a> {
                 };
                 let (shape, data) =
                     nested_list_to_tensor_data(&values, precision, &expected_shape)?;
-                let storage =
-                    data.into_storage("to_tensor", precision)?;
+                let storage = data.into_storage("to_tensor", precision)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(shape, storage),
                 )))
@@ -4392,8 +4391,7 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "pad_sequences expects 2 arguments".to_string())?;
                 let (precision, data, batch, width) = pad_sequences_value(&sequences, &pad)?;
-                let storage =
-                    data.into_storage("pad_sequences", precision)?;
+                let storage = data.into_storage("pad_sequences", precision)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(vec![batch, width], storage),
                 )))
@@ -4406,8 +4404,7 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "pad_sequences_to expects 3 arguments".to_string())?;
                 let (precision, data, batch) = pad_sequences_to_value(&sequences, width, &pad)?;
-                let storage =
-                    data.into_storage("pad_sequences_to", precision)?;
+                let storage = data.into_storage("pad_sequences_to", precision)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(vec![batch, width.max(0) as usize], storage),
                 )))

@@ -1265,12 +1265,18 @@ fn nan_atom_coverage(
 /// an arithmetic kernel (`inf + -inf`, `0 * inf`); and a one-element group
 /// that no addition touches. Widths an atom does not build at in
 /// `chelis build` are skipped with the reason beside them.
-fn nan_atom_rows(atom: chelis_ir::dag::RiscAtomIdentity, w: &'static NanWidth) -> Vec<NanKernelRow> {
+fn nan_atom_rows(
+    atom: chelis_ir::dag::RiscAtomIdentity,
+    w: &'static NanWidth,
+) -> Vec<NanKernelRow> {
     use chelis_ir::dag::RiscAtomIdentity as Id;
     let name = w.name;
     let neg_inf = w.inf | w.sign();
     let (p, n, s) = (w.payload, w.negative, w.signaling);
-    let row = |label: &str, params: Vec<(&'static str, Vec<i64>, Vec<u64>)>, output: Vec<i64>, call: String| NanKernelRow {
+    let row = |label: &str,
+               params: Vec<(&'static str, Vec<i64>, Vec<u64>)>,
+               output: Vec<i64>,
+               call: String| NanKernelRow {
         label: format!("{label}_{name}"),
         width: w,
         params,
@@ -1292,57 +1298,153 @@ fn nan_atom_rows(atom: chelis_ir::dag::RiscAtomIdentity, w: &'static NanWidth) -
     let f32_only = name == "f32";
     match atom {
         Id::Sum => vec![
-            row("sum", vec![("x", vec![4, 2], vec![w.inf, neg_inf, p, w.one, n, w.one, s, w.one])], vec![4], "sum(x, 1i32)".into()),
-            row("sum_carry", vec![("x", vec![3, 1], vec![p, n, s])], vec![3], "sum(x, 1i32)".into()),
+            row(
+                "sum",
+                vec![(
+                    "x",
+                    vec![4, 2],
+                    vec![w.inf, neg_inf, p, w.one, n, w.one, s, w.one],
+                )],
+                vec![4],
+                "sum(x, 1i32)".into(),
+            ),
+            row(
+                "sum_carry",
+                vec![("x", vec![3, 1], vec![p, n, s])],
+                vec![3],
+                "sum(x, 1i32)".into(),
+            ),
             // [05-OP-30]'s two spellings of a one-element diagonal sum agree.
-            row("trace_carry", vec![("x", vec![2, 1, 1], vec![p, n])], vec![2], "trace(x, 1i32, 2i32)".into()),
-            row("diagonal_sum", vec![("x", vec![2, 1, 1], vec![p, n])], vec![2], "sum(diagonal(x, 1i32, 2i32), 1i32)".into()),
+            row(
+                "trace_carry",
+                vec![("x", vec![2, 1, 1], vec![p, n])],
+                vec![2],
+                "trace(x, 1i32, 2i32)".into(),
+            ),
+            row(
+                "diagonal_sum",
+                vec![("x", vec![2, 1, 1], vec![p, n])],
+                vec![2],
+                "sum(diagonal(x, 1i32, 2i32), 1i32)".into(),
+            ),
         ],
         Id::MaxReduce => vec![
-            row("max_reduce", vec![("x", vec![3, 2], vec![p, w.one, n, w.one, s, w.one])], vec![3], "max_reduce(x, 1i32)".into()),
-            row("max_reduce_first", vec![("x", vec![2, 2], vec![p, n, n, p])], vec![2], "max_reduce(x, 1i32)".into()),
+            row(
+                "max_reduce",
+                vec![("x", vec![3, 2], vec![p, w.one, n, w.one, s, w.one])],
+                vec![3],
+                "max_reduce(x, 1i32)".into(),
+            ),
+            row(
+                "max_reduce_first",
+                vec![("x", vec![2, 2], vec![p, n, n, p])],
+                vec![2],
+                "max_reduce(x, 1i32)".into(),
+            ),
         ],
         Id::MinReduce => vec![
-            row("min_reduce", vec![("x", vec![3, 2], vec![w.one, p, w.one, n, w.one, s])], vec![3], "min_reduce(x, 1i32)".into()),
-            row("min_reduce_first", vec![("x", vec![2, 2], vec![p, n, n, p])], vec![2], "min_reduce(x, 1i32)".into()),
+            row(
+                "min_reduce",
+                vec![("x", vec![3, 2], vec![w.one, p, w.one, n, w.one, s])],
+                vec![3],
+                "min_reduce(x, 1i32)".into(),
+            ),
+            row(
+                "min_reduce_first",
+                vec![("x", vec![2, 2], vec![p, n, n, p])],
+                vec![2],
+                "min_reduce(x, 1i32)".into(),
+            ),
         ],
-        Id::ProdReduce if f32_only => vec![row("prod", vec![("x", vec![3, 2], vec![w.zero, w.inf, p, w.one, n, s])], vec![3], "prod_reduce(x, 1i32)".into())],
+        Id::ProdReduce if f32_only => vec![row(
+            "prod",
+            vec![("x", vec![3, 2], vec![w.zero, w.inf, p, w.one, n, s])],
+            vec![3],
+            "prod_reduce(x, 1i32)".into(),
+        )],
         Id::ReduceWindowSum if f32_only => vec![
-            row("window_sum", vec![("x", vec![4], vec![w.inf, neg_inf, p, w.one])], vec![3], "reduce_window_sum(x, [2i64], [1i64])".into()),
-            row("window_carry", x3(), vec![3], "reduce_window_sum(x, [1i64], [1i64])".into()),
+            row(
+                "window_sum",
+                vec![("x", vec![4], vec![w.inf, neg_inf, p, w.one])],
+                vec![3],
+                "reduce_window_sum(x, [2i64], [1i64])".into(),
+            ),
+            row(
+                "window_carry",
+                x3(),
+                vec![3],
+                "reduce_window_sum(x, [1i64], [1i64])".into(),
+            ),
         ],
-        Id::ReduceWindowMean if f32_only => vec![row("window_mean", vec![("x", vec![4], vec![w.inf, neg_inf, n, w.one])], vec![3], "reduce_window_mean(x, [2i64], [1i64])".into())],
-        Id::ReduceWindowMax if f32_only => vec![row("window_max", vec![("x", vec![4], vec![p, w.one, n, s])], vec![3], "reduce_window_max(x, [2i64], [1i64])".into())],
-        Id::ReduceWindowMin if f32_only => vec![row("window_min", vec![("x", vec![4], vec![p, w.one, n, s])], vec![3], "reduce_window_min(x, [2i64], [1i64])".into())],
+        Id::ReduceWindowMean if f32_only => vec![row(
+            "window_mean",
+            vec![("x", vec![4], vec![w.inf, neg_inf, n, w.one])],
+            vec![3],
+            "reduce_window_mean(x, [2i64], [1i64])".into(),
+        )],
+        Id::ReduceWindowMax if f32_only => vec![row(
+            "window_max",
+            vec![("x", vec![4], vec![p, w.one, n, s])],
+            vec![3],
+            "reduce_window_max(x, [2i64], [1i64])".into(),
+        )],
+        Id::ReduceWindowMin if f32_only => vec![row(
+            "window_min",
+            vec![("x", vec![4], vec![p, w.one, n, s])],
+            vec![3],
+            "reduce_window_min(x, [2i64], [1i64])".into(),
+        )],
         Id::ReduceWindowGrad if f32_only => vec![helped(
             "window_grad",
             vec![("x", vec![4], vec![w.inf, neg_inf, p, w.one])],
             vec![4],
             format!("grad(lwin_{name}, wrt=x)(x)"),
-            format!("def lwin_{name}(x: tensor[4, {name}]) -> {name} = {{\n  w = reduce_window_sum(x, [2i64], [1i64])\n  tensor_to_scalar(sum(mul(w, copy(w)), 0i32))\n}}\n"),
+            format!(
+                "def lwin_{name}(x: tensor[4, {name}]) -> {name} = {{\n  w = reduce_window_sum(x, [2i64], [1i64])\n  tensor_to_scalar(sum(mul(w, copy(w)), 0i32))\n}}\n"
+            ),
         )],
-        Id::ProdReduce | Id::ReduceWindowSum | Id::ReduceWindowMean | Id::ReduceWindowMax | Id::ReduceWindowMin | Id::ReduceWindowGrad => Vec::new(),
+        Id::ProdReduce
+        | Id::ReduceWindowSum
+        | Id::ReduceWindowMean
+        | Id::ReduceWindowMax
+        | Id::ReduceWindowMin
+        | Id::ReduceWindowGrad => Vec::new(),
         Id::Matmul => vec![row(
             "matmul",
-            vec![("a", vec![2, 2], vec![w.zero, w.one, p, w.one]), ("b", vec![2, 2], vec![w.inf, w.one, w.one, s])],
+            vec![
+                ("a", vec![2, 2], vec![w.zero, w.one, p, w.one]),
+                ("b", vec![2, 2], vec![w.inf, w.one, w.one, s]),
+            ],
             vec![2, 2],
             "matmul(a, b)".into(),
         )],
-        Id::Dropout => vec![row("dropout", x3(), vec![3], format!("dropout(key_from_seed(7i64), x, cast(0.0, {name}))"))],
+        Id::Dropout => vec![row(
+            "dropout",
+            x3(),
+            vec![3],
+            format!("dropout(key_from_seed(7i64), x, cast(0.0, {name}))"),
+        )],
         Id::DropoutReplay => vec![helped(
             "dropout_grad",
             x3(),
             vec![3],
             format!("grad(ldrop_{name}, wrt=x)(x)"),
-            format!("def ldrop_{name}(x: tensor[3, {name}]) -> {name} = tensor_to_scalar(sum(mul(dropout(key_from_seed(7i64), x, cast(0.5, {name})), x), 0i32))\n"),
+            format!(
+                "def ldrop_{name}(x: tensor[3, {name}]) -> {name} = tensor_to_scalar(sum(mul(dropout(key_from_seed(7i64), x, cast(0.5, {name})), x), 0i32))\n"
+            ),
         )],
         // The checker admits `uniform_like` bounds at f32 only.
         Id::UniformBoundAdjoint if name == "f32" => vec![helped(
             "uniform_low_grad",
-            vec![("x", vec![3], vec![p, w.one, n]), ("lo", vec![1], vec![w.zero])],
+            vec![
+                ("x", vec![3], vec![p, w.one, n]),
+                ("lo", vec![1], vec![w.zero]),
+            ],
             vec![1],
             format!("grad(lunif_{name}, wrt=lo)(lo, x)"),
-            format!("def lunif_{name}(lo: tensor[1, {name}], x: tensor[3, {name}]) -> {name} = {{\n  b = tensor_to_scalar(sum(lo, 0i32))\n  tensor_to_scalar(sum(mul(uniform_like(key_from_seed(1i64), x, b, cast(2.0, {name})), x), 0i32))\n}}\n"),
+            format!(
+                "def lunif_{name}(lo: tensor[1, {name}], x: tensor[3, {name}]) -> {name} = {{\n  b = tensor_to_scalar(sum(lo, 0i32))\n  tensor_to_scalar(sum(mul(uniform_like(key_from_seed(1i64), x, b, cast(2.0, {name})), x), 0i32))\n}}\n"
+            ),
         )],
         Id::UniformBoundAdjoint => Vec::new(),
         Id::ReluAdjoint => vec![helped(
@@ -1350,38 +1452,81 @@ fn nan_atom_rows(atom: chelis_ir::dag::RiscAtomIdentity, w: &'static NanWidth) -
             vec![("x", vec![3], vec![p, w.one, n])],
             vec![3],
             format!("grad(lrelu_{name}, wrt=x)(x)"),
-            format!("def lrelu_{name}(x: tensor[3, {name}]) -> {name} = tensor_to_scalar(sum(mul(relu(x), x), 0i32))\n"),
+            format!(
+                "def lrelu_{name}(x: tensor[3, {name}]) -> {name} = tensor_to_scalar(sum(mul(relu(x), x), 0i32))\n"
+            ),
         )],
         Id::ExtremaAdjoint => vec![helped(
             "max_elem_grad",
             vec![("x", vec![3], vec![p, w.one, n])],
             vec![3],
             format!("grad(lmax_{name}, wrt=x)(x)"),
-            format!("def lmax_{name}(x: tensor[3, {name}]) -> {name} = tensor_to_scalar(sum(mul(max_elem(x, neg(x)), x), 0i32))\n"),
+            format!(
+                "def lmax_{name}(x: tensor[3, {name}]) -> {name} = tensor_to_scalar(sum(mul(max_elem(x, neg(x)), x), 0i32))\n"
+            ),
         )],
         // Selection and data movement: every NaN out is a NaN in, bit for bit.
         Id::Where => vec![row(
             "where",
-            vec![("x", vec![3], vec![p, n, s]), ("y", vec![3], vec![w.one, w.one, w.one])],
+            vec![
+                ("x", vec![3], vec![p, n, s]),
+                ("y", vec![3], vec![w.one, w.one, w.one]),
+            ],
             vec![3],
             "where(cmplt(copy(x), copy(y)), y, x)".into(),
         )],
-        Id::Reshape => vec![row("reshape", x3(), vec![1, 3], "reshape(x, [1i64, 3i64])".into())],
-        Id::Permute => vec![row("permute", vec![("x", vec![2, 2], vec![p, n, s, w.one])], vec![2, 2], "permute(x, 1i32, 0i32)".into())],
-        Id::Expand => vec![row("expand", vec![("x", vec![1], vec![s])], vec![3], "expand(x, 0i32, 3i64)".into())],
-        Id::Pad => vec![row("pad", x3(), vec![4], format!("pad(x, [[1i64, 0i64]], cast(0.0, {name}))"))],
-        Id::Shrink => vec![row("shrink", x3(), vec![2], "shrink(x, [[1i64, 3i64]])".into())],
+        Id::Reshape => vec![row(
+            "reshape",
+            x3(),
+            vec![1, 3],
+            "reshape(x, [1i64, 3i64])".into(),
+        )],
+        Id::Permute => vec![row(
+            "permute",
+            vec![("x", vec![2, 2], vec![p, n, s, w.one])],
+            vec![2, 2],
+            "permute(x, 1i32, 0i32)".into(),
+        )],
+        Id::Expand => vec![row(
+            "expand",
+            vec![("x", vec![1], vec![s])],
+            vec![3],
+            "expand(x, 0i32, 3i64)".into(),
+        )],
+        Id::Pad => vec![row(
+            "pad",
+            x3(),
+            vec![4],
+            format!("pad(x, [[1i64, 0i64]], cast(0.0, {name}))"),
+        )],
+        Id::Shrink => vec![row(
+            "shrink",
+            x3(),
+            vec![2],
+            "shrink(x, [[1i64, 3i64]])".into(),
+        )],
         Id::Stride => vec![row("stride", x3(), vec![2], "stride(x, 2i64)".into())],
-        Id::Gather => vec![row("gather", x3(), vec![4], "gather(x, to_tensor([2i64, 0i64, 1i64, 2i64]), 0i32)".into())],
+        Id::Gather => vec![row(
+            "gather",
+            x3(),
+            vec![4],
+            "gather(x, to_tensor([2i64, 0i64, 1i64, 2i64]), 0i32)".into(),
+        )],
         Id::ScatterReplace => vec![row(
             "scatter_replace",
-            vec![("x", vec![3], vec![w.one, w.one, w.one]), ("y", vec![2], vec![s, n])],
+            vec![
+                ("x", vec![3], vec![w.one, w.one, w.one]),
+                ("y", vec![2], vec![s, n]),
+            ],
             vec![3],
             "scatter(x, to_tensor([2i64, 0i64]), y, 0i32, \"replace\")".into(),
         )],
         Id::ScatterElements => vec![row(
             "scatter_elements",
-            vec![("x", vec![3], vec![w.one, w.one, w.one]), ("y", vec![3], vec![p, n, s])],
+            vec![
+                ("x", vec![3], vec![w.one, w.one, w.one]),
+                ("y", vec![3], vec![p, n, s]),
+            ],
             vec![3],
             "scatter_elements(x, to_tensor([2i64, 0i64, 1i64]), y, 0i32)".into(),
         )],
@@ -1396,7 +1541,9 @@ fn nan_atom_rows(atom: chelis_ir::dag::RiscAtomIdentity, w: &'static NanWidth) -
                 vec![("x", vec![4], vec![w.one, n, p, w.one])],
                 vec![4],
                 format!("grad(gather_loss_{name}, wrt=x)(x)"),
-                format!("def gather_loss_{name}(x: tensor[4, {name}]) -> {name} = tensor_to_scalar(sum(mul({gather}, {gather}), 0i32))\n"),
+                format!(
+                    "def gather_loss_{name}(x: tensor[4, {name}]) -> {name} = tensor_to_scalar(sum(mul({gather}, {gather}), 0i32))\n"
+                ),
             )]
         }
         _ => Vec::new(),
@@ -1440,7 +1587,11 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
                         covered = true;
                     }
                 }
-                assert!(covered, "`{}` has no kernel row at any width", atom.as_str());
+                assert!(
+                    covered,
+                    "`{}` has no kernel row at any width",
+                    atom.as_str()
+                );
             }
             NanAtomCoverage::BuiltinInventory => assert!(
                 inventory.contains(&(atom.as_str(), finalization)),

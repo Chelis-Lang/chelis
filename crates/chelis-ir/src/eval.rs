@@ -3883,7 +3883,9 @@ where
                 // integer/bool payloads, exact f64 images otherwise
                 // (chelis#856).
                 match data.to_i64_exact_vec() {
-                    _ if data.prim() == out_prim && data.len() == shape.iter().product::<usize>() => {
+                    _ if data.prim() == out_prim
+                        && data.len() == shape.iter().product::<usize>() =>
+                    {
                         TensorValue::from_storage(shape, data.clone())
                     }
                     Some(ints) => finalize_wide_int("const", out_prim, shape, ints)?,

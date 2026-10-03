@@ -429,7 +429,11 @@ impl RuntimeArithmetic for half::f16 {
     }
 
     fn runtime_finalize(self) -> Self {
-        if self.is_nan() { half::f16::from_bits(0x7e00) } else { self }
+        if self.is_nan() {
+            half::f16::from_bits(0x7e00)
+        } else {
+            self
+        }
     }
 }
 
@@ -443,7 +447,11 @@ impl RuntimeArithmetic for half::bf16 {
     }
 
     fn runtime_finalize(self) -> Self {
-        if self.is_nan() { half::bf16::from_bits(0x7fc0) } else { self }
+        if self.is_nan() {
+            half::bf16::from_bits(0x7fc0)
+        } else {
+            self
+        }
     }
 }
 

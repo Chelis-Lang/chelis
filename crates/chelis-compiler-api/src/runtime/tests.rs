@@ -3749,7 +3749,7 @@ fn list_tensor_bridges_preserve_every_numeric_dtype() {
         // Float elements move into the buffer as the stored scalar itself.
         let expected_float = match &value {
             RuntimeValue::Scalar(payload) => payload.value(),
-            other => panic!("numeric_scalar built {other:?}"),
+            _ => panic!("numeric_scalar must build a numeric scalar"),
         };
         let (_, tensor_data) =
             nested_list_to_tensor_data(std::slice::from_ref(&value), prim, &[Some(1)])
