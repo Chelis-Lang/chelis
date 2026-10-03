@@ -35,7 +35,7 @@ pub(crate) const EXIT: &str = "chelis_fp_env_leave();";
 
 const HELPERS: &[&str] = &[
     HELPERS_BEGIN,
-    // Exported by libchelis_runtime and deliberately absent from the
+    // Exported by the runtime library and deliberately absent from the
     // published header: only compiler-emitted entry points call them.
     "#ifdef __cplusplus",
     "extern \"C\"",

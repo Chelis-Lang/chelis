@@ -282,6 +282,18 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "crates/chelis-compiler-api/src/fp_env_arch.rs",
+        "library-name",
+        lines=(
+            'call.args.is_empty() && segments == ["chelis_runtime", "FpEnvGuard", "enter"]',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "an architecture test matches the Rust path `chelis_runtime::FpEnvGuard::enter` "
+            "in parsed compiler-api source; it names no archive or library"
+        ),
+    ),
+    Row(
         "crates/chelis-cli/src/lane_check.rs",
         "archive-name",
         lines=(

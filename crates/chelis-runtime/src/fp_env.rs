@@ -28,7 +28,7 @@
 use std::cell::Cell;
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-compile_error!("chelis-runtime pins the floating-point environment only on aarch64 and x86_64");
+compile_error!("the Chelis runtime pins the floating-point environment only on aarch64 and x86_64");
 
 thread_local! {
     static DEPTH: Cell<u64> = const { Cell::new(0) };
