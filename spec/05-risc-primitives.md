@@ -2950,7 +2950,7 @@ exact ADT identity by [05-OP-34].
 > or any inconsistent input dimension list or dtype. Statically established
 > emptiness, extent disagreement, or a non-singleton squeeze is a type error;
 > a runtime empty list traps `Domain`, and runtime extent disagreement or a
-> non-singleton squeeze traps `DimensionMismatch` before any output is observed.
+> non-singleton squeeze traps `Domain` before any output is observed.
 > The supported dtype domain remains all active tensor element dtypes.
 > `where_indices`
 > returns the increasing row-major i64 flat indices of true elements. The
