@@ -1331,6 +1331,26 @@ job = "full-workspace"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "every exact gradient body over the 24-input sweep at f32 and f64 builds one C executable per body and dtype"
 tracking_issue = "chelis#3017"
+# Every test in these two targets is `#![cfg(feature = "smt")]`, so a
+# default-feature listing has none, and the cvc5 they link is provisioned only
+# by the SMT jobs. The nightly full SMT prove runs every smt-gated chelis-prove
+# integration target with the feature.
+[[target_exclusion]]
+package = "chelis-prove"
+name = "issue_1475_sqrt_domain"
+workflow = "smt-full-prove.yml"
+job = "full-smt-prove"
+cadence = "daily 09:00 UTC and workflow_dispatch"
+reason = "every test is smt-gated; `cargo test -p chelis-prove --features smt` runs it with cvc5"
+tracking_issue = "chelis#1475"
+[[target_exclusion]]
+package = "chelis-prove"
+name = "transcendental_finance_lowering"
+workflow = "smt-full-prove.yml"
+job = "full-smt-prove"
+cadence = "daily 09:00 UTC and workflow_dispatch"
+reason = "every test is smt-gated; `cargo test -p chelis-prove --features smt` runs it with cvc5"
+tracking_issue = "chelis#434"
 [[target_exclusion]]
 package = "chelis-prove"
 name = "standard_contract_discharge_table"
