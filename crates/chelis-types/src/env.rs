@@ -1292,12 +1292,17 @@ impl Env {
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
         equations: &[ResultConstraint],
     ) -> Scheme {
+        // The deferred equalities are generalized with the type: a component
+        // that keeps any variable shared is kept shared whole.
+        let result_scope = crate::result_scope::ResultScope::new(equations);
         let (mut level_scheme, ledger_removals) =
             self.generalize_by_levels(ty, subst, owned_contracts);
+        result_scope.retain_closed_quantifiers(&mut level_scheme);
         #[cfg(feature = "generalize-sweep-oracle")]
         GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
             if enabled.get() {
-                let (sweep_scheme, _) = self.generalize_by_sweep(ty, subst, owned_contracts);
+                let (mut sweep_scheme, _) = self.generalize_by_sweep(ty, subst, owned_contracts);
+                result_scope.retain_closed_quantifiers(&mut sweep_scheme);
                 assert_eq!(
                     level_scheme.constraints, sweep_scheme.constraints,
                     "level-based collection obligations diverged from the reference environment sweep"
@@ -1324,8 +1329,6 @@ impl Env {
                 );
             }
         });
-        crate::result_scope::ResultScope::new(equations)
-            .retain_closed_quantifiers(&mut level_scheme);
         // Transport contracts this scheme now owns have moved off the
         // inference-local contract ledger. Each later instantiation installs a
         // fresh renamed instance with its own application identity.
@@ -1500,6 +1503,14 @@ impl Env {
     /// no environment sweep can observe, so omitting one here would make the
     /// oracle disagree with a correct production path. Keep the exclusions in
     /// step with their production owners.
+    ///
+    /// Both results are compared after the same deferred-equality scope
+    /// closure. A variable that only a carried equality mentions can be older
+    /// than the binding without being in Γ: instantiating a let-bound value
+    /// in an enclosing scrutinee mints its join intermediates there. Levels
+    /// keep such a variable; a sweep cannot see its age. Its component also
+    /// reaches the Γ variable the scrutinee binds, so the closure keeps it
+    /// shared under both.
     #[cfg(feature = "generalize-sweep-oracle")]
     fn generalize_by_sweep(
         &self,
@@ -1935,6 +1946,96 @@ mod module_scope_tests {
         captured.bind("outer".to_string(), Scheme::mono(Type::Var(body_var)));
         let captured_scheme = captured.generalize(&body, &subst);
         assert!(captured_scheme.tvars.is_empty());
+    }
+
+    #[test]
+    fn deferred_equalities_reaching_the_environment_stay_shared_at_a_let_boundary() {
+        // `day = if c then Some(pair) else if d then Some(pair) else None`
+        // followed by `match day with | Some(found) => { (a, b) = found ... }`:
+        // instantiating `day` in the scrutinee mints join intermediates in the
+        // declaration scope, beside the pattern variable `found`. The
+        // destructure's `let` then carries those joins with its own body.
+        let pair = || Type::Tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]);
+        let option = |ty: Type| Type::Adt("Option".to_string(), vec![ty]);
+        let carried = |body: Type, equations: &[ResultConstraint]| {
+            Type::Tuple(
+                std::iter::once(body)
+                    .chain(equations.iter().flat_map(ResultConstraint::types).cloned())
+                    .collect(),
+            )
+        };
+        let published = |env: &Env, subst: &Subst, body: Type, equations: &[ResultConstraint]| {
+            let mut tvars = env
+                .generalize_with_result_constraints(
+                    &carried(body, equations),
+                    subst,
+                    None,
+                    equations,
+                )
+                .tvars;
+            tvars.sort_unstable();
+            tvars
+        };
+
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        let declaration = subst.enter_level(&var_gen);
+        let inner_join = var_gen.fresh_tvar();
+        let outer_join = var_gen.fresh_tvar();
+        let found = var_gen.fresh_tvar();
+        let scrutinee_joins = vec![
+            ResultConstraint::Join {
+                inputs: vec![option(pair()), option(Type::Var(inner_join))],
+                result: option(Type::Var(outer_join)),
+            },
+            ResultConstraint::Join {
+                inputs: vec![option(pair()), option(Type::Var(outer_join))],
+                result: option(Type::Var(found)),
+            },
+        ];
+        let mut env = Env::new();
+        subst.lower_type_to_current(&Type::Var(found));
+        env.bind("found".to_string(), Scheme::mono(Type::Var(found)));
+
+        let binding = subst.enter_level(&var_gen);
+        let shared_hole = var_gen.fresh_tvar();
+        let shared_result = var_gen.fresh_tvar();
+        let own_hole = var_gen.fresh_tvar();
+        let own_result = var_gen.fresh_tvar();
+        subst.leave_level(binding, &var_gen);
+
+        // `tmp = found`: the scrutinee's joins reach `found`, which Γ owns, so
+        // none of their intermediates may be freshened for this binding.
+        assert!(published(&env, &subst, Type::Var(found), &scrutinee_joins).is_empty());
+
+        // `again = if e then Some(found) else None`: variables minted for this
+        // binding share one component with `found`, so they stay shared too.
+        let mut through_found = scrutinee_joins.clone();
+        through_found.push(ResultConstraint::Join {
+            inputs: vec![option(Type::Var(found)), option(Type::Var(shared_hole))],
+            result: option(Type::Var(shared_result)),
+        });
+        assert!(
+            published(
+                &env,
+                &subst,
+                option(Type::Var(shared_result)),
+                &through_found
+            )
+            .is_empty()
+        );
+
+        // `fresh = if e then Some(pair) else None`: a component wholly owned by
+        // the binding is quantified whole.
+        let own = [ResultConstraint::Join {
+            inputs: vec![option(pair()), option(Type::Var(own_hole))],
+            result: option(Type::Var(own_result)),
+        }];
+        assert_eq!(
+            published(&env, &subst, option(Type::Var(own_result)), &own),
+            vec![own_hole, own_result]
+        );
+        subst.leave_level(declaration, &var_gen);
     }
 }
 

@@ -180,6 +180,37 @@ fn independent_binding_generalization_visits_zero_environment_bindings() {
     );
 }
 
+/// The shape of `Std.Datetime.Zone.date_rule_at`, without the stdlib: the
+/// scrutinee instantiates `day`'s deferred branch joins in the declaration
+/// scope, and the destructure's `let` carries those intermediates beside the
+/// pattern variable. Under `generalize-sweep-oracle` both generalizers must
+/// keep them shared; in every build the components stay tied to `found`.
+#[test]
+fn destructured_match_payload_keeps_scrutinee_join_intermediates_shared() {
+    let source = |use_of_a: &str| {
+        format!(
+            "def pick(c: bool, d: bool) -> i64 = {{\n\
+               day = if c then Some((1i64, 2i64)) else if d then Some((3i64, 4i64)) else None\n\
+               match day with {{\n\
+                 | Some(found) => {{\n\
+                   (a, b) = found\n\
+                   {use_of_a}\n\
+                 }}\n\
+                 | None => 0i64\n\
+               }}\n\
+             }}\n"
+        )
+    };
+    assert_surf_ok(&source("add(a, b)"));
+    let errors = surf_check_errors(&source("add(string_len(string_concat(a, \"!\")), b)"));
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+        "a destructured i64 component must not be usable as a string: {errors:?}"
+    );
+}
+
 // Fix 3: defsig not enforced — body must match declared signature
 #[test]
 fn fix3_defsig_enforced() {
