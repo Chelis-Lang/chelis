@@ -1029,13 +1029,15 @@ fn every_float_result_finalizes_nan_like_eval_through_the_static_library_abi() {
 
 /// One kernel row of the NaN finalization oracle: a tensor `def` whose result
 /// an emitter writes through its own store (a reduction's total, a window, a
-/// BLAS call, a draw), with each input's shape and stored bits.
+/// BLAS call, a draw), with each input's shape and stored bits, and the
+/// helper `def` its call names, if any.
 struct NanKernelRow {
     label: String,
     width: &'static NanWidth,
     params: Vec<(&'static str, Vec<i64>, Vec<u64>)>,
     output: Vec<i64>,
     call: String,
+    helper: Option<String>,
 }
 
 /// chelis#2957 round 2: the reduction, matmul, window and dropout emitters
@@ -1045,7 +1047,10 @@ struct NanKernelRow {
 /// matmul's inner product) and carries payload, negative and signaling NaNs
 /// through it, including a one-element group that no addition touches.
 /// `prod_reduce` and the window reductions are f32-only in `chelis build`
-/// (chelis#729).
+/// (chelis#729). The `gather_grad` rows (chelis#3047) differentiate a gather
+/// with duplicate indices, so the autodiff-only scatter-add accumulates two
+/// contributions into one element, a finite one and a NaN one; at f16 and
+/// bf16 that sum must be taken at f32, not on the storage words.
 #[test]
 fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_library_abi() {
     let mut rows = Vec::new();
@@ -1058,7 +1063,23 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
             params,
             output,
             call,
+            helper: None,
         };
+        if name != "f64" {
+            let gather = "gather(x, to_tensor([0i64, 0i64, 2i64, 2i64]), 0i32)";
+            rows.push(NanKernelRow {
+                helper: Some(format!(
+                    "def gather_loss_{name}(x: tensor[4, {name}]) -> {name} = \
+                     tensor_to_scalar(sum(mul({gather}, {gather}), 0i32))\n"
+                )),
+                ..row(
+                    "gather_grad",
+                    vec![("x", vec![4], vec![w.one, w.negative, w.payload, w.one])],
+                    vec![4],
+                    format!("grad(gather_loss_{name}, wrt=x)(x)"),
+                )
+            });
+        }
         rows.push(row(
             "sum",
             vec![(
@@ -1158,6 +1179,7 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
             .map(|(param, shape, _)| format!("{param}: tensor[{}, {}]", dims(shape), w.name))
             .collect::<Vec<_>>()
             .join(", ");
+        program.push_str(row.helper.as_deref().unwrap_or_default());
         program.push_str(&format!(
             "def t_{}({params}) -> tensor[{}, {}] = {}\n",
             row.label,
@@ -1236,7 +1258,8 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
             .collect::<Vec<_>>()
             .join(", ");
         let source = format!(
-            "def main({params}) -> tensor[{}, {}] = {}\n",
+            "{}def main({params}) -> tensor[{}, {}] = {}\n",
+            row.helper.as_deref().unwrap_or_default(),
             dims(&row.output),
             w.name,
             row.call

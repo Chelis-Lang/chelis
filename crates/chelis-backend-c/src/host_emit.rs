@@ -9462,10 +9462,23 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}    {index_type} {offset} = chelis_sparse_data_index({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {linear}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, {selected}));", self.indent));
         match kind {
             SparseSummaryKind::Gather => self.lines.push(format!("{}    (({element}*){view}.data)[{linear}] = ((const {element}*)chelis_host_tensor_data({base}))[{offset}];", self.indent)),
-            SparseSummaryKind::ScatterAdd | SparseSummaryKind::ScatterReplace => {
+            SparseSummaryKind::ScatterAdd => {
                 let updates = &args[summary.input_indices[2]];
-                let op = match kind { SparseSummaryKind::ScatterAdd => "+=", SparseSummaryKind::ScatterReplace => "=", SparseSummaryKind::Gather => unreachable!() };
-                self.lines.push(format!("{}    (({element}*){view}.data)[{offset}] {op} ((const {element}*)chelis_host_tensor_data({updates}))[{linear}];", self.indent));
+                let destination = format!("(({element}*){view}.data)[{offset}]");
+                let sum = CEmitter::scatter_add_sum(
+                    crate::fp_env::risc_nan_finalization(&chelis_ir::dag::RiscOp::ScatterAdd {
+                        axis: summary.axis,
+                        batch_rank: 0,
+                    }),
+                    &destination,
+                    &format!("((const {element}*)chelis_host_tensor_data({updates}))[{linear}]"),
+                    summary.output.precision,
+                );
+                self.lines.push(format!("{}    {destination} = {sum};", self.indent));
+            }
+            SparseSummaryKind::ScatterReplace => {
+                let updates = &args[summary.input_indices[2]];
+                self.lines.push(format!("{}    (({element}*){view}.data)[{offset}] = ((const {element}*)chelis_host_tensor_data({updates}))[{linear}];", self.indent));
             }
         }
         self.lines.push(format!("{}}}", self.indent));

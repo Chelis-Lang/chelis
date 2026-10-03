@@ -1926,16 +1926,23 @@ impl CEmitter {
     /// it emitted calls the canonicalizing helper. An emitter that writes its
     /// result another way (a BLAS call, a reduction's own store, a runtime
     /// helper) fails here, at every build that reaches it, instead of
-    /// disagreeing with eval on a NaN's bits. f16 and bf16 results narrow
-    /// through storage helpers that canonicalize, and a conversion from a
-    /// non-float or from the same dtype produces no new NaN.
+    /// disagreeing with eval on a NaN's bits. An f16 or bf16 result computes at
+    /// f32 and narrows through the canonicalizing storage helper
+    /// ([04-NUM-8]), so its C calls `chelis_f32_to_f16` or `chelis_f32_to_bf16`;
+    /// an emitter that does arithmetic on the `uint16_t` storage words fails
+    /// here. A conversion from a non-float or from the same dtype produces no
+    /// new NaN.
     fn assert_nan_finalized(&self, node: &DagNode, dag: VerifiedDagView<'_>, first_line: usize) {
         if self.nan_finalization != Some(crate::fp_env::NanFinalization::Canonical) {
             return;
         }
-        let is_f64 = match node.output_type.precision {
-            Prim::F32 => false,
-            Prim::F64 => true,
+        // A float-to-half conversion narrows from f64 in one rounding through
+        // the checked-cast helper; every other half result narrows from f32.
+        let helpers: &[&str] = match node.output_type.precision {
+            Prim::F32 => &[crate::fp_env::canonical_nan_helper(false)],
+            Prim::F64 => &[crate::fp_env::canonical_nan_helper(true)],
+            Prim::F16 => &["chelis_f32_to_f16", "chelis_host_f64_to_f16"],
+            Prim::Bf16 => &["chelis_f32_to_bf16", "chelis_host_f64_to_bf16"],
             _ => return,
         };
         if let RiscOp::Cast { new_precision } = node.op {
@@ -1948,17 +1955,17 @@ impl CEmitter {
                 return;
             }
         }
-        let helper = format!("{}(", crate::fp_env::canonical_nan_helper(is_f64));
         assert!(
-            self.lines[first_line..]
+            self.lines[first_line..].iter().any(|line| helpers
                 .iter()
-                .any(|line| line.contains(&helper)),
+                .any(|helper| line.contains(&format!("{helper}(")))),
             "C backend: node {} (`{}`) produces a {} result its classification \
-             finalizes canonically ([04-NUM-2]), but its emitter wrote it without \
-             `fp_env::finalize_float`",
+             finalizes canonically ([04-NUM-2]), but its emitter wrote it through \
+             none of `{}`, the finalizations its dtype computes through",
             node.id.0,
             chelis_ir::grad::risc_op_name(&node.op),
             node.output_type.precision.name(),
+            helpers.join("`, `"),
         );
     }
 
@@ -6194,10 +6201,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("{index_type} t{id}_base_index = chelis_sparse_data_index(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i), chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_selected));"));
         if let (Some(updates), Some("+=")) = (updates, update) {
             let destination = format!("(({element}*)t{id}_data)[t{id}_base_index]");
-            let sum = finalize_elem(
+            let sum = Self::scatter_add_sum(
                 self.nan_finalization,
-                format!("{destination} + ((const {element}*)t{updates}_data)[t{id}_i]"),
-                ty,
+                &destination,
+                &format!("((const {element}*)t{updates}_data)[t{id}_i]"),
+                ty.precision,
             );
             self.line(&format!("{destination} = {sum};"));
         } else if let (Some(updates), Some(update)) = (updates, update) {
@@ -6208,6 +6216,32 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.indent -= 1;
         self.line("}");
         self.line(&format!("chelis_sparse_plan_release(t{id}_sparse);"));
+    }
+
+    /// The value a scatter-add stores at one destination element: the stored
+    /// element plus one update. f32 and f64 finalize the sum; f16 and bf16
+    /// widen both storage words to f32, add there ([04-NUM-8]), and narrow
+    /// once through the canonicalizing storage helper, never adding the
+    /// `uint16_t` encodings themselves.
+    pub(crate) fn scatter_add_sum(
+        finalization: Option<crate::fp_env::NanFinalization>,
+        destination: &str,
+        update: &str,
+        precision: Prim,
+    ) -> String {
+        if matches!(precision, Prim::F16 | Prim::Bf16) {
+            let load = Self::reduced_to_f32_fn(precision);
+            let store = Self::f32_to_reduced_fn(precision);
+            return format!("{store}({load}({destination}) + {load}({update}))");
+        }
+        finalize_elem(
+            finalization,
+            format!("{destination} + {update}"),
+            &TensorType {
+                dims: vec![],
+                precision,
+            },
+        )
     }
 
     fn lowered_mean_sum_source(
@@ -11375,6 +11409,71 @@ mod tests {
             Ok(_) => panic!("float sparse indices must not become verified backend input"),
         };
         assert!(error.to_string().contains("requires i32/i64 indices"));
+    }
+
+    /// chelis#3047: an f16 or bf16 scatter-add widens the stored element and
+    /// the update to f32, adds there, and narrows once; adding the `uint16_t`
+    /// encodings turns 2 + 2 into inf. Without the widening the emission-time
+    /// check in `assert_nan_finalized` rejects the node.
+    #[test]
+    fn reduced_float_scatter_add_adds_at_f32_and_narrows_once() {
+        for (precision, load, store) in [
+            (Prim::F16, "chelis_f16_to_f32", "chelis_f32_to_f16"),
+            (Prim::Bf16, "chelis_bf16_to_f32", "chelis_f32_to_bf16"),
+        ] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let target = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "target".into(),
+                },
+                vec![],
+                tensor_ty(&[4], precision),
+                None,
+            );
+            let indices = dag.add_node(
+                decl,
+                RiscOp::synth_const(Prim::Int64, 0.0),
+                vec![],
+                tensor_ty(&[3], Prim::Int64),
+                None,
+            );
+            let updates = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "updates".into(),
+                },
+                vec![],
+                tensor_ty(&[3], precision),
+                None,
+            );
+            dag.add_node(
+                decl,
+                RiscOp::ScatterAdd {
+                    axis: 0,
+                    batch_rank: 0,
+                },
+                vec![target, indices, updates],
+                tensor_ty(&[4], precision),
+                None,
+            );
+
+            let c = emit_test_dag(&dag, "test_fn").unwrap();
+
+            assert!(
+                c.contains(&format!(
+                    "((uint16_t*)t3_data)[t3_base_index] = {store}({load}(((uint16_t*)t3_data)[t3_base_index]) + {load}(((const uint16_t*)t2_data)[t3_i]));"
+                )),
+                "{}: {c}",
+                precision.name()
+            );
+            assert!(
+                !c.contains("[t3_base_index] + ((const uint16_t*)"),
+                "{}",
+                precision.name()
+            );
+        }
     }
 
     #[test]
