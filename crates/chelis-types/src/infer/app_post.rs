@@ -902,7 +902,11 @@ pub(super) fn finish_unified_app(
                 {
                     return err;
                 }
-                let Some(raw_axis) = kids.get(3).and_then(extract_int_for_dim) else {
+                let Some(raw_axis) = kids
+                    .get(3)
+                    .filter(|axis| gather_axis_has_integer_casts(axis))
+                    .and_then(extract_int_for_dim)
+                else {
                     return report(
                         errors,
                         CheckError::new(

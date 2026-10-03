@@ -27,7 +27,13 @@ fn gather(axis: &str) -> String {
 #[test]
 fn unresolved_gather_axes_fail_at_surf_and_deep_checking() {
     let dir = tempdir().unwrap();
-    for axis in ["axis0()", "axis", "add(0i32, 0i32)"] {
+    for axis in [
+        "axis0()",
+        "axis",
+        "add(0i32, 0i32)",
+        "cast(cast(1i32, f32), i32)",
+        "cast(1.0f32, i32)",
+    ] {
         let surf = dir.path().join("probe.ch");
         fs::write(&surf, gather(axis)).unwrap();
         let output = cli().arg("deep").arg(&surf).output().unwrap();
@@ -68,7 +74,15 @@ fn unresolved_gather_axes_fail_at_surf_and_deep_checking() {
 
 #[test]
 fn literal_gather_axes_determine_the_actual_result_geometry() {
-    for axis in ["1i32", "cast(1, i32)", "-1i32", "cast(-1, i32)"] {
+    for axis in [
+        "1i32",
+        "cast(1, i32)",
+        "-1i32",
+        "cast(-1, i32)",
+        "cast(-1i64, i32)",
+        "cast(cast(-1i64, i64), i32)",
+        "-cast(1i64, i32)",
+    ] {
         let source = format!(
             "def pick(x: tensor[2, 3, f32], ids: tensor[2, i64]) -> tensor[2, 2, f32] = gather(x, ids, {axis})\nxs = to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]])\nids = to_tensor([2i64, 0i64])\nselected = pick(xs, ids)\n"
         );
