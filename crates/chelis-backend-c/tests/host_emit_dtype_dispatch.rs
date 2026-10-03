@@ -808,16 +808,57 @@ fn scalar_to_tensor_coercion_int64_preserves_tag_and_integer_bits() {
 
 // ---- logical operators over tensor operands ----------------------------
 
-// A checked logical operation over tensors routes through the typed DAG lane
-// ([04-TOT-2]). The host lane's `and` and `or` arms are C's scalar `&&` and
-// `||`; over two `chelis_tensor *` operands they would combine the pointers,
-// so emission refuses with a typed unsupported rather than writing that C.
+/// `op(a, b)` where `a` is a bool tensor and `b` is a bool scalar.
+fn make_mixed_logical_program(op_name: &str) -> HostProgram {
+    let mut program = make_binary_program(op_name, Prim::Bool);
+    let function = &mut program.functions[0];
+    function.params[1].ty = HostType::Bool;
+    let tt = vec_ty(4, Prim::Bool);
+    function.body = HostExpr::new(HostExprKind::Builtin {
+        name: op_name.to_string(),
+        args: vec![
+            HostExpr::new(HostExprKind::Var(
+                "a".to_string(),
+                HostType::Tensor(tt.clone()),
+            )),
+            HostExpr::new(HostExprKind::Var("b".to_string(), HostType::Bool)),
+        ],
+        ty: HostType::Tensor(tt),
+    });
+    program
+}
+
+// A logical operation over two tensors computed on the host combines them
+// element by element through typed bool storage, after the operand agreement
+// check, rather than combining the two `chelis_tensor *` with C's scalar
+// `&&` or `||`.
 #[test]
-fn logical_binary_over_tensor_operands_is_refused_in_host_emission() {
-    for op in ["and", "or"] {
+fn logical_binary_over_tensor_operands_is_elementwise_in_host_emission() {
+    for (op, c_op) in [("and", "&&"), ("or", "||")] {
         let program = make_binary_program(op, Prim::Bool);
-        let error = emit_host_program(&program, "logical_tensor")
-            .expect_err("a tensor `and`/`or` must not reach scalar host emission");
+        let src = emit_host_program(&program, "logical_tensor").unwrap();
+        assert!(
+            src.contains("chelis_host_require_elementwise_agreement(")
+                && src.contains("(uint8_t*)")
+                && src.contains(&format!("__lhs_data[idx_lhs] {c_op} __rhs_data[idx_rhs]")),
+            "{op}: tensor operands must combine element by element; got:\n{src}"
+        );
+        assert!(
+            !src.lines()
+                .any(|line| line.contains(c_op) && line.contains("__arg")),
+            "{op}: tensor pointers must never meet a scalar `{c_op}`; got:\n{src}"
+        );
+    }
+}
+
+// The negative twin: an operand pair the tensor arm does not take reaches the
+// scalar arm, which refuses any tensor operand with a typed unsupported
+// ([04-TOT-2]) rather than writing the pointer combination.
+#[test]
+fn logical_binary_with_one_tensor_operand_is_refused_in_host_emission() {
+    for op in ["and", "or"] {
+        let error = emit_host_program(&make_mixed_logical_program(op), "logical_mixed")
+            .expect_err("a tensor operand must not reach scalar `&&`/`||`");
         let rendered = format!("{error}");
         assert!(
             rendered.contains(&format!("builtin `{op}`"))
@@ -827,8 +868,8 @@ fn logical_binary_over_tensor_operands_is_refused_in_host_emission() {
     }
 }
 
-// The positive twin: `not` keeps its elementwise tensor arm, which reads and
-// writes the bool storage through typed pointers.
+// `not` keeps its elementwise tensor arm, which reads and writes the bool
+// storage through typed pointers.
 #[test]
 fn logical_not_over_a_tensor_operand_keeps_its_elementwise_arm() {
     let program = make_unary_program("not", Prim::Bool);

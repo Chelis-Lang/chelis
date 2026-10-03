@@ -6434,6 +6434,24 @@ impl<'a> HostEmitter<'a> {
                     self.assign_tensor_unary_elementwise(target, &arg_vars[0].0, "!");
                     return Ok(());
                 }
+                // A logical operation whose operands are computed on the host,
+                // such as two inline comparisons of run-time `to_tensor`
+                // results, combines its bool operands element by element after
+                // the same operand agreement check as arithmetic.
+                "and" | "or"
+                    if matches!(
+                        (&arg_vars[0].1, &arg_vars[1].1),
+                        (HostType::Tensor(_), HostType::Tensor(_))
+                    ) =>
+                {
+                    self.assign_tensor_binary_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        &arg_vars[1].0,
+                        if name == "and" { "&&" } else { "||" },
+                    );
+                    return Ok(());
+                }
                 "exp" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "expf");
                     return Ok(());
@@ -7098,7 +7116,8 @@ impl<'a> HostEmitter<'a> {
             "min_elem",
             "max_elem",
             // C's `&&`, `||` and `!` combine scalars; over `chelis_tensor *`
-            // they combine the pointers. `not` has a tensor arm above.
+            // they combine the pointers. Their tensor arms above take only
+            // tensor operands.
             "and",
             "or",
             "not",

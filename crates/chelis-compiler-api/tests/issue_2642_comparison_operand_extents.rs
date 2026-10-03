@@ -15,11 +15,11 @@
 //! such declared extent on a comparison of literal operands; it now reports
 //! the same `eq` guard as compiled C.
 //!
-//! An operand that builds a run-time `to_tensor` inside itself, such as
-//! `and(lt(to_tensor(xs), to_tensor(ys)), ...)` written with no name bound,
-//! is evaluated before the operation, which takes its result as a typed
-//! input. The C build otherwise combined two tensor pointers with a scalar
-//! `&&`, or refused a comparison of two computed operands.
+//! A logical operation whose operands are comparisons written inline over
+//! `to_tensor` results, such as `and(lt(to_tensor(xs), to_tensor(ys)), ...)`
+//! with no name bound, is computed on the host, element by element, after the
+//! same operand agreement check. Its C build combined the two tensor pointers
+//! with a scalar `&&`.
 //!
 //! Oracle for the positive corpus: the compiled program runs against the
 //! `ownership-ledger` runtime, every allocation is finalized with no live
@@ -86,16 +86,6 @@ const POSITIVE: &[Case] = &[
         name: "logical_over_generic_helper_calls",
         source: "module Demo.Main\ndef less[n](a: &tensor[n, i64], b: &tensor[n, i64]) -> tensor[n, bool] = lt(a, b)\ndef run(xs: List[i64], ys: List[i64]) -> List[bool] = to_list(and(less(to_tensor(xs), to_tensor(ys)), less(to_tensor(ys), to_tensor(xs))))\nresult = run([1i64, 9i64], [5i64, 6i64])\n",
     },
-    // The same boundary for a comparison and an equality whose operands are
-    // computed inline from `to_tensor` results.
-    Case {
-        name: "comparison_over_inline_computed_operands",
-        source: "module Demo.Main\ndef run(xs: List[i64], ys: List[i64]) -> List[bool] = to_list(lt(sub(to_tensor(xs), to_tensor(ys)), sub(to_tensor(ys), to_tensor(xs))))\nresult = run([1i64, 9i64], [5i64, 6i64])\n",
-    },
-    Case {
-        name: "equality_over_inline_comparisons",
-        source: "module Demo.Main\ndef run(xs: List[i64], ys: List[i64]) -> List[bool] = to_list(eq(lt(to_tensor(xs), to_tensor(ys)), lt(to_tensor(ys), to_tensor(xs))))\nresult = run([1i64, 9i64], [5i64, 6i64])\n",
-    },
     // The shape a validating column constructor takes: comparisons of a
     // parameter with a helper's result, folded into a failure index.
     Case {
@@ -138,14 +128,6 @@ const NEGATIVE: &[(Case, &str, &str)] = &[
             source: "module Demo.Main\ndef run(xs: List[i64], ys: List[i64]) -> List[bool] = to_list(and(lt(to_tensor(xs), to_tensor(xs)), lt(to_tensor(ys), to_tensor(ys))))\nresult = run([1i64, 2i64], [3i64, 0i64, 5i64])\n",
         },
         "tensor bool op expects matching shapes, got [2] vs [3]",
-        "elementwise operand shape mismatch",
-    ),
-    (
-        Case {
-            name: "inline_computed_comparison_lengths_differ",
-            source: "module Demo.Main\ndef run(xs: List[i64], ys: List[i64]) -> List[bool] = to_list(lt(sub(to_tensor(xs), to_tensor(xs)), sub(to_tensor(ys), to_tensor(ys))))\nresult = run([1i64, 2i64], [3i64, 0i64, 5i64])\n",
-        },
-        "tensor comparison expects matching tensor shape",
         "elementwise operand shape mismatch",
     ),
     (

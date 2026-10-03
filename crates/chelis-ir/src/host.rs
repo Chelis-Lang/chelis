@@ -16165,18 +16165,8 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     // a host-only descendant. Other builtins may carry static axis/list
     // arguments, so this two-tensor boundary is specific to matmul.
     let hoist_matmul_operands = kids.len() == 3 && direct_var_name(&kids[0]) == Some("matmul");
-    // An operand that reaches a run-time `to_tensor` at any depth, such as
-    // `lt(to_tensor(xs), to_tensor(ys))` or a call whose body builds one,
-    // makes a helper over the whole operation fail its preflight, and the
-    // operation would otherwise fall back to host emission, which has no arm
-    // for most tensor operations. Such an operand is a host boundary too: it
-    // is evaluated once, in source order, and the operation's helper takes
-    // its result as a typed input, exactly as if it were bound to a name.
-    let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(expr, program);
     let host_operand = |arg: &Expr| {
-        should_keep_tensor_expr_in_host_lane(arg)
-            || operand_reaches_dynamic_to_tensor(arg)
-            || operand_reads_host_record(arg, program, scope)
+        should_keep_tensor_expr_in_host_lane(arg) || operand_reads_host_record(arg, program, scope)
     };
     if !hoist_matmul_operands && !kids.iter().skip(1).any(host_operand) {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
@@ -18303,14 +18293,6 @@ fn tensor_helper_preflight_facts(expr: &Expr) -> Option<TensorHelperPreflightFac
         });
         facts
     })
-}
-
-/// Whether a helper over `expr` alone would fail its preflight because `expr`
-/// reaches a run-time `to_tensor`. Read inside a preflight guard covering
-/// `expr`.
-fn operand_reaches_dynamic_to_tensor(expr: &Expr) -> bool {
-    tensor_helper_preflight_facts(expr)
-        .is_some_and(|facts| facts.reaches_dynamic_to_tensor && !facts.contains_grad_like)
 }
 
 fn tensor_helper_preflight_rejects(expr: &Expr) -> bool {
