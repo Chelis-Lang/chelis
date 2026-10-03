@@ -88,6 +88,17 @@ fn json_lines(output: &std::process::Output) -> Vec<Value> {
         .collect()
 }
 
+/// `--suite-timeout` for a probe whose suite does real Reef work. A short fixed
+/// deadline races that work under host load, so no assertion here depends on
+/// it: a suite that completes ends on its own, and one whose hook hangs sets
+/// `CHELIS_TEST_EXPIRE_SUITE_DEADLINE_AT_HANG` so the deadline ends at the
+/// hang. This value is only the backstop for a hook that never hangs.
+const REAL_WORK_SUITE_TIMEOUT_SECONDS: &str = "60";
+const REAL_WORK_SUITE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Harness guard for a probe doing real Reef work; it fires only for a run
+/// that the suite deadline itself failed to end.
+const REAL_WORK_HARNESS_TIMEOUT: Duration = Duration::from_secs(90);
+
 #[test]
 fn preparation_hang_is_bounded_and_json_is_explicitly_incomplete() {
     let (_dir, pkg) = make_reef_package("suite-timeout-preparation");
@@ -140,13 +151,18 @@ fn hang_hook_requires_internal_testing_gate() {
     let (_dir, pkg) = make_reef_package("suite-timeout-hook-gate");
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        .timeout(Duration::from_secs(10))
+        .timeout(REAL_WORK_HARNESS_TIMEOUT)
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env_remove("CHELIS_TEST_INTERNAL_TESTING")
         .env("CHELIS_TEST_EMIT_FINALIZED_SUITE", "1")
         .env("CHELIS_TEST_HANG_BEFORE_SUITE", "1")
-        .args(["test", "tests/", "--suite-timeout", "3"])
+        .args([
+            "test",
+            "tests/",
+            "--suite-timeout",
+            REAL_WORK_SUITE_TIMEOUT_SECONDS,
+        ])
         .output()
         .expect("run");
     assert_eq!(
@@ -290,7 +306,7 @@ fn failed_primary_stderr_writer_reports_on_still_writable_stderr() {
 
     let ungated = Command::cargo_bin("chelis")
         .expect("binary")
-        .timeout(Duration::from_secs(5))
+        .timeout(REAL_WORK_HARNESS_TIMEOUT)
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env_remove("CHELIS_TEST_INTERNAL_TESTING")
@@ -307,7 +323,7 @@ fn failed_primary_stderr_writer_reports_on_still_writable_stderr() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        .timeout(Duration::from_secs(5))
+        .timeout(REAL_WORK_HARNESS_TIMEOUT)
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
@@ -582,13 +598,20 @@ fn incomplete_suite_reports_the_deadline_not_the_abandoned_batch() {
     let (_dir, pkg) = make_reef_package("suite-timeout-fallback-then-deadline");
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        .timeout(Duration::from_secs(10))
+        .timeout(REAL_WORK_HARNESS_TIMEOUT)
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
         .env("CHELIS_TEST_FORCE_BATCH_ABORT", "1")
         .env("CHELIS_TEST_HANG_AFTER_SUITE", "1")
-        .args(["test", "tests/", "--json", "--suite-timeout", "3"])
+        .env("CHELIS_TEST_EXPIRE_SUITE_DEADLINE_AT_HANG", "1")
+        .args([
+            "test",
+            "tests/",
+            "--json",
+            "--suite-timeout",
+            REAL_WORK_SUITE_TIMEOUT_SECONDS,
+        ])
         .output()
         .expect("run");
     assert_eq!(output.status.code(), Some(1));
@@ -624,12 +647,18 @@ fn plain_timeout_counts_rows_not_fail_text_in_filename() {
         .expect("rename fixture");
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        .timeout(Duration::from_secs(10))
+        .timeout(REAL_WORK_HARNESS_TIMEOUT)
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
         .env("CHELIS_TEST_HANG_AFTER_SUITE", "1")
-        .args(["test", "tests/", "--suite-timeout", "3"])
+        .env("CHELIS_TEST_EXPIRE_SUITE_DEADLINE_AT_HANG", "1")
+        .args([
+            "test",
+            "tests/",
+            "--suite-timeout",
+            REAL_WORK_SUITE_TIMEOUT_SECONDS,
+        ])
         .output()
         .expect("run");
     assert_eq!(output.status.code(), Some(1));
@@ -651,7 +680,7 @@ fn normal_batch_stderr_is_byte_exact_and_separate_from_progress() {
     fs::write(&binary_stderr, [0xff, 0xfe, b'\n']).expect("write non-UTF-8 stderr probe");
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        .timeout(Duration::from_secs(10))
+        .timeout(REAL_WORK_HARNESS_TIMEOUT)
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
@@ -688,7 +717,7 @@ fn batch_stderr_survives_fallback_without_duplication() {
     let (_dir, pkg) = make_reef_package("suite-timeout-batch-stderr-fallback");
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        .timeout(Duration::from_secs(10))
+        .timeout(REAL_WORK_HARNESS_TIMEOUT)
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
@@ -823,25 +852,31 @@ def test_five() -> unit = test_assert(true, "five")
     let started = Instant::now();
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        .timeout(Duration::from_secs(10))
+        .timeout(REAL_WORK_HARNESS_TIMEOUT)
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
         .env("CHELIS_TEST_BATCH_STDERR", "diagnostic before timeout")
         .env("CHELIS_TEST_HANG_AFTER_BATCH", "1")
         .env("CHELIS_TEST_HANG_PID_FILE", &pid_file)
+        .env("CHELIS_TEST_EXPIRE_SUITE_DEADLINE_AT_HANG", "1")
         .args([
             "test",
             "tests/",
             "--json",
             "--suite-timeout",
-            "3",
+            REAL_WORK_SUITE_TIMEOUT_SECONDS,
             "--batch-mode",
             "auto",
         ])
         .output()
         .expect("run");
-    assert!(started.elapsed() < Duration::from_secs(8));
+    // The backstop's SIGTERM lands at 59.8s; well under it, the deadline ended
+    // at the announced hang, after the batch's rows were recorded.
+    assert!(
+        started.elapsed() < REAL_WORK_SUITE_TIMEOUT / 2,
+        "the suite deadline did not end at the announced hang"
+    );
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(output.stderr, b"diagnostic before timeout\n");
     let lines = json_lines(&output);

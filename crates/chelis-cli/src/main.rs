@@ -6415,12 +6415,49 @@ fn testing_hook_enabled(name: &str) -> bool {
         && env::var(name).as_deref() == Ok("1")
 }
 
-fn hang_test_suite_if_requested(name: &str) {
+/// Progress-file line a hung testing hook appends once everything it emitted
+/// before hanging is recorded, so the supervisor can expire the suite deadline
+/// at the hang instead of racing the suite's real work against a short clock.
+const TESTING_HANG_REACHED_LINE: &[u8] = b"{\"testing_hang_reached\":true}";
+
+/// Whether a hung testing hook ends the suite deadline as soon as it hangs.
+///
+/// Debug builds only: release builds compile this to `false`, so neither the
+/// announcement nor the early expiry exists in a distributed `chelis`.
+#[cfg(debug_assertions)]
+fn suite_deadline_expires_at_hang() -> bool {
+    testing_hook_enabled("CHELIS_TEST_EXPIRE_SUITE_DEADLINE_AT_HANG")
+}
+
+#[cfg(not(debug_assertions))]
+fn suite_deadline_expires_at_hang() -> bool {
+    false
+}
+
+fn hang_test_suite_if_requested(name: &str, progress_path: &Path) {
     if testing_hook_enabled(name) {
+        if suite_deadline_expires_at_hang() {
+            let _ = io::stdout().flush();
+            let _ = io::stderr().flush();
+            if let Ok(mut progress) = fs::OpenOptions::new().append(true).open(progress_path) {
+                let _ = progress
+                    .write_all(TESTING_HANG_REACHED_LINE)
+                    .and_then(|_| progress.write_all(b"\n"))
+                    .and_then(|_| progress.flush());
+            }
+        }
         loop {
             thread::park();
         }
     }
+}
+
+fn testing_hang_reached(progress_path: &Path) -> bool {
+    fs::read(progress_path).is_ok_and(|bytes| {
+        bytes
+            .split(|byte| *byte == b'\n')
+            .any(|line| line == TESTING_HANG_REACHED_LINE)
+    })
 }
 
 fn emit_finalized_test_suite_if_requested(
@@ -8344,11 +8381,16 @@ fn run_test_batch_subprocess(
     let output = match run_batch_worker_command_with_timeout(cmd, worker_timeout, |line| {
         let line = line.strip_suffix(b"\n").unwrap_or(line);
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
-            return;
-        };
-        if test_row_from_json(&value).is_none() {
-            return;
+        // The batch's hang announcement follows its rows on this one pipe, so
+        // recording it here proves every earlier row is already in progress.
+        let announced_hang = line == TESTING_HANG_REACHED_LINE && suite_deadline_expires_at_hang();
+        if !announced_hang {
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+                return;
+            };
+            if test_row_from_json(&value).is_none() {
+                return;
+            }
         }
         if let Some(progress) = progress.as_mut() {
             let _ = progress.write_all(line);
@@ -9142,7 +9184,7 @@ fn run_forked_test_suite(
         start_forked_suite_parent_watchdog(supervisor_read, progress_path.clone());
         ignore_test_suite_sigterm_if_requested();
         write_test_progress_rows_if_requested(&progress_path);
-        hang_test_suite_if_requested("CHELIS_TEST_HANG_BEFORE_SUITE");
+        hang_test_suite_if_requested("CHELIS_TEST_HANG_BEFORE_SUITE", &progress_path);
         let suite_result =
             emit_finalized_test_suite_if_requested(json, expect).unwrap_or_else(|| {
                 cmd_test(
@@ -9163,7 +9205,7 @@ fn run_forked_test_suite(
                 2
             }
         };
-        hang_test_suite_if_requested("CHELIS_TEST_HANG_AFTER_SUITE");
+        hang_test_suite_if_requested("CHELIS_TEST_HANG_AFTER_SUITE", &progress_path);
         let _ = io::stdout().flush();
         let _ = io::stderr().flush();
         unsafe {
@@ -9174,7 +9216,9 @@ fn run_forked_test_suite(
     drop(stdout_write);
     drop(stderr_write);
     drop(supervisor_read);
-    let output = run_forked_suite_pid_with_timeout(pid, stdout_read, stderr_read, timeout);
+    let hang_progress = suite_deadline_expires_at_hang().then_some(progress_path.as_path());
+    let output =
+        run_forked_suite_pid_with_timeout(pid, stdout_read, stderr_read, timeout, hang_progress);
     // Keep this write end live until the child has been reaped and its output
     // collected. If this public supervisor is killed, kernel closure wakes the
     // child watchdog, which unlinks progress before killing the process group.
@@ -9207,6 +9251,7 @@ fn run_forked_suite_pid_with_timeout(
     stdout_read: std::os::fd::OwnedFd,
     stderr_read: std::os::fd::OwnedFd,
     timeout: Duration,
+    hang_progress: Option<&Path>,
 ) -> Result<TestWorkerOutput, std::io::Error> {
     use std::os::unix::process::ExitStatusExt;
 
@@ -9221,12 +9266,10 @@ fn run_forked_suite_pid_with_timeout(
         child_stderr.read_to_end(&mut bytes).map(|_| bytes)
     });
     let started = Instant::now();
-    let deadline = started.checked_add(timeout);
-    let suite_term_at = deadline.map(|deadline| {
-        deadline
-            .checked_sub(Duration::from_millis(200))
-            .unwrap_or(started)
-    });
+    let term_grace = Duration::from_millis(200);
+    let mut deadline = started.checked_add(timeout);
+    let mut suite_term_at =
+        deadline.map(|deadline| deadline.checked_sub(term_grace).unwrap_or(started));
     let mut timed_out = false;
     let mut suite_term_sent = false;
     let wait_status = loop {
@@ -9239,6 +9282,12 @@ fn run_forked_suite_pid_with_timeout(
             break status;
         }
         let now = Instant::now();
+        if !suite_term_sent && hang_progress.is_some_and(testing_hang_reached) {
+            // A debug-build testing hook announced its hang: the deadline ends
+            // here, with the same SIGTERM-then-SIGKILL grace as the real one.
+            suite_term_at = Some(now);
+            deadline = now.checked_add(term_grace);
+        }
         if !suite_term_sent && suite_term_at.is_some_and(|term_at| now >= term_at) {
             timed_out = true;
             suite_term_sent = true;
@@ -9379,14 +9428,102 @@ fn terminate_worker_process(child: &mut std::process::Child) -> Result<(), std::
 
 #[cfg(unix)]
 fn send_suite_pid_signal(pid: libc::pid_t, signal: libc::c_int) -> Result<(), std::io::Error> {
-    let rc = unsafe { libc::kill(-pid, signal) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::ESRCH) {
-            return Err(err);
+    signal_suite_group(
+        || {
+            if unsafe { libc::kill(-pid, signal) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        },
+        SUITE_GROUP_EXIT_GRACE,
+    )
+}
+
+/// How long a group signal answered with EPERM is retried before the denial
+/// is taken as genuine.
+#[cfg(unix)]
+const SUITE_GROUP_EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// Deliver one signal to the suite's process group.
+///
+/// ESRCH means the group is gone, which is what every caller wants. Darwin
+/// also answers EPERM while the group's remaining members are still exiting,
+/// a state that ends in ESRCH, so EPERM is retried until `grace` elapses and
+/// only a denial that outlasts it is returned.
+#[cfg(unix)]
+fn signal_suite_group(
+    mut kill: impl FnMut() -> Result<(), std::io::Error>,
+    grace: Duration,
+) -> Result<(), std::io::Error> {
+    let started = Instant::now();
+    loop {
+        match kill() {
+            Ok(()) => return Ok(()),
+            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
+            Err(err) if err.raw_os_error() == Some(libc::EPERM) && started.elapsed() < grace => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => return Err(err),
         }
     }
-    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod suite_group_signal_tests {
+    use super::*;
+
+    /// Run `signal_suite_group` against scripted kill replies (`None` is a
+    /// delivered signal, `Some(errno)` a failure; the last reply repeats) and
+    /// report its result and how many signals it sent.
+    fn signal_with(replies: &[Option<i32>], grace: Duration) -> (std::io::Result<()>, usize) {
+        let mut calls = 0;
+        let result = signal_suite_group(
+            || {
+                let reply = replies[calls.min(replies.len() - 1)];
+                calls += 1;
+                match reply {
+                    None => Ok(()),
+                    Some(errno) => Err(std::io::Error::from_raw_os_error(errno)),
+                }
+            },
+            grace,
+        );
+        (result, calls)
+    }
+
+    #[test]
+    fn exiting_group_eperm_is_retried_until_the_group_is_gone() {
+        let replies = [Some(libc::EPERM), Some(libc::EPERM), Some(libc::ESRCH)];
+        let (result, calls) = signal_with(&replies, Duration::from_secs(60));
+        result.expect("an exiting group is not a denial");
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn delivered_and_vanished_signals_succeed_without_retry() {
+        for reply in [None, Some(libc::ESRCH)] {
+            let (result, calls) = signal_with(&[reply], Duration::from_secs(60));
+            result.expect("delivered or gone");
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn eperm_past_the_grace_keeps_the_original_error() {
+        let (result, calls) = signal_with(&[Some(libc::EPERM)], Duration::from_millis(50));
+        let error = result.expect_err("a lasting denial is fatal");
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        assert!(calls > 1, "EPERM was not retried");
+    }
+
+    #[test]
+    fn other_errors_are_not_retried() {
+        let (result, calls) = signal_with(&[Some(libc::EINVAL)], Duration::from_secs(60));
+        let error = result.expect_err("an invalid signal is fatal");
+        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+        assert_eq!(calls, 1);
+    }
 }
 
 #[cfg(unix)]
@@ -9855,6 +9992,12 @@ fn cmd_internal_test_batch(manifest_path: &Path, timeout: Duration) -> Result<i3
         if let Ok(path) = env::var("CHELIS_TEST_HANG_PID_FILE") {
             fs::write(path, std::process::id().to_string())
                 .map_err(|e| format!("write hung-batch pid file: {e}"))?;
+        }
+        if suite_deadline_expires_at_hang() {
+            out.write_all(TESTING_HANG_REACHED_LINE)
+                .and_then(|_| out.write_all(b"\n"))
+                .and_then(|_| out.flush())
+                .map_err(|e| format!("announce hung batch: {e}"))?;
         }
         loop {
             thread::park();
