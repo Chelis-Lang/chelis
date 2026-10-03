@@ -567,8 +567,8 @@ fn f32_fused_reduction_routes_are_correctly_rounded() {
 /// result, so the library cannot change it.
 const LIBM_ROUNDED_FUNCTIONS: &[&str] = &[
     "acos", "asin", "atan", "atan2", "cos", "sin", "tan", "acosh", "asinh", "atanh", "cosh",
-    "sinh", "tanh", "exp", "exp2", "expm1", "log", "log10", "log1p", "log2", "pow", "sqrt",
-    "cbrt", "hypot", "erf", "erfc", "lgamma", "tgamma",
+    "sinh", "tanh", "exp", "exp2", "expm1", "log", "log10", "log1p", "log2", "pow", "sqrt", "cbrt",
+    "hypot", "erf", "erfc", "lgamma", "tgamma",
 ];
 
 /// The one rounded libm function generated code may call: C Annex F (F.3)
@@ -597,7 +597,11 @@ fn is_host_math_identifier(word: &str) -> bool {
     let libm = LIBM_ROUNDED_FUNCTIONS
         .iter()
         .filter(|name| !LIBM_KEPT.contains(name))
-        .any(|name| ["", "f", "l"].iter().any(|suffix| word == format!("{name}{suffix}")));
+        .any(|name| {
+            ["", "f", "l"]
+                .iter()
+                .any(|suffix| word == format!("{name}{suffix}"))
+        });
     libm || VENDOR_MATH_IDENTIFIERS.contains(&word) || word.starts_with("Sleef_")
 }
 

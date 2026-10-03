@@ -729,7 +729,7 @@ mod tests {
             &toolchain.compile_flags,
             &toolchain.link_flags,
         )
-            .unwrap_or_else(|error| panic!("{error}"));
+        .unwrap_or_else(|error| panic!("{error}"));
         assert!(identity.path.is_absolute(), "{identity}");
         assert!(!identity.version.is_empty(), "{identity}");
     }

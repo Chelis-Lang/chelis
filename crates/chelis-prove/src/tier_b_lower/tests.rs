@@ -1083,7 +1083,11 @@ fn assert_cvc5_agrees_with_eval(desc: &str, goal: SmtExpr) {
     use crate::tier_b::{TierBResult, solve_property};
     use chelis_unord::UnordMap;
 
-    let runtime_true = eval_bool_strict(&goal, &UnordMap::new(), &chelis_std_bundle::EMBEDDED_RUNTIME);
+    let runtime_true = eval_bool_strict(
+        &goal,
+        &UnordMap::new(),
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    );
     let verdict = solve_property(&ground_goal(goal.clone()), 5000);
     let cvc5_true = match verdict {
         TierBResult::Proved => true,
@@ -1119,7 +1123,11 @@ fn cvc5_disproves_point_one_plus_point_two_eq_point_three() {
     );
     // The f64 ground truth: false.
     assert!(
-        !crate::concrete_eval::eval_bool_strict(&goal, &UnordMap::new(), &chelis_std_bundle::EMBEDDED_RUNTIME),
+        !crate::concrete_eval::eval_bool_strict(
+            &goal,
+            &UnordMap::new(),
+            &chelis_std_bundle::EMBEDDED_RUNTIME
+        ),
         "f64 ground truth: 0.1 + 0.2 != 0.3"
     );
     // cvc5 must now AGREE: Disproved (a counterexample-free disproof of a
@@ -1149,7 +1157,11 @@ fn cvc5_proves_point_one_plus_point_two_gt_point_three() {
         real(0.3),
     );
     assert!(
-        crate::concrete_eval::eval_bool_strict(&goal, &UnordMap::new(), &chelis_std_bundle::EMBEDDED_RUNTIME),
+        crate::concrete_eval::eval_bool_strict(
+            &goal,
+            &UnordMap::new(),
+            &chelis_std_bundle::EMBEDDED_RUNTIME
+        ),
         "f64 ground truth: 0.1 + 0.2 > 0.3"
     );
     assert_eq!(
@@ -1233,7 +1245,11 @@ fn cvc5_dyadic_control_unaffected_by_fix() {
 
     let goal = cmp(Eq, arith(Add, real(0.5), real(0.25)), real(0.75));
     assert!(
-        crate::concrete_eval::eval_bool_strict(&goal, &UnordMap::new(), &chelis_std_bundle::EMBEDDED_RUNTIME),
+        crate::concrete_eval::eval_bool_strict(
+            &goal,
+            &UnordMap::new(),
+            &chelis_std_bundle::EMBEDDED_RUNTIME
+        ),
         "f64 ground truth (dyadic): 0.5 + 0.25 == 0.75"
     );
     assert_eq!(
@@ -1273,7 +1289,11 @@ fn cvc5_disproves_point_one_eq_one_over_ten_documented_op_rounding_gap() {
     );
     // The f64 evaluator says TRUE (1.0_f64 / 10.0_f64 rounds to 0.1_f64) ...
     assert!(
-        crate::concrete_eval::eval_bool_strict(&goal, &UnordMap::new(), &chelis_std_bundle::EMBEDDED_RUNTIME),
+        crate::concrete_eval::eval_bool_strict(
+            &goal,
+            &UnordMap::new(),
+            &chelis_std_bundle::EMBEDDED_RUNTIME
+        ),
         "f64 ground truth: 1.0 / 10.0 == 0.1 (the division rounds to 0.1_f64)"
     );
     // ... yet cvc5 DISPROVES it (exact 1/10 != the f64 rational of 0.1). This

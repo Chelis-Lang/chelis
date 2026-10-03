@@ -2719,7 +2719,9 @@ fn reduce_extreme_group(
         TensorReduceOp::Sum { .. }
         | TensorReduceOp::ReduceWindowSum
         | TensorReduceOp::ReduceWindowMean
-        | TensorReduceOp::ProdReduce => unreachable!("arithmetic reduces in reduce_arithmetic_group"),
+        | TensorReduceOp::ProdReduce => {
+            unreachable!("arithmetic reduces in reduce_arithmetic_group")
+        }
     }
 }
 

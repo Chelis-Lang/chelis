@@ -146,14 +146,13 @@ fn compiler_failure_and_missing_product_preserve_previous_artifact() {
     // those probes to a real one and breaks only the compile itself. The last
     // case refuses the probe too.
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
-    let real =
-        chelis_backend_c::toolchain::verify_compiler(
-            &toolchain.compiler,
-            &toolchain.compile_flags,
-            &toolchain.link_flags,
-        )
-            .unwrap()
-            .path;
+    let real = chelis_backend_c::toolchain::verify_compiler(
+        &toolchain.compiler,
+        &toolchain.compile_flags,
+        &toolchain.link_flags,
+    )
+    .unwrap()
+    .path;
     let probes = format!(
         "case \" $* \" in *' --version '*|*' -dM '*|*chelis-compiler-canary*) exec '{}' \"$@\";; esac\n",
         real.display()
@@ -545,14 +544,13 @@ fn c_build_ignores_compiler_environment_and_refuses_profile_changing_wrapper() {
     assert_eq!(run(&clean), run(&hostile));
 
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
-    let real =
-        chelis_backend_c::toolchain::verify_compiler(
-            &toolchain.compiler,
-            &toolchain.compile_flags,
-            &toolchain.link_flags,
-        )
-            .unwrap()
-            .path;
+    let real = chelis_backend_c::toolchain::verify_compiler(
+        &toolchain.compiler,
+        &toolchain.compile_flags,
+        &toolchain.link_flags,
+    )
+    .unwrap()
+    .path;
     // No predefined macro reveals contraction, so the floating-point canary
     // refuses that wrapper. The x86-64 baseline has no fused multiply-add, so
     // there the wrapper also adds the `-mfma` a `-march=native` one would.
@@ -1066,7 +1064,16 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
             vec![(
                 "x",
                 vec![4, 2],
-                vec![w.inf, neg_inf, w.payload, w.one, w.negative, w.one, w.signaling, w.one],
+                vec![
+                    w.inf,
+                    neg_inf,
+                    w.payload,
+                    w.one,
+                    w.negative,
+                    w.one,
+                    w.signaling,
+                    w.one,
+                ],
             )],
             vec![4],
             "sum(x, 1i32)".into(),

@@ -156,7 +156,11 @@ impl NativeBuild {
     }
 
     fn executable_command(&self, product: &Path) -> Command {
-        let mut inputs: Vec<&OsStr> = self.sources.iter().map(|source| source.as_os_str()).collect();
+        let mut inputs: Vec<&OsStr> = self
+            .sources
+            .iter()
+            .map(|source| source.as_os_str())
+            .collect();
         inputs.push(self.runtime_archive.as_os_str());
         let mut command = self.tool(&self.compiler);
         command.args(chelis_backend_c::toolchain::link_args(
