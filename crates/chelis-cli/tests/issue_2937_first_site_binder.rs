@@ -727,3 +727,150 @@ fn each_untaken_call_leaves_a_later_ascription_as_the_first_site() {
         &format!("other = {THREES_2X4}\nout = {THREES_2X4}"),
     );
 }
+
+/// Check accepts `source`; both lanes then refuse it before running, each
+/// naming `text`.
+fn assert_lanes_refuse(stem: &str, source: &str, text: &str) {
+    let dir = tempdir().expect("tempdir");
+    let path = write_fixture(&dir, stem, source);
+    let checked = check(&path);
+    assert!(
+        checked.status.success(),
+        "{stem}: check accepts: {}",
+        combined(&checked)
+    );
+    let evaluated = eval(&path);
+    let compiled = build_and_run(&dir, stem, &path);
+    for (lane, output) in [("eval", &evaluated), ("c", &compiled)] {
+        let rendered = combined(output);
+        assert!(
+            !output.status.success(),
+            "{stem}: {lane} must refuse: {rendered}"
+        );
+        assert!(
+            rendered.contains(text) && !rendered.contains("numeric trap"),
+            "{stem}: {lane} must refuse with `{text}`: {rendered}"
+        );
+    }
+}
+
+/// Only a binder the declared result names and no parameter names is
+/// output-inferred. A binder the body alone names has no site that may bind
+/// it, so a site naming it keeps the refusal, on a kernel body and across the
+/// regions of a host body alike.
+#[test]
+fn a_binder_only_the_body_names_is_refused_on_both_lanes() {
+    assert_lanes_refuse(
+        "body_only_kernel",
+        &format!(
+            "def f[c, q](v: &tensor[c, f32], k: i64) -> tensor[c, f32] = {{\n\
+             \x20 a: tensor[c, q, f32] = insert(v, 1i32, k)\n\
+             \x20 b: tensor[c, q, f32] = insert(v, 1i32, add(k, 1i64))\n\
+             \x20 sum(add(a, b), 1i32)\n\
+             }}\n\
+             out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE})\n"
+        ),
+        "cannot resolve authored extent `q`",
+    );
+    assert_lanes_refuse(
+        "body_only_regions",
+        &format!(
+            "def f[c, q](v: &tensor[c, f32], k: i64, flag: bool) -> tensor[c, f32] = {{\n\
+             \x20 s = if flag then {{\n\
+             \x20   a: tensor[c, q, f32] = insert(v, 1i32, k)\n\
+             \x20   sum(a, 1i32)\n\
+             \x20 }} else add(v, v)\n\
+             \x20 b: tensor[c, q, f32] = insert(v, 1i32, add(k, 1i64))\n\
+             \x20 add(s, sum(b, 1i32))\n\
+             }}\n\
+             {}",
+            out_call(&runtime_flag(2))
+        ),
+        "cannot resolve authored extent `q`",
+    );
+}
+
+/// A binder an element type of a `List` parameter names is the parameter's,
+/// not output-inferred, so a site naming it never binds it first. The host
+/// regions have no witness for it and keep the refusal on both lanes.
+#[test]
+fn a_list_parameter_binder_is_never_bound_by_a_site() {
+    for (stem, sites) in [
+        (
+            "list_binder_one_site",
+            "\x20 b: tensor[n, f32] = insert(sum(c0, 0i32), 0i32, k)\n\
+             \x20 if flag then add(b, b) else b\n",
+        ),
+        (
+            "list_binder_two_sites",
+            "\x20 b: tensor[n, f32] = insert(sum(c0, 0i32), 0i32, k)\n\
+             \x20 d: tensor[n, f32] = insert(sum(c0, 0i32), 0i32, add(k, 1i64))\n\
+             \x20 if flag then add(b, b) else add(c0, c0)\n",
+        ),
+    ] {
+        assert_lanes_refuse(
+            stem,
+            &format!(
+                "def f[n](xs: List[tensor[n, f32]], k: i64, flag: bool) -> tensor[n, f32] = {{\n\
+                 \x20 c0 = if flag then index(xs, 0i64) else index(xs, 1i64)\n\
+                 {sites}\
+                 }}\n\
+                 out = f([to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32])], {RUNTIME_THREE}, {})\n",
+                runtime_flag(2)
+            ),
+            "cannot resolve authored extent `n`",
+        );
+    }
+}
+
+/// A lambda's ascription naming the enclosing definition's parameter binder
+/// is a claim, never a first site: the lambda does not bind `c` afresh.
+/// Compiled C claims it against the parameter and traps. `chelis eval` has no
+/// typed parameter input inside a lambda, so it keeps the refusal it gave
+/// before output-inferred binders existed; neither lane prints a value.
+#[test]
+fn a_lambda_site_never_binds_the_enclosing_parameter_binder() {
+    for (stem, body) in [
+        (
+            "lambda_param_site",
+            "\x20   a: tensor[c, f32] = insert(sum(v, 0i32), 0i32, j)\n\
+             \x20   add(j, shape(a, 0i32))\n",
+        ),
+        (
+            "lambda_param_two_sites",
+            "\x20   a: tensor[c, f32] = insert(sum(v, 0i32), 0i32, j)\n\
+             \x20   b = add(j, shape(a, 0i32))\n\
+             \x20   d: tensor[c, f32] = insert(sum(v, 0i32), 0i32, b)\n\
+             \x20   shape(d, 0i32)\n",
+        ),
+    ] {
+        let dir = tempdir().expect("tempdir");
+        let source = format!(
+            "def f[c](v: &tensor[c, f32], k: i64) -> i64 = {{\n\
+             \x20 m = map(fn (j: i64) -> {{\n\
+             {body}\
+             \x20 }}, [k])\n\
+             \x20 sum(to_tensor(m), 0i32) |> tensor_to_scalar\n\
+             }}\n\
+             out = f(to_tensor([1.0f32, 2.0f32]), {RUNTIME_THREE})\n"
+        );
+        let path = write_fixture(&dir, stem, &source);
+        assert!(check(&path).status.success(), "{stem}: check accepts");
+        let evaluated = eval(&path);
+        let eval_out = combined(&evaluated);
+        assert!(
+            !evaluated.status.success()
+                && eval_out.contains("cannot resolve authored extent `c`")
+                && !eval_out.contains("out = "),
+            "{stem}: eval must refuse rather than bind `c`: {eval_out}"
+        );
+        let compiled = build_and_run(&dir, stem, &path);
+        let c_out = combined(&compiled);
+        assert!(
+            !compiled.status.success()
+                && c_out.contains("extent `c`: claimed = 2, insert axis 0 = 3")
+                && c_out.contains(INSERT_TRAP),
+            "{stem}: C must claim `c` against the parameter: {c_out}"
+        );
+    }
+}

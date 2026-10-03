@@ -3383,6 +3383,18 @@ impl<'a> EvalContext<'a> {
                     )));
                 }
                 Some(_) => {}
+                // Only an output-inferred binder may be bound by a site
+                // (spec/04-type-system.md section 4.4.1). Any other binder is
+                // a parameter's, and an activation without its record, such
+                // as a lambda's, cannot claim it: refuse as the lowering does
+                // for a binder it cannot resolve.
+                None if !site.output_inferred => {
+                    return Err(format!(
+                        "local tensor ascription `{}` cannot resolve authored extent `{}` in \
+                         this activation",
+                        site.binding, site.binder
+                    ));
+                }
                 None => self.activation_extents.bind(
                     site.binder.clone(),
                     NamedResultSource {

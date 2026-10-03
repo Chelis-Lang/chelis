@@ -1528,6 +1528,9 @@ pub struct LocalAscriptionNamedSite {
     pub binding: String,
     pub axis: usize,
     pub binder: String,
+    /// Whether `binder` is output-inferred ([`DimBinderRoles::return_only`]),
+    /// so this site may bind it; otherwise the site is only ever a claim.
+    pub output_inferred: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1850,6 +1853,16 @@ impl SubexprLoweringContext {
                             claim.axis(),
                             claim,
                         ),
+                        output_inferred: false,
+                    })
+                    .map(|site| LocalAscriptionNamedSite {
+                        output_inferred: DimBinderRoles::of_ascription(
+                            &self.program_signatures,
+                            ascription,
+                        )
+                        .return_only
+                        .contains(&extent_binder_label(&site.binder)),
+                        ..site
                     })
             })
             .collect()
@@ -4611,6 +4624,88 @@ fn collect_top_level_defs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
         collect_top_level_defs_from_expr(expr, &mut defs);
     }
     defs
+}
+
+/// The roles a declaration's checked function type gives its dimension
+/// binders (spec/04-type-system.md section 4.4.1).
+///
+/// This is the one derivation the lowering, the evaluator's activation
+/// records, and the C host lane's first-site handling all read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DimBinderRoles {
+    /// Named by the declared result and by no parameter type at any depth of
+    /// a List, tuple, reference, or other constructor: output-inferred, so
+    /// only these may be bound by a first site in the body.
+    pub return_only: BTreeSet<String>,
+    /// Named by a tensor parameter's own axes (through a reference): bound
+    /// when the activation starts, so a site naming one is a claim.
+    pub tensor_parameter: BTreeSet<String>,
+}
+
+impl DimBinderRoles {
+    pub fn of_signature(signature: &Expr) -> Self {
+        fn collect(expr: &Expr, out: &mut BTreeSet<String>) {
+            let Some((tag, _, kids)) = stamped_parts(expr) else {
+                return;
+            };
+            if matches!(tag, DeepTag::DName | DeepTag::DVar) {
+                if let Some(name) = kids.first().and_then(symbol_name) {
+                    out.insert(name.to_string());
+                }
+                return;
+            }
+            for kid in kids {
+                collect(kid, out);
+            }
+        }
+        fn tensor_axes(expr: &Expr, out: &mut BTreeSet<String>) {
+            match stamped_parts(expr) {
+                Some((DeepTag::TRef, _, kids)) => {
+                    if let Some(inner) = kids.first() {
+                        tensor_axes(inner, out);
+                    }
+                }
+                Some((DeepTag::TTensor, _, _)) => collect(expr, out),
+                _ => {}
+            }
+        }
+        let Some((DeepTag::TFn, _, kids)) = stamped_parts(signature) else {
+            return Self::default();
+        };
+        let Some((result, params)) = kids.split_last() else {
+            return Self::default();
+        };
+        let mut carried = BTreeSet::new();
+        let mut tensor_parameter = BTreeSet::new();
+        for param in params {
+            collect(param, &mut carried);
+            tensor_axes(param, &mut tensor_parameter);
+        }
+        let mut return_only = BTreeSet::new();
+        collect(result, &mut return_only);
+        return_only.retain(|name| !carried.contains(name));
+        Self {
+            return_only,
+            tensor_parameter,
+        }
+    }
+
+    /// The roles of the declaration that owns `ascription`, by its checked
+    /// signature in `signatures`; empty when it has none.
+    pub fn of_ascription(
+        signatures: &BTreeMap<String, Expr>,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+    ) -> Self {
+        match ascription
+            .declaration_name()
+            .and_then(|name| signatures.get(name))
+        {
+            Some(signature) => Self::of_signature(signature),
+            // A top-level value's ascription has no signature, so it names
+            // no dimension binder at all.
+            None => Self::default(),
+        }
+    }
 }
 
 pub(crate) fn collect_top_level_sigs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
@@ -10962,16 +11057,23 @@ impl<'program> LowerCtx<'program> {
         ascription: &chelis_types::CheckedLocalTensorAscription,
         claim: &chelis_types::LocalAscriptionAxisClaim,
     ) -> bool {
-        matches!(
+        if !matches!(
             claim.required_extent(),
             chelis_types::types::Dim::Name(_) | chelis_types::types::Dim::Var(_)
-        ) && self
-            .signature_witness(&Self::local_ascription_claim_label(
-                ascription,
-                claim.axis(),
-                claim,
-            ))
-            .is_none()
+        ) {
+            return false;
+        }
+        let label = Self::local_ascription_claim_label(ascription, claim.axis(), claim);
+        if self.signature_witness(&label).is_some() {
+            return false;
+        }
+        // Only an output-inferred binder may be bound here. A tensor
+        // parameter's binder without a witness is one a host region does not
+        // capture; the host lane claims it against the activation. Any other
+        // binder keeps the refusal at its claim token.
+        let roles = DimBinderRoles::of_ascription(&self.program_signatures, ascription);
+        let binder = extent_binder_label(&label);
+        roles.return_only.contains(&binder) || roles.tensor_parameter.contains(&binder)
     }
 
     fn discard_local_ascription_tokens_in(&mut self, body: &Expr) {

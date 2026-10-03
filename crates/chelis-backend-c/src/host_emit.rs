@@ -6179,7 +6179,10 @@ impl<'a> HostEmitter<'a> {
         sites: &[chelis_ir::lower::LocalAscriptionNamedSite],
     ) {
         let origin = result_origin_name(target);
-        for site in sites {
+        // Only an output-inferred binder's site binds or claims a frame; a
+        // frame no such site names is dropped, so the frames follow the
+        // signature's return-only set.
+        for site in sites.iter().filter(|site| site.output_inferred) {
             let Some(frame) = self
                 .first_site_frames
                 .iter_mut()
