@@ -288,7 +288,7 @@ fn check_compiler(path: PathBuf, compile_flags: &[String]) -> Result<CompilerIde
 
 /// The canary's inputs, as `f64` bit patterns it reads from its arguments, so
 /// the compiler cannot fold any check away.
-const CANARY_INPUTS: [u64; 6] = [
+const CANARY_INPUTS: [u64; 10] = [
     // A worst case for both kernels: `chelis_cr_exp` and `chelis_cr_tanh`
     // round it wrongly once their polynomial evaluation is contracted.
     0x3fd3_3333_3333_7111,
@@ -300,16 +300,27 @@ const CANARY_INPUTS: [u64; 6] = [
     // p = 2^53 and q = 1: (p + q) - p is 0, and q once reassociated.
     0x4340_0000_0000_0000,
     0x3ff0_0000_0000_0000,
+    // n = 5: n / 3 differs from n * (1/3) in the last bit.
+    0x4014_0000_0000_0000,
+    // z = -0: z + 0 is +0, and -0 once signed zeros are ignored.
+    0x8000_0000_0000_0000,
+    // s = 2^-1000 and t = 2^-60: s * t is the subnormal 2^-1060, and 0 under
+    // flush-to-zero (a `crtfastmath` startup, for example).
+    0x0170_0000_0000_0000,
+    0x3c30_0000_0000_0000,
 ];
 
 /// What [`CANARY_MAIN`] prints for [`CANARY_INPUTS`] under the profile: the
 /// check, the operation it evaluates, and the result's bits. The kernel rows
 /// are the correctly rounded results (checked against 300-bit mpmath).
-const CANARY_CASES: [(&str, &str, u64); 4] = [
+const CANARY_CASES: [(&str, &str, u64); 7] = [
     ("exp", "chelis_cr_exp(0x1.3333333337111p-2)", 0x3ff5_9905_8c8c_2f76),
     ("tanh", "chelis_cr_tanh(0x1.3333333337111p-2)", 0x3fd2_a4dd_a7d9_4d98),
     ("contraction", "(1+2^-27)*(1+2^-27) - (1+2^-26)", 0),
     ("reassociation", "(2^53 + 1) - 2^53", 0),
+    ("reciprocal", "5 / 3", 0x3ffa_aaaa_aaaa_aaab),
+    ("signed-zero", "-0 + 0", 0),
+    ("subnormal", "2^-1000 * 2^-60", 0x4000),
 ];
 
 /// The canary's driver. The kernels come from `chelis-crmath`, the same text
@@ -332,7 +343,7 @@ static void chelis_canary_print(const char *check, double value) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 7) {
+    if (argc != 11) {
         return 2;
     }
     double x = chelis_canary_arg(argv[1]);
@@ -341,11 +352,18 @@ int main(int argc, char **argv) {
     double c = chelis_canary_arg(argv[4]);
     double p = chelis_canary_arg(argv[5]);
     double q = chelis_canary_arg(argv[6]);
+    double n = chelis_canary_arg(argv[7]);
+    double z = chelis_canary_arg(argv[8]);
+    double s = chelis_canary_arg(argv[9]);
+    double t = chelis_canary_arg(argv[10]);
     chelis_canary_print("exp", chelis_cr_exp(x));
     chelis_canary_print("tanh", chelis_cr_tanh(x));
     chelis_canary_print("contraction", a * b + c);
     double sum = p + q;
     chelis_canary_print("reassociation", sum - p);
+    chelis_canary_print("reciprocal", n / 3.0);
+    chelis_canary_print("signed-zero", z + 0.0);
+    chelis_canary_print("subnormal", s * t);
     return 0;
 }
 "#;
@@ -735,6 +753,8 @@ mod tests {
             ("unoptimised-cc", "-O0", "__OPTIMIZE__"),
             ("contract-cc", contract, "contraction: "),
             ("unsafe-cc", "-funsafe-math-optimizations", "reassociation: "),
+            ("reciprocal-cc", "-freciprocal-math", "reciprocal: "),
+            ("signed-zero-cc", "-fno-signed-zeros", "signed-zero: "),
             (
                 "associative-cc",
                 "-fassociative-math -fno-signed-zeros -fno-trapping-math",
