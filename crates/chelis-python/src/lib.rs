@@ -1313,8 +1313,14 @@ fn compile_shared_library_inner(
         .collect();
 
     // The C compiler runs with the allowlisted environment and the pinned
-    // profile's own optimisation level, as `chelis build` does; hipcc keeps
-    // its environment, which ROCm uses to locate its installation.
+    // profile's own optimisation level, as `chelis build` does, and the same
+    // check refuses one whose wrapper or configuration changes the profile;
+    // hipcc keeps its environment, which ROCm uses to locate its installation.
+    if artifact.compile_result.target == CompileTarget::C {
+        let profile: Vec<String> = compile_flags.iter().map(|flag| flag.to_string()).collect();
+        chelis_backend_c::toolchain::verify_compiler(&compiler.to_string_lossy(), &profile)
+            .map_err(|error| format!("native compile: {error}"))?;
+    }
     let mut command = match artifact.compile_result.target {
         CompileTarget::C => chelis_backend_c::toolchain::tool_command(&compiler),
         CompileTarget::Hip => {
@@ -2536,6 +2542,71 @@ loss = (mean(x, 0) : tensor[f32])
         let library = open_compiled_library(&output.lib_path)
             .expect("shared library should load without unresolved runtime symbols");
         drop(library);
+    }
+
+    /// spec/08-backends.md: a selected compiler whose wrapper changes the
+    /// pinned profile fails the build. Contraction shows in no predefined
+    /// macro, so this is the floating-point canary's refusal. The compiler is
+    /// chosen through `CHELIS_CC`, so the job runs in a child test process.
+    #[cfg(unix)]
+    #[test]
+    fn compile_and_load_job_refuses_a_contracting_compiler_wrapper() {
+        const TEST: &str = "tests::compile_and_load_job_refuses_a_contracting_compiler_wrapper";
+        let dir = tempdir().expect("tempdir");
+        if std::env::var_os("CHELIS_PYTHON_WRAPPER_CHILD").is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+            let real = chelis_backend_c::toolchain::verify_compiler(
+                &toolchain.compiler,
+                &toolchain.compile_flags,
+            )
+            .unwrap_or_else(|error| panic!("{error}"))
+            .path;
+            // The x86-64 baseline has no fused multiply-add; `-mfma` is what a
+            // `-march=native` wrapper would add there.
+            let contract = if cfg!(target_arch = "x86_64") {
+                "-mfma -ffp-contract=fast"
+            } else {
+                "-ffp-contract=fast"
+            };
+            let wrapper = dir.path().join("contract-cc");
+            fs::write(
+                &wrapper,
+                format!("#!/bin/sh\nexec '{}' \"$@\" {contract}\n", real.display()),
+            )
+            .expect("write wrapper");
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))
+                .expect("chmod wrapper");
+            let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", TEST])
+                .env("CHELIS_PYTHON_WRAPPER_CHILD", "1")
+                .env("CHELIS_CC", &wrapper)
+                .status()
+                .expect("run child");
+            assert!(status.success(), "{TEST} failed in the child");
+            return;
+        }
+        let source_path = dir.path().join("model.ch");
+        fs::write(&source_path, RELU4_SOURCE).expect("write source");
+        let error = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        })
+        .err()
+        .expect("a contracting wrapper is refused");
+        let CompileAndLoadError::Message(message) = error else {
+            panic!("expected a refusal message");
+        };
+        assert!(
+            message.contains("contract-cc") && message.contains("floating-point canary disagrees"),
+            "{message}"
+        );
+        assert!(!dir.path().join("model.so").exists(), "no library is built");
     }
 
     const RELU4_SOURCE: &str = "def relu4(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n";

@@ -141,16 +141,17 @@ fn compiler_failure_and_missing_product_preserve_previous_artifact() {
     fs::write(&file, "answer = 42i64\n").unwrap();
     build(&file, &out).assert().success();
     let original = fs::read(out.join("answer")).unwrap();
-    // The build probes the compiler's identity and predefined macros before
-    // compiling, so the broken compiler hands those probes to a real one and
-    // breaks only the compile itself. The last case refuses the probe too.
+    // The build probes the compiler's identity, predefined macros, and
+    // floating-point canary before compiling, so the broken compiler hands
+    // those probes to a real one and breaks only the compile itself. The last
+    // case refuses the probe too.
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
     let real =
         chelis_backend_c::toolchain::verify_compiler(&toolchain.compiler, &toolchain.compile_flags)
             .unwrap()
             .path;
     let probes = format!(
-        "case \" $* \" in *' --version '*|*' -dM '*) exec '{}' \"$@\";; esac\n",
+        "case \" $* \" in *' --version '*|*' -dM '*|*chelis-compiler-canary*) exec '{}' \"$@\";; esac\n",
         real.display()
     );
     let compiler = dir.path().join("broken compiler");
@@ -544,16 +545,29 @@ fn c_build_ignores_compiler_environment_and_refuses_profile_changing_wrapper() {
         chelis_backend_c::toolchain::verify_compiler(&toolchain.compiler, &toolchain.compile_flags)
             .unwrap()
             .path;
-    let wrapper = dir.path().join("fast-cc");
-    fs::write(
-        &wrapper,
-        format!("#!/bin/sh\nexec '{}' \"$@\" -ffast-math\n", real.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-    build(&file, &dir.path().join("fast"))
-        .env("CHELIS_CC", &wrapper)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("__FAST_MATH__"));
+    // No predefined macro reveals contraction, so the floating-point canary
+    // refuses that wrapper. The x86-64 baseline has no fused multiply-add, so
+    // there the wrapper also adds the `-mfma` a `-march=native` one would.
+    let contract = if cfg!(target_arch = "x86_64") {
+        "-mfma -ffp-contract=fast"
+    } else {
+        "-ffp-contract=fast"
+    };
+    for (name, extra, diagnostic) in [
+        ("fast-cc", "-ffast-math", "__FAST_MATH__"),
+        ("contract-cc", contract, "floating-point canary disagrees"),
+    ] {
+        let wrapper = dir.path().join(name);
+        fs::write(
+            &wrapper,
+            format!("#!/bin/sh\nexec '{}' \"$@\" {extra}\n", real.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        build(&file, &dir.path().join(name))
+            .env("CHELIS_CC", &wrapper)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(diagnostic));
+    }
 }

@@ -1,5 +1,6 @@
 //! Cross-platform toolchain resolution for Chelis CPU codegen consumers.
 
+use chelis_crmath::c_source::{Kernel, kernel_text};
 use std::{
     ffi::OsStr,
     fmt,
@@ -194,10 +195,13 @@ impl fmt::Display for CompilerCheckError {
 
 /// Resolve `compiler`'s identity and check that, given `compile_flags`, it
 /// compiles with the profile's floating-point semantics. A wrapper script is
-/// opaque on the command line, so the check reads what the compiler itself
-/// predefines under those flags: fast math (`__FAST_MATH__`), finite-only math
-/// (`__FINITE_MATH_ONLY__`), or a dropped optimisation level (`__OPTIMIZE__`
-/// missing although the profile passes `-O2`) means something outside the
+/// opaque on the command line, so the check observes the compiler itself, in
+/// two steps. First it reads what the compiler predefines under those flags:
+/// fast math (`__FAST_MATH__`), finite-only math (`__FINITE_MATH_ONLY__`), or a
+/// dropped optimisation level (`__OPTIMIZE__` missing although the profile
+/// passes `-O2`). No macro reveals contraction or reassociation, so it then
+/// compiles and runs [`CANARY_MAIN`] with the same flags and compares the bits
+/// it prints with [`CANARY_CASES`]. Any difference means something outside the
 /// profile changed the compile, and the build is refused.
 pub fn verify_compiler(
     compiler: &str,
@@ -274,7 +278,191 @@ fn check_compiler(path: PathBuf, compile_flags: &[String]) -> Result<CompilerIde
             violations.join("; ")
         ));
     }
+    run_canary(&path, compile_flags)?;
     Ok(CompilerIdentity { path, version })
+}
+
+/// The canary's inputs, as `f64` bit patterns it reads from its arguments, so
+/// the compiler cannot fold any check away.
+const CANARY_INPUTS: [u64; 6] = [
+    // A worst case for both kernels: `chelis_cr_exp` and `chelis_cr_tanh`
+    // round it wrongly once their polynomial evaluation is contracted.
+    0x3fd3_3333_3333_7111,
+    // a = b = 1 + 2^-27 and c = -(1 + 2^-26): a*b + c is 0 when the product
+    // is rounded and 2^-54 when it is fused.
+    0x3ff0_0000_0200_0000,
+    0x3ff0_0000_0200_0000,
+    0xbff0_0000_0400_0000,
+    // p = 2^53 and q = 1: (p + q) - p is 0, and q once reassociated.
+    0x4340_0000_0000_0000,
+    0x3ff0_0000_0000_0000,
+];
+
+/// What [`CANARY_MAIN`] prints for [`CANARY_INPUTS`] under the profile: the
+/// check, the operation it evaluates, and the result's bits. The kernel rows
+/// are the correctly rounded results (checked against 300-bit mpmath).
+const CANARY_CASES: [(&str, &str, u64); 4] = [
+    ("exp", "chelis_cr_exp(0x1.3333333337111p-2)", 0x3ff5_9905_8c8c_2f76),
+    ("tanh", "chelis_cr_tanh(0x1.3333333337111p-2)", 0x3fd2_a4dd_a7d9_4d98),
+    ("contraction", "(1+2^-27)*(1+2^-27) - (1+2^-26)", 0),
+    ("reassociation", "(2^53 + 1) - 2^53", 0),
+];
+
+/// The canary's driver. The kernels come from `chelis-crmath`, the same text
+/// every generated unit carries.
+const CANARY_MAIN: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+
+static double chelis_canary_arg(const char *text) {
+    uint64_t bits = strtoull(text, NULL, 16);
+    double value;
+    memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+static void chelis_canary_print(const char *check, double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    printf("%s %016llx\n", check, (unsigned long long)bits);
+}
+
+int main(int argc, char **argv) {
+    if (argc != 7) {
+        return 2;
+    }
+    double x = chelis_canary_arg(argv[1]);
+    double a = chelis_canary_arg(argv[2]);
+    double b = chelis_canary_arg(argv[3]);
+    double c = chelis_canary_arg(argv[4]);
+    double p = chelis_canary_arg(argv[5]);
+    double q = chelis_canary_arg(argv[6]);
+    chelis_canary_print("exp", chelis_cr_exp(x));
+    chelis_canary_print("tanh", chelis_cr_tanh(x));
+    chelis_canary_print("contraction", a * b + c);
+    double sum = p + q;
+    chelis_canary_print("reassociation", sum - p);
+    return 0;
+}
+"#;
+
+/// A scratch directory under the system temporary directory, removed on drop.
+struct CanaryDir(PathBuf);
+
+impl CanaryDir {
+    fn create() -> Result<Self, String> {
+        let base = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.subsec_nanos());
+        for attempt in 0..100u32 {
+            let dir = base.join(format!(
+                "chelis-compiler-canary-{}-{nanos}-{attempt}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Ok(Self(dir)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(format!(
+                        "cannot create the compiler canary directory in {}: {error}",
+                        base.display()
+                    ));
+                }
+            }
+        }
+        Err(format!(
+            "cannot create the compiler canary directory in {}",
+            base.display()
+        ))
+    }
+}
+
+impl Drop for CanaryDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Compile [`CANARY_MAIN`] with `compile_flags`, run it, and refuse the
+/// compiler unless it prints exactly [`CANARY_CASES`].
+fn run_canary(path: &Path, compile_flags: &[String]) -> Result<(), String> {
+    let refuse = |what: String| {
+        format!(
+            "native compiler `{}` does not compile with the pinned floating-point profile \
+             ({}): {what}; a wrapper or configuration is adding flags, so name a compiler \
+             that applies the profile unchanged",
+            path.display(),
+            compile_flags.join(" ")
+        )
+    };
+    let dir = CanaryDir::create()?;
+    let source = dir.0.join("chelis-compiler-canary.c");
+    let program = dir.0.join("chelis-compiler-canary");
+    let text = kernel_text(&[Kernel::ExpF64, Kernel::TanhF64]) + CANARY_MAIN;
+    std::fs::write(&source, text)
+        .map_err(|error| format!("cannot write the compiler canary: {error}"))?;
+    let compiled = tool_command(path)
+        .args(compile_flags)
+        .arg(&source)
+        .arg("-o")
+        .arg(&program)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("cannot run native compiler `{}`: {error}", path.display()))?;
+    if !compiled.status.success() || !program.is_file() {
+        return Err(refuse(format!(
+            "it did not build the floating-point canary ({}): {}",
+            compiled.status,
+            String::from_utf8_lossy(&compiled.stderr).trim()
+        )));
+    }
+    let ran = Command::new(&program)
+        .env_clear()
+        .args(CANARY_INPUTS.map(|bits| format!("{bits:016x}")))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| refuse(format!("its floating-point canary did not run: {error}")))?;
+    let printed = String::from_utf8_lossy(&ran.stdout);
+    let mut lines = printed.lines();
+    let mut violations = Vec::new();
+    for (check, operation, expected) in CANARY_CASES {
+        let got = lines
+            .next()
+            .and_then(|line| line.strip_prefix(check)?.strip_prefix(' '))
+            .and_then(|bits| u64::from_str_radix(bits, 16).ok());
+        match got {
+            Some(got) if got == expected => {}
+            Some(got) => violations.push(format!(
+                "{check}: {operation} gave {:?} (0x{got:016x}) where the profile gives {:?} \
+                 (0x{expected:016x})",
+                f64::from_bits(got),
+                f64::from_bits(expected)
+            )),
+            None => {
+                return Err(refuse(format!(
+                    "its floating-point canary exited with {} and printed {:?}",
+                    ran.status,
+                    printed.trim()
+                )));
+            }
+        }
+    }
+    if !ran.status.success() || lines.next().is_some() {
+        return Err(refuse(format!(
+            "its floating-point canary exited with {} and printed {:?}",
+            ran.status,
+            printed.trim()
+        )));
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(refuse(format!(
+            "the floating-point canary disagrees with the profile ({})",
+            violations.join("; ")
+        )))
+    }
 }
 
 /// `PATH` lookup as the spawned tool will see it: [`tool_command`] passes
@@ -529,10 +717,25 @@ mod tests {
             strict_reference_toolchain(String::new(), CodegenRequirements::default()).compile_flags;
         let plain = wrapper(dir.path(), "plain-cc", "");
         verify_compiler(&plain, &flags).unwrap_or_else(|error| panic!("{error}"));
+        // Contraction changes values only where the target has a fused
+        // multiply-add instruction, which the x86-64 baseline lacks; `-mfma`
+        // is what a `-march=native` wrapper would add there.
+        let contract = if cfg!(target_arch = "x86_64") {
+            "-mfma -ffp-contract=fast"
+        } else {
+            "-ffp-contract=fast"
+        };
         for (name, extra, expected) in [
             ("fast-cc", "-ffast-math", "__FAST_MATH__"),
             ("finite-cc", "-ffinite-math-only", "__FINITE_MATH_ONLY__"),
             ("unoptimised-cc", "-O0", "__OPTIMIZE__"),
+            ("contract-cc", contract, "contraction: "),
+            ("unsafe-cc", "-funsafe-math-optimizations", "reassociation: "),
+            (
+                "associative-cc",
+                "-fassociative-math -fno-signed-zeros -fno-trapping-math",
+                "reassociation: ",
+            ),
         ] {
             let hostile = wrapper(dir.path(), name, extra);
             let error = verify_compiler(&hostile, &flags).expect_err(name);
