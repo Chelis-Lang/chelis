@@ -2675,7 +2675,7 @@ fn trace_balanced_sum(
     accumulator: Prim,
     result: Prim,
 ) -> Result<ScalarValue, String> {
-    let mut level = group
+    let level = group
         .iter()
         .map(|&index| {
             cast_scalar(
@@ -2686,14 +2686,27 @@ fn trace_balanced_sum(
             .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    balanced_accumulator_sum("trace", level, accumulator, result)
+}
+
+/// Sum leaves already held at `accumulator` width with the C runtime's
+/// `runtime_balanced_sum` order (adjacent pairs per level, an odd leaf carried
+/// up unchanged), finalize the total once, and narrow it to `result`. An empty
+/// group is the accumulator's zero.
+fn balanced_accumulator_sum(
+    op: &'static str,
+    mut level: Vec<ScalarValue>,
+    accumulator: Prim,
+    result: Prim,
+) -> Result<ScalarValue, String> {
     if level.is_empty() {
         let zero = if accumulator.is_integer() {
-            scalar_from_i64("trace", accumulator, 0)
+            scalar_from_i64(op, accumulator, 0)
         } else {
-            scalar_from_f64("trace", accumulator, 0.0)
+            scalar_from_f64(op, accumulator, 0.0)
         }
         .map_err(|error| error.to_string())?;
-        return cast_scalar("trace", zero, result).map_err(|error| error.to_string());
+        return cast_scalar(op, zero, result).map_err(|error| error.to_string());
     }
     while level.len() > 1 {
         let mut source = level.into_iter();
@@ -2712,10 +2725,10 @@ fn trace_balanced_sum(
         }
         level = next;
     }
-    // A one-leaf diagonal is still a sum ([05-OP-30]); its value finalizes
-    // like any other arithmetic result, as `sum(diagonal(..))` does.
+    // A one-leaf group is still a sum ([05-OP-30]); its value finalizes like
+    // any other arithmetic result, as `sum(diagonal(..))` does.
     let total = chelis_types::canonical_nan_scalar(level[0]);
-    cast_scalar("trace", total, result).map_err(|error| error.to_string())
+    cast_scalar(op, total, result).map_err(|error| error.to_string())
 }
 
 pub(super) fn tensor_trace_value(
@@ -2939,19 +2952,29 @@ pub(super) fn tensor_einsum_value(
     };
     let output_total = checked_product(&out_shape, "output")?;
     let reduction_total = checked_product(&reduction_shape, "reduction")?;
-    // This legacy host einsum still accumulates in f64. Unlike matmul,
-    // it does not yet delegate to the typed contraction implementation;
-    // #1290 owns alignment with [05-OP-33]'s exact tree and widths.
-    let lhs_wide = lhs.value.to_f64_lossy_vec();
-    let rhs_wide = rhs.value.to_f64_lossy_vec();
-    let mut out = vec![0.0; output_total];
-    for (out_linear, slot) in out.iter_mut().enumerate() {
+    if lhs.precision != rhs.precision {
+        return Err("einsum expects matching tensor precision".to_string());
+    }
+    // [05-OP-33] with spec/04-type-system.md §5.7.1: the omitted accumulator
+    // is the reduce-sum default, which the C lane passes to
+    // `chelis_tensor_einsum`. Each product is formed at that width and the
+    // products of one output element are summed in the runtime's balanced
+    // order, so both lanes agree bit for bit. #1290 owns moving both lanes to
+    // [05-OP-33]'s canonical tree.
+    let accumulator = lhs.precision.default_reduce_sum_accumulator()?;
+    let result = lhs.precision.default_reduce_sum_result_precision()?;
+    let widen = |tensor: &RuntimeTensorValue, index: usize| {
+        cast_scalar("einsum", tensor.value.storage().scalar_at(index), accumulator)
+            .map_err(|error| error.to_string())
+    };
+    let mut out = Vec::with_capacity(output_total);
+    for out_linear in 0..output_total {
         let out_index = linear_to_indices(out_linear, &out_shape);
         let mut label_values = chelis_unord::UnordMap::<char, usize>::new();
         for (label, value) in out_labels.iter().zip(out_index.iter()) {
             label_values.insert(*label, *value);
         }
-        let mut acc = 0.0_f64;
+        let mut products = Vec::with_capacity(reduction_total);
         for reduction_linear in 0..reduction_total {
             let reduction_index = linear_to_indices(reduction_linear, &reduction_shape);
             for (label, value) in reduction_labels.iter().zip(reduction_index.iter()) {
@@ -2965,15 +2988,23 @@ pub(super) fn tensor_einsum_value(
                 .iter()
                 .map(|label| label_values[label])
                 .collect::<Vec<_>>();
-            acc += lhs_wide[indices_to_linear(&lhs_index, &lhs.value.shape)]
-                * rhs_wide[indices_to_linear(&rhs_index, &rhs.value.shape)];
+            let left = widen(lhs, indices_to_linear(&lhs_index, &lhs.value.shape))?;
+            let right = widen(rhs, indices_to_linear(&rhs_index, &rhs.value.shape))?;
+            products.push(
+                if accumulator.is_integer() {
+                    int_binop(IntBinOp::Mul, left, right)
+                } else {
+                    float_binop(FloatBinOp::Mul, left, right)
+                }
+                .map_err(|error| error.to_string())?,
+            );
         }
-        *slot = acc;
+        out.push(balanced_accumulator_sum("einsum", products, accumulator, result)?);
     }
-    // Einsum is arithmetic: `from_wide` finalizes every NaN canonically, as
-    // the runtime lane does. The accumulation order still differs from the
-    // runtime's balanced tree (chelis#1290).
-    RuntimeTensorValue::from_wide("einsum", lhs.precision, out_shape, out)
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor_from_scalars(result, &out),
+    )))
 }
 
 /// Every exit in the eval lane truncates tensor element rendering after

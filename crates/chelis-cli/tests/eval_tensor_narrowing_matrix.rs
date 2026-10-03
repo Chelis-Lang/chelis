@@ -400,3 +400,45 @@ fn eval_f32_tensor_recip_rounds_to_f32() {
          width per spec/05 section 8.1); got: {line}"
     );
 }
+
+// ===========================================================================
+// chelis#3041 - einsum accumulates at the default accumulator in both lanes
+// ===========================================================================
+
+/// `chelis_tensor_einsum` forms each product at the §5.7.1 default
+/// accumulator (f32 for f16, bf16 and f32 operands) and sums them in the
+/// runtime's balanced order; eval accumulated in f64 ([05-OP-51]: never an
+/// unrequested f64 graph). Each witness rounds differently under the two:
+/// f32 gave 16777220 in eval, bf16 0x3f81 and f16 0x3c01.
+#[test]
+fn einsum_accumulates_at_the_default_accumulator_in_eval_and_the_executable() {
+    let source = "module Probe.Case\n\
+         def wide() -> tensor[1, f32] = einsum(\"ij,j->i\", to_tensor([[16777216.0f32, 1.0f32, 1.0f32, 1.0f32]]), to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))\n\
+         def brain() -> tensor[1, bf16] = einsum(\"ij,j->i\", to_tensor([[1.0bf16, 0.00390625bf16, 9.313225746154785e-10bf16]]), to_tensor([1.0bf16, 1.0bf16, 1.0bf16]))\n\
+         def half() -> tensor[1, f16] = einsum(\"ij,j->i\", to_tensor([[1.0f16, 0.00048828125f16, 5.960464477539063e-8f16]]), to_tensor([1.0f16, 1.0f16, 1.0f16]))\n\
+         a = print(wide())\n\
+         b = print(brain())\n\
+         c = print(half())\n";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("p.ch");
+    write_file(&path, source);
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    assert!(eval.status.success(), "{eval:?}");
+    let eval = String::from_utf8(eval.stdout).expect("utf-8 stdout");
+    let printed = eval.lines().take(3).collect::<Vec<_>>();
+    assert_eq!(
+        printed,
+        [
+            "tensor(shape=[1], data=[16777218.0])",
+            "tensor(shape=[1], data=[1.0])",
+            "tensor(shape=[1], data=[1.0])",
+        ],
+        "{eval}"
+    );
+    assert_eq!(common::build_and_run(source, "p"), eval, "{source}");
+}

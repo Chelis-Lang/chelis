@@ -2578,30 +2578,46 @@ fn host_runtime_matmul_f32_preserves_canonical_accumulator_tree() {
     );
 }
 
-/// #170 DECISION-LOCK: f32 `einsum` shares matmul's disposition — f64 eval
-/// accumulator retained, no cascade, no strict-f32 downcast. Same
-/// absorption probe; FAILS if einsum is downcast to strict f32.
-#[test]
-fn host_runtime_einsum_f32_keeps_f64_accumulator_not_strict_f32() {
-    let mut lhs_row = vec![16_777_216.0_f64];
-    lhs_row.extend(std::iter::repeat_n(1.0_f64, 40));
-    lhs_row.push(-16_777_216.0_f64);
-    let k = lhs_row.len();
+/// One `ij,j->i` einsum row against a ones vector: the result is the sum of
+/// the row's products, each formed at the operand's §5.7.1 default
+/// accumulator and summed in the C runtime's balanced order.
+fn einsum_row_sum(precision: Prim, row: Vec<f64>) -> RuntimeTensorValue {
+    let k = row.len();
     let lhs = RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![1, k], lhs_row),
-        precision: Prim::F32,
+        value: IrTensorValue::from_vec(vec![1, k], row),
+        precision,
     };
     let rhs = RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![k, 1], vec![1.0_f64; k]),
-        precision: Prim::F32,
+        value: IrTensorValue::from_vec(vec![k], vec![1.0_f64; k]),
+        precision,
     };
-    let out = tensor_einsum_value("ik,kj->ij", &lhs, &rhs).expect("einsum must evaluate");
-    assert_eq!(
-        out.value.to_f64_lossy_vec(),
-        vec![40.0_f64],
-        "f32 einsum keeps the f64 eval accumulator (#170 decision); got {:?}",
-        out.value.to_f64_lossy_vec()
-    );
+    tensor_einsum_value("ij,j->i", &lhs, &rhs).expect("einsum must evaluate")
+}
+
+/// chelis#3041: eval accumulated einsum in f64 while `chelis_tensor_einsum`
+/// accumulates at the default accumulator ([05-OP-51]: never an unrequested
+/// f64 graph). Each witness's f64 sum rounds differently from the f32 one.
+#[test]
+fn host_runtime_einsum_accumulates_at_the_default_accumulator_like_the_c_runtime() {
+    // f32: balanced pairs (2^24 + 1) + (1 + 1) = 2^24 + 2; f64 gave 2^24 + 4.
+    let out = einsum_row_sum(Prim::F32, vec![16_777_216.0, 1.0, 1.0, 1.0]);
+    assert_eq!(out.precision, Prim::F32);
+    assert_eq!(out.value.to_f64_lossy_vec(), vec![16_777_218.0]);
+    // 2^24 + forty ones - 2^24: the balanced f32 tree loses one unit.
+    let mut row = vec![16_777_216.0_f64];
+    row.extend(std::iter::repeat_n(1.0_f64, 40));
+    row.push(-16_777_216.0);
+    assert_eq!(einsum_row_sum(Prim::F32, row).value.to_f64_lossy_vec(), vec![39.0]);
+    // bf16: the f32 total 1 + 2^-8 is a tie that narrows to 1.0 (0x3f80);
+    // f64 kept 2^-30 and narrowed up to 0x3f81.
+    let out = einsum_row_sum(Prim::Bf16, vec![1.0, 2.0_f64.powi(-8), 2.0_f64.powi(-30)]);
+    assert_eq!(out.precision, Prim::Bf16);
+    assert_eq!(out.value.to_f64_lossy_vec(), vec![1.0]);
+    // f16: 2^-24 is half an f32 unit at 1, so the f32 total is the tie
+    // 1 + 2^-11, which narrows to 1.0 (0x3c00); f64 narrowed up to 0x3c01.
+    let out = einsum_row_sum(Prim::F16, vec![1.0, 2.0_f64.powi(-11), 2.0_f64.powi(-24)]);
+    assert_eq!(out.precision, Prim::F16);
+    assert_eq!(out.value.to_f64_lossy_vec(), vec![1.0]);
 }
 
 #[test]
