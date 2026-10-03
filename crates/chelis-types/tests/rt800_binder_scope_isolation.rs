@@ -111,7 +111,7 @@ fn malformed_parameter_type_is_rejected_once_at_annotation_admission() {
 fn explicit_signature_binders_reach_generated_annotation_finalization() {
     let exprs = surf(
         r#"
-sig row_argmax[piece, classes, p]: &tensor[piece, classes, p] -> i64
+sig row_argmax[piece, classes, p: Numeric]: &tensor[piece, classes, p] -> i64
 def row_argmax(row: &tensor[piece, classes, p]) -> i64 = {
   pair = sort(row, cast(1, i32))
   cast(0, i64)

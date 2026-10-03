@@ -2508,7 +2508,9 @@ pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
         "add" | "mul" | "sub" | "neg" | "floor_div" | "abs" | "floor" | "ceil" | "round"
         | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte" | "lte" | "sum"
         | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce"
-        | "reduce_window_sum" | "reduce_window_max" | "reduce_window_min" => Some(ActiveNumeric),
+        | "reduce_window_sum" | "reduce_window_max" | "reduce_window_min"
+        // [05-OP-53]'s arithmetic domain, chelis#3044.
+        | "cumsum" | "sort" | "trace" | "clamp" => Some(ActiveNumeric),
         _ => None,
     }
 }
@@ -2953,7 +2955,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[a]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2993,7 +2995,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             result_origin: None,
             constraints: vec![],
             tvars: vec![a, b, c, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[a, b, c]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -3117,7 +3119,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             result_origin: None,
             constraints: vec![],
             tvars: vec![lhs, rhs, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[lhs]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
