@@ -96,6 +96,36 @@ fn spec_deep_strict_validates_desugared() {
     );
 }
 
+fn checked_example_source(source: &str) -> chelis_types::FitnessReport {
+    let declarations = chelis_surf::parser::parse_str(source).expect("parse executable example");
+    let prepared = chelis_reef::prepare_single_file_program(
+        "example-oracle", &declarations, &chelis_std_bundle::EMBEDDED_RUNTIME,
+    ).expect("resolve every executable example import");
+    let _linked = prepared.as_ref().map(|_| chelis_types::install_linked_program_guard());
+    let declarations = prepared.as_ref().map_or(declarations.as_slice(), |program| program.decls.as_slice());
+    let deep = chelis_surf::desugar::desugar_program(declarations).expect("desugar executable example");
+    assert!(!deep.is_empty(), "executable example desugared to empty");
+    chelis_types::check_ir_fitness(&deep)
+}
+
+#[test]
+fn executable_example_imports_are_checked_before_the_corpus_oracle() {
+    let source = "module Examples.ImportProbe\nimport Std.Tensor.Construct (linspace)\ndef sample() -> f32 = index(to_list(linspace(0.0f32, 1.0f32, 3i64)), 1i64)\n";
+    let report = checked_example_source(source);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.score, 1.0);
+}
+
+#[test]
+fn executable_example_oracle_rejects_unknown_imports_and_authored_linker_names() {
+    for source in [
+        "module Examples.Unknown\nimport Std.NoSuchModule (missing)\nresult = missing(1.0f32)\n",
+        "module Examples.Forged\nimport Std.Tensor.Construct (linspace)\ndef pkg__fake__Module__sample() -> f32 = 0.0f32\n",
+    ] {
+        assert!(std::panic::catch_unwind(|| checked_example_source(source)).is_err());
+    }
+}
+
 #[test]
 fn spec_all_executable_examples_parse_and_check() {
     let examples_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -116,15 +146,7 @@ fn spec_all_executable_examples_parse_and_check() {
                 path.display(),
                 result.err()
             );
-            let decls = result.unwrap();
-            let deep_exprs =
-                chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
-            assert!(
-                !deep_exprs.is_empty(),
-                "{} desugared to empty",
-                path.display()
-            );
-            let report = chelis_types::check_ir_fitness(&deep_exprs);
+            let report = checked_example_source(&src);
             assert!(
                 report.errors.is_empty(),
                 "{} must remain executable in Phase 0: {:?}",
