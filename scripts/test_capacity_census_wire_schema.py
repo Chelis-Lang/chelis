@@ -558,7 +558,7 @@ class SchemaCases(unittest.TestCase):
 
         cases = {c.identity: c for c in dag_cases()}
         current = cases["WireDag/json/empty"]
-        self.assertEqual(current.expected["schema_version"], 24)
+        self.assertEqual(current.expected["schema_version"], 25)
         self.assertIsNone(cases["WireDag/json/version-16"].expected)
         self.assertIsNone(cases["WireDag/json/version-17"].expected)
         self.assertIsNone(cases["WireDag/json/version-18"].expected)
@@ -567,7 +567,11 @@ class SchemaCases(unittest.TestCase):
         self.assertIsNone(cases["WireDag/json/version-21"].expected)
         self.assertIsNone(cases["WireDag/json/version-22"].expected)
         self.assertIsNone(cases["WireDag/json/version-23"].expected)
-        self.assertIsNone(cases["WireDag/json/version-25"].expected)
+        self.assertIsNone(cases["WireDag/json/version-24"].expected)
+        self.assertIsNone(cases["WireDag/json/version-26"].expected)
+        self.assertIsNotNone(cases["WireDag/json/softmax"].expected)
+        for label in ("axis", "arity", "dtype", "shape"):
+            self.assertIsNone(cases[f"WireDag/json/softmax-invalid-{label}"].expected)
         for codec in ("json", "construct", "admit"):
             for owner in ("expand", "reshape", "pad", "shrink", "stride"):
                 prefix = f"WireDag/{codec}/owner-{owner}-"

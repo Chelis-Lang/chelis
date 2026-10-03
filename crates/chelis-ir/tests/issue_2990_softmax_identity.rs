@@ -103,6 +103,19 @@ fn decomposition_preserves_activation_provenance_and_nonvalue_edges() {
         },
         None,
     );
+    let claim = source.add_node(
+        owner,
+        RiscOp::ExtentWitness {
+            site: chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim,
+            parameter: String::new(),
+            axis: chelis_ir::dag::RtAxis::Lit(0),
+            requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 2).unwrap()],
+            claims: vec![],
+        },
+        vec![],
+        TensorType { dims: vec![], precision: Prim::Int64 },
+        None,
+    );
     let y = tier2::lower_softmax(
         Owner::new(owner, Some(predicate)),
         &mut source,
@@ -112,6 +125,7 @@ fn decomposition_preserves_activation_provenance_and_nonvalue_edges() {
         Some("source"),
     );
     source.add_shape_dep(y, shape);
+    source.add_result_claim_dep(y, claim);
     source
         .node_mut(y)
         .unwrap()
@@ -121,6 +135,7 @@ fn decomposition_preserves_activation_provenance_and_nonvalue_edges() {
     let lowered = compositions::decompose(&source);
     let result = lowered.get(lowered.roots()[0]).unwrap();
     assert_eq!(result.shape_deps, vec![shape]);
+    assert_eq!(result.result_claim_deps, vec![claim]);
     assert_eq!(result.merged_spans, vec!["merged"]);
     assert_eq!(result.owner.activation, Some(predicate));
     assert_eq!(lowered.declarations(), source.declarations());
@@ -128,7 +143,7 @@ fn decomposition_preserves_activation_provenance_and_nonvalue_edges() {
         lowered
             .nodes()
             .iter()
-            .skip(3)
+            .skip(4)
             .all(|n| n.owner.activation == Some(predicate))
     );
     assert!(verify::verify(&lowered).is_empty());
@@ -199,4 +214,12 @@ fn empty_axis_traps_only_when_the_retained_softmax_is_active() {
             assert_eq!(result.unwrap()[&y].shape, vec![0, 4]);
         }
     }
+}
+
+#[test]
+fn decomposition_refuses_an_unmapped_result_claim_dependency() {
+    let mut dag = graph(Prim::F32, 1);
+    let root = dag.roots()[0];
+    dag.add_result_claim_dep(root, chelis_ir::NodeId(999));
+    assert!(std::panic::catch_unwind(|| compositions::decompose(&dag)).is_err());
 }
