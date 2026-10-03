@@ -8,7 +8,7 @@
 use crate::host_abi::HostAbiType;
 use chelis_ir::{ConcreteHostType, TensorType};
 use chelis_types::types::Prim;
-use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
+use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 
 #[test]
 fn public_callable_fence_recurses_through_every_host_container() {
@@ -164,8 +164,24 @@ fn first_class_function_type_has_no_general_c_host_value_abi() {
     // `HostAbi` state, never the unresolved `HostType` state (chelis#730
     // Phase 2 red team, finding F5).
     assert!(matches!(error.what.as_ref(), UnsupportedKind::HostAbi(_)));
-    assert!(error.to_string().contains("function value"));
-    assert!(!error.to_string().contains("unresolved"));
+}
+
+#[test]
+fn nominal_function_field_rejects_at_abi_projection_before_boxing() {
+    let verified = verified_host_from_source(include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/reject_adt_function.ch"
+    ));
+    let error = crate::host_abi::project_program(verified.emission())
+        .err()
+        .expect("a nominal ADT field must not acquire the contextual callback ABI");
+    let identity = error.identity();
+    assert!(matches!(identity.what, UnsupportedKind::HostAbi(_)));
+    assert_eq!(identity.stage, Stage::Codegen("c"));
+    assert_eq!(identity.disposition, RejectionAuthorityKind::Unimplemented);
+    assert_eq!(
+        identity.tracking_issue.map(|issue| issue.number()),
+        Some(879)
+    );
 }
 
 /// chelis#841 review, finding 5: the marker guards in `project_expr` are

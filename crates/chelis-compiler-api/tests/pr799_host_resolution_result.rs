@@ -8,6 +8,7 @@
 
 use chelis_compiler_api::compiler::{CompilerError, compile, compile_for_execution};
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
+use chelis_types::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 use chelis_vocab::DiagnosticKind;
 
 fn c_request(source: &str) -> CompileRequest {
@@ -80,20 +81,18 @@ fn assert_named_function_value_has_no_c_abi(result: Result<impl std::fmt::Debug,
         DiagnosticKind::UnsupportedFeature,
         "{diagnostic:?}"
     );
-    assert!(
-        diagnostic.message.contains("unsupported:")
-            && diagnostic.message.contains("function value")
-            && diagnostic.message.contains("C host ABI")
-            && diagnostic.message.contains("(codegen:c)")
-            // [05-UNS-5] typed authority, replacing the prose
-            // `([05-UNS-1]; chelis#730)` citation - see the sibling helper.
-            && diagnostic.message.contains("unimplemented chelis#879:"),
-        "the target boundary must reject the value without an alternate representation, \
-         citing its typed authority: {diagnostic:?}"
+    let identity = diagnostic
+        .unsupported_identity()
+        .expect("the C-private ABI rejection must retain its structured identity");
+    assert!(matches!(identity.payload.what, UnsupportedKind::HostAbi(_)));
+    assert_eq!(identity.payload.stage, Stage::Codegen("c"));
+    assert_eq!(
+        identity.payload.disposition,
+        RejectionAuthorityKind::Unimplemented
     );
-    assert!(
-        !diagnostic.message.contains("grad") && !diagnostic.message.contains("vmap"),
-        "callable rejection must not be misclassified as an AD transform failure: {diagnostic:?}"
+    assert_eq!(
+        identity.payload.tracking_issue.map(|issue| issue.number()),
+        Some(879)
     );
 }
 
@@ -196,6 +195,23 @@ fn function_value_stored_in_adt_rejects_before_codegen() {
          saved = FnBox { callback: fn (x: i8) -> add(x, cast(1, i8)) }\n\
          out = print(\"ok\")\n",
     )));
+}
+
+#[test]
+fn named_function_stored_in_adt_has_no_value_abi_across_public_compiler_apis() {
+    let source = include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/reject_adt_function.ch"
+    );
+    for target in [CompileTarget::C, CompileTarget::Hip] {
+        assert_named_function_value_has_no_c_abi(compile(CompileRequest {
+            target,
+            ..c_request(source)
+        }));
+        assert_named_function_value_has_no_c_abi(compile_for_execution(CompileRequest {
+            target,
+            ..c_request(source)
+        }));
+    }
 }
 
 #[test]
