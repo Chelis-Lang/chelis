@@ -4,6 +4,8 @@
 //! nightly; `contracts::tests::chelis_2957_discharge_table_canary_*` recomputes
 //! one row per pull request.
 
+mod support;
+
 use std::path::Path;
 
 use chelis_prove::{
@@ -13,6 +15,7 @@ use chelis_prove::{
 
 #[test]
 fn standard_contract_discharge_table_matches_recomputation() {
+    crate::support::isolate();
     let recomputed = recompute_standard_contract_discharge_table().unwrap();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(STANDARD_CONTRACT_DISCHARGE_TABLE_PATH);
     if std::env::var("CHELIS_PROVE_DISCHARGE_TABLE_WRITE").as_deref() == Ok("1") {
