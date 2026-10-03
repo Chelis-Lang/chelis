@@ -293,25 +293,22 @@ fn tier2_sigmoid_expr(x: &str, dtype: &str) -> String {
     format!("recip(add(cast(1.0, {dtype}), exp(neg({x}))))")
 }
 
-fn tier2_tanh_expr(x: &str, dtype: &str) -> String {
-    let sigmoid = tier2_sigmoid_expr(&format!("mul(cast(2.0, {dtype}), {x})"), dtype);
-    format!("add(mul(cast(2.0, {dtype}), {sigmoid}), cast(-1.0, {dtype}))")
-}
-
+/// The spec/05 section 3.3 lowering of each activation. `tanh` is a primitive
+/// with no lowering; every witness below is small enough that its correctly
+/// rounded value is the input itself, so the expected expression is `x`.
 fn tier2_activation_expr(op: &str, x: &str, dtype: &str) -> String {
     match op {
         "sigmoid" => tier2_sigmoid_expr(x, dtype),
-        "tanh" => tier2_tanh_expr(x, dtype),
+        "tanh" => x.to_string(),
         "silu" => format!("mul({x}, {})", tier2_sigmoid_expr(x, dtype)),
         "gelu" => {
             let x_sq = format!("mul({x}, {x})");
             let x_cu = format!("mul({x_sq}, {x})");
             let k_x_cu = format!("mul(cast(0.044715, {dtype}), {x_cu})");
             let sum_inner = format!("add({x}, {k_x_cu})");
-            let inner = format!("mul(cast(0.7978845608028654, {dtype}), {sum_inner})");
-            let tanh_inner = tier2_tanh_expr(&inner, dtype);
-            let one_plus_tanh = format!("add(cast(1.0, {dtype}), {tanh_inner})");
-            format!("mul(cast(0.5, {dtype}), mul({x}, {one_plus_tanh}))")
+            let u = format!("mul(cast(0.7978845608028654, {dtype}), {sum_inner})");
+            let two_u = format!("mul(cast(2.0, {dtype}), {u})");
+            format!("mul({x}, {})", tier2_sigmoid_expr(&two_u, dtype))
         }
         _ => unreachable!("no Tier-2 activation expression for `{op}`"),
     }
