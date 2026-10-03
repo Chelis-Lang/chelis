@@ -47,16 +47,12 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-import json
-import os
 from pathlib import Path
-import shutil
-import subprocess
 import sys
 import tempfile
-import time
 
 import datetime_business_reference as ref
+from datetime_lanes import LaneResult, Runner, Toolchain
 
 SEED = 2860
 PASS_MARKER = "STD DATETIME BUSINESS ORACLE: PASS"
@@ -380,64 +376,6 @@ def build_canary_programs() -> list[Program]:
     return calendar_programs(ref.edge_calendars()[:2]) + [failures[name] for name in CANARY_FAILURES]
 
 
-@dataclass(frozen=True)
-class Toolchain:
-    compiler: str
-    compile_flags: tuple[str, ...]
-    link_flags: tuple[str, ...]
-
-
-@dataclass
-class LaneResult:
-    lane: str
-    status: int | None
-    stdout: str
-    stderr: str
-    stage: str
-    seconds: float = 0.0
-
-
-class Runner:
-    def __init__(self, chelis: Path, reef_home: Path, template: Path, work: Path, toolchain: Toolchain | None, timeout: int):
-        self.chelis, self.reef_home, self.template, self.work = chelis, reef_home, template, work
-        self.toolchain, self.timeout = toolchain, timeout
-
-    def env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        env.update({"CHELIS_REEF_HOME": str(self.reef_home), "CHELIS_STYLE_GATE_DISABLE": "1", "OMP_NUM_THREADS": "1"})
-        return env
-
-    def app(self, program: Program, lane: str) -> Path:
-        app = self.work / lane / program.name
-        if app.exists():
-            shutil.rmtree(app)
-        (app / "src").mkdir(parents=True)
-        shutil.copy(self.template / "reef.toml", app / "reef.toml")
-        (app / "src" / "main.ch").write_text(program_source(program.body), encoding="utf-8")
-        return app
-
-    def run(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(argv, cwd=cwd, env=self.env(), capture_output=True, text=True, timeout=self.timeout, check=False)
-
-    def eval_lane(self, program: Program) -> LaneResult:
-        app = self.app(program, "eval")
-        done = self.run([str(self.chelis), "eval", "--file", "src/main.ch"], app)
-        return LaneResult("eval", done.returncode, done.stdout, done.stderr, "eval")
-
-    def c_lane(self, program: Program) -> LaneResult:
-        assert self.toolchain is not None
-        app = self.app(program, "c")
-        build = self.run([str(self.chelis), "build", "--emit-c", "src/main.ch", "--target", "c", "--output", "out"], app)
-        if build.returncode != 0:
-            return LaneResult("c", build.returncode, build.stdout, build.stderr, "build")
-        link = self.run([self.toolchain.compiler, *self.toolchain.compile_flags, "-Iout", "out/main.c",
-                         "out/libchelis_runtime.a", *self.toolchain.link_flags, "-o", "out/case"], app)
-        if link.returncode != 0:
-            return LaneResult("c", link.returncode, link.stdout, link.stderr, "link")
-        done = self.run([str(app / "out" / "case")], app)
-        return LaneResult("c", done.returncode, done.stdout, done.stderr, "run")
-
-
 def parse_bindings(stdout: str) -> tuple[dict[str, str], list[str]]:
     found: dict[str, str] = {}
     stray = []
@@ -507,17 +445,6 @@ def first_difference(want: str, got: str | None) -> str:
     return f"{len(w)} elements expected, {len(g)} printed"
 
 
-def write_app_template(chelis: Path, root: Path) -> Path:
-    version = subprocess.run([str(chelis), "--version"], capture_output=True, text=True, check=True).stdout.split()[1]
-    template = root / "template"
-    template.mkdir(parents=True, exist_ok=True)
-    (template / "reef.toml").write_text(
-        'schema = "1"\n\n[package]\nname = "business-oracle"\nversion = "0.1.0"\n'
-        f'compiler = "={version}"\nmodule_prefix = "Demo"\n\n[dependencies]\nchelis-std = {{ version = "0.4.0" }}\n',
-        encoding="utf-8")
-    return template
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--chelis", type=Path, required=True, help="the chelis binary under test")
@@ -538,8 +465,7 @@ def main(argv: list[str] | None = None) -> int:
     if "c" in lanes:
         if not args.toolchain_json:
             parser.error("the c lane needs --toolchain-json")
-        spec = json.loads(args.toolchain_json)
-        toolchain = Toolchain(spec["compiler"], tuple(spec["compile_flags"]), tuple(spec["link_flags"]))
+        toolchain = Toolchain.from_json(args.toolchain_json)
 
     if args.profile == "full":
         corpus, calendars = build_programs(args.calendars), args.calendars + len(ref.edge_calendars())
@@ -552,19 +478,12 @@ def main(argv: list[str] | None = None) -> int:
     observations = 0
     with tempfile.TemporaryDirectory(prefix="business-oracle-") as scratch:
         work = args.work or Path(scratch)
-        runner = Runner(args.chelis.resolve(), args.reef_home.resolve(), write_app_template(args.chelis, work), work,
-                        toolchain, args.timeout)
+        runner = Runner(args.chelis.resolve(), args.reef_home.resolve(), work, toolchain, args.timeout, "business-oracle")
 
         def run_one(program: Program) -> tuple[Program, list[LaneResult]]:
             results = []
             for lane in (lane for lane in lanes if lane in program.lanes):
-                started = time.monotonic()
-                try:
-                    result = runner.eval_lane(program) if lane == "eval" else runner.c_lane(program)
-                except subprocess.TimeoutExpired as error:
-                    result = LaneResult(lane, None, "", f"timed out after {error.timeout} s", "timeout")
-                result.seconds = time.monotonic() - started
-                results.append(result)
+                results.append(runner.lane(program.name, program_source(program.body), lane))
             return program, results
 
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:

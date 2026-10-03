@@ -49,15 +49,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import datetime
 import json
-import os
 from pathlib import Path
 import random
-import shutil
-import subprocess
 import sys
 import tempfile
-import time
 import zoneinfo
+
+from datetime_lanes import LaneResult, Runner, Toolchain
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT / "crates/chelis-cli/tests/fixtures/tzif"
@@ -270,65 +268,6 @@ def render(values: list[int]) -> str:
     return "[" + ", ".join(str(value) for value in values) + "]"
 
 
-@dataclass(frozen=True)
-class Toolchain:
-    compiler: str
-    compile_flags: tuple[str, ...]
-    link_flags: tuple[str, ...]
-
-
-@dataclass
-class LaneResult:
-    lane: str
-    status: int | None
-    stdout: str
-    stderr: str
-    stage: str
-    seconds: float = 0.0
-
-
-class Runner:
-    def __init__(self, chelis: Path, reef_home: Path, work: Path, toolchain: Toolchain | None, timeout: int):
-        self.chelis = chelis
-        self.reef_home = reef_home
-        self.work = work
-        self.toolchain = toolchain
-        self.timeout = timeout
-        version = subprocess.run([str(chelis), "--version"], capture_output=True, text=True, check=True).stdout.split()[1]
-        self.manifest = ('schema = "1"\n\n[package]\nname = "datetime-zone-oracle"\nversion = "0.1.0"\n'
-                         f'compiler = "={version}"\nmodule_prefix = "Demo"\n\n[dependencies]\nchelis-std = {{ version = "0.4.0" }}\n')
-
-    def app(self, program: Program, lane: str) -> Path:
-        app = self.work / lane / program.name
-        if app.exists():
-            shutil.rmtree(app)
-        (app / "src").mkdir(parents=True)
-        (app / "reef.toml").write_text(self.manifest, encoding="utf-8")
-        (app / "src" / "main.ch").write_text(program.source, encoding="utf-8")
-        return app
-
-    def run(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-        env = dict(os.environ)
-        env.update({"CHELIS_REEF_HOME": str(self.reef_home), "CHELIS_STYLE_GATE_DISABLE": "1", "OMP_NUM_THREADS": "1"})
-        return subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=self.timeout, check=False)
-
-    def lane(self, program: Program, lane: str) -> LaneResult:
-        app = self.app(program, lane)
-        if lane == "eval":
-            done = self.run([str(self.chelis), "eval", "--file", "src/main.ch"], app)
-            return LaneResult("eval", done.returncode, done.stdout, done.stderr, "eval")
-        assert self.toolchain is not None
-        build = self.run([str(self.chelis), "build", "src/main.ch", "--target", "c", "--emit-c", "--output", "out"], app)
-        if build.returncode != 0:
-            return LaneResult("c", build.returncode, build.stdout, build.stderr, "build")
-        link = self.run([self.toolchain.compiler, *self.toolchain.compile_flags, "-Iout", "out/main.c",
-                         "out/libchelis_runtime.a", *self.toolchain.link_flags, "-o", "out/case"], app)
-        if link.returncode != 0:
-            return LaneResult("c", link.returncode, link.stdout, link.stderr, "link")
-        done = self.run([str(app / "out" / "case")], app)
-        return LaneResult("c", done.returncode, done.stdout, done.stderr, "run")
-
-
 def first_difference(expected: str, printed: str) -> str:
     want, got = expected.strip("[]").split(", "), printed.strip("[]").split(", ")
     if expected.startswith("[") and printed.startswith("["):
@@ -392,8 +331,7 @@ def main(argv: list[str] | None = None) -> int:
     if "c" in lanes:
         if not args.toolchain_json:
             parser.error("the c lane needs --toolchain-json")
-        spec = json.loads(args.toolchain_json)
-        toolchain = Toolchain(spec["compiler"], tuple(spec["compile_flags"]), tuple(spec["link_flags"]))
+        toolchain = Toolchain.from_json(args.toolchain_json)
 
     zones = json.loads((FIXTURE_DIR / "manifest.json").read_text(encoding="utf-8"))["zones"]
     if args.profile == "canary":
@@ -405,17 +343,12 @@ def main(argv: list[str] | None = None) -> int:
     report = Report()
     with tempfile.TemporaryDirectory(prefix="datetime-zone-oracle-") as scratch:
         work = args.work or Path(scratch)
-        runner = Runner(args.chelis.resolve(), args.reef_home.resolve(), work, toolchain, args.timeout)
+        runner = Runner(args.chelis.resolve(), args.reef_home.resolve(), work, toolchain, args.timeout,
+                        "datetime-zone-oracle")
 
         def run_one(job: tuple[Program, str]) -> tuple[Program, LaneResult]:
             program, lane = job
-            started = time.monotonic()
-            try:
-                result = runner.lane(program, lane)
-            except subprocess.TimeoutExpired as error:
-                result = LaneResult(lane, None, "", f"timed out after {error.timeout} s", "timeout")
-            result.seconds = time.monotonic() - started
-            return program, result
+            return program, runner.lane(program.name, program.source, lane)
 
         jobs = [(program, lane) for program in programs for lane in lanes if lane in program.lanes]
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
