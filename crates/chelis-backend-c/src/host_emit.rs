@@ -237,17 +237,6 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, NumericTrap};
 use chelis_unord::{UnordMap, UnordSet};
 
-/// Called only after an unsupported body is known to be emitted rather than
-/// replaced by an unreachable-function stub.
-fn live_host_rejection(mut error: Unsupported) -> Unsupported {
-    error.context = format!(
-        "{} (rejection scope: emitted live host code)",
-        error.context
-    )
-    .into();
-    error
-}
-
 pub(crate) fn emit_host_abi_program(
     projected: &ProjectedHostProgram<'_>,
     program_name: &str,
@@ -473,7 +462,7 @@ pub(crate) fn emit_host_abi_program(
                 )?;
                 function_bodies.push(String::new());
             }
-            Err(unsupported) => return Err(live_host_rejection(unsupported)),
+            Err(unsupported) => return Err(unsupported),
         }
     }
 
@@ -545,8 +534,7 @@ pub(crate) fn emit_host_abi_program(
             &helper_output_types,
             helper_result_origins,
             external_helpers,
-        )
-        .map_err(live_host_rejection)?;
+        )?;
     }
 
     // Insert private key callback support only when a selected body needs

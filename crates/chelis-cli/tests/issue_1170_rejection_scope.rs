@@ -1,4 +1,4 @@
-//! Release inventory: a refusal states which part of the program it covers.
+//! Release inventory: executable witnesses distinguish each refusal scope.
 #[path = "common/mod.rs"]
 mod common;
 
@@ -26,21 +26,19 @@ fn rejection(source: &str) -> String {
 }
 
 #[test]
-fn whole_program_gates_state_their_scope() {
+fn whole_program_gates_reject_even_unreachable_calls() {
     let scan = rejection(
         "def dead() -> tensor[3, f32] = tensor_scan(0.0f32, fn (previous: f32, i: i64) -> add(previous, 1.0f32), 3i64)\nout = print(7i32)\n",
     );
-    assert!(
-        scan.contains("rejection scope: whole checked program"),
-        "{scan}"
-    );
+    assert!(scan.contains("host emission (codegen:c)"), "{scan}");
     assert!(
         scan.contains("tensor_scan") && scan.contains("[05-HOST-1]"),
         "{scan}"
     );
-    let clock = rejection("reading = clock_wall_read()\n");
+    let clock = rejection("def dead() -> (i64, i64) = clock_wall_read()\nout = print(7i32)\n");
     assert!(
-        clock.contains("rejection scope: whole lowered host program"),
+        clock
+            .contains("compiled targets (the host interpreter's eval/test lanes only) (codegen:c)"),
         "{clock}"
     );
     assert!(
@@ -53,7 +51,7 @@ fn whole_program_gates_state_their_scope() {
 fn live_assertion_refuses_but_unreachable_assertion_does_not() {
     let live = rejection("out = test_assert(true, \"live\")\n");
     assert!(
-        live.contains("rejection scope: emitted live host code"),
+        live.contains("host emission (codegen:c)") && live.contains("[04-TOT-2]"),
         "{live}"
     );
     assert!(live.contains("test_assert"), "{live}");
