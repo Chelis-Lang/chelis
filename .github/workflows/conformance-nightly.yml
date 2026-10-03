@@ -103,7 +103,10 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: rust-v1-${{ runner.environment }}
           workspaces: chelis
+          shared-key: conformance-nightly
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build chelis (release)
         working-directory: chelis

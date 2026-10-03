@@ -84,6 +84,7 @@ PR_PACKAGE_EXPANSION_YML = (
     REPO_ROOT / ".github" / "workflows" / "pr-package-expansion.yml"
 )
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
+CI_CACHE_WARM_YML = REPO_ROOT / ".github" / "workflows" / "ci-cache-warm.yml"
 CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 DEVENV_SETUP_ACTION = "./.github/actions/vendor/ci/actions/setup-devenv"
@@ -737,6 +738,10 @@ NON_GATE_WORKFLOWS = {
     # Shared planning validation checks the locked store through its pinned
     # action; it runs no compiler command owned by the developer gate.
     "openspec-store.yml",
+    # Writes the Rust build caches that read-only CI restores, from main only.
+    # It repeats consumer build commands to warm their caches; it gates
+    # nothing (scripts/test_ci_cache_policy.py owns its contract).
+    "ci-cache-warm.yml",
 }
 
 
@@ -2013,38 +2018,66 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
     return steps[0]
 
 
-def _assert_shared_rust_cache_writer_contract(workflow: str, *, macos: bool = False) -> None:
-    """Require exactly one reviewed writer for each shared cache namespace."""
-    census: list[tuple[str, dict[str, str]]] = []
-    for job, block in _workflow_job_blocks(workflow).items():
-        census.extend((job, inputs) for inputs in _rust_cache_steps(block))
+# The reviewed writer of each shared cache namespace these parity tests census:
+# (workflow file, job, save-if). CI restores without saving (`cache-mode:
+# read`), so the workspace family is written by ci-cache-warm.yml from main.
+SHARED_RUST_CACHE_WRITERS = {
+    "linux-workspace": (
+        "ci-cache-warm.yml",
+        "linux-workspace",
+        "${{ github.ref == 'refs/heads/main' }}",
+    ),
+    "macos-workspace": (
+        "macos-nightly.yml",
+        "macos-workspace-shard",
+        "${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}",
+    ),
+}
 
-    expected = {
-        "linux-workspace": (
-            "ci-fast",
-            "${{ github.ref == 'refs/heads/main' }}",
-        ),
-        "macos-workspace": (
-            "macos-workspace-shard",
-            "${{ matrix.shard == 1 }}",
-        ),
+# Every workflow with a job in either shared namespace.
+SHARED_RUST_CACHE_WORKFLOWS = (
+    "ci.yml",
+    "ci-cache-warm.yml",
+    "heavy-e2e.yml",
+    "macos-nightly.yml",
+    "pr-package-expansion.yml",
+)
+
+
+def _shared_rust_cache_workflow_texts(ci_text: str | None = None) -> dict[str, str]:
+    """Read the censused workflows, optionally replacing ci.yml's text."""
+    texts = {
+        name: (CI_YML.parent / name).read_text()
+        for name in SHARED_RUST_CACHE_WORKFLOWS
     }
-    expected = {key: value for key, value in expected.items() if (key == "macos-workspace") == macos}
-    for shared_key, expected_writer in expected.items():
+    texts["ci.yml"] = CI_YML.read_text() if ci_text is None else ci_text
+    return texts
+
+
+def _assert_shared_rust_cache_writer_contract(workflows: dict[str, str]) -> None:
+    """Require exactly one reviewed writer for each shared cache namespace."""
+    census: list[tuple[str, str, dict[str, str]]] = []
+    for name, workflow in workflows.items():
+        for job, block in _workflow_job_blocks(workflow).items():
+            census.extend(
+                (name, job, inputs) for inputs in _rust_cache_steps(block)
+            )
+
+    for shared_key, expected_writer in SHARED_RUST_CACHE_WRITERS.items():
         namespace = [
-            (job, inputs)
-            for job, inputs in census
+            (name, job, inputs)
+            for name, job, inputs in census
             if inputs.get("shared-key") == shared_key
         ]
         writers = [
-            (job, inputs.get("save-if", "true"))
-            for job, inputs in namespace
+            (name, job, inputs.get("save-if", "true"))
+            for name, job, inputs in namespace
             if inputs.get("save-if", "true") != "false"
         ]
         if len(writers) != 1:
             raise AssertionError(
                 f"{shared_key} must have exactly one writer across the "
-                f"workflow, found {writers}"
+                f"workflows, found {writers}"
             )
         if writers[0] != expected_writer:
             raise AssertionError(
@@ -2597,12 +2630,14 @@ class CiParityTests(unittest.TestCase):
             _assert_executable_run_once(mutated, command)
 
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
-        _assert_shared_rust_cache_writer_contract(CI_YML.read_text())
-        _assert_shared_rust_cache_writer_contract(CI_YML.with_name("macos-nightly.yml").read_text(), macos=True)
+        _assert_shared_rust_cache_writer_contract(
+            _shared_rust_cache_workflow_texts()
+        )
         workspace_inputs = _rust_cache_inputs(
-            _ci_job_block("ci-fast")
+            _workflow_job_block(CI_CACHE_WARM_YML, "linux-workspace")
         )
         read_only_jobs = (
+            "ci-fast",
             "change-owned-shard",
             "package-expansion-shard",
             "dtype-phase3-oracle",
@@ -2620,7 +2655,8 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertEqual(macos_inputs.get("shared-key"), "macos-workspace")
         self.assertEqual(
-            macos_inputs.get("save-if"), "${{ matrix.shard == 1 }}"
+            macos_inputs.get("save-if"),
+            "${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}",
         )
         for job in read_only_jobs:
             with self.subTest(job=job):
@@ -2677,7 +2713,9 @@ class CiParityTests(unittest.TestCase):
             AssertionError,
             "linux-workspace.*exactly one writer",
         ):
-            _assert_shared_rust_cache_writer_contract(mutated)
+            _assert_shared_rust_cache_writer_contract(
+                _shared_rust_cache_workflow_texts(mutated)
+            )
 
     def test_cache_input_parser_normalizes_or_rejects_yaml_equivalents(self):
         cases = (
@@ -2746,7 +2784,9 @@ class CiParityTests(unittest.TestCase):
                     1,
                 )
                 with self.assertRaisesRegex(AssertionError, error):
-                    _assert_shared_rust_cache_writer_contract(mutated)
+                    _assert_shared_rust_cache_writer_contract(
+                        _shared_rust_cache_workflow_texts(mutated)
+                    )
 
     def test_read_only_cache_contract_rejects_a_second_cache_step(self):
         block = _ci_job_block("faithful-observation-phase2-oracle")

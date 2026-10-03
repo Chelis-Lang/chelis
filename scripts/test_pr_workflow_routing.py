@@ -1463,12 +1463,14 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
 
 class CandidatePrivilegeTests(unittest.TestCase):
     def test_candidate_cache_tokens_are_readonly(self) -> None:
-        for path in (CI, HULL):
+        # Package expansion checks out the candidate from a main dispatch, so
+        # it runs in the default branch's cache scope like a retarget.
+        for path in (CI, HULL, EXPANSION):
             with self.subTest(workflow=path.name):
                 assert_candidate_cache_readonly(self, yaml.safe_load(path.read_text()))
 
     def test_candidate_cache_write_grants_are_rejected(self) -> None:
-        for path in (CI, HULL):
+        for path in (CI, HULL, EXPANSION):
             original = yaml.safe_load(path.read_text())
             for mode in (None, "write", "write-only"):
                 workflow = copy.deepcopy(original)

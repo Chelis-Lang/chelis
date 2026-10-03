@@ -92,7 +92,9 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          key: smt-darwin-arm64
+          prefix-key: rust-v1-${{ runner.environment }}
+          shared-key: smt-darwin-arm64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Build chelis-cli (release, smt)
@@ -163,8 +165,9 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: rust-v1-${{ runner.environment }}
           shared-key: macos-workspace
-          save-if: ${{ matrix.shard == 1 }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
 
       - name: Install Python binding dependencies
         run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
@@ -262,6 +265,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: rust-v1-${{ runner.environment }}
           shared-key: macos-workspace
           save-if: false
 

@@ -181,9 +181,10 @@ not a silent per-PR tax.
 ### Cache-pool pruning
 
 The Actions-cache pool is dominated by `Swatinem/rust-cache` `target/`
-snapshots — one per (job, `Cargo.lock`/rustc generation) — plus per-PR caches.
-Left alone it creeps over GitHub's 10GB per-repo limit and LRU-evicts whatever
-is least-recently-used. `.github/workflows/cache-prune.yml` (weekly + manual)
+snapshots, one per cache family and `Cargo.lock`/rustc generation. Only `main`
+saves them ([Rust build caches](ci_validation.md#rust-build-caches)). Left
+alone, stale generations push the pool toward the repository's cache limit, and
+GitHub then evicts whatever was used least recently. `.github/workflows/cache-prune.yml` (weekly + manual)
 runs `scripts/ci_cache_prune.py`, which deletes closed-PR-ref caches and stale
 duplicate `main` generations while PROTECTING the `cvc5-prebuilt-*` fallback
 caches. A failed open-PR lookup fail-safes to no PR pruning (never mass-delete

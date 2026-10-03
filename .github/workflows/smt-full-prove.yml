@@ -100,15 +100,12 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          # Restore the same cvc5 target cache as the required smt smoke
-          # lane. The full corpus is intentionally slower, but it should
-          # spend time proving, not cold-building cvc5 again before the
-          # first prove step.
+          prefix-key: rust-v1-${{ runner.environment }}
+          # Restore the cvc5 target cache that ci-cache-warm.yml writes for
+          # the required smt smoke lane, so the full corpus spends its time
+          # proving rather than cold-building cvc5 before the first step.
           shared-key: smt-smt-build
-          # Match the smt-build smoke lane so the shared cache inputs stay
-          # identical (asserted by scripts/test_gate.py) and a slow run
-          # still warms the cache (chelis#583).
-          cache-on-failure: true
+          save-if: false
 
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt

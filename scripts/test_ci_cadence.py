@@ -197,10 +197,16 @@ def assert_extended(test, pr, nightly):
                 else:
                     test.assertNotIn("if", step)
     full = jobs["full-workspace"]
-    capacity = lambda job: [s for s in job["steps"] if s.get("name") == "Restore capacity rustdoc build"]
-    test.assertFalse(capacity(full))
-    test.assertFalse(capacity(jobs["generalize-sweep-oracle-shard"]))
-    test.assertEqual(len(capacity(jobs["dtype-phase3-oracle"])), 1)
+    # Main runs these jobs on the self-hosted pool, which keeps its Kache
+    # compiler cache and never saves a GitHub cache; hosted branch runs
+    # restore only the Rust families ci-cache-warm.yml writes. An explicit
+    # target-directory cache here would have no writer.
+    for job_id, job in jobs.items():
+        for step in job.get("steps", []):
+            test.assertFalse(
+                str(step.get("uses", "")).startswith("actions/cache"),
+                (job_id, step.get("name")),
+            )
     # chelis#1819: one unsharded run of this selection has never finished
     # inside any budget, so it never reported a verdict at all. The selection
     # is unchanged and still unfiltered; it executes as four disjoint hash
@@ -215,19 +221,6 @@ def assert_extended(test, pr, nightly):
     test.assertIn(module_suite, [s.get("run") for s in module["steps"]])
     assert_complete_hash_partition(test, module, module_suite)
     test.assertIn("python scripts/ci_script_tests.py nightly", [s.get("run") for s in jobs["script-nightly"]["steps"]])
-    script_cache_steps = [
-        step
-        for step in jobs["script-nightly"]["steps"]
-        if step.get("name") in {
-            "Restore script compiler builds",
-            "Save script compiler builds",
-        }
-    ]
-    test.assertEqual(len(script_cache_steps), 2)
-    for step in script_cache_steps:
-        cached_paths = step["with"]["path"].splitlines()
-        test.assertIn("target/agents/native-execution-integration", cached_paths)
-        test.assertIn("target/agents/native-owner-integration", cached_paths)
     test.assertIn("cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture", commands)
     test.assertIn("cargo test -p chelis-backend-c", [s.get("run") for s in jobs["backend-sanitizers-full"]["steps"]])
     support = jobs["integration-support"]
