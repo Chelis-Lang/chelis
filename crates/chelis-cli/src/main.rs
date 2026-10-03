@@ -9272,13 +9272,19 @@ fn run_forked_suite_pid_with_timeout(
         deadline.map(|deadline| deadline.checked_sub(term_grace).unwrap_or(started));
     let mut timed_out = false;
     let mut suite_term_sent = false;
+    // The leader's wait status, once reaped. A group signal can reap it too
+    // (see `signal_suite_group`), so it is never waited for twice.
+    let mut reaped = None;
     let wait_status = loop {
-        if let Some(status) = waitpid_nonblocking(pid)? {
+        if reaped.is_none() {
+            reaped = waitpid_nonblocking(pid)?;
+        }
+        if let Some(status) = reaped {
             // A leader may die while a worker still owns the captured pipes.
             // Always quiesce its process group before joining reader threads;
             // a legitimate leader has already reaped its workers, making this
             // an ESRCH no-op.
-            send_suite_pid_signal(pid, libc::SIGKILL)?;
+            send_suite_pid_signal(pid, libc::SIGKILL, &mut reaped)?;
             break status;
         }
         let now = Instant::now();
@@ -9291,12 +9297,18 @@ fn run_forked_suite_pid_with_timeout(
         if !suite_term_sent && suite_term_at.is_some_and(|term_at| now >= term_at) {
             timed_out = true;
             suite_term_sent = true;
-            send_suite_pid_signal(pid, libc::SIGTERM)?;
+            send_suite_pid_signal(pid, libc::SIGTERM, &mut reaped)?;
+            if reaped.is_some() {
+                continue;
+            }
         }
         if deadline.is_some_and(|deadline| now >= deadline) {
             timed_out = true;
-            send_suite_pid_signal(pid, libc::SIGKILL)?;
-            break waitpid_blocking(pid)?;
+            send_suite_pid_signal(pid, libc::SIGKILL, &mut reaped)?;
+            break match reaped {
+                Some(status) => status,
+                None => waitpid_blocking(pid)?,
+            };
         }
         thread::sleep(Duration::from_millis(20));
     };
@@ -9426,8 +9438,18 @@ fn terminate_worker_process(child: &mut std::process::Child) -> Result<(), std::
     child.kill()
 }
 
+/// Signal the suite's process group, the leader `pid` and its descendants.
+///
+/// `reaped` holds the leader's wait status once the supervisor has reaped it.
+/// On macOS a refused signal can reap the leader here (see
+/// `signal_suite_group`), so callers read `reaped` afterwards instead of
+/// waiting for the leader again.
 #[cfg(unix)]
-fn send_suite_pid_signal(pid: libc::pid_t, signal: libc::c_int) -> Result<(), std::io::Error> {
+fn send_suite_pid_signal(
+    pid: libc::pid_t,
+    signal: libc::c_int,
+    reaped: &mut Option<libc::c_int>,
+) -> Result<(), std::io::Error> {
     signal_suite_group(
         || {
             if unsafe { libc::kill(-pid, signal) } == 0 {
@@ -9436,24 +9458,32 @@ fn send_suite_pid_signal(pid: libc::pid_t, signal: libc::c_int) -> Result<(), st
                 Err(std::io::Error::last_os_error())
             }
         },
+        || {
+            if reaped.is_none() {
+                *reaped = waitpid_nonblocking(pid)?;
+            }
+            Ok(())
+        },
         SUITE_GROUP_EXIT_GRACE,
     )
 }
 
-/// How long a group signal answered with EPERM is retried before the denial
-/// is taken as genuine.
+/// How long macOS may refuse a group signal before the refusal is taken as a
+/// genuine permission failure.
 #[cfg(unix)]
 const SUITE_GROUP_EXIT_GRACE: Duration = Duration::from_secs(2);
 
-/// Deliver one signal to the suite's process group.
+/// Deliver one signal to a process group; ESRCH means the group is gone.
 ///
-/// ESRCH means the group is gone, which is what every caller wants. Darwin
-/// also answers EPERM while the group's remaining members are still exiting,
-/// a state that ends in ESRCH, so EPERM is retried until `grace` elapses and
-/// only a denial that outlasts it is returned.
+/// macOS answers EPERM while a member of the group is exiting, including a
+/// leader that has exited but that its parent has not reaped. On EPERM this
+/// first calls `reap_leader`, which reaps the supervisor's own exited leader,
+/// then signals again, for at most `grace`; EPERM that outlasts it is returned
+/// unchanged. Elsewhere every error but ESRCH is returned at once.
 #[cfg(unix)]
 fn signal_suite_group(
     mut kill: impl FnMut() -> Result<(), std::io::Error>,
+    mut reap_leader: impl FnMut() -> Result<(), std::io::Error>,
     grace: Duration,
 ) -> Result<(), std::io::Error> {
     let started = Instant::now();
@@ -9461,7 +9491,12 @@ fn signal_suite_group(
         match kill() {
             Ok(()) => return Ok(()),
             Err(err) if err.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
-            Err(err) if err.raw_os_error() == Some(libc::EPERM) && started.elapsed() < grace => {
+            Err(err)
+                if cfg!(target_os = "macos")
+                    && err.raw_os_error() == Some(libc::EPERM)
+                    && started.elapsed() < grace =>
+            {
+                reap_leader()?;
                 thread::sleep(Duration::from_millis(10));
             }
             Err(err) => return Err(err),
@@ -9475,9 +9510,14 @@ mod suite_group_signal_tests {
 
     /// Run `signal_suite_group` against scripted kill replies (`None` is a
     /// delivered signal, `Some(errno)` a failure; the last reply repeats) and
-    /// report its result and how many signals it sent.
-    fn signal_with(replies: &[Option<i32>], grace: Duration) -> (std::io::Result<()>, usize) {
+    /// report its result, how many signals it sent and how often it tried to
+    /// reap the leader.
+    fn signal_with(
+        replies: &[Option<i32>],
+        grace: Duration,
+    ) -> (std::io::Result<()>, usize, usize) {
         let mut calls = 0;
+        let mut reaps = 0;
         let result = signal_suite_group(
             || {
                 let reply = replies[calls.min(replies.len() - 1)];
@@ -9487,42 +9527,94 @@ mod suite_group_signal_tests {
                     Some(errno) => Err(std::io::Error::from_raw_os_error(errno)),
                 }
             },
+            || {
+                reaps += 1;
+                Ok(())
+            },
             grace,
         );
-        (result, calls)
+        (result, calls, reaps)
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn exiting_group_eperm_is_retried_until_the_group_is_gone() {
+    fn exiting_group_eperm_reaps_and_retries_until_the_group_is_gone() {
         let replies = [Some(libc::EPERM), Some(libc::EPERM), Some(libc::ESRCH)];
-        let (result, calls) = signal_with(&replies, Duration::from_secs(60));
+        let (result, calls, reaps) = signal_with(&replies, Duration::from_secs(60));
         result.expect("an exiting group is not a denial");
-        assert_eq!(calls, 3);
+        assert_eq!((calls, reaps), (3, 2));
     }
 
-    #[test]
-    fn delivered_and_vanished_signals_succeed_without_retry() {
-        for reply in [None, Some(libc::ESRCH)] {
-            let (result, calls) = signal_with(&[reply], Duration::from_secs(60));
-            result.expect("delivered or gone");
-            assert_eq!(calls, 1);
-        }
-    }
-
+    #[cfg(target_os = "macos")]
     #[test]
     fn eperm_past_the_grace_keeps_the_original_error() {
-        let (result, calls) = signal_with(&[Some(libc::EPERM)], Duration::from_millis(50));
+        let (result, calls, _) = signal_with(&[Some(libc::EPERM)], Duration::from_millis(50));
         let error = result.expect_err("a lasting denial is fatal");
         assert_eq!(error.raw_os_error(), Some(libc::EPERM));
         assert!(calls > 1, "EPERM was not retried");
     }
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn eperm_is_reported_at_once_off_macos() {
+        let (result, calls, reaps) = signal_with(&[Some(libc::EPERM)], Duration::from_secs(60));
+        let error = result.expect_err("EPERM is a denial");
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        assert_eq!((calls, reaps), (1, 0));
+    }
+
+    #[test]
+    fn delivered_and_vanished_signals_succeed_without_retry() {
+        for reply in [None, Some(libc::ESRCH)] {
+            let (result, calls, reaps) = signal_with(&[reply], Duration::from_secs(60));
+            result.expect("delivered or gone");
+            assert_eq!((calls, reaps), (1, 0));
+        }
+    }
+
     #[test]
     fn other_errors_are_not_retried() {
-        let (result, calls) = signal_with(&[Some(libc::EINVAL)], Duration::from_secs(60));
+        let (result, calls, reaps) = signal_with(&[Some(libc::EINVAL)], Duration::from_secs(60));
         let error = result.expect_err("an invalid signal is fatal");
         assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
-        assert_eq!(calls, 1);
+        assert_eq!((calls, reaps), (1, 0));
+    }
+
+    /// The suite leader is the supervisor's own child, so after it exits it
+    /// stays a zombie in its group until the supervisor reaps it. Darwin
+    /// refuses the group signal with EPERM for as long as that lasts.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_exited_unreaped_leader_is_reaped_rather_than_reported() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            unsafe {
+                libc::setpgid(0, 0);
+                libc::_exit(7);
+            }
+        }
+        // Wait for the exit without reaping, so the leader is a zombie.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(waited, 0, "waitid: {}", std::io::Error::last_os_error());
+
+        let mut reaped = None;
+        let result = send_suite_pid_signal(pid, libc::SIGKILL, &mut reaped);
+        let status = match reaped {
+            Some(status) => status,
+            None => waitpid_blocking(pid).expect("reap the leader the signal left behind"),
+        };
+        result.expect("an exited leader is not a permission denial");
+        assert!(reaped.is_some(), "the exited leader was not reaped");
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 7);
     }
 }
 

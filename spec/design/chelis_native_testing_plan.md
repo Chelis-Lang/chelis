@@ -598,7 +598,11 @@ expires, the supervisor terminates the suite worker and every descendant,
 exits `1`, and reports an explicit incomplete-suite failure. It must not retry
 the same work through another execution mode after the suite deadline. Zero is
 not a valid suite timeout. Any cooperative termination grace is part of, rather
-than additional to, the advertised wall-clock deadline.
+than additional to, the advertised wall-clock deadline. The one bounded
+exception is on macOS, which refuses a signal to a process group while members
+of it are exiting. There the supervisor reaps an exited suite leader at once,
+and waits at most two seconds for the group's other exiting members before
+treating the refusal as a supervision failure.
 
 In `--json` mode, every stdout line remains valid JSON. Completed test rows and
 completed `--expect` verdict records are retained, any child-produced summary

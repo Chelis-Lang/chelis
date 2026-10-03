@@ -514,7 +514,9 @@ fn wait_for_suite_child(public_pid: u32) -> i32 {
     }
 }
 
-#[cfg(target_os = "linux")]
+/// A killed descendant can still be exiting when the supervisor returns: on
+/// macOS it is reparented and `kill(pid, 0)` answers EPERM until it is gone.
+#[cfg(unix)]
 fn assert_process_disappears(pid: i32) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -902,12 +904,7 @@ def test_five() -> unit = test_assert(true, "five")
         .trim()
         .parse()
         .expect("numeric pid");
-    let exists = unsafe { libc::kill(pid, 0) } == 0
-        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-    assert!(
-        !exists,
-        "hung batch descendant {pid} survived suite timeout"
-    );
+    assert_process_disappears(pid);
 }
 
 #[cfg(target_os = "linux")]
