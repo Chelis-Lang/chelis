@@ -141,15 +141,28 @@ fn compiler_failure_and_missing_product_preserve_previous_artifact() {
     fs::write(&file, "answer = 42i64\n").unwrap();
     build(&file, &out).assert().success();
     let original = fs::read(out.join("answer")).unwrap();
+    // The build probes the compiler's identity and predefined macros before
+    // compiling, so the broken compiler hands those probes to a real one and
+    // breaks only the compile itself. The last case refuses the probe too.
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    let real =
+        chelis_backend_c::toolchain::verify_compiler(&toolchain.compiler, &toolchain.compile_flags)
+            .unwrap()
+            .path;
+    let probes = format!(
+        "case \" $* \" in *' --version '*|*' -dM '*) exec '{}' \"$@\";; esac\n",
+        real.display()
+    );
     let compiler = dir.path().join("broken compiler");
     for (body, diagnostic) in [
         (
-            "echo deliberate-compiler-failure >&2; exit 37",
+            format!("{probes}echo deliberate-compiler-failure >&2; exit 37"),
             "deliberate-compiler-failure",
         ),
-        ("exit 0", "did not produce"),
+        (format!("{probes}exit 0"), "did not produce"),
+        ("exit 37".to_string(), "--version failed"),
     ] {
-        executable_script(&compiler, body);
+        executable_script(&compiler, &body);
         build(&file, &out)
             .env("CHELIS_CC", &compiler)
             .assert()
