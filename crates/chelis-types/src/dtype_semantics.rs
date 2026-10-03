@@ -2223,10 +2223,10 @@ impl_native_activation_element!(f32, apply_float_unop_f32, apply_float_binop_f32
 impl_native_activation_element!(f64, apply_float_unop_f64, apply_float_binop_f64);
 
 macro_rules! impl_reduced_activation_element {
-    ($ty:ty) => {
+    ($ty:ty, $from_f64:ident) => {
         impl ActivationElement for $ty {
             fn constant(value: f64) -> Self {
-                Self::from_f64(value)
+                $from_f64(value)
             }
 
             fn unary(self, op: FloatUnOp) -> Self {
@@ -2240,8 +2240,8 @@ macro_rules! impl_reduced_activation_element {
     };
 }
 
-impl_reduced_activation_element!(half::f16);
-impl_reduced_activation_element!(half::bf16);
+impl_reduced_activation_element!(half::f16, f16_from_f64_rne);
+impl_reduced_activation_element!(half::bf16, bf16_from_f64_rne);
 
 /// Evaluates each section 3.3 primitive on one tensor element as it is reached.
 struct ElementActivationGraph<T>(std::marker::PhantomData<T>);
