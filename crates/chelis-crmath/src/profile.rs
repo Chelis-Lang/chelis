@@ -6,9 +6,11 @@
 //! a wrapper adds, and no command line shows it, so `chelis build` compiles and runs a
 //! canary with the selected compiler and the exact profile arguments before it trusts
 //! the compiler. The canary is not a list of hand-picked witnesses: it is generated
-//! from this table, which is closed over the profile's [`Obligation`]s and the float
-//! [`Primitive`]s generated code computes. The table is three fixtures, read at
-//! compile time:
+//! from this table, which covers every [`Obligation`] for the float [`Primitive`]s it
+//! lists. That list is written by hand and is not closed over what generated code
+//! computes: it omits `floor`, `ceil`, `rint`, `fabs`, `fmax` and `fmin`, the `<=`,
+//! `>` and `>=` comparisons (`>` appears only inside the `gt_max` shape), and the
+//! integer-float conversions. The table is three fixtures, read at compile time:
 //!
 //! - `tests/fixtures/canary.txt` and `tests/fixtures/binary64_worst_cases.txt`: the
 //!   seven transcendentals at both widths (special cases, thresholds, and CORE-MATH's
@@ -209,7 +211,9 @@ const SHAPE: &[Class] = &[];
 
 macro_rules! primitives {
     ($(($name:literal, $width:literal, $arity:literal, $result:ident, $c:expr, $classes:ident)),* $(,)?) => {
-        /// Every primitive the table covers. The fixtures may name no other.
+        /// Every primitive the table covers, listed by hand (the module docs name the
+        /// operations generated code computes that it omits). The fixtures may name no
+        /// other.
         pub static PRIMITIVES: &[Primitive] = &[
             $(Primitive {
                 name: $name,
