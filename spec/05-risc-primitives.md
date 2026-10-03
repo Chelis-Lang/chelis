@@ -467,6 +467,19 @@ the formula examples below already use (`axis=-1` for the last axis).
 > type error when it already names an operand dimension. Its optional anchor
 > is a named dimension of the operand and follows the operand rule above.
 
+> **[05-AXIS-2]** `gather`'s axis SHALL be an i32 integer constant,
+> spelled as a literal (including a negative literal) or that literal wrapped
+> in integer casts. A variable, helper call, or other runtime expression is a
+> type error at the gather call site, even when it evaluates to a constant:
+> the checker must determine which value dimension the index dimensions
+> replace. No checker, lowering, or backend SHALL assume axis zero for an
+> unresolved gather axis. `sort` preserves its operand shape and SHALL admit
+> an i32 axis computed at runtime, including a helper call or variable.
+> Every lane SHALL use that axis value. Both operations normalize negative
+> axes from the end; an invalid constant axis is a type error, and an invalid
+> runtime sort axis fails loudly at execution before producing a result.
+> The reduction, `expand`, and `insert` family retains [05-AXIS-1].
+
 The reduction axis must resolve statically: a literal, a
 `cast(N, i32)`-wrapped literal, or a named operand dimension as specified by
 `spec/04-type-system.md` §4.5.3. Because the output shape is "remove the
@@ -3876,7 +3889,7 @@ path even though bare `round` under `grad` remains a structural
 >
 > Domain: Indices use any active signed-integer dtype at their exact stored
 > width. Tensor data and updates share one active element dtype; axis is
-> i32. The selected scatter mode is explicitly add or replace. Bool data
+> i32. Gather axes obey [05-AXIS-2]. The selected scatter mode is explicitly add or replace. Bool data
 > may be selected/replaced but cannot enter numeric addition.
 >
 > Result: Gather selects the indexed source cells. Add scatter accumulates
@@ -3909,7 +3922,7 @@ path even though bare `round` under `grad` remains a structural
 > operand shape; `split(x,axis,sizes)` returns a List of tensor slices with
 > i64 sizes.
 >
-> Domain: Axis arguments are i32. Where, diagonal, and split admit every
+> Domain: Axis arguments are i32; sort axes obey [05-AXIS-2]. Where, diagonal, and split admit every
 > active tensor element dtype by exact selection. Cumsum, sort, trace, and
 > clamp admit the arithmetic dtype domains and parameter shapes specified
 > for their corresponding tensor operations in [05-OP-33]. No parameter or
