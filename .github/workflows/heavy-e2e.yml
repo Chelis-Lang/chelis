@@ -84,8 +84,10 @@ jobs:
   # Execution jobs selected on main use the self-hosted warm runners, which
   # substitute from the private Nix/Kache caches instead of rebuilding from
   # source. The warm broker admits them only from refs/heads/main, so candidate
-  # dispatches stay GitHub-hosted. test-telemetry and the scope receipt use
-  # GitHub-hosted runners.
+  # dispatches stay GitHub-hosted. It also admits only jobs that have a
+  # reviewed member route, and module-oracles has none (chelis#3070), so
+  # module-oracles, test-telemetry and the scope receipt use GitHub-hosted
+  # runners on every ref.
   #
   # On main those warm jobs also share the linux-extended-warm-x64 concurrency
   # group, so a run holds at most one runner of the two-runner pool and leaves
@@ -123,7 +125,8 @@ jobs:
   # Their Linux times sum to a few hours of test time at most (the slowest
   # single test took 1588 s); the limits are generous so a slow night does not
   # cancel them: five hours a shard, and two hours a test (the
-  # `module-oracles` nextest profile).
+  # `module-oracles` nextest profile). The five-hour shard limit stays inside
+  # the six-hour GitHub-hosted job limit.
   module-oracles:
     needs: module-oracles-plan
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
@@ -132,10 +135,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2]
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-module-oracles-{1}', github.run_id, matrix.shard) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
