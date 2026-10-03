@@ -2964,8 +2964,12 @@ pub(super) fn tensor_einsum_value(
     let accumulator = lhs.precision.default_reduce_sum_accumulator()?;
     let result = lhs.precision.default_reduce_sum_result_precision()?;
     let widen = |tensor: &RuntimeTensorValue, index: usize| {
-        cast_scalar("einsum", tensor.value.storage().scalar_at(index), accumulator)
-            .map_err(|error| error.to_string())
+        cast_scalar(
+            "einsum",
+            tensor.value.storage().scalar_at(index),
+            accumulator,
+        )
+        .map_err(|error| error.to_string())
     };
     let mut out = Vec::with_capacity(output_total);
     for out_linear in 0..output_total {
@@ -2999,7 +3003,12 @@ pub(super) fn tensor_einsum_value(
                 .map_err(|error| error.to_string())?,
             );
         }
-        out.push(balanced_accumulator_sum("einsum", products, accumulator, result)?);
+        out.push(balanced_accumulator_sum(
+            "einsum",
+            products,
+            accumulator,
+            result,
+        )?);
     }
     Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
         out_shape,

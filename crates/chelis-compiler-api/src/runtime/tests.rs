@@ -2607,7 +2607,10 @@ fn host_runtime_einsum_accumulates_at_the_default_accumulator_like_the_c_runtime
     let mut row = vec![16_777_216.0_f64];
     row.extend(std::iter::repeat_n(1.0_f64, 40));
     row.push(-16_777_216.0);
-    assert_eq!(einsum_row_sum(Prim::F32, row).value.to_f64_lossy_vec(), vec![39.0]);
+    assert_eq!(
+        einsum_row_sum(Prim::F32, row).value.to_f64_lossy_vec(),
+        vec![39.0]
+    );
     // bf16: the f32 total 1 + 2^-8 is a tie that narrows to 1.0 (0x3f80);
     // f64 kept 2^-30 and narrowed up to 0x3f81.
     let out = einsum_row_sum(Prim::Bf16, vec![1.0, 2.0_f64.powi(-8), 2.0_f64.powi(-30)]);
