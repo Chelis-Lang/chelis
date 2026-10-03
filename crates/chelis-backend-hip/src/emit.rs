@@ -3833,6 +3833,16 @@ impl HipEmitter {
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
         self.emit_sparse_geometry(id, axis, batch_rank, indices, "scatter", target_ty);
+        self.emit_scatter_update_shape_check(
+            id,
+            axis,
+            batch_rank,
+            indices,
+            updates,
+            target_ty.dims.len(),
+            indices_ty.dims.len(),
+            "scatter",
+        );
         self.line(&format!("chelis_device_metadata t{id}_index_count = t{id}_batch_count == 0 ? 0 : d_t{indices}->count / t{id}_batch_count;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_total = d_t{updates}->count;"
@@ -3853,6 +3863,55 @@ impl HipEmitter {
         self.indent -= 1;
         self.line("}");
         Ok(())
+    }
+
+    /// Trap unless a scatter's run-time update shape is the gathered shape
+    /// `target[..axis] ++ indices[batch_rank..] ++ target[axis + 1..]`.
+    ///
+    /// The verifier refuses only a static contradiction and leaves an update
+    /// shape it cannot prove to the run time (runtime_extents.md C2.3). The
+    /// host lane checks it in `chelis_tensor_sparse_plan`; the device kernels
+    /// walk the update count, so without this check fewer updates would
+    /// write a partial scatter silently (chelis#3045). The output slot holds
+    /// the target's shape.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_scatter_update_shape_check(
+        &mut self,
+        id: usize,
+        axis: usize,
+        batch_rank: usize,
+        indices: usize,
+        updates: usize,
+        target_rank: usize,
+        indices_rank: usize,
+        op: &str,
+    ) {
+        let expected = (0..axis)
+            .map(|target_axis| format!("d_t{id}->shape[{target_axis}]"))
+            .chain(
+                (batch_rank..indices_rank)
+                    .map(|index_axis| format!("d_t{indices}->shape[{index_axis}]")),
+            )
+            .chain(
+                (axis + 1..target_rank).map(|target_axis| format!("d_t{id}->shape[{target_axis}]")),
+            )
+            .collect::<Vec<_>>();
+        self.emit_update_shape_check(updates, &expected, op);
+    }
+
+    /// Trap unless `updates` has exactly the `expected` extents, the rank
+    /// first so no extent read leaves the descriptor's shape.
+    fn emit_update_shape_check(&mut self, updates: usize, expected: &[String], op: &str) {
+        let trap = format!("chelis_numeric_trap(\"numeric trap: domain in {op} at i64\");");
+        self.line(&format!(
+            "if (d_t{updates}->rank != {}) {trap}",
+            expected.len()
+        ));
+        for (axis, extent) in expected.iter().enumerate() {
+            self.line(&format!(
+                "if (d_t{updates}->shape[{axis}] != {extent}) {trap}"
+            ));
+        }
     }
 
     /// Launch the sparse replace-scatter (last-write-wins) kernel.
@@ -3905,6 +3964,16 @@ impl HipEmitter {
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
         self.emit_sparse_geometry(id, axis, batch_rank, indices, "scatter_replace", target_ty);
+        self.emit_scatter_update_shape_check(
+            id,
+            axis,
+            batch_rank,
+            indices,
+            updates,
+            target_ty.dims.len(),
+            indices_ty.dims.len(),
+            "scatter_replace",
+        );
         self.line(&format!("chelis_device_metadata t{id}_index_count = t{id}_batch_count == 0 ? 0 : d_t{indices}->count / t{id}_batch_count;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_total = d_t{updates}->count;"
@@ -3971,6 +4040,13 @@ impl HipEmitter {
         // Initialize the output from `data`; the kernel overwrites only
         // the scattered cells, so the remainder must equal `data`.
         self.emit_materialize_into_slot(id, data);
+        // The updates share the indices' shape (§3.5.1), and the kernel
+        // walks the update count, so a run-time mismatch traps here
+        // (chelis#3045).
+        let expected = (0..indices_ty.dims.len())
+            .map(|axis| format!("d_t{indices}->shape[{axis}]"))
+            .collect::<Vec<_>>();
+        self.emit_update_shape_check(updates, &expected, "scatter_elements");
         self.emit_shape_vars(id, "idx", indices);
         self.emit_shape_vars(id, "out", id);
         self.line(&format!(
@@ -6138,6 +6214,175 @@ mod tests {
         assert!(hip.contains("kernel_scatter_add_i64"));
         assert!(hip.contains("const long long *indices"));
         assert!(hip.contains("atomicAdd(&out[dst], updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)]);"));
+    }
+
+    /// A scatter DAG over a `(3, 2)` f32 target, `indices` of the given
+    /// shape, and `updates` of the given shape. Node ids are target 0,
+    /// indices 1, updates 2, output 3.
+    fn scatter_dag(op: RiscOp, indices: Vec<usize>, updates: Vec<usize>) -> Dag {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let mut load = |name: &str, dims: Vec<usize>, precision: Prim| {
+            dag.add_node(
+                decl,
+                RiscOp::Load { name: name.into() },
+                vec![],
+                TensorType {
+                    dims: dims.into_iter().map(DimInfo::Lit).collect(),
+                    precision,
+                },
+                None,
+            )
+        };
+        let target = load("target", vec![3, 2], Prim::F32);
+        let indices = load("indices", indices, Prim::Int64);
+        let updates = load("updates", updates, Prim::F32);
+        let out = dag.add_node(
+            decl,
+            op,
+            vec![target, indices, updates],
+            mat_f32(3, 2),
+            None,
+        );
+        dag.add_root(out);
+        dag
+    }
+
+    /// The emitted host lines that trap on a run-time update shape, in
+    /// order, up to the kernel's argument array.
+    fn update_shape_checks(hip: &str, op: &str) -> Vec<String> {
+        let trap = format!("chelis_numeric_trap(\"numeric trap: domain in {op} at i64\");");
+        let launch = hip
+            .find("void *args[] = { &p_t1, &p_t2, &p_t3")
+            .unwrap_or_else(|| panic!("no {op} launch in:\n{hip}"));
+        hip[..launch]
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("if (d_t2->") && line.ends_with(&trap))
+            .map(|line| line.trim_end_matches(&trap).trim().to_string())
+            .collect()
+    }
+
+    /// chelis#3045: the verifier leaves an update shape it cannot prove to
+    /// the run time (runtime_extents.md C2.3), and the device scatter
+    /// kernels loop over the update count. Each launch therefore compares
+    /// the update shape with the gathered shape the host sparse plan
+    /// requires, `target[..axis] ++ indices[batch_rank..] ++
+    /// target[axis + 1..]`, before the kernel runs.
+    #[test]
+    fn scatter_launches_check_the_update_shape_before_the_kernel() {
+        for (op, name) in [
+            (
+                RiscOp::ScatterAdd {
+                    axis: 1,
+                    batch_rank: 0,
+                },
+                "scatter",
+            ),
+            (
+                RiscOp::Scatter {
+                    axis: 1,
+                    batch_rank: 0,
+                },
+                "scatter_replace",
+            ),
+        ] {
+            let dag = scatter_dag(op, vec![4], vec![3, 4]);
+            let (hip, _) = emit_test_dag(&dag, "test_scatter").unwrap();
+            assert_eq!(
+                update_shape_checks(&hip, name),
+                [
+                    "if (d_t2->rank != 2)",
+                    "if (d_t2->shape[0] != d_t3->shape[0])",
+                    "if (d_t2->shape[1] != d_t1->shape[0])",
+                ],
+                "{name}:\n{hip}"
+            );
+        }
+    }
+
+    /// chelis#3045: an element-wise scatter's updates share the indices'
+    /// shape (`spec/05-risc-primitives.md` §3.5.1), never the target's.
+    #[test]
+    fn scatter_elements_launch_checks_updates_against_indices() {
+        let dag = scatter_dag(RiscOp::ScatterElements { axis: 0 }, vec![2, 2], vec![2, 2]);
+        let (hip, _) = emit_test_dag(&dag, "test_scatter_elements").unwrap();
+        assert_eq!(
+            update_shape_checks(&hip, "scatter_elements"),
+            [
+                "if (d_t2->rank != 2)",
+                "if (d_t2->shape[0] != d_t1->shape[0])",
+                "if (d_t2->shape[1] != d_t1->shape[1])",
+            ],
+            "{hip}"
+        );
+    }
+
+    /// chelis#3045's negative twin: the scattered axis selects target rows
+    /// by index, so its update extent is the index count and is never
+    /// compared with the target's extent on that axis, and a gather, which
+    /// has no updates, emits no update check.
+    #[test]
+    fn scatter_never_compares_the_scattered_axis_with_the_target() {
+        let dag = scatter_dag(
+            RiscOp::ScatterAdd {
+                axis: 0,
+                batch_rank: 0,
+            },
+            vec![4],
+            vec![4, 2],
+        );
+        let (hip, _) = emit_test_dag(&dag, "test_scatter").unwrap();
+        let checks = update_shape_checks(&hip, "scatter");
+        assert!(
+            !checks.iter().any(|line| line.contains("!= d_t3->shape[0]")),
+            "{checks:?}"
+        );
+        assert!(
+            checks
+                .iter()
+                .any(|line| line == "if (d_t2->shape[0] != d_t1->shape[0])"),
+            "{checks:?}"
+        );
+
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let values = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            mat_f32(3, 2),
+            None,
+        );
+        let indices = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_i64(4),
+            None,
+        );
+        let out = dag.add_node(
+            decl,
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0,
+            },
+            vec![values, indices],
+            mat_f32(4, 2),
+            None,
+        );
+        dag.add_root(out);
+        let (hip, _) = emit_test_dag(&dag, "test_gather").unwrap();
+        assert!(
+            !hip.lines().any(|line| {
+                line.trim_start().starts_with("if (d_t") && line.contains("domain in gather at i64")
+            }),
+            "{hip}"
+        );
     }
 
     /// A program-owned `Copy` with a terminal fused use receives the shared
