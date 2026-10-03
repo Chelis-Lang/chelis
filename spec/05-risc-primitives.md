@@ -3757,9 +3757,10 @@ path even though bare `round` under `grad` remains a structural
 > Integer/bool/string operands are type errors. Softmax's axis obeys
 > [05-DIM-3], including negative-axis normalization and runtime validation.
 >
-> Result: The pointwise lowerings are the formulas in section 3.3: sigmoid
-> is 1/(1+exp(-x)), silu is x*sigmoid(x), and gelu is x*sigmoid(2u) with
-> section 3.3's exact spelling of u. Softmax uses section 4.2's max-shifted
+> Result: The pointwise lowerings are section 3.3's primitive graphs:
+> sigmoid is `recip(add(const(1.0), exp(neg(x))))`, silu is
+> `mul(x, sigmoid(x))`, and gelu is `mul(x, sigmoid(mul(const(2.0), u)))`
+> with section 3.3's exact spelling of `u`. Softmax uses section 4.2's max-shifted
 > exponentials divided by their axis sum. Every exponential in these graphs
 > is [05-OP-46]'s correctly rounded primitive, and every other step is a finalized IEEE
 > operation without contraction, so each composition denotes exactly one
