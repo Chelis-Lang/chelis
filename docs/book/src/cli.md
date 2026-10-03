@@ -47,6 +47,12 @@ means exit `0`; a nonempty one means exit `2`. `chelis check DIRECTORY` checks d
 failures appear either in the affected file's report or in the envelope. A failing directory
 check exits `2`.
 
+File reports carry fitness components, checked-node counters, unresolved names,
+and diagnostics. `--show-inferred` requests callable signatures. Annotated Deep
+is available through the compiler checked-program API; the JSON report has no
+`typed_ast` member. A failure report still carries diagnostics even when no
+checked program can be produced.
+
 For a short calculation without a file, use `chelis eval 'EXPR'`. A file containing
 definitions but no expression has nothing to display; with `--json`, a successful evaluation
 of such a file prints a result whose `roots` array is empty. `chelis eval --file app.ch --timeout 30` bounds an

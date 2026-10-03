@@ -2529,7 +2529,9 @@ When full type checking fails, the compiler still infers types for as many sub-e
   (var {type: (t-tensor {} (d-name {} batch) (t-prim {} bf16))} y))
 ```
 
-The agent can read the annotated AST and see exactly which nodes type-checked and which didn't.
+The agent can use the fitness counters and diagnostics to locate failed checks.
+The compiler's checked-program product carries annotated Deep after successful
+type checking; the fitness report is a diagnostic document.
 
 > **[04-FIT-1]** `typed_nodes` and `total_nodes` SHALL report the type
 > inference product's checked-node counters, not a fabricated structural AST
@@ -2584,7 +2586,6 @@ shape is a change to a published interface.
 | `typed_nodes`, `untyped_nodes`, `total_nodes` | integer | always |
 | `unresolved_names` | array of string | always, possibly empty |
 | `errors` | array of diagnostic | always, possibly empty |
-| `typed_ast` | annotated Deep carrying a type on every node | always |
 | `inferred_signatures` | structured signature tree | only when the caller requests inferred signatures |
 
 > **[04-FIT-18]** `score`, `components.parse`, `components.structure`,
@@ -2604,10 +2605,13 @@ shape is a change to a published interface.
 
 (The fixed-dtype report carrier requirement is not fully implemented; see chelis#1288.)
 
-> **[04-FIT-13]** `typed_ast` and, when requested, `inferred_signatures`
-> SHALL be carried in the same typed value as the rest of the report.
-> They are members of the report's type -- `inferred_signatures` absent by
-> omission when not requested -- not separately spliced fragments.
+> **[04-FIT-13]** When requested, `inferred_signatures` SHALL be carried
+> in the same typed value as the rest of the report, absent by omission when
+> not requested. The report SHALL NOT carry a `typed_ast` member. Annotated
+> Deep belongs to the compiler's checked-program product, which represents
+> successful type checking; the fitness report carries the diagnostics and
+> measurements of a compilation attempt. A consumer SHALL NOT infer the
+> existence of a checked-program product from the presence of a report.
 
 #### Diagnostic fields
 
@@ -2685,8 +2689,7 @@ Illustrative of the shape only; the atoms above are normative.
       "span": {"span": "range", "offset": 786, "len": 20},
       "span_id": "surf:786..806"
     }
-  ],
-  "typed_ast": "... (annotated Deep with types on every node) ..."
+  ]
 }
 ```
 
