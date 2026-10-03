@@ -701,6 +701,34 @@ impl NanWidth {
 
 /// The arity of a float builtin in the host lane's NaN inventory. A builtin
 /// added to the inventory fails here until the oracle knows how to call it.
+/// Link `out/driver.c` against a `chelis build` static library and the
+/// runtime archive it staged, as `chelis build` links an executable: the
+/// profile for the requirements every generated unit declares (OpenMP wanted,
+/// so gcc links `-fopenmp` for the library's parallel regions) through the
+/// shared `toolchain::link_args`, in the tools' cleared environment.
+fn link_static_library_driver(out: &Path, library: &str, needs_blas: bool) -> bool {
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas,
+        },
+    );
+    let driver = out.join("driver.c");
+    let library = out.join(library);
+    let runtime = out.join("libchelis_runtime.a");
+    let product = out.join("driver");
+    chelis_backend_c::toolchain::tool_command(&toolchain.compiler)
+        .args(chelis_backend_c::toolchain::link_args(
+            &toolchain.compile_flags,
+            &[driver.as_os_str(), library.as_os_str(), runtime.as_os_str()],
+            &toolchain.link_flags,
+            product.as_os_str(),
+        ))
+        .status()
+        .unwrap()
+        .success()
+}
+
 fn nan_inventory_arity(name: &str) -> usize {
     match name {
         "add" | "sub" | "mul" | "div" | "floor_div" | "min" | "max" | "min_elem" | "max_elem" => 2,
@@ -948,17 +976,10 @@ fn every_float_result_finalizes_nan_like_eval_through_the_static_library_abi() {
         .stdout(predicate::str::contains("Built static library"));
     let driver = out.join("driver.c");
     fs::write(&driver, &harness).unwrap();
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
-    let status = Process::new(toolchain.compiler)
-        .arg(&driver)
-        .arg(out.join("libnan_oracle.a"))
-        .arg(out.join("libchelis_runtime.a"))
-        .args(toolchain.link_flags)
-        .arg("-o")
-        .arg(out.join("driver"))
-        .status()
-        .unwrap();
-    assert!(status.success(), "the oracle driver must link");
+    assert!(
+        link_static_library_driver(&out, "libnan_oracle.a", false),
+        "the oracle driver must link"
+    );
     let run = Process::new(out.join("driver")).output().unwrap();
     assert!(run.status.success(), "{run:?}");
     let stdout = String::from_utf8(run.stdout).unwrap();
@@ -1712,22 +1733,10 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
         .stdout(predicate::str::contains("Built static library"));
     let driver = out.join("driver.c");
     fs::write(&driver, &harness).unwrap();
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
-        chelis_backend_c::toolchain::CodegenRequirements {
-            wants_openmp: false,
-            needs_blas: true,
-        },
+    assert!(
+        link_static_library_driver(&out, "libnan_kernels.a", true),
+        "the oracle driver must link"
     );
-    let status = Process::new(toolchain.compiler)
-        .arg(&driver)
-        .arg(out.join("libnan_kernels.a"))
-        .arg(out.join("libchelis_runtime.a"))
-        .args(toolchain.link_flags)
-        .arg("-o")
-        .arg(out.join("driver"))
-        .status()
-        .unwrap();
-    assert!(status.success(), "the oracle driver must link");
     let run = Process::new(out.join("driver")).output().unwrap();
     assert!(run.status.success(), "{run:?}");
     let stdout = String::from_utf8(run.stdout).unwrap();

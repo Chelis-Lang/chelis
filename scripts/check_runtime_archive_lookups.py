@@ -799,8 +799,7 @@ REVIEWED: tuple[Row, ...] = (
         lines=(
             '.arg(out.join("libchelis_runtime.a"))',
             '.arg(out.join("libchelis_runtime.a"))',
-            '.arg(out.join("libchelis_runtime.a"))',
-            '.arg(out.join("libchelis_runtime.a"))',
+            'let runtime = out.join("libchelis_runtime.a");',
             'assert!(argv.contains("libchelis_runtime.a\\n"), "{argv}");',
             'let output = dir.path().join("out/libchelis_runtime.a.c");',
             'let runtime = fs::read(dir.path().join("out/libchelis_runtime.a")).unwrap();',

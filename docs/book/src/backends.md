@@ -92,6 +92,9 @@ clang driver.c out/libfunctions.a out/libchelis_runtime.a -lm -framework Acceler
 ```
 
 Use the build's reported dependencies for the actual target and operations.
+With gcc the module's parallel loops are compiled with OpenMP, so the reported
+link line includes `-fopenmp`; a link without it fails with undefined
+`omp_*` and `GOMP_*` symbols.
 Native tool failures fail the build and preserve the previous native artifact;
 generated sources and runtime files may already have been refreshed.
 
