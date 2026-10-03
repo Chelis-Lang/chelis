@@ -135,7 +135,7 @@ pub(super) fn check_round_to_builtin_signature(
 ) -> Type {
     const FNAME: &str = "round_to";
     if arg_tys.len() != 2 {
-        return report_builtin_arity(errors, node, FNAME, 2, arg_tys.len());
+        return report_builtin_arity(errors, node, CheckSite::Node(node), FNAME, 2, arg_tys.len());
     }
     let operand = type_for_readonly_check(&arg_tys[0], subst);
     let result = match &operand {
@@ -194,7 +194,14 @@ pub(super) fn check_csv_builtin_signature(
         _ => 2,
     };
     if arg_tys.len() != expected_arity {
-        return report_builtin_arity(errors, node, fname, expected_arity, arg_tys.len());
+        return report_builtin_arity(
+            errors,
+            node,
+            CheckSite::Node(node),
+            fname,
+            expected_arity,
+            arg_tys.len(),
+        );
     }
 
     macro_rules! require_slot {

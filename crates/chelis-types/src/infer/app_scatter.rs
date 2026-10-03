@@ -13,7 +13,14 @@ pub(super) fn check_scatter_elements(
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 4 {
-        return report_builtin_arity(errors, node, "scatter_elements", 4, arg_tys.len());
+        return report_builtin_arity(
+            errors,
+            node,
+            CheckSite::Node(node),
+            "scatter_elements",
+            4,
+            arg_tys.len(),
+        );
     }
     let data_ty = subst.apply(&arg_tys[0]);
     let indices_ty = subst.apply(&arg_tys[1]);

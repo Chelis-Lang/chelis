@@ -265,23 +265,31 @@ fn expand_inline_size_still_fires_the_size_rule_once() {
     // (chelis#469: spec/04-type-system.md section 4.7.2 admits any `i64`
     // size), so the row watches the rule that remains: an `i32` size is
     // rejected EXACTLY ONCE (not skipped, not doubled), and never an ICE.
-    let msgs = reject_messages(
-        "def g[a, n](b: tensor[n, f32], t: (i32, i32)) -> tensor[a, n, f32] = \
-         insert(b, 0, add(t.1, cast(1, i32)))\n",
-        "3c: expand i32 inline size",
-    );
-    let size_rule: Vec<_> = msgs
+    let source = "def g[a, n](b: tensor[n, f32], t: (i32, i32)) -> tensor[a, n, f32] = \
+         insert(b, 0, add(t.1, cast(1, i32)))\n";
+    let report = check_ir_program(&surf_to_deep_macro(source))
+        .expect_err("an i32 inline insert size must reject");
+    let size_errors: Vec<_> = report
+        .errors
         .iter()
-        .filter(|m| m.contains("insert") && m.contains("expects an i64 size"))
+        .filter(|error| {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("i64")
+                && error.got.as_deref() == Some("i32")
+                && error.span_offset == source.find("insert(")
+        })
         .collect();
     assert_eq!(
-        size_rule.len(),
+        size_errors.len(),
         1,
-        "3c: the size-dtype rejection must fire exactly once, got {msgs:?}",
+        "the size-dtype rejection must fire exactly once at insert: {:?}",
+        report.errors
     );
-    assert!(
-        !msgs.iter().any(|m| m.contains("internal compiler error")),
-        "3c: reject must be a clean diagnostic, never an ICE; got {msgs:?}",
+    assert_eq!(
+        report.errors.len(),
+        1,
+        "the rejected size must not cascade into an unrelated failure: {:?}",
+        report.errors
     );
 }
 

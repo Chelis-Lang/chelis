@@ -316,9 +316,15 @@ fn deferred_window_shape_errors_precede_late_family_rejection() {
             serde_json::from_slice(&checked.stdout).expect("check JSON");
         let errors = report["errors"].as_array().expect("check errors");
         assert!(
-            errors.iter().any(|error| error["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("window arity 2 exceeds tensor rank 1"))),
+            errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["expected"] == "window arity at most 1"
+                    && error["got"] == "window arity 2"
+                    && error["span"]["offset"].as_u64()
+                        == invalid_rank
+                            .find("reduce_window_sum(")
+                            .map(|offset| offset as u64)
+            }),
             "{invalid_rank}: {report}"
         );
         assert!(

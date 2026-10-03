@@ -129,7 +129,8 @@ def source_parameter_cases():
                     type=_node("t-prim", _atom("symbol", "i32")),
                 ),
                 span=_atom("str", f"surf:8..{len(source)}"),
-            )
+            ),
+            span=_atom("str", f"surf:0..{len(source)}"),
         )
         add("SourceProgram", "parse-surf", f"tuple-{value}", source, {"syntax": surf})
         add("SourceProgram", "desugar-surf", f"tuple-{value}", source, {"syntax": deep})
@@ -147,7 +148,8 @@ def source_parameter_cases():
                     type=_node("t-prim", _atom("symbol", "i32")),
                 ),
                 span=_atom("str", f"surf:8..{len(source)}"),
-            )
+            ),
+            span=_atom("str", f"surf:0..{len(source)}"),
         )
         add("SourceProgram", "parse-surf", f"axis-{value}", source, {"syntax": surf})
         add("SourceProgram", "desugar-surf", f"axis-{value}", source, {"syntax": deep})
@@ -356,7 +358,8 @@ def materialization_cases():
             _atom("int", 9007199254740993),
             type=_node("t-prim", _atom("symbol", "i64")),
             span=_atom("str", "surf:8..27"),
-        )
+        ),
+        span=_atom("str", "surf:0..27"),
     )
     add(
         "SourceProgram",

@@ -548,12 +548,16 @@ pub(super) fn infer_let(
                             }
                             Ok(()) => {}
                             Err(e) => {
-                                let mut diagnostic = CheckError::new(
+                                let expected = subst.apply(&declared_ty);
+                                let got = subst.apply(&expr_ty);
+                                let mut diagnostic = CheckError::with_types(
                                     check_error_kind_from_type_error_kind(&e.kind),
                                     format!(
-                                        "let-binding `{name}` ascription does not match RHS: {}",
-                                        e.message
+                                        "let-binding `{name}` ascription does not match RHS: \
+                                         expected {expected}, got {got}"
                                     ),
+                                    expected.to_string(),
+                                    got.to_string(),
                                     vec![format!(
                                         "Declared type for `{name}` is {declared_ty}; \
                                      RHS inferred to {expr_ty}"
@@ -561,7 +565,10 @@ pub(super) fn infer_let(
                                 );
                                 if let Some(location) =
                                     TypeDiagnosticLocation::from_expr(declared_ty_expr)
-                                        .or_else(|| TypeDiagnosticLocation::from_expr(rhs_expr))
+                                {
+                                    diagnostic = location.attach(diagnostic);
+                                }
+                                if let Some(location) = TypeDiagnosticLocation::from_expr(rhs_expr)
                                 {
                                     diagnostic = location.attach(diagnostic);
                                 }

@@ -103,6 +103,7 @@ mod app_hostio;
 mod app_numeric;
 mod app_operand_dtype;
 mod app_post;
+mod app_post_diagonal;
 mod app_route;
 mod app_scatter;
 mod app_shape;

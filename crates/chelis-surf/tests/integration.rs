@@ -2,6 +2,7 @@
 
 use chelis_deep::parser::parse_str_strict as deep_parse_strict;
 use chelis_deep::printer::print_canonical;
+use chelis_deep::{Atom, DeepTag, Expr, ExprCarrier};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
 
@@ -266,9 +267,19 @@ fn wildcard_dimension_desugars_to_d_name_star() {
 fn typed_def_emits_defsig() {
     let decls = surf_parse("def f(x: f32) -> f32 = x").unwrap();
     let deep = desugar_program(&decls).expect("Surf fixture must desugar");
-    let text = print_canonical(&deep);
-    assert!(text.contains("(defsig {} f"), "Missing defsig in:\n{text}");
-    assert!(text.contains("(def {}\n  f"), "Missing def in:\n{text}");
+    assert!(
+        matches!(
+            deep.as_slice(),
+            [signature, definition]
+                if matches!(signature.carrier(), ExprCarrier::DecodedNode(
+                    DeepTag::Defsig, _, [Expr::Atom(Atom::Name(name), _), ..]
+                ) if name == "f")
+                && matches!(definition.carrier(), ExprCarrier::DecodedNode(
+                    DeepTag::Def, _, [Expr::Atom(Atom::Name(name), _), ..]
+                ) if name == "f")
+        ),
+        "a typed declaration must emit its matching signature and body: {deep:#?}"
+    );
 }
 
 #[test]
@@ -770,7 +781,14 @@ fn fmt_if_as_binary_operand_is_idempotent_and_meaning_preserving() {
 }
 
 fn discover_repo_ch_files(root: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
-    const GENERATED_DIRECTORIES: &[&str] = &[".devenv", ".git", ".venv", "node_modules", "target"];
+    const GENERATED_DIRECTORIES: &[&str] = &[
+        ".devenv",
+        ".git",
+        ".venv",
+        ".worktrees",
+        "node_modules",
+        "target",
+    ];
 
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -816,7 +834,14 @@ fn repo_ch_corpus_discovery_excludes_generated_and_symlinked_trees() {
     let external = tempfile::tempdir().expect("external fixture");
     std::fs::write(root.path().join("real.ch"), "def real() -> i32 = 1\n")
         .expect("write repository source");
-    for generated in [".devenv", ".venv", "target", "node_modules", ".git"] {
+    for generated in [
+        ".devenv",
+        ".venv",
+        "target",
+        "node_modules",
+        ".git",
+        ".worktrees",
+    ] {
         let directory = root.path().join(generated);
         std::fs::create_dir_all(&directory).expect("create generated directory");
         std::fs::write(directory.join("generated.ch"), "not repository source")

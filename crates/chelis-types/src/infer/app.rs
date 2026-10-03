@@ -157,11 +157,11 @@ fn infer_app_inner(
     });
 
     if matches!(func_name.as_deref(), Some("permute")) {
-        return infer_permute_app(node, env, vg, subst, adt_reg, errors, product);
+        return infer_permute_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("reshape")) {
-        let inferred = infer_reshape_app(node, env, vg, subst, adt_reg, errors, product);
+        let inferred = infer_reshape_app(expr, node, env, vg, subst, adt_reg, errors, product);
         if let Some(expected) = env.exact_stdlib_expected_result()
             && matches!(expected, Type::Tensor(_, _))
         {
@@ -175,25 +175,21 @@ fn infer_app_inner(
     }
 
     if matches!(func_name.as_deref(), Some("shrink")) {
-        return infer_shrink_app(node, env, vg, subst, adt_reg, errors, product);
+        return infer_shrink_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("pad")) {
-        return infer_pad_app(node, env, vg, subst, adt_reg, errors, product);
+        return infer_pad_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("stride")) {
-        return infer_stride_app(node, env, vg, subst, adt_reg, errors, product);
+        return infer_stride_app(expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
-    // chelis#339: the anchored named-axis expand form `expand(x, new, size,
-    // anchor)` carries four arguments, but the builtin HM scheme is arity-3
-    // (`(&tensor, i32, i32) -> out`), so it would hit the generic arity
-    // check before the procedural arm. Dispatch it here (the
-    // `infer_permute_app` pattern). The ordinary 3-arg expand keeps the generic
-    // path, which reaches `check_expand_signature` with the scheme intact.
-    // Named-axis calls and malformed arities use the procedural path so the
-    // expand-specific arity diagnostic owns obsolete shape-taking spellings.
+    // chelis#339: the four-argument anchored form belongs to `insert`, but
+    // its registered HM scheme is arity-3. Route it around generic arity
+    // checking. Both operations' malformed arities take this procedural path
+    // for their own exact diagnostics; ordinary 3-argument calls use HM.
     if let Some(callee @ ("expand" | "insert")) = func_name.as_deref()
         && kids.len() != 4
     {
@@ -203,7 +199,7 @@ fn infer_app_inner(
         } else {
             "expand"
         };
-        return infer_expand_app(callee, node, env, vg, subst, adt_reg, errors, product);
+        return infer_expand_app(callee, expr, node, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.
@@ -228,6 +224,7 @@ fn infer_app_inner(
     ) && kids.len() >= 4
     {
         return infer_reduction_app(
+            expr,
             node,
             func_name.as_deref().unwrap(),
             env,
@@ -416,6 +413,7 @@ fn infer_app_inner(
             return_with_collection_cleanup!(report_builtin_arity(
                 errors,
                 node,
+                CheckSite::Expr(expr),
                 "drop",
                 1,
                 arg_tys.len()
@@ -436,23 +434,34 @@ fn infer_app_inner(
         _ => None,
     };
     if let Some((retired, keyed)) = retired_draw {
-        return_with_collection_cleanup!(report(
+        let builtin = if func_name.as_deref() == Some("dropout") {
+            "dropout"
+        } else {
+            "uniform_like"
+        };
+        let expected = format!("{} arguments", arg_tys.len() + 1);
+        let got = format!("{} arguments", arg_tys.len());
+        return_with_collection_cleanup!(report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::ArityMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "`{retired}` is the retired counter-stream spelling: a random draw \
+                        "call `{builtin}`: expected {expected}, got {got}; \
+                         `{retired}` is the retired counter-stream spelling: a random draw \
                          takes an explicit key first, `{keyed}` (spec/05-risc-primitives.md \
                          section 2.7)"
                     ),
                 ),
+                expected,
+                got,
                 vec![format!(
                     "Pass a key first: make one with `key_from_seed(seed)` and derive more \
                      with `split_key`, `split_keys` or `fold_in`, as in `{keyed}`"
                 )],
             ),
+            CheckSite::Expr(expr),
         ));
     }
 
@@ -535,6 +544,7 @@ fn infer_app_inner(
             && left.is_integer()
         {
             return_with_collection_cleanup!(check_matmul_signature(
+                CheckSite::Expr(expr),
                 &arg_tys,
                 &Type::Unit,
                 subst,
@@ -606,7 +616,14 @@ fn infer_app_inner(
     // `postprocess_application`; every unambiguous builtin is screened here.
     if let Some(fname) = func_name.as_deref()
         && fname != "concat"
-        && let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, subst, errors)
+        && let Err(rejected) = enforce_registered_axis_dtypes(
+            fname,
+            &arg_tys,
+            node,
+            CheckSite::Expr(expr),
+            subst,
+            errors,
+        )
     {
         return_with_collection_cleanup!(rejected);
     }
@@ -620,20 +637,22 @@ fn infer_app_inner(
         && let Type::Prim(p) = subst.apply(&arg_tys[2])
         && p != Prim::Int64
     {
-        return_with_collection_cleanup!(report(
+        return_with_collection_cleanup!(report_at_check_site(
             errors,
-            CheckError::new(
+            CheckError::with_types(
                 CheckErrorKind::TypeMismatch,
                 with_node_provenance(
                     node,
                     format!(
-                        "{callee} expects an i64 size (write Ni64 or cast(N, i64)), \
-                         got {}",
-                        Type::Prim(p)
+                        "{callee} argument 3 (size): expected i64, got {} (write Ni64 or cast(N, i64))",
+                        p.name()
                     ),
                 ),
+                "i64".to_string(),
+                p.name().to_string(),
                 vec![],
             ),
+            CheckSite::Expr(expr),
         ));
     }
 
@@ -704,25 +723,26 @@ fn infer_app_inner(
                 // a rank-mixed literal. The dim slot `k` is a
                 // dimension variable, not a shape-vector variable;
                 // see spec/04-type-system.md §4.5.1.
-                return_with_collection_cleanup!(report(
+                return_with_collection_cleanup!(report_at_check_site(
                     errors,
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         with_node_provenance(
                             node,
                             format!(
-                                "list element rank mismatch: {} dims vs {} dims; \
-                             List[tensor[...]] requires rank-uniform elements \
-                             (the dim slot is a dimension variable, not a \
-                             shape-vector variable). Reshape or flatten \
-                             elements to a common rank before listing \
-                             (spec/04-type-system.md §4.5.1).",
+                                "call `Cons` arguments 1 and 2: list element rank mismatch: {} dims vs {} dims; \
+                                 List[tensor[...]] requires rank-uniform elements \
+                                 (the dim slot is a dimension variable, not a \
+                                 shape-vector variable). Reshape or flatten \
+                                 elements to a common rank before listing \
+                                 (spec/04-type-system.md §4.5.1).",
                                 head_dims.len(),
                                 tail_dims.len(),
                             ),
                         ),
                         vec![],
                     ),
+                    CheckSite::Expr(expr),
                 ));
             }
             if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {
@@ -814,6 +834,7 @@ fn infer_app_inner(
     };
     let mut ret_tv = match unify_checked_call_contract(
         expr,
+        source_func_name.as_deref(),
         &func_ty,
         &arg_tys,
         aggregate_call_context,
@@ -865,6 +886,7 @@ fn infer_app_inner(
     let checkpoint = errors.checkpoint();
     let contract_name = func_name.clone();
     let applied = finish_unified_app(
+        CheckSite::Expr(expr),
         node,
         kids,
         func_name,

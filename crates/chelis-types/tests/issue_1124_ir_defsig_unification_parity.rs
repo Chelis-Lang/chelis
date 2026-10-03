@@ -11,40 +11,40 @@
 //! fail-open in the shipped checker. PP9 gives both entries one function-only
 //! metadata prebind that never overwrites an explicit signature.
 //!
-//! The contract these tests lock: for every input the IR ingress
-//! (`check_ir_program`) and the typed ingress (`check_typed_program`) produce
-//! the identical ordered diagnostic set. A `defsig`/body mismatch is rejected
-//! by BOTH with the same message; a matching `defsig`/body and a `defsig`-less
-//! def are accepted by BOTH (the over-rejection guard: the fix must not reject
-//! any program the body stamp and the declared signature agree on).
+//! The contract these tests lock: IR ingress (`check_ir_program`) and typed
+//! ingress (`check_typed_program`) produce the same diagnostic kind and
+//! directional declared/actual types. A `defsig`/body mismatch is rejected by
+//! both; matching and `defsig`-less defs are accepted by both.
 
 use chelis_deep::parse_and_stamp;
 use chelis_types::{check_ir_program, check_typed_program};
 
-/// The ordered `(kind, message)` diagnostic set for the IR ingress.
-fn ir_diagnostics(source: &str) -> Vec<String> {
+/// The ordered `(kind, expected, got)` diagnostics from a checker ingress.
+type Diagnostics = Vec<(String, Option<String>, Option<String>)>;
+
+fn diagnostics(source: &str, typed: bool) -> Diagnostics {
     let exprs = parse_and_stamp(source).expect("fixture must parse and stamp");
-    match check_ir_program(&exprs) {
+    let result = if typed {
+        check_typed_program(&exprs)
+    } else {
+        check_ir_program(&exprs)
+    };
+    match result {
         Ok(_) => Vec::new(),
         Err(result) => result
             .errors
             .iter()
-            .map(|e| format!("{:?}: {}", e.kind, e.message))
+            .map(|e| (format!("{:?}", e.kind), e.expected.clone(), e.got.clone()))
             .collect(),
     }
 }
 
-/// The ordered `(kind, message)` diagnostic set for the typed ingress.
-fn typed_diagnostics(source: &str) -> Vec<String> {
-    let exprs = parse_and_stamp(source).expect("fixture must parse and stamp");
-    match check_typed_program(&exprs) {
-        Ok(_) => Vec::new(),
-        Err(result) => result
-            .errors
-            .iter()
-            .map(|e| format!("{:?}: {}", e.kind, e.message))
-            .collect(),
-    }
+fn ir_diagnostics(source: &str) -> Diagnostics {
+    diagnostics(source, false)
+}
+
+fn typed_diagnostics(source: &str) -> Diagnostics {
+    diagnostics(source, true)
 }
 
 /// The blank line between the two top-level forms is required: the un-spaced
@@ -67,9 +67,8 @@ const NO_DEFSIG: &str = "(def {} k (lit {type: (t-prim {} i32)} 1))\n";
 const DEFSIG_LESS_CROSS_REF: &str = "(def {} use_base (var {} base))\n\n\
                                      (def {} base (lit {type: (t-prim {} i32)} 7))\n";
 
-/// Positive rejection: a `defsig`/body type mismatch is rejected by the IR
-/// ingress with EXACTLY the diagnostic the typed ingress reports. This is the
-/// fail-open chelis#1124 closes.
+/// A `defsig`/body type mismatch is rejected by the IR ingress with the
+/// same kind and declared/actual types as the typed ingress.
 #[test]
 fn ir_ingress_rejects_defsig_body_mismatch_like_typed_ingress() {
     let ir = ir_diagnostics(MISMATCH);
@@ -82,12 +81,12 @@ fn ir_ingress_rejects_defsig_body_mismatch_like_typed_ingress() {
     );
     assert_eq!(
         ir,
-        vec![
-            "TypeMismatch: def 'k' body doesn't match declared signature: \
-             body has type `i32`, declared type is `f32`"
-                .to_string()
-        ],
-        "the mismatch must be the exact declared-signature diagnostic"
+        vec![(
+            "TypeMismatch".to_string(),
+            Some("f32".to_string()),
+            Some("i32".to_string()),
+        )],
+        "the mismatch must retain the declared and actual type directions"
     );
 }
 
@@ -178,7 +177,7 @@ fn both_ingresses_reject_defsig_less_forward_cross_reference() {
     assert_eq!(ir, typed, "chelis#1134 requires ingress parity");
     assert!(
         ir.iter()
-            .any(|diagnostic| diagnostic.starts_with("UnboundVariable:")),
+            .any(|diagnostic| diagnostic.0 == "UnboundVariable"),
         "a defsig-less forward cross-reference must reject at both ingresses: {ir:?}"
     );
 }

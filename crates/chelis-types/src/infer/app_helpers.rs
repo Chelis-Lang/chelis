@@ -29,6 +29,39 @@ pub(super) fn auto_borrow_call_arg_types(
         .collect()
 }
 
+/// An application may call a function returned by a named call or a
+/// source-level transform, as in `vmap(f)(xs)`. Keep the authored producer and
+/// returned-call depth instead of labeling the failed operand "function
+/// application". This is inspected only after a checked call rejects.
+fn returned_call_source(site: &deep::Expr) -> Option<(&str, usize)> {
+    let (DeepTag::App, _, children) = stamped_parts(site)? else {
+        return None;
+    };
+    let mut callee = children.first()?;
+    let mut returned = 0;
+    loop {
+        let (tag, _, children) = stamped_parts(callee)?;
+        match tag {
+            DeepTag::App => {
+                callee = children.first()?;
+                returned += 1;
+            }
+            // Authored callable transforms have dedicated Deep tags, not
+            // applications of a variable; their tag spells the source callee.
+            tag @ (DeepTag::Grad | DeepTag::Vmap | DeepTag::Jit | DeepTag::Realize) => {
+                return Some((tag.as_str(), returned + 1));
+            }
+            DeepTag::Var if returned > 0 => {
+                return children
+                    .first()
+                    .and_then(symbol_name)
+                    .map(|name| (name, returned));
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Apply the checked function contract shared by ordinary and specialized
 /// application paths.
 ///
@@ -39,6 +72,7 @@ pub(super) fn auto_borrow_call_arg_types(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn unify_checked_call_contract(
     site: &deep::Expr,
+    callee: Option<&str>,
     func_ty: &Type,
     arg_tys: &[Type],
     diagnostic_context: Option<(&str, &str)>,
@@ -70,24 +104,305 @@ pub(super) fn unify_checked_call_contract(
                 return Err(rejected);
             }
             let mut error: CheckError = te.into();
+            let (callee, returned) = callee
+                .map(|name| (name, 0))
+                .or_else(|| returned_call_source(site))
+                .unwrap_or(("function application", 0));
+            if let Some((context, expected, got)) = describe_failed_call_operand(
+                callee,
+                returned,
+                func_ty,
+                &unify_arg_tys,
+                subst,
+                &error.kind,
+            ) {
+                error.message = if expected.is_some() {
+                    context
+                } else {
+                    format!("{context}; {}", error.message)
+                };
+                error.expected = expected;
+                error.got = got;
+            }
             if let Some((operation, contract)) = diagnostic_context {
                 error.message = format!("{operation} {contract}; {}", error.message);
             }
-            if let Some(id) = site.span_id() {
-                error.span_offset = parse_span_offset(id);
-                error.span_id = Some(id.to_string());
-            } else {
-                let offset = site.span().offset;
-                if offset > 0 {
-                    error.span_offset = Some(offset);
-                }
-            }
-            let rejected = report(errors, error);
+            let span = TypeDiagnosticLocation::from_expr(site);
+            let rejected = report_at(errors, error, span.as_ref());
             if family_mismatch && let Type::Error(witness) = rejected {
                 product.cancel_shape_checks_for_failed_family_call(func_ty, subst, witness);
             }
             Err(rejected)
         }
+    }
+}
+
+/// A unifier error has no source-level argument path. At an application we
+/// still hold the checked parameter slots and their actual arguments, so
+/// recover only mismatches witnessed by those slots; never infer a direction
+/// from `TypeError.message` (whose internal unification order may differ).
+fn describe_failed_call_operand(
+    callee: &str,
+    returned: usize,
+    func_ty: &Type,
+    arguments: &[Type],
+    subst: &Subst,
+    kind: &CheckErrorKind,
+) -> Option<(String, Option<String>, Option<String>)> {
+    // Linker names are not authored call names. Peel off the recovered
+    // terminal before decoding the module so an authored `__` stays intact.
+    let source_name = crate::opacity::demangle_ident(callee);
+    let module = callee
+        .strip_prefix("pkg__")
+        .or_else(|| callee.strip_prefix("Pkg__"))
+        .and_then(|stem| stem.strip_suffix(&source_name))
+        .and_then(|stem| stem.strip_suffix("__"))
+        .map(|stem| crate::opacity::demangle_module(&stem.replace("__", ".")))
+        .filter(|module| {
+            module
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        });
+    let mut callee = module
+        .map(|module| format!("{module}.{source_name}"))
+        .unwrap_or(source_name);
+    for _ in 0..returned {
+        callee.push_str("(...)");
+    }
+    let Type::Fn(params, _) = subst.apply(func_ty) else {
+        return None;
+    };
+    if matches!(kind, CheckErrorKind::ArityMismatch) && params.len() != arguments.len() {
+        let count = |n: usize| format!("{n} argument{}", if n == 1 { "" } else { "s" });
+        let expected = count(params.len());
+        let got = count(arguments.len());
+        return Some((
+            format!("call `{callee}`: expected {expected}, got {got}"),
+            Some(expected),
+            Some(got),
+        ));
+    }
+    if matches!(kind, CheckErrorKind::ArityMismatch) {
+        for (index, (parameter, argument)) in params.iter().zip(arguments).enumerate() {
+            if let (Type::Fn(expected_args, _), Type::Fn(actual_args, _)) =
+                (parameter, subst.apply(argument))
+                && expected_args.len() != actual_args.len()
+            {
+                let count = |n: usize| format!("{n} parameter{}", if n == 1 { "" } else { "s" });
+                let expected = count(expected_args.len());
+                let got = count(actual_args.len());
+                return Some((
+                    format!(
+                        "`{callee}` argument {} (callback): expected {expected}, got {got}",
+                        index + 1
+                    ),
+                    Some(expected),
+                    Some(got),
+                ));
+            }
+        }
+    }
+    let Type::Fn(explicit_params, _) = func_ty else {
+        return None;
+    };
+    for (index, (param, argument)) in params.iter().zip(arguments).enumerate() {
+        let actual = subst.apply(argument);
+        if matches!(kind, CheckErrorKind::DimensionMismatch) {
+            let mut components = Vec::new();
+            if let Some((path, expected, got)) =
+                mismatching_tensor_dimension(param, &actual, subst, &mut components)
+            {
+                let at = if path.is_empty() {
+                    format!("argument {}", index + 1)
+                } else {
+                    format!("argument {}, {path}", index + 1)
+                };
+                return Some((
+                    format!("`{callee}` {at}: expected {expected}, got {got}"),
+                    Some(expected),
+                    Some(got),
+                ));
+            }
+            // A dimension failure may be inside an unpairable constructor.
+            // Name the argument but do not invent a directional comparison.
+            if param != &actual {
+                return Some((format!("`{callee}` argument {}", index + 1), None, None));
+            }
+        }
+        if matches!(kind, CheckErrorKind::PrecisionMismatch) {
+            let mut components = Vec::new();
+            if let Some((expected, got)) = explicit_params.get(index).and_then(|declared| {
+                mismatching_declared_precision(declared, &actual, &mut components)
+            }) {
+                let at = if components.is_empty() {
+                    format!("argument {}", index + 1)
+                } else {
+                    format!("argument {}, {}", index + 1, components.join(", "))
+                };
+                return Some((
+                    format!("`{callee}` {at}: expected {expected}, got {got}"),
+                    Some(expected),
+                    Some(got),
+                ));
+            }
+        }
+    }
+    if matches!(kind, CheckErrorKind::PrecisionMismatch) {
+        return Some((format!("`{callee}` arguments"), None, None));
+    }
+    None
+}
+
+/// A solved inference variable is not an authored parameter restriction:
+/// `add(f32, f64)` must not claim the first operand was a declared dtype.
+/// Only concrete precision in the callee's pre-unification type supplies
+/// direction, even when nested inside a collection or tuple parameter.
+fn mismatching_declared_precision(
+    expected: &Type,
+    actual: &Type,
+    components: &mut Vec<String>,
+) -> Option<(String, String)> {
+    match (expected, actual) {
+        (Type::Prim(expected), Type::Prim(actual)) if expected != actual => {
+            Some((expected.name().to_string(), actual.name().to_string()))
+        }
+        (
+            Type::Tensor(_, TensorPrec::Concrete(expected)),
+            Type::Tensor(_, TensorPrec::Concrete(actual)),
+        ) if expected != actual => Some((expected.name().to_string(), actual.name().to_string())),
+        (Type::Ref(expected), Type::Ref(actual)) => {
+            mismatching_declared_precision(expected, actual, components)
+        }
+        (Type::Adt(expected_name, expected_args), Type::Adt(actual_name, actual_args))
+            if expected_name == actual_name && expected_args.len() == actual_args.len() =>
+        {
+            for (index, (expected, actual)) in expected_args.iter().zip(actual_args).enumerate() {
+                components.push(if expected_name == "List" {
+                    "List element".to_string()
+                } else {
+                    format!("{expected_name} type argument {}", index + 1)
+                });
+                if let Some(pair) = mismatching_declared_precision(expected, actual, components) {
+                    return Some(pair);
+                }
+                components.pop();
+            }
+            None
+        }
+        (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
+            for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+                components.push(format!("tuple component {}", index + 1));
+                if let Some(pair) = mismatching_declared_precision(expected, actual, components) {
+                    return Some(pair);
+                }
+                components.pop();
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Compare only parallel, declared and actual constructors. The unifier's
+/// internal operand order cannot establish a user-facing expected/got pair.
+fn mismatching_tensor_dimension(
+    expected: &Type,
+    actual: &Type,
+    subst: &Subst,
+    components: &mut Vec<String>,
+) -> Option<(String, String, String)> {
+    match (expected, actual) {
+        (Type::Tensor(expected_dims, _), Type::Tensor(actual_dims, _)) => {
+            // A rank spread occupies one vector entry but can stand for any
+            // number of axes. Neither its storage length nor the parallel
+            // positions establish a fixed-rank or axis mismatch.
+            if expected_dims
+                .iter()
+                .chain(actual_dims)
+                .any(|dim| matches!(dim, Dim::Rank(_)))
+            {
+                return None;
+            }
+            if expected_dims.len() != actual_dims.len() {
+                return Some((
+                    components.join(", "),
+                    format!("rank-{} tensor", expected_dims.len()),
+                    format!("rank-{} tensor", actual_dims.len()),
+                ));
+            }
+            for (axis, (expected_dim, actual_dim)) in
+                expected_dims.iter().zip(actual_dims).enumerate()
+            {
+                let expected_dim = subst.constraint_dim(expected_dim);
+                let actual_dim = subst.constraint_dim(actual_dim);
+                if matches!(
+                    (&expected_dim, &actual_dim),
+                    (Dim::Lit(a), Dim::Lit(b)) if a != b
+                ) || matches!(
+                    (&expected_dim, &actual_dim),
+                    (Dim::Name(a), Dim::Name(b)) if a != b
+                ) {
+                    let mut path = components.join(", ");
+                    if !path.is_empty() {
+                        path.push_str(", ");
+                    }
+                    path.push_str(&format!("axis {axis}"));
+                    return Some((path, expected_dim.to_string(), actual_dim.to_string()));
+                }
+            }
+            None
+        }
+        (Type::Ref(expected), Type::Ref(actual)) => {
+            mismatching_tensor_dimension(expected, actual, subst, components)
+        }
+        (Type::Adt(expected_name, expected_args), Type::Adt(actual_name, actual_args))
+            if expected_name == actual_name && expected_args.len() == actual_args.len() =>
+        {
+            for (index, (expected, actual)) in expected_args.iter().zip(actual_args).enumerate() {
+                let component = if expected_name == "List" && index == 0 {
+                    "List element".to_string()
+                } else {
+                    format!("{expected_name} type argument {}", index + 1)
+                };
+                components.push(component);
+                let mismatch = mismatching_tensor_dimension(expected, actual, subst, components);
+                components.pop();
+                if mismatch.is_some() {
+                    return mismatch;
+                }
+            }
+            None
+        }
+        (
+            Type::KindedAdt(expected_name, expected_args),
+            Type::KindedAdt(actual_name, actual_args),
+        ) if expected_name == actual_name && expected_args.len() == actual_args.len() => {
+            for (index, (expected, actual)) in expected_args.iter().zip(actual_args).enumerate() {
+                if let (NominalArg::Type(expected), NominalArg::Type(actual)) = (expected, actual) {
+                    components.push(format!("{expected_name} type argument {}", index + 1));
+                    let mismatch =
+                        mismatching_tensor_dimension(expected, actual, subst, components);
+                    components.pop();
+                    if mismatch.is_some() {
+                        return mismatch;
+                    }
+                }
+            }
+            None
+        }
+        (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
+            for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+                components.push(format!("tuple element {}", index + 1));
+                let mismatch = mismatching_tensor_dimension(expected, actual, subst, components);
+                components.pop();
+                if mismatch.is_some() {
+                    return mismatch;
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 

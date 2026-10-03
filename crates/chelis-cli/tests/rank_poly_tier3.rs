@@ -1240,13 +1240,33 @@ fn variadic_reduce_positional_axes_rejected() {
 /// along one axis is not composable with a second reduction.
 #[test]
 fn variadic_argmax_rejected() {
-    let json = check_json(
-        "def bad(x: &tensor[batch, seq, head, f32]) -> tensor[batch, i64] = argmax_reduce(x, seq, head)\n",
+    let source = "def bad(x: &tensor[batch, seq, head, f32]) -> tensor[batch, i64] = argmax_reduce(x, seq, head)\n";
+    let json = check_json(source);
+    let error = json["errors"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .find(|error| {
+            error["kind"] == "ArityMismatch"
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("argmax_reduce"))
+        })
+        .unwrap_or_else(|| panic!("index-returning reduction must reject a second axis: {json}"));
+    assert_eq!(
+        error["span"]["offset"],
+        source.find("argmax_reduce(").unwrap()
     );
-    assert_rejected_with(
-        &json,
-        "index-returning",
-        "variadic argmax_reduce has no defined semantics",
+    assert_eq!(error["expected"], "2 arguments");
+    assert_eq!(error["got"], "3 arguments");
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("expected") && message.contains("got"),
+        "{error}"
+    );
+    assert!(
+        message.contains("2 arguments") && message.contains("3 arguments"),
+        "{error}"
     );
 }
 
@@ -1969,10 +1989,17 @@ fn vmap_callee_dim_conflict_stays_rejected_not_ice() {
     let source = "def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
          def inner(x: &tensor[seq, 4, f32]) -> tensor[4, f32] = reduce_seq(x)\n\
          out = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
-    assert_rejected_with(
-        &check_json(source),
-        "dimension mismatch",
-        "#351 negative: conflicting concrete dim through the vmapped callee",
+    let report = check_json(source);
+    assert!(
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["expected"] == "4"
+                    && error["got"] == "3"
+                    && error["span"]["offset"].as_u64().is_some()
+            })),
+        "#351 negative: conflicting concrete dim through the vmapped callee: {report}"
     );
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "vmap_dim_conflict");
@@ -2950,21 +2977,34 @@ fn form3_bias_broadcast_c_is_byte_deterministic() {
 /// chelis#469 axis-side separation (rlronan's shared-walker constraint, the
 /// #364 sibling): the extent-side static-arithmetic fold must NOT leak into
 /// the reduction/softmax/gather AXIS path. `extract_int_for_dim` (the shared
-/// axis walker) is deliberately left un-widened; the fold lives only in
-/// `fold_static_size` on the extent path. A static-arithmetic reduction axis
-/// (`sum(x, sub(cast(2, i32), cast(1, i32)))`) therefore stays REJECTED at
-/// check ("axis must be a compile-time constant or a named axis") — proving the
-/// extent fold did not silently widen the axis contract.
+/// axis walker) remains un-widened. `fold_static_size` applies only to
+/// extents: a computed reduction axis remains invalid, while the
+/// corresponding literal axis is admitted.
 #[test]
 fn static_arith_reduction_axis_still_rejected_at_check() {
-    let json = check_json(
-        "def f(x: &tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, sub(cast(2, i32), cast(1, i32)))\n",
+    let source = "def f(x: &tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, sub(cast(2, i32), cast(1, i32)))\n";
+    let json = check_json(source);
+    let errors = json["errors"].as_array().expect("checker errors");
+    let error = errors
+        .iter()
+        .find(|error| error["kind"] == "DimensionMismatch")
+        .expect("computed reduction axis must reject at check");
+    assert_eq!(
+        error["expected"],
+        "compile-time constant or named axis of the operand"
     );
-    assert_rejected_with(
-        &json,
-        "axis must be a compile-time constant or a named axis",
-        "static-arithmetic reduction axis must stay rejected at check (chelis#469/#364 \
-         extent-vs-axis separation)",
+    assert_eq!(error["got"], "a non-constant expression");
+    assert_eq!(
+        error["span"]["offset"],
+        source.find("sum(").expect("authored reduction call")
+    );
+    let message = error["message"].as_str().expect("human diagnostic");
+    assert!(message.contains("sum argument 2 (axis)"));
+    assert!(message.contains(error["expected"].as_str().unwrap()));
+    assert!(message.contains(error["got"].as_str().unwrap()));
+    assert_clean(
+        &check_json("def f(x: &tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, 1i32)\n"),
+        "literal reduction axis remains admitted",
     );
 }
 

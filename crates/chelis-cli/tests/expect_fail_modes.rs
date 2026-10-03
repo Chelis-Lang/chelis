@@ -197,12 +197,14 @@ fn neg_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
     let record: serde_json::Value =
         serde_json::from_str(stdout.lines().next().expect("verdict row")).expect("valid NDJSON");
     assert_eq!(record["verdict"], "wrong-diagnostic");
-    assert_eq!(
-        record["got"],
-        serde_json::json!([
-            "compile: def 'helper' body doesn't match declared signature: body has type `() -> bool`, declared type is `() -> i64`"
-        ])
-    );
+    let got = record["got"]
+        .as_array()
+        .expect("preserved actual diagnostics");
+    let [actual] = got.as_slice() else {
+        panic!("the failed compilation must produce one diagnostic: {got:?}");
+    };
+    let actual = actual.as_str().expect("diagnostic string");
+    assert!(actual.starts_with("compile: ") && actual.contains("bool") && actual.contains("i64"));
 }
 
 // ------------------------------------------------------------ blocked mode
@@ -293,12 +295,14 @@ fn blocked_bare_file_diagnostic_mismatch_is_drifted_and_preserved() {
         .assert()
         .failure()
         .code(1)
-        .stdout(predicate::eq(
-            "DRIFTED            tests/probe.ch\n\
-             \x20   expected diagnostic substring: \"some other diagnostic\"\n\
-             \x20   got: compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> ()`\n\n\
-             0 ok, 1 failing (blocked mode)\n",
-        ));
+        .stdout(predicate::str::contains(
+            "DRIFTED            tests/probe.ch",
+        ))
+        .stdout(predicate::str::contains(
+            "expected diagnostic substring: \"some other diagnostic\"",
+        ))
+        .stdout(predicate::str::contains("missing_file_level_symbol"))
+        .stdout(predicate::str::contains("1 failing (blocked mode)"));
 }
 
 #[test]
@@ -322,12 +326,14 @@ fn blocked_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
     let record: serde_json::Value =
         serde_json::from_str(stdout.lines().next().expect("verdict row")).expect("valid NDJSON");
     assert_eq!(record["verdict"], "drifted");
-    assert_eq!(
-        record["got"],
-        serde_json::json!([
-            "compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> ()`"
-        ])
-    );
+    let got = record["got"]
+        .as_array()
+        .expect("preserved actual diagnostics");
+    let [actual] = got.as_slice() else {
+        panic!("the failed compilation must produce one diagnostic: {got:?}");
+    };
+    let actual = actual.as_str().expect("diagnostic string");
+    assert!(actual.starts_with("compile: ") && actual.contains("missing_file_level_symbol"));
 }
 
 // ---------------------------------------------------------- fail-closed

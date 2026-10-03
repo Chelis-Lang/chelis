@@ -320,9 +320,15 @@ fn an_access_on_a_binder_is_decided_at_its_instantiations() {
 /// checked and then failed at run time.
 #[test]
 fn a_projection_keeps_its_lambda_monomorphic() {
-    rejects_with(
-        "def f() -> f32 = {\n  g = fn (t) -> t.0\n  g((1i32, 2i32))\n}\n",
-        &["body has type `() -> i32`, declared type is `() -> f32`"],
+    let source = "def f() -> f32 = {\n  g = fn (t) -> t.0\n  g((1i32, 2i32))\n}\n";
+    let diagnostics = agreed_diagnostics(source);
+    assert!(!diagnostics.is_empty(), "the mismatched result must reject");
+    let errors = check_typed_program(&desugared(source)).unwrap_err().errors;
+    assert!(
+        errors.iter().any(|e| {
+            e.expected.as_deref() == Some("() -> f32") && e.got.as_deref() == Some("() -> i32")
+        }),
+        "the declaration must reject the inferred i32 result: {errors:?}"
     );
     accepts("def f() -> i32 = {\n  g = fn (t) -> t.0\n  g((1i32, 2i32))\n}\n");
 }
@@ -352,7 +358,22 @@ fn an_unresolved_axis_is_constrained_to_i32() {
     ] {
         let program =
             format!("def f(x: tensor[3, f32]) -> tensor[*, f32] = (fn (v) -> {call})(0i64)");
-        rejects_with(&program, &["expected i32, got i64"]);
+        for checked in [
+            check_typed_program(&desugared(&program)),
+            check_ir_program(&expanded(&program)),
+        ] {
+            let report = checked.expect_err("an i64 axis must not satisfy an i32 slot");
+            assert!(
+                report.errors.iter().any(|error| {
+                    error.kind.diagnostic_name() == "PrecisionMismatch"
+                        && error.expected.as_deref() == Some("i32")
+                        && error.got.as_deref() == Some("i64")
+                        && error.span_offset == program.find("fn (v)")
+                }),
+                "the later binding must conflict with the axis dtype: {:?}",
+                report.errors
+            );
+        }
         accepts(&program.replace("0i64)", &format!("{valid})")));
     }
 }

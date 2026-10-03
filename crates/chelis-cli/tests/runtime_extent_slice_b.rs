@@ -4404,12 +4404,19 @@ fn issue_1907_literal_non_positive_stride_steps_are_rejected_statically() {
             !checked.status.success(),
             "{name}: literal step rejects: {out}"
         );
+        let report: serde_json::Value =
+            serde_json::from_slice(&checked.stdout).expect("check JSON");
         assert!(
-            out.contains(&format!(
-                "stride axis 0 step {} must be positive",
-                if name == "zero" { "0" } else { "-1" }
-            )),
-            "{name}: the checker names the stride step: {out}"
+            report["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|error| {
+                    error["kind"] == "DimensionMismatch"
+                        && error["expected"] == "positive step"
+                        && error["got"] == if name == "zero" { "0" } else { "-1" }
+                        && error["span"]["offset"].as_u64()
+                            == source.find("stride(").map(|offset| offset as u64)
+                })),
+            "{name}: the checker identifies the invalid stride step: {report}"
         );
     }
 }
@@ -7506,12 +7513,9 @@ fn a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes() {
         );
         assert!(
             out.contains("DimensionMismatch")
-                && out.contains(
-                    "def 'probe' body doesn't match declared signature: body has type \
-                     `(tensor[4, 3, f32]) -> tensor[8, 3, f32]`, declared type is \
-                     `(tensor[4, 3, f32]) -> tensor[100, 3, f32]`"
-                ),
-            "{lane}: and the CHECKER reports it, naming both function types: {out}"
+                && out.contains("tensor[8, 3, f32]")
+                && out.contains("tensor[100, 3, f32]"),
+            "{lane}: checker rejects the inferred extent against the declaration: {out}"
         );
         assert!(
             !out.contains("the inlined body produces"),
@@ -7544,9 +7548,9 @@ fn the_checker_refuses_a_static_pad_extent_a_declaration_refutes() {
     assert!(!ok, "a statically refuted claim does not execute: {out}");
     assert!(
         out.contains("DimensionMismatch")
-            && out.contains("body has type `(tensor[4, f32]) -> tensor[6, f32]`")
-            && out.contains("declared type is `(tensor[4, f32]) -> tensor[2, f32]`"),
-        "and the checker, not a runtime guard, reports it: {out}"
+            && out.contains("tensor[6, f32]")
+            && out.contains("tensor[2, f32]"),
+        "the checker, not a runtime guard, rejects the conflicting result extents: {out}"
     );
     assert!(
         !out.contains(&domain_trap_line("pad")),

@@ -559,8 +559,8 @@ fn contextual_literal_copies_share_one_unknown_precision_owner() {
                 && ir[0]
                     .message
                     .contains("unknown primitive type `p` in type annotation")
-                && ir[0].span_offset.is_some()
-                && ir[0].span_id.is_some()
+                && ir[0].span_offset == source.find("p]")
+                && ir[0].span_id.is_none()
                 && ir[0].suggestions.iter().any(|suggestion| {
                     suggestion.contains("nearest active dtype")
                         && suggestion.contains("declare `p`")
@@ -941,8 +941,8 @@ fn body_only_surf_annotations_cannot_introduce_undeclared_binders() {
         );
         if source.contains("tensor[2, p]") {
             assert!(
-                ir[0].span_offset.is_some()
-                    && ir[0].span_id.is_some()
+                ir[0].span_offset == source.find("p]")
+                    && ir[0].span_id.is_none()
                     && ir[0]
                         .suggestions
                         .iter()

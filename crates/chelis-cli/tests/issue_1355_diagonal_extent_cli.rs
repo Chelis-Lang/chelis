@@ -78,12 +78,13 @@ fn wrong_declared_extent_does_not_score_one() {
         panic!("expected exactly one error, got {errors:?}");
     };
     assert_eq!(error["kind"].as_str(), Some("DimensionMismatch"));
-    let message = error["message"].as_str().expect("message string");
-    assert!(
-        message.contains("body has type `(tensor[3, 4, f32]) -> tensor[3, f32]`")
-            && message.contains("declared type is `(tensor[3, 4, f32]) -> tensor[4, f32]`"),
-        "the diagnostic must name the inferred tensor[3, f32] against the \
-         declared tensor[4, f32], got {message}"
+    assert_eq!(
+        error["expected"], "(tensor[3, 4, f32]) -> tensor[4, f32]",
+        "the declared extent is 4"
+    );
+    assert_eq!(
+        error["got"], "(tensor[3, 4, f32]) -> tensor[3, f32]",
+        "the inferred diagonal extent is 3"
     );
 }
 
@@ -170,7 +171,8 @@ fn symbolic_program(declared: &str, operand: &str) -> String {
 /// exactly one `DimensionMismatch` naming the bound and the declared extent.
 #[test]
 fn a_symbolic_pair_declared_wider_than_its_literal_axis_does_not_score_one() {
-    let (_dir, path) = write_program(&symbolic_program("9", THREE_BY_FOUR));
+    let source = symbolic_program("9", THREE_BY_FOUR);
+    let (_dir, path) = write_program(&source);
     let json = check_json(&path);
 
     let score = json["score"].as_f64().expect("numeric score");
@@ -185,13 +187,16 @@ fn a_symbolic_pair_declared_wider_than_its_literal_axis_does_not_score_one() {
         panic!("expected exactly one error, got {errors:?}");
     };
     assert_eq!(error["kind"].as_str(), Some("DimensionMismatch"));
-    let message = error["message"].as_str().expect("message string");
+    assert_eq!(error["expected"], "extent at most 4");
+    assert_eq!(error["got"], "declared extent 9");
     assert_eq!(
-        message,
-        "diagonal declares the smaller selected extent ([05-OP-33]): axis 1 is \
-         literal 4, so the result extent is at most 4, but the declared result \
-         extent is 9",
-        "the CLI must carry the same exact diagnostic the checker suite pins"
+        error["span"]["offset"].as_u64(),
+        source.find("diagonal(").map(|offset| offset as u64),
+        "{error:?}"
+    );
+    assert!(
+        error["message"].as_str().unwrap().contains("axis 1"),
+        "{error:?}"
     );
 }
 

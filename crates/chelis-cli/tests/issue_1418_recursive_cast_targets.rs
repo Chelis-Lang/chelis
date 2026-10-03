@@ -113,7 +113,7 @@ fn invalid_cast_targets_and_polymorphic_recursion_fail_for_the_right_reason() {
         (
             "(def {} out (cast {} 1 (t-tuple {} (t-prim {} i32) (t-prim {} i32))))",
             "dp",
-            "not a recognized primitive type",
+            "expected primitive dtype, got (i32, i32)",
         ),
         (
             "def f[p: Float](x: p) -> p = cast(1, p)\nout = f(1i32)",
@@ -141,6 +141,21 @@ fn invalid_cast_targets_and_polymorphic_recursion_fail_for_the_right_reason() {
                 String::from_utf8_lossy(&result.stdout),
                 String::from_utf8_lossy(&result.stderr)
             );
+            if extension == "dp" && args[0] == "check" {
+                let report: serde_json::Value =
+                    serde_json::from_slice(&result.stdout).expect("check report JSON");
+                assert!(
+                    report["errors"].as_array().is_some_and(|errors| {
+                        errors.iter().any(|error| {
+                            error["kind"] == "CastNonTensor"
+                                && error["expected"] == "primitive dtype"
+                                && error["got"] == "(i32, i32)"
+                                && error["span"]["offset"] == source.find("(cast").unwrap()
+                        })
+                    }),
+                    "tuple cast must report the target type at its call: {report}"
+                );
+            }
             assert!(errors.contains(diagnostic), "{source}: {errors}");
             assert!(!dir.path().join("out/probe.c").exists());
         }

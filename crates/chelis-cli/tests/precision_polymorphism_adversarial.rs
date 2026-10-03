@@ -356,13 +356,11 @@ fn unbound_function_in_polymorphic_body_no_longer_masks_return_mismatch() {
 fn unbound_precision_name_in_let_now_rejected() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("unbound_p_in_let.ch");
-    write_file(
-        &path,
-        "def main() -> tensor[3, f32] = {\n  \
+    let source = "def main() -> tensor[3, f32] = {\n  \
            xs: tensor[3, p] = [1.0, 2.0, 3.0]\n  \
            xs\n\
-         }\n",
-    );
+         }\n";
+    write_file(&path, source);
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().cloned().unwrap_or_default();
     assert_eq!(
@@ -379,8 +377,15 @@ fn unbound_precision_name_in_let_now_rejected() {
             .is_some_and(|message| message.contains("unknown primitive type `p`")),
         "{errors:?}"
     );
-    assert_eq!(error["span"]["offset"], 49, "{errors:?}");
-    assert_eq!(error["span_id"], "source:49..50", "{errors:?}");
+    assert_eq!(
+        error["span"]["offset"],
+        source.find("p]").unwrap(),
+        "{errors:?}"
+    );
+    assert!(
+        error.get("span_id").is_none(),
+        "the type spelling supplies a coordinate, not an authored external ID: {errors:?}"
+    );
     assert!(
         error["suggestions"].as_array().is_some_and(|suggestions| {
             suggestions.iter().any(|suggestion| {

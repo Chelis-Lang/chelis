@@ -6,8 +6,8 @@
 //! `main` `e813415d0`: an unannotated lambda parameter bound by a later
 //! application. (Resolved, valid) accepts, (resolved, invalid) rejects with
 //! the route's own diagnostic, (unresolved, valid) accepts, and (unresolved,
-//! invalid) rejects with the SAME diagnostic text. The fourth cell is the
-//! issue; the third is its other half on the `app_shape` routes, which used
+//! invalid) rejects with the SAME diagnostic kind or reason. The fourth cell
+//! is the issue; the third is its other half on the `app_shape` routes, which used
 //! to publish the operand's own type and so rejected a correct declared
 //! result while accepting the operand's shape.
 //!
@@ -15,7 +15,7 @@
 //! otherwise: each was watched failing on `e813415d0` before the repair, and
 //! the recorded pre-repair verdict is in the row's comment.
 //!
-//! Asserting the diagnostic TEXT rather than mere rejection is deliberate.
+//! Asserting the route's diagnostic rather than mere rejection is deliberate.
 //! Suspending a decision relocates it, and anything the eager call path did
 //! on its way to that decision can silently stop happening (measured three
 //! times on chelis#1489's conversions). A cell that only checked "rejected"
@@ -58,8 +58,8 @@ fn unresolved(decl: &str, call: &str, result: &str) -> String {
 }
 
 /// One route's four cells. `valid_result` is the type the route's rule
-/// actually produces; `invalid_call` is a call the rule rejects, and
-/// `diagnostic` is the substring its own rejection prints.
+/// actually produces; `invalid_call` is a call the rule rejects. `diagnostic`
+/// is its rejection substring where no structured comparison is asserted.
 struct Row {
     route: &'static str,
     decl: &'static str,
@@ -68,6 +68,58 @@ struct Row {
     invalid_call: &'static str,
     invalid_result: &'static str,
     diagnostic: &'static str,
+}
+
+fn matches_route_rejection(
+    error: &CheckError,
+    route: &str,
+    diagnostic: &str,
+    source: &str,
+) -> bool {
+    match route {
+        "permute" | "shrink" => {
+            let (expected, got) = if route == "permute" {
+                ("2 axis indices", "3 axis indices")
+            } else {
+                ("2 bounds pairs", "1 bounds pair")
+            };
+            error.kind.diagnostic_name() == "ArityMismatch"
+                && error.message.contains(route)
+                && error.expected.as_deref() == Some(expected)
+                && error.got.as_deref() == Some(got)
+        }
+        "expand" => {
+            error.kind.diagnostic_name() == "DimensionMismatch"
+                && error.expected.as_deref() == Some("axis in 0..2")
+                && error.got.as_deref() == Some("9")
+                && error.message.contains("broadcasts an existing axis")
+                && error.span_offset == source.find("expand(")
+        }
+        "sum" => {
+            error.kind.diagnostic_name() == "DimensionMismatch"
+                && error.expected.as_deref() == Some("axis in -2..2")
+                && error.got.as_deref() == Some("7")
+                && error.span_offset == source.find("sum(")
+        }
+        "stride" | "pad" => {
+            let (expected, got) = if route == "stride" {
+                ("2 strides", "1 strides")
+            } else {
+                ("2 padding pairs", "1 padding pairs")
+            };
+            error.kind.diagnostic_name() == "ArityMismatch"
+                && error.expected.as_deref() == Some(expected)
+                && error.got.as_deref() == Some(got)
+                && error.span_offset == source.find(&format!("{route}("))
+        }
+        "tensor_to_scalar" => {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.message.contains(route)
+                && error.expected.as_deref() == Some("rank-0 tensor")
+                && error.got.as_deref() == Some("rank-1 tensor")
+        }
+        _ => error.message.contains(diagnostic),
+    }
 }
 
 fn run(row: &Row) {
@@ -90,18 +142,19 @@ fn run(row: &Row) {
         )
     });
 
-    // Cell 2 (resolved, invalid): DISPOSITION LOCK. This is the rule that was
-    // always right and simply never ran; the cell pins its exact wording so
-    // cell 4 has something to be equal to.
-    let eager = check(&resolved(decl, invalid_call, invalid_result)).expect_err(&format!(
+    // Cell 2 (resolved, invalid): DISPOSITION LOCK. The route's own
+    // rejection, rather than an unrelated downstream mismatch, must fire.
+    let eager_source = resolved(decl, invalid_call, invalid_result);
+    let eager = check(&eager_source).expect_err(&format!(
         "{route}: an invalid resolved call must be rejected"
     ));
     assert!(
-        eager.iter().any(|e| e.message.contains(diagnostic)),
+        eager
+            .iter()
+            .any(|error| matches_route_rejection(error, route, diagnostic, &eager_source)),
         "{route}: the resolved rejection must name its own rule, got:\n{}",
         summary(&eager)
     );
-
     // Cell 3 (unresolved, valid): REGRESSION TEST for the `app_shape` family,
     // DISPOSITION LOCK elsewhere. Before the repair the five window routes
     // published the OPERAND's type here, so a correct declared result was
@@ -116,13 +169,18 @@ fn run(row: &Row) {
     // Cell 4 (unresolved, invalid): REGRESSION TEST. This is chelis#1512.
     // Before the repair every route below accepted this program at score 1
     // with an empty error list.
-    let deferred = check(&unresolved(decl, invalid_call, invalid_result)).expect_err(&format!(
+    let deferred_source = unresolved(decl, invalid_call, invalid_result);
+    let deferred = check(&deferred_source).expect_err(&format!(
         "{route}: an invalid call over an unresolved operand must be rejected"
     ));
     assert!(
-        deferred.iter().any(|e| e.message.contains(diagnostic)),
-        "{route}: the deferred rejection must carry the SAME diagnostic as the resolved one \
-         ({diagnostic:?}), got:\n{}",
+        deferred.iter().any(|error| matches_route_rejection(
+            error,
+            route,
+            diagnostic,
+            &deferred_source
+        )),
+        "{route}: the deferred rejection must match the resolved rule, got:\n{}",
         summary(&deferred)
     );
 }
@@ -158,7 +216,7 @@ fn app_shape_window_family_validates_a_late_bound_operand() {
             valid_result: "tensor[2, 2, f32]",
             invalid_call: "stride($, 1i64)",
             invalid_result: "tensor[2, 4, f32]",
-            diagnostic: "stride expects 2 strides for rank 2 tensor, got 1",
+            diagnostic: "stride",
         },
         Row {
             route: "pad",
@@ -167,7 +225,7 @@ fn app_shape_window_family_validates_a_late_bound_operand() {
             valid_result: "tensor[3, 5, f32]",
             invalid_call: "pad($, [[0i64, 1i64]], 0.0f32)",
             invalid_result: "tensor[3, 4, f32]",
-            diagnostic: "pad expects 2 padding pairs for rank 2 tensor, got 1",
+            diagnostic: "pad",
         },
     ] {
         run(&row);
@@ -410,7 +468,7 @@ fn app_tensor_ledger_family_validates_a_late_bound_operand() {
             valid_result: "tensor[2, f32]",
             invalid_call: "sum($, 7i32)",
             invalid_result: "tensor[2, f32]",
-            diagnostic: "sum axis 7 is out of bounds for rank 2 tensor",
+            diagnostic: "axis in -2..2",
         },
         Row {
             route: "expand",
@@ -419,7 +477,7 @@ fn app_tensor_ledger_family_validates_a_late_bound_operand() {
             valid_result: "tensor[4, 3, f32]",
             invalid_call: "expand($, 9i32, 4i64)",
             invalid_result: "tensor[4, 3, f32]",
-            diagnostic: "expand axis 9 is out of bounds for rank 2 tensor",
+            diagnostic: "expand broadcasts an existing axis",
         },
         Row {
             route: "layer_norm",
@@ -479,9 +537,8 @@ fn reshape_validates_a_late_bound_operand() {
 /// catch turns the census's claim red here.
 ///
 /// DISPOSITION LOCK, every cell: measured on this head, not repaired by this
-/// pull request. The wording is another rule's, deliberately: a
-/// `caught_downstream` row asserts only that the program is rejected, never
-/// that the route's own diagnostic is what the reader sees.
+/// pull request. A `caught_downstream` row asserts that the downstream rule
+/// rejects the program, not that the route's own validator rejects it.
 #[test]
 fn a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule() {
     for (route, program, diagnostic) in [
@@ -493,25 +550,42 @@ fn a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule() {
         (
             "string_contains",
             "def f(x: i32) -> bool = {\n  g = fn (t) -> string_contains(t, \"a\")\n  g(x)\n}\n",
-            "precision mismatch: expected string, got i32",
+            "string",
         ),
         (
             "expand",
             "def f(x: tensor[1, f32], a: i32) -> tensor[4, f32] = {\n  g = fn (v) -> expand(x, 0i32, v)\n  g(a)\n}\n",
-            "precision mismatch: expected i64, got i32",
+            "argument 1",
         ),
         (
             "cast",
             "def f(x: List[i32]) -> f32 = {\n  g = fn (t) -> cast(t, f32)\n  g(x)\n}\n",
-            "cast requires tensor or prim type",
+            "CastNonTensor",
         ),
     ] {
         let errors = check(program).expect_err(&format!(
             "{route}: the program must still be rejected by a later rule"
         ));
         assert!(
-            errors.iter().any(|e| e.message.contains(diagnostic)),
-            "{route}: the downstream rule's diagnostic must be {diagnostic:?}, got:\n{}",
+            errors.iter().any(|error| {
+                if route == "string_contains" {
+                    error.kind.diagnostic_name() == "PrecisionMismatch"
+                        && error.expected.as_deref() == Some("string")
+                        && error.got.as_deref() == Some("i32")
+                } else if route == "expand" {
+                    error.kind.diagnostic_name() == "PrecisionMismatch"
+                        && error.expected.as_deref() == Some("i64")
+                        && error.got.as_deref() == Some("i32")
+                        && error.message.contains(diagnostic)
+                        && error.span_offset == program.find("g(a)")
+                } else if route == "cast" {
+                    error.kind.diagnostic_name() == "CastNonTensor"
+                        && error.got.as_deref() == Some("List i32")
+                } else {
+                    error.message.contains(diagnostic)
+                }
+            }),
+            "{route}: the downstream rejection must be preserved, got:\n{}",
             summary(&errors)
         );
     }
@@ -603,6 +677,42 @@ fn assert_family_error(errors: &[CheckError], family: &str, dtype: &str) {
     );
 }
 
+fn matches_collection_rejection(
+    error: &CheckError,
+    route: &str,
+    diagnostic: &str,
+    source: &str,
+) -> bool {
+    match route {
+        "concat" => {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.message.contains("concat")
+                && error.message.contains("i32")
+                && error.message.contains("f32")
+        }
+        "dict_merge" => {
+            error.kind.diagnostic_name() == "PrecisionMismatch"
+                && error.message.contains("dict_merge")
+                && error.message.contains("i32")
+                && error.message.contains("f32")
+        }
+        "permute axis" => {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.message.contains("permute")
+                && error.message.contains("axis")
+                && error.expected.as_deref() == Some("i32")
+                && error.got.as_deref() == Some("i64")
+        }
+        "stride step" => {
+            error.kind.diagnostic_name() == "TypeMismatch"
+                && error.expected.as_deref() == Some("i64")
+                && error.got.as_deref() == Some("i32")
+                && error.span_offset == source.find("stride(")
+        }
+        _ => error.message.contains(diagnostic),
+    }
+}
+
 fn run_cell(cell: &Cell) {
     let Cell {
         route,
@@ -612,13 +722,15 @@ fn run_cell(cell: &Cell) {
         diagnostic,
     } = cell;
 
-    // DISPOSITION LOCK. The resolved rejection pins the wording the late-bound
-    // one has to equal.
+    // The resolved and late-bound calls must report the same owning rule and
+    // preserve any source-aware structured operands.
     let eager = check(resolved_invalid).expect_err(&format!(
         "{route}: an invalid resolved call must be rejected"
     ));
     assert!(
-        eager.iter().any(|e| e.message.contains(diagnostic)),
+        eager.iter().any(|error| {
+            matches_collection_rejection(error, route, diagnostic, resolved_invalid)
+        }),
         "{route}: the resolved rejection must name its own rule, got:\n{}",
         summary(&eager)
     );
@@ -644,9 +756,10 @@ fn run_cell(cell: &Cell) {
         );
     } else {
         assert!(
-            late.iter().any(|e| e.message.contains(diagnostic)),
-            "{route}: the late-bound rejection must carry the SAME diagnostic as the resolved one \
-         ({diagnostic:?}), got:\n{}",
+            late.iter().any(|error| {
+                matches_collection_rejection(error, route, diagnostic, late_invalid)
+            }),
+            "{route}: the late-bound rejection must match the resolved rule, got:\n{}",
             summary(&late)
         );
     }
@@ -697,7 +810,7 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             resolved_invalid: "def f(x: List[i32], y: List[f32]) -> List[i32] = concat(x, y)\n",
             late_invalid: "def f(x: List[i32], y: List[f32]) -> List[i32] = {\n  g = fn (t) -> concat(x, t)\n  g(y)\n}\n",
             late_valid: "def f(x: List[i32], y: List[i32]) -> List[i32] = {\n  g = fn (t) -> concat(x, t)\n  g(y)\n}\n",
-            diagnostic: "precision mismatch: expected i32, got f32",
+            diagnostic: "precision mismatch",
         },
         Cell {
             route: "zip",
@@ -711,7 +824,7 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             resolved_invalid: "def f(d: Dict[string, i32], e: Dict[string, f32]) -> Dict[string, i32] = dict_merge(d, e)\n",
             late_invalid: "def f(d: Dict[string, i32], e: Dict[string, f32]) -> Dict[string, i32] = {\n  g = fn (t) -> dict_merge(d, t)\n  g(e)\n}\n",
             late_valid: "def f(d: Dict[string, i32], e: Dict[string, i32]) -> Dict[string, i32] = {\n  g = fn (t) -> dict_merge(d, t)\n  g(e)\n}\n",
-            diagnostic: "precision mismatch: expected i32, got f32",
+            diagnostic: "precision mismatch",
         },
         Cell {
             route: "split sizes",
@@ -769,7 +882,7 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             resolved_invalid: "def f(x: tensor[2, 4, f32], a: i32) -> tensor[2, 2, f32] = stride(x, a, 2i64)\n",
             late_invalid: "def f(x: tensor[2, 4, f32], a: i32) -> tensor[2, 2, f32] = {\n  g = fn (v) -> stride(x, v, 2i64)\n  g(a)\n}\n",
             late_valid: "def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = {\n  g = fn (t) -> stride(t, 1i64, 2i64)\n  g(x)\n}\n",
-            diagnostic: "stride expects i64 strides (write 2i64), got i32",
+            diagnostic: "stride",
         },
     ] {
         run_cell(&cell);
@@ -1288,12 +1401,12 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
         (
             "dropout",
             "def f(k: key, x: tensor[3, i32]) -> tensor[3, i32] = {\n  g = fn (j, t) -> dropout(j, t, 0.5f32)\n  g(k, x)\n}\n",
-            "tensor precision mismatch: f32 vs i32",
+            "PrecisionMismatch",
         ),
         (
             "test_assert_close_tensor",
             "def test_a(x: tensor[3, f32]) -> unit ! {Test} = {\n  g = fn (t) -> test_assert_close_tensor(t, t, 0.01f64, \"m\")\n  g(x)\n}\n",
-            "tensor precision mismatch: f64 vs f32",
+            "PrecisionMismatch",
         ),
         (
             "sum (late-bound axis)",
@@ -1303,8 +1416,24 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
     ] {
         let errors = check(program).expect_err(&format!("{route}: this program must be rejected"));
         assert!(
-            errors.iter().any(|e| e.message.contains(diagnostic)),
-            "{route}: the verdict must not move, expected {diagnostic:?}, got:\n{}",
+            errors.iter().any(|error| {
+                match route {
+                    "dropout" => {
+                        error.kind.diagnostic_name() == "PrecisionMismatch"
+                            && error.expected.as_deref() == Some("f32")
+                            && error.got.as_deref() == Some("i32")
+                            && error.span_offset == program.rfind("g(k, x)")
+                    }
+                    "test_assert_close_tensor" => {
+                        error.kind.diagnostic_name() == "PrecisionMismatch"
+                            && error.expected.as_deref() == Some("f64")
+                            && error.got.as_deref() == Some("f32")
+                            && error.span_offset == program.rfind("g(x)")
+                    }
+                    _ => error.message.contains(diagnostic),
+                }
+            }),
+            "{route}: the verdict must not move, got:\n{}",
             summary(&errors)
         );
     }
@@ -1773,26 +1902,31 @@ fn an_empty_literal_the_declared_result_determines_is_now_validated() {
 // `Type::Var` arm, published the call's own result variable, and the
 // declaration was free to bind that variable to any shape at all.
 //
-// Each cell below is the pair the issue names: the FALSE declared shape must
-// be rejected with the direct spelling's own `DimensionMismatch` text, and
-// the TRUE declared shape must still check. Asserting the text rather than
-// mere rejection is the same discipline the rest of this file follows: a
-// relocated decision can be reported by an unrelated rule.
+// Each FALSE declared shape must be rejected with a directional declared
+// versus inferred type mismatch, while the TRUE declared shape checks. The
+// type pair distinguishes a deferred declaration contract failure from an
+// unrelated rejection without pinning checker prose.
 // ---------------------------------------------------------------------------
 
-/// The direct spelling's rejection, which every untied form must reproduce.
-fn signature_mismatch(params: &str, body_result: &str, declared_result: &str) -> String {
-    format!(
-        "def 'probe' body doesn't match declared signature: body has type \
-         `({params}) -> {body_result}`, declared type is `({params}) -> {declared_result}`"
+/// Directional type pair for a rejected declared result.
+fn signature_mismatch(params: &str, body_result: &str, declared_result: &str) -> (String, String) {
+    (
+        format!("({params}) -> {declared_result}"),
+        format!("({params}) -> {body_result}"),
     )
 }
 
-fn expect_exact_error(program: &str, expected: &str) {
+fn expect_exact_error(program: &str, (expected, got): &(String, String)) {
     let errors = check(program).expect_err(&format!("this program must be rejected:\n{program}"));
     assert!(
-        errors.iter().any(|e| e.message == expected),
-        "the rejection must be the direct spelling's own text.\nexpected: {expected}\ngot:\n{}",
+        errors.iter().any(|e| {
+            matches!(
+                e.kind,
+                chelis_types::errors::CheckErrorKind::DimensionMismatch
+            ) && e.expected.as_ref() == Some(expected)
+                && e.got.as_ref() == Some(got)
+        }),
+        "declaration contract must preserve expected {expected}, actual {got}.\ngot:\n{}",
         summary(&errors)
     );
 }

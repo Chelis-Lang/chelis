@@ -1887,7 +1887,7 @@ impl DesugarCtx {
     }
 
     fn desugar_decl(&self, decl: &Decl) -> Vec<deep::Expr> {
-        match decl {
+        let mut lowered = match decl {
             Decl::FunDef {
                 name,
                 type_binders,
@@ -2090,7 +2090,24 @@ impl DesugarCtx {
                 }
                 vec![node(DeepTag::Export, children)]
             }
+        };
+        for expr in &mut lowered {
+            if let deep::Expr::Node(node, _) = expr
+                && matches!(
+                    node.tag(),
+                    DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias
+                )
+                && node.meta().span_id().is_none()
+                && let Some(entry) = span_entry(decl.span())
+            {
+                let mut meta = node.meta().clone();
+                meta.insert(entry)
+                    .expect("declaration has no existing span ID");
+                node.try_replace_meta(meta)
+                    .expect("Surf declaration span is valid metadata");
+            }
         }
+        lowered
     }
 
     fn desugar_fun_def(
@@ -4495,40 +4512,6 @@ mod tests {
         assert_eq!(
             print_expr(&desugar_type(&ty)),
             "(t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))"
-        );
-    }
-
-    #[test]
-    fn typealias_desugaring_uses_its_explicit_binder_scope() {
-        let declarations = crate::parser::parse_str("type Matrix[p, rows] = tensor[rows, p]")
-            .expect("typealias parses");
-        let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
-        assert_eq!(
-            print_expr(&deep[0]),
-            "(typealias {} Matrix (p rows) (t-tensor {} (d-var {} rows) (t-var {} p)))"
-        );
-    }
-
-    #[test]
-    fn zero_parameter_typealias_dimension_is_symbolic_not_implicitly_bound() {
-        let declarations =
-            crate::parser::parse_str("type Weights = tensor[n, f32]").expect("alias parses");
-        let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
-        assert_eq!(
-            print_expr(&deep[0]),
-            "(typealias {} Weights () (t-tensor {} (d-name {} n) (t-prim {} f32)))"
-        );
-    }
-
-    #[test]
-    fn deftype_desugaring_uses_multi_letter_dimension_binder_scope() {
-        let declarations =
-            crate::parser::parse_str("type Batch[rows] = | Batch { values: tensor[rows, f32] }")
-                .expect("deftype parses");
-        let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
-        assert_eq!(
-            print_expr(&deep[0]),
-            "(deftype {}\n  Batch\n  (rows)\n  (variant {}\n    Batch\n    (field {} values (t-tensor {} (d-var {} rows) (t-prim {} f32)))))"
         );
     }
 

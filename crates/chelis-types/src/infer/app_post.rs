@@ -3,6 +3,7 @@
 //! The checks remain in their original order. Each rejection still returns
 //! before the next operation family runs.
 
+use super::app_post_diagonal::{diagonal_result_error, reject_unreachable_diagonal_extent};
 use super::*;
 
 /// [05-OP-56]'s key domain: string, bool, or an active signed-integer scalar.
@@ -14,134 +15,9 @@ fn is_dict_key_type(ty: &Type) -> bool {
     }
 }
 
-/// The declared extent at one axis of an application's result, read from the
-/// two ingresses a declaration can reach a builtin call through.
-///
-/// The `def`/`sig` route hands the declared return type down as
-/// `expected_result`. A block-scoped ascription (`y: tensor[9, f32] = ...`)
-/// does not: `infer_let` infers the right-hand side with no expectation and
-/// unifies afterwards, so the ascription arrives as `"type"` metadata on this
-/// very application node (`crates/chelis-surf/src/desugar.rs`'s
-/// `inject_type_metadata`). Resolving it here costs one speculative
-/// `resolve_deep_type`, whose diagnostics are rolled back because `infer_let`
-/// owns reporting for that same annotation and would otherwise report twice.
-/// Going through the resolver rather than reading the metadata shape directly
-/// is what makes a declared type alias (`type Row = tensor[9, f32]`) carry the
-/// same verdict as its expansion.
-#[allow(clippy::too_many_arguments)]
-fn declared_result_literal(
-    result_axis: usize,
-    result_rank: usize,
-    expected_result: Option<&Type>,
-    node: &DeepNode,
-    env: &Env,
-    vg: &mut VarGen,
-    adt_reg: &AdtRegistry,
-    subst: &Subst,
-    errors: &mut DiagnosticSink<'_>,
-) -> Option<i64> {
-    // The rank-equality precondition matters as much as the literal does. A
-    // declaration whose RANK disagrees is already a signature mismatch, and the
-    // checker reports it with the two full tensor types. Reading an axis out of
-    // it anyway turns `tensor[n, 4, 5] -> tensor[7]` into "the result extent is
-    // at most 4", which names a repair that would not fix the program, and the
-    // `Type::Error` this path returns then suppresses the accurate diagnostic
-    // (round 1 P2). Rank belongs to unification; the bound stands down.
-    let literal_at = |ty: &Type| -> Option<i64> {
-        let Type::Tensor(dims, _) = ty else {
-            return None;
-        };
-        if dims.len() != result_rank {
-            return None;
-        }
-        subst.observe_dim(dims.get(result_axis)?).literal_extent()
-    };
-
-    if let Some(found) = expected_result
-        .map(|expected| subst.apply(expected))
-        .as_ref()
-        .and_then(&literal_at)
-    {
-        return Some(found);
-    }
-
-    let declared = node.meta().ty().map(|value| value.expression())?;
-    let checkpoint = errors.checkpoint();
-    let resolved = resolve_deep_type(
-        declared,
-        vg,
-        adt_reg,
-        TypeUseSite::Annotation,
-        annotation_binder_mode(env),
-        errors,
-    );
-    errors.retain_since(checkpoint, |_| false);
-    literal_at(&resolved.ok()?)
-}
-
-/// chelis#1739. `[05-OP-33]` replaces the retained axis extent with the smaller
-/// selected extent, so a literal selected axis bounds the result from above for
-/// every runtime value of the other axis. A declared extent strictly greater
-/// than that bound is unreachable and is a `DimensionMismatch`; at or below it
-/// is satisfiable and the runtime guard owns the verdict.
-///
-/// Returns the error type when it rejects, so the caller propagates it instead
-/// of the inferred result. `Type::Error` unifies with anything, which is what
-/// keeps the enclosing signature or ascription from reporting a second time.
-#[allow(clippy::too_many_arguments)]
-fn reject_unreachable_diagonal_extent(
-    operand: &Type,
-    inferred: &Type,
-    axis1: usize,
-    axis2: usize,
-    node: &DeepNode,
-    env: &Env,
-    vg: &mut VarGen,
-    adt_reg: &AdtRegistry,
-    subst: &Subst,
-    errors: &mut DiagnosticSink<'_>,
-    expected_result: Option<&Type>,
-) -> Option<Type> {
-    let (result_axis, source_axis, bound) = diagonal_result_bound(operand, axis1, axis2, subst)?;
-    let Type::Tensor(inferred_dims, _) = inferred else {
-        return None;
-    };
-    let declared = declared_result_literal(
-        result_axis,
-        inferred_dims.len(),
-        expected_result,
-        node,
-        env,
-        vg,
-        adt_reg,
-        subst,
-        errors,
-    )?;
-    if declared <= bound {
-        return None;
-    }
-    Some(report(
-        errors,
-        CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            with_node_provenance(
-                node,
-                format!(
-                    "diagonal declares the smaller selected extent ([05-OP-33]): \
-                     axis {source_axis} is literal {bound}, so the result extent is \
-                     at most {bound}, but the declared result extent is {declared}"
-                ),
-            ),
-            vec![format!(
-                "Declare an extent at or below {bound}, or select an axis pair \
-                 whose literal extent is at least {declared}"
-            )],
-        ),
-    ))
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_unified_app(
+    source_site: CheckSite<'_>,
     node: &DeepNode,
     kids: &[deep::Expr],
     func_name: Option<String>,
@@ -184,7 +60,14 @@ pub(super) fn finish_unified_app(
             let operands = match rule {
                 builtins::AggregateRule::Fold | builtins::AggregateRule::Scan => {
                     if arg_tys.len() != 3 {
-                        return report_builtin_arity(errors, node, name, 3, arg_tys.len());
+                        return report_builtin_arity(
+                            errors,
+                            node,
+                            source_site,
+                            name,
+                            3,
+                            arg_tys.len(),
+                        );
                     }
                     let element = vg.fresh_type();
                     if let Err(error) = unify(
@@ -199,6 +82,7 @@ pub(super) fn finish_unified_app(
                     // accumulator belongs to the aggregate rule below.
                     let callback_result = match unify_checked_call_contract(
                         &kids[1],
+                        None,
                         &arg_tys[0],
                         &[arg_tys[1].clone(), element],
                         None,
@@ -266,7 +150,7 @@ pub(super) fn finish_unified_app(
         && let Some(expected) = expected_result
     {
         if let Err(error) = unify(&result_ty, expected, subst) {
-            return report(errors, error.into());
+            return report_at_check_site(errors, error.into(), source_site);
         }
         result_ty = subst.apply(&result_ty);
     }
@@ -283,7 +167,7 @@ pub(super) fn finish_unified_app(
     // the operand settles.
     let dtype_site = func_name
         .as_deref()
-        .map(|fname| DtypeAdmissibilitySite::new(node, kids, fname, env));
+        .map(|fname| DtypeAdmissibilitySite::new(node, kids, fname, env).with_site(source_site));
 
     if let Some(rejected) = validate_numeric_and_reduction_arguments(
         node,
@@ -401,14 +285,17 @@ pub(super) fn finish_unified_app(
                 checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
-                        DeferredShapeRule::Matmul,
+                        DeferredShapeRule::Matmul {
+                            location: source_site.owned_location(),
+                        },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
                         result_ty.clone(),
                     );
                     retained_shape_obligation = true;
                 }
-                result_ty = check_matmul_signature(&arg_tys, &result_ty, subst, errors);
+                result_ty =
+                    check_matmul_signature(source_site, &arg_tys, &result_ty, subst, errors);
             }
             "sum" | "count" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
             | "argmin_reduce" | "mean" => {
@@ -417,6 +304,7 @@ pub(super) fn finish_unified_app(
                     product.defer_shape_check(
                         DeferredShapeRule::Reduction {
                             name: fname.clone(),
+                            location: source_site.owned_location(),
                         },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
@@ -425,6 +313,7 @@ pub(super) fn finish_unified_app(
                     retained_shape_obligation = true;
                 }
                 result_ty = check_reduction_signature(
+                    source_site,
                     fname,
                     &kids[1..],
                     &arg_tys,
@@ -450,6 +339,7 @@ pub(super) fn finish_unified_app(
                             builtin: callee,
                             axis_is_dim_name,
                             env: Box::new(env.clone()),
+                            location: source_site.owned_location(),
                         },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
@@ -458,6 +348,7 @@ pub(super) fn finish_unified_app(
                     retained_shape_obligation = true;
                 }
                 result_ty = check_expand_signature(
+                    source_site,
                     callee,
                     &kids[1..],
                     &arg_tys,
@@ -472,32 +363,57 @@ pub(super) fn finish_unified_app(
                 checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
-                        DeferredShapeRule::LayerNorm,
+                        DeferredShapeRule::LayerNorm {
+                            location: source_site.owned_location(),
+                        },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
                         result_ty.clone(),
                     );
                     retained_shape_obligation = true;
                 }
-                result_ty = check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
+                result_ty = check_layer_norm_signature(
+                    source_site,
+                    &arg_tys,
+                    &result_ty,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "conv" => {
                 checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
-                        DeferredShapeRule::Conv,
+                        DeferredShapeRule::Conv {
+                            location: source_site.owned_location(),
+                        },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
                         result_ty.clone(),
                     );
                     retained_shape_obligation = true;
                 }
-                result_ty =
-                    check_conv_signature(&kids[1..], &arg_tys, &result_ty, vg, subst, errors);
+                result_ty = check_conv_signature(
+                    source_site,
+                    &kids[1..],
+                    &arg_tys,
+                    &result_ty,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "split_keys" => {
                 checked_route_observed = true;
-                result_ty = check_split_keys_signature(&kids[1..], &result_ty, env, subst, errors);
+                result_ty = check_split_keys_signature(
+                    source_site,
+                    &kids[1..],
+                    &result_ty,
+                    env,
+                    subst,
+                    errors,
+                );
             }
             "scatter_elements" if owes_shape_replay => {
                 checked_route_observed = true;
@@ -630,7 +546,8 @@ pub(super) fn finish_unified_app(
     }
 
     if let Some(ref fname) = func_name {
-        let site = UnresolvedOperandSite::new(node, kids, fname.as_str(), env);
+        let site =
+            UnresolvedOperandSite::new(node, kids, fname.as_str(), env).with_site(source_site);
         match fname.as_str() {
             "print" => {
                 return Type::Unit;
@@ -849,16 +766,22 @@ pub(super) fn finish_unified_app(
                     match type_for_readonly_check(first_arg, subst) {
                         Type::Tensor(dims, precision) => {
                             if !dims.is_empty() {
-                                return report(
+                                return report_at_check_site(
                                     errors,
-                                    CheckError::new(
+                                    CheckError::with_types(
                                         CheckErrorKind::TypeMismatch,
                                         with_node_provenance(
                                             node,
-                                            "tensor_to_scalar expects a rank-0 tensor".to_string(),
+                                            format!(
+                                                "tensor_to_scalar argument 1: expected rank-0 tensor, got rank-{} tensor",
+                                                dims.len()
+                                            ),
                                         ),
+                                        "rank-0 tensor".to_string(),
+                                        format!("rank-{} tensor", dims.len()),
                                         vec![],
                                     ),
+                                    site.source_site,
                                 );
                             }
                             // Conversion changes the surface, not the dtype's
@@ -873,18 +796,21 @@ pub(super) fn finish_unified_app(
                             return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                         }
                         other => {
-                            return report(
+                            return report_at_check_site(
                                 errors,
-                                CheckError::new(
+                                CheckError::with_types(
                                     CheckErrorKind::TypeMismatch,
                                     with_node_provenance(
                                         node,
                                         format!(
-                                            "tensor_to_scalar expects tensor input, got {other}"
+                                            "tensor_to_scalar argument 1: expected tensor, got {other}"
                                         ),
                                     ),
+                                    "tensor".to_string(),
+                                    other.to_string(),
                                     vec![],
                                 ),
+                                site.source_site,
                             );
                         }
                     }
@@ -923,7 +849,14 @@ pub(super) fn finish_unified_app(
             }
             "einsum" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let Some(equation) = kids.get(1).and_then(extract_string_literal) else {
                     return report(
@@ -956,7 +889,14 @@ pub(super) fn finish_unified_app(
             }
             "gather" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 if let Err(err) = reject_non_int32_axis("gather", &arg_tys[2], node, subst, errors)
                 {
@@ -980,7 +920,14 @@ pub(super) fn finish_unified_app(
             }
             "where" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let cond_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let then_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -1039,7 +986,14 @@ pub(super) fn finish_unified_app(
             }
             "cumsum" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let cumsum_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let _axis = match resolve_builtin_axis(
@@ -1079,7 +1033,14 @@ pub(super) fn finish_unified_app(
             }
             "diagonal" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let diagonal_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let axis1 = match resolve_axis_pair_member(
@@ -1123,6 +1084,7 @@ pub(super) fn finish_unified_app(
                             axis1,
                             axis2,
                             node,
+                            source_site,
                             env,
                             vg,
                             adt_reg,
@@ -1135,20 +1097,24 @@ pub(super) fn finish_unified_app(
                         return ty;
                     }
                     Err(message) => {
-                        return report(
+                        return report_at_check_site(
                             errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(node, message),
-                                vec![],
-                            ),
+                            diagonal_result_error(node, &diagonal_operand, axis1, axis2, message),
+                            source_site,
                         );
                     }
                 }
             }
             "trace" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 for idx in [1usize, 2] {
                     if let Err(err) =
@@ -1172,7 +1138,14 @@ pub(super) fn finish_unified_app(
             }
             "clamp" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let input_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let low_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -1232,7 +1205,14 @@ pub(super) fn finish_unified_app(
             }
             "sort" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let sort_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let _axis = match resolve_builtin_axis(
@@ -1275,7 +1255,14 @@ pub(super) fn finish_unified_app(
             }
             "scatter" => {
                 if arg_tys.len() != 5 {
-                    return report_builtin_arity(errors, node, fname, 5, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        5,
+                        arg_tys.len(),
+                    );
                 }
                 if let Err(err) = reject_non_int32_axis("scatter", &arg_tys[3], node, subst, errors)
                 {
@@ -1303,7 +1290,14 @@ pub(super) fn finish_unified_app(
             }
             "scatter_replace" => {
                 if arg_tys.len() != 4 {
-                    return report_builtin_arity(errors, node, fname, 4, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        4,
+                        arg_tys.len(),
+                    );
                 }
                 if let Err(err) =
                     reject_non_int32_axis("scatter_replace", &arg_tys[3], node, subst, errors)
@@ -1379,7 +1373,14 @@ pub(super) fn finish_unified_app(
             }
             "index" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let index_arg = subst.apply(&arg_tys[1]);
@@ -1445,7 +1446,14 @@ pub(super) fn finish_unified_app(
             }
             "concat" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let lhs = subst.apply(&arg_tys[0]);
                 let rhs = subst.apply(&arg_tys[1]);
@@ -1546,7 +1554,14 @@ pub(super) fn finish_unified_app(
             }
             "split" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let axis_ty = subst.apply(&arg_tys[1]);
@@ -1644,7 +1659,14 @@ pub(super) fn finish_unified_app(
             }
             "take" | "skip" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let op_name = func_name.as_deref().unwrap_or("collection helper");
                 let list_arg = subst.apply(&arg_tys[0]);
@@ -1695,7 +1717,14 @@ pub(super) fn finish_unified_app(
             }
             "chunk" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let count_arg = subst.apply(&arg_tys[1]);
@@ -1748,7 +1777,14 @@ pub(super) fn finish_unified_app(
             }
             "range" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 for arg_ty in &arg_tys {
                     match subst.apply(arg_ty) {
@@ -1774,7 +1810,14 @@ pub(super) fn finish_unified_app(
             }
             "map" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let elem_ty = vg.fresh_type();
                 let out_ty = vg.fresh_type();
@@ -1796,7 +1839,14 @@ pub(super) fn finish_unified_app(
             }
             "filter" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let elem_ty = vg.fresh_type();
                 if let Err(te) = unify(
@@ -1834,7 +1884,14 @@ pub(super) fn finish_unified_app(
                 // that at execution time. At type-check time we accept
                 // any Type::Prim and let unification do the rest.
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let elem_ty = vg.fresh_type();
                 let i64 = Type::Prim(Prim::Int64);
@@ -1918,7 +1975,14 @@ pub(super) fn finish_unified_app(
             }
             "partition" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let elem_ty = vg.fresh_type();
                 if let Err(te) = unify(
@@ -1948,7 +2012,14 @@ pub(super) fn finish_unified_app(
             }
             "flat_map" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let elem_ty = vg.fresh_type();
                 let out_elem_ty = vg.fresh_type();
@@ -2034,7 +2105,14 @@ pub(super) fn finish_unified_app(
             }
             "zip" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let lhs = subst.apply(&arg_tys[0]);
                 let rhs = subst.apply(&arg_tys[1]);
@@ -2190,7 +2268,14 @@ pub(super) fn finish_unified_app(
             }
             "dict_get" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
@@ -2225,7 +2310,14 @@ pub(super) fn finish_unified_app(
             }
             "dict_contains" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
@@ -2260,7 +2352,14 @@ pub(super) fn finish_unified_app(
             }
             "dict_remove" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
@@ -2534,19 +2633,22 @@ pub(super) fn finish_unified_app(
                     match type_for_readonly_check(first_arg, subst) {
                         Type::Tensor(dims, precision) => {
                             if dims.len() != 1 {
-                                return report(
+                                return report_at_check_site(
                                     errors,
-                                    CheckError::new(
+                                    CheckError::with_types(
                                         CheckErrorKind::TypeMismatch,
                                         with_node_provenance(
                                             node,
                                             format!(
-                                                "to_list expects a rank-1 tensor, got rank {} tensor",
+                                                "to_list argument 1: expected rank-1 tensor, got rank-{} tensor",
                                                 dims.len()
                                             ),
                                         ),
+                                        "rank-1 tensor".to_string(),
+                                        format!("rank-{} tensor", dims.len()),
                                         vec![],
                                     ),
+                                    site.source_site,
                                 );
                             }
                             let precision = match precision {
@@ -2567,18 +2669,23 @@ pub(super) fn finish_unified_app(
                                 }
                             };
                             if !precision.is_numeric() && !matches!(precision, Prim::Bool) {
-                                return report(
+                                return report_at_check_site(
                                     errors,
-                                    CheckError::new(
+                                    CheckError::with_types(
                                         CheckErrorKind::TypeMismatch,
                                         with_node_provenance(
                                             node,
                                             format!(
-                                                "to_list expects numeric or bool tensor input, got {precision:?}"
+                                                "to_list argument 1: expected numeric or bool tensor, got tensor[{}, {}]",
+                                                dims[0],
+                                                precision.name()
                                             ),
                                         ),
+                                        "numeric or bool tensor".to_string(),
+                                        format!("tensor[{}, {}]", dims[0], precision.name()),
                                         vec![],
                                     ),
+                                    site.source_site,
                                 );
                             }
                             return Type::Adt("List".to_string(), vec![Type::Prim(precision)]);
@@ -2588,16 +2695,19 @@ pub(super) fn finish_unified_app(
                             return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                         }
                         other => {
-                            return report(
+                            return report_at_check_site(
                                 errors,
-                                CheckError::new(
+                                CheckError::with_types(
                                     CheckErrorKind::TypeMismatch,
                                     with_node_provenance(
                                         node,
-                                        format!("to_list expects Tensor input, got {other}"),
+                                        format!("to_list argument 1: expected tensor, got {other}"),
                                     ),
+                                    "tensor".to_string(),
+                                    other.to_string(),
                                     vec![],
                                 ),
+                                site.source_site,
                             );
                         }
                     }
@@ -2605,7 +2715,14 @@ pub(super) fn finish_unified_app(
             }
             "pad_sequences" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        2,
+                        arg_tys.len(),
+                    );
                 }
                 let seqs_ty = subst.apply(&arg_tys[0]);
                 let pad_ty = subst.apply(&arg_tys[1]);
@@ -2693,7 +2810,14 @@ pub(super) fn finish_unified_app(
             }
             "pad_sequences_to" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
+                    return report_builtin_arity(
+                        errors,
+                        node,
+                        source_site,
+                        fname,
+                        3,
+                        arg_tys.len(),
+                    );
                 }
                 let seqs_ty = subst.apply(&arg_tys[0]);
                 let width_ty = subst.apply(&arg_tys[1]);

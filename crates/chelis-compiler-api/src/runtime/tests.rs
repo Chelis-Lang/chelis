@@ -1312,12 +1312,16 @@ value = choose_and_cast(cast(1, i16), cast(2, i64))
         .expect_err("one bounded precision cannot actualize to two concrete dtypes");
     assert!(
         errors.errors.iter().any(|error| {
-            let message = error.message.to_ascii_lowercase();
-            message.contains("precision mismatch")
-                && message.contains("i16")
-                && message.contains("i64")
+            error.kind.diagnostic_name() == "PrecisionMismatch"
+                && error.expected.is_none()
+                && error.got.is_none()
+                && error.span_offset == source.rfind("choose_and_cast(")
+                && error.message.contains("choose_and_cast")
+                && error.message.contains("i16")
+                && error.message.contains("i64")
         }),
-        "the checker should report the conflicting concrete precisions"
+        "the shared binder must reject both concrete precisions at the call without \
+         fabricating a declared dtype direction"
     );
 }
 

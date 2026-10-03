@@ -223,7 +223,7 @@ pub(super) fn ambiguous_size_name_error(
                 CheckErrorKind::DimensionMismatch,
                 format!(
                     "{builtin} size names `{name}`, which is both a value of type {value_ty} \
-                     and {dimension}, so the extent it denotes is ambiguous \
+                     and {dimension}, so argument 3 (size) has an ambiguous extent \
                      (spec/04-type-system.md \u{00a7}4.7.2)"
                 ),
                 vec![format!(

@@ -1082,6 +1082,7 @@ pub(super) fn infer_cast(
                                 DeferredOperandGate::CastToBinder {
                                     target,
                                     result: Box::new(result.clone()),
+                                    location: TypeDiagnosticLocation::from_expr(expr),
                                 },
                             );
                             result
@@ -1144,16 +1145,21 @@ pub(super) fn infer_cast(
         other => {
             return report(
                 errors,
-                CheckError::new(
-                    CheckErrorKind::CastNonTensor,
-                    format!(
-                        "cast target `{other}` is not a recognized primitive type (chelis#756)"
-                    ),
-                    vec![
-                        "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
+                at_check_site(
+                    expr,
+                    CheckError::with_types(
+                        CheckErrorKind::CastNonTensor,
+                        format!(
+                            "cast argument 2: expected primitive dtype, got {other} (chelis#756)"
+                        ),
+                        "primitive dtype".to_string(),
+                        other.to_string(),
+                        vec![
+                            "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
                      i8, i16, i32, i64"
-                            .to_string(),
-                    ],
+                                .to_string(),
+                        ],
+                    ),
                 ),
             );
         }
@@ -1174,7 +1180,7 @@ pub(super) fn infer_cast(
     {
         return report(errors, error);
     }
-    cast_result_from_source(resolved, new_prec, mode, subst, vg, errors)
+    cast_result_from_source(expr, resolved, new_prec, mode, subst, vg, errors)
 }
 
 /// The [05-OP-6] source-side decision for a source whose type is already
@@ -1281,12 +1287,14 @@ pub(crate) fn cast_result_from_settled_source(
             // no cast, whether it is written directly or bound later through a
             // lambda parameter, since both reach this one decision.
             if !src_prec.is_data_element_dtype() {
-                return Err(Box::new(CheckError::new(
+                return Err(Box::new(CheckError::with_types(
                     CheckErrorKind::CastNonTensor,
                     format!(
-                        "cast requires a numeric or bool source, got {} ([05-OP-63])",
+                        "cast argument 1: expected numeric or bool scalar, got {} ([05-OP-63])",
                         src_prec.name()
                     ),
+                    "numeric or bool scalar".to_string(),
+                    src_prec.name().to_string(),
                     vec![],
                 )));
             }
@@ -1298,9 +1306,11 @@ pub(crate) fn cast_result_from_settled_source(
             Ok(Type::Prim(new_prec))
         }
         Type::Error(w) => Ok(propagate(&w)),
-        other => Err(Box::new(CheckError::new(
+        other => Err(Box::new(CheckError::with_types(
             CheckErrorKind::CastNonTensor,
-            format!("cast requires tensor or prim type, got {other}"),
+            format!("cast argument 1: expected tensor or numeric/bool scalar, got {other}"),
+            "tensor or numeric/bool scalar".to_string(),
+            other.to_string(),
             vec![],
         ))),
     }
@@ -1330,17 +1340,20 @@ pub(crate) fn binder_cast_result_from_settled_source(
         // [04-NUM-14] and [05-OP-63] admit a numeric or `bool` scalar source.
         Type::Prim(source) if source.is_data_element_dtype() => Ok(Type::Var(target)),
         Type::Error(_) => Ok(Type::Var(target)),
-        other => Err(Box::new(CheckError::new(
+        other => Err(Box::new(CheckError::with_types(
             CheckErrorKind::CastNonTensor,
             format!(
-                "cast to a quantified scalar dtype requires a numeric or bool scalar, got {other}"
+                "cast argument 1: expected numeric or bool scalar, got {other} (quantified target)"
             ),
+            "numeric or bool scalar".to_string(),
+            other.to_string(),
             vec![],
         ))),
     }
 }
 
 pub(super) fn cast_result_from_source(
+    site: &deep::Expr,
     resolved: Type,
     new_prec: Prim,
     mode: CastMode,
@@ -1375,6 +1388,7 @@ pub(super) fn cast_result_from_source(
                     target: new_prec,
                     mode,
                     result: Box::new(result.clone()),
+                    location: TypeDiagnosticLocation::from_expr(site),
                 },
             );
             result
@@ -1384,7 +1398,7 @@ pub(super) fn cast_result_from_source(
         // decision to disagree with.
         settled => match cast_result_from_settled_source(settled, new_prec, mode, subst) {
             Ok(result) => result,
-            Err(error) => report(errors, *error),
+            Err(error) => report(errors, at_check_site(site, *error)),
         },
     }
 }
@@ -1614,17 +1628,27 @@ pub(super) fn report_unknown_cast_target(
     name: &str,
     location: Option<&TypeDiagnosticLocation>,
 ) -> Type {
-    let error = CheckError::new(
+    let error = CheckError::with_types(
         CheckErrorKind::CastNonTensor,
-        format!("cast target `{name}` is not a recognized primitive type (chelis#756)"),
+        format!(
+            "cast argument 2: expected primitive dtype, got `{name}` \
+             (not a recognized primitive type; chelis#756)"
+        ),
+        "primitive dtype".to_string(),
+        name.to_string(),
         vec![
             "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
              i8, i16, i32, i64"
                 .to_string(),
         ],
     );
-    let error = location.map_or(error.clone(), |location| location.attach(error));
-    report(errors, error)
+    report(
+        errors,
+        match location {
+            Some(location) => location.attach(error),
+            None => error,
+        },
+    )
 }
 
 /// Build the canonical "unsupported precision" rejection for either a

@@ -60,9 +60,10 @@ def driver(a: tensor[2, 3, f32], b: tensor[3, 4, f32], c: tensor[5, 6, f32], d: 
     );
     assert!(
         errors.iter().any(|error| {
-            error.message.contains("dimension mismatch")
-                || error.message.contains("tensor dimension mismatch")
-                || error.message.contains("cannot unify")
+            error.kind.diagnostic_name() == "DimensionMismatch"
+                && error.expected.as_deref() == Some("2")
+                && error.got.as_deref() == Some("5")
+                && error.message.contains("`f` argument 1, axis 0")
         }),
         "the second application must conflict with the first concrete instantiation; got:\n{}",
         summary(&errors)

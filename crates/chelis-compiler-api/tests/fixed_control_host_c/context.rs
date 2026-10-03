@@ -6,6 +6,7 @@ use chelis_compiler_api::compiler::{CompiledExecutionArtifact, compile_for_execu
 use chelis_compiler_api::context::CompiledContext;
 use chelis_compiler_api::schema::CompileTarget;
 use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+use chelis_vocab::DiagnosticKind;
 
 fn context() -> CompiledContext {
     context_with_library(
@@ -331,31 +332,42 @@ fn context_rejects_unbound_names_and_keyless_calls() {
     let cases = [
         (
             source("keep(key_from_seed(9i64), x, missing)", "4"),
-            "unbound variable",
+            DiagnosticKind::UnboundVariable,
         ),
         (
             source("keep(key_from_seed(9i64), x, 0.5f32)", "4").replace(
                 "import Probe.Draw (keep, loss, matrix, empty, single)\n",
                 "",
             ),
-            "unbound variable",
+            DiagnosticKind::UnboundVariable,
         ),
         (
             source("keep(x, 0.5f32)", "4"),
-            "arity mismatch: expected 3 args, got 2",
+            DiagnosticKind::ArityMismatch,
         ),
     ];
     for context in [&original, &decoded] {
-        for (source, reason) in &cases {
+        for (source, kind) in &cases {
             let error =
                 compile_for_execution_in_context(context, source, CompileTarget::C, Some("main"))
-                    .err()
-                    .unwrap_or_else(|| panic!("expected {reason} rejection for {source}"));
+                    .expect_err("invalid call must not compile");
             assert!(error.transcript.is_empty());
-            assert!(
-                format!("{error:?}").contains(reason),
-                "expected {reason}: {error:?}"
-            );
+            let diagnostic = error
+                .errors
+                .iter()
+                .find(|diagnostic| diagnostic.kind() == *kind)
+                .unwrap_or_else(|| panic!("expected {kind:?} rejection: {error:?}"));
+            if *kind == DiagnosticKind::ArityMismatch {
+                let call_offset = u64::try_from(source.find("keep(x, 0.5f32)").unwrap()).unwrap();
+                assert_eq!(diagnostic.expected.as_deref(), Some("3 arguments"));
+                assert_eq!(diagnostic.got.as_deref(), Some("2 arguments"));
+                assert!(diagnostic.message.contains("Probe.Draw.keep"), "{error:?}");
+                assert_eq!(
+                    diagnostic.span.map(|span| span.offset()),
+                    Some(call_offset),
+                    "{error:?}"
+                );
+            }
         }
     }
 }

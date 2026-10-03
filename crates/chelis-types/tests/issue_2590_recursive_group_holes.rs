@@ -224,11 +224,25 @@ fn a_concrete_in_group_argument_leaves_the_omitted_type_generic() {
 /// argument and returned `3i32` as a `string`.
 #[test]
 fn a_concrete_instance_types_the_result_of_its_own_call() {
-    rejects_with(
-        "def pick(x, n: i32) = if eq(n, 0) then x else pick(3i32, n - 1)\n\n\
-         def main() -> string = pick(\"s\", 2)\n",
-        &["precision mismatch: expected i32, got string"],
-    );
+    let source = "def pick(x, n: i32) = if eq(n, 0) then x else pick(3i32, n - 1)\n\n\
+                  def main() -> string = pick(\"s\", 2)\n";
+    for checked in [
+        check_typed_program(&desugared(source)),
+        check_ir_program(&expanded(source)),
+    ] {
+        let report = checked.expect_err("a concrete recursive argument must reject");
+        assert!(
+            report.errors.iter().any(|error| {
+                error.kind.diagnostic_name() == "PrecisionMismatch"
+                    && error.expected.as_deref() == Some("i32")
+                    && error.got.as_deref() == Some("string")
+                    && error.message.contains("`pick` argument 1")
+                    && error.span_offset == source.rfind("pick(")
+            }),
+            "the call must own the concrete argument mismatch: {:?}",
+            report.errors
+        );
+    }
     accepts(
         "def pick(x, n: i32) = if eq(n, 0) then x else pick(3i32, n - 1)\n\n\
          def main() -> i32 = pick(4i32, 2)\n",

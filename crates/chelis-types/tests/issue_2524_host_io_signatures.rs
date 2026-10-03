@@ -89,10 +89,27 @@ const PATH_CALLS: &[(&str, &str)] = &[
 #[test]
 fn a_path_must_be_a_string() {
     for (call, result) in PATH_CALLS {
-        rejects_with(
-            &format!("def bad(k: f32) -> {result} ! {{IO}} = {call}"),
-            &["[PrecisionMismatch] precision mismatch: expected string, got f32"],
-        );
+        let source = format!("def bad(k: f32) -> {result} ! {{IO}} = {call}");
+        let builtin = call.split_once('(').expect("call syntax").0;
+        for checked in [
+            check_typed_program(&desugared(&source)),
+            check_ir_program(&expanded(&source)),
+        ] {
+            let report = checked.expect_err("a non-string file path must reject");
+            assert!(
+                report.errors.iter().any(|error| {
+                    matches!(
+                        error.kind,
+                        chelis_types::errors::CheckErrorKind::PrecisionMismatch
+                    ) && error.expected.as_deref() == Some("string")
+                        && error.got.as_deref() == Some("f32")
+                        && error.message.contains(builtin)
+                        && error.message.contains("argument 1")
+                }),
+                "{builtin} must identify its first operand and actual type: {:?}",
+                report.errors
+            );
+        }
         accepts(&format!("def ok(k: string) -> {result} ! {{IO}} = {call}"));
     }
 }

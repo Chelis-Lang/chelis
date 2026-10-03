@@ -6,9 +6,9 @@
 //! behavioral; it does not depend on a hand-maintained inventory of source
 //! spellings.
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::check_ir_program;
+use chelis_types::{InferResult, check_ir_program};
 
-fn check(source: &str) -> Result<(), String> {
+fn check(source: &str) -> Result<(), InferResult> {
     let parsed = parse_str(source).expect("valid Surf fixture");
     let expanded = chelis_macros::expand_program(
         &desugar_program(&parsed).expect("Surf fixture must desugar"),
@@ -16,9 +16,7 @@ fn check(source: &str) -> Result<(), String> {
     )
     .expect("valid macro expansion")
     .into_exprs();
-    check_ir_program(&expanded)
-        .map(|_| ())
-        .map_err(|e| format!("{e:?}"))
+    check_ir_program(&expanded).map(|_| ())
 }
 
 #[test]
@@ -27,7 +25,7 @@ fn layer_norm_accepts_explicit_epsilon_at_each_float_width() {
         let source = format!(
             "def f(x: tensor[2,2,{dtype}], g: tensor[2,{dtype}], b: tensor[2,{dtype}], e: {dtype}) -> tensor[2,2,{dtype}] = layer_norm(x,g,b,e)\n"
         );
-        check(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
+        check(&source).unwrap_or_else(|e| panic!("{source}: {e:?}"));
     }
 }
 
@@ -83,9 +81,14 @@ fn expand_rejects_rank_raising_recipe() {
          expand(x,0i32,4i64)\n";
     let error = check(rank_raising).expect_err("expand must not add an axis");
     assert!(
-        error.contains("expand output rank 4 must equal input rank 3")
-            && error.contains("Use `insert` to add an axis"),
-        "rank-raising expand should fail at its owning checker rule, got {error}"
+        error.errors.iter().any(|diagnostic| {
+            diagnostic.kind.diagnostic_name() == "DimensionMismatch"
+                && diagnostic.message.contains("expand")
+                && diagnostic.expected.as_deref() == Some("3")
+                && diagnostic.got.as_deref() == Some("4")
+                && diagnostic.span_offset == rank_raising.find("expand(")
+        }),
+        "rank-raising expand should fail at its owning checker rule, got {error:?}"
     );
 }
 
@@ -94,8 +97,15 @@ fn expand_rejects_nonunit_axis_recipe() {
     let nonunit = "def f(x: tensor[2,3,f32]) -> tensor[2,4,f32] = expand(x,1i32,4i64)\n";
     let error = check(nonunit).expect_err("expand must not replace a non-unit axis");
     assert!(
-        error.contains("requires the operand's extent at axis 1 to be 1, got 3"),
-        "non-unit expand should fail at its owning checker guard, got {error}"
+        error.errors.iter().any(|diagnostic| {
+            diagnostic.kind.diagnostic_name() == "DimensionMismatch"
+                && diagnostic.message.contains("expand")
+                && diagnostic.message.contains("axis 1")
+                && diagnostic.expected.as_deref() == Some("1")
+                && diagnostic.got.as_deref() == Some("3")
+                && diagnostic.span_offset == nonunit.find("expand(")
+        }),
+        "non-unit expand should fail at its owning checker guard, got {error:?}"
     );
 }
 
@@ -104,12 +114,41 @@ fn expand_rejects_retired_shape_taking_recipe() {
     let obsolete_shape_form = "def f(x: tensor[2,3,f32]) = expand(x,[2i64,3i64,4i64])\n";
     let error = check(obsolete_shape_form).expect_err("retired expand form must be rejected");
     assert!(
-        error.contains("kind: ArityMismatch")
-            && error.contains(
-                "expand expects (tensor, axis, size) or the named-axis form \
-                 (tensor, name, size, anchor), got 2 arguments"
-            ),
-        "the retired shape-taking form must reach expand's owning arity route, got {error}"
+        error.errors.iter().any(|diagnostic| {
+            diagnostic.kind.diagnostic_name() == "ArityMismatch"
+                && diagnostic.message.contains("expand")
+                && diagnostic.expected.as_deref() == Some("3 arguments")
+                && diagnostic.got.as_deref() == Some("2 arguments")
+                && diagnostic.span_offset == obsolete_shape_form.find("expand(")
+        }),
+        "the retired shape-taking form must reach expand's owning arity route, got {error:?}"
+    );
+}
+
+#[test]
+fn expand_and_insert_reject_only_their_own_invalid_arities() {
+    let four_arg_expand = "def f(x: tensor[1,2,f32]) = expand(x,0i32,4i64,1i32)\n";
+    let error = check(four_arg_expand).expect_err("expand cannot take an anchor");
+    assert!(
+        error.errors.iter().any(|diagnostic| {
+            diagnostic.kind.diagnostic_name() == "ArityMismatch"
+                && diagnostic.expected.as_deref() == Some("3 arguments")
+                && diagnostic.got.as_deref() == Some("4 arguments")
+                && diagnostic.span_offset == four_arg_expand.find("expand(")
+        }),
+        "four-argument expand must reject at its call with its exact arity: {error:?}"
+    );
+
+    let short_insert = "def f(x: tensor[1,2,f32]) = insert(x,0i32)\n";
+    let error = check(short_insert).expect_err("insert needs a size");
+    assert!(
+        error.errors.iter().any(|diagnostic| {
+            diagnostic.kind.diagnostic_name() == "ArityMismatch"
+                && diagnostic.expected.as_deref() == Some("3 or 4 arguments")
+                && diagnostic.got.as_deref() == Some("2 arguments")
+                && diagnostic.span_offset == short_insert.find("insert(")
+        }),
+        "insert must report both admitted arities: {error:?}"
     );
 }
 

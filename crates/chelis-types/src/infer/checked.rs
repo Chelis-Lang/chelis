@@ -179,9 +179,12 @@ pub(super) enum DeferredShapeRule {
     ResultJoin {
         last_propagated: Option<Type>,
     },
-    Matmul,
+    Matmul {
+        location: Option<TypeDiagnosticLocation>,
+    },
     Reduction {
         name: String,
+        location: Option<TypeDiagnosticLocation>,
     },
     Expand {
         /// `expand` or `insert`. The replay must reach the same route arm the
@@ -189,9 +192,14 @@ pub(super) enum DeferredShapeRule {
         builtin: &'static str,
         axis_is_dim_name: bool,
         env: Box<Env>,
+        location: Option<TypeDiagnosticLocation>,
     },
-    LayerNorm,
-    Conv,
+    LayerNorm {
+        location: Option<TypeDiagnosticLocation>,
+    },
+    Conv {
+        location: Option<TypeDiagnosticLocation>,
+    },
     ScatterElements {
         node: DeepNode,
     },
@@ -206,6 +214,7 @@ pub(super) enum DeferredShapeRule {
         route: ShapeRouteKind,
         node: DeepNode,
         kids: Vec<deep::Expr>,
+        location: Option<TypeDiagnosticLocation>,
     },
     /// A tuple projection or record-field read whose target was still a
     /// type variable; `arg_tys` is `[target]` and `result_ty` is the
@@ -223,6 +232,7 @@ pub(super) enum DeferredShapeRule {
         node: DeepNode,
         kids: Vec<deep::Expr>,
         func_name: String,
+        location: Option<TypeDiagnosticLocation>,
         env: Box<Env>,
     },
 }
@@ -258,6 +268,7 @@ pub(super) struct PostAppCall<'a> {
     pub(super) node: &'a DeepNode,
     pub(super) kids: &'a [deep::Expr],
     pub(super) func_name: &'a str,
+    pub(super) location: Option<&'a TypeDiagnosticLocation>,
     pub(super) env: &'a Env,
 }
 
@@ -1026,7 +1037,13 @@ impl InferenceProduct {
                         .iter()
                         .any(|variable| failed_parameters.contains(variable))
                 });
-                let DeferredShapeRule::ShapeRoute { route, node, kids } = &check.rule else {
+                let DeferredShapeRule::ShapeRoute {
+                    route,
+                    node,
+                    kids,
+                    location,
+                } = &check.rule
+                else {
                     return None;
                 };
                 shares_failed_parameter.then(|| {
@@ -1035,12 +1052,13 @@ impl InferenceProduct {
                         route.clone(),
                         node.clone(),
                         kids.clone(),
+                        location.clone(),
                         check.arg_tys.clone(),
                     )
                 })
             })
             .collect();
-        for (id, route, node, kids, pending_arguments) in candidates {
+        for (id, route, node, kids, location, pending_arguments) in candidates {
             let settled: Vec<_> = pending_arguments
                 .iter()
                 .map(|ty| structural.apply(&subst.apply(ty)))
@@ -1056,6 +1074,7 @@ impl InferenceProduct {
             let mut trial_vg = vg.clone();
             let mut trial_subst = subst.clone();
             let result = check_shape_route_signature(
+                CheckSite::Deferred(location.as_ref()),
                 &route,
                 &node,
                 &kids,
@@ -1188,10 +1207,15 @@ impl InferenceProduct {
                 DeferredShapeRule::ResultJoin { .. } => {
                     unreachable!("joins replay with the complete producer graph")
                 }
-                DeferredShapeRule::Matmul => {
-                    check_matmul_signature(&check.arg_tys, &check.result_ty, subst, errors)
-                }
-                DeferredShapeRule::Reduction { name } => check_reduction_signature(
+                DeferredShapeRule::Matmul { location } => check_matmul_signature(
+                    CheckSite::Deferred(location.as_ref()),
+                    &check.arg_tys,
+                    &check.result_ty,
+                    subst,
+                    errors,
+                ),
+                DeferredShapeRule::Reduction { name, location } => check_reduction_signature(
+                    CheckSite::Deferred(location.as_ref()),
                     name,
                     &check.arg_exprs,
                     &check.arg_tys,
@@ -1203,7 +1227,9 @@ impl InferenceProduct {
                     builtin,
                     axis_is_dim_name,
                     env,
+                    location,
                 } => check_expand_signature(
+                    CheckSite::Deferred(location.as_ref()),
                     builtin,
                     &check.arg_exprs,
                     &check.arg_tys,
@@ -1213,10 +1239,16 @@ impl InferenceProduct {
                     subst,
                     errors,
                 ),
-                DeferredShapeRule::LayerNorm => {
-                    check_layer_norm_signature(&check.arg_tys, &check.result_ty, vg, subst, errors)
-                }
-                DeferredShapeRule::Conv => check_conv_signature(
+                DeferredShapeRule::LayerNorm { location } => check_layer_norm_signature(
+                    CheckSite::Deferred(location.as_ref()),
+                    &check.arg_tys,
+                    &check.result_ty,
+                    vg,
+                    subst,
+                    errors,
+                ),
+                DeferredShapeRule::Conv { location } => check_conv_signature(
+                    CheckSite::Deferred(location.as_ref()),
                     &check.arg_exprs,
                     &check.arg_tys,
                     &check.result_ty,
@@ -1235,11 +1267,24 @@ impl InferenceProduct {
                         errors,
                     )
                 }
-                DeferredShapeRule::ShapeRoute { route, node, kids } => {
+                DeferredShapeRule::ShapeRoute {
+                    route,
+                    node,
+                    kids,
+                    location,
+                } => {
                     let settled: Vec<Type> =
                         check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
-                    let produced =
-                        check_shape_route_signature(route, node, kids, &settled, vg, subst, errors);
+                    let produced = check_shape_route_signature(
+                        CheckSite::Deferred(location.as_ref()),
+                        route,
+                        node,
+                        kids,
+                        &settled,
+                        vg,
+                        subst,
+                        errors,
+                    );
                     reconcile_replayed_result(
                         &route.builtin(),
                         &check.result_ty,
@@ -1291,6 +1336,7 @@ impl InferenceProduct {
                     kids,
                     func_name,
                     env,
+                    location,
                 } => {
                     let settled: Vec<Type> =
                         check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
@@ -1301,6 +1347,7 @@ impl InferenceProduct {
                         kids,
                         func_name,
                         env,
+                        location: location.as_ref(),
                     };
                     self.replay_post_app(
                         call,
@@ -1366,6 +1413,7 @@ impl InferenceProduct {
                 // the live node, not by this clone.
                 self.replaying_post_app = Some((std::ptr::from_ref(call.node).addr(), call.site));
                 let replayed = finish_unified_app(
+                    CheckSite::Deferred(call.location),
                     call.node,
                     call.kids,
                     Some(call.func_name.to_string()),
@@ -1427,11 +1475,11 @@ impl InferenceProduct {
                     self.deferred_shape_checks.push(check);
                     continue;
                 }
-                DeferredShapeRule::Matmul => "matmul".to_string(),
-                DeferredShapeRule::Reduction { name } => name,
+                DeferredShapeRule::Matmul { .. } => "matmul".to_string(),
+                DeferredShapeRule::Reduction { name, .. } => name,
                 DeferredShapeRule::Expand { builtin, .. } => builtin.to_string(),
-                DeferredShapeRule::LayerNorm => "layer_norm".to_string(),
-                DeferredShapeRule::Conv => "conv".to_string(),
+                DeferredShapeRule::LayerNorm { .. } => "layer_norm".to_string(),
+                DeferredShapeRule::Conv { .. } => "conv".to_string(),
                 DeferredShapeRule::ScatterElements { .. } => "scatter_elements".to_string(),
                 DeferredShapeRule::ShapeRoute { route, .. } => route.builtin(),
                 // chelis#2216, chelis#2518, chelis#2523: a suspended call or a
@@ -1445,6 +1493,7 @@ impl InferenceProduct {
                     ref node,
                     ref kids,
                     ref func_name,
+                    ref location,
                     env: ref call_env,
                 } => {
                     let call = PostAppCall {
@@ -1454,6 +1503,7 @@ impl InferenceProduct {
                         kids,
                         func_name,
                         env: call_env,
+                        location: location.as_ref(),
                     };
                     decide_at_boundary(
                         BoundaryObligation::Call(call),

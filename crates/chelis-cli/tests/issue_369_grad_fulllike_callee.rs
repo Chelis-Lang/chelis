@@ -283,10 +283,33 @@ fn issue_369_bare_scalar_expand_size_still_rejects() {
         "a bare-scalar `insert` size must be rejected, not silently \
          defaulted; stdout={stdout} stderr={stderr}",
     );
-    let combined = format!("{stdout}{stderr}");
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bare_scalar.ch");
+    fs::write(&path, REPRO_BARE_SCALAR_REJECTS).expect("write source");
+    let json = run_check(&path);
+    let at = REPRO_BARE_SCALAR_REJECTS
+        .find("insert(")
+        .expect("authored insert call");
+    let error = json["errors"]
+        .as_array()
+        .expect("checker errors")
+        .iter()
+        .find(|error| error["kind"] == "TypeMismatch" && error["span"]["offset"] == at)
+        .expect("insert size dtype rejection must point to the authored call");
+    assert_eq!(error["expected"], "i64");
+    assert_eq!(error["got"], "i32");
     assert!(
-        combined.contains("insert expects an i64 size"),
-        "rejection must name the `insert` size dtype (§4.7.2), not some \
-         unrelated failure; got stdout={stdout} stderr={stderr}",
+        error["span_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with(&format!("surf:{at}..")))
+    );
+    let message = error["message"].as_str().expect("human diagnostic");
+    assert!(
+        message.contains("insert argument 3") && message.contains("size"),
+        "rejection must name the `insert` size argument, not another failure: {message}"
+    );
+    assert!(
+        stderr.contains(message),
+        "eval must report the same size-dtype checker rejection: {stderr}"
     );
 }

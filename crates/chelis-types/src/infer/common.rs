@@ -68,6 +68,53 @@ pub(super) fn propagate_if_error<'a>(tys: impl IntoIterator<Item = &'a Type>) ->
     })
 }
 
+/// Use the same source-location carrier as Deep type diagnostics. Native Deep
+/// supplies a measured coordinate; Surf supplies the opaque `surf:` identity.
+pub(super) fn at_check_site(site: &deep::Expr, error: CheckError) -> CheckError {
+    match TypeDiagnosticLocation::from_expr(site) {
+        Some(span) => span.attach(error),
+        None => error,
+    }
+}
+
+pub(super) fn at_check_node(node: Option<&DeepNode>, error: CheckError) -> CheckError {
+    match node.and_then(TypeDiagnosticLocation::from_node) {
+        Some(span) => span.attach(error),
+        None => error,
+    }
+}
+
+/// Borrow the application node on eager paths; only suspended checks retain
+/// an owned location. A successful call never clones its source identity.
+#[derive(Clone, Copy)]
+pub(super) enum CheckSite<'a> {
+    Expr(&'a deep::Expr),
+    Node(&'a DeepNode),
+    Deferred(Option<&'a TypeDiagnosticLocation>),
+}
+
+pub(super) fn report_at_check_site(
+    errors: &mut DiagnosticSink<'_>,
+    error: CheckError,
+    site: CheckSite<'_>,
+) -> Type {
+    match site {
+        CheckSite::Expr(expr) => report(errors, at_check_site(expr, error)),
+        CheckSite::Node(node) => report(errors, at_check_node(Some(node), error)),
+        CheckSite::Deferred(location) => report_at(errors, error, location),
+    }
+}
+
+impl CheckSite<'_> {
+    pub(super) fn owned_location(self) -> Option<TypeDiagnosticLocation> {
+        match self {
+            Self::Expr(expr) => TypeDiagnosticLocation::from_expr(expr),
+            Self::Node(node) => TypeDiagnosticLocation::from_node(node),
+            Self::Deferred(location) => location.cloned(),
+        }
+    }
+}
+
 /// chelis#731 Phase 2 (spec/design/checker_totality.md §C3): report a
 /// wrong-arity call of a shape-polymorphic builtin. Before the witness-token
 /// migration these arity guards returned a SILENT `Type::Error` -- an
@@ -75,51 +122,55 @@ pub(super) fn propagate_if_error<'a>(tys: impl IntoIterator<Item = &'a Type>) ->
 /// the builtin lane. The guard now pushes an `ArityMismatch` naming the
 /// builtin and the expected/found counts, so the malformed call is rejected
 /// with a diagnostic instead of exempted from checking.
-/// Span-free sibling of [`report_builtin_arity`] for the `check_*_signature`
-/// helpers, which receive `arg_tys`/`errors` but not the `(list)` node. Same
-/// chelis#731 §C3 role: a wrong-arity signature-checked builtin used to return
-/// a silent `Type::Error`; it now reports an `ArityMismatch`. `expected` is a
-/// prose description ("at least 2 arguments", "3 or 4 arguments") since these
-/// guards range over exact and minimum arities.
-pub(super) fn report_builtin_arity_bare(
+/// A source-located arity guard for signature-checked builtins whose accepted
+/// argument counts are ranges or alternatives rather than one exact count.
+pub(super) fn report_builtin_arity_range(
     errors: &mut DiagnosticSink<'_>,
+    site: CheckSite<'_>,
     builtin: &str,
     expected: &str,
     got: usize,
 ) -> Type {
-    report(
+    report_at_check_site(
         errors,
-        CheckError::new(
+        CheckError::with_types(
             CheckErrorKind::ArityMismatch,
             format!(
                 "builtin `{builtin}` expects {expected}, got {got} argument(s) \
                  (chelis#731 [04-TOT-3])"
             ),
+            expected.to_string(),
+            format!("{got} argument(s)"),
             vec![],
         ),
+        site,
     )
 }
 
 pub(super) fn report_builtin_arity(
     errors: &mut DiagnosticSink<'_>,
     node: &DeepNode,
+    site: CheckSite<'_>,
     builtin: &str,
     expected: usize,
     got: usize,
 ) -> Type {
-    report(
+    report_at_check_site(
         errors,
-        CheckError::new(
+        CheckError::with_types(
             CheckErrorKind::ArityMismatch,
             with_node_provenance(
                 node,
                 format!(
-                    "builtin `{builtin}` expects {expected} argument(s), got {got} \
+                    "builtin `{builtin}` expects {expected} argument(s), got {got} argument(s) \
                      (chelis#731 [04-TOT-3])"
                 ),
             ),
+            format!("{expected} argument(s)"),
+            format!("{got} argument(s)"),
             vec![],
         ),
+        site,
     )
 }
 
@@ -1550,13 +1601,13 @@ pub(super) fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Diagnost
             continue;
         };
         if !seen.insert(name) {
-            errors.push(CheckError::new(
+            errors.push(at_check_site(expr, CheckError::new(
                 CheckErrorKind::DuplicateDefinition,
                 format!("duplicate definition: `{name}` is defined more than once"),
                 vec![format!(
                     "rename one of the `{name}` definitions: Chelis does not dispatch same-name `def`s by argument type or rank"
                 )],
-            ));
+            )));
         }
     }
 }
@@ -1582,13 +1633,13 @@ pub(super) fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut Diagn
             continue;
         };
         if !seen.insert(name) {
-            errors.push(CheckError::new(
+            errors.push(at_check_site(expr, CheckError::new(
                 CheckErrorKind::DuplicateDefinition,
                 format!("duplicate signature: `{name}` has more than one `defsig`"),
                 vec![format!(
                     "keep a single `defsig` for `{name}`: Chelis does not dispatch same-name functions by argument type, arity, or rank"
                 )],
-            ));
+            )));
         }
     }
 }
@@ -1762,13 +1813,13 @@ pub(super) fn collect_declarations(
             if let Some(name) = kids.first().and_then(symbol_name)
                 && let Some(prior_kind) = adt_reg.existing_kind(name)
             {
-                errors.push(CheckError::new(
+                errors.push(at_check_site(expr, CheckError::new(
                     CheckErrorKind::DuplicateDefinition,
                     format!(
                         "duplicate type definition: `{name}` was already declared as a {prior_kind}"
                     ),
                     vec![format!("rename one of the `{name}` declarations")],
-                ));
+                )));
                 return;
             }
             // RFC D-CHECK: record opacity + module identity on the
@@ -1863,13 +1914,13 @@ pub(super) fn collect_declarations(
                 && let Some(name) = symbol_name(&kids[0])
             {
                 if let Some(prior_kind) = adt_reg.existing_kind(name) {
-                    errors.push(CheckError::new(
+                    errors.push(at_check_site(expr, CheckError::new(
                         CheckErrorKind::DuplicateDefinition,
                         format!(
                             "duplicate type definition: `{name}` was already declared as a {prior_kind}"
                         ),
                         vec![format!("rename one of the `{name}` declarations")],
-                    ));
+                    )));
                     return;
                 }
                 let params = match &kids[1] {
@@ -2383,8 +2434,8 @@ pub(super) fn infer_top_level(
         // collapsing the param-side and return-side of the callee into
         // the same equivalence class. The post-body sig-unify then drives
         // the return position to `Ref(t)` instead of the declared `t`,
-        // surfacing as `def 'tadd' body doesn't match declared signature:
-        // body has type `(&t, &t) -> &t`, declared type is `(&t, &t) -> t``.
+        // surfacing as a mismatch between inferred `(&t, &t) -> &t`
+        // and declared `(&t, &t) -> t`.
         // Annotated params do not hit this because their concrete type
         // (`&tensor[..]`) flows through the call site directly. Seeding
         // bare params with the declared type here makes the bare-arg path
@@ -2639,15 +2690,22 @@ pub(super) fn infer_top_level(
                         _ => String::new(),
                     }
                 };
-                errors.push(CheckError::new(
+                let error = CheckError::with_types(
                     mismatch_kind,
                     format!(
-                        "def '{}' body doesn't match declared signature: \
-                         body has type `{}`, declared type is `{}`{}",
-                        name, resolved_body, resolved_decl, extra
+                        "def '{name}' body doesn't match declared signature: \
+                         expected `{resolved_decl}`, got `{resolved_body}`{extra}"
                     ),
+                    resolved_decl.to_string(),
+                    resolved_body.to_string(),
                     vec![],
-                ));
+                );
+                let location = TypeDiagnosticLocation::from_expr(&kids[1])
+                    .or_else(|| TypeDiagnosticLocation::from_expr(expr));
+                errors.push(match location {
+                    Some(location) => location.attach(error),
+                    None => error,
+                });
             }
             // #39 wildcard narrowing. The narrow may now substitute a
             // declared `Dim::Var` or `Dim::Name` into a body

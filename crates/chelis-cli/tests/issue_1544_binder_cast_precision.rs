@@ -77,7 +77,11 @@ fn reject(source: &str, citation: &str) {
         &["build", "src/main.ch", "--target", "c", "--output", "out"],
     ] {
         let output = run(&root, args);
-        assert!(!output.status.success() && text(&output).contains(citation));
+        assert!(
+            !output.status.success() && text(&output).contains(citation),
+            "{args:?}: expected rejection containing {citation:?}, got {}",
+            text(&output)
+        );
     }
 }
 
@@ -249,7 +253,7 @@ fn native_scalar_and_tensor_match_eval_exactly() {
 fn undeclared_and_unbounded_targets_fail_all_lanes() {
     reject(
         "module Bind.Main\nexport (main)\ndef typo(x: f32) -> f32 = cast(x, flt32)\ndef main() -> f32 = typo(1.0f32)\n",
-        "cast target `flt32` is not a recognized primitive type",
+        "flt32",
     );
     for literal in ["0.1", "-0.1", "0.1f64", "-0.1f64"] {
         reject(

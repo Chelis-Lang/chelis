@@ -217,11 +217,7 @@ fn assert_one_report_per_site(source: &str, names: &[&str]) {
                 .unwrap_or_else(|| panic!("expected `{name}` after byte {search_start}: {source}"));
             let offset = search_start + relative;
             search_start = offset + name.len();
-            (
-                *name,
-                offset,
-                format!("source:{offset}..{}", offset + name.len()),
-            )
+            (*name, offset)
         })
         .collect::<Vec<_>>();
     for (entry, result) in [
@@ -235,7 +231,7 @@ fn assert_one_report_per_site(source: &str, names: &[&str]) {
             "{entry}: {source}: {:?}",
             report.errors
         );
-        for (error, (name, offset, span)) in report.errors.iter().zip(&expected) {
+        for (error, (name, offset)) in report.errors.iter().zip(&expected) {
             assert!(
                 matches!(
                     error.kind,
@@ -246,9 +242,8 @@ fn assert_one_report_per_site(source: &str, names: &[&str]) {
             assert!(error.message.contains(name), "{entry}: {error:?}");
             assert_eq!(error.span_offset, Some(*offset), "{entry}: {error:?}");
             assert_eq!(
-                error.span_id.as_deref(),
-                Some(span.as_str()),
-                "{entry}: {error:?}"
+                error.span_id, None,
+                "{entry}: native type site has no authored external ID: {error:?}"
             );
         }
     }
@@ -775,7 +770,8 @@ fn a_failed_signature_does_not_hide_an_independent_body_site() {
             );
             assert!(error.message.contains(name), "{error:?}");
         }
-        assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
+        assert_eq!(report.errors[0].span_offset, Some(16));
+        assert_eq!(report.errors[0].span_id, None);
         let start = source.find("cast(").expect("cast site");
         let expected = format!("surf:{start}..{}", source.len());
         assert_eq!(report.errors[1].span_offset, Some(start));
@@ -798,7 +794,8 @@ fn declaration_ownership_does_not_absorb_a_same_spelling_cast_failure() {
             "{:?}",
             report.errors
         );
-        assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
+        assert_eq!(report.errors[0].span_offset, Some(16));
+        assert_eq!(report.errors[0].span_id, None);
         let start = source.find("cast(").expect("cast site");
         let expected = format!("surf:{start}..{}", source.len());
         assert_eq!(report.errors[1].span_offset, Some(start));
@@ -814,7 +811,6 @@ fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
         let source = format!("def inspect(x: tensor[3, {name}]) -> i64 = shape(x, 1i32)");
         let program = surf_to_deep(&source);
         let offset = source.find(name).expect("reserved precision site");
-        let span = format!("source:{offset}..{}", offset + name.len());
 
         for (entry, result) in [
             ("ir", check_ir_program(&program)),
@@ -840,11 +836,7 @@ fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
                 Some(offset),
                 "{entry}: {reserved:?}"
             );
-            assert_eq!(
-                reserved[0].span_id.as_deref(),
-                Some(span.as_str()),
-                "{entry}: {reserved:?}"
-            );
+            assert_eq!(reserved[0].span_id, None, "{entry}: {reserved:?}");
 
             let dimensions: Vec<_> = report
                 .errors
@@ -884,7 +876,6 @@ fn deep_surf_deep_roundtrip_preserves_tensor_precision_diagnostic_span() {
             desugar_program(&resugar_program(&original).expect("resugar direct Deep program"))
                 .expect("Surf fixture must desugar");
         let offset = source.find(name).expect("reserved precision site");
-        let expected_span = format!("source:{offset}..{}", offset + name.len());
 
         for (carrier, program) in [
             ("original", original.as_slice()),
@@ -914,11 +905,7 @@ fn deep_surf_deep_roundtrip_preserves_tensor_precision_diagnostic_span() {
                     Some(offset),
                     "{carrier}/{entry}/{name}: {error:?}"
                 );
-                assert_eq!(
-                    error.span_id.as_deref(),
-                    Some(expected_span.as_str()),
-                    "{carrier}/{entry}/{name}: {error:?}"
-                );
+                assert_eq!(error.span_id, None, "{carrier}/{entry}/{name}: {error:?}");
             }
         }
     }
@@ -1188,7 +1175,6 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
                     );
                     assert!(error.message.contains(name), "{error:?}");
                     assert!(error.span_offset.is_some(), "{error:?}");
-                    assert!(error.span_id.is_some(), "{error:?}");
                 }
             }
         }

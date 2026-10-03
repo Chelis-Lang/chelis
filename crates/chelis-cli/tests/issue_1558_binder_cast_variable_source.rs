@@ -281,11 +281,16 @@ fn a_tensor_source_carries_both_the_scalar_rule_and_the_dtype_rule() {
     for (label, json) in [("surf", &surf), ("deep", &deep)] {
         let messages = error_messages(json);
         assert!(
-            messages
-                .iter()
-                .any(|m| m.contains("requires a numeric or bool scalar")),
-            "the pre-existing scalar-source rule must still fire at the {label} ingress; \
-             got {messages:?}"
+            json["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|error| {
+                    error["kind"] == "CastNonTensor"
+                        && error["expected"] == "numeric or bool scalar"
+                        && error["got"]
+                            .as_str()
+                            .is_some_and(|actual| actual.starts_with("tensor[2,"))
+                })),
+            "the scalar-source rule must still fire at the {label} ingress: {json}"
         );
         assert!(
             messages.iter().any(|m| m.contains("04-DTYPE-1")),

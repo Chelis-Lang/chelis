@@ -440,7 +440,10 @@ pub(crate) enum DeferredOperandGate {
     /// `copy` with an unresolved operand. Carries the result variable the call
     /// returned: `copy(&t)` yields `t`, not `&t`, so discharge must unify the
     /// eager arm's own answer into it rather than let the operand's type stand.
-    Copy { result: Box<Type> },
+    Copy {
+        result: Box<Type>,
+        location: Option<crate::deep_type::TypeDiagnosticLocation>,
+    },
     /// `cast`/`cast_trunc` whose SOURCE was unresolved. Carries the target
     /// precision, the mode, and the result variable the call returned, which
     /// discharge unifies against once `cast`'s own decision function is called
@@ -449,6 +452,7 @@ pub(crate) enum DeferredOperandGate {
         target: crate::types::Prim,
         mode: chelis_deep::CastMode,
         result: Box<Type>,
+        location: Option<crate::deep_type::TypeDiagnosticLocation>,
     },
     /// chelis#2534: a checked `cast` whose TARGET is a declaration's dtype
     /// binder and whose SOURCE was unresolved. Carries the target binder and
@@ -457,6 +461,7 @@ pub(crate) enum DeferredOperandGate {
     CastToBinder {
         target: crate::types::TypeVar,
         result: Box<Type>,
+        location: Option<crate::deep_type::TypeDiagnosticLocation>,
     },
     /// A host-lane slot that unifies against a fixed expected type:
     /// the ten csv routes, which funnel through `unify_host_slot`. Carries
@@ -590,11 +595,36 @@ impl DeferredOperandGate {
     /// cannot be added without deciding this.
     fn result(&self) -> Option<&Type> {
         match self {
-            Self::Copy { result }
+            Self::Copy { result, .. }
             | Self::Cast { result, .. }
             | Self::CastToBinder { result, .. }
             | Self::ShapeRoute { result, .. } => Some(result.as_ref()),
             Self::HostSlot { .. } => None,
+        }
+    }
+
+    pub(crate) fn location(&self) -> Option<&crate::deep_type::TypeDiagnosticLocation> {
+        match self {
+            Self::Copy { location, .. }
+            | Self::Cast { location, .. }
+            | Self::CastToBinder { location, .. } => location.as_ref(),
+            Self::HostSlot { .. } | Self::ShapeRoute { .. } => None,
+        }
+    }
+
+    fn attach_location(&self, error: crate::errors::CheckError) -> crate::errors::CheckError {
+        match self.location() {
+            Some(location) => location.attach(error),
+            None => error,
+        }
+    }
+
+    pub(crate) fn expected_operand(&self) -> String {
+        match self {
+            Self::Copy { .. } | Self::ShapeRoute { .. } => "tensor".to_string(),
+            Self::Cast { .. } => "tensor or numeric/bool scalar".to_string(),
+            Self::CastToBinder { .. } => "numeric or bool scalar".to_string(),
+            Self::HostSlot { description, .. } => description.clone(),
         }
     }
 
@@ -632,7 +662,7 @@ impl DeferredOperandGate {
     /// variable, and re-aliases instead when a variable was bound to another.
     fn discharge(self, resolved: &Type, subst: &mut Subst) {
         match self {
-            Self::Copy { ref result } => {
+            Self::Copy { ref result, .. } => {
                 match crate::infer::expr::copy_result_from_source(resolved) {
                     Some(settled) => {
                         self.reconcile_result(result, settled, subst);
@@ -647,6 +677,7 @@ impl DeferredOperandGate {
                 target,
                 mode,
                 ref result,
+                ..
             } => {
                 match crate::infer::expr_record::cast_result_from_settled_source(
                     resolved.clone(),
@@ -658,11 +689,13 @@ impl DeferredOperandGate {
                         self.reconcile_result(result, settled, subst);
                     }
                     Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
-                        error: *error,
+                        error: self.attach_location(*error),
                     }),
                 }
             }
-            Self::CastToBinder { target, ref result } => {
+            Self::CastToBinder {
+                target, ref result, ..
+            } => {
                 match crate::infer::expr_record::binder_cast_result_from_settled_source(
                     resolved.clone(),
                     target,
@@ -672,7 +705,7 @@ impl DeferredOperandGate {
                         self.reconcile_result(result, settled, subst);
                     }
                     Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
-                        error: *error,
+                        error: self.attach_location(*error),
                     }),
                 }
             }
@@ -3237,11 +3270,7 @@ fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeErr
         (Type::Prim(p1), Type::Prim(p2)) if p1 == p2 => Ok(()),
         (Type::Prim(p1), Type::Prim(p2)) => Err(TypeError {
             kind: TypeErrorKind::PrecisionMismatch,
-            message: format!(
-                "precision mismatch: expected {}, got {}",
-                p1.name(),
-                p2.name()
-            ),
+            message: format!("precision mismatch: {} vs {}", p1.name(), p2.name()),
         }),
 
         (Type::Unit, Type::Unit) => Ok(()),
@@ -3258,7 +3287,7 @@ fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeErr
                 return Err(TypeError {
                     kind: TypeErrorKind::ArityMismatch,
                     message: format!(
-                        "function arity mismatch: expected {} args, got {}",
+                        "function arity mismatch: {} args vs {} args",
                         args1.len(),
                         args2.len()
                     ),
@@ -3399,8 +3428,8 @@ fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeErr
         // the mismatch explicitly (e.g. the def-body vs declared-sig
         // unify in `infer.rs` does this for WS-A5 RT-3a F1: when the
         // body collapses to Error but the declared type is concrete, we
-        // still emit a "body has type `<error>`, declared type is `T`"
-        // diagnostic so the user sees the unresolved declared shape).
+        // still emit a declared-versus-inferred mismatch so the user sees
+        // the unresolved declared shape).
         (Type::Error(_), _) | (_, Type::Error(_)) => Ok(()),
 
         // Everything else is a mismatch
@@ -3557,9 +3586,9 @@ fn discharge_bounded_scalar_casts(subst: &mut Subst) {
         };
         match decision {
             Ok(settled) => gate.reconcile_result(result, settled, subst),
-            Err(error) => {
-                subst.record_operand_gate_failure(OperandGateFailure::Decision { error: *error })
-            }
+            Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                error: gate.attach_location(*error),
+            }),
         }
     }
 }
@@ -4626,6 +4655,7 @@ mod tests {
             operand,
             DeferredOperandGate::Copy {
                 result: Box::new(result.clone()),
+                location: None,
             },
         );
         subst.leave_level(level, &vg);

@@ -38,6 +38,7 @@
 
 use assert_cmd::Command;
 use chelis_types::agreement::compare_exact_observations;
+use serde_json::Value;
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
@@ -216,19 +217,6 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          placeholder is chelis#734)\n",
     ),
     (
-        // [04-INF-9]: the Float admission contract rejects this before
-        // lowering. Retain the exact original source and byte comparator.
-        "c_int_tensor_cos",
-        "def run(x: tensor[4, i32]) -> tensor[4, i32] = cos(x)\n\
-         out = run(to_tensor([cast(1, i32), cast(2, i32), cast(3, i32), \
-         cast(4, i32)]))\n",
-        "c",
-        // [04-FIT-26] (chelis#1853): one projected line per diagnostic.
-        "error: Check errors: Type errors:\n  PrecisionMismatch: type variable bounded by dtype \
-         family `Float` (the active float dtypes) cannot be instantiated at `i32` at byte 47 \
-         [surf:47..53] (suggestion: Insert explicit cast)\n",
-    ),
-    (
         "c_nonliteral_window",
         "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
@@ -262,6 +250,55 @@ fn rejected_cells_fail_the_build_with_their_pinned_diagnostics() {
         compare_exact_observations(&format!("{name} build rejection"), expected, &stderr)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
     }
+}
+
+#[test]
+fn integer_tensor_cos_rejects_at_its_float_family_call_without_a_backend_artifact() {
+    let program = "def run(x: tensor[4, i32]) -> tensor[4, i32] = cos(x)\n\
+                   out = run(to_tensor([cast(1, i32), cast(2, i32), cast(3, i32), cast(4, i32)]))\n";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("cos.ch");
+    write_file(&path, program);
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().expect("UTF-8 path")])
+        .output()
+        .expect("checker must run");
+    assert!(!output.status.success(), "integer tensor cos must reject");
+    let report: Value = serde_json::from_slice(&output.stdout).expect("check JSON");
+    assert!(
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "PrecisionMismatch"
+                    && error["span"]["offset"] == program.find("cos(x)").unwrap()
+                    && error["message"].as_str().is_some_and(|message| {
+                        message.contains("cos")
+                            && message.contains("Float")
+                            && message.contains("i32")
+                    })
+            })),
+        "the float family must reject the integer cos operand at its own call: {report}"
+    );
+    let (ok, stderr, emitted) = build_target(program, "c_int_tensor_cos", "c");
+    assert!(!ok, "integer tensor cos must fail C build");
+    assert!(
+        stderr.contains("PrecisionMismatch")
+            && stderr.contains("cos")
+            && stderr.contains("Float")
+            && stderr.contains("i32"),
+        "build must render the same rejected operation and dtype: {stderr}"
+    );
+    assert!(
+        emitted.is_empty(),
+        "a rejected check must emit no backend artifact"
+    );
+
+    let valid = "def run(x: tensor[4, f32]) -> tensor[4, f32] = cos(x)\n\
+                 out = run(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n";
+    let (ok, stderr, _) = build_target(valid, "c_float_tensor_cos", "c");
+    assert!(ok, "float tensor cos must build successfully: {stderr}");
 }
 
 fn compare_cross_lane_rejection(

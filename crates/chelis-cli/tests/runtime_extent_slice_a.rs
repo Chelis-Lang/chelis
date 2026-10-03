@@ -138,22 +138,10 @@ fn negative_extent_remains_a_static_type_error() {
     );
 }
 
-/// A declared result one rank too high is refused, through the outer
-/// unification rather than through the operation's own rank diagnostic.
-///
-/// `expand` has two legal result shapes, so it records a deferred obligation
-/// and the ascription rejects it through the deferred-constraint path, whose
-/// message names the callee. `insert` has one legal shape and nothing to
-/// defer, so it builds that shape from the operand and axis alone and the
-/// disagreement surfaces here as the generic let-binding mismatch. Same
-/// verdict, same kind, same severity, less specific text; the pull request
-/// body carries the row.
-///
-/// The exact text is the assertion because a looser `contains("rank")` needle
-/// is satisfied by both messages and would not distinguish the two routes.
-/// `insert`'s own rank diagnostic is reachable where a declared result is
-/// threaded as an expected result, which
-/// `insert_def_body_wrong_rank_names_the_callee` pins.
+/// A declared result one rank too high is refused by the local ascription.
+/// `insert` computes its result from the operand and axis; the mismatched
+/// ascription retains the declared and inferred tensor types. A def body
+/// that supplies its result requirement directly to `insert` is covered below.
 #[test]
 fn shape_sourced_insert_rejects_wrong_rank_ascription() {
     let source = "def bad[c, a, h, w](g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = {\n\
@@ -161,9 +149,20 @@ fn shape_sourced_insert_rejects_wrong_rank_ascription() {
         \x20 step1\n\
         }\n";
     let report = check(source);
-    let joined = errors(&report).join("\n");
     assert!(
-        joined.contains("tensor rank mismatch: 2 dims vs 3 dims"),
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["expected"]
+                        .as_str()
+                        .is_some_and(|ty| ty.starts_with("tensor["))
+                    && error["got"]
+                        .as_str()
+                        .is_some_and(|ty| ty.starts_with("tensor["))
+                    && error["expected"] != error["got"]
+                    && error["span"]["offset"].as_u64().is_some()
+            })),
         "wrong-rank ascription must reject at check: {report}"
     );
 }
@@ -181,9 +180,15 @@ fn shape_sourced_insert_rejects_wrong_rank_ascription() {
 fn insert_def_body_wrong_rank_names_the_callee() {
     let source = "def bad[c, a, h, w](g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = insert(g, 1, shape(x, cast(2, i32)))\n";
     let report = check(source);
-    let joined = errors(&report).join("\n");
     assert!(
-        joined.contains("insert output rank 3 must equal input rank 1 plus one"),
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["expected"] == "2"
+                    && error["got"] == "3"
+                    && error["span"]["offset"] == source.find("insert(").unwrap()
+            })),
         "a wrong-rank def body must reject with insert's own rank diagnostic: {report}"
     );
 }
