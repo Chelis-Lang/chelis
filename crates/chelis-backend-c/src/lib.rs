@@ -12,8 +12,8 @@ pub mod integer_float;
 pub mod memory;
 pub mod toolchain;
 
-pub use host_emit::host_builtin_nan_inventory;
 pub use generated_header::{GeneratedDeclaration, GeneratedHeader, GeneratedHeaderError};
+pub use host_emit::host_builtin_nan_inventory;
 
 /// Primitive types the C backend's tensor-DAG path can realize.
 /// A def whose declared return type or intermediates use a prim NOT in this

@@ -208,9 +208,7 @@ impl CExpressionBuiltin {
             | Self::Abs
             | Self::Min
             | Self::Max => Some(NanFinalization::Canonical),
-            Self::Relu
-            | Self::MinElem
-            | Self::MaxElem => Some(NanFinalization::BitPreserving),
+            Self::Relu | Self::MinElem | Self::MaxElem => Some(NanFinalization::BitPreserving),
             Self::TruncDiv
             | Self::Mod
             | Self::BitAnd
@@ -7672,7 +7670,9 @@ impl<'a> HostEmitter<'a> {
                     arg(1),
                     ty,
                 )?,
-                CExpressionBuiltin::Add => binary(BinaryOperator::Add, numeric_arg(0), numeric_arg(1)),
+                CExpressionBuiltin::Add => {
+                    binary(BinaryOperator::Add, numeric_arg(0), numeric_arg(1))
+                }
                 CExpressionBuiltin::Sub if is_integer_abi(ty) => integer_checked_binary_expr(
                     "chelis_int_checked_sub",
                     "sub",
@@ -7680,7 +7680,9 @@ impl<'a> HostEmitter<'a> {
                     arg(1),
                     ty,
                 )?,
-                CExpressionBuiltin::Sub => binary(BinaryOperator::Subtract, numeric_arg(0), numeric_arg(1)),
+                CExpressionBuiltin::Sub => {
+                    binary(BinaryOperator::Subtract, numeric_arg(0), numeric_arg(1))
+                }
                 CExpressionBuiltin::Mul if is_integer_abi(ty) => integer_checked_binary_expr(
                     "chelis_int_checked_mul",
                     "mul",
@@ -7688,7 +7690,9 @@ impl<'a> HostEmitter<'a> {
                     arg(1),
                     ty,
                 )?,
-                CExpressionBuiltin::Mul => binary(BinaryOperator::Multiply, numeric_arg(0), numeric_arg(1)),
+                CExpressionBuiltin::Mul => {
+                    binary(BinaryOperator::Multiply, numeric_arg(0), numeric_arg(1))
+                }
                 // #387: integer scalar `div`/`mod` trap portably on a zero
                 // divisor (ARM64 does not fault on integer div-by-zero), using the
                 // same clean diagnostic the evaluator emits. `chelis_int_div_guard`
@@ -7702,7 +7706,9 @@ impl<'a> HostEmitter<'a> {
                     arg(0),
                     EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
                 ),
-                CExpressionBuiltin::Div => binary(BinaryOperator::Divide, numeric_arg(0), numeric_arg(1)),
+                CExpressionBuiltin::Div => {
+                    binary(BinaryOperator::Divide, numeric_arg(0), numeric_arg(1))
+                }
                 // chelis#178: `trunc_div` is integer-only — the guarded C `/`
                 // quotient (round toward zero).
                 CExpressionBuiltin::TruncDiv => binary(
@@ -7742,13 +7748,13 @@ impl<'a> HostEmitter<'a> {
                     binary(BinaryOperator::Subtract, quotient, correction)
                 }
                 CExpressionBuiltin::FloorDiv => EmittedExpr::call(
-                        float_math_function(ty, "floor", "floorf"),
-                        [binary(
-                            BinaryOperator::Divide,
-                            numeric_arg(0),
-                            numeric_arg(1),
-                        )],
-                    ),
+                    float_math_function(ty, "floor", "floorf"),
+                    [binary(
+                        BinaryOperator::Divide,
+                        numeric_arg(0),
+                        numeric_arg(1),
+                    )],
+                ),
                 CExpressionBuiltin::Mod => EmittedExpr::conditional(
                     binary(BinaryOperator::Equal, arg(1), EmittedExpr::integer(-1)),
                     EmittedExpr::integer(0),
@@ -7832,9 +7838,7 @@ impl<'a> HostEmitter<'a> {
                         EmittedExpr::string_literal(integer_trap_message(ty, "neg", true)?),
                     ],
                 ),
-                CExpressionBuiltin::Neg => {
-                    unary(UnaryOperator::Negate, numeric_arg(0))
-                }
+                CExpressionBuiltin::Neg => unary(UnaryOperator::Negate, numeric_arg(0)),
                 CExpressionBuiltin::StringConcat => {
                     // chelis#2205: a string the verifier moved at its last
                     // use is consumed by the owned entry point; a borrowed
@@ -8091,31 +8095,33 @@ impl<'a> HostEmitter<'a> {
                 // `emit.rs`; both name the correctly rounded `chelis_cr_*`
                 // kernels ([05-OP-46]) the unit carries, and `sqrt` is the
                 // correctly rounded IEEE square root.
-                CExpressionBuiltin::Sqrt => EmittedExpr::call(float_math_function(ty, "sqrt", "sqrtf"), [numeric_arg(0)]),
+                CExpressionBuiltin::Sqrt => {
+                    EmittedExpr::call(float_math_function(ty, "sqrt", "sqrtf"), [numeric_arg(0)])
+                }
                 CExpressionBuiltin::Exp => EmittedExpr::call(
-                        float_math_function(ty, "chelis_cr_exp", "chelis_cr_expf"),
-                        [numeric_arg(0)],
-                    ),
+                    float_math_function(ty, "chelis_cr_exp", "chelis_cr_expf"),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Log => EmittedExpr::call(
-                        float_math_function(ty, "chelis_cr_log", "chelis_cr_logf"),
-                        [numeric_arg(0)],
-                    ),
+                    float_math_function(ty, "chelis_cr_log", "chelis_cr_logf"),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Sin => EmittedExpr::call(
-                        float_math_function(ty, "chelis_cr_sin", "chelis_cr_sinf"),
-                        [numeric_arg(0)],
-                    ),
+                    float_math_function(ty, "chelis_cr_sin", "chelis_cr_sinf"),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Cos => EmittedExpr::call(
-                        float_math_function(ty, "chelis_cr_cos", "chelis_cr_cosf"),
-                        [numeric_arg(0)],
-                    ),
+                    float_math_function(ty, "chelis_cr_cos", "chelis_cr_cosf"),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Tan => EmittedExpr::call(
-                        float_math_function(ty, "chelis_cr_tan", "chelis_cr_tanf"),
-                        [numeric_arg(0)],
-                    ),
+                    float_math_function(ty, "chelis_cr_tan", "chelis_cr_tanf"),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Atan => EmittedExpr::call(
-                        float_math_function(ty, "chelis_cr_atan", "chelis_cr_atanf"),
-                        [numeric_arg(0)],
-                    ),
+                    float_math_function(ty, "chelis_cr_atan", "chelis_cr_atanf"),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Relu
                 | CExpressionBuiltin::Sigmoid
                 | CExpressionBuiltin::Tanh
@@ -8158,45 +8164,45 @@ impl<'a> HostEmitter<'a> {
                     }
                 }
                 CExpressionBuiltin::Sigmoid => EmittedExpr::call(
-                        activation_math_function(
-                            ty,
-                            "chelis_host_sigmoid_f16",
-                            "chelis_host_sigmoid_bf16",
-                            "chelis_host_sigmoid_f32",
-                            "chelis_host_sigmoid_f64",
-                        ),
-                        [numeric_arg(0)],
+                    activation_math_function(
+                        ty,
+                        "chelis_host_sigmoid_f16",
+                        "chelis_host_sigmoid_bf16",
+                        "chelis_host_sigmoid_f32",
+                        "chelis_host_sigmoid_f64",
                     ),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Tanh => EmittedExpr::call(
-                        activation_math_function(
-                            ty,
-                            "chelis_host_tanh_f16",
-                            "chelis_host_tanh_bf16",
-                            "chelis_host_tanh_f32",
-                            "chelis_host_tanh_f64",
-                        ),
-                        [numeric_arg(0)],
+                    activation_math_function(
+                        ty,
+                        "chelis_host_tanh_f16",
+                        "chelis_host_tanh_bf16",
+                        "chelis_host_tanh_f32",
+                        "chelis_host_tanh_f64",
                     ),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Silu => EmittedExpr::call(
-                        activation_math_function(
-                            ty,
-                            "chelis_host_silu_f16",
-                            "chelis_host_silu_bf16",
-                            "chelis_host_silu_f32",
-                            "chelis_host_silu_f64",
-                        ),
-                        [numeric_arg(0)],
+                    activation_math_function(
+                        ty,
+                        "chelis_host_silu_f16",
+                        "chelis_host_silu_bf16",
+                        "chelis_host_silu_f32",
+                        "chelis_host_silu_f64",
                     ),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Gelu => EmittedExpr::call(
-                        activation_math_function(
-                            ty,
-                            "chelis_host_gelu_f16",
-                            "chelis_host_gelu_bf16",
-                            "chelis_host_gelu_f32",
-                            "chelis_host_gelu_f64",
-                        ),
-                        [numeric_arg(0)],
+                    activation_math_function(
+                        ty,
+                        "chelis_host_gelu_f16",
+                        "chelis_host_gelu_bf16",
+                        "chelis_host_gelu_f32",
+                        "chelis_host_gelu_f64",
                     ),
+                    [numeric_arg(0)],
+                ),
                 CExpressionBuiltin::Floor
                 | CExpressionBuiltin::Ceil
                 | CExpressionBuiltin::Round
@@ -8204,18 +8210,25 @@ impl<'a> HostEmitter<'a> {
                 {
                     arg(0)
                 }
-                CExpressionBuiltin::Floor => EmittedExpr::call(float_math_function(ty, "floor", "floorf"), [numeric_arg(0)]),
-                CExpressionBuiltin::Ceil => EmittedExpr::call(float_math_function(ty, "ceil", "ceilf"), [numeric_arg(0)]),
-                CExpressionBuiltin::Round => // spec/05 §2.2: `round` is IEEE roundTiesToEven. The C
-                    // `round{,f}` family resolves half ties away from zero;
-                    // `rint{,f}` under the default rounding mode matches the
-                    // evaluator and the typed-DAG C emitter.
-                    EmittedExpr::call(float_math_function(ty, "rint", "rintf"), [numeric_arg(0)]),
+                CExpressionBuiltin::Floor => {
+                    EmittedExpr::call(float_math_function(ty, "floor", "floorf"), [numeric_arg(0)])
+                }
+                CExpressionBuiltin::Ceil => {
+                    EmittedExpr::call(float_math_function(ty, "ceil", "ceilf"), [numeric_arg(0)])
+                }
+                CExpressionBuiltin::Round =>
+                // spec/05 §2.2: `round` is IEEE roundTiesToEven. The C
+                // `round{,f}` family resolves half ties away from zero;
+                // `rint{,f}` under the default rounding mode matches the
+                // evaluator and the typed-DAG C emitter.
+                {
+                    EmittedExpr::call(float_math_function(ty, "rint", "rintf"), [numeric_arg(0)])
+                }
                 CExpressionBuiltin::Recip => binary(
-                        BinaryOperator::Divide,
-                        EmittedExpr::integer(1),
-                        numeric_arg(0),
-                    ),
+                    BinaryOperator::Divide,
+                    EmittedExpr::integer(1),
+                    numeric_arg(0),
+                ),
                 CExpressionBuiltin::Abs => match arg_vars[0].1 {
                     HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
                         let prim = match arg_vars[0].1 {
@@ -8239,9 +8252,9 @@ impl<'a> HostEmitter<'a> {
                     | HostType::BFloat16
                     | HostType::Float32
                     | HostType::Float64 => EmittedExpr::call(
-                            float_math_function(ty, "fabs", "fabsf"),
-                            [numeric_arg(0)],
-                        ),
+                        float_math_function(ty, "fabs", "fabsf"),
+                        [numeric_arg(0)],
+                    ),
                     ref other => {
                         return Err(invalid_abi_shape(
                             format!("abs carries non-numeric argument type `{other:?}`"),
@@ -8250,13 +8263,13 @@ impl<'a> HostEmitter<'a> {
                     }
                 },
                 CExpressionBuiltin::Min => EmittedExpr::call(
-                        float_math_function(ty, "fmin", "fminf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
+                    float_math_function(ty, "fmin", "fminf"),
+                    [numeric_arg(0), numeric_arg(1)],
+                ),
                 CExpressionBuiltin::Max => EmittedExpr::call(
-                        float_math_function(ty, "fmax", "fmaxf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
+                    float_math_function(ty, "fmax", "fmaxf"),
+                    [numeric_arg(0), numeric_arg(1)],
+                ),
                 CExpressionBuiltin::MinElem if is_integer_abi(ty) => EmittedExpr::conditional(
                     binary(BinaryOperator::LessEqual, arg(0), arg(1)),
                     arg(0),
@@ -8626,10 +8639,7 @@ impl<'a> HostEmitter<'a> {
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {};",
-            self.finalize_tensor_elem(
-                arm,
-                format!("__lhs_data[idx_lhs] {op} __rhs_data[idx_rhs]")
-            )
+            self.finalize_tensor_elem(arm, format!("__lhs_data[idx_lhs] {op} __rhs_data[idx_rhs]"))
         ));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));

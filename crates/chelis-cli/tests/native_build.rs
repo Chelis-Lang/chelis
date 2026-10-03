@@ -794,7 +794,10 @@ fn every_float_result_finalizes_nan_like_eval_through_the_static_library_abi() {
                 },
                 &["main".to_string()],
             );
-            assert!(rejected.is_err(), "`{name}` is now admitted; remove it from the unreachable list");
+            assert!(
+                rejected.is_err(),
+                "`{name}` is now admitted; remove it from the unreachable list"
+            );
             continue;
         }
         for width in &NAN_WIDTHS {
@@ -979,7 +982,10 @@ fn every_float_result_finalizes_nan_like_eval_through_the_static_library_abi() {
                     expected == row.output.canonical
                 };
                 if !admitted {
-                    failures.push(format!("eval {} {operands:x?} gave {expected:#x}", row.label));
+                    failures.push(format!(
+                        "eval {} {operands:x?} gave {expected:#x}",
+                        row.label
+                    ));
                 }
             }
             for lane in ["s", "t"] {
@@ -993,5 +999,10 @@ fn every_float_result_finalizes_nan_like_eval_through_the_static_library_abi() {
             }
         }
     }
-    assert!(failures.is_empty(), "{} disagreements:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} disagreements:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

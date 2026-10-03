@@ -206,7 +206,9 @@ fn finalize_elem(
     ty: &TensorType,
 ) -> String {
     match (finalization, ty.precision) {
-        (Some(finalization), Prim::F32) => crate::fp_env::finalize_float(&expr, false, finalization),
+        (Some(finalization), Prim::F32) => {
+            crate::fp_env::finalize_float(&expr, false, finalization)
+        }
         (Some(finalization), Prim::F64) => crate::fp_env::finalize_float(&expr, true, finalization),
         _ => expr,
     }
@@ -4169,8 +4171,11 @@ impl CEmitter {
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!("int64_t idx = i * t{id}_input{a}_step;"));
-        let recip =
-            finalize_elem(self.nan_finalization, format!("{one} / __in_a_{id}[idx]"), ty);
+        let recip = finalize_elem(
+            self.nan_finalization,
+            format!("{one} / __in_a_{id}[idx]"),
+            ty,
+        );
         self.line(&format!("__out_{id}[i] = {recip};"));
         self.indent -= 1;
         self.line("}");
@@ -10075,7 +10080,9 @@ mod tests {
             "cast must emit a checked element-wise loop; got:\n{c}"
         );
         assert!(
-            c.contains("((double*)t1_data)[i] = __chelis_nan_f64((double)(((float*)t0_data)[idx]));"),
+            c.contains(
+                "((double*)t1_data)[i] = __chelis_nan_f64((double)(((float*)t0_data)[idx]));"
+            ),
             "cast must read at the source width and convert into the target width; got:\n{c}"
         );
         assert!(
