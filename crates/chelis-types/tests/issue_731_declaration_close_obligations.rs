@@ -14,7 +14,8 @@
 //! replays that narrowed a binder (chelis#2537).
 //!
 //! Every program is asserted on both checker ingresses (chelis#1107), and each
-//! rejection has an accepted twin that differs only in the operand's type.
+//! rejection has an accepted control. Gather also requires a literal axis
+//! under [05-AXIS-2], so its positive control uses that static spelling.
 
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
