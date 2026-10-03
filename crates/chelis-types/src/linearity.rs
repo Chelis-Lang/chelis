@@ -1175,6 +1175,11 @@ impl Checker {
     fn check_app(&mut self, expr: &Expr, children: &[Expr], scope: &mut LinearScope) {
         let builtin = children.first().and_then(var_name);
         let builtin_callee = builtin.filter(|name| self.is_builtin_reference(name, scope));
+        // Borrow dispositions also cover intrinsic calls such as `dropout`,
+        // which intentionally lives outside the ordinary builtin vocabulary.
+        // The closed borrow policy below recognizes the intrinsic; lexical
+        // bindings must still use their actual function signature.
+        let borrowing_callee = builtin.filter(|name| scope.top_id(name).is_none());
         // A builtin callee is judged operand by operand below; a builtin
         // named as a value is judged by the type checker
         // (`infer::expr::forbid_keys_a_builtin_value_does_not_admit`).
@@ -1210,13 +1215,13 @@ impl Checker {
                 // A callee position that only borrows cannot take one.
                 if verdicts[index - 1] != KeyOperand::Refused
                     && !observational
-                    && self.arg_is_borrowed(children.first(), builtin_callee, index - 1, scope)
+                    && self.arg_is_borrowed(children.first(), borrowing_callee, index - 1, scope)
                 {
                     self.reject_key_read(arg, "borrowed by this call");
                 } else {
                     self.consume_var_expr(arg, scope, app_site(expr, children));
                 }
-            } else if self.arg_is_borrowed(children.first(), builtin_callee, index - 1, scope)
+            } else if self.arg_is_borrowed(children.first(), borrowing_callee, index - 1, scope)
                 && is_var_expr(arg)
                 && self.expr_is_owned_linear(arg, scope)
             {

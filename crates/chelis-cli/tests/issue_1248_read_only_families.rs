@@ -7,6 +7,47 @@ use std::fs;
 use tempfile::tempdir;
 const COMPARISONS: &[&str] = &["cmplt", "lt", "gt", "lte", "gte", "eq", "neq"];
 
+#[test]
+fn intrinsic_borrowing_preserves_dropout_but_respects_shadowing() {
+    let valid = check(
+        "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = dropout(key_from_seed(42i64), x, tensor_to_scalar(sum(x, 0)))\n",
+    );
+    assert!(valid["errors"].as_array().unwrap().is_empty(), "{valid}");
+    let shadowed = check(
+        "def bad(b: tensor[2, f32]) = { dropout = fn (k: key, y: tensor[2, f32], rate: f32) -> realize(y)\nfirst = dropout(key_from_seed(42i64), b, 0.5f32)\nadd(first, b) }\n",
+    );
+    assert!(
+        shadowed["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "UseAfterConsume"),
+        "{shadowed}"
+    );
+    let consumed = check(
+        "def bad(x: tensor[4, f32]) = { gone = realize(x)\ndropout(key_from_seed(42i64), x, 0.5f32) }\n",
+    );
+    assert!(
+        consumed["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "UseAfterConsume"),
+        "{consumed}"
+    );
+    let key_reuse = check(
+        "def bad(x: tensor[4, f32]) = { key = key_from_seed(42i64)\nfirst = dropout(key, x, 0.5f32)\ndropout(key, first, 0.5f32) }\n",
+    );
+    assert!(
+        key_reuse["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "KeyReuse"),
+        "{key_reuse}"
+    );
+}
+
 fn check(source: &str) -> Value {
     let dir = tempdir().unwrap();
     let path = dir.path().join("probe.ch");
