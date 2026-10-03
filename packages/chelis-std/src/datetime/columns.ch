@@ -14,7 +14,7 @@ import Std.Rounding (Rounding, RoundTowardNegative, RoundTowardPositive, RoundTo
 @opaque
 type Durations[n] =
   | Durations { seconds: tensor[n, i64], nanoseconds: tensor[n, i64] }
--- Range constants are written inline, as in Std.Datetime: epoch days
+-- Range constants are written inline: epoch days
 -- -4371587..2932896, total months -119988..119999, unix seconds
 -- -377705030401..253402214400, 1000000000 nanoseconds per second, and 86400
 -- seconds per day.
