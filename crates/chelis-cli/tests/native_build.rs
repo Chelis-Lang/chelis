@@ -564,7 +564,7 @@ fn c_build_ignores_compiler_environment_and_refuses_profile_changing_wrapper() {
         )
         .unwrap();
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-        build(&file, &dir.path().join(name))
+        build(&file, &dir.path().join(format!("{name}-out")))
             .env("CHELIS_CC", &wrapper)
             .assert()
             .failure()
