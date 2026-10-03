@@ -366,7 +366,9 @@ mod tests {
     /// symbols undefined.
     #[test]
     fn static_library_link_requirements_are_the_build_link_flags() {
-        let link_flags = ["-lm", "-lpthread", "-ldl", "-fopenmp"].map(String::from).to_vec();
+        let link_flags = ["-lm", "-lpthread", "-ldl", "-fopenmp"]
+            .map(String::from)
+            .to_vec();
         let build = NativeBuild {
             target: "c",
             compiler: "gcc".into(),
