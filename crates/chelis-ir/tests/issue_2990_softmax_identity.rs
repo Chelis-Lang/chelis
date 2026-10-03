@@ -113,7 +113,10 @@ fn decomposition_preserves_activation_provenance_and_nonvalue_edges() {
             claims: vec![],
         },
         vec![],
-        TensorType { dims: vec![], precision: Prim::Int64 },
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        },
         None,
     );
     let y = tier2::lower_softmax(

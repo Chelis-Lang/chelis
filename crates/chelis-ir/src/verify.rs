@@ -2924,17 +2924,19 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
         }
 
-        if let RiscOp::Softmax { axis } = node.op {
-            if !node.output_type.precision.is_float()
+        if let RiscOp::Softmax { axis } = node.op
+            && (!node.output_type.precision.is_float()
                 || node
                     .inputs
                     .first()
                     .and_then(|id| dag.get(*id))
                     .is_some_and(|input| input.output_type != node.output_type)
-                || axis >= node.output_type.dims.len()
-            {
-                errors.push(format!("softmax at node {} requires one same-shape/dtype float input and an in-range axis", node.id.0));
-            }
+                || axis >= node.output_type.dims.len())
+        {
+            errors.push(format!(
+                "softmax at node {} requires one same-shape/dtype float input and an in-range axis",
+                node.id.0
+            ));
         }
         if matches!(node.op, RiscOp::Relu | RiscOp::ReluAdjoint) {
             if !node.output_type.precision.is_float() {

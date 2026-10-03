@@ -2886,10 +2886,11 @@ impl WireDag {
                 }
             }
 
-            if let WireRiscOp::Softmax { axis } = node.op {
-                if node.inputs.len() != 1
+            if let WireRiscOp::Softmax { axis } = node.op
+                && (node.inputs.len() != 1
                     || axis < 0
-                    || usize::try_from(axis).map_or(true, |axis| axis >= node.output_type.dims.len())
+                    || usize::try_from(axis)
+                        .map_or(true, |axis| axis >= node.output_type.dims.len())
                     || !Prim::parse_interchange_name(&node.output_type.precision)
                         .is_some_and(|p| p.is_float())
                     || {
@@ -2901,13 +2902,12 @@ impl WireDag {
                                 .iter()
                                 .zip(&node.output_type.dims)
                                 .any(|(actual, expected)| !wire_dim_info_equal(actual, expected))
-                    }
-                {
-                    return Err(WireDagContractError::new(format!(
-                        "WireDag softmax node {} requires one same-shape/dtype float input and an in-range axis",
-                        node.id
-                    )));
-                }
+                    })
+            {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag softmax node {} requires one same-shape/dtype float input and an in-range axis",
+                    node.id
+                )));
             }
             if matches!(&node.op, WireRiscOp::Relu | WireRiscOp::ReluAdjoint) {
                 let expected_inputs = if matches!(&node.op, WireRiscOp::Relu) {
