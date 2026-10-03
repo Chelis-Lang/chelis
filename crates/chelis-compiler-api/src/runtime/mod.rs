@@ -79,6 +79,21 @@ impl RuntimeTensorValue {
         IrTensorValue::finalize_from_wide(op, prim, shape, wide).map(Self::new)
     }
 
+    /// Data-movement constructor: store scalars that already carry `prim`
+    /// by inserting their bits, so a moved NaN keeps its payload, sign and
+    /// signaling bit ([04-NUM-11]). A value produced by arithmetic or
+    /// conversion goes through [`Self::from_wide`] instead.
+    pub(crate) fn from_scalars(
+        prim: Prim,
+        shape: Vec<usize>,
+        values: &[chelis_types::ScalarValue],
+    ) -> Self {
+        Self::new(IrTensorValue::from_storage(
+            shape,
+            chelis_types::tensor_from_scalars(prim, values),
+        ))
+    }
+
     /// Exact-integer compute-op constructor for paths that computed in
     /// i64.
     pub(crate) fn from_wide_int(

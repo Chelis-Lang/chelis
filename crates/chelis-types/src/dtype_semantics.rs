@@ -2611,13 +2611,21 @@ fn reduce_sum_group(
 /// [04-NUM-2]: the NaN an arithmetic reduction yields (a sum, product, or
 /// mean, including a one-leaf group that no operation touched) finalizes to
 /// the accumulator's canonical quiet NaN; extrema select and keep their bits.
-fn canonical_nan_scalar(value: ScalarValue) -> ScalarValue {
+/// Public so a reduction assembled outside this module (the host lane's
+/// `trace`) finalizes its tree's value at the same point.
+pub fn canonical_nan_scalar(value: ScalarValue) -> ScalarValue {
     match value.bits {
         Bits::F32(value) => ScalarValue {
             bits: Bits::F32(canonical_nan_f32(value)),
         },
         Bits::F64(value) => ScalarValue {
             bits: Bits::F64(canonical_nan_f64(value)),
+        },
+        Bits::F16(value) if value.is_nan() => ScalarValue {
+            bits: Bits::F16(half::f16::from_bits(0x7e00)),
+        },
+        Bits::Bf16(value) if value.is_nan() => ScalarValue {
+            bits: Bits::Bf16(half::bf16::from_bits(0x7fc0)),
         },
         _ => value,
     }
@@ -2845,21 +2853,12 @@ pub fn reduce_tensor_groups(
                 .and_then(|value| reduction_result_scalar(op, value, result))
         })
         .collect::<Result<Vec<_>, NumericKernelError>>()?;
-    let raw = if result.is_integer() {
-        RawTensor::Int(
-            values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_i64_exact()
-                        .expect("integer reduction results read exactly")
-                })
-                .collect(),
-        )
-    } else {
-        RawTensor::Float(values.iter().map(ScalarValue::as_f64_lossy).collect())
-    };
-    finalize_tensor(op.name(), result, raw).map_err(Into::into)
+    // Each group's value is already final at `result`: an arithmetic group
+    // finalized its NaN canonically and rounded once into `result`, and an
+    // extremum selected a stored element whose bits [05-OP-12] keeps. Storing
+    // them is insertion, so no f64 image or second finalization can change a
+    // selected NaN's payload, sign or signaling bit.
+    Ok(tensor_from_scalars(result, &values))
 }
 
 /// One [05-OP-33] addition at the operands' arithmetic width: integers
@@ -4183,6 +4182,14 @@ pub use wire_codec::{KeyBits, execution_storage};
 /// Bulk finalize: one monomorphized loop per dtype, never per-element
 /// dynamic dispatch (the section C5 performance contract). Traps on the
 /// first offending element.
+///
+/// This is the tensor constructor for a value PRODUCED by arithmetic or
+/// numeric conversion from wide images, so [04-NUM-2] applies: every float
+/// NaN it stores is the dtype's canonical quiet NaN, at every width (f16 and
+/// bf16 through their one-step narrowing, f32 and f64 here). Selection and
+/// data movement never come through it: they move stored bits with
+/// [`tensor_from_scalars`] or the `reuse_*` family, which keep a NaN's
+/// payload, sign and signaling bit ([05-OP-40], [04-NUM-11]).
 pub fn finalize_tensor(
     op: &'static str,
     prim: Prim,
@@ -4190,11 +4197,14 @@ pub fn finalize_tensor(
 ) -> Result<TensorStorage, NumericTrap> {
     let buf = match prim {
         Prim::F64 => Buf::F64(match raw {
-            RawTensor::Float(v) => v,
+            RawTensor::Float(v) => v.into_iter().map(canonical_nan_f64).collect(),
             RawTensor::Int(v) => v.into_iter().map(|i| i as f64).collect(),
         }),
         Prim::F32 => Buf::F32(match raw {
-            RawTensor::Float(v) => v.into_iter().map(|x| x as f32).collect(),
+            RawTensor::Float(v) => v
+                .into_iter()
+                .map(|x| canonical_nan_f32(x as f32))
+                .collect(),
             RawTensor::Int(v) => v.into_iter().map(|i| i as f32).collect(),
         }),
         Prim::F16 => Buf::F16(match raw {

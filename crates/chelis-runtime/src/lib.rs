@@ -327,6 +327,9 @@ pub use fp_env::FpEnvGuard;
 trait RuntimeArithmetic: TensorElement + Copy + Default {
     fn runtime_add(self, rhs: Self, op: &'static str) -> Self;
     fn runtime_mul(self, rhs: Self, op: &'static str) -> Self;
+    /// [04-NUM-2] finalization of an arithmetic result that no operation
+    /// touched (a one-leaf sum): a float NaN becomes the canonical quiet NaN.
+    fn runtime_finalize(self) -> Self;
 }
 
 macro_rules! impl_runtime_float_arithmetic {
@@ -340,6 +343,11 @@ macro_rules! impl_runtime_float_arithmetic {
             #[inline]
             fn runtime_mul(self, rhs: Self, _op: &'static str) -> Self {
                 $finalize(self * rhs)
+            }
+
+            #[inline]
+            fn runtime_finalize(self) -> Self {
+                $finalize(self)
             }
         }
     };
@@ -358,6 +366,11 @@ macro_rules! impl_runtime_integer_arithmetic {
             fn runtime_mul(self, rhs: Self, op: &'static str) -> Self {
                 self.checked_mul(rhs)
                     .unwrap_or_else(|| runtime_fail!("numeric trap: overflow in {op} at {}", $name))
+            }
+
+            #[inline]
+            fn runtime_finalize(self) -> Self {
+                self
             }
         }
     };
@@ -414,6 +427,10 @@ impl RuntimeArithmetic for half::f16 {
     fn runtime_mul(self, rhs: Self, _op: &'static str) -> Self {
         finalize_f16(f32::from(self) * f32::from(rhs))
     }
+
+    fn runtime_finalize(self) -> Self {
+        if self.is_nan() { half::f16::from_bits(0x7e00) } else { self }
+    }
 }
 
 impl RuntimeArithmetic for half::bf16 {
@@ -423,6 +440,10 @@ impl RuntimeArithmetic for half::bf16 {
 
     fn runtime_mul(self, rhs: Self, _op: &'static str) -> Self {
         finalize_bf16(f32::from(self) * f32::from(rhs))
+    }
+
+    fn runtime_finalize(self) -> Self {
+        if self.is_nan() { half::bf16::from_bits(0x7fc0) } else { self }
     }
 }
 
@@ -546,7 +567,9 @@ fn runtime_balanced_sum<T: RuntimeArithmetic>(mut leaves: Vec<T>, op: &'static s
         }
         leaves = next;
     }
-    leaves[0]
+    // A sum is arithmetic even when its group has one leaf that no addition
+    // touched, so that leaf finalizes like every other sum ([04-NUM-2]).
+    leaves[0].runtime_finalize()
 }
 
 /// Numeric ordering without any conversion. Float NaNs sort after numeric

@@ -932,19 +932,32 @@ pub(super) fn nested_list_to_tensor_data(
     Ok((shape, data))
 }
 
-/// Wide ingress buffer for `to_tensor`: exact i64 for the integer/bool
-/// families, exact f64 images for floats (chelis#729 Phase 1; ends the
-/// f64-collapse of exact i64 elements, chelis#684).
+/// Ingress buffer for `to_tensor`: exact i64 for the integer/bool families
+/// (chelis#729 Phase 1; ends the f64-collapse of exact i64 elements,
+/// chelis#684), and the stored float scalars themselves for floats. Moving a
+/// list into a tensor is data movement, not arithmetic or conversion: the
+/// elements already carry the checked dtype, so their bits, a NaN's payload,
+/// sign and signaling bit included, are stored unchanged ([04-NUM-11]). A
+/// float element never passes through an f64 image or `finalize_tensor`.
 pub(super) enum ListTensorData {
     Int(Vec<i64>),
-    Float(Vec<f64>),
+    Float(Vec<chelis_types::ScalarValue>),
 }
 
 impl ListTensorData {
-    pub(super) fn into_raw(self) -> chelis_types::RawTensor {
+    /// Store the elements at `precision`: integers and bools through the
+    /// exact, domain-checked finalization; floats by inserting their bits.
+    pub(super) fn into_storage(
+        self,
+        op: &'static str,
+        precision: Prim,
+    ) -> Result<chelis_types::TensorStorage, String> {
         match self {
-            ListTensorData::Int(v) => chelis_types::RawTensor::Int(v),
-            ListTensorData::Float(v) => chelis_types::RawTensor::Float(v),
+            ListTensorData::Int(v) => {
+                chelis_types::finalize_tensor(op, precision, chelis_types::RawTensor::Int(v))
+                    .map_err(|trap| trap.to_string())
+            }
+            ListTensorData::Float(v) => Ok(chelis_types::tensor_from_scalars(precision, &v)),
         }
     }
 
@@ -988,7 +1001,7 @@ fn list_to_tensor_data(values: &[RuntimeValue], precision: Prim) -> Result<ListT
             RuntimeValue::Scalar(payload)
                 if payload.dtype() == precision && precision.is_float() =>
             {
-                floats.push(payload.as_f64_lossy());
+                floats.push(payload.value());
             }
             RuntimeValue::Bool(value) if precision == Prim::Bool => {
                 ints.push(i64::from(*value));
@@ -1140,7 +1153,7 @@ fn pad_rows(
             Ok(ListTensorData::Int(out))
         }
         ListTensorData::Float(flat) => {
-            let pad_value = payload.as_f64_lossy();
+            let pad_value = payload.value();
             let mut out = Vec::with_capacity(batch * width);
             let mut offset = 0usize;
             for &len in lens {
@@ -2699,7 +2712,10 @@ fn trace_balanced_sum(
         }
         level = next;
     }
-    cast_scalar("trace", level[0], result).map_err(|error| error.to_string())
+    // A one-leaf diagonal is still a sum ([05-OP-30]); its value finalizes
+    // like any other arithmetic result, as `sum(diagonal(..))` does.
+    let total = chelis_types::canonical_nan_scalar(level[0]);
+    cast_scalar("trace", total, result).map_err(|error| error.to_string())
 }
 
 pub(super) fn tensor_trace_value(
@@ -2954,6 +2970,9 @@ pub(super) fn tensor_einsum_value(
         }
         *slot = acc;
     }
+    // Einsum is arithmetic: `from_wide` finalizes every NaN canonically, as
+    // the runtime lane does. The accumulation order still differs from the
+    // runtime's balanced tree (chelis#1290).
     RuntimeTensorValue::from_wide("einsum", lhs.precision, out_shape, out)
 }
 

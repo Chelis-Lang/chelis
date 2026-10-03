@@ -3864,7 +3864,13 @@ where
                 // lane (no f64 laundering above 2^53), float payloads
                 // through their exact f64 images. A payload whose value
                 // does not survive the node's dtype traps loudly.
+                // A payload already at the node's dtype is moved, bits
+                // and all, so a NaN constant keeps its encoding.
                 match value.as_i64_exact() {
+                    _ if value.prim() == out_prim => TensorValue::from_storage(
+                        shape,
+                        chelis_types::tensor_from_scalars(out_prim, &vec![*value; n]),
+                    ),
                     Some(i) => finalize_wide_int("const", out_prim, shape, vec![i; n])?,
                     None => finalize_wide("const", out_prim, shape, vec![value.as_f64_lossy(); n])?,
                 }
@@ -3877,6 +3883,9 @@ where
                 // integer/bool payloads, exact f64 images otherwise
                 // (chelis#856).
                 match data.to_i64_exact_vec() {
+                    _ if data.prim() == out_prim && data.len() == shape.iter().product() => {
+                        TensorValue::from_storage(shape, data.clone())
+                    }
                     Some(ints) => finalize_wide_int("const", out_prim, shape, ints)?,
                     None => finalize_wide("const", out_prim, shape, data.to_f64_lossy_vec())?,
                 }
