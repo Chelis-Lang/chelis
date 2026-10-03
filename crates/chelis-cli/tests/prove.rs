@@ -46,6 +46,55 @@ fn property_summary(output: &[u8]) -> Value {
 }
 
 #[test]
+fn prove_rejects_unknown_and_unimplemented_tiers_before_discovery() {
+    for tier in ["bogus-tier", "type-only", "AUTO", ""] {
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["prove", "does-not-exist.ch", "--tier", tier, "--json"])
+            .assert()
+            .code(2)
+            .stdout("")
+            .stderr(
+                predicate::str::contains("invalid value")
+                    .or(predicate::str::contains("a value is required")),
+            )
+            .stderr(predicate::str::contains("fuzz-only"))
+            .stderr(predicate::str::contains("smt-only"));
+    }
+}
+
+#[test]
+fn prove_accepts_every_advertised_tier() {
+    let dir = write_prop("@property identity forall(x: f32):\n  x == x\n");
+    for tier in [
+        "auto",
+        "fuzz-only",
+        "smt-only",
+        "induction-only",
+        "beacon-only",
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                dir.path().join("prop.ch").to_str().unwrap(),
+                "--tier",
+                tier,
+                "--samples",
+                "2",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert_ne!(output.status.code(), Some(3), "tier={tier}: {output:?}");
+        assert!(
+            !property_records(&output.stdout).is_empty(),
+            "tier={tier}: {output:?}"
+        );
+    }
+}
+
+#[test]
 fn prove_passes_filtered_samples() {
     // Pin `--tier fuzz-only` so the test asserts exactly one behavior
     // across the default and `--features smt` builds: a trivial linear
@@ -1140,7 +1189,13 @@ fn desugared_deep_property_uses_source_samples_and_seed() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        .args(["prove", deep_path.to_str().unwrap(), "--json"])
+        .args([
+            "prove",
+            deep_path.to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--json",
+        ])
         .output()
         .expect("run prove");
     assert!(
@@ -1156,6 +1211,7 @@ fn desugared_deep_property_uses_source_samples_and_seed() {
         .collect::<Vec<_>>();
     assert_eq!(records[0]["samples"], 2);
     assert_eq!(records[0]["seed"], 7);
+    assert_eq!(records[0]["proof_tier"], "fuzz");
 }
 
 #[test]
@@ -1185,6 +1241,8 @@ fn deep_property_uses_metadata_quantifiers_and_cli_samples() {
             "2",
             "--seed",
             "0",
+            "--tier",
+            "fuzz-only",
             "--json",
         ])
         .output()
@@ -1202,6 +1260,44 @@ fn deep_property_uses_metadata_quantifiers_and_cli_samples() {
         .collect::<Vec<_>>();
     assert_eq!(records[0]["name"], "deep_non_negative");
     assert_eq!(records[0]["samples"], 2);
+    assert_eq!(records[0]["proof_tier"], "fuzz");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn deep_auto_smt_verdicts_do_not_claim_fuzz_samples() {
+    for (predicate, status, exit) in [("x == x", "passed", 0), ("x > x", "failed", 1)] {
+        let dir = write_prop(&format!(
+            "@property identity forall(x: f32):\n  {predicate}\n"
+        ));
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["deep", dir.path().join("prop.ch").to_str().unwrap()])
+            .output()
+            .expect("desugar");
+        assert!(deep.status.success(), "{deep:?}");
+        let path = dir.path().join("prop.dp");
+        std::fs::write(&path, deep.stdout).expect("write deep");
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                path.to_str().unwrap(),
+                "--samples",
+                "2",
+                "--tier",
+                "auto",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert_eq!(output.status.code(), Some(exit), "{output:?}");
+        let records = property_records(&output.stdout);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0]["status"], status);
+        assert_eq!(records[0]["proof_tier"], "smt");
+        assert_eq!(records[0]["samples"], 0);
+    }
 }
 
 // --- WI-7 mandatory non-vacuity: close the CLI-local green bypass ---

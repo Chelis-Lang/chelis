@@ -3601,6 +3601,7 @@ class SmtCiSplitTests(unittest.TestCase):
             "workflow_dispatch:",
             "shared-key: smt-smt-build",
             "cargo test -p chelis-prove --features smt",
+            "run: cargo test -p chelis-cli --features smt --test prove\n",
             "cargo test -p chelis-prove --features z3",
             'cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle',
             "cargo test -p chelis-prove --features clarabel",

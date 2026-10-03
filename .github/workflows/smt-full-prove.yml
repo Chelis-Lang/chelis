@@ -143,6 +143,9 @@ jobs:
       - name: Run smt-gated chelis-prove unit and integration tests
         run: cargo test -p chelis-prove --features smt
 
+      - name: Run CLI prove tests with the release solver feature
+        run: cargo test -p chelis-cli --features smt --test prove
+
       - name: Run carcara-gated chelis-prove tests
         # The nightly parallel process exited with SIGSEGV after tests; the
         # same complete suite passed serially. Retain the full corpus while
