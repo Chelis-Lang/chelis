@@ -1311,6 +1311,12 @@ legitimate:
   `examples/hello_tensor.ch` shape: `def main[n]() -> tensor[n, f32]`
   whose body builds a `tensor[3, f32]`.
 
+At run time a return-only dim parameter takes its value from the first site,
+in evaluation order, that produces an extent for it, such as a block binding
+whose ascription names it. Every later site that names it, the declared
+result included, is a claim under §4.7: execution checks equality and traps
+`Domain` on mismatch.
+
 What the body must **not** do is couple the promised-independent output
 dimension to the caller-visible input world. Both of the following are
 `DimensionMismatch` type errors:

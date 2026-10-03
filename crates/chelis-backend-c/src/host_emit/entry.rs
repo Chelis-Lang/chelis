@@ -306,7 +306,7 @@ impl<'a> Walker<'a> {
             HostExprKind::ResultClaimScope { body, .. } => {
                 self.walk(body, env, facts);
             }
-            HostExprKind::FormalIngress { value, .. } => {
+            HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
                 self.walk(value, env, facts);
             }
             HostExprKind::SignatureEntry {

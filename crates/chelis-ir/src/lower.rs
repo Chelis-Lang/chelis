@@ -82,6 +82,7 @@ pub struct LowerDiagnostic {
     pub span_id: Option<String>,
     pub fatal: bool,
     unsupported: Option<Box<Unsupported>>,
+    host_control: bool,
 }
 
 impl LowerDiagnostic {
@@ -92,6 +93,7 @@ impl LowerDiagnostic {
             span_id,
             fatal: false,
             unsupported: None,
+            host_control: false,
         }
     }
 
@@ -113,6 +115,7 @@ impl LowerDiagnostic {
             span_id,
             fatal: false,
             unsupported: Some(Box::new(unsupported)),
+            host_control: false,
         }
     }
 
@@ -129,6 +132,20 @@ impl LowerDiagnostic {
     pub fn fatal(mut self) -> Self {
         self.fatal = true;
         self
+    }
+
+    /// Mark a body a tensor kernel cannot carry but host control flow can:
+    /// the declaration's body belongs on the host lane of both evaluators,
+    /// so the shared kernel decision routes it there instead of failing.
+    fn host_control(mut self) -> Self {
+        self.host_control = true;
+        self
+    }
+
+    /// Whether this diagnostic routes its declaration to host control flow
+    /// rather than rejecting it.
+    pub fn requires_host_control(&self) -> bool {
+        self.host_control
     }
 }
 
@@ -445,7 +462,7 @@ fn raise_lowering_diagnostic(diagnostic: LowerDiagnostic) -> ! {
     // `host::try_lower_compiled_program` keys off this so the user
     // receives the AD rejection text instead of an undefined-symbol
     // host call. Issue #197.
-    if !diagnostic.fatal && unrepresentable_panic_suppressed() {
+    if !diagnostic.fatal && !diagnostic.host_control && unrepresentable_panic_suppressed() {
         std::panic::panic_any(UnrepresentableDag);
     }
     std::panic::panic_any(diagnostic);
@@ -1505,6 +1522,18 @@ impl LocalAscriptionBindingRegion {
     }
 }
 
+/// One named axis a local tensor ascription claims: binding `binding`'s
+/// extent at `axis` is a site for dimension binder `binder`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalAscriptionNamedSite {
+    pub binding: String,
+    pub axis: usize,
+    pub binder: String,
+    /// Whether `binder` is output-inferred ([`DimBinderRoles::return_only`]),
+    /// so this site may bind it; otherwise the site is only ever a claim.
+    pub output_inferred: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TensorCallsiteSpecialization {
     /// Checker-owned identities used while lowering the concrete body. These
@@ -1810,6 +1839,59 @@ impl SubexprLoweringContext {
             claims.push(ty);
         }
         Ok(Some(claims))
+    }
+
+    /// The named axes the region's ascriptions claim, in binding order: each
+    /// is a site that names a dimension binder (spec/04-type-system.md
+    /// section 4.4.1). A host lane executes a region on its own, so it is the
+    /// host lane that relates the site to the binder's other sites in the
+    /// activation: the first one binds the binder and every later one is a
+    /// claim against it.
+    pub fn local_ascription_named_sites(
+        &self,
+        region: &LocalAscriptionBindingRegion,
+    ) -> Vec<LocalAscriptionNamedSite> {
+        self.local_tensor_ascriptions
+            .iter()
+            .filter(|ascription| region.ascription_ids.contains(&ascription.id().get()))
+            .flat_map(|ascription| {
+                ascription
+                    .outstanding_claims()
+                    .iter()
+                    .filter(|claim| {
+                        matches!(
+                            claim.required_extent(),
+                            chelis_types::types::Dim::Name(_) | chelis_types::types::Dim::Var(_)
+                        )
+                    })
+                    .map(|claim| LocalAscriptionNamedSite {
+                        binding: ascription.binding_name().to_string(),
+                        axis: claim.axis(),
+                        binder: LowerCtx::local_ascription_claim_label(
+                            ascription,
+                            claim.axis(),
+                            claim,
+                        ),
+                        output_inferred: false,
+                    })
+                    .map(|site| LocalAscriptionNamedSite {
+                        output_inferred: DimBinderRoles::of_ascription(
+                            &self.program_signatures,
+                            ascription,
+                        )
+                        .return_only
+                        .contains(&extent_binder_label(&site.binder)),
+                        ..site
+                    })
+            })
+            .collect()
+    }
+
+    /// The dimension-binder roles of declaration `name`
+    /// ([`DimBinderRoles::of_declaration`]), from the same signature table
+    /// the named sites read.
+    pub fn dim_binder_roles(&self, name: &str) -> DimBinderRoles {
+        DimBinderRoles::of_declaration(&self.program_signatures, name)
     }
 
     /// Restrict one synthetic region to the exact checker identities selected
@@ -4605,6 +4687,94 @@ fn collect_top_level_defs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
         collect_top_level_defs_from_expr(expr, &mut defs);
     }
     defs
+}
+
+/// The roles a declaration's checked function type gives its dimension
+/// binders (spec/04-type-system.md section 4.4.1).
+///
+/// This is the one derivation the lowering, the evaluator's activation
+/// records, and the C host lane's first-site handling all read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DimBinderRoles {
+    /// Named by the declared result and by no parameter type at any depth of
+    /// a List, tuple, reference, or other constructor: output-inferred, so
+    /// only these may be bound by a first site in the body.
+    pub return_only: BTreeSet<String>,
+    /// Named by a tensor parameter's own axes (through a reference): bound
+    /// when the activation starts, so a site naming one is a claim.
+    pub tensor_parameter: BTreeSet<String>,
+}
+
+impl DimBinderRoles {
+    pub fn of_signature(signature: &Expr) -> Self {
+        fn collect(expr: &Expr, out: &mut BTreeSet<String>) {
+            let Some((tag, _, kids)) = stamped_parts(expr) else {
+                return;
+            };
+            if matches!(tag, DeepTag::DName | DeepTag::DVar) {
+                if let Some(name) = kids.first().and_then(symbol_name) {
+                    out.insert(name.to_string());
+                }
+                return;
+            }
+            for kid in kids {
+                collect(kid, out);
+            }
+        }
+        fn tensor_axes(expr: &Expr, out: &mut BTreeSet<String>) {
+            match stamped_parts(expr) {
+                Some((DeepTag::TRef, _, kids)) => {
+                    if let Some(inner) = kids.first() {
+                        tensor_axes(inner, out);
+                    }
+                }
+                Some((DeepTag::TTensor, _, _)) => collect(expr, out),
+                _ => {}
+            }
+        }
+        let Some((DeepTag::TFn, _, kids)) = stamped_parts(signature) else {
+            return Self::default();
+        };
+        let Some((result, params)) = kids.split_last() else {
+            return Self::default();
+        };
+        let mut carried = BTreeSet::new();
+        let mut tensor_parameter = BTreeSet::new();
+        for param in params {
+            collect(param, &mut carried);
+            tensor_axes(param, &mut tensor_parameter);
+        }
+        let mut return_only = BTreeSet::new();
+        collect(result, &mut return_only);
+        return_only.retain(|name| !carried.contains(name));
+        Self {
+            return_only,
+            tensor_parameter,
+        }
+    }
+
+    /// The roles of the declaration that owns `ascription`, by its checked
+    /// signature in `signatures`; empty when it has none.
+    pub fn of_ascription(
+        signatures: &BTreeMap<String, Expr>,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+    ) -> Self {
+        match ascription.declaration_name() {
+            Some(name) => Self::of_declaration(signatures, name),
+            // A top-level value's ascription has no signature, so it names
+            // no dimension binder at all.
+            None => Self::default(),
+        }
+    }
+
+    /// The roles of declaration `name` by its checked signature in
+    /// `signatures`; empty when it has none.
+    pub fn of_declaration(signatures: &BTreeMap<String, Expr>, name: &str) -> Self {
+        match signatures.get(name) {
+            Some(signature) => Self::of_signature(signature),
+            None => Self::default(),
+        }
+    }
 }
 
 pub(crate) fn collect_top_level_sigs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
@@ -7490,6 +7660,11 @@ enum FailMessage {
     Unusable(FailMessageDefect),
 }
 
+/// One local tensor ascription's claim tokens, by claimed axis. `None` is a
+/// claim on a binder that no witness declared when the activation started; it
+/// is resolved where the ascription's initializer lowers.
+type LocalAscriptionClaimTokens = Vec<(usize, Option<NodeId>)>;
+
 struct LowerCtx<'program> {
     host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
     host_sources: Vec<crate::host::staged::HostSource>,
@@ -7530,7 +7705,23 @@ struct LowerCtx<'program> {
     bindings: ValueScope,
     /// Binder lookup exists only in the current signature activation. Once
     /// selected, ordinary node edges carry the declaring witness's identity.
+    ///
+    /// A parameter axis declares a binder when the activation starts. An
+    /// output-inferred binder (spec/04-type-system.md section 4.4.1) is
+    /// declared later, by the first site in evaluation order that produces
+    /// its extent, and every later site naming it, the declared result
+    /// included, is a claim against that witness. The list therefore belongs
+    /// to the activation, not to a block: a `let` does not restore it. A
+    /// first site inside a runtime `if` arm would bind on that arm's path
+    /// alone, which a `Where` cannot express, so lowering routes such a body
+    /// to host control flow (see [`Self::selected_arm_depth`]).
     signature_witnesses: Vec<(String, NodeId)>,
+    /// The first-site witnesses of binders in their declaration's
+    /// [`DimBinderRoles::return_only`] set, so the declared result is a later
+    /// site of exactly those. A witness id is unique in the graph, so the set
+    /// needs no activation scoping: [`Self::signature_witnesses`] already
+    /// selects the witness the current activation sees.
+    return_only_first_sites: UnordSet<NodeId>,
     /// Every parameter witness minted by the CURRENT activation's
     /// [`LowerCtx::prepare_parameter_witnesses`], in parameter order.
     ///
@@ -7561,7 +7752,10 @@ struct LowerCtx<'program> {
     /// separate from ordinary inferred expression `type` metadata.
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
     /// Activation-local lowering tokens allocated before its body executes.
-    local_ascription_tokens: Vec<(u64, Vec<(usize, NodeId)>)>,
+    /// `None` marks a claim on a binder no witness declares yet; it is
+    /// resolved where the ascription's initializer lowers, as a claim if an
+    /// earlier site bound the binder and as that binder's first site if not.
+    local_ascription_tokens: Vec<(u64, LocalAscriptionClaimTokens)>,
     /// Scalar Bool selecting the runtime control-flow path currently being
     /// lowered. Unlike [`Self::random_path_condition`], this is present in
     /// ordinary tensor DAGs as well as transform/helper subcontexts.
@@ -7603,6 +7797,11 @@ struct LowerCtx<'program> {
     /// directly is an INDIRECT trap (behind a helper call or a `let`); it
     /// has no [05-OP-68] guard and must not fall back to a placeholder.
     if_branch_depth: usize,
+    /// Depth of runtime `if` arms that lower into a `Where`, which computes
+    /// both arms on every path. A first site inside one would bind its
+    /// binder on a path that may not run (spec/04-type-system.md section
+    /// 4.4.1), so such a body runs in host control flow instead.
+    selected_arm_depth: usize,
     linearity: LinearityInfo,
     /// chelis#620 (Inlining-F1 successor): per-callee active-inline depth.
     /// Recursion lowers by unrolling, so a self- or mutually-recursive call
@@ -7778,6 +7977,7 @@ impl<'program> LowerCtx<'program> {
             next_pin: 0,
             bindings: ValueScope::default(),
             signature_witnesses: Vec::new(),
+            return_only_first_sites: UnordSet::new(),
             activation_witnesses: Vec::new(),
             signature_is_authored: false,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
@@ -7793,6 +7993,7 @@ impl<'program> LowerCtx<'program> {
             program_signatures: program_signatures.into(),
             random_path_condition: None,
             if_branch_depth: 0,
+            selected_arm_depth: 0,
             linearity,
             inlining_depths: UnordMap::new(),
             inlining_active: 0,
@@ -9786,6 +9987,22 @@ impl<'program> LowerCtx<'program> {
                 Some((axis, label, required, matches!(dim, DimInfo::Lit(_))))
             })
             .collect::<Vec<_>>();
+        // A named result dimension of a return-only binder
+        // (spec/04-type-system.md section 4.4.1) is a later site of the
+        // body's first site for it. Which binder that is, the first site
+        // recorded from the declaration's [`DimBinderRoles`] when it bound
+        // it, so the claim is resolved once the body has lowered.
+        let first_site_claims = claim
+            .into_iter()
+            .filter(|_| !function && self.signature_is_authored)
+            .flat_map(|ty| ty.dims.iter().enumerate())
+            .filter_map(|(axis, dim)| match dim {
+                DimInfo::Named(name, _) if !name.is_empty() && name != "*" => {
+                    Some((axis, extent_binder_label(name)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let mut result = self.lower_expr_unclaimed(expr, claim.filter(|_| function));
         let start = self.invocation_witnesses.len();
         for (axis, label, required, literal) in requirements {
@@ -9913,6 +10130,39 @@ impl<'program> LowerCtx<'program> {
                     );
                 }
             }
+        }
+        for (axis, label) in first_site_claims {
+            let (Some(first_site), Some(mut id)) = (
+                self.signature_witness(&label)
+                    .filter(|witness| self.return_only_first_sites.contains(witness)),
+                result.as_single_node(),
+            ) else {
+                continue;
+            };
+            let required = self.capture_result_claim(first_site, label, axis);
+            // The token is captured after the body produced its value, so the
+            // claim belongs to a carrier of that value, which the guard
+            // derivation follows back to the producer.
+            if !matches!(self.dag.get(id).map(|node| &node.op), Some(RiscOp::Copy))
+                || id.0 <= required.0
+            {
+                let ty = self
+                    .dag
+                    .get(id)
+                    .expect("returned value")
+                    .output_type
+                    .clone();
+                id = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Copy,
+                    vec![id],
+                    ty,
+                    self.current_span_id.clone(),
+                );
+                result = LoweredValue::Node(id);
+            }
+            self.dag.add_shape_dep(id, required);
+            self.invocation_witnesses.push(id);
         }
         self.retain_invocation_witnesses(result, start)
     }
@@ -10543,7 +10793,6 @@ impl<'program> LowerCtx<'program> {
         }
         let saved = self.bindings.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
-        let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
         let saved_signature_is_authored = self.signature_is_authored;
         let saved_callables = self.local_callables.clone();
@@ -10645,9 +10894,9 @@ impl<'program> LowerCtx<'program> {
                                                 &bind_kids[i + 1],
                                             )
                                         })
-                                        .map(|_| claims.clone())
+                                        .map(|ascription| (ascription.clone(), claims.clone()))
                                 });
-                        if let Some(claims) = local_claims {
+                        if let Some((ascription, pending)) = local_claims {
                             let Some(mut owner) = val_id.as_single_node() else {
                                 raise_fatal_lowering_error(
                                     format!(
@@ -10657,6 +10906,13 @@ impl<'program> LowerCtx<'program> {
                                     bind_kids[i + 1].span_id().map(str::to_owned),
                                 )
                             };
+                            let claims = self.resolve_local_ascription_claims(
+                                &ascription,
+                                pending,
+                                owner,
+                                name,
+                                bind_kids[i + 1].span_id(),
+                            );
                             for (axis, _) in &claims {
                                 self.restore_local_ascription_owner_axis(owner, *axis);
                             }
@@ -10708,7 +10964,6 @@ impl<'program> LowerCtx<'program> {
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.bindings = saved; // Restore scope
         self.local_unit_refinements = saved_unit_refinements;
-        self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
         self.signature_is_authored = saved_signature_is_authored;
         self.local_callables = saved_callables;
@@ -10744,10 +10999,9 @@ impl<'program> LowerCtx<'program> {
                 .outstanding_claims()
                 .iter()
                 .map(|claim| {
-                    (
-                        claim.axis(),
-                        self.local_ascription_claim_token(&ascription, claim),
-                    )
+                    let token = (!self.local_claim_awaits_first_site(&ascription, claim))
+                        .then(|| self.local_ascription_claim_token(&ascription, claim));
+                    (claim.axis(), token)
                 })
                 .collect();
             self.local_ascription_tokens
@@ -10805,6 +11059,124 @@ impl<'program> LowerCtx<'program> {
             }
         }
         contains(body, ascription)
+    }
+
+    /// Resolve an ascription's pending claims where its initializer `owner`
+    /// has lowered, and return the claims to attach to it.
+    ///
+    /// A pending claim names a binder no witness declared when the activation
+    /// started. If an earlier site has bound it since, the claim is an
+    /// ordinary claim against that site. Otherwise this ascription is the
+    /// binder's first producing site: the initializer's extent at the axis
+    /// becomes the binder's witness and owes no comparison here. Axes resolve
+    /// in order, so a binder repeated within one ascription is bound by its
+    /// first axis and claimed by the rest.
+    fn resolve_local_ascription_claims(
+        &mut self,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        pending: LocalAscriptionClaimTokens,
+        owner: NodeId,
+        binding: &str,
+        span: Option<&str>,
+    ) -> Vec<(usize, NodeId)> {
+        let id = ascription.id().get();
+        let mut claims = Vec::with_capacity(pending.len());
+        for (axis, token) in pending {
+            if let Some(token) = token {
+                claims.push((axis, token));
+                continue;
+            }
+            let claim = ascription
+                .outstanding_claims()
+                .iter()
+                .find(|claim| claim.axis() == axis)
+                .expect("a pending token names one of the ascription's claims");
+            if self.local_claim_awaits_first_site(ascription, claim) {
+                let label = Self::local_ascription_claim_label(ascription, axis, claim);
+                if self.selected_arm_depth > 0 {
+                    raise_lowering_diagnostic(
+                        LowerDiagnostic::new(
+                            format!(
+                                "the output-inferred dimension `{}` is first produced under a \
+                                 runtime conditional; a tensor kernel computes both arms, so it \
+                                 cannot bind `{}` on the arm's path alone (spec/04-type-system.md \
+                                 section 4.4.1)",
+                                extent_binder_label(&label),
+                                extent_binder_label(&label),
+                            ),
+                            None,
+                            span.map(str::to_owned),
+                        )
+                        .host_control(),
+                    );
+                }
+                let witness = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LocalExpand,
+                        parameter: binding.to_string(),
+                        axis: RtAxis::Lit(
+                            i32::try_from(axis).expect("checked tensor rank fits int32"),
+                        ),
+                        requirements: Vec::new(),
+                        claims: Vec::new(),
+                    },
+                    vec![owner],
+                    TensorType {
+                        dims: Vec::new(),
+                        precision: Prim::Int64,
+                    },
+                    span.map(str::to_owned),
+                );
+                if DimBinderRoles::of_ascription(&self.program_signatures, ascription)
+                    .return_only
+                    .contains(&extent_binder_label(&label))
+                {
+                    self.return_only_first_sites.insert(witness);
+                }
+                self.signature_witnesses.push((label, witness));
+                continue;
+            }
+            let token = self.local_ascription_claim_token(ascription, claim);
+            if let Some((_, recorded)) = self
+                .local_ascription_tokens
+                .iter_mut()
+                .find(|(recorded, _)| *recorded == id)
+                .and_then(|(_, tokens)| tokens.iter_mut().find(|(at, _)| *at == axis))
+            {
+                *recorded = Some(token);
+            }
+            claims.push((axis, token));
+        }
+        claims
+    }
+
+    /// Whether `claim` names a binder that no witness declares yet: an
+    /// output-inferred binder (spec/04-type-system.md section 4.4.1) whose
+    /// first producing site has not been lowered. Such a claim is resolved
+    /// where its initializer lowers.
+    fn local_claim_awaits_first_site(
+        &self,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        claim: &chelis_types::LocalAscriptionAxisClaim,
+    ) -> bool {
+        if !matches!(
+            claim.required_extent(),
+            chelis_types::types::Dim::Name(_) | chelis_types::types::Dim::Var(_)
+        ) {
+            return false;
+        }
+        let label = Self::local_ascription_claim_label(ascription, claim.axis(), claim);
+        if self.signature_witness(&label).is_some() {
+            return false;
+        }
+        // Only an output-inferred binder may be bound here. A tensor
+        // parameter's binder without a witness is one a host region does not
+        // capture; the host lane claims it against the activation. Any other
+        // binder keeps the refusal at its claim token.
+        let roles = DimBinderRoles::of_ascription(&self.program_signatures, ascription);
+        let binder = extent_binder_label(&label);
+        roles.return_only.contains(&binder) || roles.tensor_parameter.contains(&binder)
     }
 
     fn discard_local_ascription_tokens_in(&mut self, body: &Expr) {
@@ -11047,12 +11419,12 @@ impl<'program> LowerCtx<'program> {
                     None,
                 )
             };
-            for (_, token) in claims {
+            for token in claims.iter().filter_map(|(_, token)| *token) {
                 let owner_count = self
                     .dag
                     .nodes()
                     .iter()
-                    .filter(|owner| owner.shape_deps.contains(token))
+                    .filter(|owner| owner.shape_deps.contains(&token))
                     .count();
                 if owner_count != 1 {
                     raise_fatal_lowering_error(
@@ -21533,7 +21905,9 @@ impl<'program> LowerCtx<'program> {
         // that arm's key under.
         let then_active = self.draw_activation();
         self.if_branch_depth += 1;
+        self.selected_arm_depth += 1;
         let then_value = self.lower_expr(then_expr);
+        self.selected_arm_depth -= 1;
         self.if_branch_depth -= 1;
         let then_node = self.expect_runtime_if_branch(then_value, "then", span);
         if let Some(parent_path) = saved_random_path {
@@ -21580,7 +21954,9 @@ impl<'program> LowerCtx<'program> {
         });
         let else_active = self.draw_activation();
         self.if_branch_depth += 1;
+        self.selected_arm_depth += 1;
         let else_value = self.lower_expr(else_expr);
+        self.selected_arm_depth -= 1;
         self.if_branch_depth -= 1;
         let else_node = self.expect_runtime_if_branch(else_value, "else", span);
         self.random_path_condition = saved_random_path;

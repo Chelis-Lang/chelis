@@ -486,7 +486,7 @@ pub(super) fn resolve_callable_aliases(
         HostExprKind::ResultClaimScope { body, .. } => {
             resolve_callable_aliases(body, aliases);
         }
-        HostExprKind::FormalIngress { value, .. } => {
+        HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
             resolve_callable_aliases(value, aliases);
         }
         HostExprKind::Var(name, _) => {

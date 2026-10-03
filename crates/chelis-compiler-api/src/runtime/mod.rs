@@ -697,6 +697,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
         cancel: chelis_types::current_cancel_token(),
         system: system_boundary,
         failure_kind: RuntimeFailureKind::Ordinary,
+        activation_extents: Default::default(),
     };
 
     for name in top_level_order {
@@ -1219,6 +1220,8 @@ struct EvalContext<'a> {
     /// Origin of the error currently unwinding through the string-based host
     /// evaluator. Only a trusted numeric producer may set `NumericTrap`.
     failure_kind: RuntimeFailureKind,
+    /// The dimension-binder extents of each executing activation.
+    activation_extents: eval::ActivationExtents,
 }
 
 /// True when the checked-program effect annotation on this node carries a

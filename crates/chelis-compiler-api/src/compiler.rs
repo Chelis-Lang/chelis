@@ -1116,7 +1116,8 @@ fn project_host_program_to_entry(
             }
             ConcreteHostExprKind::AdtFieldAccess { base, .. } => collect_expr(base, bound, out),
             ConcreteHostExprKind::ResultClaimScope { body, .. } => collect_expr(body, bound, out),
-            ConcreteHostExprKind::FormalIngress { value, .. } => collect_expr(value, bound, out),
+            ConcreteHostExprKind::FormalIngress { value, .. }
+            | ConcreteHostExprKind::ExtentSites { value, .. } => collect_expr(value, bound, out),
             ConcreteHostExprKind::If {
                 cond,
                 then_expr,
@@ -4851,7 +4852,8 @@ pub fn reject_host_only_builtins(
                 scan_expr(list, found);
             }
             ConcreteHostExprKind::ResultClaimScope { body, .. } => scan_expr(body, found),
-            ConcreteHostExprKind::FormalIngress { value, .. } => scan_expr(value, found),
+            ConcreteHostExprKind::FormalIngress { value, .. }
+            | ConcreteHostExprKind::ExtentSites { value, .. } => scan_expr(value, found),
             _ => {}
         }
     }
