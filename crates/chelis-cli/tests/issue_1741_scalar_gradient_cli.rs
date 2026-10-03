@@ -82,11 +82,11 @@ fn check_and_eval_agree_for_scalar_gradients_and_reject_real_mixed_surfaces() {
 /// The #2993 oracle bodies, each `f: T -> T`; `{t}` is the dtype.
 const BODIES: [&str; 4] = ["mul(exp(x), x)", "div(1.0{t}, x)", "log(x)", "sqrt(x)"];
 
-/// Bodies built only from correctly rounded arithmetic, so a lane mismatch
+/// Bodies built only from correctly rounded operations, so a lane mismatch
 /// can only come from the differentiation order (#3017's witnesses first).
-/// Bodies with `exp`/`log`/`sin`/`cos`/`tanh` are left to confirm after the
-/// correctly rounded math kernels land in both lanes (chelis#2957).
-const EXACT_BODIES: [&str; 8] = [
+/// The transcendentals are correctly rounded in both lanes ([05-OP-46],
+/// chelis#2957), so bodies through them are bit-exact too.
+const EXACT_BODIES: [&str; 13] = [
     "add(mul(x, x), x)",
     "mul(x, sqrt(x))",
     "sqrt(sqrt(x))",
@@ -95,6 +95,11 @@ const EXACT_BODIES: [&str; 8] = [
     "div(sqrt(x), add(x, 1.0{t}))",
     "sqrt(sqrt(sqrt(x)))",
     "div(1.0{t}, x)",
+    "mul(exp(x), log(x))",
+    "div(sin(x), add(cos(x), 2.0{t}))",
+    "exp(neg(mul(x, x)))",
+    "tanh(mul(x, sin(x)))",
+    "log(add(x, 1.0{t}))",
 ];
 
 fn width_program(dtype: &str, body: &str, root: &str) -> String {
