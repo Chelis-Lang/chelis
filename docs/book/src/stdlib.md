@@ -150,7 +150,7 @@ the `Test` effect. Generated builds reject these assertion calls.
 and returns `(exit_code, stdout, stderr)`. `run_chelis(args)` invokes the
 `chelis` command. Both carry `IO` and run during evaluation and
 testing. The language specifies compiled host process execution too, but
-`chelis build` does not yet compile these calls
+`chelis build` does not compile these calls
 ([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)).
 
 ### Dates and times
@@ -179,11 +179,8 @@ its type's range. Each `try_` form other than the masked column forms returns
 `neq` compare values. Dates, times, datetimes, instants, and durations also
 have `*_lt`, `*_lte`, `*_gt`, and `*_gte` functions that order them; offsets,
 offset datetimes, and periods have no order. The module is pure and runs under
-`chelis eval`, `chelis test`, and generated C. `chelis build` refuses a program
-that projects `.0` from a masked column producer such as
-`try_dates_from_epoch_days`
-([#2883](https://github.com/Chelis-Lang/chelis/issues/2883)); destructure the
-pair instead.
+`chelis eval`, `chelis test`, and generated C, including a program that
+projects `.0` from a masked column producer such as `try_dates_from_epoch_days`.
 
 `Std.Datetime.Clock` reads the host clocks. It is a separate module, so
 nothing in `Std.Datetime` reads a clock; any code that reads one, through this
@@ -195,7 +192,7 @@ no other datetime function takes one and it does not convert to an `Instant`. Bo
 `IO`, so every caller carries it, declared or inferred. A failed read reports
 `clock_wall_read: io: <detail>` or `clock_monotonic_read: io: <detail>`, naming
 the underlying read. The clocks run under `chelis eval` and `chelis test`;
-`chelis build` does not yet compile them
+`chelis build` does not compile them
 ([#1297](https://github.com/Chelis-Lang/chelis/issues/1297)).
 
 ### Business days
@@ -216,6 +213,33 @@ is negative for a reversed range. `business_in_all` and `business_in_any`
 combine two calendars over their common horizon. The constructor, the
 queries, and the combinations each have a `try_` form, and the `dates_*` forms
 apply the queries to `Dates[n]` columns.
+
+### Date and instant columns
+
+`Std.Datetime.Columns` applies `Std.Datetime` to whole columns. `dates_year`,
+`dates_month`, `dates_day`, `dates_weekday_iso_number`, and `dates_day_of_year`
+read every date of a `Dates[n]` into a `tensor[n, i64]`. `dates_from_ymd` builds
+a column from year, month, and day tensors. `dates_add_days` and
+`dates_add_months` take a tensor of counts, one per date, and
+`dates_add_months` takes a `DayOverflow` policy. `dates_days_until` and the
+`dates_lt` family compare two columns element by element. `try_parse_dates`
+reads a `List[string]` of dates, and `dates_to_strings` writes them.
+
+For instants, `instants_from_unix_count` and `instants_to_unix_count` convert
+counts of a `TimeUnit`; the second takes a `Rounding`.
+`instants_add_duration` adds a `Durations[n]` column, which `instants_until`
+produces and `durations(seconds, nanoseconds)` builds. `instants_round_to`
+buckets instants by one increment, and `instants_to_dates_at` reads their dates
+at an offset. `instants_seconds_since_f64(is, origin)` gives a numerical time
+axis, equal bit for bit to `duration_to_seconds_f64` of each difference.
+
+Each callable agrees with its scalar function at every element. A call fails
+when any element would fail, and the message names the lowest such element
+(`dates_add_days: overflow: element 3: ...`). Columns of different lengths fail
+`domain`. The masked forms `try_dates_from_ymd`, `try_durations`, and
+`try_parse_dates` return the column with a `tensor[n, bool]` mask that is false
+where the scalar function would fail. Those positions hold 1970-01-01 or a
+zero duration. Every callable consumes its columns and borrows its tensors.
 
 ### Exact decimals
 

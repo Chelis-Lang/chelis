@@ -145,6 +145,11 @@ path = "tests/issue_2599_contextual_nullary_host_types.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]
+name = "issue_2642_comparison_operand_extents"
+path = "tests/issue_2642_comparison_operand_extents.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "issue_2781_loop_result_captured_by_a_loop"
 path = "tests/issue_2781_loop_result_captured_by_a_loop.rs"
 required-features = ["ownership-ledger"]
@@ -157,6 +162,21 @@ required-features = ["ownership-ledger"]
 [[test]]
 name = "issue_2891_aggregate_shared_operand"
 path = "tests/issue_2891_aggregate_shared_operand.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2907_scatter_update_extents"
+path = "tests/issue_2907_scatter_update_extents.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2914_record_operand_routing"
+path = "tests/issue_2914_record_operand_routing.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2917_activation_dimensions"
+path = "tests/issue_2917_activation_dimensions.rs"
 required-features = ["ownership-ledger"]
 
 [[test]]

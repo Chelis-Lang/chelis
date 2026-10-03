@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Independent reference semantics for `Std.Datetime` stage S1 (chelis#2859).
+"""Independent reference semantics for `Std.Datetime` stages S1 (chelis#2859) and S3 (chelis#2861).
 
 This module is the oracle the differential harness compares `chelis eval` and
 compiled C against. It is written from the algorithms' published definitions
 and from the design of record, `spec/design/std_datetime.md` (§4 range, §5
-failure grammar, §6 to §8 API, semantics and text profile), never by
+failure grammar, §6 to §8 and §10 API, semantics and text profile), never by
 translating Chelis source. Python integers are unbounded, so every value here
 is the exact mathematical answer; a result that leaves i64 or the supported
 range is reported the way §5 says the module must report it.
@@ -989,6 +989,158 @@ PARSERS = {
     "duration": (parse_duration, duration_to_string),
     "period": (parse_period, period_to_string),
 }
+
+
+# ---------------------------------------------------------------------------
+# §10 columns (`Std.Datetime.Columns`, stage S3). A column is a list of
+# element values in the representation above; a `Durations[n]` column holds
+# Durations. Each column callable applies its scalar twin at every index and
+# fails with the twin's kind for the lowest failing index; a column whose
+# length differs from another argument's fails `domain` first.
+
+
+def column_lengths(function: str, *columns: list) -> None:
+    lengths = [len(column) for column in columns]
+    if len(set(lengths)) > 1:
+        raise domain(function, "arguments have " + " and ".join(str(n) for n in lengths) + " elements")
+
+
+def elementwise(function: str, twin, *columns: list) -> list:
+    column_lengths(function, *columns)
+    results = []
+    for index, arguments in enumerate(zip(*columns)):
+        try:
+            results.append(twin(*arguments))
+        except DatetimeError as error:
+            raise DatetimeError(function, error.kind, f"element {index}: {error.detail}") from None
+    return results
+
+
+def masked(twin, placeholder, *columns: list) -> tuple[list, list[bool]]:
+    """A masked form: the twin's value or `placeholder`, and where the twin succeeds."""
+    values, valid = [], []
+    for arguments in zip(*columns):
+        try:
+            values.append(twin(*arguments))
+            valid.append(True)
+        except DatetimeError as error:
+            if error.kind != "domain":
+                raise
+            values.append(placeholder)
+            valid.append(False)
+    return values, valid
+
+
+def dates_year(days: list[int]) -> list[int]:
+    return [civil_from_days(day)[0] for day in days]
+
+
+def dates_month(days: list[int]) -> list[int]:
+    return [civil_from_days(day)[1] for day in days]
+
+
+def dates_day(days: list[int]) -> list[int]:
+    return [civil_from_days(day)[2] for day in days]
+
+
+def dates_weekday_iso_number(days: list[int]) -> list[int]:
+    return [weekday_of(day) for day in days]
+
+
+def dates_day_of_year(days: list[int]) -> list[int]:
+    return [day_of_year(day) for day in days]
+
+
+def dates_from_ymd(years: list[int], months: list[int], days: list[int]) -> list[int]:
+    return elementwise("dates_from_ymd", date, years, months, days)
+
+
+def try_dates_from_ymd(years: list[int], months: list[int], days: list[int]) -> tuple[list[int], list[bool]]:
+    return masked(date, 0, years, months, days)
+
+
+def dates_add_days(days: list[int], counts: list[int]) -> list[int]:
+    return elementwise("dates_add_days", date_add_days, days, counts)
+
+
+def dates_add_months(days: list[int], counts: list[int], policy: str) -> list[int]:
+    return elementwise("dates_add_months", lambda day, n: date_add_months(day, n, policy), days, counts)
+
+
+def dates_days_until(a: list[int], b: list[int]) -> list[int]:
+    return elementwise("dates_days_until", date_days_until, a, b)
+
+
+DATE_ORDER = {
+    "dates_lt": lambda a, b: a < b,
+    "dates_lte": lambda a, b: a <= b,
+    "dates_gt": lambda a, b: a > b,
+    "dates_gte": lambda a, b: a >= b,
+}
+
+
+def dates_order(name: str, a: list[int], b: list[int]) -> list[bool]:
+    return elementwise(name, DATE_ORDER[name], a, b)
+
+
+def try_parse_dates(texts: list[str]) -> tuple[list[int], list[bool]]:
+    return masked(parse_date, 0, texts)
+
+
+def dates_to_strings(days: list[int]) -> list[str]:
+    return [date_to_string(day) for day in days]
+
+
+def durations(seconds: list[int], nanoseconds: list[int]) -> list[tuple[int, int]]:
+    return elementwise("durations", duration, seconds, nanoseconds)
+
+
+def try_durations(seconds: list[int], nanoseconds: list[int]) -> tuple[list[tuple[int, int]], list[bool]]:
+    return masked(duration, (0, 0), seconds, nanoseconds)
+
+
+def instants_from_unix_count(counts: list[int], unit: str) -> list[tuple[int, int]]:
+    return elementwise("instants_from_unix_count", lambda count: instant_from_unix_count(count, unit), counts)
+
+
+def instants_to_unix_count(instants: list[tuple[int, int]], unit: str, rounding: str) -> list[int]:
+    return elementwise("instants_to_unix_count", lambda i: instant_to_unix_count(i, unit, rounding), instants)
+
+
+def instants_add_duration(instants: list[tuple[int, int]], shifts: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    return elementwise("instants_add_duration", instant_add_duration, instants, shifts)
+
+
+def instants_until(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    return elementwise("instants_until", instant_until, a, b)
+
+
+def instants_round_to(instants: list[tuple[int, int]], increment: tuple[int, int], rounding: str) -> list[tuple[int, int]]:
+    """The increment is checked once, before any element, so an empty column rejects it too."""
+    step = nanos_of(increment)
+    if step <= 0 or NANOS_PER_DAY % step != 0:
+        raise domain("instants_round_to", f"increment {duration_to_string(increment)} is not a positive divisor of 86400 s")
+    return elementwise("instants_round_to", lambda i: instant_round_to(i, increment, rounding), instants)
+
+
+def instants_to_dates_at(instants: list[tuple[int, int]], offset_seconds: int) -> list[int]:
+    return [instant_to_datetime_at(i, offset_seconds)[0] for i in instants]
+
+
+def instants_seconds_since_f64(instants: list[tuple[int, int]], origin: tuple[int, int]) -> list[float]:
+    return [duration_to_seconds_f64(instant_until(origin, i)) for i in instants]
+
+
+INSTANT_ORDER = {
+    "instants_lt": lambda a, b: nanos_of(a) < nanos_of(b),
+    "instants_lte": lambda a, b: nanos_of(a) <= nanos_of(b),
+    "instants_gt": lambda a, b: nanos_of(a) > nanos_of(b),
+    "instants_gte": lambda a, b: nanos_of(a) >= nanos_of(b),
+}
+
+
+def instants_order(name: str, a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[bool]:
+    return elementwise(name, INSTANT_ORDER[name], a, b)
 
 
 def canonical(kind: str, text: str) -> str:

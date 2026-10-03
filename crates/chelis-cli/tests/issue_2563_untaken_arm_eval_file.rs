@@ -1035,8 +1035,10 @@ def main() -> tensor[*, f32] = {
 /// [05-OP-53]: a uniform condition shaped unlike the branch it selects, by
 /// extent, by axis order, or with the unselected branch shaped like the
 /// selected one, is refused. The host interpreter fails with the typed shape
-/// error; the whole-program C refuses to build the graph, whose operand types
-/// already disagree.
+/// error; the whole-program C checks the operands' agreement before `where`
+/// reads them and fails when it runs, since the graph proves neither
+/// agreement nor a contradiction between the wildcard extents
+/// (runtime_extents.md C2.3, chelis#2642).
 ///
 /// Evidentiary status: REGRESSION TEST for every H row (at 1a026f823 each
 /// returns its selected branch); DISPOSITION LOCK for the C rows.
@@ -1083,8 +1085,7 @@ fn a_condition_shaped_unlike_its_selected_branch_is_refused_in_eval_file_and_c()
         }
         let c = c_file(directory.path(), &stem, source);
         let c_refused = c.as_ref().is_err_and(|stderr| {
-            stderr.starts_with("build: ")
-                && stderr.contains("condition and branches must have exactly matching shape")
+            !stderr.starts_with("build: ") && stderr.contains("elementwise operand shape mismatch")
         });
         if !c_refused {
             failures.push(format!("{row}, C: {c:?}"));

@@ -5744,6 +5744,12 @@ fn lower_host_function(
         return Ok(None);
     };
     let mut tensor_helpers = TensorHelperSink::for_declaration(collect_trace, name);
+    let _dimensions = ActiveDimSubstGuard::push(declaration_dimensions(
+        program,
+        name,
+        body,
+        &signature.params,
+    ));
     // The preflight facts are keyed by the body expression's address, so the
     // guard opens on the signature's own copy, which is not moved until the
     // body has been lowered.
@@ -5915,14 +5921,17 @@ fn try_lower_tensor_helper_call_inner(
         profile.tensor_helper_attempts += 1;
         profile.tensor_helper_input_nodes += deep_expr_nodes(expr);
     });
-    let specialized_context = (!tensor_helpers.tensor_specializations.is_empty()).then(|| {
+    let active_dimensions = active_dim_subst();
+    let specialized_context = (!tensor_helpers.tensor_specializations.is_empty()
+        || !active_dimensions.is_empty())
+    .then(|| {
         let mut context = lowering_context
             .cloned()
             .unwrap_or_else(|| cached_subexpr_lowering_context(program));
         for specialization in &tensor_helpers.tensor_specializations {
             context = context.with_tensor_callsite_specialization(specialization.clone());
         }
-        context
+        context.with_checked_dimensions(active_dimensions)
     });
     let Some(product) = lower_tensor_helper_product(
         expr,
@@ -13059,12 +13068,23 @@ fn result_claim_body_type(result: &TensorType) -> TensorType {
     }
 }
 
-fn checked_function_type_expr_parts(expr: &Expr) -> Option<(Vec<Expr>, Expr)> {
+/// The checked type an expression node records, as Deep.
+fn checked_type_expr(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::MetaExpr(meta, _) => checked_type_expr(&meta.expr),
+        Expr::Node(node, _) if node.tag() != DeepTag::Var => {
+            node.meta().ty().map(|ty| ty.expression())
+        }
+        _ => None,
+    }
+}
+
+fn checked_function_type_expr(expr: &Expr) -> Option<Expr> {
     match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) => metadata
-            .ty()
-            .and_then(|ty| parse_fn_type_expr_parts(ty.expression())),
-        ExprCarrier::MetadataExpression(meta) => checked_function_type_expr_parts(&meta.expr),
+        ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) => {
+            metadata.ty().map(|ty| ty.expression().clone())
+        }
+        ExprCarrier::MetadataExpression(meta) => checked_function_type_expr(&meta.expr),
         _ => None,
     }
 }
@@ -13091,6 +13111,7 @@ struct ActualizedRetainedHostContract {
     params: Vec<HostParam>,
     result_claim: Option<TensorType>,
     body_substitution: UnordMap<String, HostTypeTerm>,
+    body_dimensions: UnordMap<String, DimInfo>,
     tensor_specialization: crate::lower::TensorCallsiteSpecialization,
 }
 
@@ -13112,6 +13133,7 @@ fn actualize_retained_host_contract(
     signature: &HostDefSignature,
     program: &HostLoweringSession<'_>,
     actual_types: &[HostTypeTerm],
+    call_result: &HostTypeTerm,
 ) -> Result<ActualizedRetainedHostContract, crate::lower::LowerDiagnostic> {
     let app_args = as_node(expr)
         .and_then(|app| app.children_slice().split_first().map(|(_, args)| args))
@@ -13121,12 +13143,15 @@ fn actualize_retained_host_contract(
         .ok_or_else(|| {
             host_expr_lowering_error(expr, "polymorphic invocation lost its authored signature")
         })?;
-    let checked_signature = program
+    let checked_type = program
         .def_named(name)
-        .and_then(|(_, body)| checked_function_type_expr_parts(body))
+        .and_then(|(_, body)| checked_function_type_expr(body));
+    let checked_signature = checked_type
+        .as_ref()
+        .and_then(parse_fn_type_expr_parts)
         .unwrap_or_else(|| authored_signature.clone());
     let (authored_formals, authored_result) = authored_signature;
-    let (checked_formals, _) = checked_signature;
+    let (checked_formals, checked_result) = checked_signature;
     if app_args.len() != signature.params.len()
         || authored_formals.len() != app_args.len()
         || checked_formals.len() != app_args.len()
@@ -13166,6 +13191,43 @@ fn actualize_retained_host_contract(
             .entry(name.clone())
             .or_insert_with(|| term.clone());
     }
+    let body_dimensions = checked_type
+        .as_ref()
+        .map(|checked_type| {
+            let evidence = checked_formals
+                .iter()
+                .zip(actual_types)
+                .chain(std::iter::once((&checked_result, call_result)))
+                .collect::<Vec<_>>();
+            let mut dimensions = activation_dimensions(program, checked_type, &evidence);
+            // A record's dimension arguments survive only in the checked
+            // Deep types: the call's own, and an annotated actual's.
+            let mut binders = UnordSet::new();
+            collect_checked_dimension_binders(checked_type, &mut binders);
+            let enclosing = active_dim_subst();
+            let mut recorded = UnordMap::new();
+            let checked_evidence = checked_formals
+                .iter()
+                .zip(app_args.iter().map(checked_type_expr))
+                .chain(std::iter::once((&checked_result, checked_type_expr(expr))));
+            for (checked, call) in checked_evidence {
+                if let Some(call) = call {
+                    pair_authored_dimensions(call, checked, &binders, &mut recorded);
+                }
+            }
+            for (binder, dim) in recorded.into_sorted() {
+                let dim = match dim {
+                    DimInfo::Named(name, None) => enclosing
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or(DimInfo::Named(name, None)),
+                    other => other,
+                };
+                dimensions.entry(binder).or_insert(dim);
+            }
+            dimensions
+        })
+        .unwrap_or_else(active_dim_subst);
     let mut authored_substitution = UnordMap::new();
     for (authored, actual_term) in authored_formals.iter().zip(actual_types) {
         if let Some(authored_term) = decode_expanded_host_type_expr(program, authored) {
@@ -13296,8 +13358,182 @@ fn actualize_retained_host_contract(
         params,
         result_claim: result,
         body_substitution,
+        body_dimensions,
         tensor_specialization,
     })
+}
+
+/// The checked dimension binders of one activation, mapped to the axes it
+/// runs with (runtime_extents.md C2.2, generic_tensor_actualization.md).
+///
+/// The checker generalizes each definition over its own `d-var` identities,
+/// and every type recorded inside the body names those identities. Lowering
+/// the body must therefore instantiate them, as it instantiates the body's
+/// type and precision variables; otherwise two values the signature ties to
+/// one binder keep two callee-private names (`d55`, `d57`), and two calls
+/// of one helper share one. At an inlined call the evidence is the prepared
+/// actuals and then the call's checked result type, which supplies binders
+/// that occur only inside a record formal, whose host type erases its
+/// dimension arguments. A definition's own body binds them to its
+/// parameters. A binder keeps its first binding; equal sizes never merge
+/// two binders. The enclosing activation's bindings stay in force, because
+/// substituted caller expressions still carry its names.
+fn activation_dimensions(
+    program: &HostLoweringSession<'_>,
+    checked_type: &Expr,
+    evidence: &[(&Expr, &HostTypeTerm)],
+) -> UnordMap<String, DimInfo> {
+    let mut binders = UnordSet::new();
+    collect_checked_dimension_binders(checked_type, &mut binders);
+    let mut dimensions = UnordMap::new();
+    for (checked, actual) in evidence.iter().copied() {
+        if let Some(checked) = decode_expanded_host_type_expr(program, checked) {
+            solve_checked_dimensions(&checked, actual, &binders, &mut dimensions);
+        }
+    }
+    let mut body_dimensions = active_dim_subst();
+    for (name, dim) in dimensions.to_sorted() {
+        body_dimensions
+            .entry(name.clone())
+            .or_insert_with(|| dim.clone());
+    }
+    body_dimensions
+}
+
+/// The activation of a definition lowered as its own function: each checked
+/// binder is the authored binder at the same position of its declared
+/// signature, including one that occurs only as a record's dimension
+/// argument, which the host type of that parameter erases. A parameter's
+/// host type supplies any binder the declaration does not spell.
+fn declaration_dimensions(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+    function: &Expr,
+    params: &[HostParam],
+) -> UnordMap<String, DimInfo> {
+    let Some(checked_type) = checked_function_type_expr(function) else {
+        return active_dim_subst();
+    };
+    let mut binders = UnordSet::new();
+    collect_checked_dimension_binders(&checked_type, &mut binders);
+    let mut authored = UnordMap::new();
+    if let Some(declared) = lookup_authored_defsig_type_expr(program, name) {
+        pair_authored_dimensions(&declared, &checked_type, &binders, &mut authored);
+    }
+    // A checked type that is no function type has no parameter positions,
+    // so only the authored pairing applies.
+    let mut dimensions = match parse_fn_type_expr_parts(&checked_type) {
+        Some((checked_formals, _)) => {
+            let evidence = checked_formals
+                .iter()
+                .zip(params.iter().map(|param| &param.ty))
+                .collect::<Vec<_>>();
+            activation_dimensions(program, &checked_type, &evidence)
+        }
+        None => active_dim_subst(),
+    };
+    for (binder, dim) in authored.into_sorted() {
+        dimensions.insert(binder, dim);
+    }
+    dimensions
+}
+
+/// Pair each checked binder with the authored dimension at the same
+/// position of the declared signature.
+fn pair_authored_dimensions(
+    authored: &Expr,
+    checked: &Expr,
+    binders: &UnordSet<String>,
+    out: &mut UnordMap<String, DimInfo>,
+) {
+    if let Expr::MetaExpr(meta, _) = authored {
+        return pair_authored_dimensions(&meta.expr, checked, binders, out);
+    }
+    if let Expr::MetaExpr(meta, _) = checked {
+        return pair_authored_dimensions(authored, &meta.expr, binders, out);
+    }
+    let (Some((authored_tag, _, authored_children)), Some((checked_tag, _, checked_children))) =
+        (stamped_parts(authored), stamped_parts(checked))
+    else {
+        return;
+    };
+    if checked_tag == DeepTag::DVar {
+        if let Some(binder) = checked_children.first().and_then(symbol_name)
+            && binders.contains(binder)
+            && let Some(dim) = authored_nominal_dimension(authored)
+        {
+            out.entry(binder.to_string()).or_insert(dim);
+        }
+        return;
+    }
+    if authored_tag != checked_tag || authored_children.len() != checked_children.len() {
+        return;
+    }
+    for (authored, checked) in authored_children.iter().zip(checked_children) {
+        pair_authored_dimensions(authored, checked, binders, out);
+    }
+}
+
+fn collect_checked_dimension_binders(expr: &Expr, binders: &mut UnordSet<String>) {
+    if let Expr::MetaExpr(meta, _) = expr {
+        collect_checked_dimension_binders(&meta.expr, binders);
+        return;
+    }
+    let Some((tag, _, children)) = stamped_parts(expr) else {
+        return;
+    };
+    if tag == DeepTag::DVar {
+        if let Some(name) = children.first().and_then(symbol_name) {
+            binders.insert(name.to_string());
+        }
+        return;
+    }
+    for child in children {
+        collect_checked_dimension_binders(child, binders);
+    }
+}
+
+/// Bind each checked binder axis of `checked` to the axis at the same
+/// position of `actual`. An unknown actual axis is no evidence.
+fn solve_checked_dimensions(
+    checked: &HostTypeTerm,
+    actual: &HostTypeTerm,
+    binders: &UnordSet<String>,
+    out: &mut UnordMap<String, DimInfo>,
+) {
+    match (checked, actual) {
+        (HostTypeTerm::Tensor(checked), HostTypeTerm::Tensor(actual))
+            if checked.dims.len() == actual.dims.len() =>
+        {
+            for (checked, actual) in checked.dims.iter().zip(&actual.dims) {
+                let DimInfo::Named(name, None) = checked else {
+                    continue;
+                };
+                let unknown =
+                    matches!(actual, DimInfo::Named(axis, None) if axis.is_empty() || axis == "*");
+                if binders.contains(name) && !unknown && actual != checked {
+                    out.entry(name.clone()).or_insert_with(|| actual.clone());
+                }
+            }
+        }
+        (HostTypeTerm::Adt(_, checked), HostTypeTerm::Adt(_, actual))
+        | (HostTypeTerm::Tuple(checked), HostTypeTerm::Tuple(actual))
+            if checked.len() == actual.len() =>
+        {
+            for (checked, actual) in checked.iter().zip(actual) {
+                solve_checked_dimensions(checked, actual, binders, out);
+            }
+        }
+        (HostTypeTerm::List(checked), HostTypeTerm::List(actual))
+        | (HostTypeTerm::Option(checked), HostTypeTerm::Option(actual)) => {
+            solve_checked_dimensions(checked, actual, binders, out);
+        }
+        (HostTypeTerm::Dict(checked_key, checked_value), HostTypeTerm::Dict(key, value)) => {
+            solve_checked_dimensions(checked_key, key, binders, out);
+            solve_checked_dimensions(checked_value, value, binders, out);
+        }
+        _ => {}
+    }
 }
 
 /// Lower every executable actual exactly once in the caller's type context.
@@ -13817,6 +14053,7 @@ fn lower_named_retained_host_invocation(
         params,
         result_claim,
         body_substitution,
+        body_dimensions,
         tensor_specialization,
     } = if let Some(prepared) = prepared_actuals.as_ref() {
         let app_args = as_node(expr)
@@ -13834,12 +14071,20 @@ fn lower_named_retained_host_invocation(
                 })
             })
             .collect::<Vec<_>>();
-        actualize_retained_host_contract(expr, canonical, &signature, program, &actual_types)?
+        actualize_retained_host_contract(
+            expr,
+            canonical,
+            &signature,
+            program,
+            &actual_types,
+            expected,
+        )?
     } else {
         ActualizedRetainedHostContract {
             params: signature.params.clone(),
             result_claim: None,
             body_substitution: active_type_subst(),
+            body_dimensions: active_dim_subst(),
             tensor_specialization: crate::lower::TensorCallsiteSpecialization::default(),
         }
     };
@@ -13851,6 +14096,8 @@ fn lower_named_retained_host_invocation(
         .map(HostTypeTerm::Tensor);
     let _body_substitution =
         actualize_polymorphic_contract.then(|| ActiveTypeSubstGuard::push(body_substitution));
+    let _body_dimensions =
+        actualize_polymorphic_contract.then(|| ActiveDimSubstGuard::push(body_dimensions));
     lower_retained_host_invocation(
         expr,
         invocation,
@@ -15918,21 +16165,34 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     // a host-only descendant. Other builtins may carry static axis/list
     // arguments, so this two-tensor boundary is specific to matmul.
     let hoist_matmul_operands = kids.len() == 3 && direct_var_name(&kids[0]) == Some("matmul");
-    if !hoist_matmul_operands
-        && !kids
-            .iter()
-            .skip(1)
-            .any(should_keep_tensor_expr_in_host_lane)
-    {
+    let host_operand = |arg: &Expr| {
+        should_keep_tensor_expr_in_host_lane(arg) || operand_reads_host_record(arg, program, scope)
+    };
+    if !hoist_matmul_operands && !kids.iter().skip(1).any(host_operand) {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
+
+    // Hoisted operands run before the operation's helper, so an earlier
+    // operand left inside the helper would run after a later hoisted one.
+    // Every operand before the last hoisted one that does any work is
+    // therefore hoisted too, and the operands are evaluated once, in source
+    // order, by construction.
+    let last_hoisted = kids
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, arg)| hoist_matmul_operands || host_operand(arg))
+        .map(|(index, _)| index)
+        .next_back();
 
     let mut new_children = vec![kids[0].clone()];
     let mut scoped = scope.clone();
     let mut bindings = Vec::new();
 
     for (index, arg) in kids.iter().enumerate().skip(1) {
-        if hoist_matmul_operands || should_keep_tensor_expr_in_host_lane(arg) {
+        let precedes_a_hoisted_operand =
+            last_hoisted.is_some_and(|last| index < last) && operand_does_work(arg);
+        if hoist_matmul_operands || host_operand(arg) || precedes_a_hoisted_operand {
             let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))
@@ -15971,6 +16231,94 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     let rewritten = Expr::node(list.tag(), list.meta().clone(), new_children, *span);
     record_host_work(|profile| profile.app_clone_nodes += deep_expr_nodes(&rewritten));
     Ok((Cow::Owned(rewritten), Cow::Owned(scoped), bindings))
+}
+
+/// Whether evaluating an operand can trap or have an effect, so that its
+/// position in the evaluation order is observable. A name, a literal and a
+/// callable value do no work; a borrow does the work of what it borrows.
+fn operand_does_work(expr: &Expr) -> bool {
+    match expr.tag() {
+        None | Some(DeepTag::Var | DeepTag::Lit | DeepTag::Fn) => false,
+        Some(DeepTag::Borrow) => match expr {
+            Expr::Node(list, _) => list.children_slice().iter().any(operand_does_work),
+            _ => true,
+        },
+        Some(_) => true,
+    }
+}
+
+/// Whether an operand reads an ADT value the host lane holds
+/// (computed_tensor_host_admission.md): the operand is a name of such a
+/// type, or some subterm's type holds an ADT value, such as a record-typed
+/// name in an accessor `col_days(a)`, a tuple of records projected in
+/// `col_days(p.0)`, or a branch of an `if`. The tensor execution lane has no
+/// ADT carrier, so a helper over the whole operation cannot read the value,
+/// and the operation would otherwise fall back to host emission, which has
+/// no tensor arm. The operand's typed producer fact is therefore Host: it is
+/// evaluated once, in source order, and enters the operation as a typed
+/// input, exactly as if bound to a name. The operand's own type is what the
+/// operation consumes, not what the operand reads, so an ADT constructed in
+/// place for a definition's activation stays there.
+fn operand_reads_host_record(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> bool {
+    if let Expr::MetaExpr(meta, _) = expr {
+        return operand_reads_host_record(&meta.expr, program, scope);
+    }
+    match stamped_parts(expr) {
+        Some((DeepTag::Var | DeepTag::Fn, _, _)) => subterm_holds_adt(expr, program, scope),
+        Some((_, _, kids)) => kids
+            .iter()
+            .any(|kid| subterm_holds_adt(kid, program, scope)),
+        None => false,
+    }
+}
+
+/// Whether `expr` or one of its subterms has a type that holds an ADT value.
+/// A name is typed by the scope, and every other subterm by its checked
+/// type. Callable values are not entered, so no binder inside one can shadow
+/// the name the scope types.
+fn subterm_holds_adt(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> bool {
+    if let Expr::MetaExpr(meta, _) = expr {
+        return subterm_holds_adt(&meta.expr, program, scope);
+    }
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    match tag {
+        DeepTag::Var => kids
+            .first()
+            .and_then(symbol_name)
+            .and_then(|name| scope.get(name))
+            .is_some_and(holds_adt_value),
+        DeepTag::Fn => false,
+        _ => {
+            checked_type_expr(expr)
+                .and_then(|ty| decode_expanded_host_type_expr(program, ty))
+                .is_some_and(|ty| holds_adt_value(&ty))
+                || kids
+                    .iter()
+                    .any(|kid| subterm_holds_adt(kid, program, scope))
+        }
+    }
+}
+
+/// Whether a value of `ty` holds an ADT value, directly or inside a tuple,
+/// list, option or dictionary.
+fn holds_adt_value(ty: &HostTypeTerm) -> bool {
+    match ty {
+        HostTypeTerm::Adt(..) => true,
+        HostTypeTerm::Tuple(items) => items.iter().any(holds_adt_value),
+        HostTypeTerm::List(item) | HostTypeTerm::Option(item) => holds_adt_value(item),
+        HostTypeTerm::Dict(key, value) => holds_adt_value(key) || holds_adt_value(value),
+        _ => false,
+    }
 }
 
 fn host_fn_signature(ty: &HostTypeTerm) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
@@ -16576,6 +16924,41 @@ fn remap_tensor_helper_dim_symbols(
         }
     }
     actualize_tensor_helper_types(&remapped, scope)
+}
+
+/// The typed refusal for a checker dimension that two activations reached
+/// one tensor helper graph with, each binding it to a different extent.
+fn raise_conflicting_checker_dimension(
+    name: &str,
+    first: &DimInfo,
+    second: &DimInfo,
+    span_id: Option<String>,
+) -> ! {
+    let extent = |dim: &DimInfo| match dim {
+        DimInfo::Lit(value) => value.to_string(),
+        DimInfo::Named(label, _) => format!("`{label}`"),
+    };
+    let unsupported = chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct(format!(
+            "checker dimension `{name}` with two extents"
+        )),
+        format!(
+            "tensor helper lowering gives checker dimension `{name}` the extents {} and {}",
+            extent(first),
+            extent(second)
+        ),
+        chelis_types::unsupported::Stage::Lowering,
+        chelis_types::unimplemented_rejection!(
+            1277,
+            "a checker dimension that two activations share without a per-activation binding \
+             has no single extent"
+        ),
+    );
+    crate::lower::raise_fatal_lowering_diagnostic(crate::lower::LowerDiagnostic::new(
+        unsupported.to_string(),
+        None,
+        span_id,
+    ))
 }
 
 fn actualize_tensor_helper_types(
@@ -17288,16 +17671,20 @@ fn actualize_tensor_helper_types(
                         slot.insert(new_dim);
                     }
                     chelis_unord::Entry::Occupied(existing) => {
-                        // A single checker dim-var has a single extent in
-                        // a well-typed program; a conflicting re-bind
-                        // means the helper DAG was already inconsistent.
-                        // Fail loudly in debug rather than renaming op
-                        // fields with the wrong extent (review #363 N1).
-                        debug_assert_eq!(
-                            existing.get(),
-                            &new_dim,
-                            "synthetic dim `{name}` resolved to conflicting actuals"
-                        );
+                        // One checker binder has one extent in one
+                        // activation. Two different actuals mean two
+                        // activations reached this graph sharing the
+                        // binder's identity, so no rename is right: refuse
+                        // before emission rather than rename op fields with
+                        // either extent (runtime_extents.md C2.2, C6.1).
+                        if existing.get() != &new_dim {
+                            raise_conflicting_checker_dimension(
+                                name,
+                                existing.get(),
+                                &new_dim,
+                                node.span_id.clone(),
+                            );
+                        }
                     }
                 }
             }
@@ -17439,7 +17826,21 @@ fn cached_dropout_reaching_defs(program: &HostLoweringSession<'_>) -> Arc<UnordS
     reaching
 }
 
+/// The program's subexpression lowering context, instantiated with the
+/// dimension binders of the activation being lowered.
 fn cached_subexpr_lowering_context(
+    program: &HostLoweringSession<'_>,
+) -> crate::lower::SubexprLoweringContext {
+    let context = program_subexpr_lowering_context(program);
+    let dimensions = active_dim_subst();
+    if dimensions.is_empty() {
+        context
+    } else {
+        context.with_checked_dimensions(dimensions)
+    }
+}
+
+fn program_subexpr_lowering_context(
     program: &HostLoweringSession<'_>,
 ) -> crate::lower::SubexprLoweringContext {
     if let Some(cached) = program.facts.subexpr_lowering_context.borrow().clone() {
@@ -18008,6 +18409,12 @@ pub(crate) fn expr_host_type(
     } else {
         apply_host_type_subst(&raw, &subst)
     };
+    let dimensions = active_dim_subst();
+    let specialized = if dimensions.is_empty() {
+        specialized
+    } else {
+        substitute_host_dimension_terms(specialized, &dimensions)
+    };
     expand_host_type_aliases(program, specialized)
 }
 
@@ -18209,7 +18616,13 @@ fn expr_host_type_raw(
             })
             .unwrap_or_else(fresh_host_inference),
         Expr::Node(_, _) if expr.tag() == Some(DeepTag::App) => {
-            let explicit = expr_type(expr).unwrap_or_else(fresh_host_inference);
+            // The activation's instantiated binders come first: a checked
+            // binder it instantiates is not a synthetic dimension to infer
+            // from the callee's authored signature, whose labels belong to
+            // the callee's activation.
+            let explicit = expr_type(expr)
+                .map(|ty| substitute_host_dimension_terms(ty, &active_dim_subst()))
+                .unwrap_or_else(fresh_host_inference);
             if app_expr_needs_inferred_type(&explicit) {
                 let inferred = infer_app_expr_host_type(expr, program, scope)
                     .unwrap_or_else(fresh_host_inference);
@@ -21384,6 +21797,40 @@ fn active_type_subst() -> UnordMap<String, HostTypeTerm> {
         Some(subst) => subst.clone(),
         None => UnordMap::new(),
     })
+}
+
+thread_local! {
+    /// Checked dimension binders instantiated for the activations being
+    /// lowered, innermost last (see `activation_dimensions`).
+    static ACTIVE_DIM_SUBST: RefCell<Vec<UnordMap<String, DimInfo>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// The dimension bindings in force for the innermost activation. Outside
+/// every activation no binder is instantiated, so the empty map is the
+/// stated answer, as for `active_type_subst`.
+fn active_dim_subst() -> UnordMap<String, DimInfo> {
+    ACTIVE_DIM_SUBST.with(|stack| match stack.borrow().last() {
+        Some(subst) => subst.clone(),
+        None => UnordMap::new(),
+    })
+}
+
+struct ActiveDimSubstGuard;
+
+impl ActiveDimSubstGuard {
+    fn push(subst: UnordMap<String, DimInfo>) -> Self {
+        ACTIVE_DIM_SUBST.with(|stack| stack.borrow_mut().push(subst));
+        ActiveDimSubstGuard
+    }
+}
+
+impl Drop for ActiveDimSubstGuard {
+    fn drop(&mut self) {
+        ACTIVE_DIM_SUBST.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
 }
 
 /// RAII scope for a specialization's type bindings (chelis#1201).
@@ -25179,6 +25626,73 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             },
             "the shrink result rank and literal extents come from its actual input and bounds"
         );
+    }
+
+    /// chelis#2906: a checker binder two activations bring into one helper
+    /// graph with different extents is a typed refusal in every build,
+    /// never a debug assertion that a release build skips by keeping the
+    /// first extent.
+    #[test]
+    fn conflicting_checker_dimension_is_a_typed_refusal() {
+        use crate::dag::{Dag, DimInfo, RiscOp, TensorType};
+
+        let shared = DimInfo::Named("d7".into(), None);
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        for name in ["x", "y"] {
+            let load = dag.add_node(
+                decl,
+                RiscOp::Load { name: name.into() },
+                vec![],
+                TensorType {
+                    dims: vec![shared.clone()],
+                    precision: Prim::Int64,
+                },
+                None,
+            );
+            dag.add_root(load);
+        }
+        let scope = UnordMap::from([
+            (
+                "x".to_string(),
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(3)],
+                    precision: Prim::Int64,
+                }),
+            ),
+            (
+                "y".to_string(),
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(4)],
+                    precision: Prim::Int64,
+                }),
+            ),
+        ]);
+        let refused =
+            crate::lower::catch_lowering_external(|| actualize_tensor_helper_types(&dag, &scope))
+                .expect_err("two extents for one checker dimension");
+        assert!(refused.fatal, "{refused:?}");
+        assert!(
+            refused
+                .message
+                .contains("gives checker dimension `d7` the extents 3 and 4")
+                && refused.message.contains("unimplemented chelis#1277"),
+            "{}",
+            refused.message
+        );
+
+        // The control: one extent for the binder is a rename, not a refusal.
+        let agreeing = UnordMap::from([
+            ("x".to_string(), scope["x"].clone()),
+            ("y".to_string(), scope["x"].clone()),
+        ]);
+        let actualized = actualize_tensor_helper_types(&dag, &agreeing);
+        for root in actualized.roots() {
+            assert_eq!(
+                actualized.get(*root).expect("root").output_type.dims,
+                vec![DimInfo::Lit(3)]
+            );
+        }
     }
 
     #[test]

@@ -730,9 +730,8 @@ Two costs outside this module show up in the measurements:
 ## 10. `Std.Datetime.Columns` (stage S3)
 
 These are vectorized forms of §8 over `Dates[n]` and `Instants[n]`, plus a `Durations[n]`
-column (`{ seconds, nanoseconds }` tensors). Every kernel is composed from i64 tensor
-primitives (`floor_div`, `mod`, `where`, `gather`, `cumsum`, comparisons), so no new dtype
-or builtin is introduced.
+column (`{ seconds, nanoseconds }` tensors). They compose `Std.Datetime`'s public
+callables and existing primitives, so no new dtype or builtin is introduced.
 
 **Families:**
 - Field extraction to `tensor[n, i64]`: year, month, day, ISO weekday number, day of year.
@@ -752,6 +751,61 @@ or builtin is introduced.
     numerical time axis, applying `duration_to_seconds_f64`'s composition per element.
 
 A failure of any element fails the whole call, except in the masked `try_` forms.
+
+**Signatures (decided in S3).** Each callable is the elementwise form of a scalar twin
+from §8, and [05-OP-73] states each one.
+- `Durations[n]` has the producer `durations(seconds, nanoseconds)`, which normalizes as
+  `duration` does, its masked form `try_durations`, and the accessors `durations_seconds`
+  and `durations_nanoseconds`. `instants_until` produces one and `instants_add_duration`
+  consumes one.
+- Counts and shifts are columns. `dates_add_days` and `dates_add_months` take a
+  `tensor[n, i64]` of counts, and `instants_add_duration` a `Durations[n]`, applied
+  element by element. A constant shift is a constant column, so one signature covers
+  both uses.
+- `instants_round_to` takes one increment. The increment is checked once, before any
+  element, so an increment that is not admitted fails even for an empty column.
+- The comparisons are `dates_lt`, `dates_lte`, `dates_gt`, `dates_gte` and the same four
+  for instants.
+- `try_parse_dates(texts)` returns a column as long as `texts`.
+
+**Failures (decided in S3).** A call fails with the scalar twin's kind for the lowest
+failing index, and its detail is the twin's prefixed `element k: `, as S1's column
+producers do. Within one element the twin's own check order holds, so
+`dates_add_months` reports a target past the range as `overflow` before it looks at
+the day. A column argument whose length differs from another argument's fails `domain`
+(`arguments have 2 and 3 elements`) before any element is read. Tensor arguments that
+share a dimension never get that far: spec/04 §4.7's entry guards reject them first.
+
+**Ownership (decided in S3, §19).** Column arguments are consumed and tensor arguments
+are borrowed.
+- Outside `Std.Datetime`, a column's storage is reachable only through §8.7's consuming
+  accessors. A borrowed column would therefore be copied on every call, while a
+  consumed one is copied only when the caller uses it again, by implicit linearity.
+- Every tensor argument is only read: counts, fields and the parts of a duration. Each
+  result is computed, so no argument becomes storage, and borrowing costs the caller
+  nothing.
+- `durations_seconds` and `durations_nanoseconds` consume the column and return its
+  storage, as §8.7's accessors do.
+- A column taken from a masked form by destructuring receives no inserted copy
+  (spec/04 §8.3). A caller that reads it twice passes it to a function, whose
+  parameter does receive the copy.
+
+**Evaluation (decided in S3).** Each callable on dates, instants and durations is a
+tensor kernel: it composes i64 tensor primitives over the whole column, with Hinnant's
+`days_from_civil` and `civil_from_days` written in floor division and Euclidean
+remainders. The kernels compute what each scalar twin computes, and the differential
+oracle checks every family against the reference on `chelis eval` and compiled C.
+- A kernel validates or replaces every value before a trapping primitive reads it, and
+  the Euclidean remainder takes a truncated quotient, so no step overflows at any i64.
+- A failing call reads only the lowest failing element, through `to_list`, to build its
+  detail.
+- A call over two columns, or a column and a tensor, compares their lengths before it
+  reads an element.
+- `instants_seconds_since_f64` composes its difference exactly as
+  `duration_to_seconds_f64` does: the whole seconds and the fraction share a sign, and
+  each step rounds to nearest-even. Its bit patterns are the twin's.
+- `try_parse_dates` and `dates_to_strings` apply their scalar twin to each element,
+  since their text side is a `List`.
 
 **Backend claims cite cells.** The S3 PR cites, for each family, its cell in
 `spec/design/capability_table.md`. For example, i64 tensors on HIP are `Unimplemented`
@@ -1075,8 +1129,8 @@ holiday tables.
 
 [05-OP-35] gains one sentence routing their semantics to a new atom, "`datetime::*`
 identities follow [05-OP-73]", as JSON access already follows [05-OP-2..5]. S2 extends the
-sentence and the atom's scope to the `datetime/business::*` identities, and S4a to the
-`datetime/zone::*` identities. The capacity
+sentence and the atom's scope to the `datetime/business::*` identities, S3 to the
+`datetime/columns::*` identities, and S4a to the `datetime/zone::*` identities. The capacity
 census, the frozen-contract oracle (`scripts/dtype_phase4b_oracle.py`) and the registry
 bijection test then need no new structure.
 
@@ -1217,7 +1271,7 @@ S6, Shoals keeps its own date layer.
 ## 19. Decisions owned by a stage
 
 Each item below is decided in the named stage's PR and recorded in this document there:
-- the ownership form of each column signature (S1, S3);
+- the ownership form of each column signature (S1, S3; S3's is recorded in §10);
 - `BusinessCalendar`'s internal representation, with its measured cost (S2);
 - how tzdata bytes reach `time_zone_from_tzif`, decided by the S4b spike;
 - the holidays package's provenance format and its list of calendars (S7);

@@ -301,6 +301,12 @@ def try_business_in_any(a: BusinessCalendar, b: BusinessCalendar) -> Option[Busi
 -- element's detail, naming the lowest such element.
 -- The index of the first result carrying a problem, or -1.
 def first_problem(results: List[(string, i64)]) -> i64 = fold(fn (acc: (i64, i64), result: (string, i64)) -> if gte(acc.1, 0i64) then acc else if eq(result.0, "") then (add(acc.0, 1i64), -1i64) else (add(acc.0, 1i64), acc.0), (0i64, -1i64), results).1
+-- A column argument whose length differs from another argument's fails
+-- before any element is read ([05-OP-73]).
+def length_failure[n, m](function: string, first: &tensor[n, i64], second: &tensor[m, i64]) -> string =
+  function
+  |> domain_failure(joined(["arguments have ", to_string(shape(first, 0i32)), " and ", to_string(shape(second, 0i32)), " elements"]))
+def lengths_differ[n, m](first: &tensor[n, i64], second: &tensor[m, i64]) -> bool = neq(shape(first, 0i32), shape(second, 0i32))
 def column_values(function: string, results: List[(string, i64)]) -> List[i64] = {
   bad = first_problem(results)
   if gte(bad, 0i64) then function |> domain_failure(element_detail(bad, index(results, bad).0)) |> fail else map(fn (result: (string, i64)) -> result.1, results)
@@ -318,13 +324,20 @@ def dates_business_day_roll[n](cal: BusinessCalendar, ds: Dates[n], roll: Busine
   |> dates_from_epoch_days
 }
 def dates_business_day_offset[n](cal: BusinessCalendar, ds: Dates[n], offsets: &tensor[n, i64], start: NonBusinessStart) -> Dates[n] = {
-  results = map(fn (pair: (i64, i64)) -> offset_of(cal, pair.0, pair.1, start), zip(to_list(dates_epoch_days(ds)), to_list(offsets)))
-  "dates_business_day_offset"
-  |> column_values(results)
-  |> to_tensor
-  |> dates_from_epoch_days
+  days = dates_epoch_days(ds)
+  if lengths_differ(days, offsets) then fail(length_failure("dates_business_day_offset", days, offsets)) else {
+    results = map(fn (pair: (i64, i64)) -> offset_of(cal, pair.0, pair.1, start), zip(to_list(days), to_list(offsets)))
+    "dates_business_day_offset"
+    |> column_values(results)
+    |> to_tensor
+    |> dates_from_epoch_days
+  }
 }
 def dates_business_day_count[n](cal: BusinessCalendar, begins: Dates[n], ends: Dates[n]) -> tensor[n, i64] = {
-  results = map(fn (pair: (i64, i64)) -> count_of(cal, pair.0, pair.1), zip(to_list(dates_epoch_days(begins)), to_list(dates_epoch_days(ends))))
-  "dates_business_day_count" |> column_values(results) |> to_tensor
+  firsts = dates_epoch_days(begins)
+  lasts = dates_epoch_days(ends)
+  if lengths_differ(firsts, lasts) then fail(length_failure("dates_business_day_count", firsts, lasts)) else {
+    results = map(fn (pair: (i64, i64)) -> count_of(cal, pair.0, pair.1), zip(to_list(firsts), to_list(lasts)))
+    "dates_business_day_count" |> column_values(results) |> to_tensor
+  }
 }

@@ -244,14 +244,14 @@ fn stdlib_closure_preserves_all_final_registered_source_identities() {
             .iter()
             .filter(|(kind, _)| kind == "std-def-numeric")
             .count(),
-        250
+        281
     );
     assert_eq!(
         expected
             .iter()
             .filter(|(kind, _)| kind == "std-adt-numeric")
             .count(),
-        17
+        18
     );
     let actual = stdlib_rows(&repo_root())
         .into_iter()

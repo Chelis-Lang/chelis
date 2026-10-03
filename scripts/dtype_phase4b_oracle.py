@@ -345,6 +345,7 @@ EXPECTED_OP_MANIFESTS = {
 | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
 | `decimal::Decimal` | `Decimal { negative: bool, limb0: i64, limb1: i64, limb2: i64, limb3: i64, limb4: i64, scale: i64 }` |
 | `datetime/business::BusinessCalendar` | `BusinessCalendar { weekmask: Weekmask, holidays: List[i64], valid_from: i64, valid_until: i64 }` |
+| `datetime/columns::Durations` | `Durations { seconds: tensor[n,i64], nanoseconds: tensor[n,i64] }` |
 | `datetime::Date` | `Date { epoch_day: i64 }` |
 | `datetime::Time` | `Time { nanosecond_of_day: i64 }` |
 | `datetime::DateTime` | `DateTime { epoch_day: i64, nanosecond_of_day: i64 }` |
@@ -391,6 +392,37 @@ EXPECTED_OP_MANIFESTS = {
 | `datetime/clock::clock_now` | `()->Instant!{IO}` |
 | `datetime/clock::monotonic_now` | `()->MonotonicInstant!{IO}` |
 | `datetime/clock::monotonic_until` | `(MonotonicInstant,MonotonicInstant)->Duration` |
+| `datetime/columns::dates_add_days` | `(Dates[n],&tensor[n,i64])->Dates[n]` |
+| `datetime/columns::dates_add_months` | `(Dates[n],&tensor[n,i64],DayOverflow)->Dates[n]` |
+| `datetime/columns::dates_day` | `(Dates[n])->tensor[n,i64]` |
+| `datetime/columns::dates_day_of_year` | `(Dates[n])->tensor[n,i64]` |
+| `datetime/columns::dates_days_until` | `(Dates[n],Dates[n])->tensor[n,i64]` |
+| `datetime/columns::dates_from_ymd` | `(&tensor[n,i64],&tensor[n,i64],&tensor[n,i64])->Dates[n]` |
+| `datetime/columns::dates_gt` | `(Dates[n],Dates[n])->tensor[n,bool]` |
+| `datetime/columns::dates_gte` | `(Dates[n],Dates[n])->tensor[n,bool]` |
+| `datetime/columns::dates_lt` | `(Dates[n],Dates[n])->tensor[n,bool]` |
+| `datetime/columns::dates_lte` | `(Dates[n],Dates[n])->tensor[n,bool]` |
+| `datetime/columns::dates_month` | `(Dates[n])->tensor[n,i64]` |
+| `datetime/columns::dates_to_strings` | `(Dates[n])->List[string]` |
+| `datetime/columns::dates_weekday_iso_number` | `(Dates[n])->tensor[n,i64]` |
+| `datetime/columns::dates_year` | `(Dates[n])->tensor[n,i64]` |
+| `datetime/columns::durations` | `(&tensor[n,i64],&tensor[n,i64])->Durations[n]` |
+| `datetime/columns::durations_nanoseconds` | `(Durations[n])->tensor[n,i64]` |
+| `datetime/columns::durations_seconds` | `(Durations[n])->tensor[n,i64]` |
+| `datetime/columns::instants_add_duration` | `(Instants[n],Durations[n])->Instants[n]` |
+| `datetime/columns::instants_from_unix_count` | `(&tensor[n,i64],TimeUnit)->Instants[n]` |
+| `datetime/columns::instants_gt` | `(Instants[n],Instants[n])->tensor[n,bool]` |
+| `datetime/columns::instants_gte` | `(Instants[n],Instants[n])->tensor[n,bool]` |
+| `datetime/columns::instants_lt` | `(Instants[n],Instants[n])->tensor[n,bool]` |
+| `datetime/columns::instants_lte` | `(Instants[n],Instants[n])->tensor[n,bool]` |
+| `datetime/columns::instants_round_to` | `(Instants[n],Duration,Rounding)->Instants[n]` |
+| `datetime/columns::instants_seconds_since_f64` | `(Instants[n],Instant)->tensor[n,f64]` |
+| `datetime/columns::instants_to_dates_at` | `(Instants[n],Offset)->Dates[n]` |
+| `datetime/columns::instants_to_unix_count` | `(Instants[n],TimeUnit,Rounding)->tensor[n,i64]` |
+| `datetime/columns::instants_until` | `(Instants[n],Instants[n])->Durations[n]` |
+| `datetime/columns::try_dates_from_ymd` | `(&tensor[n,i64],&tensor[n,i64],&tensor[n,i64])->(Dates[n],tensor[n,bool])` |
+| `datetime/columns::try_durations` | `(&tensor[n,i64],&tensor[n,i64])->(Durations[n],tensor[n,bool])` |
+| `datetime/columns::try_parse_dates` | `(List[string])->(Dates[n],tensor[n,bool])` |
 | `datetime::date` | `(i64,i64,i64)->Date` |
 | `datetime::date_add_days` | `(Date,i64)->Date` |
 | `datetime::date_add_months` | `(Date,i64,DayOverflow)->Date` |
@@ -935,10 +967,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 250 or len(set(identities)) != 250:
+    if len(identities) != 281 or len(set(identities)) != 281:
         violations.append(
             "[05-OP-35] stdlib numeric manifest must have exactly two hundred "
-            "fifty unique identities"
+            "eighty-one unique identities"
         )
 
 
@@ -2482,6 +2514,7 @@ def validate_normative_contract(
             "`datetime::Date`",
             "`datetime::Instants`",
             "`datetime/business::BusinessCalendar`",
+            "`datetime/columns::Durations`",
             "accepts every representable declared field tuple",
             "validation and normalization belong to named stdlib functions",
             "A public signature is numeric when any reachable field of an admitted ADT",
@@ -2498,7 +2531,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the two hundred fifty final exported stdlib numeric definitions",
+            "exactly the two hundred eighty-one final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "
@@ -2520,8 +2553,8 @@ def validate_normative_contract(
             "`tensor/construct::stack` | "
             "`(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "Every primitive-width intermediate in a graph whose contract names a dtype",
-            "The `datetime::*`, `datetime/business::*`, `datetime/clock::*`, and "
-            "`datetime/zone::*` identities follow [05-OP-73]",
+            "The `datetime::*`, `datetime/business::*`, `datetime/clock::*`, "
+            "`datetime/columns::*`, and `datetime/zone::*` identities follow [05-OP-73]",
             "The `decimal::*` identities follow [05-OP-76]",
             "integer primitive arithmetic is checked",
             "JSON access follows [05-OP-2..5]",
@@ -2719,8 +2752,8 @@ def validate_normative_contract(
         ),
         "05-OP-73": (
             "governs exactly the `datetime::*`, `datetime/business::*`, "
-            "`datetime/clock::*`, and `datetime/zone::*` identities of the [05-OP-34] "
-            "and [05-OP-35] registries",
+            "`datetime/clock::*`, `datetime/columns::*`, and `datetime/zone::*` "
+            "identities of the [05-OP-34] and [05-OP-35] registries",
             "A day of the horizon is a business day when the weekmask includes its "
             "weekday and it is not a holiday",
             "so two calendars with the same business days, weekmask, and horizon are "
@@ -2740,6 +2773,23 @@ def validate_normative_contract(
             "is empty",
             "the call fails `domain` naming the lowest such element index and the "
             "twin's detail there",
+            "Each `datetime/columns::*` callable is the elementwise form of the scalar "
+            "callable named below, its twin",
+            "A call fails exactly when the twin fails at some index; it then fails with "
+            "the twin's kind for the lowest such index `k` and the twin's detail prefixed "
+            "`element k: `, under the column callable's name",
+            "A column callable fails `domain` before it reads any element when a column "
+            "argument's length differs from another argument's",
+            "it first fails `domain` with the twin's detail and no element prefix when "
+            "`inc` is not positive or does not divide 86 400 seconds, whatever the column "
+            "holds",
+            "`instants_seconds_since_f64(is,origin)` is "
+            "`duration_to_seconds_f64(instant_until(origin,i))` for each instant `i`, bit "
+            "for bit",
+            "return the column with a `tensor[n,bool]` mask that is false exactly where "
+            "the twin fails",
+            "Every callable consumes its column arguments and borrows its tensor "
+            "arguments",
             "The calendar is proleptic Gregorian with astronomical year numbering",
             "The timescale is POSIX: every day has exactly 86 400 seconds",
             "-4 371 587..2 932 896",
