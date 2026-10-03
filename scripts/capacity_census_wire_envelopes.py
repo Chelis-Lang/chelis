@@ -257,6 +257,7 @@ def dag_cases():
     add("softmax", softmax, True)
     for label, target, value in (
         ("axis", "op", {"kind": "softmax", "axis": 1}),
+        ("negative-axis", "op", {"kind": "softmax", "axis": -1}),
         ("arity", "inputs", []),
         ("dtype", "output_type", {"dims": [{"kind": "lit", "size": 2}], "precision": "i32"}),
         ("shape", "output_type", {"dims": [{"kind": "lit", "size": 3}], "precision": "f32"}),

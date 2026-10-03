@@ -6885,7 +6885,9 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
             },
         },
         RiscOp::Relu => WireRiscOp::Relu,
-        RiscOp::Softmax { axis } => WireRiscOp::Softmax { axis: *axis },
+        RiscOp::Softmax { axis } => WireRiscOp::Softmax {
+            axis: i32::try_from(*axis).expect("normalized softmax axis is i32"),
+        },
         RiscOp::ReluAdjoint => WireRiscOp::ReluAdjoint,
         RiscOp::Neg => WireRiscOp::Neg,
         RiscOp::Recip => WireRiscOp::Recip,

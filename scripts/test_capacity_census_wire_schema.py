@@ -412,7 +412,7 @@ class SchemaCases(unittest.TestCase):
                 ]
                 self.assertTrue(any(c.expected is not None for c in selected))
                 self.assertTrue(any(c.expected is None for c in selected))
-            future = f"{carrier}/json/version-25"
+            future = f"{carrier}/json/version-26"
             self.assertIsNone(next(c for c in cases if c.identity == future).expected)
 
     def test_source_coordinates_preserve_point_empty_absent_and_checked_access(self):
@@ -570,7 +570,7 @@ class SchemaCases(unittest.TestCase):
         self.assertIsNone(cases["WireDag/json/version-24"].expected)
         self.assertIsNone(cases["WireDag/json/version-26"].expected)
         self.assertIsNotNone(cases["WireDag/json/softmax"].expected)
-        for label in ("axis", "arity", "dtype", "shape"):
+        for label in ("axis", "negative-axis", "arity", "dtype", "shape"):
             self.assertIsNone(cases[f"WireDag/json/softmax-invalid-{label}"].expected)
         for codec in ("json", "construct", "admit"):
             for owner in ("expand", "reshape", "pad", "shrink", "stride"):

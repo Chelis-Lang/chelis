@@ -2888,7 +2888,8 @@ impl WireDag {
 
             if let WireRiscOp::Softmax { axis } = node.op {
                 if node.inputs.len() != 1
-                    || axis >= node.output_type.dims.len()
+                    || axis < 0
+                    || usize::try_from(axis).map_or(true, |axis| axis >= node.output_type.dims.len())
                     || !Prim::parse_interchange_name(&node.output_type.precision)
                         .is_some_and(|p| p.is_float())
                     || {
@@ -4061,7 +4062,7 @@ pub enum WireRiscOp {
     Relu,
     ReluAdjoint,
     Softmax {
-        axis: usize,
+        axis: i32,
     },
     Neg,
     Recip,

@@ -35,6 +35,7 @@ def operation_contracts():
         ("ScatterElements.axis", 66, "indexed_tensor(arguments...)", False),
         ("Shape.axis", 7, "axis-domain `i32`", False),
         ("Sum.axis", 30, "sum(x, axes...", False),
+        ("Softmax.axis", 48, "Softmax\'s axis obeys", False),
     )
     result = []
     for field, number, anchor, many in rows:

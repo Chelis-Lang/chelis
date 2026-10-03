@@ -209,7 +209,8 @@ IR/specialization marker and backends must not receive it after specialization.
 
 Version 24 adds `Tanh` and its fused step under [05-OP-46]. Version 25 adds
 `Softmax { axis }` under [05-OP-48], with one same-shape/dtype floating input and
-a normalized in-range axis. An invalid axis, non-float dtype, input cardinality,
+a normalized nonnegative axis-domain i32, exactly registered to [05-OP-48].
+An invalid axis, non-float dtype, input cardinality,
 or shape/dtype mismatch is rejected before IR construction. Its identity survives
 AD and batching; backend preparation applies the normative forward decomposition.
 
