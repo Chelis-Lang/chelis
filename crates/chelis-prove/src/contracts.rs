@@ -251,16 +251,7 @@ fn standard_contracts_selected(
                         implementation,
                         samples,
                         seed,
-                    } => fuzz_invariant(
-                        spec.id,
-                        spec.description,
-                        spec.assumption,
-                        implementation,
-                        samples,
-                        seed,
-                        &widths,
-                        runtime,
-                    ),
+                    } => fuzz_invariant(spec, implementation, samples, seed, &widths, runtime),
                     DischargeSpec::Smt => smt_invariant(spec.id, spec.description, spec.assumption),
                 })
                 .collect::<Vec<_>>();
@@ -370,15 +361,14 @@ fn smt_invariant(id: &str, description: &str, assumption: &str) -> ContractInvar
 }
 
 fn fuzz_invariant(
-    id: &str,
-    description: &str,
-    assumption: &str,
+    spec: &InvariantSpec,
     implementation: &str,
     samples: usize,
     seed: u64,
     widths: &[Prim],
     runtime: &'static EmbeddedRuntime,
 ) -> ContractInvariant {
+    let (id, description, assumption) = (spec.id, spec.description, spec.assumption);
     ContractInvariant {
         id: id.to_string(),
         description: description.to_string(),
