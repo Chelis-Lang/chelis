@@ -1811,3 +1811,360 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
         failures.join("\n")
     );
 }
+
+// ---- chelis#2957: eval/C parity through a built static library ----
+//
+// The oracles below build one `chelis build` static library (the shipped
+// profile) and call it from a C driver that passes every input as run-time
+// storage bits, so the C compiler cannot fold a call whose argument it cannot
+// see. Each result is compared bit for bit with eval.
+
+fn width_named(name: &str) -> &'static NanWidth {
+    NAN_WIDTHS
+        .iter()
+        .find(|width| width.name == name)
+        .unwrap_or_else(|| panic!("no float width {name}"))
+}
+
+fn mangled(name: &str) -> String {
+    let hex: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
+    format!("chelis_fn_{hex}")
+}
+
+/// The C expression for a scalar argument given as `width`'s storage bits.
+fn c_scalar_arg(width: &NanWidth, bits: u64) -> String {
+    match width.name {
+        "f32" => format!("f32_of(UINT32_C({bits:#x}))"),
+        "f64" => format!("f64_of(UINT64_C({bits:#x}))"),
+        _ => format!("(uint16_t){bits:#x}"),
+    }
+}
+
+/// The C expression for a scalar result's storage bits.
+fn c_scalar_bits(width: &NanWidth, call: &str) -> String {
+    match width.name {
+        "f32" => format!("(unsigned long long)f32_bits({call})"),
+        "f64" => format!("(unsigned long long)f64_bits({call})"),
+        _ => format!("(unsigned long long){call}"),
+    }
+}
+
+/// Driver lines calling the scalar `def` once per input, printing
+/// `label i bits`.
+fn c_scalar_calls(label: &str, def: &str, width: &NanWidth, inputs: &[u64]) -> String {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(index, bits)| {
+            let call = format!("{}({})", mangled(def), c_scalar_arg(width, *bits));
+            format!(
+                "    printf(\"{label} {index} %llx\\n\", {});\n",
+                c_scalar_bits(width, &call)
+            )
+        })
+        .collect()
+}
+
+/// Driver lines passing `inputs` to the tensor `def` as one rank-1 tensor,
+/// printing each result element as `label i bits`.
+fn c_tensor_call(label: &str, def: &str, width: &NanWidth, inputs: &[u64]) -> String {
+    let n = inputs.len();
+    let data = inputs
+        .iter()
+        .map(|bits| format!("{bits:#x}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "    {{ static const {storage} d[{n}] = {{ {data} }}; static const int64_t shape[1] = {{ {n} }};\n      \
+         chelis_tensor *r = {def}(chelis_tensor_entry_borrow(1, shape, {dtype}, d, sizeof d));\n      \
+         const {storage} *o = (const {storage} *)chelis_tensor_read_view(r).data;\n      \
+         for (int i = 0; i < {n}; ++i) printf(\"{label} %d %llx\\n\", i, (unsigned long long)o[i]); }}\n",
+        storage = width.storage,
+        dtype = width.dtype,
+        def = mangled(def),
+    )
+}
+
+/// Build `program` as the static library `lib<stem>.a`, link a driver whose
+/// `main` runs `body`, run it, and return the build's `Compiler:` line with
+/// every printed `label i bits` result keyed by `label i`.
+fn run_static_library(
+    stem: &str,
+    program: &str,
+    body: &str,
+) -> (String, std::collections::BTreeMap<String, u64>) {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join(format!("{stem}.ch"));
+    let out = dir.path().join("out");
+    fs::write(&file, program).unwrap();
+    let built = build(&file, &out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Built static library"));
+    let compiler = String::from_utf8_lossy(&built.get_output().stdout)
+        .lines()
+        .find(|line| line.starts_with("Compiler: "))
+        .expect("the build reports its C compiler")
+        .to_string();
+    let driver = format!(
+        "#include <stdio.h>\n#include <stdint.h>\n#include <string.h>\n\
+         #include \"chelis_runtime.h\"\n#include \"{stem}.h\"\n\
+         static float f32_of(uint32_t b) {{ float x; memcpy(&x, &b, 4); return x; }}\n\
+         static double f64_of(uint64_t b) {{ double x; memcpy(&x, &b, 8); return x; }}\n\
+         static uint32_t f32_bits(float x) {{ uint32_t b; memcpy(&b, &x, 4); return b; }}\n\
+         static uint64_t f64_bits(double x) {{ uint64_t b; memcpy(&b, &x, 8); return b; }}\n\
+         int main(void) {{\n{body}    return 0;\n}}\n"
+    );
+    fs::write(out.join("driver.c"), driver).unwrap();
+    assert!(
+        link_static_library_driver(&out, &format!("lib{stem}.a"), false),
+        "the {stem} driver must link"
+    );
+    let run = Process::new(out.join("driver")).output().unwrap();
+    assert!(run.status.success(), "{run:?}");
+    let results = String::from_utf8(run.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let (key, bits) = line.rsplit_once(' ').expect("`label i bits`");
+            (key.to_string(), u64::from_str_radix(bits, 16).unwrap())
+        })
+        .collect();
+    (compiler, results)
+}
+
+/// The bits the driver printed for `label i`.
+fn c_result(results: &std::collections::BTreeMap<String, u64>, label: &str, index: usize) -> u64 {
+    *results
+        .get(&format!("{label} {index}"))
+        .unwrap_or_else(|| panic!("the driver printed no `{label} {index}`"))
+}
+
+/// `body` (over `x`) applied by eval to the rank-1 `width` tensor `inputs`.
+fn eval_tensor_body(helpers: &str, body: &str, width: &NanWidth, inputs: &[u64]) -> Vec<u64> {
+    let (n, name) = (inputs.len(), width.name);
+    let source =
+        format!("{helpers}def main(x: tensor[{n}, {name}]) -> tensor[{n}, {name}] = {body}\n");
+    nan_eval_bits(&source, &[("x", width, inputs.to_vec())], width)
+}
+
+/// Compare every `(what, C bits, eval bits)` triple and fail with all
+/// disagreements.
+fn assert_lanes_agree(oracle: &str, rows: Vec<(String, u64, u64)>) {
+    assert!(!rows.is_empty(), "{oracle}: nothing was compared");
+    let failures: Vec<String> = rows
+        .iter()
+        .filter(|(_, c, eval)| c != eval)
+        .map(|(what, c, eval)| format!("{what}: C {c:#x}, eval {eval:#x}"))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{oracle}: {} of {} results disagree:\n{}",
+        failures.len(),
+        rows.len(),
+        failures.join("\n")
+    );
+}
+
+fn f32_bits_of(values: &[f64]) -> Vec<u64> {
+    values
+        .iter()
+        .map(|value| u64::from((*value as f32).to_bits()))
+        .collect()
+}
+
+fn f64_bits_of(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|value| value.to_bits()).collect()
+}
+
+/// A finite value as a Surf literal of `width` that names it exactly.
+fn exact_literal(width: &NanWidth, bits: u64) -> String {
+    let (magnitude, negative) = match width.name {
+        "f32" => {
+            let x = f32::from_bits(u32::try_from(bits).unwrap());
+            (format!("{:?}f32", x.abs()), x.is_sign_negative())
+        }
+        "f64" => {
+            let x = f64::from_bits(bits);
+            (format!("{:?}f64", x.abs()), x.is_sign_negative())
+        }
+        other => panic!("no exact literal spelling at {other}"),
+    };
+    if negative {
+        format!("neg({magnitude})")
+    } else {
+        magnitude
+    }
+}
+
+/// `chelis eval --json` of `source`, returning root `name`'s tensor bits.
+fn cli_eval_bits(source: &str, name: &str) -> Vec<u64> {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("reference.ch");
+    fs::write(&file, source).unwrap();
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", file.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let root = value["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|root| root["name"] == name)
+        .unwrap_or_else(|| panic!("no eval root {name}: {value}"));
+    root["value"]["value"]["data"]["bits"]
+        .as_array()
+        .expect("tensor bits")
+        .iter()
+        .map(|bits| u64::from_str_radix(bits.as_str().unwrap(), 16).unwrap())
+        .collect()
+}
+
+/// chelis#2952's f32 inputs: the issue's six `normal_cdf` witnesses and its
+/// `sigmoid` witness, `1.72889078` (whose `exp(-x)` is the issue's misrounded
+/// `expf(-1.72889078)`), then inputs at which macOS libm misrounds the `exp`
+/// inside `normal_cdf` and `gelu` (found by scanning each graph's `exp`
+/// argument against an MPFR-backed reference).
+const COMPOUND_WITNESSES_F32: [f64; 14] = [
+    -1.335_994_482_040_405_3,
+    -0.461_234_301_328_659_06,
+    -1.219_169_020_652_771,
+    0.919_759_511_947_631_8,
+    -0.335_103_929_042_816_16,
+    0.031_051_857_396_960_26,
+    0.048_035_141_1,
+    1.728_890_78,
+    1.851_996_064_186_096_2,
+    0.053_997_941_315_174_1,
+    1.121_795_654_296_875,
+    0.580_531_716_346_740_7,
+    1.759_212_017_059_326_2,
+    3.211_342_573_165_893_6,
+];
+
+/// chelis#2952's f64 inputs: `0x1.93179431561a0p-2` (whose `exp(-x)` is the
+/// issue's misrounded `exp(-0x1.93179431561a0p-2)`), then inputs at which macOS
+/// libm misrounds the `exp` inside `normal_cdf` and `gelu`.
+fn compound_witnesses_f64() -> Vec<f64> {
+    let mut values = vec![
+        f64::from_bits(0x3fd9_3179_4315_61a0),
+        -2.908_605_891_044_485,
+        1.511_954_080_226_180_6,
+        1.838_723_303_506_749_4,
+        0.491_156_805_196_720_1,
+        0.081_570_304_728_129_1,
+        1.587_021_571_239_189_3,
+    ];
+    values.extend(COMPOUND_WITNESSES_F32);
+    values
+}
+
+/// chelis#2952: every zero-ULP compound that embeds `exp` (`sigmoid`, `silu`,
+/// `gelu`, `tanh`, `softmax`, `Std.Contracts.normal_cdf`) agrees bit for bit
+/// between eval and a built static library at f32 and f64, at the shipped
+/// optimization level, with each input supplied at run time as a scalar
+/// argument and as a tensor element (softmax: the pair `[0, -x]`, so its
+/// `exp(-x)` meets the witness). The inputs are where platform libm misrounds
+/// the embedded `exp`.
+#[test]
+fn compound_activations_match_eval_on_libm_misrounding_inputs_through_the_static_library_abi() {
+    const UNARY: [&str; 4] = ["sigmoid", "silu", "gelu", "tanh"];
+    let widths = [
+        (width_named("f32"), f32_bits_of(&COMPOUND_WITNESSES_F32)),
+        (width_named("f64"), f64_bits_of(&compound_witnesses_f64())),
+    ];
+    let mut program = String::from("import Std.Contracts (normal_cdf)\n");
+    let mut body = String::new();
+    for (width, inputs) in &widths {
+        let (w, n) = (width.name, inputs.len());
+        for op in UNARY {
+            program.push_str(&format!(
+                "def s_{op}_{w}(x: {w}) -> {w} = {op}(x)\n\
+                 def t_{op}_{w}(x: tensor[{n}, {w}]) -> tensor[{n}, {w}] = {op}(x)\n"
+            ));
+            body.push_str(&c_scalar_calls(
+                &format!("s_{op}_{w}"),
+                &format!("s_{op}_{w}"),
+                width,
+                inputs,
+            ));
+            body.push_str(&c_tensor_call(
+                &format!("t_{op}_{w}"),
+                &format!("t_{op}_{w}"),
+                width,
+                inputs,
+            ));
+        }
+        program.push_str(&format!(
+            "def s_ncdf_{w}(x: {w}) -> {w} = normal_cdf(x)\n\
+             def t_softmax_{w}(x: tensor[2, {w}]) -> tensor[2, {w}] = softmax(x, 0i32)\n"
+        ));
+        body.push_str(&c_scalar_calls(
+            &format!("s_ncdf_{w}"),
+            &format!("s_ncdf_{w}"),
+            width,
+            inputs,
+        ));
+        for (index, bits) in inputs.iter().enumerate() {
+            body.push_str(&c_tensor_call(
+                &format!("t_softmax_{w}_{index}"),
+                &format!("t_softmax_{w}"),
+                width,
+                &[0, bits ^ width.sign()],
+            ));
+        }
+    }
+    let (_, c) = run_static_library("compound_parity", &program, &body);
+
+    let mut rows = Vec::new();
+    for (width, inputs) in &widths {
+        let w = width.name;
+        for op in UNARY {
+            let eval = eval_tensor_body("", &format!("{op}(x)"), width, inputs);
+            for (index, (input, expected)) in inputs.iter().zip(&eval).enumerate() {
+                for lane in ["s", "t"] {
+                    let label = format!("{lane}_{op}_{w}");
+                    rows.push((
+                        format!("{label}({input:#x})"),
+                        c_result(&c, &label, index),
+                        *expected,
+                    ));
+                }
+            }
+        }
+        let calls = inputs
+            .iter()
+            .map(|bits| format!("normal_cdf({})", exact_literal(width, *bits)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let eval = cli_eval_bits(
+            &format!("import Std.Contracts (normal_cdf)\nreference = to_tensor([{calls}])\n"),
+            "reference",
+        );
+        for (index, (input, expected)) in inputs.iter().zip(&eval).enumerate() {
+            let label = format!("s_ncdf_{w}");
+            rows.push((
+                format!("{label}({input:#x})"),
+                c_result(&c, &label, index),
+                *expected,
+            ));
+        }
+        for (index, bits) in inputs.iter().enumerate() {
+            let pair = [0, bits ^ width.sign()];
+            let eval = eval_tensor_body("", "softmax(x, 0i32)", width, &pair);
+            for (element, expected) in eval.iter().enumerate() {
+                let label = format!("t_softmax_{w}_{index}");
+                rows.push((
+                    format!("{label}[{element}]({pair:#x?})"),
+                    c_result(&c, &label, element),
+                    *expected,
+                ));
+            }
+        }
+    }
+    assert_lanes_agree("chelis#2952 compounds", rows);
+}
