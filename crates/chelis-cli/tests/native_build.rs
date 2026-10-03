@@ -232,13 +232,15 @@ fn hip_and_metal_build_commands_include_support_and_ordered_flags() {
         "out = add(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
     )
     .unwrap();
+    // Native tools run with an allowlisted environment, so the recording
+    // compiler finds its log beside itself rather than through a variable.
     let compiler = dir.path().join("recording compiler");
-    let log = dir.path().join("argv");
+    let log = dir.path().join("recording compiler.argv");
     executable_script(
         &compiler,
         r#"
 if [ "$1" = "--version" ]; then echo 'clang version test'; exit 0; fi
-printf '%s\n' "$@" > "$NATIVE_TEST_LOG"
+printf '%s\n' "$@" > "$0.argv"
 while [ "$#" -gt 0 ]; do
     if [ "$1" = "-o" ]; then shift; cp /usr/bin/true "$1"; exit 0; fi
     shift
@@ -250,7 +252,6 @@ exit 1"#,
         build(&file, &out)
             .args(["--target", target])
             .env(override_var, &compiler)
-            .env("NATIVE_TEST_LOG", &log)
             .assert()
             .success();
         let argv = fs::read_to_string(&log).unwrap();
@@ -273,7 +274,6 @@ exit 1"#,
         let output = build(&file, &out)
             .args(["--target", target])
             .env(override_var, &compiler)
-            .env("NATIVE_TEST_LOG", &log)
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
