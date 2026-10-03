@@ -102,17 +102,32 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         # chelis#2964 moved C subtraction onto the shared [04-NUM-2] NaN
-        # finalizer: f32/f64 results pass through the fp_env helpers and the
-        # f16/bf16 narrowing stores emit their canonical encodings.
+        # finalizer: every f32/f64 result passes through the one finalization
+        # point `fp_env::finalize_float` with the finalization its operation's
+        # classification selects, and the f16/bf16 narrowing stores emit their
+        # canonical encodings.
         SourceContract(
             "C subtraction canonical NaNs",
             "crates/chelis-backend-c/src/emit.rs",
             (
                 'if is_float && matches!(op, "+" | "-" | "*" | "/") {',
-                'return crate::fp_env::canonical_nan(&format!("({lhs}) {op} ({rhs})"), is_f64);',
+                'return finalize_elem(nan, format!("({lhs}) {op} ({rhs})"), ty);',
                 'format!("{store}(__av {op} __bv)")',
-                "FusedStepOp::MaxElem | FusedStepOp::MinElem => raw,\n"
-                "            _ => crate::fp_env::canonical_nan(&raw, is_f64),",
+                "self.nan_finalization = crate::fp_env::risc_nan_finalization(&node.op);",
+                "crate::fp_env::finalize_float(&expr, false, finalization)",
+                "(Some(finalization), Prim::F64) => crate::fp_env::finalize_float(&expr, true, finalization),",
+                "crate::fp_env::finalize_float(&raw, is_f64, crate::fp_env::fused_step_nan_finalization(op))",
+            ),
+        ),
+        SourceContract(
+            "C subtraction NaN classification",
+            "crates/chelis-backend-c/src/fp_env.rs",
+            (
+                'NanFinalization::Canonical => format!("{}({expr})", canonical_nan_helper(is_f64)),',
+                "        RiscOp::Add\n        | RiscOp::Sub\n",
+                "FusedStepOp::MaxElem | FusedStepOp::MinElem => NanFinalization::BitPreserving,\n"
+                "        FusedStepOp::Add\n"
+                "        | FusedStepOp::Sub\n",
             ),
         ),
         SourceContract(

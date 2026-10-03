@@ -173,6 +173,52 @@ class SourceContractMutationTests(unittest.TestCase):
         ):
             oracle.validate_source_contracts(self.repo)
 
+    def test_c_subtraction_skipping_the_finalization_point_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/emit.rs",
+            'return finalize_elem(nan, format!("({lhs}) {op} ({rhs})"), ty);',
+            'return format!("({lhs}) {op} ({rhs})");',
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction canonical NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_finalization_point_removal_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/fp_env.rs",
+            'NanFinalization::Canonical => format!("{}({expr})", canonical_nan_helper(is_f64)),',
+            "NanFinalization::Canonical => expr.to_string(),",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction NaN classification"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_subtraction_reclassified_bit_preserving_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/fp_env.rs",
+            "        RiscOp::Add\n        | RiscOp::Sub\n",
+            "        RiscOp::Add\n",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction NaN classification"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_fused_subtraction_reclassified_bit_preserving_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/fp_env.rs",
+            "FusedStepOp::MaxElem | FusedStepOp::MinElem => NanFinalization::BitPreserving,",
+            "FusedStepOp::MaxElem | FusedStepOp::MinElem | FusedStepOp::Sub => {\n"
+            "            NanFinalization::BitPreserving\n"
+            "        }",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction NaN classification"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
     def test_c_wide_nan_canonicalization_removal_fails(self) -> None:
         self.mutate(
             "crates/chelis-backend-c/src/fp_env.rs",
