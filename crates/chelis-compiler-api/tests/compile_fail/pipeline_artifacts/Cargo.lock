@@ -142,12 +142,12 @@ dependencies = [
 name = "chelis-backend-c"
 version = "0.18.12"
 dependencies = [
+ "chelis-crmath",
  "chelis-ir",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
  "half",
- "pkg-config",
  "sha2",
  "tree-sitter",
  "tree-sitter-c",
