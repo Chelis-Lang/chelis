@@ -2477,7 +2477,10 @@ pub(super) fn finish_unified_app(
                 }
             }
             "to_tensor" => {
-                if kids.get(1).is_some_and(|arg| static_to_tensor_shape_status(arg).is_err()) {
+                if kids
+                    .get(1)
+                    .is_some_and(|arg| static_to_tensor_shape_status(arg).is_err())
+                {
                     return report(
                         errors,
                         CheckError::new(

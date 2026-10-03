@@ -86,7 +86,10 @@ pub(super) fn static_to_tensor_shape_status(expr: &deep::Expr) -> Result<Option<
     for element in &elements {
         match static_to_tensor_shape_status(element)? {
             Some(shape) => {
-                if inner_shape.as_ref().is_some_and(|previous| previous != &shape) {
+                if inner_shape
+                    .as_ref()
+                    .is_some_and(|previous| previous != &shape)
+                {
                     return Err(());
                 }
                 inner_shape = Some(shape);

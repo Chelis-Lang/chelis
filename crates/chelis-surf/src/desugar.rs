@@ -1962,11 +1962,14 @@ impl DesugarCtx {
                         .unwrap_or_default(),
                 );
                 let body = match (self.top_level_binding_tensor_prec.get(name), value) {
-                    (Some(precision), Expr::List(items, _)) =>
-                        self.desugar_list_as_tensor_literal(items, precision, &[]),
+                    (Some(precision), Expr::List(items, _)) => {
+                        self.desugar_list_as_tensor_literal(items, precision, &[])
+                    }
                     _ if !self.explicit_sig_names.contains(name)
                         && is_bare_numeric_tensor_literal(value) =>
-                        self.desugar_default_tensor_binding(value),
+                    {
+                        self.desugar_default_tensor_binding(value)
+                    }
                     _ => self.desugar_expr(value),
                 };
                 self.current_type_binders.replace(restore_binders);
@@ -3233,8 +3236,23 @@ fn is_bare_numeric_tensor_literal(expr: &Expr) -> bool {
     fn numeric_leaf_or_list(expr: &Expr) -> bool {
         match expr {
             Expr::List(items, _) => !items.is_empty() && items.iter().all(numeric_leaf_or_list),
-            Expr::Lit(Literal::Int(_) | Literal::Float(_) | Literal::TypedInt(_, _) | Literal::TypedFloat(_, _), _) => true,
-            Expr::Unary(UnaryOp::Neg, inner, _) => matches!(inner.as_ref(), Expr::Lit(Literal::Int(_) | Literal::Float(_) | Literal::TypedInt(_, _) | Literal::TypedFloat(_, _), _)),
+            Expr::Lit(
+                Literal::Int(_)
+                | Literal::Float(_)
+                | Literal::TypedInt(_, _)
+                | Literal::TypedFloat(_, _),
+                _,
+            ) => true,
+            Expr::Unary(UnaryOp::Neg, inner, _) => matches!(
+                inner.as_ref(),
+                Expr::Lit(
+                    Literal::Int(_)
+                        | Literal::Float(_)
+                        | Literal::TypedInt(_, _)
+                        | Literal::TypedFloat(_, _),
+                    _
+                )
+            ),
             _ => false,
         }
     }
@@ -3303,7 +3321,10 @@ impl DesugarCtx {
     /// dtype/default. Do not apply contextual adoption to explicit suffixes.
     fn desugar_default_tensor_binding(&self, value: &Expr) -> deep::Expr {
         attach_span_metadata(
-            node(DeepTag::App, vec![dvar("to_tensor"), self.desugar_expr(value)]),
+            node(
+                DeepTag::App,
+                vec![dvar("to_tensor"), self.desugar_expr(value)],
+            ),
             expr_span(value),
         )
     }
