@@ -237,28 +237,33 @@ fn emitted_f32_gradient_has_no_double_intermediate_or_f64_tag() {
 
 /// #2995's shapes, each `{t}`-parameterised: nested `grad`, `grad` of a def
 /// calling imported `Std.Scalar` defs, and `grad` of a def calling a local
-/// def. The C lane once refused the first two at f32 and f64 only.
-const GRAD_SHAPES: [(&str, &str); 3] = [
+/// def, with the gradients eval prints. The C lane once refused the first
+/// two at f32 and f64 only.
+const GRAD_SHAPES: [(&str, &str, &str); 3] = [
     (
         "nested",
         "module Probe.Case\ndef f(x: {t}) -> {t} = mul(mul(x, x), x)\ndef df(x: {t}) -> {t} = grad(f)(x)\nout = print(grad(df)(3.0{t}))\n",
+        "18.0\nout = ()\n",
     ),
     (
         "imported_std",
         "module Probe.Case\nimport Std.Scalar (abs, max)\ndef f(x: {t}) -> {t} = abs(x)\ndef h(x: {t}, y: {t}) -> {t} = max(x, y)\na = print(grad(f)(-2.0{t}))\nb = print(grad(h)(1.0{t}, 2.0{t}))\n",
+        "-1.0\n(0.0, 1.0)\na = ()\nb = ()\n",
     ),
     (
         "local",
         "module Probe.Case\ndef sq(x: {t}) -> {t} = mul(x, x)\ndef f(x: {t}) -> {t} = add(sq(x), x)\nout = print(grad(f)(3.0{t}))\n",
+        "7.0\nout = ()\n",
     ),
 ];
 
 #[test]
 fn every_grad_shape_builds_at_every_float_width_and_matches_eval() {
-    for (shape, template) in GRAD_SHAPES {
+    for (shape, template, expected) in GRAD_SHAPES {
         for dtype in ["f16", "bf16", "f32", "f64"] {
             let source = template.replace("{t}", dtype);
             let eval = eval_stdout(&source);
+            assert_eq!(eval, expected, "{shape} {dtype}:\n{source}");
             let built = common::build_and_run(&source, "p");
             assert_eq!(built, eval, "{shape} {dtype}:\n{source}");
         }
