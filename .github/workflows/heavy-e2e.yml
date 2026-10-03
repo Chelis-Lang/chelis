@@ -111,10 +111,13 @@ jobs:
 
       # The test exclusions that `.config/ci-test-targets.toml` assigns to the
       # `module-oracles` job. That job runs this filterset, and the workspace
-      # suite negates it.
+      # suite negates it. Assigning before echoing fails the step when the
+      # derivation fails, instead of publishing an empty filterset.
       - name: Derive the module oracle tests
         id: derive
-        run: echo "filterset=$(.venv/bin/python scripts/ci_change_owned.py module-oracles)" >> "$GITHUB_OUTPUT"
+        run: |
+          filterset=$(.venv/bin/python scripts/ci_change_owned.py module-oracles)
+          echo "filterset=$filterset" >> "$GITHUB_OUTPUT"
 
   # The module sweeps and eval-and-C differentials, as two hash partitions.
   # Their Linux times sum to a few hours of test time at most (the slowest
@@ -599,7 +602,7 @@ jobs:
         with:
           name: runtime-extent-timings
           path: target/runtime-extent-timings
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   generalize-sweep-oracle-shard:

@@ -6368,7 +6368,10 @@ name = {json.dumps(name)}
 
     def test_workflow_runs_and_negates_the_derived_filterset(self) -> None:
         heavy = (Path(__file__).resolve().parents[1] / ".github/workflows/heavy-e2e.yml").read_text()
-        self.assertIn("scripts/ci_change_owned.py module-oracles)", heavy)
+        self.assertIn(
+            "filterset=$(.venv/bin/python scripts/ci_change_owned.py module-oracles)\n", heavy
+        )
+        self.assertNotIn('echo "filterset=$(', heavy)
         self.assertEqual(heavy.count("${{ needs.module-oracles-plan.outputs.filterset }}"), 2)
 
     @staticmethod
@@ -6381,6 +6384,10 @@ name = {json.dumps(name)}
         return missing
 
     def test_repository_selection_names_existing_tests(self) -> None:
+        # A source-text check: per pull request it catches a renamed or
+        # deleted test. A test moved into a module or given #[ignore] still
+        # passes here; the nightly exact-selection check in
+        # test_nextest_profile_partition catches that drift (chelis#3024).
         root = Path(__file__).resolve().parents[1]
         config = owned.read_config(root / ".config/ci-test-targets.toml")
         tests = owned.module_oracle_tests(config)
