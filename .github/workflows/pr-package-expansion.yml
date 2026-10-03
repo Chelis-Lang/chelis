@@ -193,11 +193,7 @@ jobs:
 
       - name: Execute the informational package-expansion shard
         if: steps.shard-selection.outputs.has_targets == 'true'
-        # CC and CXX are step-scoped: in the job environment they would enter
-        # the Rust build cache key and miss the linux-workspace family.
         env:
-          CC: clang
-          CXX: clang++
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
           CHELIS_CI_TIMING_DIR: ${{ github.workspace }}/target/integration-change/package-expansion-${{ matrix.shard }}/census-timings
         run: >-

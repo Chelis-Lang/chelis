@@ -269,17 +269,16 @@ def assert_change_owned_topology(
     )
     test.assertEqual(expansion["timeout-minutes"], 90)
     test.assertEqual(expansion["env"]["CHELIS_TEST_CC"], "clang")
-    # The C compilers are scoped to the executor step: in the job environment
-    # they would enter the Rust build cache key and miss the workspace family.
-    test.assertNotIn("CC", expansion["env"])
-    test.assertNotIn("CXX", expansion["env"])
+    # Cargo builds here with the compilers the linux-workspace cache writer
+    # used; a different CC or CXX reruns every cc-rs build script on a hit.
     expansion_executor = next(
         step
         for step in expansion["steps"]
         if "scripts/ci_change_owned.py run-shard" in step.get("run", "")
     )
-    test.assertEqual(expansion_executor["env"]["CC"], "clang")
-    test.assertEqual(expansion_executor["env"]["CXX"], "clang++")
+    for scope in (expansion["env"], expansion_executor.get("env", {})):
+        test.assertNotIn("CC", scope)
+        test.assertNotIn("CXX", scope)
     test.assertFalse(expansion.get("continue-on-error", False))
     test.assertFalse(expansion["strategy"]["fail-fast"])
     test.assertEqual(expansion["strategy"]["matrix"]["shard"], SHARDS)

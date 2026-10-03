@@ -91,18 +91,17 @@ the nightly run (which opens/closes a tracking issue) or on demand via
 oracle, `clarabel`, the production `smt clarabel` config, Gappa
 `--check-only`, the Arb certifier, and `--features arb`.
 
-The full workflow restores the same `shared-key: smt-smt-build` cargo cache as
-the fast smoke lane. The key matches the required `smt-build` job's cache
-namespace (`key: smt` plus job id `smt-build`), so the optional lane reuses the
-cvc5 build cache and does not cold-build cvc5 before reaching its proof
-steps.
+The full workflow restores the `smt-smt-build` cargo cache family that
+`ci-cache-warm.yml` writes for the required `smt-build` job, under the same key,
+so the optional lane reuses the cvc5 build cache and does not cold-build cvc5
+before reaching its proof steps.
 
 The required `smt-build` job realizes the `ci-smt` Devenv profile only on the
 self-hosted runner, which substitutes it from the private Nix cache:
 `nix/ci-cvc5.nix` builds the locked CVC5 1.3.1, GMP, CaDiCaL and LibPoly
 archive/header tree, and Cargo consumes its `CVC5_DIR` without rebuilding it.
-The job's Devenv-prefixed Cargo namespace keeps those outputs apart from the
-native full-prove lane. GitHub-hosted runs of the same job keep main's toolchain and link the
+Self-hosted runs skip the GitHub Rust cache, so those Nix-built outputs never
+reach a hosted job's cache family. GitHub-hosted runs of the same job keep main's toolchain and link the
 prebuilt cvc5 stores described next.
 
 ### Durable prebuilt cvc5

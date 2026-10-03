@@ -8,12 +8,18 @@ that key from a ref the consumer can restore. These checks keep that true:
 
 * every cache step names its family through `shared-key` under one prefix,
   and a job that can land on a self-hosted runner skips the step there;
-* each family has exactly one writer job, which saves only from main;
-* read-only workflows (CI, Hull, package expansion) own no writer, and the
-  families they restore are written by ci-cache-warm.yml;
-* every job in a family agrees on each other key input the workflow controls;
+* each family has exactly one writer job, which saves only from main and only
+  after a successful build;
+* only the workflows in WRITERS may save a cache, each proven main-only from
+  its own triggers and checkouts; every other workflow either saves nothing or
+  holds `cache-mode: read`, and the families a read-only workflow restores are
+  written by ci-cache-warm.yml;
+* every job in a family declares the same key inputs and build environment;
 * ci-cache-warm.yml writes from main's own code only and repeats only commands
   its family's consumers run.
+
+The checks read what the workflows declare. An environment variable a step
+exports through GITHUB_ENV is outside them.
 """
 
 from __future__ import annotations
@@ -28,14 +34,24 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 WARM = "ci-cache-warm.yml"
-# Workflows that run candidate code and so hold `cache-mode: read`.
-READ_ONLY = ("ci.yml", "conformance.yml", "pr-package-expansion.yml")
+# The only workflows that may save a GitHub cache. Each must prove from its own
+# YAML that it saves from main's code only (assert_writers_save_from_main).
+WRITERS = (
+    WARM,
+    "conformance-nightly.yml",
+    "ecosystem-drift.yml",
+    "macos-nightly.yml",
+    # Saves the prebuilt cvc5 fallback; its Rust cache step only restores.
+    "smt-full-prove.yml",
+)
 
 PREFIX_KEY = "rust-v1-${{ runner.environment }}"
 MAIN_ONLY = "${{ github.ref == 'refs/heads/main' }}"
 SAVE_IF = (False, "false", MAIN_ONLY, "${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}")
 HOSTED = "runner.environment == 'github-hosted'"
 KEY_ENV = re.compile(r"^(CARGO|CC|CFLAGS|CXX|CMAKE|RUST)")
+# Variables a Cargo build, a build script or a C toolchain reads.
+BUILD_ENV = re.compile(r"^(CARGO|CC|CFLAGS|CXX|CMAKE|RUST|CPPFLAGS|LDFLAGS|LIBRARY_PATH|PKG_CONFIG|AR$|LD$|NM$|RANLIB$)")
 FAMILY = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:-\$\{\{ matrix\.[a-z_]+ \}\})?$")
 HOSTED_LABEL = re.compile(r"^(ubuntu|macos|windows)-[a-z0-9.]+$")
 # setup-project-ci installs the toolchain with this action on hosted runners.
@@ -62,6 +78,21 @@ def triggers(workflow: dict) -> dict:
 
 def is_cache(step: dict) -> bool:
     return str(step.get("uses", "")).lower().startswith("swatinem/rust-cache@")
+
+
+def saves(step: dict) -> bool:
+    """Whether a step can write a GitHub cache entry."""
+    uses = str(step.get("uses", "")).lower()
+    if is_cache(step):
+        return (step.get("with") or {}).get("save-if", True) not in (False, "false")
+    return uses.startswith(("actions/cache@", "actions/cache/save@"))
+
+
+def read_only(workflow: dict) -> bool:
+    """Whether GitHub refuses every save in the workflow."""
+    modes = [workflow.get("cache-mode")]
+    modes += [job.get("cache-mode", workflow.get("cache-mode")) for job in (workflow.get("jobs") or {}).values()]
+    return all(mode in ("read", "none") for mode in modes)
 
 
 def cache_steps(workflows: dict[str, dict]):
@@ -92,6 +123,11 @@ def assert_cache_steps_name_their_family(workflows: dict[str, dict]) -> None:
                 raise AssertionError(f"{where}: {override} would split the family's key")
         if "save-if" not in inputs or inputs["save-if"] not in SAVE_IF:
             raise AssertionError(f"{where}: save-if must be false or main-only, found {inputs.get('save-if')!r}")
+        if inputs.get("cache-on-failure", False) not in (False, "false"):
+            raise AssertionError(
+                f"{where}: save only after a successful build; rust-cache never re-saves "
+                "a key it restored exactly, so a partial entry would stay live"
+            )
         if not hosted_only_job(job):
             condition = str(step.get("if", ""))
             if condition != HOSTED and not condition.startswith(HOSTED + " && "):
@@ -117,35 +153,99 @@ def assert_one_writer_per_family(workflows: dict[str, dict]) -> None:
         if len(writers) != 1:
             raise AssertionError(f"{family} must have exactly one writer, found {writers}")
         name, job_id = writers[0]
-        if name in READ_ONLY:
-            raise AssertionError(f"{family}: {name}::{job_id} runs candidate code and must not write")
-        restored_by_candidates = any(member in READ_ONLY for member, _, _ in members)
+        restored_by_candidates = any(read_only(workflows[member]) for member, _, _ in members)
         if restored_by_candidates and name != WARM:
-            raise AssertionError(f"{family} is restored by candidate CI, so {WARM} must write it, not {name}")
-        if name != WARM and set(triggers(workflows[name])) - {"schedule", "workflow_dispatch"}:
-            raise AssertionError(f"{family}: {name} writes but is not a scheduled or manual workflow")
+            raise AssertionError(f"{family} is restored by read-only CI, so {WARM} must write it, not {name}")
 
 
-def setup_before(job: dict, index: int) -> list[str]:
-    """Toolchain installs ahead of the cache step, normalized to the action."""
+def own_checkout(step: dict) -> bool:
+    repository = (step.get("with") or {}).get("repository")
+    return repository in (None, "${{ github.repository }}", "Chelis-Lang/chelis")
+
+
+def assert_writers_save_from_main(workflows: dict[str, dict]) -> None:
+    """Fail closed: a workflow saves only if it is a WRITER proven main-only."""
+    for name, workflow in workflows.items():
+        saving = [
+            f"{job_id}: {step.get('name') or step.get('uses')}"
+            for job_id, job in (workflow.get("jobs") or {}).items()
+            for step in job.get("steps") or []
+            if saves(step)
+        ]
+        if name not in WRITERS:
+            # GitHub refuses saves under cache-mode read, but a Rust cache
+            # writer outside WRITERS is still a policy error.
+            rust_writer = any(
+                is_cache(step) and saves(step)
+                for job in (workflow.get("jobs") or {}).values()
+                for step in job.get("steps") or []
+            )
+            if rust_writer or (saving and not read_only(workflow)):
+                raise AssertionError(
+                    f"{name} is not in WRITERS, so it must save nothing or hold "
+                    f"cache-mode: read; it saves in {saving}"
+                )
+            continue
+        if not saving:
+            raise AssertionError(f"{name} is listed in WRITERS but saves nothing")
+        if read_only(workflow):
+            raise AssertionError(f"{name} is listed in WRITERS but holds cache-mode read")
+        events = triggers(workflow)
+        if set(events) - {"push", "schedule", "workflow_dispatch"}:
+            raise AssertionError(f"{name} writes caches, so it may run only on push to main, schedule and dispatch: {sorted(events)}")
+        if "push" in events:
+            push = events["push"] or {}
+            if push.get("branches") != ["main"] or set(push) - {"branches", "paths"}:
+                raise AssertionError(f"{name} writes caches, so it may push-trigger on main only")
+        for job_id, job in workflow["jobs"].items():
+            for step in job.get("steps") or []:
+                if not str(step.get("uses", "")).startswith("actions/checkout@"):
+                    continue
+                ref = str((step.get("with") or {}).get("ref", ""))
+                if own_checkout(step) and ref not in ("", "${{ github.sha }}"):
+                    raise AssertionError(f"{name}::{job_id} writes caches but checks out {ref!r} instead of the triggering commit")
+                if any(source in ref for source in ("inputs.", "github.event", "github.head_ref", "refs/pull", "pull/")):
+                    raise AssertionError(f"{name}::{job_id} writes caches but takes its checkout ref from {ref!r}")
+
+
+def setup_before(job: dict, index: int) -> list[tuple[str, str]]:
+    """Toolchain installs ahead of the cache step, normalized to the action.
+
+    rust-cache hashes each installed toolchain's rustc version, which the
+    action ref and its `toolchain` input select; components do not change it.
+    """
     installs = []
     for step in (job.get("steps") or [])[:index]:
         uses = str(step.get("uses", ""))
         if uses == "./.github/actions/setup-project-ci":
-            installs.append(SETUP_TOOLCHAIN)
+            installs.append((SETUP_TOOLCHAIN, ""))
         elif uses.startswith("dtolnay/rust-toolchain@"):
-            installs.append(uses)
+            installs.append((uses, str((step.get("with") or {}).get("toolchain", ""))))
     return installs
+
+
+def build_env(workflow: dict, job: dict) -> dict[str, list[str]]:
+    """Every value each build-relevant variable takes anywhere in the job."""
+    values: dict[str, set[str]] = {}
+    scopes = [workflow.get("env") or {}, job.get("env") or {}]
+    scopes += [step.get("env") or {} for step in job.get("steps") or []]
+    for scope in scopes:
+        for name, value in scope.items():
+            if BUILD_ENV.match(name):
+                values.setdefault(name, set()).add(str(value))
+    return {name: sorted(found) for name, found in values.items()}
 
 
 def key_inputs(workflow: dict, job: dict, index: int, step: dict) -> dict:
     env = {**(workflow.get("env") or {}), **(job.get("env") or {})}
+    inputs = {name: str(value) for name, value in (step.get("with") or {}).items() if name != "save-if"}
     return {
         "env": {name: str(value) for name, value in env.items() if KEY_ENV.match(name)},
+        "build environment": build_env(workflow, job),
         "container": job.get("container"),
         "os": "macos" if "macos" in str(job.get("runs-on")) else "linux",
         "toolchain": setup_before(job, index),
-        "workspaces": (step.get("with") or {}).get("workspaces"),
+        "cache inputs": inputs,
     }
 
 
@@ -228,6 +328,7 @@ class CachePolicyTests(unittest.TestCase):
 
     def check_all(self, workflows: dict[str, dict]) -> None:
         assert_cache_steps_name_their_family(workflows)
+        assert_writers_save_from_main(workflows)
         assert_one_writer_per_family(workflows)
         assert_family_members_share_a_key(workflows)
         assert_warm_workflow_writes_from_main(workflows)
@@ -253,12 +354,21 @@ class CachePolicyTests(unittest.TestCase):
             with self.subTest(family=family):
                 writers = [(name, job_id) for name, job_id, writes in members[family] if writes]
                 self.assertEqual([name for name, _ in writers], [WARM])
-                self.assertTrue(any(name in READ_ONLY for name, _, _ in members[family]))
+                self.assertTrue(any(read_only(self.workflows[name]) for name, _, _ in members[family]))
+
+    def test_candidate_workflows_are_read_only(self) -> None:
+        for name in ("ci.yml", "conformance.yml", "pr-package-expansion.yml"):
+            with self.subTest(workflow=name):
+                self.assertTrue(read_only(self.workflows[name]))
+                self.assertNotIn(name, WRITERS)
 
     def test_a_second_writer_is_rejected(self) -> None:
         workflows = self.mutated()
+        self.job_cache(workflows, "macos-nightly.yml", "macos-ownership-ledger")["with"]["save-if"] = MAIN_ONLY
+        self.rejects(workflows, "macos-workspace must have exactly one writer")
+        workflows = self.mutated()
         self.job_cache(workflows, "heavy-e2e.yml", "full-workspace")["with"]["save-if"] = MAIN_ONLY
-        self.rejects(workflows, "linux-workspace must have exactly one writer")
+        self.rejects(workflows, "heavy-e2e.yml is not in WRITERS")
 
     def test_a_family_without_a_writer_is_rejected(self) -> None:
         workflows = self.mutated()
@@ -269,7 +379,54 @@ class CachePolicyTests(unittest.TestCase):
         workflows = self.mutated()
         self.job_cache(workflows, WARM, "lint-rust")["with"]["save-if"] = False
         self.job_cache(workflows, "ci.yml", "lint-rust")["with"]["save-if"] = MAIN_ONLY
-        self.rejects(workflows, "runs candidate code and must not write")
+        self.rejects(workflows, "ci.yml is not in WRITERS")
+
+    def test_writers_save_only_after_success(self) -> None:
+        for name, job_id in ((WARM, "docs"), ("macos-nightly.yml", "smt-build-darwin-arm64")):
+            with self.subTest(job=f"{name}::{job_id}"):
+                workflows = self.mutated()
+                self.job_cache(workflows, name, job_id)["with"]["cache-on-failure"] = True
+                self.rejects(workflows, "save only after a successful build")
+
+    def test_a_new_dispatch_writer_checking_out_a_pull_request_is_rejected(self) -> None:
+        # Review escape M7: a dispatch workflow that checks out a pull request's
+        # merge ref and saves a family nothing else writes.
+        workflows = self.mutated()
+        workflows["escape.yml"] = {
+            True: {"workflow_dispatch": {"inputs": {"pr": {"type": "number"}}}},
+            "jobs": {"build": {"runs-on": "ubuntu-latest", "steps": [
+                {"uses": "actions/checkout@v6", "with": {"ref": "refs/pull/${{ inputs.pr }}/merge"}},
+                {"uses": "Swatinem/rust-cache@v2", "with": {
+                    "prefix-key": PREFIX_KEY, "shared-key": "escape", "save-if": MAIN_ONLY}},
+                {"run": "cargo build"},
+            ]}},
+        }
+        self.rejects(workflows, "escape.yml is not in WRITERS")
+        workflows["escape.yml"]["jobs"]["build"]["steps"][1] = {
+            "uses": "actions/cache/save@v4", "with": {"path": "target", "key": "escape"}}
+        self.rejects(workflows, "escape.yml is not in WRITERS")
+
+    def test_a_writer_checking_out_an_input_ref_is_rejected(self) -> None:
+        # Review escape M8: a nightly writer that checks out a dispatch input.
+        workflows = self.mutated()
+        nightly = workflows["macos-nightly.yml"]
+        triggers(nightly)["workflow_dispatch"] = {"inputs": {"ref": {"type": "string"}}}
+        checkout = nightly["jobs"]["macos-workspace-shard"]["steps"][0]
+        checkout["with"] = {"ref": "${{ inputs.ref }}"}
+        self.rejects(workflows, "instead of the triggering commit")
+        checkout["with"] = {"repository": "Chelis-Lang/hull", "ref": "${{ github.event.inputs.ref }}"}
+        self.rejects(workflows, "takes its checkout ref from")
+
+    def test_writers_must_be_main_only_and_live(self) -> None:
+        workflows = self.mutated()
+        triggers(workflows["smt-full-prove.yml"])["pull_request"] = None
+        self.rejects(workflows, "may run only on push to main, schedule and dispatch")
+        workflows = self.mutated()
+        workflows["smt-full-prove.yml"]["jobs"]["full-smt-prove"]["steps"] = [
+            step for step in workflows["smt-full-prove.yml"]["jobs"]["full-smt-prove"]["steps"]
+            if not saves(step)
+        ]
+        self.rejects(workflows, "listed in WRITERS but saves nothing")
 
     def test_a_pull_request_writer_is_rejected(self) -> None:
         workflows = self.mutated()
@@ -313,24 +470,47 @@ class CachePolicyTests(unittest.TestCase):
         workflows["pr-package-expansion.yml"]["jobs"]["package-expansion-shard"]["env"]["CC"] = "clang"
         self.rejects(workflows, "linux-workspace: .* env .* compute different keys")
 
+    def test_a_build_environment_difference_is_rejected(self) -> None:
+        # Review finding P2-3: a step-scoped compiler keeps the key but makes
+        # every cc-rs build script rerun on a hit.
+        for variable, value in (("CC", "clang"), ("CXX", "clang++"), ("RUSTFLAGS", "-Ctarget-cpu=native"), ("CFLAGS", "-O3")):
+            with self.subTest(variable=variable):
+                workflows = self.mutated()
+                steps = workflows["pr-package-expansion.yml"]["jobs"]["package-expansion-shard"]["steps"]
+                executor = next(step for step in steps if "run-shard" in str(step.get("run", "")))
+                executor.setdefault("env", {})[variable] = value
+                self.rejects(workflows, "linux-workspace: .* build environment")
+
+    def test_a_cache_input_difference_is_rejected(self) -> None:
+        for name, value in (("cache-bin", False), ("cache-directories", "~/.cache/extra"), ("cache-all-crates", True)):
+            with self.subTest(input=name):
+                workflows = self.mutated()
+                self.job_cache(workflows, "heavy-e2e.yml", "module-oracles")["with"][name] = value
+                self.rejects(workflows, "linux-workspace: .* cache inputs")
+
     def test_a_toolchain_difference_is_rejected(self) -> None:
         workflows = self.mutated()
         steps = workflows["smt-full-prove.yml"]["jobs"]["full-smt-prove"]["steps"]
         install = next(step for step in steps if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain@"))
         install["uses"] = "dtolnay/rust-toolchain@1.98.0"
         self.rejects(workflows, "smt-smt-build: .* toolchain")
+        workflows = self.mutated()
+        steps = workflows["smt-full-prove.yml"]["jobs"]["full-smt-prove"]["steps"]
+        install = next(step for step in steps if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain@"))
+        install.setdefault("with", {})["toolchain"] = "nightly"
+        self.rejects(workflows, "smt-smt-build: .* toolchain")
 
     def test_a_target_directory_difference_is_rejected(self) -> None:
         workflows = self.mutated()
         self.job_cache(workflows, "ci.yml", "script-unit")["with"]["workspaces"] = ". -> target"
-        self.rejects(workflows, "python-wheel-smoke: .* workspaces")
+        self.rejects(workflows, "python-wheel-smoke: .* cache inputs")
 
     def test_warm_triggers_are_restricted_to_main(self) -> None:
         for event in ("pull_request", "pull_request_target", "workflow_run"):
             with self.subTest(event=event):
                 workflows = self.mutated()
                 triggers(workflows[WARM])[event] = None
-                self.rejects(workflows, "may run only on push, schedule and dispatch")
+                self.rejects(workflows, "may run only on push")
         workflows = self.mutated()
         triggers(workflows[WARM])["push"]["branches"] = ["**"]
         self.rejects(workflows, "push-trigger on main only")
@@ -347,9 +527,12 @@ class CachePolicyTests(unittest.TestCase):
         workflows = self.mutated()
         checkout = workflows[WARM]["jobs"]["docs"]["steps"][0]
         checkout["with"] = {"ref": "${{ github.event.pull_request.head.sha }}"}
-        self.rejects(workflows, "must check out the pushed commit")
+        self.rejects(workflows, "instead of the triggering commit")
         workflows = self.mutated()
         workflows[WARM]["cache-mode"] = "read"
+        self.rejects(workflows, "listed in WRITERS but holds cache-mode read")
+        workflows = self.mutated()
+        del workflows[WARM]["cache-mode"]
         self.rejects(workflows, "must declare cache-mode: write")
 
     def test_warm_commands_must_come_from_a_consumer(self) -> None:

@@ -16,7 +16,9 @@ name: CI Cache Warm
 # artifacts and drops the workspace crates, so a family's key changes only
 # with Cargo manifests, the lockfile, the toolchain or the job environment.
 # The push filter below names those inputs; the weekly run refreshes anything
-# a filter missed. scripts/test_ci_cache_policy.py locks the family census,
+# a filter missed. A writer saves only after a successful build: rust-cache
+# never re-saves a key it restored exactly, so a failed run's partial entry
+# would otherwise stay live until a key input changed. scripts/test_ci_cache_policy.py locks the family census,
 # the single writer per family and the key parity.
 
 on:
@@ -72,7 +74,6 @@ jobs:
           prefix-key: rust-v1-${{ runner.environment }}
           shared-key: lint-rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Gate (lint-and-unit subset)
         run: chelis-gate lint-and-unit
@@ -103,7 +104,6 @@ jobs:
           prefix-key: rust-v1-${{ runner.environment }}
           shared-key: linux-workspace
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Install Python binding dependencies
         run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
@@ -139,7 +139,6 @@ jobs:
           prefix-key: rust-v1-${{ runner.environment }}
           shared-key: docs
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Install shared-skill validator dependency
         run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
@@ -201,7 +200,6 @@ jobs:
           prefix-key: rust-v1-${{ runner.environment }}
           shared-key: smt-smt-build
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt
@@ -276,7 +274,6 @@ jobs:
           prefix-key: rust-v1-${{ runner.environment }}
           shared-key: smt-glibc231
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Build chelis-cli (release, smt)
         run: cargo build --release -p chelis-cli --features smt
@@ -322,7 +319,6 @@ jobs:
           prefix-key: rust-v1-${{ runner.environment }}
           shared-key: backend-sanitizers
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Backend tests under ASan/UBSan
         run: cargo test -p chelis-backend-c --lib
@@ -355,7 +351,6 @@ jobs:
           prefix-key: rust-v1-${{ runner.environment }}
           shared-key: conformance
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Build chelis (release)
         run: cargo build --release -p chelis-cli --bin chelis
@@ -387,7 +382,6 @@ jobs:
           shared-key: python-wheel-smoke
           workspaces: . -> target/python-wheel-smoke/cargo
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Build and exercise Python distributions
         env:
@@ -426,7 +420,6 @@ jobs:
           shared-key: diagnostic-kind-oracle
           workspaces: . -> target/diagnostic-kind-oracle
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Run C2.2 controlled mutations
         run: python scripts/diagnostic_kind_oracle.py

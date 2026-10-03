@@ -51,13 +51,13 @@ jobs:
       # manifests on a cold compile -- a cvc5/cvc5-sys bump, a new flag, a
       # toolchain change on the macos-latest image -- would then stay green
       # here until a cache-key change or a cache eviction forces the cold
-      # path. The release.yml darwin job uses a DIFFERENT cache key (no `key:`
-      # override) and no cvc5 cache, so it does not share either cache and is
-      # the authoritative cold-build proof for the SHIPPED artifact; treat a
-      # release-job cvc5 failure as real even when this nightly lane is green.
-      # If a cvc5/toolchain bump is in the diff, force a cold build by bumping
-      # this `key:` (e.g. `smt-darwin-arm64-v2`) AND the cvc5 CACHE_SCHEMA in
-      # the same PR so both cold paths are proven before release relies on it.
+      # path. The release.yml darwin job keeps no Rust cache and no cvc5
+      # cache, so it is the authoritative cold-build proof for the SHIPPED
+      # artifact; treat a release-job cvc5 failure as real even when this
+      # nightly lane is green. If a cvc5/toolchain bump is in the diff, force a
+      # cold build by renaming this job's cache family (its `shared-key`, e.g.
+      # `smt-darwin-arm64-v2`) AND bumping the cvc5 CACHE_SCHEMA in the same PR
+      # so both cold paths are proven before release relies on it.
       #
       # chelis#583: dedicated stable-key cvc5 cache in the `darwin-arm64`
       # namespace, decoupled from Cargo.lock churn (the Swatinem cache keys on
@@ -95,7 +95,6 @@ jobs:
           prefix-key: rust-v1-${{ runner.environment }}
           shared-key: smt-darwin-arm64
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Build chelis-cli (release, smt)
         run: cargo build --release -p chelis-cli --features smt
