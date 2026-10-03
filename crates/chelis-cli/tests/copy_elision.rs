@@ -151,7 +151,7 @@ fn copy_probe_materializes_explicit_copies_without_memcpy() {
     let alloc_calls = source.matches("chelis_alloc(").count();
     let repurpose_calls = source.matches("chelis_tensor_repurpose(").count();
     let memcpy_calls = source.matches("memcpy(").count();
-    let fused_kernels = source.matches("parallel for simd").count();
+    let fused_kernels = source.matches("omp for simd").count();
     let restrict_qualifiers = source.matches("restrict").count();
     let borrowed_slot_wrappers = source.matches("chelis_slot").count();
     let legacy_view_allocations = source.matches("chelis_alloc_view").count();

@@ -177,11 +177,9 @@ pub fn codegen_host_program_with_external_tensor_helpers(
         .iter()
         .cloned()
         .collect::<chelis_unord::UnordSet<_>>();
-    let c_source = crmath_kernels::link_called_kernels(host_emit::emit_host_abi_program(
-        &abi_program,
-        func_name,
-        &external_helpers,
-    )?);
+    let c_source = crmath_kernels::link_called_kernels(fp_env::pin_parallel_regions(
+        host_emit::emit_host_abi_program(&abi_program, func_name, &external_helpers)?,
+    ));
     let h_header = host_emit::emit_host_abi_header(&abi_program, func_name)?;
     let (c_source, h_header) = seal_generated_artifact(func_name, &c_source, &h_header)?;
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
@@ -255,9 +253,9 @@ pub fn codegen_with_options(
             emission.symbolic_params(),
         )
     };
-    let c_source = crmath_kernels::link_called_kernels(emit::CEmitter::emit_dag_with_options(
-        dag, func_name, options,
-    )?);
+    let c_source = crmath_kernels::link_called_kernels(fp_env::pin_parallel_regions(
+        emit::CEmitter::emit_dag_with_options(dag, func_name, options)?,
+    ));
     let (c_source, h_header) = if options.static_entry {
         (c_source, String::new())
     } else {
@@ -3026,7 +3024,7 @@ int main(void) {{
              through the legacy codegen-time BLAS detector"
         );
         assert!(
-            result.c_source.contains("parallel for"),
+            result.c_source.contains("#pragma omp for"),
             "non-contiguous matmul should remain on the generic reduction path"
         );
     }

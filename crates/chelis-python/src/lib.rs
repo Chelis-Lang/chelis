@@ -684,7 +684,7 @@ where
 /// `dlopen` a compiled artifact so that dropping it does not unmap it.
 ///
 /// chelis#963: a compiled kernel's elementwise loops carry
-/// `#pragma omp parallel for simd`, and on Linux `-fopenmp` is live
+/// OpenMP parallel regions, and on Linux `-fopenmp` is live
 /// (`chelis-backend-c/src/toolchain.rs`: OpenMP is gated on
 /// `is_real_gcc`, true for the `gcc` Linux resolves to and false for the
 /// Apple clang macOS resolves to). Executing such a kernel spawns
@@ -2804,7 +2804,7 @@ loss = (mean(x, 0) : tensor[f32])
         let dir = tempdir().expect("tempdir");
         let source_path = dir.path().join("model.ch");
         // An elementwise chain, so the emitted C carries
-        // `#pragma omp parallel for simd` and executing it starts
+        // OpenMP parallel regions and executing it starts
         // libgomp's pool -- the precondition for the crash.
         fs::write(
             &source_path,

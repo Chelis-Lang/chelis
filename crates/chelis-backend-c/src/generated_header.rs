@@ -1430,8 +1430,12 @@ fn validate_generated_pragmas(source: &str) -> Result<(), GeneratedHeaderError> 
         let Some(payload) = preprocessor_directive_payload(&line, "pragma") else {
             continue;
         };
-        let allowed_openmp = matches!(payload, "omp parallel for" | "omp parallel for simd")
-            || (payload.starts_with("omp parallel for reduction(") && payload.ends_with(')'));
+        // A parallel loop is an `omp for` inside a bare `omp parallel` region
+        // that pins every worker's floating-point environment
+        // (`fp_env::pin_parallel_regions`); a combined `omp parallel for`
+        // would run workers in whatever state they last had.
+        let allowed_openmp = matches!(payload, "omp parallel" | "omp for" | "omp for simd")
+            || (payload.starts_with("omp for reduction(") && payload.ends_with(')'));
         if !allowed_openmp
             && !["clang diagnostic ", "GCC diagnostic "]
                 .into_iter()

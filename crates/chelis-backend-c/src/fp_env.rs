@@ -93,3 +93,141 @@ pub(crate) fn prune_unused_nan_helpers(source: &str) -> String {
 pub(crate) fn helper_lines() -> impl Iterator<Item = &'static str> {
     HELPERS.iter().copied()
 }
+
+const PARALLEL_FOR: &str = "#pragma omp parallel for";
+
+/// Pin every OpenMP worker, not only the calling thread (spec/08-backends.md,
+/// chelis#2957). `chelis_fp_env_enter` writes the calling thread's control
+/// register, and a host's OpenMP pool threads keep whatever state they last
+/// had, so each `#pragma omp parallel for` loop becomes a parallel region in
+/// which every participating thread enters before its share of the loop and
+/// leaves after it:
+///
+/// ```c
+/// #pragma omp parallel
+/// {
+///     chelis_fp_env_enter();
+///     #pragma omp for <clauses>
+///     for (...) { ... }
+///     chelis_fp_env_leave();
+/// }
+/// ```
+///
+/// The loop's clauses (`simd`, `reduction`) are all worksharing clauses, so
+/// they move to the `omp for` unchanged. The `omp for`'s implicit barrier
+/// keeps every thread's share inside its pinned span. On the calling thread
+/// the entry only nests. Without OpenMP the pragmas are inert and the block
+/// runs once on the calling thread.
+pub(crate) fn pin_parallel_regions(source: String) -> String {
+    if !source.contains(PARALLEL_FOR) {
+        return source;
+    }
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out = String::with_capacity(source.len() + source.len() / 8);
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim_start();
+        let Some(clauses) = trimmed.strip_prefix(PARALLEL_FOR) else {
+            out.push_str(line);
+            out.push('\n');
+            index += 1;
+            continue;
+        };
+        assert!(
+            clauses.is_empty() || clauses.starts_with(' '),
+            "unrecognized OpenMP pragma in generated C: {line}"
+        );
+        let indent = &line[..line.len() - trimmed.len()];
+        let loop_end = loop_end(&lines, index + 1)
+            .unwrap_or_else(|| panic!("`{line}` must precede a braced for loop"));
+        out.push_str(&format!("{indent}#pragma omp parallel\n{indent}{{\n"));
+        out.push_str(&format!("{indent}    {ENTRY}\n"));
+        out.push_str(&format!("{indent}    #pragma omp for{clauses}\n"));
+        for body in &lines[index + 1..=loop_end] {
+            if body.is_empty() {
+                out.push('\n');
+            } else {
+                out.push_str(&format!("    {body}\n"));
+            }
+        }
+        out.push_str(&format!("{indent}    {EXIT}\n{indent}}}\n"));
+        index = loop_end + 1;
+    }
+    if !source.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// The line that closes the braced `for` loop opening at `lines[start]`.
+/// Braces inside C string and character literals and comments do not count.
+fn loop_end(lines: &[&str], start: usize) -> Option<usize> {
+    if !lines.get(start)?.trim_start().starts_with("for (") {
+        return None;
+    }
+    let mut depth = 0i64;
+    let mut opened = false;
+    let mut in_block_comment = false;
+    for (offset, line) in lines[start..].iter().enumerate() {
+        let bytes = line.as_bytes();
+        let mut at = 0;
+        while at < bytes.len() {
+            if in_block_comment {
+                if bytes[at..].starts_with(b"*/") {
+                    in_block_comment = false;
+                    at += 1;
+                }
+            } else if bytes[at..].starts_with(b"/*") {
+                in_block_comment = true;
+                at += 1;
+            } else if bytes[at..].starts_with(b"//") {
+                break;
+            } else if bytes[at] == b'"' || bytes[at] == b'\'' {
+                let quote = bytes[at];
+                at += 1;
+                while at < bytes.len() && bytes[at] != quote {
+                    at += if bytes[at] == b'\\' { 2 } else { 1 };
+                }
+            } else if bytes[at] == b'{' {
+                depth += 1;
+                opened = true;
+            } else if bytes[at] == b'}' {
+                depth -= 1;
+            }
+            at += 1;
+        }
+        if opened && depth == 0 {
+            return Some(start + offset);
+        }
+        if !opened && offset == 0 {
+            // The loop header must open its body on its own line.
+            return None;
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallel_loops_pin_every_participating_thread() {
+        let source = "void f(void) {\n    chelis_fp_env_enter();\n    #pragma omp parallel for simd\n    for (int64_t i = 0; i < n; i++) {\n        out[i] = \"}\"[0] + in[i]; /* } */\n    }\n    #pragma omp parallel for reduction(min:first)\n    for (int64_t i = 0; i < n; i++) {\n        if (bad[i]) {\n            first = i;\n        }\n    }\n    chelis_fp_env_leave();\n}\n";
+        let pinned = pin_parallel_regions(source.to_string());
+        assert_eq!(
+            pinned,
+            "void f(void) {\n    chelis_fp_env_enter();\n    #pragma omp parallel\n    {\n        chelis_fp_env_enter();\n        #pragma omp for simd\n        for (int64_t i = 0; i < n; i++) {\n            out[i] = \"}\"[0] + in[i]; /* } */\n        }\n        chelis_fp_env_leave();\n    }\n    #pragma omp parallel\n    {\n        chelis_fp_env_enter();\n        #pragma omp for reduction(min:first)\n        for (int64_t i = 0; i < n; i++) {\n            if (bad[i]) {\n                first = i;\n            }\n        }\n        chelis_fp_env_leave();\n    }\n    chelis_fp_env_leave();\n}\n"
+        );
+        assert!(!pinned.contains(PARALLEL_FOR));
+        let plain = "int x;\n".to_string();
+        assert_eq!(pin_parallel_regions(plain.clone()), plain);
+    }
+
+    #[test]
+    #[should_panic(expected = "must precede a braced for loop")]
+    fn a_parallel_pragma_without_a_braced_loop_is_a_compiler_bug() {
+        pin_parallel_regions("#pragma omp parallel for\nfor (i = 0; i < n; i++) x[i] = 0;\n".into());
+    }
+}

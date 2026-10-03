@@ -2462,7 +2462,7 @@ fn exec_exp_kernel_correct_output() {
         "generated C must define and call the carried exp kernel"
     );
     assert!(
-        src.contains("#pragma omp parallel for simd"),
+        src.contains("#pragma omp for simd"),
         "generated C must use the Level-1 omp simd loop"
     );
 
@@ -2503,6 +2503,128 @@ int main() {{
         output.contains("PASS"),
         "exp kernel wrong output:\n{output}"
     );
+}
+
+// ---- chelis#2957: every OpenMP worker runs under the pinned environment ----
+
+/// Compile `kernel.c` and `main.c` with OpenMP, or `None` when this compiler
+/// has no OpenMP (Apple clang): the property needs a real worker pool.
+fn compile_with_openmp(test_name: &str, c_source: &str, harness: &str) -> Option<(tempfile::TempDir, std::path::PathBuf)> {
+    let probe = common::probe_dir(&format!("exec_{test_name}"));
+    let dir = probe.path().to_path_buf();
+    fs::write(dir.join("omp_probe.c"), "int main(void) {\n#pragma omp parallel\n{ }\nreturn 0;\n}\n").unwrap();
+    let has_openmp = Command::new("gcc")
+        .args(["-fopenmp", "-Werror", "-o"])
+        .arg(dir.join("omp_probe"))
+        .arg(dir.join("omp_probe.c"))
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !has_openmp {
+        return None;
+    }
+    fs::write(dir.join("kernel.c"), c_source).unwrap();
+    fs::write(dir.join("main.c"), harness).unwrap();
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
+    let bin = dir.join("omp_bin");
+    let compile = Command::new("gcc")
+        .args(["-O2", "-ffp-contract=off", "-fno-fast-math", "-fopenmp", "-std=c11", "-I"])
+        .arg(&dir)
+        .arg(dir.join("kernel.c"))
+        .arg(dir.join("main.c"))
+        .arg(&staged.archive)
+        .args(["-fopenmp", "-lm", "-lpthread", "-ldl", "-o"])
+        .arg(&bin)
+        .output()
+        .expect("failed to invoke gcc");
+    assert!(
+        compile.status.success(),
+        "COMPILE FAILED [{test_name}]:\n{}\nKernel C:\n{c_source}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    Some((probe, bin))
+}
+
+/// A host whose OpenMP pool threads already run with flush-to-zero (as after
+/// a `crtfastmath` library or `set_flush_denormal(True)` initialized them)
+/// gets the same bits as a clean process: each worker pins the IEEE default
+/// for its share of the loop. `exp` of these inputs is subnormal in f32.
+#[test]
+fn openmp_workers_compute_under_the_pinned_environment() {
+    const N: usize = 4096;
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let a = dag.add_node(decl, RiscOp::Load { name: "a".into() }, vec![], vec_f32(N), None);
+    dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(N), None);
+    let dag = fuse(&dag);
+    let result = codegen_with_options(&dag, "test_omp_exp", CodegenOptions::default()).unwrap();
+    let src = &result.c_source;
+    assert!(
+        src.contains("#pragma omp parallel\n") && src.contains("#pragma omp for simd"),
+        "the loop must run inside a pinning parallel region:\n{src}"
+    );
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void test_omp_exp(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+static void flush_to_zero_on_this_thread(void) {{
+#if defined(__aarch64__)
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= (UINT64_C(1) << 24);
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+#elif defined(__x86_64__)
+    unsigned int csr;
+    __asm__ volatile("stmxcsr %0" : "=m"(csr));
+    csr |= 0x8040u;
+    __asm__ volatile("ldmxcsr %0" : : "m"(csr));
+#endif
+}}
+
+int main(int argc, char** argv) {{
+    if (argc > 1) {{
+#pragma omp parallel
+        flush_to_zero_on_this_thread();
+    }}
+    static float in_data[{N}];
+    for (int i = 0; i < {N}; i++) {{
+        in_data[i] = -88.0f - (float)(i % 16);
+    }}
+    chelis_tensor* inputs[1] = {{make_view_1d(in_data, {N})}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_omp_exp(inputs, 1, outputs, 1);
+    const float* out = (const float*)chelis_tensor_read_view(outputs[0]).data;
+    uint64_t hash = 1469598103934665603u;
+    int subnormal = 0;
+    for (int i = 0; i < {N}; i++) {{
+        uint32_t bits;
+        memcpy(&bits, &out[i], sizeof bits);
+        hash = (hash ^ bits) * 1099511628211u;
+        subnormal += bits != 0 && bits < 0x00800000u;
+    }}
+    printf("%016llx %d\n", (unsigned long long)hash, subnormal);
+    return 0;
+}}
+"#
+    );
+    let Some((_probe, bin)) = compile_with_openmp("omp_exp", src, &harness) else {
+        eprintln!("SKIP openmp_workers_compute_under_the_pinned_environment: gcc has no OpenMP");
+        return;
+    };
+    let run = |args: &[&str]| {
+        let output = Command::new(&bin)
+            .args(args)
+            .env("OMP_NUM_THREADS", "4")
+            .output()
+            .expect("run the OpenMP harness");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let clean = run(&[]);
+    let subnormals: usize = clean.trim().split(' ').nth(1).unwrap().parse().unwrap();
+    assert!(subnormals > N / 2, "the witness must produce subnormals: {clean}");
+    assert_eq!(run(&["dirty"]), clean, "a flush-to-zero worker changed the result");
 }
 
 // ---- Test 10: Scalar ReduceSum preserves the canonical tree ----

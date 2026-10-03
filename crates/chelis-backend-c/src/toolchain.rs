@@ -92,9 +92,13 @@ fn resolve_toolchain(requirements: CodegenRequirements, override_vars: &[&str]) 
 /// agreement gate. Its flags fix floating-point semantics independently of
 /// the build machine: `-O2`, no contraction (spec/08-backends.md), no fast
 /// math, and no `-march` (the instruction set is the compiler's configured
-/// default, never the build host's CPU). OpenMP is the only optional part; the
-/// generated parallel loops are element-wise, so it changes throughput, not
-/// values.
+/// default, never the build host's CPU). OpenMP is the only optional part. It
+/// changes throughput, not values, because two conditions hold: the generated
+/// parallel loops are element-wise, so no result depends on how iterations are
+/// split, and each loop is a region in which every worker thread installs the
+/// pinned floating-point environment before its share
+/// (`fp_env::pin_parallel_regions`), so no result depends on which thread, or
+/// that thread's prior state, computed it.
 fn pinned_toolchain(
     compiler: String,
     requirements: CodegenRequirements,
