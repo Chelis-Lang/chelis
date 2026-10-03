@@ -954,3 +954,8 @@ fn parity_literal_ascriptions() {
 fn parity_linspace() {
     drive_parity(&examples_root().join("linspace.ch"), true);
 }
+
+#[test]
+fn parity_softmax_adjoint() {
+    drive_parity(&examples_root().join("softmax_adjoint.ch"), true);
+}

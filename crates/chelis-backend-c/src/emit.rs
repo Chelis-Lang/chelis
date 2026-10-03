@@ -1402,6 +1402,17 @@ impl CEmitter {
         self.emit_same_shape_result_guards(node);
         self.open_inactive_zeros(node);
         match &node.op {
+            RiscOp::Softmax { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("softmax".into()),
+                    "undecomposed softmax reached C emission",
+                    Stage::Codegen("c"),
+                    chelis_types::deliberate_rejection!(
+                        "[05-OP-48]",
+                        "prepare the retained softmax identity after AD and before ownership/codegen"
+                    ),
+                ));
+            }
             RiscOp::Const { value } => self.emit_const(id, value, &node.output_type)?,
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
             RiscOp::Shape { axis } => self.emit_shape(id, *axis, &node.inputs, &node.output_type),

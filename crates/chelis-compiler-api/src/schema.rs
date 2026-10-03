@@ -2162,7 +2162,9 @@ pub struct WireRecordPatternField {
 /// - `24`: `Tanh` and the fused `Tanh` step are the [05-OP-46] Tier 1
 ///   primitive (chelis#2957); an earlier graph spelled `tanh` as
 ///   `2*sigmoid(2x)-1`, and a version-23 reader does not know the operation.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 24;
+/// - `25`: `Softmax` retains [05-OP-48] through AD before stable forward
+///   decomposition; a version-24 reader does not know the operation.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 25;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2884,6 +2886,28 @@ impl WireDag {
                 }
             }
 
+            if let WireRiscOp::Softmax { axis } = node.op {
+                if node.inputs.len() != 1
+                    || axis >= node.output_type.dims.len()
+                    || !Prim::parse_interchange_name(&node.output_type.precision)
+                        .is_some_and(|p| p.is_float())
+                    || {
+                        let input = &self.nodes[node.inputs[0] as usize].output_type;
+                        input.precision != node.output_type.precision
+                            || input.dims.len() != node.output_type.dims.len()
+                            || input
+                                .dims
+                                .iter()
+                                .zip(&node.output_type.dims)
+                                .any(|(actual, expected)| !wire_dim_info_equal(actual, expected))
+                    }
+                {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag softmax node {} requires one same-shape/dtype float input and an in-range axis",
+                        node.id
+                    )));
+                }
+            }
             if matches!(&node.op, WireRiscOp::Relu | WireRiscOp::ReluAdjoint) {
                 let expected_inputs = if matches!(&node.op, WireRiscOp::Relu) {
                     1
@@ -3476,6 +3500,7 @@ fn wire_axis_origin(
         | WireRiscOp::MinElem
         | WireRiscOp::ExtremaAdjoint { .. }
         | WireRiscOp::Relu
+        | WireRiscOp::Softmax { .. }
         | WireRiscOp::ReluAdjoint
         | WireRiscOp::Neg
         | WireRiscOp::Recip
@@ -4035,6 +4060,9 @@ pub enum WireRiscOp {
     },
     Relu,
     ReluAdjoint,
+    Softmax {
+        axis: usize,
+    },
     Neg,
     Recip,
     Exp,

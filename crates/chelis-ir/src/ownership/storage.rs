@@ -739,6 +739,7 @@ fn classify_nodes(
                 | RiscOp::MinElem
                 | RiscOp::ExtremaAdjoint { .. }
                 | RiscOp::Relu
+                | RiscOp::Softmax { .. }
                 | RiscOp::ReluAdjoint
                 | RiscOp::Neg
                 | RiscOp::Recip

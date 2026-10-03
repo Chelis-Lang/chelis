@@ -5858,6 +5858,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Realize
             | RiscOp::Relu
+            | RiscOp::Softmax { .. }
             | RiscOp::ReluAdjoint
             | RiscOp::Where
             | RiscOp::Sub
@@ -6884,6 +6885,7 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
             },
         },
         RiscOp::Relu => WireRiscOp::Relu,
+        RiscOp::Softmax { axis } => WireRiscOp::Softmax { axis: *axis },
         RiscOp::ReluAdjoint => WireRiscOp::ReluAdjoint,
         RiscOp::Neg => WireRiscOp::Neg,
         RiscOp::Recip => WireRiscOp::Recip,

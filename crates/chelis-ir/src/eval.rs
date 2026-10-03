@@ -4399,6 +4399,30 @@ where
                 .map_err(|error| error.to_string())?;
                 TensorValue::from_storage(lhs.shape.clone(), storage)
             }
+            RiscOp::Softmax { axis } => {
+                let input = &values[&node.inputs[0]];
+                let mut graph = Dag::new();
+                let owner = graph.declare("softmax");
+                let ty = TensorType {
+                    dims: input.shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: node.output_type.precision,
+                };
+                let x = graph.add_node(
+                    owner,
+                    RiscOp::Load { name: "x".into() },
+                    vec![],
+                    ty.clone(),
+                    None,
+                );
+                let result =
+                    crate::tier2::decompose_softmax(owner.into(), &mut graph, x, *axis, &ty, None);
+                graph.add_root(result);
+                let mut load = |_: &str| Some(input.clone());
+                let load: &mut dyn FnMut(&str) -> Option<TensorValue> = &mut load;
+                eval_tensor_roots_with_strict(&graph, &[result], load)?
+                    .remove(&result)
+                    .expect("softmax root evaluated")
+            }
             RiscOp::Relu => {
                 let input = &values[&node.inputs[0]];
                 let storage = float_relu(input.storage()).map_err(|error| error.to_string())?;
@@ -5085,7 +5109,8 @@ fn inactive_unchecked_value(
         }
         RuntimeCheck::EmptyAxis => {
             let axis = match &node.op {
-                RiscOp::MaxReduce { axis }
+                RiscOp::Softmax { axis }
+                | RiscOp::MaxReduce { axis }
                 | RiscOp::MinReduce { axis }
                 | RiscOp::Argmax { axis }
                 | RiscOp::Argmin { axis } => *axis,
@@ -5096,7 +5121,9 @@ fn inactive_unchecked_value(
                 return Ok(None);
             }
             let mut shape = operand.shape.clone();
-            shape.remove(axis);
+            if !matches!(node.op, RiscOp::Softmax { .. }) {
+                shape.remove(axis);
+            }
             zeros(&shape).map(Some)
         }
         RuntimeCheck::ExtentClaims => match &node.op {

@@ -33,6 +33,15 @@ gradient of the same shape. `grad` can also be applied again to a suitable
 scalar gradient function for a second derivative. For an ordered `wrt` example,
 see [`examples/grad_wrt_order.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/grad_wrt_order.ch).
 
+## Softmax gradients
+
+The softmax adjoint uses its forward output `y` and incoming cotangent `g`:
+`y * (g - sum(g*y, axis))`. The reduction is finalized into the operand dtype
+before subtraction. Differentiation preserves this rule for f16, bf16, f32 and
+f64; it does not differentiate the stabilizing maximum used by the forward graph.
+See the executable [`softmax_adjoint.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/softmax_adjoint.ch)
+for the declared formula alongside the gradient.
+
 ## Map across a batch with `vmap`
 
 `vmap(f)` adds a batch axis at position zero. To insert it elsewhere, write a

@@ -279,6 +279,7 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
             | RiscOp::Relu
+            | RiscOp::Softmax { .. }
             | RiscOp::ReluAdjoint
             | RiscOp::Neg
             | RiscOp::Exp
@@ -449,6 +450,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
         | RiscOp::Relu
+        | RiscOp::Softmax { .. }
         | RiscOp::ReluAdjoint
         | RiscOp::Neg
         | RiscOp::Exp

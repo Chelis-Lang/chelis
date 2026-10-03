@@ -250,6 +250,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::MinElem
             | WireRiscOp::ExtremaAdjoint { .. }
             | WireRiscOp::Relu
+            | WireRiscOp::Softmax { .. }
             | WireRiscOp::ReluAdjoint
             | WireRiscOp::Neg
             | WireRiscOp::Recip
@@ -626,7 +627,8 @@ const _: () = {
     // not a floating numeric payload or float-envelope transformer.
     // Version 24 adds the Tier 1 `Tanh`, a unary float primitive grouped with
     // `Atan`; it embeds no numeric payload.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 24);
+    // Version 25 adds Softmax axis metadata, with no embedded numeric values.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 25);
 };
 
 #[cfg(test)]

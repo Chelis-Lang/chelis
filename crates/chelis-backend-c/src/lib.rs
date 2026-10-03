@@ -305,6 +305,7 @@ pub fn prepare_dag_for_codegen(
     dag: chelis_ir::dag::Dag,
     options: CodegenOptions,
 ) -> chelis_ir::dag::Dag {
+    let dag = chelis_ir::compositions::decompose(&dag);
     let dag = if options.use_blas {
         chelis_ir::specialize::specialize_for_exact_arithmetic(&dag)
     } else {
@@ -360,10 +361,11 @@ fn prepare_concrete_host_program_for_codegen(
         ) {
             helper.specialization = None;
         }
+        let decomposed = chelis_ir::compositions::decompose(&helper.dag);
         let specialized = if specialize_exact_arithmetic {
-            chelis_ir::specialize::specialize_for_exact_arithmetic(&helper.dag)
+            chelis_ir::specialize::specialize_for_exact_arithmetic(&decomposed)
         } else {
-            helper.dag.clone()
+            decomposed
         };
         chelis_ir::check_axis_sources(
             &specialized,

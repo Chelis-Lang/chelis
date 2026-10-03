@@ -141,6 +141,7 @@ fn vectorize_axis0_impl(
             RiscOp::Count { axes } => RiscOp::Count {
                 axes: axes.iter().map(|axis| axis + 1).collect(),
             },
+            RiscOp::Softmax { axis } => RiscOp::Softmax { axis: axis + 1 },
             RiscOp::MaxReduce { axis } => RiscOp::MaxReduce { axis: axis + 1 },
             RiscOp::MinReduce { axis } => RiscOp::MinReduce { axis: axis + 1 },
             RiscOp::ProdReduce { axis } => RiscOp::ProdReduce { axis: axis + 1 },

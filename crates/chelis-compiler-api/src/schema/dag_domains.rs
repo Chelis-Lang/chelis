@@ -304,6 +304,7 @@ pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
         | WireRiscOp::MinElem
         | WireRiscOp::ExtremaAdjoint { .. }
         | WireRiscOp::Relu
+        | WireRiscOp::Softmax { .. }
         | WireRiscOp::ReluAdjoint
         | WireRiscOp::Neg
         | WireRiscOp::Recip
@@ -391,6 +392,7 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
             | WireRiscOp::MinElem
             | WireRiscOp::ExtremaAdjoint { .. }
             | WireRiscOp::Relu
+            | WireRiscOp::Softmax { .. }
             | WireRiscOp::ReluAdjoint
             | WireRiscOp::Neg
             | WireRiscOp::Recip
